@@ -4,6 +4,22 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
+		<script>
+			// Apply the saved theme before first paint to avoid a flash of the wrong
+			// theme. Mirrors lib/stores/persisted.ts (values are JSON-encoded).
+			(function () {
+				try {
+					var raw = localStorage.getItem('theme');
+					var theme = raw ? JSON.parse(raw) : 'dark';
+					document.documentElement.setAttribute(
+						'data-theme',
+						theme === 'light' ? 'light' : 'dark'
+					);
+				} catch (e) {
+					document.documentElement.setAttribute('data-theme', 'dark');
+				}
+			})();
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

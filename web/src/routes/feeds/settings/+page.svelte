@@ -920,4 +920,8 @@
 		}
 	}
 
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .diag.bad .diag-value { color: #c0271d; }
+	:global(:root[data-theme='light']) .state-error { color: #c0271d; }
+
 </style>

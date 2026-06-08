@@ -331,4 +331,16 @@
 		text-align: left;
 	}
 	.markdown :global(th) { background: var(--surface-base); font-weight: 600; }
+
+	/* Light theme — dark-tuned chat colors remapped for white surfaces.
+	   Dark rules above are untouched. */
+	:global(:root[data-theme='light']) .msg.error .body,
+	:global(:root[data-theme='light']) .cmd-output.error {
+		color: #c0271d;
+	}
+	:global(:root[data-theme='light']) .markdown :global(code),
+	:global(:root[data-theme='light']) .markdown :global(pre) {
+		background: #ececef;
+		color: #1a1a1a;
+	}
 </style>

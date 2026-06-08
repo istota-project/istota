@@ -393,4 +393,10 @@
 		font-size: var(--text-xs);
 		color: var(--text-muted);
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .btn.primary { border-color: #2563b0; color: #2563b0; }
+	:global(:root[data-theme='light']) .btn.danger:hover:not(:disabled) { color: #c0271d; }
+	:global(:root[data-theme='light']) .linked-card:hover { border-color: var(--border-default); }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
 </style>

@@ -550,4 +550,9 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .new-place-btn:hover { border-color: var(--border-default); }
+	:global(:root[data-theme='light']) .new-place-btn.active { color: #946a00; border-color: #946a00; }
+	:global(:root[data-theme='light']) .action-error { color: #c0271d; }
 </style>

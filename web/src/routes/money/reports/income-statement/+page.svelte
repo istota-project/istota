@@ -253,4 +253,12 @@
 
 	.net-amount.positive { color: #4adbc0; }
 	.net-amount.negative { color: #d46ab5; }
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .section-total.income { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .section-total.expense { color: #a3157e; }
+	:global(:root[data-theme='light']) .tree-balance.income { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .tree-balance.expense { color: #a3157e; }
+	:global(:root[data-theme='light']) .net-amount.positive { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .net-amount.negative { color: #a3157e; }
 </style>

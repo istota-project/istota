@@ -550,6 +550,18 @@
 	}
 	.msg.error { background: rgba(204, 102, 102, 0.1); color: #f0a; }
 	.msg.info { background: rgba(122, 163, 216, 0.1); color: #7aa3d8; }
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .encounter-link a { color: #2563b0; }
+	:global(:root[data-theme='light']) .badge.draft { background: #f6eccd; color: #8a6400; }
+	:global(:root[data-theme='light']) .btn.primary { border-color: #2563b0; color: #2563b0; }
+	:global(:root[data-theme='light']) .btn.danger { border-color: #c0271d; color: #c0271d; }
+	:global(:root[data-theme='light']) .del:hover { color: #c0271d; }
+	:global(:root[data-theme='light']) .flag-H { background: #f7dada; color: #b3261e; }
+	:global(:root[data-theme='light']) .flag-L { background: #dbe9fb; color: #1d5fc4; }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
+	:global(:root[data-theme='light']) .msg.info { color: #2563b0; }
+
 	.modal-backdrop {
 		position: fixed;
 		inset: 0;

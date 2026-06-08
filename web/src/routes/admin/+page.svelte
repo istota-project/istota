@@ -908,4 +908,14 @@
 			grid-template-columns: 1fr 1fr;
 		}
 	}
+
+	/* Light theme overrides — dark rules above untouched. JS chart/dot color
+	   constants (SOURCE_COLOR, .dot-ok/.dot-bad fills) are data-viz on their own
+	   colored swatches and are left as-is. Only CSS text/borders fixed here. */
+	:global(:root[data-theme='light']) .kpi-warn .kpi-value { color: #946a00; }
+	:global(:root[data-theme='light']) .failed-inline { color: #946a00; }
+	:global(:root[data-theme='light']) .failed-pill { color: #946a00; }
+	:global(:root[data-theme='light']) .row-error td:first-child::before { color: #946a00; }
+	:global(:root[data-theme='light']) .error-row pre { color: #946a00; }
+	:global(:root[data-theme='light']) .module-warn { border-color: #e3c08a; }
 </style>

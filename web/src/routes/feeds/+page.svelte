@@ -656,4 +656,17 @@
 		aspect-ratio: auto;
 		height: auto;
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .center-msg.error { color: #c0271d; }
+	:global(:root[data-theme='light']) .feed-grid :global(.card-title-overlay) { background: #ececef; }
+	/* "SEEN" pill flips to a light translucent badge so it reads on light cards
+	   and over image thumbnails alike. */
+	:global(:root[data-theme='light']) .feed-grid :global(.seen-pill) {
+		background: rgba(255, 255, 255, 0.82);
+		color: #555;
+	}
+	:global(:root[data-theme='light']) .feed-grid :global(.excerpt a) { color: var(--text-secondary); }
+	:global(:root[data-theme='light']) .feed-grid :global(.meta-link:hover) { color: var(--text-primary); }
+	:global(:root[data-theme='light']) .status-badge { background: #ececef; }
 </style>

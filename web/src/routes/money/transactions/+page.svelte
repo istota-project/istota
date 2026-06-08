@@ -533,4 +533,8 @@
 		.txn-account { display: none; }
 		.txn-amount { min-width: 4rem; }
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .txn-amount.income { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .txn-amount.expense { color: #a3157e; }
 </style>

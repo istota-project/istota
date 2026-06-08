@@ -488,4 +488,11 @@
 	@media (max-width: 768px) {
 		.date-inputs { display: none; }
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .center-msg.error { color: #c0271d; }
+	/* Calendar icon is dark by default; drop the dark-mode invert in light mode. */
+	:global(:root[data-theme='light']) .date-inputs input[type="date"]::-webkit-calendar-picker-indicator { filter: none; }
+	/* Floating hint sits over the map canvas — keep a dark pill, force legible light text. */
+	:global(:root[data-theme='light']) .discover-hint { color: #ececef; }
 </style>

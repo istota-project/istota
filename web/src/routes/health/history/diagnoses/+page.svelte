@@ -567,4 +567,13 @@
 		justify-content: flex-end;
 		gap: 0.5rem;
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .btn.primary { border-color: #2563b0; color: #2563b0; }
+	:global(:root[data-theme='light']) .btn.danger { border-color: #c0271d; color: #c0271d; }
+	:global(:root[data-theme='light']) .sev-mild { color: #15803d; }
+	:global(:root[data-theme='light']) .sev-moderate { color: #946a00; }
+	:global(:root[data-theme='light']) .sev-severe { color: #c0271d; }
+	:global(:root[data-theme='light']) .d-meta .enc:hover { color: #2563b0; }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
 </style>

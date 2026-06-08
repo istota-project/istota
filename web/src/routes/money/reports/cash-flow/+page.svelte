@@ -499,4 +499,12 @@
 			height: 200px;
 		}
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .card-value.income,
+	:global(:root[data-theme='light']) .breakdown-amount.income { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .card-value.expense,
+	:global(:root[data-theme='light']) .breakdown-amount.expense { color: #a3157e; }
+	:global(:root[data-theme='light']) .card-value.positive { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .card-value.negative { color: #a3157e; }
 </style>

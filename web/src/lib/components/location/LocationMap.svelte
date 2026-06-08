@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { get } from 'svelte/store';
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
 	import type { LocationPing, Place, DiscoveredCluster, DismissedCluster } from '$lib/api';
 	import { ACTIVITY_COLORS, SPEED_GRADIENT_STOPS } from '$lib/location-constants';
 	import { buildEdges, filterAccuratePings, greatCircleArc } from '$lib/location-path';
+	import { theme } from '$lib/stores/theme';
 
 	interface Props {
 		center?: [number, number];
@@ -176,6 +178,10 @@
 	}
 
 	function initMap() {
+		// Both CARTO basemaps are added; visibility is toggled by theme so a
+		// light/dark switch is an instant layer swap (no setStyle rebuild that
+		// would drop our data layers). Initial visibility follows the saved theme.
+		const startLight = get(theme) === 'light';
 		map = new maplibregl.Map({
 			container,
 			style: {
@@ -187,14 +193,31 @@
 						tileSize: 256,
 						attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>',
 					},
+					'carto-light': {
+						type: 'raster',
+						tiles: ['https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png'],
+						tileSize: 256,
+						attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>',
+					},
 				},
-				layers: [{
-					id: 'carto-dark-layer',
-					type: 'raster',
-					source: 'carto-dark',
-					minzoom: 0,
-					maxzoom: 20,
-				}],
+				layers: [
+					{
+						id: 'carto-dark-layer',
+						type: 'raster',
+						source: 'carto-dark',
+						minzoom: 0,
+						maxzoom: 20,
+						layout: { visibility: startLight ? 'none' : 'visible' },
+					},
+					{
+						id: 'carto-light-layer',
+						type: 'raster',
+						source: 'carto-light',
+						minzoom: 0,
+						maxzoom: 20,
+						layout: { visibility: startLight ? 'visible' : 'none' },
+					},
+				],
 			},
 			center: center as [number, number],
 			zoom,
@@ -210,6 +233,7 @@
 			addLayers();
 			updateSources();
 			updateCurrentMarker();
+			applyMapTheme(get(theme));
 			fitBounds();
 		});
 	}
@@ -509,6 +533,22 @@
 		if (dismissedSrc) dismissedSrc.setData(buildDismissedGeoJSON(dismissedClusters));
 	}
 
+	// Swap basemap + recolor map-data styling for the active theme. The label
+	// halos, place-radius strokes, and dismissed-zone strokes are tuned for the
+	// dark basemap; light tiles need a white halo and lighter strokes.
+	function applyMapTheme(t: 'light' | 'dark') {
+		if (!map || !mapLoaded) return;
+		const light = t === 'light';
+		map.setLayoutProperty('carto-light-layer', 'visibility', light ? 'visible' : 'none');
+		map.setLayoutProperty('carto-dark-layer', 'visibility', light ? 'none' : 'visible');
+		const halo = light ? '#ffffff' : '#111111';
+		map.setPaintProperty('place-labels', 'text-color', light ? '#444444' : '#888888');
+		map.setPaintProperty('place-labels', 'text-halo-color', halo);
+		map.setPaintProperty('cluster-labels', 'text-halo-color', halo);
+		map.setPaintProperty('place-radius', 'circle-stroke-color', light ? '#9a9aa2' : '#555555');
+		map.setPaintProperty('dismissed-zones', 'circle-stroke-color', light ? '#9a9aa2' : '#888888');
+	}
+
 	function updateLayerVisibility() {
 		if (!map || !mapLoaded) return;
 		map.setLayoutProperty('path-line', 'visibility', showPath ? 'visible' : 'none');
@@ -616,6 +656,10 @@
 		showPath;
 		showHeat;
 		updateLayerVisibility();
+	});
+
+	$effect(() => {
+		applyMapTheme($theme);
 	});
 
 	$effect(() => {
@@ -727,5 +771,37 @@
 
 	:global(.maplibregl-ctrl-attrib a) {
 		color: #888 !important;
+	}
+
+	/* Light theme — markers keep a contrasting border against light tiles, and
+	   the MapLibre controls/attribution flip to a light surface with dark icons.
+	   The dark rules above are untouched. */
+	:global(:root[data-theme='light'] .current-position-marker),
+	:global(:root[data-theme='light'] .place-drag-marker) {
+		border-color: #fff;
+	}
+	/* The bright tracker green washes out on light tiles — darken the dot. */
+	:global(:root[data-theme='light'] .current-position-marker) {
+		background: #16a34a;
+	}
+	:global(:root[data-theme='light'] .maplibregl-ctrl-group) {
+		background: #fff !important;
+		border-color: var(--border-default) !important;
+	}
+	:global(:root[data-theme='light'] .maplibregl-ctrl-group button) {
+		border-color: #d4d4d8 !important;
+	}
+	:global(:root[data-theme='light'] .maplibregl-ctrl-group button:not(:disabled):hover) {
+		background-color: #ececef !important;
+	}
+	:global(:root[data-theme='light'] .maplibregl-ctrl-group button span) {
+		filter: none;
+	}
+	:global(:root[data-theme='light'] .maplibregl-ctrl-attrib) {
+		background: rgba(255, 255, 255, 0.75) !important;
+		color: #555 !important;
+	}
+	:global(:root[data-theme='light'] .maplibregl-ctrl-attrib a) {
+		color: #2563b0 !important;
 	}
 </style>

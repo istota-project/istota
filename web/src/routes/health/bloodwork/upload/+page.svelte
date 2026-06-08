@@ -490,4 +490,11 @@
 	.msg.info { background: rgba(122, 163, 216, 0.1); color: #7aa3d8; }
 	.msg.warn { background: rgba(230, 185, 107, 0.1); color: #e6b96b; }
 	.msg ul { margin: 0.25rem 0 0 1rem; padding: 0; }
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .del:hover { color: #c0271d; }
+	:global(:root[data-theme='light']) .btn.primary { border-color: #2563b0; color: #2563b0; }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
+	:global(:root[data-theme='light']) .msg.info { color: #2563b0; }
+	:global(:root[data-theme='light']) .msg.warn { color: #946a00; }
 </style>

@@ -654,4 +654,9 @@
 	.btn:hover:not(:disabled) { background: var(--surface-raised); }
 	.btn:disabled { opacity: 0.6; cursor: not-allowed; }
 	.btn.primary { border-color: #7aa3d8; color: #7aa3d8; }
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .card:hover { border-color: var(--border-default); }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
+	:global(:root[data-theme='light']) .btn.primary { border-color: #2563b0; color: #2563b0; }
 </style>
