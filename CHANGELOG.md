@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-06-08
+
 ### Added
 - A light/dark theme toggle in the web UI. It switches the whole interface between light and dark, and your choice is remembered per browser.
 - Web chat now syntax-highlights fenced code blocks, so code in replies is colored by language.
@@ -671,7 +673,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.19.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.20.0...main
+[0.20.0]: https://gitlab.com/cynium/istota/-/releases/v0.20.0
 [0.19.0]: https://gitlab.com/cynium/istota/-/releases/v0.19.0
 [0.18.0]: https://gitlab.com/cynium/istota/-/releases/v0.18.0
 [0.17.0]: https://gitlab.com/cynium/istota/-/releases/v0.17.0
