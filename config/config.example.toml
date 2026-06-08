@@ -220,6 +220,13 @@ output = "console"
 [scheduler]
 # Seconds between checking for new tasks in the queue
 poll_interval = 5
+# Seconds between pending-task dispatch scans within a single poll tick. The
+# periodic checks (briefings, email, heartbeat, …) stay on poll_interval; only
+# the cheap pending-task scan runs at this finer cadence, so a freshly-enqueued
+# task (e.g. a web chat message) is claimed within dispatch_interval instead of
+# waiting up to a full poll_interval. Set to 0 or >= poll_interval for the
+# legacy "one dispatch per poll tick" behaviour.
+dispatch_interval = 0.5
 # Seconds between polling Talk conversations
 talk_poll_interval = 10
 # Long-poll timeout for Talk API (server-side wait)

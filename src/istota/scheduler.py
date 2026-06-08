@@ -17,6 +17,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -2952,6 +2953,44 @@ def _talk_poll_loop(config: Config) -> None:
         time.sleep(config.scheduler.talk_poll_interval)
 
 
+def _dispatch_sleep(
+    pool: "WorkerPool", config: Config, should_stop: Callable[[], bool]
+) -> None:
+    """Sleep out one base poll tick, re-dispatching workers in sub-tick slices.
+
+    Every periodic check in the daemon loop is self-throttled by its own
+    interval timer, so the only work that needs to happen on every base tick is
+    ``pool.dispatch()`` (pending-task discovery). Sleeping the whole
+    ``poll_interval`` in one shot means a freshly-enqueued task waits up to a
+    full ``poll_interval`` before a worker claims it. Instead we sleep in
+    ``dispatch_interval`` slices and dispatch after each, so cold pickup latency
+    is bounded by ``dispatch_interval`` — without re-running any of the heavy
+    interval-gated checks (they stay on ``poll_interval`` granularity because the
+    slice loop consumes one full base tick before the outer loop iterates).
+
+    ``dispatch_interval`` <= 0 or >= ``poll_interval`` restores the legacy
+    single-sleep-per-tick behaviour. ``should_stop`` is polled before and after
+    each slice so shutdown is honoured within one ``dispatch_interval``.
+    """
+    base = config.scheduler.poll_interval
+    slice_s = config.scheduler.dispatch_interval
+    if slice_s <= 0 or slice_s >= base:
+        time.sleep(base)
+        return
+    deadline = time.monotonic() + base
+    while not should_stop():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(slice_s, remaining))
+        if should_stop():
+            return
+        try:
+            pool.dispatch()
+        except Exception as e:  # noqa: BLE001
+            logger.error("Error dispatching workers: %s", e)
+
+
 def run_daemon(config: Config) -> None:
     """
     Run the scheduler as a daemon (continuous loop).
@@ -3280,8 +3319,11 @@ def run_daemon(config: Config) -> None:
                 logger.error("Error checking heartbeats: %s", e)
             last_heartbeat_check = now
 
-        # Sleep before next poll cycle
-        time.sleep(config.scheduler.poll_interval)
+        # Sleep out the rest of the base tick, re-dispatching in sub-tick slices
+        # so a freshly-enqueued task is claimed within dispatch_interval instead
+        # of waiting a full poll_interval (the gated checks above stay on
+        # poll_interval granularity — see _dispatch_sleep).
+        _dispatch_sleep(pool, config, lambda: _shutdown_requested)
 
     # Shutdown workers before releasing lock
     pool.shutdown()

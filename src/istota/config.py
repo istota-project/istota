@@ -104,6 +104,7 @@ class ConversationConfig:
 @dataclass
 class SchedulerConfig:
     poll_interval: int = 2  # seconds between task queue checks
+    dispatch_interval: float = 0.5  # seconds between pending-task dispatch scans within a poll tick (0 or >= poll_interval = legacy single dispatch per tick)
     email_poll_interval: int = 60  # seconds between email polls
     briefing_check_interval: int = 60  # seconds between briefing checks
     tasks_file_poll_interval: int = 30  # seconds between TASKS.md file polls
@@ -1021,6 +1022,7 @@ def load_config(config_path: Path | None = None) -> Config:
         sched = data["scheduler"]
         config.scheduler = SchedulerConfig(
             poll_interval=sched.get("poll_interval", 5),
+            dispatch_interval=sched.get("dispatch_interval", 0.5),
             email_poll_interval=sched.get("email_poll_interval", 60),
             briefing_check_interval=sched.get("briefing_check_interval", 60),
             tasks_file_poll_interval=sched.get("tasks_file_poll_interval", sched.get("istota_file_poll_interval", 30)),

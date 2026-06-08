@@ -169,6 +169,7 @@ istota_repo_clone_token: ""
 
 # Scheduler settings
 istota_scheduler_poll_interval: 5
+istota_scheduler_dispatch_interval: 0.5       # Sub-tick pending-task dispatch cadence (0 or >= poll_interval = legacy)
 istota_scheduler_talk_poll_interval: 10       # Talk conversation polling interval
 istota_scheduler_talk_poll_timeout: 30        # Talk long-poll timeout
 istota_scheduler_talk_poll_wait: 2.0         # Max seconds to wait before processing fast rooms
