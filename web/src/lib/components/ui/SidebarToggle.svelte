@@ -42,7 +42,7 @@
 			left: 0;
 			transform: translateY(-50%);
 			padding: 0.5rem 0.3rem;
-			background: #161616;
+			background: var(--surface-card);
 			color: var(--text-muted);
 			border: 1px solid var(--border-subtle);
 			border-left: none;

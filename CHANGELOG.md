@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Light mode: the dashboard feature cards no longer render with dark backgrounds and unreadable titles, and the mobile slide-out sidebar tab now matches the light theme.
+
 ## [0.20.0] - 2026-06-08
 
 ### Added

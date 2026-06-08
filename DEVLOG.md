@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-08: Light-mode fixes — dashboard cards + mobile sidebar toggle
+
+Two surfaces still hardcoded dark hex values instead of the theme CSS variables, so they stayed dark (with unreadable dark titles) in light mode.
+
+**Dashboard feature cards.** `+page.svelte` hardcoded `#1a1a1a` (card background), `#222` (hover), and `#888` (description). The card stayed dark in light mode while the title inherited `--text-primary` (dark on a light theme) — dark-on-dark, unreadable. Swapped to `var(--surface-card)` / `var(--surface-raised)`, added a `var(--border-subtle)` border, and gave the title an explicit `var(--text-primary)` and the description `var(--text-muted)`. All flip automatically with the theme.
+
+**Mobile sidebar slide-out tab.** `SidebarToggle.svelte`'s base style already used `var(--surface-card)`, but the `max-width: 768px` branch overrode it with a hardcoded `background: #161616`. Replaced with `var(--surface-card)` so the fixed-position edge tab matches the rest of the light theme.
+
+The remaining hardcoded dark values elsewhere (health bloodwork flag cells, location map markers/colors) are the deliberately dark-tuned status/chart colors that `app.css` documents as exempt from the variable flip — left as-is.
+
+**Files modified:**
+- `web/src/routes/+page.svelte` - dashboard card surfaces/text → theme variables
+- `web/src/lib/components/ui/SidebarToggle.svelte` - mobile tab background → `var(--surface-card)`
+
 ## 2026-06-07: Web chat room settings — rename, copy token, hard-delete, deep link
 
 Web chat shipped with rooms you could create and select but not manage: no rename, no delete, and the per-room channel token (the thing you'd paste into a `web:<token>` output route after ISSUE-121) was never shown anywhere but the DB. This session added a per-room settings modal and a query-param deep link.
