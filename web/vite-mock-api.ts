@@ -129,20 +129,33 @@ function mockTaskEvents(task: MockChatTask) {
 		'- The real bot runs your message through the scheduler.\n' +
 		'- Streaming, tools, and `markdown` all render here.\n\n' +
 		'Try `!help` for commands.';
-	// Tools run for a continuous ~6s window (c1 800→3400ms, c2 3000→6500ms, so at
-	// least one is always running 800–6500ms) so the ToolStrip's active animation
-	// is visible long enough to preview in the dev server.
-	return [
+	// An interleaved text_delta / tool_start / tool_end timeline so the
+	// ordered-segment rendering can be eyeballed: lead-in narration streams live
+	// then folds to a collapsed disclosure once a tool follows; tool chips render
+	// inline in order; the final answer streams token-by-token after the last
+	// tool. Tools overlap (c1 800→3400, c2 3000→6500) so a chip is always pulsing
+	// across 800–6500ms.
+	const ans = reply.match(/.{1,18}/gs) ?? [reply];
+	const events: { seq: number; kind: string; payload: Record<string, unknown>; at: number }[] = [
 		{ seq: 1, kind: 'task_started', payload: { text: 'On it...' }, at: 0 },
-		{ seq: 2, kind: 'progress_text', payload: { text: 'Looking into it…' }, at: 400 },
-		{ seq: 3, kind: 'tool_start', payload: { tool_name: 'Bash', description: '⚙️ calendar list --date today', tool_call_id: 'c1' }, at: 800 },
-		{ seq: 4, kind: 'tool_start', payload: { tool_name: 'WebFetch', description: '🌐 browse get https://example.com', tool_call_id: 'c2' }, at: 3000 },
-		{ seq: 5, kind: 'tool_end', payload: { tool_name: 'Bash', tool_call_id: 'c1', success: true, duration_ms: 2600 }, at: 3400 },
-		{ seq: 6, kind: 'tool_end', payload: { tool_name: 'WebFetch', tool_call_id: 'c2', success: true, duration_ms: 3500 }, at: 6500 },
-		{ seq: 7, kind: 'progress_text', payload: { text: 'Writing the answer…' }, at: 6800 },
-		{ seq: 8, kind: 'result', payload: { text: reply, truncated: false }, at: 7300 },
-		{ seq: 9, kind: 'done', payload: { stop_reason: 'completed', duration_seconds: 7.4 }, at: 7400 },
+		{ seq: 2, kind: 'text_delta', payload: { text: 'Let me check your calendar ' }, at: 300 },
+		{ seq: 3, kind: 'text_delta', payload: { text: 'and an example page.' }, at: 500 },
+		{ seq: 4, kind: 'tool_start', payload: { tool_name: 'Bash', description: '⚙️ calendar list --date today', tool_call_id: 'c1' }, at: 800 },
+		{ seq: 5, kind: 'tool_progress', payload: { tool_call_id: 'c1', text: '2 events found' }, at: 1500 },
+		{ seq: 6, kind: 'text_delta', payload: { text: 'Now fetching the page…' }, at: 2800 },
+		{ seq: 7, kind: 'tool_start', payload: { tool_name: 'WebFetch', description: '🌐 browse get https://example.com', tool_call_id: 'c2' }, at: 3000 },
+		{ seq: 8, kind: 'tool_end', payload: { tool_name: 'Bash', tool_call_id: 'c1', success: true, duration_ms: 2600 }, at: 3400 },
+		{ seq: 9, kind: 'tool_end', payload: { tool_name: 'WebFetch', tool_call_id: 'c2', success: true, duration_ms: 3500 }, at: 6500 },
 	];
+	// The answer streams in after the last tool, chunked, then the canonical
+	// result reconciles it.
+	let seq = 10;
+	ans.forEach((chunk, i) => {
+		events.push({ seq: seq++, kind: 'text_delta', payload: { text: chunk }, at: 6800 + i * 60 });
+	});
+	events.push({ seq: seq++, kind: 'result', payload: { text: reply, truncated: false }, at: 7300 });
+	events.push({ seq: seq++, kind: 'done', payload: { stop_reason: 'completed', duration_seconds: 7.4 }, at: 7400 });
+	return events;
 }
 const MOCK_TASK_DONE_MS = 7400;
 
@@ -248,16 +261,36 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 			if (now - t.createdAt >= MOCK_TASK_DONE_MS) {
 				const evs = mockTaskEvents(t);
 				const ev = evs.find((e) => e.kind === 'result');
+				const result = (ev?.payload as any).text as string;
 				// Mirror the backend: a finished turn carries its tool trace +
 				// duration so the action strip + timing persist on reload (ISSUE-122).
 				const tools = evs
 					.filter((e) => e.kind === 'tool_start')
 					.map((e) => (e.payload as any).description as string);
+				// Ordered segments rebuilt from the event timeline (mirrors the
+				// backend `_trace_segments`): consecutive text_deltas collapse into
+				// one text segment, tool_starts become tool segments, and the
+				// canonical result reconciles the trailing answer.
+				const segments: { kind: string; text: string }[] = [];
+				for (const e of evs) {
+					if (e.kind === 'text_delta') {
+						const last = segments[segments.length - 1];
+						if (last && last.kind === 'text') last.text += (e.payload as any).text;
+						else segments.push({ kind: 'text', text: (e.payload as any).text });
+					} else if (e.kind === 'tool_start') {
+						segments.push({ kind: 'tool', text: (e.payload as any).description });
+					}
+				}
+				if (result) {
+					const last = segments[segments.length - 1];
+					if (last && last.kind === 'text') last.text = result;
+					else segments.push({ kind: 'text', text: result });
+				}
 				const done = evs.find((e) => e.kind === 'done');
 				messages.push({
-					role: 'assistant', text: (ev?.payload as any).text, task_id: t.id,
+					role: 'assistant', text: result, task_id: t.id,
 					status: 'completed', created_at: new Date(t.createdAt).toISOString(),
-					tools, duration_seconds: (done?.payload as any)?.duration_seconds ?? null,
+					tools, segments, duration_seconds: (done?.payload as any)?.duration_seconds ?? null,
 				});
 			} else {
 				active = { id: t.id, status: 'running' };

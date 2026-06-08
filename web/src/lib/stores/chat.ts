@@ -25,32 +25,28 @@ import {
 	type ChatRoom,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
+import { applyEvent as applySegmentEvent, type ChatMessage, type Segment, type ToolEntry } from '$lib/stores/segments';
 
-export interface ToolEntry {
-	id: string;
-	name: string;
-	description: string;
-	running: boolean;
-	success?: boolean;
-	// Live incremental output while the tool runs (NativeBrain tool_progress).
-	progress?: string;
-}
+// The message / segment model lives in the pure reducer module so it can be
+// unit-tested without a DOM; re-export here so existing `$lib/stores/chat`
+// importers keep working.
+export type { ChatMessage, Segment, ToolEntry };
 
-export interface ChatMessage {
-	cid: number;
-	role: 'user' | 'assistant' | 'system';
-	text: string;
-	taskId?: number;
-	status?: string;
-	confirmation?: boolean;
-	tools: ToolEntry[];
-	progress?: string;
-	streaming: boolean;
-	error?: boolean;
-	attachments?: string[];
-	createdAt?: string;
-	// Total wall time in seconds, from the task's terminal `done` event.
-	durationSeconds?: number;
+/** Build an assistant message's `segments` from a finished task's history
+ * payload. Tool entries render as neutral "done" chips (history carries no
+ * per-tool success / progress / timing); the last text segment is the answer
+ * (unsettled, prominent), all earlier text segments are settled narration. */
+function historySegments(raw: { kind: string; text: string }[]): Segment[] {
+	const segs: Segment[] = raw.map((s, i) =>
+		s.kind === 'tool'
+			? { kind: 'tool', id: `h${i}`, tool: { id: `h${i}`, name: '', description: s.text, running: false } }
+			: { kind: 'text', id: `s${i}`, text: s.text, settled: true },
+	);
+	for (let i = segs.length - 1; i >= 0; i--) {
+		const s = segs[i];
+		if (s.kind === 'text') { s.settled = false; break; }
+	}
+	return segs;
 }
 
 export type ChatStatus = 'idle' | 'sending' | 'streaming';
@@ -148,113 +144,20 @@ function createSession(): ChatSession {
 		});
 	};
 
-	// Mark every still-running tool as finished. Required because the Claude
-	// Code brain never emits tool_end — without this, tool spinners would spin
-	// forever once the task completes. success stays undefined (unknown) so the
-	// UI shows a neutral "done" rather than a real success/fail mark.
-	const finalizeTools = (m: ChatMessage) => {
-		for (const t of m.tools) t.running = false;
-	};
-
 	function applyEvent(cid: number, kind: string, payload: Record<string, any>) {
 		updateMsg(cid, (m) => {
-			switch (kind) {
-				case 'task_started':
-					// Generic "working on it" verb stamped by the executor (shared
-					// with Talk). We already seeded a client-side verb when the
-					// placeholder was created, so skip the overwrite to avoid a
-					// flicker from one random verb to another — real status
-					// (progress_text / tool_start) still replaces it below.
-					if (payload.text && !m.progress) m.progress = String(payload.text);
-					break;
-				case 'progress_text':
-					m.progress = String(payload.text ?? '');
-					break;
-				case 'text_delta':
-					// Incremental text streamed live (stream surfaces). It's the
-					// *current turn's* text — pre-tool narration on a tool-using turn,
-					// or the answer on the final turn. Append to the body as a live
-					// preview; `tool_start` clears it (narration, not answer) and the
-					// canonical `result` reconciles the final answer on arrival.
-					m.text = (m.text ?? '') + String(payload.text ?? '');
-					m.streaming = true;
-					m.progress = undefined;
-					break;
-				case 'tool_start': {
-					// The text streamed so far was this turn's lead-in narration, not
-					// the answer (a tool call follows it). Drop the live preview so
-					// intermediate narration doesn't pile up — concatenated and
-					// unseparated — in the body. The answer is the final turn's text,
-					// which streams in fresh after the last tool; the ToolStrip
-					// carries the activity in between. No-op when nothing streamed yet.
-					if (m.streaming) m.text = '';
-					const name = String(payload.tool_name ?? 'tool');
-					const description = String(payload.description ?? '');
-					m.tools.push({
-						id: String(payload.tool_call_id ?? `t${m.tools.length}`),
-						name,
-						description,
-						running: true,
-					});
-					break;
-				}
-				case 'tool_progress': {
-					// Incremental tool output (NativeBrain) — attach to the running
-					// tool so the tool box shows live detail.
-					const txt = String(payload.text ?? '');
-					const t = m.tools.find((x) => x.id === String(payload.tool_call_id));
-					if (t && txt) t.progress = txt;
-					break;
-				}
-				case 'tool_end': {
-					const t = m.tools.find((x) => x.id === String(payload.tool_call_id));
-					if (t) {
-						t.running = false;
-						t.success = payload.success !== false;
-					}
-					break;
-				}
-				case 'result':
-					m.text = String(payload.text ?? '');
-					m.progress = undefined;
-					m.streaming = false;
-					finalizeTools(m);
-					break;
-				case 'confirmation':
-					m.text = String(payload.prompt ?? '');
-					m.confirmation = true;
-					m.status = 'pending_confirmation';
-					m.progress = undefined;
-					m.streaming = false;
-					finalizeTools(m);
-					break;
-				case 'error':
-					m.text = String(payload.message ?? 'Something went wrong.');
-					m.error = true;
-					m.progress = undefined;
-					m.streaming = false;
-					finalizeTools(m);
-					break;
-				case 'cancelled':
-					// A cancelled task has no canonical result to reconcile against.
-					// If text streamed in via deltas (m.streaming still set), keep the
-					// partial answer but mark it cancelled; otherwise show a bare notice.
-					if (!m.text) m.text = '_(cancelled)_';
-					else if (m.streaming) m.text = m.text + '\n\n_(cancelled)_';
-					m.progress = undefined;
-					m.streaming = false;
-					finalizeTools(m);
-					break;
-				case 'done':
-					// Terminal safety net: if no result/error/cancelled arrived,
-					// still stop streaming and freeze any running tools.
-					m.streaming = false;
-					finalizeTools(m);
-					if (typeof payload.duration_seconds === 'number') {
-						m.durationSeconds = payload.duration_seconds;
-					}
-					break;
+			if (kind === 'task_started') {
+				// Generic "working on it" verb stamped by the executor (shared with
+				// Talk). We already seeded a client-side verb when the placeholder
+				// was created, so skip the overwrite to avoid a flicker from one
+				// random verb to another — real status (progress_text / tool_start /
+				// the first text delta) takes over via the reducer below.
+				if (payload.text && !m.progress) m.progress = String(payload.text);
+				return;
 			}
+			// Every other event kind builds the ordered segment list. The reducer
+			// is pure and unit-tested in segments.test.ts.
+			applySegmentEvent(m, kind, payload);
 		});
 	}
 
@@ -402,7 +305,7 @@ function createSession(): ChatSession {
 				if (seenNotifIds.has(m.notif_id)) continue;
 				seenNotifIds.add(m.notif_id);
 				messages.update((arr) => [...arr, {
-					cid: nextCid(), role: 'system', text: m.text, tools: [],
+					cid: nextCid(), role: 'system', text: m.text, segments: [],
 					streaming: false, createdAt: m.created_at,
 				}]);
 			}
@@ -426,13 +329,24 @@ function createSession(): ChatSession {
 			if (m.role === 'system' && typeof m.notif_id === 'number') {
 				seenNotifIds.add(m.notif_id);
 			}
-			// Rebuild the action strip from the persisted trace so a finished
-			// turn stays inspectable across reloads (ISSUE-122). Descriptions
-			// only — history has no per-tool success/timing, so spinners stay
-			// off and the strip renders a neutral "done" state.
-			const tools: ToolEntry[] = (m.tools ?? []).map((d, i) => ({
-				id: `h${i}`, name: '', description: d, running: false,
-			}));
+			// Rebuild the ordered segment list from the persisted trace so a
+			// finished turn renders the same interleaved layout across reloads
+			// (ISSUE-122). Prefer the server's ordered `segments`; fall back to the
+			// flat `tools` descriptions + answer for an in-flight turn or an old
+			// payload. History has no per-tool success/timing, so chips render a
+			// neutral "done" state. An in-flight assistant turn starts empty — its
+			// resumed SSE rebuilds the segments live.
+			let segments: Segment[] = [];
+			if (m.role === 'assistant') {
+				if (m.segments && m.segments.length) {
+					segments = historySegments(m.segments);
+				} else if (!inFlight(m.status)) {
+					segments = historySegments([
+						...(m.tools ?? []).map((d) => ({ kind: 'tool', text: d })),
+						...(m.text ? [{ kind: 'text', text: m.text }] : []),
+					]);
+				}
+			}
 			return {
 				cid,
 				role: m.role,
@@ -440,7 +354,7 @@ function createSession(): ChatSession {
 				taskId: m.task_id,
 				status: m.status,
 				confirmation: !!m.confirmation,
-				tools,
+				segments,
 				streaming: m.role === 'assistant' && inFlight(m.status),
 				createdAt: m.created_at,
 				durationSeconds: typeof m.duration_seconds === 'number' ? m.duration_seconds : undefined,
@@ -459,7 +373,7 @@ function createSession(): ChatSession {
 			if (cid == null) {
 				const ph: ChatMessage = {
 					cid: nextCid(), role: 'assistant', text: '', taskId: at.id,
-					status: at.status, tools: [], streaming: true,
+					status: at.status, segments: [], streaming: true,
 					createdAt: new Date().toISOString(),
 				};
 				messages.update((arr) => { arr.push(ph); return arr; });
@@ -553,7 +467,7 @@ function createSession(): ChatSession {
 		messages.update((a) => [
 			...a,
 			{
-				cid: nextCid(), role: 'user', text: trimmed, tools: [], streaming: false,
+				cid: nextCid(), role: 'user', text: trimmed, segments: [], streaming: false,
 				attachments: attachments.map((x) => x.name),
 				createdAt: new Date().toISOString(),
 			},
@@ -562,7 +476,7 @@ function createSession(): ChatSession {
 		messages.update((a) => [
 			...a,
 			{
-				cid: phCid, role: 'assistant', text: '', tools: [], streaming: true,
+				cid: phCid, role: 'assistant', text: '', segments: [], streaming: true,
 				progress: randomAckVerb(),
 				createdAt: new Date().toISOString(),
 			},
@@ -572,11 +486,16 @@ function createSession(): ChatSession {
 		const res = await sendChatMessage(roomId, trimmed, attachments.map((x) => x.path));
 		if (!res.ok) {
 			updateMsg(phCid, (m) => {
-				m.text = res.status === 429
+				const msg = res.status === 429
 					? `Rate limit reached — wait ${res.retry_after ?? 60}s and try again.`
 					: (res.error || 'Failed to send message.');
+				m.text = msg;
+				// Render the failure as the message's answer segment (the send
+				// never reached the backend, so there's no event stream to build it).
+				m.segments = [{ kind: 'text', id: 'send-error', text: msg, settled: false }];
 				m.error = true;
 				m.streaming = false;
+				m.progress = undefined;
 			});
 			status.set('idle');
 			return;
@@ -609,6 +528,9 @@ function createSession(): ChatSession {
 		updateMsg(cid, (m) => {
 			m.confirmation = false;
 			m.status = 'pending';
+			// Drop the confirmation prompt's segments so the resumed stream
+			// rebuilds the answer fresh (the prompt was a question, not the answer).
+			m.segments = [];
 			m.text = '';
 			m.streaming = true;
 			m.error = false;
@@ -624,7 +546,13 @@ function createSession(): ChatSession {
 			m.confirmation = false;
 			m.status = 'cancelled';
 			m.streaming = false;
-			m.text = m.text ? `~~${m.text}~~` : '_(declined)_';
+			// Strike the declined prompt (the trailing text segment), or leave a
+			// bare notice when there was none.
+			const last = m.segments[m.segments.length - 1];
+			if (last && last.kind === 'text' && last.text) last.text = `~~${last.text}~~`;
+			else m.segments.push({ kind: 'text', id: 'declined', text: '_(declined)_', settled: false });
+			m.text = m.segments[m.segments.length - 1].kind === 'text'
+				? (m.segments[m.segments.length - 1] as Extract<Segment, { kind: 'text' }>).text : '';
 		});
 		// The parked confirmation was holding the queue; release it so the next
 		// queued message (if any) starts.

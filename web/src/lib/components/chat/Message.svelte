@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { renderMarkdown } from '$lib/markdown';
 	import type { ChatMessage } from '$lib/stores/chat';
-	import ToolStrip from './ToolStrip.svelte';
+	import { isRenderable } from '$lib/stores/segments';
+	import ToolChip from './ToolChip.svelte';
+	import TextSegment from './TextSegment.svelte';
 	import ConfirmationCard from './ConfirmationCard.svelte';
 
 	let {
@@ -27,20 +29,20 @@
 	const author = $derived(isUser ? userName : botName);
 	const initial = $derived((author.trim()[0] ?? '?').toUpperCase());
 
-	// User text is shown verbatim (escaped via text binding) — we don't render
-	// their input as markdown. Bot text goes through the safe markdown renderer.
-	const bodyHtml = $derived(isUser ? '' : renderMarkdown(message.text));
+	// System (!command) output goes through the safe markdown renderer; user text
+	// is shown verbatim and the assistant body is rendered per-segment below.
+	const bodyHtml = $derived(isSystem ? renderMarkdown(message.text) : '');
 
-	const hasRunningTool = $derived(message.tools.some((t) => t.running));
+	// Renderable segments in order (empty settled-narration rows are suppressed).
+	const segments = $derived(message.segments.filter(isRenderable));
+	const toolCount = $derived(message.segments.filter((s) => s.kind === 'tool').length);
 
 	// Subtle per-message metadata, revealed on hover (bottom-right).
 	const meta = $derived.by(() => {
 		const parts: string[] = [];
 		if (message.taskId) parts.push(`#${message.taskId}`);
 		if (typeof message.durationSeconds === 'number') parts.push(`${message.durationSeconds}s`);
-		if (message.tools.length) {
-			parts.push(`${message.tools.length} tool${message.tools.length === 1 ? '' : 's'}`);
-		}
+		if (toolCount) parts.push(`${toolCount} tool${toolCount === 1 ? '' : 's'}`);
 		return parts;
 	});
 
@@ -76,22 +78,7 @@
 				</div>
 			{/if}
 
-			{#if message.tools.length}
-				<ToolStrip tools={message.tools} streaming={message.streaming} />
-			{/if}
-
-			{#if message.streaming && !message.text}
-				{#if !hasRunningTool && !message.tools.length}
-					<!-- Pre-tool / pure-thinking cue. Suppressed once any tool
-					     appears — the ToolStrip is then the single activity
-					     indicator (it keeps pulsing between tools while streaming),
-					     so the dot doesn't flicker in and out per tool call. -->
-					<div class="progress">
-						<span class="dot"></span>
-						<span class="status-text">{message.progress || 'Thinking…'}</span>
-					</div>
-				{/if}
-			{:else if isUser}
+			{#if isUser}
 				{#if message.text}<div class="body user-body">{message.text}</div>{/if}
 				{#if message.attachments?.length}
 					<div class="attachments">
@@ -101,15 +88,24 @@
 					</div>
 				{/if}
 			{:else}
-				<div class="body markdown">{@html bodyHtml}</div>
-				{#if message.streaming && !hasRunningTool && !message.tools.length}
-					<!-- Typing affordance while the answer streams, for the
-					     no-tools case only. When tools are present the ToolStrip
-					     carries the "still working" signal, so we don't also show
-					     this dot (it would flicker in after each tool completes). -->
-					<div class="progress subtle">
+				<!-- Ordered segment list: settled narration folds to a dim
+				     disclosure, tool calls render inline at their true position,
+				     the open/answer text streams live as prominent markdown. -->
+				{#each segments as seg (seg.id)}
+					{#if seg.kind === 'tool'}
+						<ToolChip tool={seg.tool} />
+					{:else}
+						<TextSegment text={seg.text} settled={seg.settled} />
+					{/if}
+				{/each}
+
+				{#if message.streaming && segments.length === 0}
+					<!-- Pre-first-segment cue: the ack verb + pulsing dot, shown only
+					     until the first segment exists. Once segments stream in, the
+					     open text block / pulsing tool chips carry the activity. -->
+					<div class="progress">
 						<span class="dot"></span>
-						{#if message.progress}<span class="status-text">{message.progress}</span>{/if}
+						<span class="status-text">{message.progress || 'Thinking…'}</span>
 					</div>
 				{/if}
 			{/if}
@@ -263,7 +259,6 @@
 		color: var(--text-muted);
 		font-size: var(--text-sm);
 	}
-	.progress.subtle { margin-top: 0.3rem; color: var(--text-dim); }
 	/* Tool descriptions (e.g. a long shell command) shouldn't wrap the row. */
 	.status-text {
 		min-width: 0;
@@ -279,58 +274,9 @@
 	}
 	@keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
-	/* Markdown content spacing — roomy enough to separate blocks clearly. */
-	.markdown :global(p) { margin: 0 0 1rem; }
-	.markdown :global(p:last-child) { margin-bottom: 0; }
-	.markdown :global(ul),
-	.markdown :global(ol) { margin: 0 0 1rem; padding-left: 1.3rem; }
-	.markdown :global(li) { margin: 0.1rem 0; }
-	.markdown :global(li > ul),
-	.markdown :global(li > ol) { margin: 0.1rem 0; }
-	.markdown :global(h1),
-	.markdown :global(h2),
-	.markdown :global(h3),
-	.markdown :global(h4) { margin: 0.4rem 0 0.3rem; font-size: var(--text-base); font-weight: 600; }
-	.markdown :global(blockquote) {
-		margin: 0 0 1rem;
-		padding: 0.1rem 0.7rem;
-		border-left: 3px solid var(--border-default);
-		color: var(--text-secondary);
-	}
-	.markdown :global(code) {
-		font-family: ui-monospace, monospace;
-		font-size: 0.9em;
-		background: #2d2d2d;
-		color: #e6e6e6;
-		padding: 0.05rem 0.3rem;
-		border-radius: 0.25rem;
-	}
-	.markdown :global(pre) {
-		background: #2d2d2d;
-		color: #e6e6e6;
-		border: 1px solid var(--border-subtle);
-		border-radius: 0.35rem;
-		padding: 0.5rem 0.65rem;
-		overflow-x: auto;
-		margin: 0 0 1rem;
-	}
-	.markdown :global(pre code) { background: none; padding: 0; }
-	.markdown :global(a) { color: var(--accent-amber); }
-	.markdown :global(del) { color: var(--text-muted); }
-	.markdown :global(table) {
-		border-collapse: collapse;
-		margin: 0 0 1rem;
-		font-size: var(--text-sm);
-		display: block;
-		overflow-x: auto;
-	}
-	.markdown :global(th),
-	.markdown :global(td) {
-		border: 1px solid var(--border-subtle);
-		padding: 0.2rem 0.45rem;
-		text-align: left;
-	}
-	.markdown :global(th) { background: var(--surface-base); font-weight: 600; }
+	/* Markdown block styling is global (src/app.css `.markdown`) so it applies
+	   across component boundaries — Message's command output and TextSegment's
+	   bot prose both render through the same `.markdown` container class. */
 
 	/* Light theme — dark-tuned chat colors remapped for white surfaces.
 	   Dark rules above are untouched. */
@@ -341,9 +287,4 @@
 	/* The amber accent darkens in light mode, so the bot initial needs light
 	   text for contrast (dark mode keeps its dark initial on bright amber). */
 	:global(:root[data-theme='light']) .avatar.bot { color: #fff; }
-	:global(:root[data-theme='light']) .markdown :global(code),
-	:global(:root[data-theme='light']) .markdown :global(pre) {
-		background: #ececef;
-		color: #1a1a1a;
-	}
 </style>

@@ -1292,6 +1292,52 @@ def _trace_tool_descriptions(execution_trace: str | None, actions_taken: str | N
     return []
 
 
+def _trace_segments(
+    execution_trace: str | None,
+    actions_taken: str | None,
+    result: str | None,
+) -> list[dict]:
+    """Ordered, interleaved ``text`` / ``tool`` segments for a finished task, so
+    the web client reconstructs the same in-order layout as the live stream.
+
+    Prefers the ordered ``execution_trace`` (``type`` of ``text`` / ``tool`` /
+    ``cm_boundary``; the boundary is skipped). The canonical answer is the
+    ``result``: when non-empty it overwrites the trailing text segment (or is
+    appended when the trace ends on a tool). Falls back to the flat
+    ``actions_taken`` tool descriptions plus a result text segment when the
+    trace is absent or malformed. Never raises.
+    """
+    result = result or ""
+    segments: list[dict] = []
+    parsed_trace = False
+    if execution_trace:
+        try:
+            entries = json.loads(execution_trace)
+            if isinstance(entries, list):
+                parsed_trace = True
+                for e in entries:
+                    if not isinstance(e, dict):
+                        continue
+                    etype = e.get("type")
+                    if etype == "text":
+                        segments.append({"kind": "text", "text": str(e.get("text", ""))})
+                    elif etype == "tool":
+                        segments.append({"kind": "tool", "text": str(e.get("text", ""))})
+                    # cm_boundary (and anything else) is skipped.
+        except (ValueError, TypeError):
+            parsed_trace = False
+    if not parsed_trace:
+        # Fallback: ordered tool descriptions, then the answer.
+        for desc in _trace_tool_descriptions(None, actions_taken):
+            segments.append({"kind": "tool", "text": desc})
+    if result:
+        if segments and segments[-1]["kind"] == "text":
+            segments[-1]["text"] = result
+        else:
+            segments.append({"kind": "text", "text": result})
+    return segments
+
+
 def _task_duration_seconds(started_at: str | None, completed_at: str | None) -> float | None:
     """Wall-clock seconds between a task's ``started_at`` and ``completed_at``
     (both SQLite ``datetime('now')`` strings), rounded to match the live `done`
@@ -1349,7 +1395,11 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
             messages.append({
                 "role": "assistant", "text": r["result"] or "", "task_id": r["id"],
                 "status": status, "created_at": r["created_at"],
-                "tools": tools, "duration_seconds": duration,
+                "tools": tools,
+                "segments": _trace_segments(
+                    r["execution_trace"], r["actions_taken"], r["result"],
+                ),
+                "duration_seconds": duration,
             })
         elif status == "pending_confirmation":
             messages.append({
@@ -1360,10 +1410,15 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
             })
             active_tasks.append({"id": r["id"], "status": status})
         elif status in ("failed", "cancelled"):
+            answer = r["result"] or r["error"] or ""
             messages.append({
-                "role": "assistant", "text": r["result"] or r["error"] or "",
+                "role": "assistant", "text": answer,
                 "task_id": r["id"], "status": status, "created_at": r["created_at"],
-                "tools": tools, "duration_seconds": duration,
+                "tools": tools,
+                "segments": _trace_segments(
+                    r["execution_trace"], r["actions_taken"], answer,
+                ),
+                "duration_seconds": duration,
             })
         else:  # pending / locked / running
             # Emit a placeholder assistant slot so the transcript stays ordered
