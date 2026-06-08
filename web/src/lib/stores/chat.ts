@@ -127,6 +127,13 @@ function createSession(): ChatSession {
 	// resumes from the new room's history.
 	let activeStream: { stop: () => void } | null = null;
 	let streamQueue: { taskId: number; cid: number }[] = [];
+	// Bot-delivered messages (alerts / logs / notifications routed to the `web`
+	// surface) are appended to the room out-of-band — they have no task to
+	// stream. When the room is idle we poll its history and surface any new ones.
+	// `seenNotifIds` dedups across polls; it's reset per room in loadHistory.
+	const seenNotifIds = new Set<number>();
+	let notifTimer: ReturnType<typeof setInterval> | null = null;
+	const NOTIF_POLL_MS = 5000;
 
 	const updateMsg = (cid: number, fn: (m: ChatMessage) => void) => {
 		messages.update((arr) => {
@@ -344,8 +351,36 @@ function createSession(): ChatSession {
 	function stopActive() {
 		if (activeStream) { activeStream.stop(); activeStream = null; }
 		streamQueue = [];
+		stopNotifPolling();
 		status.set('idle');
 		activeTaskId.set(null);
+	}
+
+	function stopNotifPolling() {
+		if (notifTimer) { clearInterval(notifTimer); notifTimer = null; }
+	}
+
+	// Poll the room's history while idle and surface any newly-delivered
+	// bot messages (alerts / logs / web-routed notifications). Skipped while a
+	// task streams — the stream owns the transcript then; the next idle tick
+	// picks up anything that landed meanwhile.
+	function startNotifPolling(roomId: number) {
+		stopNotifPolling();
+		notifTimer = setInterval(async () => {
+			if (get(activeRoomId) !== roomId || activeStream || get(status) !== 'idle') return;
+			let hist;
+			try { hist = await getRoomMessages(roomId); } catch { return; }
+			if (get(activeRoomId) !== roomId) return;
+			for (const m of hist.messages) {
+				if (m.role !== 'system' || typeof m.notif_id !== 'number') continue;
+				if (seenNotifIds.has(m.notif_id)) continue;
+				seenNotifIds.add(m.notif_id);
+				messages.update((arr) => [...arr, {
+					cid: nextCid(), role: 'system', text: m.text, tools: [],
+					streaming: false, createdAt: m.created_at,
+				}]);
+			}
+		}, NOTIF_POLL_MS);
 	}
 
 	async function loadHistory(roomId: number) {
@@ -354,10 +389,16 @@ function createSession(): ChatSession {
 		// binds to the message the server already laid out in order.
 		const cidByTask = new Map<number, number>();
 		const inFlight = (s?: string) => s === 'pending' || s === 'locked' || s === 'running';
+		// Reset the per-room dedup set, then record every notification already in
+		// the transcript so the idle poller only appends ones that arrive later.
+		seenNotifIds.clear();
 		const msgs: ChatMessage[] = hist.messages.map((m) => {
 			const cid = nextCid();
 			if (m.role === 'assistant' && typeof m.task_id === 'number') {
 				cidByTask.set(m.task_id, cid);
+			}
+			if (m.role === 'system' && typeof m.notif_id === 'number') {
+				seenNotifIds.add(m.notif_id);
 			}
 			return {
 				cid,
@@ -372,6 +413,7 @@ function createSession(): ChatSession {
 			};
 		});
 		messages.set(msgs);
+		startNotifPolling(roomId);
 
 		// Resume the room's in-flight tasks in order: the first streams, the rest
 		// queue behind it. A leading pending_confirmation is left parked (its card
@@ -437,7 +479,7 @@ function createSession(): ChatSession {
 		if (get(activeRoomId) === id) {
 			const remaining = get(rooms);
 			if (remaining[0]) await selectRoom(remaining[0].id);
-			else { activeRoomId.set(null); messages.set([]); }
+			else { stopNotifPolling(); activeRoomId.set(null); messages.set([]); }
 		}
 	}
 

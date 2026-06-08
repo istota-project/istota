@@ -103,6 +103,38 @@ class TestWebChatRoomsDB:
         assert db.count_recent_web_tasks(conn, "alice", 300) == 3
 
 
+class TestWebChatMessagesDB:
+    """Bot-delivered (unsolicited) room messages — the `web` delivery surface."""
+
+    def test_add_and_list_oldest_first(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "general")
+        db.add_web_chat_message(conn, "alice", room.token, "first")
+        db.add_web_chat_message(conn, "alice", room.token, "second", title="T")
+        msgs = db.list_web_chat_messages(conn, room.token)
+        assert [m.text for m in msgs] == ["first", "second"]
+        assert msgs[0].role == "system"
+        assert msgs[1].title == "T"
+
+    def test_add_returns_id(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "general")
+        mid = db.add_web_chat_message(conn, "alice", room.token, "x")
+        assert isinstance(mid, int) and mid > 0
+
+    def test_scoped_by_token(self, conn):
+        a = db.create_web_chat_room(conn, "alice", "one")
+        b = db.create_web_chat_room(conn, "alice", "two")
+        db.add_web_chat_message(conn, "alice", a.token, "in-a")
+        assert [m.text for m in db.list_web_chat_messages(conn, a.token)] == ["in-a"]
+        assert db.list_web_chat_messages(conn, b.token) == []
+
+    def test_limit_keeps_most_recent(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "general")
+        for i in range(5):
+            db.add_web_chat_message(conn, "alice", room.token, f"m{i}")
+        msgs = db.list_web_chat_messages(conn, room.token, limit=2)
+        assert [m.text for m in msgs] == ["m3", "m4"]
+
+
 # ---------------------------------------------------------------------------
 # Delivery routing: web is a stream surface (no Talk/email push)
 # ---------------------------------------------------------------------------
@@ -322,6 +354,28 @@ class TestChatMessagesApi:
         assert data["messages"][0]["role"] == "user"
         assert data["messages"][0]["text"] == "hello there"
         assert data["active_task"] is not None  # task is pending
+
+    async def test_delivered_notification_surfaces_in_history(self, chat_client):
+        """A message posted to the `web` surface (alert / log) shows up in the
+        room transcript as a system message with a stable notif_id and no
+        task_id — the user sees it on the next room load."""
+        from istota import db
+        from istota.web_app import _config
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        with db.get_db(_config.db_path) as conn:
+            db.add_web_chat_message(
+                conn, "alice", room["token"], "disk almost full", title="Alert",
+            )
+        data = (await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )).json()
+        sys_msgs = [m for m in data["messages"] if m["role"] == "system"]
+        assert len(sys_msgs) == 1
+        assert "disk almost full" in sys_msgs[0]["text"]
+        assert "Alert" in sys_msgs[0]["text"]
+        assert "notif_id" in sys_msgs[0]
+        assert "task_id" not in sys_msgs[0]
 
     async def test_history_multiple_in_flight_ordered(self, chat_client):
         """Several queued messages each surface a user msg + an in-flight

@@ -1255,6 +1255,8 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
             "ORDER BY id DESC LIMIT ?",
             (token, username, limit),
         ).fetchall()
+        # Bot-delivered messages (alerts / logs / notifications routed to web).
+        notes = db.list_web_chat_messages(conn, token, limit)
     rows = list(reversed(rows))
     messages: list[dict] = []
     # In-flight tasks, oldest-first. The room runs them one at a time (the
@@ -1295,6 +1297,19 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
                 "status": status, "created_at": r["created_at"],
             })
             active_tasks.append({"id": r["id"], "status": status})
+    # Merge bot-delivered messages in by time. Task created_at and message
+    # created_at share the `datetime('now')` string format, so a stable sort on
+    # created_at interleaves notifications between tasks while keeping each
+    # task's user→assistant pair adjacent (equal timestamps preserve order, and
+    # the notifications are appended after the task messages here). `notif_id`
+    # gives the client a stable key so a poll can append only new ones.
+    for n in notes:
+        text = f"**{n.title}**\n\n{n.text}" if n.title else n.text
+        messages.append({
+            "role": n.role, "text": text, "notif_id": n.id,
+            "created_at": n.created_at,
+        })
+    messages.sort(key=lambda m: m.get("created_at") or "")
     return {
         "messages": messages,
         "active_task": active_tasks[0] if active_tasks else None,

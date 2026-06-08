@@ -568,3 +568,20 @@ CREATE TABLE IF NOT EXISTS web_chat_rooms (
 
 CREATE INDEX IF NOT EXISTS idx_web_chat_rooms_user
     ON web_chat_rooms (user_id, archived, id);
+
+-- Unsolicited (bot-delivered) messages posted into a web chat room: alerts,
+-- the verbose execution log, and any notification routed to the `web` surface.
+-- Unlike task-backed chat turns (in `tasks`) these have no originating user
+-- prompt, so they render as a single system message merged into the transcript.
+CREATE TABLE IF NOT EXISTS web_chat_messages (
+    id          INTEGER PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    token       TEXT NOT NULL,                  -- room channel id (web_chat_rooms.token)
+    role        TEXT NOT NULL DEFAULT 'system',
+    title       TEXT,
+    text        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_web_chat_messages_token
+    ON web_chat_messages (token, id);

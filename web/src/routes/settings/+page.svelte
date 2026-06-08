@@ -65,7 +65,7 @@
 
 	let briefings: UserBriefingRow[] = $state([]);
 	let briefingRooms: BriefingRoomOption[] = $state([]);
-	let briefingOutputs: string[] = $state(['talk', 'email', 'ntfy']);
+	let briefingOutputs: string[] = $state(['talk', 'email', 'ntfy', 'web']);
 	let newBriefing = $state({
 		name: '',
 		cron: '0 7 * * *',
@@ -106,7 +106,7 @@
 			briefingRooms = briefResp.rooms;
 			briefingOutputs = briefResp.outputs?.length
 				? briefResp.outputs
-				: ['talk', 'email', 'ntfy'];
+				: ['talk', 'email', 'ntfy', 'web'];
 			allModules = modResp.modules;
 			error = '';
 		} catch (e) {
@@ -132,14 +132,20 @@
 		profile.disabled_modules = [...next];
 	}
 
-	// User-routable surfaces only — self-routing (istota_file) and the
-	// events-only stream/repl surfaces are held back from the UI; the server's
-	// delivery_surfaces list is the source of truth, this is the offline fallback.
-	const BUILTIN_SURFACES = ['talk', 'email', 'ntfy'];
+	// User-routable surfaces only — self-routing (istota_file) and the inline
+	// repl surface are held back from the UI; the server's delivery_surfaces
+	// list is the source of truth, this is the offline fallback. `web` is the
+	// web chat surface: routing logs/alerts there posts into the user's room.
+	const BUILTIN_SURFACES = ['talk', 'email', 'ntfy', 'web'];
 
 	function deliverySurfaces(): string[] {
 		const s = profile?.delivery_surfaces;
 		return s && s.length ? s : BUILTIN_SURFACES;
+	}
+
+	// Friendly labels for surface names that aren't self-explanatory.
+	function surfaceLabel(s: string): string {
+		return s === 'web' ? 'Web chat' : s;
 	}
 
 	// Per-purpose route dropdown. `emptyValue`/`emptyLabel` is the leading no-op
@@ -155,7 +161,7 @@
 		const { emptyValue = '', emptyLabel = '(default)', talkLabel = 'talk' } = opts;
 		const surfaces = deliverySurfaces();
 		const out: SelectOption[] = [{ value: emptyValue, label: emptyLabel }];
-		for (const s of surfaces) out.push({ value: s, label: s === 'talk' ? talkLabel : s });
+		for (const s of surfaces) out.push({ value: s, label: s === 'talk' ? talkLabel : surfaceLabel(s) });
 		if (current && current !== emptyValue && !surfaces.includes(current))
 			out.push({ value: current, label: current });
 		return out;
@@ -165,7 +171,7 @@
 	// always a default), plus the current value if it's a custom descriptor.
 	function destinationOptions(current: string): SelectOption[] {
 		const surfaces = deliverySurfaces();
-		const out: SelectOption[] = surfaces.map((s) => ({ value: s, label: s }));
+		const out: SelectOption[] = surfaces.map((s) => ({ value: s, label: surfaceLabel(s) }));
 		if (current && !surfaces.includes(current)) out.push({ value: current, label: current });
 		return out;
 	}
@@ -757,7 +763,7 @@
 					<SettingsField label="Output">
 						<select bind:value={newBriefing.output}>
 							{#each briefingOutputs as opt (opt)}
-								<option value={opt}>{opt}</option>
+								<option value={opt}>{surfaceLabel(opt)}</option>
 							{/each}
 						</select>
 					</SettingsField>

@@ -284,6 +284,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `istota_kv` | — | user_id, namespace, key, value (JSON) — backs the `kv` skill |
 | `trusted_email_senders` | — | user_id, pattern (fnmatch) — email-gate allowlist |
 | `web_chat_rooms` | `WebChatRoom` | id, user_id, token (channel id), name, archived, created_at, updated_at — backs the web chat surface; one room = one `conversation_token` |
+| `web_chat_messages` | `WebChatMessage` | id, user_id, token, role, title, text, created_at — bot-delivered (unsolicited) room messages: alerts / logs / notifications routed to the `web` surface via `WebTransport.deliver`. Distinct from task-backed turns; merged into room history by time |
 
 ## Key DB Functions
 

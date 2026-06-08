@@ -27,6 +27,7 @@ from .routing import (
     resolve_delivery_plan,
 )
 from .talk import TalkTransport
+from .web import WebTransport
 
 __all__ = [
     "IncomingMessage",
@@ -42,4 +43,5 @@ __all__ = [
     "resolve_delivery_plan",
     "TalkTransport",
     "EmailTransport",
+    "WebTransport",
 ]

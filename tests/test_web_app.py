@@ -1645,6 +1645,20 @@ class TestProfileEndpoints:
         )
         assert resp.status_code == 400
 
+    async def test_update_profile_accepts_web_routing_surface(self, tmp_path, client, app):
+        # Web chat is a registered, user-routable surface (ISSUE-121), so an
+        # alert/log route to it is valid on the wire.
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"routing": {"alert": "web", "log": "web"}},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+
     async def test_update_profile_rejects_unknown_routing_surface(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
@@ -2234,8 +2248,8 @@ class TestBriefingEndpoints:
         )
         assert resp.status_code == 200
         outputs = set(resp.json()["outputs"])
-        # User-routable, instance-enabled push surfaces are offered.
-        assert {"talk", "email", "ntfy"} <= outputs
+        # User-routable surfaces are offered — including web chat (ISSUE-121).
+        assert {"talk", "email", "ntfy", "web"} <= outputs
         # Self-routing / inline surfaces are never offered.
         assert "istota_file" not in outputs
         assert "repl" not in outputs
