@@ -468,6 +468,50 @@ class TestChatMessagesApi:
         assert "notif_id" in sys_msgs[0]
         assert "task_id" not in sys_msgs[0]
 
+    async def test_completed_task_history_carries_trace_and_duration(self, chat_client):
+        """A completed web task surfaces its tool trace and wall-clock duration
+        in history, so the action strip and timing persist as an inspectable
+        done state across reloads / room switches (ISSUE-122)."""
+        import json
+
+        import istota.web_app as mod
+
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        trace = json.dumps([
+            {"type": "tool", "text": "Read config.toml"},
+            {"type": "text", "text": "thinking"},
+            {"type": "tool", "text": "Grep for foo"},
+        ])
+        with db.get_db(mod._config.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="do the thing", user_id="alice", source_type="web",
+                conversation_token=room["token"], output_target="web",
+            )
+            db.update_task_status(
+                conn, tid, "completed", result="done!",
+                actions_taken=json.dumps(["Read config.toml", "Grep for foo"]),
+                execution_trace=trace,
+            )
+            # Stamp a deterministic 7-second wall clock.
+            conn.execute(
+                "UPDATE tasks SET started_at = '2026-06-07 10:00:00', "
+                "completed_at = '2026-06-07 10:00:07' WHERE id = ?",
+                (tid,),
+            )
+
+        data = (await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )).json()
+        assistant = next(
+            m for m in data["messages"]
+            if m["role"] == "assistant" and m.get("task_id") == tid
+        )
+        assert assistant["text"] == "done!"
+        # Tool descriptions persist (in order) so the action strip can rebuild.
+        assert assistant["tools"] == ["Read config.toml", "Grep for foo"]
+        assert assistant["duration_seconds"] == 7.0
+
     async def test_history_multiple_in_flight_ordered(self, chat_client):
         """Several queued messages each surface a user msg + an in-flight
         assistant placeholder, and active_tasks lists them oldest-first so the

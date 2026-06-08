@@ -1265,6 +1265,49 @@ def _chat_delete_room(username: str, room_id: int) -> str:
     return "ok"
 
 
+def _trace_tool_descriptions(execution_trace: str | None, actions_taken: str | None) -> list[str]:
+    """Tool-use descriptions for a finished task, in order, so the client can
+    rebuild the action strip as a persisted "done" trace (ISSUE-122). Prefers
+    the ordered ``execution_trace`` (tool entries only), falling back to the
+    flat ``actions_taken`` list. Malformed JSON degrades to an empty list."""
+    if execution_trace:
+        try:
+            entries = json.loads(execution_trace)
+            tools = [
+                str(e.get("text", ""))
+                for e in entries
+                if isinstance(e, dict) and e.get("type") == "tool"
+            ]
+            if tools:
+                return tools
+        except (ValueError, TypeError):
+            pass
+    if actions_taken:
+        try:
+            actions = json.loads(actions_taken)
+            if isinstance(actions, list):
+                return [str(a) for a in actions]
+        except (ValueError, TypeError):
+            pass
+    return []
+
+
+def _task_duration_seconds(started_at: str | None, completed_at: str | None) -> float | None:
+    """Wall-clock seconds between a task's ``started_at`` and ``completed_at``
+    (both SQLite ``datetime('now')`` strings), rounded to match the live `done`
+    event's ``duration_seconds``. ``None`` if either is missing/unparseable."""
+    if not started_at or not completed_at:
+        return None
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        start = datetime.strptime(started_at[:19], fmt)
+        end = datetime.strptime(completed_at[:19], fmt)
+    except ValueError:
+        return None
+    delta = (end - start).total_seconds()
+    return round(delta, 1) if delta >= 0 else None
+
+
 def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     """Recent messages for a room plus the active (in-flight) task, if any.
 
@@ -1276,7 +1319,8 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     with db.get_db(_config.db_path) as conn:
         rows = conn.execute(
             "SELECT id, prompt, result, status, error, confirmation_prompt, "
-            "created_at FROM tasks "
+            "created_at, actions_taken, execution_trace, started_at, completed_at "
+            "FROM tasks "
             "WHERE conversation_token = ? AND user_id = ? AND source_type = 'web' "
             "ORDER BY id DESC LIMIT ?",
             (token, username, limit),
@@ -1296,10 +1340,16 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
             "created_at": r["created_at"],
         })
         status = r["status"]
+        # Tool trace + wall-clock duration so a finished turn renders its action
+        # strip as a persisted, inspectable "done" state and shows timing in the
+        # metadata after a reload / room switch (ISSUE-122).
+        tools = _trace_tool_descriptions(r["execution_trace"], r["actions_taken"])
+        duration = _task_duration_seconds(r["started_at"], r["completed_at"])
         if status == "completed":
             messages.append({
                 "role": "assistant", "text": r["result"] or "", "task_id": r["id"],
                 "status": status, "created_at": r["created_at"],
+                "tools": tools, "duration_seconds": duration,
             })
         elif status == "pending_confirmation":
             messages.append({
@@ -1313,6 +1363,7 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
             messages.append({
                 "role": "assistant", "text": r["result"] or r["error"] or "",
                 "task_id": r["id"], "status": status, "created_at": r["created_at"],
+                "tools": tools, "duration_seconds": duration,
             })
         else:  # pending / locked / running
             # Emit a placeholder assistant slot so the transcript stays ordered
