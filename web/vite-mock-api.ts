@@ -143,20 +143,24 @@ function mockTaskEvents(task: MockChatTask) {
 
 	const events: { seq: number; kind: string; payload: Record<string, unknown>; at: number }[] = [
 		{ seq: 1, kind: 'task_started', payload: { text: 'On it...' }, at: 0 },
-		// Lead-in narration → folds into the activity chip when its tool starts.
-		{ seq: 2, kind: 'text_delta', payload: { text: 'Let me search for the latest headlines.' }, at: 300 },
-		{ seq: 3, kind: 'tool_start', payload: { tool_name: 'WebSearch', description: '🔎 web_search "today\'s news"', tool_call_id: 'c1' }, at: 800 },
-		{ seq: 4, kind: 'tool_progress', payload: { tool_call_id: 'c1', text: '7 results' }, at: 1600 },
-		{ seq: 5, kind: 'tool_end', payload: { tool_name: 'WebSearch', tool_call_id: 'c1', success: true, duration_ms: 1800 }, at: 2600 },
-		// Second progress message + action — the chip's "current step" updates.
-		{ seq: 6, kind: 'text_delta', payload: { text: 'Now extracting the key stories.' }, at: 2900 },
-		{ seq: 7, kind: 'tool_start', payload: { tool_name: 'WebFetch', description: '🌐 browse get justsecurity.org', tool_call_id: 'c2' }, at: 3200 },
-		{ seq: 8, kind: 'tool_end', payload: { tool_name: 'WebFetch', tool_call_id: 'c2', success: true, duration_ms: 1900 }, at: 5100 },
+		// Reasoning lead-in → streams INSIDE the activity chip (💭), never the
+		// prominent answer area. Folds to a settled chip row once the tool starts.
+		{ seq: 2, kind: 'thinking', payload: { text: 'The user is asking for today\'s headlines. ' }, at: 250 },
+		{ seq: 3, kind: 'thinking', payload: { text: 'I should search the web for recent news first.' }, at: 450 },
+		{ seq: 4, kind: 'tool_start', payload: { tool_name: 'WebSearch', description: '🔎 web_search "today\'s news"', tool_call_id: 'c1' }, at: 800 },
+		{ seq: 5, kind: 'tool_progress', payload: { tool_call_id: 'c1', text: '7 results' }, at: 1600 },
+		{ seq: 6, kind: 'tool_end', payload: { tool_name: 'WebSearch', tool_call_id: 'c1', success: true, duration_ms: 1800 }, at: 2600 },
+		// More reasoning between tools — the chip's "current step" updates.
+		{ seq: 7, kind: 'thinking', payload: { text: 'Good results. Let me fetch the top source for detail.' }, at: 2900 },
+		{ seq: 8, kind: 'tool_start', payload: { tool_name: 'WebFetch', description: '🌐 browse get justsecurity.org', tool_call_id: 'c2' }, at: 3200 },
+		{ seq: 9, kind: 'tool_end', payload: { tool_name: 'WebFetch', tool_call_id: 'c2', success: true, duration_ms: 1900 }, at: 5100 },
+		// A final beat of reasoning before the answer streams.
+		{ seq: 10, kind: 'thinking', payload: { text: 'I have enough to summarize the top stories now.' }, at: 5250 },
 	];
 
 	// The final answer streams in, chunked, after the last tool — prominent and
 	// live — then the canonical result reconciles it.
-	let seq = 9;
+	let seq = 11;
 	const answerStart = 5500;
 	const perChunk = 70; // ms between chunks → visibly streaming markdown
 	answerChunks.forEach((chunk, i) => {
@@ -289,6 +293,10 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 						const last = segments[segments.length - 1];
 						if (last && last.kind === 'text') last.text += (e.payload as any).text;
 						else segments.push({ kind: 'text', text: (e.payload as any).text });
+					} else if (e.kind === 'thinking') {
+						const last = segments[segments.length - 1];
+						if (last && last.kind === 'thinking') last.text += (e.payload as any).text;
+						else segments.push({ kind: 'thinking', text: (e.payload as any).text });
 					} else if (e.kind === 'tool_start') {
 						segments.push({ kind: 'tool', text: (e.payload as any).description });
 					}

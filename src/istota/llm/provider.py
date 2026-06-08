@@ -35,6 +35,12 @@ class ToolCallDelta:
 
 
 @dataclass
+class ThinkingDelta:
+    type: Literal["thinking_delta"] = "thinking_delta"
+    thinking: str = ""
+
+
+@dataclass
 class StreamDone:
     type: Literal["done"] = "done"
     message: AssistantMessage = field(default_factory=AssistantMessage)
@@ -47,7 +53,9 @@ class StreamError:
 
 
 # Discriminated union via the ``type`` field.
-StreamEvent = StreamStart | TextDelta | ToolCallDelta | StreamDone | StreamError
+StreamEvent = (
+    StreamStart | TextDelta | ToolCallDelta | ThinkingDelta | StreamDone | StreamError
+)
 
 
 class LLMProvider(Protocol):

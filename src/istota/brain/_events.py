@@ -82,6 +82,25 @@ class ToolProgressEvent:
     text: str
 
 
+@dataclass
+class ThinkingEvent:
+    """A complete extended-thinking / reasoning block. ClaudeCodeBrain only —
+    the ``claude`` CLI emits ``thinking`` content blocks as whole snapshots (one
+    per block, deduped by block id), not token deltas. The executor maps this to
+    a ``thinking`` task event on stream surfaces only (web/repl); push surfaces
+    drop it."""
+    text: str
+
+
+@dataclass
+class ThinkingDeltaEvent:
+    """An *incremental* fragment of the assistant's extended thinking. NativeBrain
+    only — the OpenAI-compat provider streams ``reasoning_content`` / ``reasoning``
+    deltas, which the loop forwards token-by-token. The executor coalesces these
+    into ``thinking`` task events on stream surfaces only."""
+    thinking: str
+
+
 StreamEvent = (
     ToolUseEvent
     | TextEvent
@@ -90,6 +109,8 @@ StreamEvent = (
     | ContextManagementEvent
     | ToolEndEvent
     | ToolProgressEvent
+    | ThinkingEvent
+    | ThinkingDeltaEvent
 )
 
 
@@ -153,6 +174,7 @@ def parse_stream_line(
 
         tool_events = []
         text_parts = []
+        thinking_parts = []
 
         for block in content_blocks:
             block_type = block.get("type")
@@ -184,11 +206,33 @@ def parse_stream_line(
                     _seen.add(text_key)
                 text_parts.append(text)
 
-        # Prefer tool events (more informative for progress)
+            elif block_type == "thinking":
+                # Extended-thinking block. Arrives as a whole snapshot per block;
+                # dedup by message_id + content hash to drop CM replays, mirroring
+                # the text-dedup above (ISSUE-024).
+                think = block.get("thinking", "").strip()
+                if not think:
+                    continue
+                if _seen is not None:
+                    msg_id = message.get("id", "")
+                    think_key = f"think:{msg_id}:{hash(think)}"
+                    if think_key in _seen:
+                        continue
+                    _seen.add(think_key)
+                thinking_parts.append(think)
+
+        # Single event per line, in priority order: a tool call is the most
+        # informative, then answer/narration text, then (only when a line carries
+        # thinking alone) the reasoning. A rare combined thinking+text line still
+        # prefers text — acceptable for v1, since the CLI emits thinking on its
+        # own block/line in practice.
         if tool_events:
             return tool_events[0]
 
         if text_parts:
             return TextEvent(text="\n".join(text_parts))
+
+        if thinking_parts:
+            return ThinkingEvent(text="\n".join(thinking_parts))
 
     return None

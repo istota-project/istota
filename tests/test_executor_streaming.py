@@ -856,6 +856,112 @@ class TestStreamSurfaceCoalescing:
         # The pre-boundary flush put a text_delta ("Let me look.") before the tool.
         assert first_delta < first_tool
 
+    def test_stream_task_routes_thinking_to_thinking_event(self, tmp_path):
+        """Stream surface (web): a ClaudeCode thinking block → coalesced
+        `thinking` event, never `text_delta` / `progress_text`."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_text = False
+        task = _make_task(source_type="web")
+
+        stream_lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "content": [
+                    {"type": "thinking", "thinking": "The user wants the answer."},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m2", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "42."}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": "42."}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, _r, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        thinks = [e for e in rec.events if e.kind == "thinking"]
+        assert thinks, "stream task should produce thinking events"
+        assert "".join(e.payload["text"] for e in thinks) == "The user wants the answer."
+        # Thinking is its own kind — not leaked into the answer channels.
+        assert "progress_text" not in rec.kinds()
+        # Thinking row precedes the answer text_delta (boundary flush keeps order).
+        kinds = rec.kinds()
+        assert kinds.index("thinking") < kinds.index("text_delta")
+
+    def test_push_task_emits_no_thinking(self, tmp_path):
+        """Push surface (talk): a thinking block produces ZERO thinking events —
+        reasoning is web/repl-only, with no progress_text fallback."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_text = True
+        task = _make_task(source_type="cli")  # → talk surface (push)
+
+        stream_lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "content": [
+                    {"type": "thinking", "thinking": "Reasoning the user never sees."},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m2", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "Visible."}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": "Done."}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, _r, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        assert "thinking" not in rec.kinds()
+        # The thinking text must not appear in any emitted payload on a push task.
+        for e in rec.events:
+            assert "Reasoning the user never sees" not in str(e.payload)
+
+    def test_thinking_buffer_independent_of_text_buffer(self, tmp_path):
+        """Thinking flushes into a `thinking` row before the answer's `text_delta`
+        row — the two buffers never merge (separate render targets)."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_tool_use = True
+        task = _make_task(source_type="web")
+
+        stream_lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "content": [
+                    {"type": "thinking", "thinking": "Planning the search."},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m2", "stop_reason": "tool_use", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": "/tmp/x.txt"}},
+                ]},
+            }) + "\n",
+            json.dumps({"type": "user", "message": {"role": "user"}}) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m3", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "All set."}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": "All set."}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, _r, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        kinds = rec.kinds()
+        # thinking flushed at the tool boundary → before the tool_start, and the
+        # answer text_delta is a distinct, later row.
+        assert kinds.index("thinking") < kinds.index("tool_start")
+        thinks = [e for e in rec.events if e.kind == "thinking"]
+        deltas = [e for e in rec.events if e.kind == "text_delta"]
+        assert "".join(e.payload["text"] for e in thinks) == "Planning the search."
+        assert "".join(e.payload["text"] for e in deltas) == "All set."
+
 
 class TestStreamingStdinDelivery:
     """Regression: the prompt must be written to the subprocess stdin

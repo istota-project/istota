@@ -20,7 +20,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from istota.llm.provider import StreamDone, StreamError, TextDelta, ToolCallDelta
+from istota.llm.provider import (
+    StreamDone,
+    StreamError,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallDelta,
+)
 from istota.llm.types import (
     AssistantMessage,
     Message,
@@ -298,6 +304,12 @@ async def _stream_assistant_response(
             await emit(AgentEvent(type="message_update", assistant_event=event))
         elif isinstance(event, ToolCallDelta):
             _accumulate_tool_delta(tool_acc, event)
+            await emit(AgentEvent(type="message_update", assistant_event=event))
+        elif isinstance(event, ThinkingDelta):
+            # Reasoning fragment — forwarded so the brain can surface it on stream
+            # surfaces. Not folded into text_parts (it must not land in the
+            # message content / result_text); the provider assembles the canonical
+            # ThinkingContent block from its own accumulation at StreamDone.
             await emit(AgentEvent(type="message_update", assistant_event=event))
         elif isinstance(event, StreamDone):
             final = event.message

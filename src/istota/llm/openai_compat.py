@@ -14,7 +14,14 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from .provider import StreamDone, StreamError, StreamEvent, TextDelta, ToolCallDelta
+from .provider import (
+    StreamDone,
+    StreamError,
+    StreamEvent,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallDelta,
+)
 from .types import (
     AssistantMessage,
     ImageContent,
@@ -363,7 +370,11 @@ class OpenAICompatibleProvider:
 
             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
             if isinstance(reasoning, str) and reasoning:
+                # Accumulate for StreamDone message fidelity (assembled into a
+                # ThinkingContent block, excluded from result_text) AND stream it
+                # live so the executor can surface reasoning on stream surfaces.
                 thinking_parts.append(reasoning)
+                yield ThinkingDelta(thinking=reasoning)
 
             content = delta.get("content")
             if content:

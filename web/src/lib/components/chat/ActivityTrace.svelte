@@ -17,13 +17,17 @@
 	);
 	const toolCount = $derived(tools.length);
 
-	// The latest progress message (most recent settled narration).
-	const latestMessage = $derived.by(() => {
+	// The latest step text: the most recent narration (text) OR reasoning
+	// (thinking), whichever came last. Carries its kind so the collapsed line can
+	// mark thinking distinctly (💭).
+	const latestStep = $derived.by<{ kind: 'text' | 'thinking'; text: string } | null>(() => {
 		for (let i = steps.length - 1; i >= 0; i--) {
 			const s = steps[i];
-			if (s.kind === 'text' && s.text.trim()) return s.text.trim();
+			if ((s.kind === 'text' || s.kind === 'thinking') && s.text.trim()) {
+				return { kind: s.kind, text: s.text.trim() };
+			}
 		}
-		return '';
+		return null;
 	});
 	// The active action: the running tool, else the most recent one.
 	const activeTool = $derived(
@@ -46,7 +50,11 @@
 		<!-- Collapsed: the current progress message, then the current action on its
 		     own line below it. -->
 		<span class="current">
-			{#if latestMessage}<span class="msg">{firstLine(latestMessage)}</span>{/if}
+			{#if latestStep}
+				<span class="msg" class:thinking={latestStep.kind === 'thinking'}>
+					{#if latestStep.kind === 'thinking'}💭 {/if}{firstLine(latestStep.text)}
+				</span>
+			{/if}
 			{#if activeTool}
 				<span class="action">
 					{#if activeTool.running}
@@ -59,7 +67,7 @@
 					<span class="desc">{activeTool.description || activeTool.name}</span>
 				</span>
 			{/if}
-			{#if !latestMessage && !activeTool}<span class="msg">Working…</span>{/if}
+			{#if !latestStep && !activeTool}<span class="msg">Working…</span>{/if}
 		</span>
 		{#if toolCount > 0}<span class="count">{toolCount}</span>{/if}
 	</button>
@@ -80,6 +88,8 @@
 						{/if}
 						<span class="desc">{step.tool.description || step.tool.name}</span>
 					</div>
+				{:else if step.kind === 'thinking'}
+					<div class="step-thinking">💭 {firstLine(step.text)}</div>
 				{:else}
 					<div class="step-msg">{firstLine(step.text)}</div>
 				{/if}
@@ -154,6 +164,7 @@
 		font-style: italic;
 		color: var(--text-dim);
 	}
+	.msg.thinking { opacity: 0.85; }
 	.action {
 		min-width: 0;
 		display: flex;
@@ -207,6 +218,15 @@
 	.step-msg {
 		font-style: italic;
 		color: var(--text-dim);
+		word-break: break-word;
+		white-space: pre-wrap;
+	}
+	/* Reasoning rows read as the model's quiet inner voice: same dim italic as a
+	   narration row, set off only by the 💭 glyph (added in the markup). */
+	.step-thinking {
+		font-style: italic;
+		color: var(--text-dim);
+		opacity: 0.85;
 		word-break: break-word;
 		white-space: pre-wrap;
 	}

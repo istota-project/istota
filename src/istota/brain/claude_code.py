@@ -25,6 +25,7 @@ from ._events import (
     ResultEvent,
     StreamEvent,
     TextEvent,
+    ThinkingEvent,
     ToolUseEvent,
     make_stream_parser,
 )
@@ -479,8 +480,12 @@ class ClaudeCodeBrain:
                     execution_trace.append({"type": "tool", "text": event.description})
                 elif isinstance(event, TextEvent):
                     execution_trace.append({"type": "text", "text": event.text})
+                # ThinkingEvent is intentionally NOT added to execution_trace:
+                # reasoning is a live-stream-only concern (a ``thinking`` task
+                # event on stream surfaces), never persisted in the trace, so
+                # result composition / history reconstruction stay unchanged.
 
-                if isinstance(event, (ToolUseEvent, TextEvent)) and req.on_progress is not None:
+                if isinstance(event, (ToolUseEvent, TextEvent, ThinkingEvent)) and req.on_progress is not None:
                     try:
                         req.on_progress(event)
                     except Exception:
