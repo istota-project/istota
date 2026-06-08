@@ -2,7 +2,10 @@
 	import { Check, X, ChevronRight, ChevronDown } from 'lucide-svelte';
 	import type { ToolEntry } from '$lib/stores/chat';
 
-	let { tools }: { tools: ToolEntry[] } = $props();
+	// `streaming` is true for the whole in-flight run, not just while a tool is
+	// literally executing. The strip stays the single activity indicator across
+	// the run (pulsing between tools too) so a separate dot doesn't flicker in.
+	let { tools, streaming = false }: { tools: ToolEntry[]; streaming?: boolean } = $props();
 
 	let expanded = $state(false);
 
@@ -12,6 +15,9 @@
 	const anyRunning = $derived(tools.some((t) => t.running));
 	const anyFailed = $derived(tools.some((t) => t.success === false));
 	const count = $derived(tools.length);
+	// Busy = a tool is running, or the run is still streaming between/after
+	// tools. Drives the pulse and defers the final check/X until the run ends.
+	const busy = $derived(anyRunning || streaming);
 
 	function label(t: ToolEntry): string {
 		return t.progress || t.description || `Using ${t.name}`;
@@ -21,9 +27,9 @@
 	);
 </script>
 
-<div class="tool-strip" class:open={expanded} class:active={anyRunning}>
+<div class="tool-strip" class:open={expanded} class:active={busy}>
 	<button class="head" onclick={() => (expanded = !expanded)} type="button" aria-expanded={expanded}>
-		{#if !anyRunning}
+		{#if !busy}
 			<span class="status">
 				{#if anyFailed}<X size={13} />{:else}<Check size={13} />{/if}
 			</span>
@@ -64,8 +70,9 @@
 	}
 	.tool-strip.open { width: 100%; }
 
-	/* Active state: a subtle amber gradient sweeps across the strip instead of a
-	   spinning icon. */
+	/* Active state: a subtle gradient sweeps across the strip instead of a
+	   spinning icon. Held for the whole streaming run (not just while a tool
+	   runs) so the indicator stays continuous between tool calls. */
 	.tool-strip.active {
 		background: linear-gradient(
 			100deg,

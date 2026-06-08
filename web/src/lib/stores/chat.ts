@@ -228,7 +228,11 @@ function createSession(): ChatSession {
 					finalizeTools(m);
 					break;
 				case 'cancelled':
+					// A cancelled task has no canonical result to reconcile against.
+					// If text streamed in via deltas (m.streaming still set), keep the
+					// partial answer but mark it cancelled; otherwise show a bare notice.
 					if (!m.text) m.text = '_(cancelled)_';
+					else if (m.streaming) m.text = m.text + '\n\n_(cancelled)_';
 					m.progress = undefined;
 					m.streaming = false;
 					finalizeTools(m);

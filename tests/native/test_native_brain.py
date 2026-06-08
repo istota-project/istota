@@ -299,11 +299,14 @@ class TestProgressStreaming:
         edited = [name for kind, name in log if kind == "edited"]
         assert "ToolUseEvent" in received
         assert "ToolEndEvent" in received  # NativeBrain emits tool completion
-        # The intermediate "Working on it." now reaches the sink as a streamed
-        # TextDeltaEvent (token-level answer streaming), and the redundant
-        # whole-turn TextEvent flush is suppressed (no double-render).
+        # "Working on it." and "Wrote the file." both stream as TextDeltaEvents
+        # (token-level answer streaming). The brain also flushes intermediate-turn
+        # text as a whole-turn TextEvent so push surfaces (Talk) still get
+        # narration — here turn 1's "Working on it." Only the *final* turn's
+        # TextEvent is suppressed (its text becomes result_text); the executor
+        # dedupes deltas-vs-TextEvent per surface downstream.
         assert "TextDeltaEvent" in received
-        assert "TextEvent" not in received
+        assert "TextEvent" in received
         assert edited == received  # every callback ran to completion
 
     def test_streaming_suppresses_whole_turn_text_event(self, tmp_path):

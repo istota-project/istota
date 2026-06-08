@@ -2655,6 +2655,14 @@ def execute_task(
         _DELTA_FLUSH_CHARS = 120
         _delta_buf: list[str] = []
         _delta_state = {"chars": 0, "last_flush": time.monotonic()}
+        # True once any TextDeltaEvent has streamed this task. Used to dedupe a
+        # NativeBrain whole-turn TextEvent against the deltas that already
+        # carried the same text: the brain stays surface-agnostic (it always
+        # emits both per-token deltas and intermediate-turn TextEvents); the
+        # executor — which alone knows the surface — drops the redundant
+        # TextEvent on a stream surface once deltas have flowed, and forwards it
+        # as progress_text on a push surface (where deltas were dropped).
+        _delta_seen = {"value": False}
 
         def _flush_deltas() -> None:
             if event_writer is None or not _delta_buf:
@@ -2711,17 +2719,25 @@ def execute_task(
                 # NativeBrain incremental answer text. Stream surfaces only; a
                 # push task drops it (the final result is delivered once).
                 if is_stream_surface:
+                    _delta_seen["value"] = True
                     _buffer_delta(event.text)
             elif isinstance(event, TextEvent):
                 if is_stream_surface:
-                    # Coarse streaming for ClaudeCodeBrain (one TextEvent per
-                    # completed block) — route through the same delta channel
-                    # rather than progress_text, so it renders live too.
+                    if _delta_seen["value"]:
+                        # NativeBrain: the per-token deltas already carried this
+                        # intermediate turn's text live, so the whole-turn
+                        # TextEvent is a redundant re-render — drop it.
+                        return
+                    # ClaudeCodeBrain (no deltas): coarse streaming, one
+                    # TextEvent per completed block — route through the same
+                    # delta channel rather than progress_text so it renders live.
                     _buffer_delta(event.text)
                 elif show_text:
-                    # Push surface: NativeBrain already suppresses the final
-                    # turn's text (it becomes the result); ClaudeCodeBrain's
-                    # ResultEvent is a distinct frame, so neither double-renders.
+                    # Push surface: deltas are dropped, so intermediate-turn
+                    # TextEvents are how NativeBrain narration reaches Talk. The
+                    # brain holds back the final turn's text (it becomes the
+                    # result); ClaudeCodeBrain's ResultEvent is a distinct frame.
+                    # Neither double-renders against the result.
                     event_writer.emit("progress_text", {"text": event.text})
             elif isinstance(event, ContextManagementEvent):
                 if is_stream_surface:
@@ -2804,17 +2820,19 @@ def execute_task(
             result_file=result_file,
         )
 
-        with contextlib.ExitStack() as stack:
-            if _proxy_ctx is not None:
-                stack.enter_context(_proxy_ctx)
-            if _net_proxy_ctx is not None:
-                stack.enter_context(_net_proxy_ctx)
-            brain_result = brain.execute(req)
-
-        # Final flush: emit any buffered streamed text before the scheduler
-        # emits the terminal ``result`` (which replaces it in the UI). Guarantees
-        # no buffered delta is lost for very fast/tiny answers.
-        _flush_deltas()
+        try:
+            with contextlib.ExitStack() as stack:
+                if _proxy_ctx is not None:
+                    stack.enter_context(_proxy_ctx)
+                if _net_proxy_ctx is not None:
+                    stack.enter_context(_net_proxy_ctx)
+                brain_result = brain.execute(req)
+        finally:
+            # Final flush: emit any buffered streamed text before the scheduler
+            # emits the terminal event. On success this precedes the canonical
+            # ``result`` (which replaces it in the UI); on an exception the
+            # finally still drains the buffer so the last fragment isn't lost.
+            _flush_deltas()
 
         success = brain_result.success
         result = brain_result.result_text

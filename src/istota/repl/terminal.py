@@ -98,11 +98,14 @@ class TerminalSubscriber:
         elif kind == "error":
             self._print()
             self._print(self._c(_RED, f"error: {p.get('message') or 'task failed'}"))
+            self._streamed = ""
         elif kind == "cancelled":
             self._print(self._c(_YELLOW, "cancelled"))
+            self._streamed = ""
         elif kind == "confirmation":
             self._print()
             self._print(self._c(_YELLOW, p.get("prompt") or "(confirmation requested)"))
+            self._streamed = ""
 
     def on_finish(self) -> None:
         """No-op: the terminal renders everything live via ``on_event``.
