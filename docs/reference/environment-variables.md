@@ -15,6 +15,7 @@ Set for every task:
 | `ISTOTA_DEFERRED_DIR` | Temp directory for deferred JSON writes |
 | `ISTOTA_SKILL_PROXY_SOCK` | Skill proxy socket path (if proxy enabled) |
 | `ISTOTA_CONFIG_PATH` | Config file path (propagated to subprocess children so module-skill jobs find the config) |
+| `ISTOTA_EXPERIMENTAL_FEATURES` | CSV of enabled experimental features (`config.experimental.features`). Injected by every subprocess builder so `@requires_feature`-gated CLI subcommands and gated skills see the same gate as the LLM path |
 
 ## Nextcloud
 
@@ -143,5 +144,6 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET` | `google_workspace.client_secret` |
 | `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
 | `ISTOTA_WEB_SESSION_SECRET_KEY` | `web.session_secret_key` |
+| `ISTOTA_BRAIN_NATIVE_API_KEY` | `brain.native.api_key` (native brain provider key; kept out of TOML) |
 
 See [credentials](../configuration/credentials.md) for what each override covers and the full env var → config mapping.

@@ -8,7 +8,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 |---|---|---|
 | `bot_name` | `"Istota"` | User-facing name (chat, emails, folder names) |
 | `emissaries_enabled` | `true` | Include emissaries.md in system prompts |
-| `model` | `""` | Claude model override (empty = CLI default). Pin to a version like `"claude-opus-4-7"`. |
+| `model` | `""` | Claude model override (empty = CLI default). Pin to a version like `"claude-opus-4-8"`. |
 | `effort` | `""` | Effort level: `low`, `medium`, `high`, `xhigh`, or `max` (empty = model default) |
 | `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default |
 | `db_path` | `"data/istota.db"` | SQLite database path |
@@ -87,6 +87,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | Setting | Default | Description |
 |---|---|---|
 | `poll_interval` | `2` | Seconds between queue checks |
+| `dispatch_interval` | `0.5` | Sub-tick cadence for `pool.dispatch()` within a poll tick — bounds cold pending-task pickup latency. 0 or ≥ `poll_interval` = legacy one-dispatch-per-tick |
 | `talk_poll_interval` | `10` | Seconds between Talk polls |
 | `talk_poll_timeout` | `30` | Talk long-poll timeout |
 | `talk_poll_wait` | `2.0` | Max wait before processing available rooms |
@@ -95,19 +96,21 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls |
 | `shared_file_check_interval` | `120` | Seconds between shared file checks |
 | `heartbeat_check_interval` | `60` | Seconds between heartbeat checks |
+| `db_health_check_interval` | `86400` | Seconds between SQLite `quick_check` + self-heal `REINDEX` sweeps over framework + per-user DBs (24h) |
 
-### Progress updates
+### Progress & event streaming
+
+One persisted, typed event stream per task (the `task_events` table) feeds Talk, the web SSE endpoint, the log channel, and push notifications.
 
 | Setting | Default | Description |
 |---|---|---|
-| `progress_updates` | `true` | Enable Talk progress updates |
-| `progress_min_interval` | `8` | Min seconds between updates |
-| `progress_max_messages` | `5` | Max updates per task |
-| `progress_show_tool_use` | `true` | Show tool descriptions |
-| `progress_show_text` | `false` | Show intermediate text |
-| `progress_text_max_chars` | `200` | Max chars for text progress |
-| `progress_style` | `"replace"` | Display style: replace, full, none |
-| `progress_max_display_items` | `20` | Max items in full mode |
+| `progress_updates` | `true` | Master toggle for Talk progress updates |
+| `progress_show_tool_use` | `true` | Emit `tool_start` / `tool_end` events |
+| `progress_show_text` | `false` | Emit `progress_text` events (intermediate text; noisy) |
+| `event_log_enabled` | `true` | Write events to the `task_events` table (kill-switch for task-event-streaming) |
+| `stream_text_gate_chars` | `200` | Narration gate for streamed answer text on stream surfaces (web/REPL). A text run emits no `text_delta` until it crosses this many chars without an intervening tool call, so short lead-in narration ("Let me check…") is discarded at the tool boundary instead of leaking into the answer area. Never loses text — only animation. 0 disables |
+| `push_notification_threshold_seconds` | `30` | Min task duration before an ntfy completion push fires |
+| `push_notification_sources` | `[]` | Source types that trigger a completion push; empty = ntfy opt-in only (never a default surface) |
 
 ### Worker pool
 
@@ -126,7 +129,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `task_timeout_minutes` | `30` | Claude Code execution timeout |
 | `confirmation_timeout_minutes` | `120` | Auto-cancel confirmations after |
 | `stale_pending_warn_minutes` | `30` | Warn for long-pending tasks |
-| `stale_pending_fail_hours` | `24` | Auto-fail ancient tasks |
+| `stale_pending_fail_hours` | `2` | Auto-fail ancient tasks |
 | `worker_heartbeat_seconds` | `60` | How often a running worker pings liveness (0 disables). Stuck-task reclaim uses the heartbeat to tell a slow-but-alive worker from a dead one. |
 | `worker_stuck_minutes` | `5` | Reclaim a heartbeating worker's task after this much heartbeat silence. Independent of `task_timeout_minutes`. |
 | `task_retention_days` | `7` | Delete old completed tasks |
@@ -310,6 +313,20 @@ See [Google Workspace](../features/google-workspace.md) for setup instructions.
 | `oauth2_userinfo_endpoint` | `""` | Optional server-to-server userinfo URL override |
 | `oauth2_redirect_uri` | `""` | Explicit redirect URI override; otherwise derived from request |
 | `session_secret_key` | `""` | Session signing key (or `ISTOTA_WEB_SESSION_SECRET_KEY` env) |
+
+### `[web.chat]`
+
+Knobs for the in-app web chat surface (the "Chat" tab). The surface is always enabled when the web UI is on; these tune limits and streaming cadence.
+
+| Setting | Default | Description |
+|---|---|---|
+| `max_prompt_chars` | `32000` | Max characters accepted per chat message |
+| `max_attachment_mb` | `25` | Max attachment size, in MB |
+| `attachment_extensions` | (image/pdf/text set) | Allowed attachment file extensions |
+| `rate_limit_messages` | `30` | Messages allowed per user per window |
+| `rate_limit_window_seconds` | `300` | Rate-limit window (5 minutes) |
+| `sse_poll_interval_ms` | `200` | Server-side `task_events` poll cadence for the SSE stream |
+| `client_poll_interval_ms` | `1500` | Client fallback poll cadence when SSE is unavailable |
 
 ## `[location]`
 

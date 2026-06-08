@@ -3,7 +3,7 @@
 Per-user data lives in three DB tables and (optionally) the user's Nextcloud workspace:
 
 1. **DB tables** (authoritative)
-   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, disabled_skills, **disabled_modules**
+   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table)
    - `user_resources` — resources (calendar, folder, todo_file, notes_folder, email_folder, reminders_file). The `extras` JSON column carries resource-type-specific config.
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
    - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, ntfy, etc.). See [credentials](credentials.md) for the full per-user inventory.
@@ -48,6 +48,15 @@ site_enabled = true
 
 # Modules to opt out of (default-on otherwise)
 disabled_modules = ["money"]
+
+# Default delivery surface for results/notifications when nothing else applies
+default_destination = "talk"   # talk | email | ntfy | web | surface:channel | comma list
+
+# Purpose-keyed routing table — overrides default_destination per purpose.
+# Purposes: reply, alert, log, briefing, notification
+[users.alice.routing]
+alert = "ntfy"                 # heartbeat + security alerts go to ntfy
+log = "web:<room-token>"       # verbose execution log streamed to a web chat room
 ```
 
 > ntfy push notifications are **not** a profile field. They live in the encrypted `secrets` table — provision via the web UI (`/istota/settings` → Connected services → ntfy push) or `istota secret ensure --user alice --service ntfy --key topic --value …`.
@@ -96,6 +105,21 @@ news = true
 ```
 
 See [briefings](../features/briefings.md) for details.
+
+### Delivery routing
+
+Each user has a default delivery surface (`default_destination`, defaults to `talk`) plus an optional purpose-keyed `routing` table that overrides it per purpose. The purposes are `reply`, `alert`, `log`, `briefing`, and `notification`; each maps to an `output_target` descriptor (`talk`, `email`, `ntfy`, `web`, `surface:channel`, or a comma list). Routing notifications by purpose (e.g. `alert = "ntfy"`) is what reroutes heartbeat and security alerts off Talk; the `log` purpose drives the verbose per-task execution log to any user-routable surface (it supersedes the legacy `log_channel` shorthand). `web` is a routable delivery surface — alerts, the execution log, and notifications routed to it land in a web chat room as system messages.
+
+Provision via the CLI:
+
+```bash
+istota user ensure -u alice \
+  --default-destination email \
+  --route alert=ntfy \
+  --route log=web:<room-token>
+```
+
+`--route` is repeatable and validates the purpose against the allowed set. The web Preferences card surfaces `default_destination`, the `alert` route, and the `log` route; CLI-set routes for the other purposes are preserved on round-trip.
 
 ## User workspace files
 

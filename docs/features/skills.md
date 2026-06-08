@@ -24,7 +24,7 @@ Admin-only skills are filtered out for non-admin users. Skills with unmet `depen
 
 ### Pass 2: semantic routing (LLM-based, additive)
 
-When `semantic_routing` is enabled (default), a Haiku call sees the task prompt, a manifest of unselected skills, and the user's resource types (so it can reason "user has feeds configured → feeds is plausibly relevant" without keyword overlap). It returns additional skills to load. Results are merged with Pass 1. On timeout or error, falls back to Pass 1 only.
+When `semantic_routing` is enabled (default), a fast-model call (the `fast` role alias, Haiku by default, resolved through the active brain) sees the task prompt, a manifest of unselected skills, and the user's resource types (so it can reason "user has feeds configured → feeds is plausibly relevant" without keyword overlap). It returns additional skills to load. Results are merged with Pass 1. On timeout or error, falls back to Pass 1 only.
 
 ### Selection observability
 
@@ -42,7 +42,7 @@ Audio attachments are transcribed before skill selection so keyword matching wor
 
 ### Skill stickiness
 
-Skills from recent conversation turns are automatically re-selected for follow-up messages in the same conversation. This covers up to 2 prior tasks within a 30-minute window. Skills from a direct reply parent are also carried forward. Sticky skills bypass keyword matching but still respect `disabled_skills` and dependency checks.
+Skills from recent conversation turns are automatically re-selected for follow-up messages in the same conversation. This applies to the interactive surfaces (`talk`, `email`, `repl`, `web`) with a `conversation_token`, and covers up to 2 prior tasks within a 30-minute window. Skills from a direct reply parent are also carried forward. Sticky skills bypass keyword matching but still respect `disabled_skills` and dependency checks.
 
 This means if you ask about your calendar and then say "also add that to my todos," the calendar skill stays loaded even though the follow-up message only triggers the todos skill.
 
@@ -80,7 +80,7 @@ dependencies: [caldav, icalendar]
 Calendar operations use CalDAV...
 ```
 
-Supported frontmatter fields: `name`, `triggers`, `description`, `always_include`, `admin_only`, `cli`, `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_memory`, `exclude_persona`, `exclude_resources`, `env` (JSON-encoded array of env spec objects).
+Supported frontmatter fields: `name`, `triggers`, `description`, `always_include`, `admin_only`, `cli`, `experimental` (requires `skill_<name>` in `[experimental] features`), `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_memory`, `exclude_persona`, `exclude_resources`, `env` (JSON-encoded array of env spec objects).
 
 Operator overrides in `config/skills/` can use `skill.md` (or `skill.toml` for backward compatibility).
 
@@ -116,7 +116,7 @@ See [adding skills](../development/adding-skills.md) for a step-by-step guide.
 ```toml
 [skills]
 semantic_routing = true           # Enable LLM-based Pass 2
-semantic_routing_model = "haiku"  # Model for classification
+semantic_routing_model = "fast"   # Role/model alias for classification (default fast → Haiku)
 semantic_routing_timeout = 3.0    # Seconds, falls back to Pass 1 on timeout
 ```
 

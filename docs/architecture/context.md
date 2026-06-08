@@ -8,7 +8,7 @@ The context module (`context.py`) selects which previous messages to include in 
 2. Apply recency window: if `context_recency_hours` > 0, exclude messages older than the cutoff while always keeping at least `context_min_messages` (10)
 3. If total <= `skip_selection_threshold` (3): include all, skip LLM selection
 4. Most recent `always_include_recent` (5) messages are always included
-5. Older messages are triaged by a fast model (Haiku via Claude CLI subprocess) that returns which message IDs are relevant to the current request
+5. Older messages are triaged by a fast model that returns which message IDs are relevant to the current request. Triage runs through the **task's own brain**, not a hardcoded `claude` CLI call: a `claude_code` task triages with Haiku via the CLI subprocess, a `native` task triages through its own provider's fast completer. If a completer can't be built (e.g. a native task with no API key), triage fails open — all older messages are kept rather than dropped
 6. Selected older messages + guaranteed recent messages are combined in chronological order
 7. On any error: fall back to guaranteed recent messages only
 
@@ -33,7 +33,7 @@ All context settings live in the `[conversation]` section:
 | `enabled` | `true` | Enable conversation context |
 | `lookback_count` | 25 | Messages to consider |
 | `skip_selection_threshold` | 3 | Include all if history is this small |
-| `selection_model` | `"haiku"` | Model for relevance matching |
+| `selection_model` | `"haiku"` | Model alias for relevance matching (resolved through the active brain; under `native` the brain's own fast completer is used) |
 | `selection_timeout` | 30.0 | Timeout for LLM selection |
 | `use_selection` | `true` | Use LLM selection (false = include all) |
 | `always_include_recent` | 5 | Always include this many recent messages |

@@ -23,10 +23,10 @@ src/istota/memory/
 The executor is the only consumer of memory data at task time. During prompt assembly (see [executor](executor.md)) it injects memory in this fixed order:
 
 1. **User memory** (USER.md) — `read_user_memory_v2(config, user_id)` from `storage.py`. Auto-loaded into every interactive prompt, skipped for briefings.
-2. **Knowledge graph facts** — `select_relevant_facts()` returns identity facts (subject == user_id) plus any fact whose subject or object appears in the prompt. Capped by `max_knowledge_facts`. Skipped for briefings.
+2. **Knowledge graph facts** — `select_relevant_facts()` returns identity facts (subject == user_id) plus any fact whose subject or object appears in the prompt. User-subject facts whose predicate is *ephemeral* (`decided`, `interested_in`, `completed`, `acquired`, `disposed_of`, `traveled_to`) are **not** auto-loaded as always-on identity — they pass through the same prompt-relevance gate as third-party facts, so a one-off shopping decision only surfaces when the current task is about it (ISSUE-109 lever 2). Capped by `max_knowledge_facts`. Skipped for briefings.
 3. **Channel memory** (CHANNEL.md) — `read_channel_memory(config, conversation_token)` when a token is set.
 4. **Dated memories** — `read_dated_memories()` reads the last `auto_load_dated_days` files from `memories/YYYY-MM-DD.md`. Skipped for briefings.
-5. **Recalled memories** — `_recall_memories()` runs a hybrid search using the task prompt as the query, keyed on the user's namespace plus `channel:{token}` when applicable. Off by default (`auto_recall = false`).
+5. **Recalled memories** — `_recall_memories()` runs a hybrid search using the task prompt as the query, keyed on the user's namespace plus `channel:{token}` when applicable. Off by default (`auto_recall = false`). Two ISSUE-109 scope levers shape the results: **recency decay** down-weights each hit by age with a half-life of `recency_half_life_days` (default 180; 0 disables) so dense old clusters don't outrank current context on sheer mass, and **episode windows** suppress any chunk whose `valid_until` has passed so time-boxed memories age out cleanly.
 
 If the resulting memory section exceeds `max_memory_chars`, `_apply_memory_cap()` truncates in this order: recalled → knowledge facts → dated. User and channel memory are always preserved.
 
@@ -62,7 +62,7 @@ Two filters apply before indexing:
 1. Reads `sleep_cycle_state` (last task id processed for this user).
 2. `gather_day_data()` partitions completed tasks since the last run into INTERACTIVE (`talk`, `email`, `cli`) and AUTOMATED (`cron`, `briefing`, `subtask`) sections. Interactive tasks get 80% of a 50,000-char budget; per-task allocation is proportional to content length with tail-biased truncation (40% head + 60% tail).
 3. `build_memory_extraction_prompt()` includes the day data, the current USER.md (so Sonnet skips already-known facts), and a list of suggested predicates with usage hints.
-4. Invokes `claude -p - --model sonnet` directly via `subprocess.run` (not via the task queue, not via the brain abstraction). The sleep cycle is privileged orchestration — it doesn't go through the same isolation pipeline as user-initiated tasks.
+4. Runs a privileged text-only model call through the **configured brain** (`make_brain(config.brain).execute(BrainRequest(...))`) — no streaming, no sandbox, no task queue. The sleep cycle is privileged orchestration: it goes through the brain abstraction (so a `native` deployment extracts with its own provider) but skips the isolation pipeline user-initiated tasks run through. Per-feature model overrides come from `[sleep_cycle]` (`extraction_model`, `curation_model`).
 5. `_parse_structured_extraction()` extracts `MEMORIES:` (bullets), `FACTS:` (JSON triples), and `TOPICS:` (JSON map). Missing or malformed sections degrade gracefully.
 6. Writes `memories/YYYY-MM-DD.md` with the bullets only.
 7. Inserts each fact via `add_fact()` (fuzzy-deduped, single-valued predicates auto-supersede).
@@ -85,7 +85,7 @@ curate_user_memory(config, user_id, conn)
   ├── _load_kg_facts_text()              # current knowledge graph
   ├── parse_sectioned_doc()              # SectionedDoc
   ├── build_op_curation_prompt()         # prompt builder
-  ├── claude -p - --model sonnet         # subprocess
+  ├── make_brain(config.brain).execute() # configured brain (text-only, no sandbox)
   ├── strip_json_fences() + json.loads() # {"ops": [...]}
   ├── apply_ops()                        # (new_doc, applied, rejected)
   ├── (skip-write check on outcomes)
@@ -131,7 +131,7 @@ SQLite tables (`schema.sql`):
 |---|---|
 | `sleep_cycle_state` | Per-user `last_run_at`, `last_processed_task_id` |
 | `channel_sleep_cycle_state` | Same, keyed on `conversation_token` |
-| `memory_chunks` | Indexed text chunks; columns include `source_type`, `topic`, `entities`, `metadata_json`, `content_hash`, `created_at` |
+| `memory_chunks` | Indexed text chunks; columns include `source_type`, `topic`, `entities`, `metadata_json`, `content_hash`, `created_at`, and `valid_from` / `valid_until` episode-window bounds (ISSUE-109) |
 | `memory_chunks_fts` | FTS5 virtual table, trigger-synced from `memory_chunks` |
 | `memory_chunks_vec` | sqlite-vec table, lazy-created via `ensure_vec_table()` |
 | `knowledge_facts` | Temporal triples; `valid_from` / `valid_until` columns; unique-current index on `(user_id, subject, predicate, object) WHERE valid_until IS NULL` |
@@ -149,7 +149,13 @@ SQLite tables (`schema.sql`):
 
 `memory/knowledge_graph.py` is consumed in three places:
 
-1. **Sleep cycle.** Extracted facts are inserted via `add_fact()` with `source_type = "extracted"`. Single-valued predicates (`works_at`, `lives_in`, `has_role`, `has_status`) auto-supersede; temporary predicates (`staying_in`, `visiting`) coexist; everything else is multi-valued. Word-level Jaccard similarity (threshold 0.7) on the `predicate object` signature catches near-duplicates.
+1. **Sleep cycle.** Extracted facts are inserted via `add_fact()` with `source_type = "extracted"`. Predicate categories (all `frozenset`s in `knowledge_graph.py`):
+   - **Single-valued** (`works_at`, `lives_in`, `has_role`, `has_status`) — a new value auto-supersedes the prior one (sets `valid_until` on it).
+   - **Temporary** (`staying_in`, `visiting`) — short-lived; the extractor sets `valid_until` case-by-case.
+   - **Auto-expiring** (`interested_in`, `completed`, `acquired`, `disposed_of`, `traveled_to`) — when the caller supplies no `valid_until`, a default `DEFAULT_EPHEMERAL_TTL_DAYS` (90) window is stamped so the event ages out of the always-current view (ISSUE-109 lever 1). `decided` is deliberately excluded — durable decisions persist.
+   - Everything else is multi-valued and coexists.
+
+   Word-level Jaccard similarity (threshold 0.7) on the `predicate object` signature catches near-duplicates.
 2. **Executor read path.** `select_relevant_facts()` filters by relevance to the prompt and `format_facts_for_prompt()` renders them into the prompt's "Known facts" section.
 3. **Curation prompt.** `_load_kg_facts_text()` includes current facts in the USER.md curation prompt so Sonnet doesn't duplicate structured knowledge as bullets in USER.md.
 
@@ -159,7 +165,7 @@ The graph stores temporal validity in dedicated columns rather than baking dates
 
 - **`sqlite-vec` missing**: `enable_vec_extension()` returns False; search degrades to BM25-only. Indexing skips the vec write but still inserts `memory_chunks` and `memory_chunks_fts`.
 - **`sentence-transformers` missing**: `_get_model()` returns None; same degradation as above.
-- **Sleep cycle Claude CLI missing or timeout**: extraction is skipped for that user/channel that night; state advances anyway when the data is empty so we don't reprocess silently.
+- **Sleep cycle brain unavailable or timeout**: extraction is skipped for that user/channel that night; state advances anyway when the data is empty so we don't reprocess silently.
 - **Curation JSON parse failure**: logged with the raw output truncated; nothing is written, no audit entry. The next night re-attempts.
 - **Indexing exception**: caught and logged; never affects task completion.
 - **Mount unavailable**: sleep cycle skips file writes (mount is required for memory file reads/writes).

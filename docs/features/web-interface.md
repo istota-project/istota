@@ -124,7 +124,11 @@ If the token response doesn't include `user_id` (older NC versions or custom aut
 
 Users not in the config are rejected with a 403 even if they have a valid Nextcloud account.
 
+A light/dark theme toggle in the shell header switches the whole UI between themes; the choice persists per browser.
+
 ## Pages
+
+**Chat**: an always-on, full-page in-app chat console — the first nav tab, before Feeds. Discord/Slack-style rooms in a sidebar, live SSE streaming of tool use and intermediate text, `!commands` and the `!model` prefix, confirmation cards, and drag-drop/paste attachments. See [Web chat](web-chat.md) for the full surface.
 
 **Dashboard**: shows available features for the authenticated user. When [Google Workspace](google-workspace.md) is enabled, the dashboard also shows a connect/disconnect card for linking a Google account.
 
@@ -152,6 +156,13 @@ Users not in the config are rejected with a 403 even if they have a valid Nextcl
 | `/istota/money/api/*` | Money module (ledger, transactions, invoicing) |
 | `/istota/api/location/*` | Places CRUD, pings, trips |
 | `/istota/api/health/*` | Stats, panels, biomarkers, encounters, diagnoses, immunizations, Garmin, settings |
+| `/istota/api/chat/config` | Chat limits + streaming intervals |
+| `/istota/api/chat/rooms` | Room CRUD (list/create); `DELETE /chat/rooms/{id}` hard-deletes |
+| `/istota/api/chat/rooms/{id}/messages` | Message history + send |
+| `/istota/api/chat/tasks/{id}/stream` | SSE stream of a task's events (tool use, text deltas) |
+| `/istota/api/chat/tasks/{id}/events` | Snapshot of a task's events |
+| `/istota/api/chat/tasks/{id}/confirm` · `/cancel` | Confirm / cancel a chat task |
+| `/istota/api/chat/attachments/upload` | Attachment upload (multipart) |
 
 The SvelteKit build is served as static files for all other `/istota/*` paths.
 

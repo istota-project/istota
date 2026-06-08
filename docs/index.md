@@ -4,12 +4,13 @@ A self-hosted AI agent that lives in your Nextcloud instance. Run it on the [Cla
 
 ```
 Talk message ──>┐
+Web chat ──────>│
 Email ─────────>├──> SQLite queue -> Scheduler -> Brain -> Response
 TASKS.md ──────>│
-CLI ───────────>┘
+CLI / REPL ────>┘
 ```
 
-Messages arrive through Talk polling, IMAP, TASKS.md file watching, or the CLI. The scheduler claims tasks from a SQLite queue, builds a prompt with the user's resources, skills, memory, and conversation context, then hands it to a **Brain** in a sandbox. Responses go back through the same channel.
+Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file watching, the interactive REPL, or the CLI. The scheduler claims tasks from a SQLite queue, builds a prompt with the user's resources, skills, memory, and conversation context, then hands it to a **Brain** in a sandbox. Responses go back through the same channel.
 
 ## What is it?
 
@@ -21,8 +22,8 @@ It runs as a regular Nextcloud user. File sharing, calendars, contacts, and Talk
 
 ## Features at a glance
 
-- **Messaging** -- Nextcloud Talk (DMs and group rooms), email (IMAP/SMTP with threading), TASKS.md file polling, CLI
-- **Skills** -- ~20 built-in skills loaded on demand: calendar, email, web browsing, git/GitLab/GitHub, Moneyman accounting, GPS tracking, bookmarks, voice transcription, OCR, RSS feeds, and more
+- **Messaging** -- Nextcloud Talk (DMs and group rooms), in-app web chat (always-on rooms with live streaming), email (IMAP/SMTP with threading), TASKS.md file polling, interactive REPL, CLI
+- **Skills** -- ~30 built-in skills loaded on demand: calendar, email, web browsing, git/GitLab/GitHub, Beancount accounting, GPS tracking, bookmarks, voice transcription, OCR, RSS feeds, health tracking, and more
 - **Memory** -- Per-user persistent memory (with op-based nightly curation), per-channel memory, dated memory files, BM25 + vector search, temporal knowledge graph
 - **Scheduling** -- Cron jobs via CRON.md, natural-language reminders, scheduled briefings with calendar/markets/headlines/news/todos
 - **Multi-user** -- Per-user config, resource permissions, worker pools, filesystem sandboxing, admin/non-admin isolation

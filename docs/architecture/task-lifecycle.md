@@ -18,9 +18,11 @@ Tasks enter the queue from multiple sources:
 | Source | Entry point | `source_type` |
 |---|---|---|
 | Talk message | Talk poller (`transport/talk/inbound.py`) | `talk` |
+| Web chat | Web POST → `ingest_message` (`web_app.py`) | `web` |
 | Email | Email poller (`transport/email/inbound.py`) | `email` |
 | TASKS.md file | File poller (`tasks_file_poller.py`) | `istota_file` |
 | CLI | `istota task` command (`cli.py`) | `cli` |
+| REPL | `istota repl` (inline, `run_task_inline`) | `repl` |
 | Scheduled job | `check_scheduled_jobs()` in scheduler | `scheduled` |
 | Briefing | `check_briefings()` in scheduler | `briefing` |
 | Subtask | Deferred JSON from a parent task | `subtask` |
@@ -33,7 +35,7 @@ All sources call `db.create_task()`, which inserts a row with `status='pending'`
 
 1. Fail tasks locked > 30 min that are too old to retry
 2. Release recent stale locks back to `pending`
-3. Same for stuck `running` tasks (started > 15 min ago)
+3. Same for stuck `running` tasks — "stuck" is decided by worker liveness, not a flat runtime (ISSUE-112): a `running` task is reclaimable once its `last_heartbeat` has been silent longer than `worker_stuck_minutes` (default 5), or, if it never heartbeated, once `started_at` exceeds `task_timeout_minutes` + grace. The running worker pings `last_heartbeat` every `worker_heartbeat_seconds`, so a slow-but-alive worker (e.g. the in-process native brain) is never reclaimed
 
 Tasks are ordered by `priority DESC, created_at ASC`. Workers filter by `user_id` and `queue` type.
 
@@ -80,7 +82,7 @@ Back in the scheduler, `process_one_task()` handles the result inside a DB trans
 3. **Confirmation check**: regex match for confirmation requests → `pending_confirmation`
 4. **Update to `completed`**: stores result, actions_taken, execution_trace
 5. **Memory search indexing**: index conversation under user and channel namespaces
-6. **Delivery routing**: Talk, email, ntfy, or TASKS.md based on `output_target`
+6. **Delivery routing**: `transport.routing.resolve_delivery_plan` turns `output_target` into an ordered, channel-resolved destination list (Talk, email, ntfy, TASKS.md write-back, or stream surfaces web/REPL). Stream destinations need no push — the `task_events` log is the delivery
 
 ### Failure path
 
@@ -97,7 +99,7 @@ After the DB transaction closes:
 2. **Briefing digest**: save for next-run deduplication
 3. **Talk progress finalize**: edit ack message with final summary
 4. **Log channel finalize**: edit/post completion message with skills and tool summary
-5. **Result delivery**: post to Talk, send email reply, or update TASKS.md
+5. **Result delivery**: fan out to every push destination in the resolved plan (Talk, email, ntfy, TASKS.md); stream surfaces (web, REPL) deliver via the `task_events` SSE log
 
 ## Log channel messages
 

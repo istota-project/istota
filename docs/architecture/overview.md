@@ -1,12 +1,13 @@
 # Architecture overview
 
-Istota is a self-hosted AI assistant that runs as a regular Nextcloud user. It dispatches each task to a pluggable **Brain**. Two brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, and `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model). Swapping brains doesn't touch executor orchestration. Messages arrive from Nextcloud Talk, email, file-based task queues, scheduled jobs, or the CLI. They flow through a SQLite task queue, get claimed by per-user worker threads, and produce responses delivered back to the originating channel.
+Istota is a self-hosted AI assistant that runs as a regular Nextcloud user. It dispatches each task to a pluggable **Brain**. Two brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, and `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model). Swapping brains doesn't touch executor orchestration. Messages arrive from Nextcloud Talk, the in-app web chat, email, file-based task queues, scheduled jobs, the interactive REPL, or the CLI — each surface sits behind a uniform [Transport](#input-channels) seam. They flow through a SQLite task queue, get claimed by per-user worker threads, and produce responses delivered back to the originating channel.
 
 ```
 Talk (polling) ──────►┐
-Email (IMAP) ────────►├─► SQLite queue ──► Scheduler ──► Brain ──► Talk / Email
+Web chat (HTTP/SSE) ─►│
+Email (IMAP) ────────►├─► SQLite queue ──► Scheduler ──► Brain ──► Talk / Web / Email / …
 TASKS.md (file) ─────►│                    (WorkerPool)  (pluggable)
-CLI (direct) ────────►│
+CLI / REPL ──────────►│
 CRON.md (scheduled) ─►┘
 ```
 
@@ -16,7 +17,7 @@ Tool calling, function dispatch, and the agent loop live in the brain, not the e
 
 Every interaction follows the same path:
 
-1. **Input** arrives from one of several channels (Talk message, email, TASKS.md edit, CLI command, cron trigger)
+1. **Input** arrives from one of several channels (Talk message, web chat, email, TASKS.md edit, CLI/REPL command, cron trigger)
 2. A **task** is created in the SQLite `tasks` table with status `pending`
 3. The **scheduler** dispatches a `UserWorker` thread for the task's user
 4. The worker **claims** the task (atomic `UPDATE...RETURNING`, setting status to `locked` then `running`)
@@ -33,8 +34,11 @@ Task lifecycle: `pending` -> `locked` -> `running` -> `completed` | `failed` | `
 
 | Module | Purpose |
 |---|---|
+| `transport/` | Uniform seam over messaging surfaces: `IncomingMessage` / `Transport` protocol / `TransportRegistry` / `ingest_message` (inbound) + `resolve_delivery_plan` (outbound). Six transports ship — Talk, Email, Ntfy, IstotaFile, Repl, Web |
 | `transport/talk/inbound.py` | Long-polls Talk conversations, creates tasks, intercepts `!commands`, handles confirmations (the TalkTransport inbound body) |
 | `transport/email/inbound.py` | Polls INBOX via IMAP, creates tasks from known senders, downloads attachments (the EmailTransport inbound body) |
+| `web_app.py` (`/api/chat/*`) | In-app web chat: POST → `ingest_message` creates a `source_type="web"` task; SSE tails `task_events` |
+| `repl/` | Interactive terminal loop (`istota repl`); each line is an inline `source_type="repl"` task streamed to the terminal |
 | `tasks_file_poller.py` | Watches TASKS.md files for changes, identifies tasks by SHA-256 content hash |
 | `cli.py` | Direct task execution (`istota task "prompt" -u USER -x`), supports `--dry-run` |
 | `cron_loader.py` | Reads CRON.md (markdown with embedded TOML), syncs jobs to `scheduled_jobs` DB table |
@@ -74,8 +78,11 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 | Module | Purpose |
 |---|---|
 | `talk.py` | Async HTTP client for Nextcloud Talk API (send, poll, download attachments) |
-| `notifications.py` | Unified dispatcher for Talk, email, and ntfy push notifications |
-| `commands.py` | `!command` dispatch, handled synchronously in the talk poller thread |
+| `async_runtime.py` | One persistent asyncio loop + one pooled httpx client for all Talk I/O (`run_coro`, `get_talk_client` singleton); started/stopped by `run_daemon` |
+| `notifications.py` | Unified dispatcher for Talk, email, ntfy, and web notifications; per-user purpose-keyed routing table |
+| `events.py` | Task-event-streaming: `TaskEvent`, `EventWriter`, `EventSubscriber` + the `task_events` log that feeds every output surface |
+| `consumers/` | Event consumers: `TalkEventSubscriber`, `LogChannelSubscriber`, `PushNotificationSubscriber` |
+| `commands.py` | Surface-agnostic `!command` dispatch (`CommandContext` + registry), handled synchronously across Talk / web / CLI |
 
 ### Modules (in-tree)
 

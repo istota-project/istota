@@ -109,6 +109,14 @@ Codifies a spec-driven development workflow. Specs live in `{notes_folder}/Specs
 |---|---|---|
 | `website` | website, site, publish, blog | doc-only |
 
+## Safety
+
+| Skill | Keywords | CLI |
+|---|---|---|
+| `untrusted_input` | (none — never selected directly) | doc-only |
+
+`untrusted_input` is a doc-only companion skill with no triggers. It loads via `companion_skills` declarations on the seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`), so its inbound-content security rules ride along whenever a task processes content from outside the trust boundary. It pairs with `sensitive_actions` (outbound rules there, inbound-reading rules here).
+
 ## Selection triggers
 
 Skills are selected through a two-pass system:
@@ -120,4 +128,4 @@ See [skills](../features/skills.md) for details on the selection system.
 
 ## Checking availability
 
-In Talk, use `!skills` to see which skills are available, unavailable (missing dependencies), or disabled for your user. Use `!skills <name>` for details on a specific skill.
+Use `!skills` (in Talk or web chat) to see which skills are available, unavailable (missing dependencies), or disabled for your user. Use `!skills <name>` for details on a specific skill.

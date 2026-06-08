@@ -1,6 +1,6 @@
-# Talk commands
+# Commands
 
-Commands prefixed with `!` are intercepted in the Talk poller before task creation and handled synchronously. No Claude Code invocation -- they execute immediately.
+Commands prefixed with `!` are intercepted before task creation and handled synchronously — no Claude Code invocation; they execute immediately. They are **surface-agnostic**: the same set works in Nextcloud Talk, web chat, and the CLI. `commands.dispatch(...)` runs each handler over a `CommandContext` and delivers the result via the resolved transport. On a push surface (Talk) the result is delivered as a new message; on a stream surface (web) it is returned inline and rendered as a text card.
 
 ## Available commands
 
@@ -27,9 +27,9 @@ Commands prefixed with `!` are intercepted in the Talk poller before task creati
 
 ## Model override prefix
 
-`!model <alias> <prompt>` is a per-task model override parsed in the Talk poller before task creation. It is not a `!command` — it resolves the alias, sets the model (and optionally effort) on the task row, and passes the remaining text as the prompt. If the alias is unknown, it replies with usage help instead of creating a task.
+`!model <alias> <prompt>` is a per-task model override parsed before task creation on every surface (Talk and web alike). It is not a `!command` — it resolves the alias, sets the model (and optionally effort) on the task row, and passes the remaining text as the prompt. If the alias is unknown, it replies with usage help instead of creating a task.
 
-Aliases include role names (`fast`, `general`, `smart`, plus any operator-defined custom roles from `[models.roles]`), provider aliases (`opus`, `opus-high`, `opus-xhigh`, `opus-max`, `opus-46`, `opus-46-high`, `sonnet`, `sonnet-high`, `haiku`), and `default`. Use `!models` to see the resolved alias table.
+Aliases include role names (`fast`, `general`, `smart`, plus any operator-defined custom roles from `[models.roles]`), provider aliases (`opus`, `opus-high`, `opus-xhigh`, `opus-max`, `opus-47`, `opus-47-high`, `opus-46`, `opus-46-high`, `sonnet`, `sonnet-high`, `haiku`), and `default`. Bare `opus` resolves to the current-latest Opus. Use `!models` to see the resolved alias table.
 
 ## Export
 

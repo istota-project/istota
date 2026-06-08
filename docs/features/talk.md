@@ -4,7 +4,7 @@ Istota communicates through Nextcloud Talk using the regular user API (not the b
 
 ## Polling
 
-The talk poller runs in a background daemon thread with its own asyncio event loop. It long-polls each conversation the bot participates in. First poll initializes state; subsequent polls use `lookIntoFuture=1` for real-time message delivery.
+The talk poller runs in a background daemon thread and drives all its Nextcloud I/O onto the daemon's persistent asyncio runtime (one long-lived loop + one pooled httpx client, via `run_coro`). It long-polls each conversation the bot participates in. First poll initializes state; subsequent polls use `lookIntoFuture=1` for real-time message delivery. Talk is one surface behind the [Transport abstraction](../architecture/overview.md) — inbound it normalizes messages into `IncomingMessage`/`ingest_message`, outbound it delivers through `TalkTransport`.
 
 Fast rooms (with new messages) are processed immediately without waiting for slow (quiet) rooms. The `talk_poll_wait` setting (default 2s) controls the maximum wait time before processing available results.
 
@@ -16,19 +16,11 @@ Final responses in group chats use `reply_to` on the original message and prepen
 
 ## Progress updates
 
-While Claude works, the bot sends real-time updates to Talk showing what's happening.
-
-**Replace mode** (default): Edits the initial ack message in-place, showing the latest tool action + elapsed time. One message, updated as work progresses.
-
-**Full mode**: Appends all tool actions as separate messages.
-
-**None mode**: Silent, no progress updates.
-
-Rate-limited: minimum `progress_min_interval` (8s) between updates, capped at `progress_max_messages` (5) per task.
+While the brain works, the bot sends real-time updates to Talk showing what's happening. Progress is driven by the [task event stream](../architecture/scheduler.md#task-event-streaming): the `TalkEventSubscriber` consumer edits the initial ack message in place, showing the latest tool action and elapsed time. One message, updated as work progresses — no separate progress spam. `progress_show_tool_use` and `progress_show_text` gate which event kinds appear.
 
 ### Log channel
 
-Per-user verbose logging to a dedicated Talk conversation. When `log_channel` is set in per-user config, every tool action is posted to that room with a `[task_id #channel]` prefix and status emoji. This provides full observability without cluttering the user's chat.
+Per-user verbose logging of every tool action, with a `[task_id #channel]` prefix and status emoji, for full observability without cluttering the user's chat. This is driven by the `LogChannelSubscriber` and is no longer Talk-only — it routes to any user-routable surface via the `log` routing purpose (`routing["log"]` > the legacy `log_channel` Talk shorthand > off). Edit-capable surfaces (Talk) get the live in-place edited stream; non-edit surfaces (email, ntfy) get a single final-summary delivery. See [delivery routing](../configuration/per-user.md#delivery-routing).
 
 ## Message handling
 
@@ -39,8 +31,8 @@ Per-user verbose logging to a dedicated Talk conversation. When `log_channel` is
 - Alerts channel (`alerts_channel` per-user config): dedicated Talk room for confirmations, email gate prompts, and security alerts. Falls back to briefing token, then auto-detected 1:1 DM with the bot
 - `!trust`/`!untrust` commands for runtime management of trusted email senders
 - Multi-line tool output is collapsed to the first line in progress updates
-- Progress callbacks carry the Talk message ID from the ack so subsequent updates edit the same message
-- Log channel callbacks compose with progress callbacks -- both fire on each event
+- The ack message id is carried on the task so the `TalkEventSubscriber` edits the same message as work progresses
+- The Talk progress consumer and the log-channel consumer both subscribe to the one per-task event stream — independent consumers, not chained callbacks
 - Background tasks (briefings, scheduled jobs) suppress error notifications to avoid noise -- failures are logged to the DB and log channel only
 
 ## Configuration
@@ -52,7 +44,7 @@ Per-user verbose logging to a dedicated Talk conversation. When `log_channel` is
 | `talk_poll_interval` | 10s | `[scheduler]` |
 | `talk_poll_timeout` | 30s | `[scheduler]` |
 | `talk_poll_wait` | 2.0s | `[scheduler]` |
-| `progress_style` | `"replace"` | `[scheduler]` |
-| `progress_min_interval` | 8s | `[scheduler]` |
-| `progress_max_messages` | 5 | `[scheduler]` |
+| `progress_updates` | `true` | `[scheduler]` |
+| `progress_show_tool_use` | `true` | `[scheduler]` |
+| `progress_show_text` | `false` | `[scheduler]` |
 | `talk_cache_max_per_conversation` | 200 | `[scheduler]` |
