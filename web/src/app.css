@@ -259,6 +259,78 @@ a:hover { color: var(--accent-hover); }
 	color: #1a1a1a;
 }
 
+/* highlight.js token palette. The renderer (src/lib/markdown) tags fenced code
+   with `.hljs` + per-token `.hljs-*` spans; these rules color them. Dark values
+   sit on the #2d2d2d block background; the light overrides below sit on #ececef.
+   Tuned to the One Dark / One Light families for familiarity. */
+.markdown .hljs-comment,
+.markdown .hljs-quote { color: #7f848e; font-style: italic; }
+.markdown .hljs-keyword,
+.markdown .hljs-selector-tag,
+.markdown .hljs-literal,
+.markdown .hljs-section,
+.markdown .hljs-doctag,
+.markdown .hljs-name { color: #c678dd; }
+.markdown .hljs-string,
+.markdown .hljs-regexp,
+.markdown .hljs-addition,
+.markdown .hljs-attribute,
+.markdown .hljs-meta .hljs-string { color: #98c379; }
+.markdown .hljs-number,
+.markdown .hljs-symbol,
+.markdown .hljs-bullet,
+.markdown .hljs-link { color: #d19a66; }
+.markdown .hljs-title,
+.markdown .hljs-title.function_,
+.markdown .hljs-section { color: #61afef; }
+.markdown .hljs-built_in,
+.markdown .hljs-class .hljs-title,
+.markdown .hljs-title.class_,
+.markdown .hljs-type { color: #e5c07b; }
+.markdown .hljs-variable,
+.markdown .hljs-template-variable,
+.markdown .hljs-attr,
+.markdown .hljs-selector-attr,
+.markdown .hljs-selector-class,
+.markdown .hljs-selector-id,
+.markdown .hljs-deletion { color: #e06c75; }
+.markdown .hljs-meta,
+.markdown .hljs-comment .hljs-doctag { color: #56b6c2; }
+.markdown .hljs-emphasis { font-style: italic; }
+.markdown .hljs-strong { font-weight: 600; }
+
+:root[data-theme='light'] .markdown .hljs-comment,
+:root[data-theme='light'] .markdown .hljs-quote { color: #a0a1a7; }
+:root[data-theme='light'] .markdown .hljs-keyword,
+:root[data-theme='light'] .markdown .hljs-selector-tag,
+:root[data-theme='light'] .markdown .hljs-literal,
+:root[data-theme='light'] .markdown .hljs-doctag,
+:root[data-theme='light'] .markdown .hljs-name { color: #a626a4; }
+:root[data-theme='light'] .markdown .hljs-string,
+:root[data-theme='light'] .markdown .hljs-regexp,
+:root[data-theme='light'] .markdown .hljs-addition,
+:root[data-theme='light'] .markdown .hljs-attribute,
+:root[data-theme='light'] .markdown .hljs-meta .hljs-string { color: #50a14f; }
+:root[data-theme='light'] .markdown .hljs-number,
+:root[data-theme='light'] .markdown .hljs-symbol,
+:root[data-theme='light'] .markdown .hljs-bullet,
+:root[data-theme='light'] .markdown .hljs-link { color: #b76b01; }
+:root[data-theme='light'] .markdown .hljs-title,
+:root[data-theme='light'] .markdown .hljs-title.function_,
+:root[data-theme='light'] .markdown .hljs-section { color: #4078f2; }
+:root[data-theme='light'] .markdown .hljs-built_in,
+:root[data-theme='light'] .markdown .hljs-class .hljs-title,
+:root[data-theme='light'] .markdown .hljs-title.class_,
+:root[data-theme='light'] .markdown .hljs-type { color: #c18401; }
+:root[data-theme='light'] .markdown .hljs-variable,
+:root[data-theme='light'] .markdown .hljs-template-variable,
+:root[data-theme='light'] .markdown .hljs-attr,
+:root[data-theme='light'] .markdown .hljs-selector-attr,
+:root[data-theme='light'] .markdown .hljs-selector-class,
+:root[data-theme='light'] .markdown .hljs-selector-id,
+:root[data-theme='light'] .markdown .hljs-deletion { color: #e45649; }
+:root[data-theme='light'] .markdown .hljs-meta { color: #0184bc; }
+
 /* An errored assistant turn tints its rendered answer. Global so it reaches the
    `.markdown` answer body across the `.msg.error` row owned by Message. */
 .msg.error .markdown { color: #e0a0a0; }

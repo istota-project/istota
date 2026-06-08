@@ -31,6 +31,7 @@
 	"dependencies": {
 		"bits-ui": "^2.18.0",
 		"chart.js": "^4.5.1",
+		"highlight.js": "^11.11.1",
 		"lucide-svelte": "^1.0.1",
 		"maplibre-gl": "^5.21.1",
 		"markdown-it": "^14.2.0"
