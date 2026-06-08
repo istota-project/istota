@@ -132,7 +132,7 @@
 		position: relative;
 	}
 	.msg:not(.continuation) { margin-top: 0.7rem; padding-top: 0.45rem; }
-	.msg:hover { background: var(--surface-card); }
+	.msg:hover { background: var(--surface-raised); }
 	.msg:hover .hover-time { opacity: 1; }
 	.msg:hover .meta-footer { opacity: 1; }
 
@@ -226,7 +226,7 @@
 		font-size: var(--text-sm);
 		line-height: 1.5;
 		color: var(--text-secondary);
-		background: var(--surface-card);
+		background: var(--surface-raised);
 		border: 1px solid var(--border-subtle);
 		border-radius: 0.4rem;
 		padding: 0.5rem 0.75rem;
@@ -289,12 +289,12 @@
 	.markdown :global(code) {
 		font-family: ui-monospace, monospace;
 		font-size: 0.9em;
-		background: var(--surface-raised);
+		background: #2d2d2d;
 		padding: 0.05rem 0.3rem;
 		border-radius: 0.25rem;
 	}
 	.markdown :global(pre) {
-		background: var(--surface-raised);
+		background: #2d2d2d;
 		border: 1px solid var(--border-subtle);
 		border-radius: 0.35rem;
 		padding: 0.5rem 0.65rem;
