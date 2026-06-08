@@ -238,4 +238,17 @@
 			min-width: 0;
 		}
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light'] .error-badge) {
+		color: #c0271d;
+		border-color: #f0caca;
+	}
+	:global(:root[data-theme='light']) .error-panel {
+		background: #f7dada;
+		border-bottom-color: #f0caca;
+	}
+	:global(:root[data-theme='light']) .error-line {
+		color: #946a00;
+	}
 </style>

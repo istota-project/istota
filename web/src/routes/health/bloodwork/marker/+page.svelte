@@ -643,4 +643,14 @@
 	}
 	.msg.error { background: rgba(204, 102, 102, 0.1); color: #f0a; }
 	.msg.warn { background: rgba(230, 185, 107, 0.1); color: #e6b96b; margin-bottom: 0.75rem; }
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .related a:hover { border-color: var(--border-default); }
+	:global(:root[data-theme='light']) .alert-pill { color: #c0271d; }
+	:global(:root[data-theme='light']) .alert-low .alert-pill { color: #2563b0; }
+	:global(:root[data-theme='light']) .alert .error-text { color: #c0271d; }
+	:global(:root[data-theme='light']) .flag-H { background: #f7dada; color: #b3261e; }
+	:global(:root[data-theme='light']) .flag-L { background: #dbe9fb; color: #1d5fc4; }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
+	:global(:root[data-theme='light']) .msg.warn { color: #946a00; }
 </style>

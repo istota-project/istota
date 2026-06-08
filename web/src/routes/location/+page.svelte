@@ -367,4 +367,7 @@
 		font-weight: 500;
 		margin-bottom: 0.25rem;
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .center-msg.error { color: #c0271d; }
 </style>

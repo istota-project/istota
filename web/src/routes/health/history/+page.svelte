@@ -563,4 +563,20 @@
 		margin-bottom: 0.75rem;
 	}
 	.msg.error { background: rgba(204, 102, 102, 0.1); color: #f0a; }
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .btn.primary { border-color: #2563b0; color: #2563b0; }
+	:global(:root[data-theme='light']) .card:hover { border-color: var(--border-default); }
+	:global(:root[data-theme='light']) .badge.type-visit { color: #2563b0; }
+	:global(:root[data-theme='light']) .badge.type-procedure { color: #946a00; }
+	:global(:root[data-theme='light']) .badge.type-screening { color: #2563b0; }
+	:global(:root[data-theme='light']) .badge.type-hospitalization { color: #c0271d; }
+	:global(:root[data-theme='light']) .badge.type-er { color: #c0271d; }
+	:global(:root[data-theme='light']) .badge.type-telehealth { color: #15803d; }
+	:global(:root[data-theme='light']) .badge.type-imaging { color: #7c3aed; }
+	:global(:root[data-theme='light']) .badge.type-dental { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .severity.sev-mild { color: #15803d; }
+	:global(:root[data-theme='light']) .severity.sev-moderate { color: #946a00; }
+	:global(:root[data-theme='light']) .severity.sev-severe { color: #c0271d; }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
 </style>

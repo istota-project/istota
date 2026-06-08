@@ -259,4 +259,9 @@
 	.delete-link:hover {
 		color: #c66;
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .copy-error { color: #c0271d; }
+	:global(:root[data-theme='light']) .delete-link:hover { color: #c0271d; }
+	:global(:root[data-theme='light']) .danger-zone { border-color: #e3b3b3; }
 </style>

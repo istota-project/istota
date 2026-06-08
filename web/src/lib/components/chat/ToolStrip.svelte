@@ -142,4 +142,17 @@
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
+
+	/* Light theme overrides — dark rules above untouched. The active-state
+	   shimmer sweeps a white highlight over the badge; on a light surface that
+	   washes out, so use a subtle dark tint instead to keep the pulse visible. */
+	:global(:root[data-theme='light']) .tool-strip.active {
+		background: linear-gradient(
+			100deg,
+			var(--surface-badge) 20%,
+			rgba(0, 0, 0, 0.06) 50%,
+			var(--surface-badge) 80%
+		);
+		background-size: 200% 100%;
+	}
 </style>

@@ -220,6 +220,11 @@
 		   light-on-dark contrast. */
 		--text-primary: #cfcfcf;
 	}
+	/* Light theme: the chat-scoped soften must flip to a soft *dark* text,
+	   otherwise the #cfcfcf above is unreadable on the light pane. */
+	:global(:root[data-theme='light']) .chat-pane {
+		--text-primary: #2a2a2e;
+	}
 	.messages {
 		flex: 1;
 		min-height: 0;

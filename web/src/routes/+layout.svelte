@@ -2,9 +2,10 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import { LogOut, Menu } from 'lucide-svelte';
+	import { LogOut, Menu, Sun, Moon } from 'lucide-svelte';
 	import { DropdownMenu } from 'bits-ui';
 	import { getMe, AuthError, type User } from '$lib/api';
+	import { theme, toggleTheme } from '$lib/stores/theme';
 	import '../app.css';
 
 	let { children } = $props();
@@ -80,6 +81,19 @@
 			>
 				{user.display_name}
 			</a>
+			<button
+				type="button"
+				class="theme-btn"
+				onclick={toggleTheme}
+				title={$theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+				aria-label="Toggle color theme"
+			>
+				{#if $theme === 'dark'}
+					<Sun size={15} />
+				{:else}
+					<Moon size={15} />
+				{/if}
+			</button>
 			<a href="{base}/logout" class="logout-btn" title="Log out" aria-label="Log out">
 				<LogOut size={14} />
 			</a>
@@ -184,6 +198,24 @@
 {/if}
 
 <style>
+	.theme-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: none;
+		border: none;
+		color: var(--text-dim);
+		padding: 0.25rem;
+		border-radius: var(--radius-pill);
+		cursor: pointer;
+		transition: color var(--transition-fast), background var(--transition-fast);
+	}
+
+	.theme-btn:hover {
+		color: var(--text-primary);
+		background: var(--surface-raised);
+	}
+
 	.hamburger-btn {
 		display: none;
 		background: none;

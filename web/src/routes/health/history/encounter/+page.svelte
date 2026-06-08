@@ -501,4 +501,13 @@
 		justify-content: flex-end;
 		gap: 0.5rem;
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .btn.primary { border-color: #2563b0; color: #2563b0; }
+	:global(:root[data-theme='light']) .btn.danger { border-color: #c0271d; color: #c0271d; }
+	:global(:root[data-theme='light']) .related li a:hover { border-color: var(--border-default); }
+	:global(:root[data-theme='light']) .badge.status-active { color: #c0271d; }
+	:global(:root[data-theme='light']) .badge.status-chronic { color: #946a00; }
+	:global(:root[data-theme='light']) .badge.status-resolved { color: #15803d; }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
 </style>

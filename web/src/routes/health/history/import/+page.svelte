@@ -650,4 +650,12 @@
 		background: hsla(220, 8%, 60%, 0.18);
 		color: var(--text-muted);
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .btn.primary { border-color: #2563b0; color: #2563b0; }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
+	:global(:root[data-theme='light']) .msg.warn { color: #946a00; }
+	:global(:root[data-theme='light']) .badge.conf-high { color: #15803d; }
+	:global(:root[data-theme='light']) .badge.conf-medium { color: #946a00; }
+	:global(:root[data-theme='light']) .badge.conf-low { color: #c0271d; }
 </style>

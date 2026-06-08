@@ -188,4 +188,8 @@
 		padding: 2rem 1rem;
 		text-align: center;
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .account-balance.income { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .account-balance.expense { color: #a3157e; }
 </style>

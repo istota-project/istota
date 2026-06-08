@@ -1,6 +1,8 @@
 @import './lib/styles/settings.css';
 
 :root {
+	color-scheme: dark;
+
 	/* Surfaces */
 	--surface-base: #111;
 	--surface-card: #1a1a1a;
@@ -51,6 +53,39 @@
 	--text-base: 0.85rem;
 }
 
+/* Light theme — overrides the surface/text/border/accent variables. Everything
+   built on these variables flips automatically; only the dark-tuned status and
+   chart colors on data-heavy pages keep their hardcoded values. */
+:root[data-theme='light'] {
+	color-scheme: light;
+
+	/* Surfaces */
+	--surface-base: #ffffff;
+	--surface-card: #f4f4f5;
+	--surface-raised: #e8e8ea;
+	--surface-badge: #e0e0e3;
+
+	/* Text */
+	--text-primary: #1a1a1a;
+	--text-secondary: #3f3f46;
+	--text-muted: #6b6b72;
+	--text-dim: #9a9aa2;
+
+	/* Borders */
+	--border-default: #d4d4d8;
+	--border-subtle: #e4e4e7;
+
+	/* Interactive */
+	--accent: #1a1a1a;
+	--accent-hover: #000000;
+	/* Darker amber so the bot's accent stays legible on a light surface. */
+	--accent-amber: #b9740a;
+
+	/* Map colors — keep the path/current hues; soften the place overlay. */
+	--map-place-fill: rgba(0, 0, 0, 0.05);
+	--map-place-stroke: #b8b8bd;
+}
+
 *,*::before,*::after { box-sizing: border-box; }
 
 html, body {
@@ -60,15 +95,15 @@ html, body {
 body {
 	margin: 0;
 	font-family: system-ui, -apple-system, sans-serif;
-	background: #111;
-	color: #e0e0e0;
+	background: var(--surface-base);
+	color: var(--text-primary);
 	line-height: 1.5;
 	display: flex;
 	flex-direction: column;
 }
 
-a { color: #e0e0e0; }
-a:hover { color: #fff; }
+a { color: var(--text-primary); }
+a:hover { color: var(--accent-hover); }
 
 /* Use on a flex nav container whose first chip/link is the leftmost element of
    its row. Pulls the row left by one chip's horizontal padding so chip TEXT
@@ -83,8 +118,8 @@ a:hover { color: #fff; }
 	align-items: center;
 	gap: 1rem;
 	padding: 0.75rem;
-	background: #1a1a1a;
-	border-bottom: 1px solid #222;
+	background: var(--surface-card);
+	border-bottom: 1px solid var(--border-subtle);
 	font-size: 0.85rem;
 }
 
@@ -92,7 +127,7 @@ a:hover { color: #fff; }
 	font-weight: 600;
 	font-size: 0.9rem;
 	text-decoration: none;
-	color: #e0e0e0;
+	color: var(--text-primary);
 }
 
 .app-nav .nav-links {
@@ -101,14 +136,14 @@ a:hover { color: #fff; }
 }
 
 .app-nav .nav-links a {
-	color: #888;
+	color: var(--text-muted);
 	text-decoration: none;
 	padding: 0.15rem 0;
 }
 
 .app-nav .nav-links a:hover,
 .app-nav .nav-links a.active {
-	color: #e0e0e0;
+	color: var(--text-primary);
 }
 
 .app-nav .nav-right {
@@ -116,16 +151,16 @@ a:hover { color: #fff; }
 	display: flex;
 	align-items: center;
 	gap: 0.75rem;
-	color: #666;
+	color: var(--text-dim);
 	font-size: 0.8rem;
 }
 
 .app-nav .nav-right a {
-	color: #666;
+	color: var(--text-dim);
 	text-decoration: none;
 }
 
-.app-nav .nav-right a:hover { color: #aaa; }
+.app-nav .nav-right a:hover { color: var(--text-secondary); }
 
 .app-nav .nav-right .logout-btn {
 	display: inline-flex;
@@ -138,7 +173,7 @@ a:hover { color: #fff; }
 
 .app-nav .nav-right .logout-btn:hover {
 	background: var(--surface-raised);
-	color: #ddd;
+	color: var(--text-primary);
 }
 
 .app-content {
@@ -156,7 +191,7 @@ a:hover { color: #fff; }
 .loading, .error-msg {
 	text-align: center;
 	padding: 3rem 1rem;
-	color: #666;
+	color: var(--text-dim);
 	font-size: 0.85rem;
 }
 

@@ -280,4 +280,8 @@
 		font-variant-numeric: tabular-nums;
 		color: var(--text-primary);
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .nw-amount.positive { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .nw-amount.negative { color: #a3157e; }
 </style>

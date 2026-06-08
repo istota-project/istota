@@ -676,4 +676,20 @@
 		background: rgba(204, 102, 102, 0.1);
 		color: #e88;
 	}
+
+	/* Light theme — remap the dark-tuned status badge / chip colors for white
+	   surfaces. The hsla badge backgrounds re-tint fine over light; only the
+	   pastel text needs darkening. Dark rules above are untouched. */
+	:global(:root[data-theme='light']) .btn.primary {
+		border-color: #2563b0;
+		color: #2563b0;
+	}
+	:global(:root[data-theme='light']) .btn.danger:hover:not(:disabled) { color: #c0271d; }
+	:global(:root[data-theme='light']) .card:hover { border-color: var(--border-default); }
+	:global(:root[data-theme='light']) .badge.status-overdue,
+	:global(:root[data-theme='light']) .badge.status-expired { color: #c0271d; }
+	:global(:root[data-theme='light']) .badge.status-due_soon { color: #946a00; }
+	:global(:root[data-theme='light']) .badge.status-series_incomplete { color: #7c3aed; }
+	:global(:root[data-theme='light']) .badge.status-up_to_date { color: #15803d; }
+	:global(:root[data-theme='light']) .msg.error { color: #c0271d; }
 </style>

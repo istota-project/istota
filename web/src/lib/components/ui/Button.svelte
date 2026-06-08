@@ -102,4 +102,7 @@
 	.btn-danger-icon:hover:not(:disabled) {
 		color: #c66;
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .btn-danger-icon:hover:not(:disabled) { color: #c0271d; }
 </style>

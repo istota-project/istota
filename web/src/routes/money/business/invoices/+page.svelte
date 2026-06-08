@@ -474,4 +474,9 @@
 		.inv-details { padding-left: 1.5rem; }
 		.detail-qty { display: none; }
 	}
+
+	/* Light theme overrides — dark rules above untouched. */
+	:global(:root[data-theme='light']) .inv-status.status-posted { color: #946a00; }
+	:global(:root[data-theme='light']) .inv-status.status-paid { color: #0d8f7e; }
+	:global(:root[data-theme='light']) .detail-discount { color: #a3157e; }
 </style>
