@@ -1,43 +1,25 @@
 <script lang="ts">
 	import { ChevronRight, ChevronDown, Check, X } from 'lucide-svelte';
-	import { isRenderable, type Segment } from '$lib/stores/segments';
+	import type { Segment } from '$lib/stores/segments';
 
-	// The model's "work" for one assistant turn: its reasoning (thinking) and
-	// tool calls, in order. Rendered as ONE chip — collapsed shows the latest
-	// reasoning + the active action together; expanded shows the whole chain.
-	// Plain narration text is NOT shown here (the tool actions are descriptive
+	// The model's tool calls for one assistant turn, in order. Rendered as ONE
+	// chip — collapsed shows the active action; expanded lists every call. The
+	// model's reasoning and narration are NOT shown (the actions are descriptive
 	// enough); the final answer streams prominent outside this component.
 	let { steps, streaming = false }: { steps: Segment[]; streaming?: boolean } = $props();
 
 	let expanded = $state(false);
 
-	// Chip rows are reasoning + tool calls only — narration text segments are
-	// dropped (neither chip nor answer).
-	const renderable = $derived(steps.filter((s) => s.kind !== 'text').filter(isRenderable));
 	const tools = $derived(
 		steps.filter((s): s is Extract<Segment, { kind: 'tool' }> => s.kind === 'tool'),
 	);
 	const toolCount = $derived(tools.length);
-
-	// The latest reasoning text — the chip's collapsed "current thought" line.
-	const latestThinking = $derived.by<string | null>(() => {
-		for (let i = steps.length - 1; i >= 0; i--) {
-			const s = steps[i];
-			if (s.kind === 'thinking' && s.text.trim()) return s.text.trim();
-		}
-		return null;
-	});
 	// The active action: the running tool, else the most recent one.
 	const activeTool = $derived(
 		[...tools].reverse().find((t) => t.tool.running)?.tool ?? tools[tools.length - 1]?.tool ?? null,
 	);
 	const anyRunning = $derived(tools.some((t) => t.tool.running));
 	const busy = $derived(streaming || anyRunning);
-
-	// One-line preview for a progress message (first non-empty line).
-	function firstLine(text: string): string {
-		return text.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? '';
-	}
 </script>
 
 <div class="activity" class:open={expanded} class:active={busy}>
@@ -45,54 +27,44 @@
 		<span class="chev">
 			{#if expanded}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
 		</span>
-		<!-- Collapsed: the current progress message, then the current action on its
-		     own line below it. Expanded: a static label only — the live current
-		     step is shown in the chain below, so repeating it here would duplicate
-		     the last row. -->
+		<!-- Collapsed: the active action. Expanded: a static label only — every
+		     call is listed in the chain below, so repeating the latest here would
+		     duplicate the last row. -->
 		<span class="current">
 			{#if expanded}
 				<span class="msg label">{busy ? 'Working…' : 'Activity'}</span>
+			{:else if activeTool}
+				<span class="action">
+					{#if activeTool.running}
+						<span class="run-dot"></span>
+					{:else}
+						<span class="status">
+							{#if activeTool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
+						</span>
+					{/if}
+					<span class="desc">{activeTool.description || activeTool.name}</span>
+				</span>
 			{:else}
-				{#if latestThinking}
-					<span class="msg thinking">{firstLine(latestThinking)}</span>
-				{/if}
-				{#if activeTool}
-					<span class="action">
-						{#if activeTool.running}
-							<span class="run-dot"></span>
-						{:else}
-							<span class="status">
-								{#if activeTool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
-							</span>
-						{/if}
-						<span class="desc">{activeTool.description || activeTool.name}</span>
-					</span>
-				{/if}
-				{#if !latestThinking && !activeTool}<span class="msg">Working…</span>{/if}
+				<span class="msg">Working…</span>
 			{/if}
 		</span>
 		{#if toolCount > 0}<span class="count">{toolCount}</span>{/if}
 	</button>
 
 	{#if expanded}
-		<!-- Expanded: the whole interleaved chain, in order. Tool calls are flat
-		     rows (no expand — that only repeated the action). -->
+		<!-- Expanded: every tool call, flat rows in order. -->
 		<div class="chain">
-			{#each renderable as step (step.id)}
-				{#if step.kind === 'tool'}
-					<div class="action chain-action">
-						{#if step.tool.running}
-							<span class="run-dot"></span>
-						{:else}
-							<span class="status">
-								{#if step.tool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
-							</span>
-						{/if}
-						<span class="desc">{step.tool.description || step.tool.name}</span>
-					</div>
-				{:else if step.kind === 'thinking'}
-					<div class="step-thinking">{firstLine(step.text)}</div>
-				{/if}
+			{#each tools as step (step.id)}
+				<div class="action chain-action">
+					{#if step.tool.running}
+						<span class="run-dot"></span>
+					{:else}
+						<span class="status">
+							{#if step.tool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
+						</span>
+					{/if}
+					<span class="desc">{step.tool.description || step.tool.name}</span>
+				</div>
 			{/each}
 		</div>
 	{/if}
@@ -147,7 +119,7 @@
 
 	.chev { display: inline-flex; align-items: center; flex: 0 0 auto; opacity: 0.6; }
 
-	/* Current step: progress message on one line, the action on its own line. */
+	/* Current step: the active action (or a quiet label when expanded). */
 	.current {
 		flex: 1;
 		min-width: 0;
@@ -164,9 +136,8 @@
 		font-style: italic;
 		color: var(--text-dim);
 	}
-	.msg.thinking { opacity: 0.85; }
-	/* Expanded-header label: a quiet stand-in for the live current step (which
-	   moves into the chain below when expanded). */
+	/* Expanded-header label: a quiet stand-in for the live action (which moves
+	   into the chain below when expanded). */
 	.msg.label { font-style: normal; opacity: 0.7; }
 	.action {
 		min-width: 0;
@@ -209,22 +180,12 @@
 	.chain {
 		border-top: 1px solid var(--border-subtle);
 		/* Left padding aligns the chain with the header's content (past the
-		   caret): head padding (0.5rem) + chevron (13px) + head gap (0.4rem).
-		   font-size matches the header so tool rows don't render larger than the
-		   progress messages (otherwise `.desc` inherits the bigger message size). */
+		   caret): head padding (0.5rem) + chevron (13px) + head gap (0.4rem). */
 		padding: 0.35rem 0.5rem 0.4rem calc(0.5rem + 13px + 0.4rem);
 		font-size: var(--text-xs);
 		display: flex;
 		flex-direction: column;
 		gap: 0.3rem;
-	}
-	/* Reasoning rows read as the model's quiet inner voice — dim italic. */
-	.step-thinking {
-		font-style: italic;
-		color: var(--text-dim);
-		opacity: 0.85;
-		word-break: break-word;
-		white-space: pre-wrap;
 	}
 
 	/* Light theme — the active shimmer washes out on a light surface; use a

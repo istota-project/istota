@@ -143,14 +143,15 @@ function mockTaskEvents(task: MockChatTask) {
 
 	const events: { seq: number; kind: string; payload: Record<string, unknown>; at: number }[] = [
 		{ seq: 1, kind: 'task_started', payload: { text: 'On it...' }, at: 0 },
-		// Reasoning lead-in → streams INSIDE the activity chip (💭), never the
-		// prominent answer area. Folds to a settled chip row once the tool starts.
+		// Reasoning is still emitted by the brain (and exercised here), but the
+		// web UI no longer renders it — the chip is tool-actions-only. These rows
+		// verify the client correctly ignores `thinking`; they should NOT appear.
 		{ seq: 2, kind: 'thinking', payload: { text: 'The user is asking for today\'s headlines. ' }, at: 250 },
 		{ seq: 3, kind: 'thinking', payload: { text: 'I should search the web for recent news first.' }, at: 450 },
 		{ seq: 4, kind: 'tool_start', payload: { tool_name: 'WebSearch', description: '🔎 web_search "today\'s news"', tool_call_id: 'c1' }, at: 800 },
 		{ seq: 5, kind: 'tool_progress', payload: { tool_call_id: 'c1', text: '7 results' }, at: 1600 },
 		{ seq: 6, kind: 'tool_end', payload: { tool_name: 'WebSearch', tool_call_id: 'c1', success: true, duration_ms: 1800 }, at: 2600 },
-		// More reasoning between tools — the chip's "current step" updates.
+		// Reasoning between tools — also ignored by the UI.
 		{ seq: 7, kind: 'thinking', payload: { text: 'Good results. Let me fetch the top source for detail.' }, at: 2900 },
 		{ seq: 8, kind: 'tool_start', payload: { tool_name: 'WebFetch', description: '🌐 browse get justsecurity.org', tool_call_id: 'c2' }, at: 3200 },
 		{ seq: 9, kind: 'tool_end', payload: { tool_name: 'WebFetch', tool_call_id: 'c2', success: true, duration_ms: 1900 }, at: 5100 },
