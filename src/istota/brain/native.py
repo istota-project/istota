@@ -41,7 +41,13 @@ from istota.agent.types import (
 )
 from istota.llm import make_provider
 from istota.llm.catalog import get_model_info
-from istota.llm.provider import StreamDone, StreamError, TextDelta, ToolCallDelta
+from istota.llm.provider import (
+    StreamDone,
+    StreamError,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallDelta,
+)
 from istota.llm.types import (
     AssistantMessage,
     Message,
@@ -283,6 +289,14 @@ class NativeBrain:
                 ae = event.assistant_event
                 if isinstance(ae, TextDelta) and ae.text:
                     await self._emit_progress(req, _text_delta_event(ae.text))
+                elif isinstance(ae, ThinkingDelta) and ae.thinking:
+                    # Stream reasoning fragments as ThinkingDeltaEvents. The
+                    # assembled ThinkingContent in StreamDone stays as-is (message
+                    # fidelity, excluded from result_text) — no double count since
+                    # the loop breaks on StreamDone and never emits it as progress.
+                    await self._emit_progress(
+                        req, _thinking_delta_event(ae.thinking)
+                    )
             elif event.type == "tool_execution_start":
                 desc = _describe_tool_use(event.tool_name, event.args)
                 trace.append({"type": "tool", "text": desc})
@@ -793,3 +807,9 @@ def _text_delta_event(text: str):
     from ._events import TextDeltaEvent
 
     return TextDeltaEvent(text=text)
+
+
+def _thinking_delta_event(thinking: str):
+    from ._events import ThinkingDeltaEvent
+
+    return ThinkingDeltaEvent(thinking=thinking)

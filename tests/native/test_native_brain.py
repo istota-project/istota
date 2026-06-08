@@ -8,7 +8,13 @@ from pathlib import Path
 from istota.brain import BrainRequest, make_brain
 from istota.brain.native import NativeBrain
 from istota.config import BrainConfig, NativeBrainConfig
-from istota.llm.provider import StreamDone, StreamError, StreamStart, TextDelta
+from istota.llm.provider import (
+    StreamDone,
+    StreamError,
+    StreamStart,
+    TextDelta,
+    ThinkingDelta,
+)
 from istota.llm.types import AssistantMessage, TextContent, ToolCallContent, Usage
 
 from ._mock_provider import MockProvider
@@ -378,6 +384,45 @@ class TestAnswerStreaming:
         assert not any(isinstance(e, TextEvent) for e in captured)
         # The canonical result still equals the assembled final-turn text.
         assert result.result_text == "Hello, world"
+
+
+class TestThinkingStreaming:
+    """Stage 4 — provider reasoning deltas surface as ThinkingDeltaEvents and stay
+    out of result_text."""
+
+    def test_thinking_deltas_forwarded_and_excluded_from_result(self, tmp_path):
+        from istota.brain import TextDeltaEvent, ThinkingDeltaEvent
+
+        class _ThinkingProvider:
+            async def stream(
+                self, system_prompt, messages, tools, *, model="", max_tokens=16384, **kw
+            ) -> AsyncIterator:
+                yield StreamStart()
+                # Reasoning streams first (Anthropic-compat reasoning_content),
+                # then the answer content.
+                for frag in ["Let me ", "think… "]:
+                    yield ThinkingDelta(thinking=frag)
+                for frag in ["The ", "answer."]:
+                    yield TextDelta(text=frag)
+                yield StreamDone(
+                    message=AssistantMessage(
+                        content=[TextContent(text="The answer.")],
+                        stop_reason="end_turn",
+                    )
+                )
+
+        captured: list = []
+        req = _req("hi", tmp_path)
+        req.on_progress = lambda ev: captured.append(ev)
+        result = _brain(_ThinkingProvider()).execute(req)
+
+        thinking = [e.thinking for e in captured if isinstance(e, ThinkingDeltaEvent)]
+        assert thinking == ["Let me ", "think… "]
+        # Reasoning never lands in the answer stream or the canonical result.
+        deltas = [e.text for e in captured if isinstance(e, TextDeltaEvent)]
+        assert deltas == ["The ", "answer."]
+        assert result.result_text == "The answer."
+        assert "Let me" not in result.result_text
 
 
 class TestTimeout:

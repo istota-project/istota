@@ -26,6 +26,7 @@ export interface ToolEntry {
 
 export type Segment =
 	| { kind: 'text'; id: string; text: string; settled: boolean }
+	| { kind: 'thinking'; id: string; text: string; settled: boolean }
 	| { kind: 'tool'; id: string; tool: ToolEntry };
 
 export interface ChatMessage {
@@ -57,6 +58,11 @@ function nextTextId(): string {
 	return `s${++_textSegSeq}`;
 }
 
+let _thinkSegSeq = 0;
+function nextThinkId(): string {
+	return `k${++_thinkSegSeq}`;
+}
+
 /** The last segment if it is an open (unsettled) text segment; otherwise push a
  * fresh open text segment and return it. Only called from the `text_delta`
  * branch, so a tool-first turn never gets an empty leading text segment. */
@@ -68,11 +74,35 @@ export function openTextSegment(m: ChatMessage): Extract<Segment, { kind: 'text'
 	return seg;
 }
 
-/** Settle the open text segment, if any — "a tool came after this text, so it
- * was narration." A no-op when the last segment isn't an open text segment. */
-export function settleOpenText(m: ChatMessage): void {
+/** The last segment if it is an open (unsettled) thinking segment; otherwise
+ * push a fresh open thinking segment and return it. Mirrors openTextSegment —
+ * only called from the `thinking` branch, so a turn with no thinking never gets
+ * an empty leading thinking segment. */
+export function openThinkingSegment(m: ChatMessage): Extract<Segment, { kind: 'thinking' }> {
 	const last = m.segments[m.segments.length - 1];
-	if (last && last.kind === 'text' && !last.settled) last.settled = true;
+	if (last && last.kind === 'thinking' && !last.settled) return last;
+	const seg = { kind: 'thinking' as const, id: nextThinkId(), text: '', settled: false };
+	m.segments.push(seg);
+	return seg;
+}
+
+/** Settle the open trailing block — text OR thinking — if any. "Something came
+ * after this block (a tool, or the answer), so it was lead-in, not the answer."
+ * A no-op when the last segment isn't an open text/thinking block. */
+export function settleOpenBlock(m: ChatMessage): void {
+	const last = m.segments[m.segments.length - 1];
+	if (last && (last.kind === 'text' || last.kind === 'thinking') && !last.settled) {
+		last.settled = true;
+	}
+}
+
+/** Settle the open trailing block only when it is of `kind`. Used at the
+ * thinking↔answer boundary, where a thinking segment must settle before answer
+ * text opens (and vice-versa) without disturbing an open block of the other
+ * kind. */
+function settleOpenOfKind(m: ChatMessage, kind: 'text' | 'thinking'): void {
+	const last = m.segments[m.segments.length - 1];
+	if (last && last.kind === kind && !last.settled) last.settled = true;
 }
 
 export function findTool(m: ChatMessage, id: string): Extract<Segment, { kind: 'tool' }> | undefined {
@@ -136,10 +166,27 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
 			m.progress = String(payload.text ?? '');
 			break;
 
+		case 'thinking': {
+			// Real extended-thinking / reasoning from the brain. Accumulates into a
+			// distinct thinking segment that renders in the activity chip — never the
+			// answer. A late stray delta after the message terminated is ignored.
+			if (!m.streaming) break;
+			// thinking after answer text shouldn't reopen the answer block; settle
+			// an open text block at the answer→thinking boundary.
+			settleOpenOfKind(m, 'text');
+			const seg = openThinkingSegment(m);
+			seg.text += String(payload.text ?? '');
+			m.progress = undefined;
+			break;
+		}
+
 		case 'text_delta': {
 			// A late stray delta after the message terminated must not reopen a
 			// finished answer.
 			if (!m.streaming) break;
+			// Settle an open thinking block first (thinking → answer boundary) so the
+			// reasoning lead-in folds into the chip and the answer opens fresh.
+			settleOpenOfKind(m, 'thinking');
 			const seg = openTextSegment(m);
 			seg.text += String(payload.text ?? '');
 			m.progress = undefined;
@@ -147,9 +194,9 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
 		}
 
 		case 'tool_start': {
-			// The text streamed so far was this turn's lead-in narration (a tool
+			// The text/thinking streamed so far was this turn's lead-in (a tool
 			// follows it) — settle it so it folds to a collapsed disclosure.
-			settleOpenText(m);
+			settleOpenBlock(m);
 			const toolCount = m.segments.filter((s) => s.kind === 'tool').length;
 			// ClaudeCodeBrain (the default brain) emits an EMPTY tool_call_id, so a
 			// `?? fallback` (null/undefined only) would key every tool in a

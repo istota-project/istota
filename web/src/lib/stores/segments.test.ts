@@ -232,3 +232,97 @@ describe('applyEvent reducer', () => {
 		expect(m.segments).toHaveLength(0);
 	});
 });
+
+function thinks(m: ChatMessage): Extract<Segment, { kind: 'thinking' }>[] {
+	return m.segments.filter((s): s is Extract<Segment, { kind: 'thinking' }> => s.kind === 'thinking');
+}
+
+describe('applyEvent — thinking segments', () => {
+	it('consecutive thinking deltas accumulate into one thinking segment', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['thinking', { text: 'The user ' }],
+			['thinking', { text: 'wants X. ' }],
+			['thinking', { text: 'I should search.' }],
+		]);
+		expect(m.segments).toHaveLength(1);
+		const seg = m.segments[0];
+		expect(seg.kind).toBe('thinking');
+		expect((seg as any).text).toBe('The user wants X. I should search.');
+		expect((seg as any).settled).toBe(false);
+	});
+
+	it('thinking is never returned by answerText', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['thinking', { text: 'reasoning only' }],
+			['done', {}],
+		]);
+		expect(answerText(m)).toBe('');
+	});
+
+	it('tool_start settles an open thinking segment (folds into the chip)', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['thinking', { text: 'Let me look it up.' }],
+			['tool_start', { tool_name: 'Bash', description: 'search', tool_call_id: 'c1' }],
+		]);
+		expect(thinks(m)[0].settled).toBe(true);
+		expect(m.segments.map((s) => s.kind)).toEqual(['thinking', 'tool']);
+	});
+
+	it('text_delta after thinking settles thinking and opens a fresh answer block', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['thinking', { text: 'Reasoning lead-in.' }],
+			['text_delta', { text: 'The answer ' }],
+			['text_delta', { text: 'is 42.' }],
+		]);
+		expect(m.segments.map((s) => s.kind)).toEqual(['thinking', 'text']);
+		expect(thinks(m)[0].settled).toBe(true);
+		expect(answerText(m)).toBe('The answer is 42.');
+	});
+
+	it('full turn: thinking → tool → thinking → answer → result', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['thinking', { text: 'First I plan.' }],
+			['tool_start', { tool_name: 'WebSearch', description: 'search', tool_call_id: 'c1' }],
+			['tool_end', { tool_call_id: 'c1', success: true }],
+			['thinking', { text: 'Now I summarize.' }],
+			['text_delta', { text: 'Here it is.' }],
+			['result', { text: 'Here it is.' }],
+			['done', { duration_seconds: 2 }],
+		]);
+		expect(m.segments.map((s) => s.kind)).toEqual(['thinking', 'tool', 'thinking', 'text']);
+		// Both thinking segments settled; the answer is the trailing text.
+		expect(thinks(m).every((t) => t.settled)).toBe(true);
+		expect(answerText(m)).toBe('Here it is.');
+		// The two thinking segments carry distinct ids (no keyed {#each} collision).
+		const ids = thinks(m).map((t) => t.id);
+		expect(new Set(ids).size).toBe(ids.length);
+	});
+
+	it('empty whitespace thinking is non-renderable once settled', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['thinking', { text: '   ' }],
+			['tool_start', { tool_name: 'Bash', description: 'a', tool_call_id: 'c1' }],
+		]);
+		const t = m.segments[0];
+		expect(t.kind).toBe('thinking');
+		expect((t as any).settled).toBe(true);
+		expect(isRenderable(t)).toBe(false);
+	});
+
+	it('a late thinking delta after the message terminated is ignored', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['text_delta', { text: 'answer' }],
+			['result', { text: 'answer' }],
+			['thinking', { text: 'stray' }],
+		]);
+		expect(thinks(m)).toHaveLength(0);
+		expect(answerText(m)).toBe('answer');
+	});
+});

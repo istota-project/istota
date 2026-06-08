@@ -37,11 +37,16 @@ export type { ChatMessage, Segment, ToolEntry };
  * per-tool success / progress / timing); the last text segment is the answer
  * (unsettled, prominent), all earlier text segments are settled narration. */
 function historySegments(raw: { kind: string; text: string }[]): Segment[] {
-	const segs: Segment[] = raw.map((s, i) =>
-		s.kind === 'tool'
-			? { kind: 'tool', id: `h${i}`, tool: { id: `h${i}`, name: '', description: s.text, running: false } }
-			: { kind: 'text', id: `s${i}`, text: s.text, settled: true },
-	);
+	const segs: Segment[] = raw.map((s, i) => {
+		if (s.kind === 'tool') {
+			return { kind: 'tool', id: `h${i}`, tool: { id: `h${i}`, name: '', description: s.text, running: false } };
+		}
+		if (s.kind === 'thinking') {
+			return { kind: 'thinking', id: `k${i}`, text: s.text, settled: true };
+		}
+		return { kind: 'text', id: `s${i}`, text: s.text, settled: true };
+	});
+	// Only the last *text* segment is the answer; thinking stays settled.
 	for (let i = segs.length - 1; i >= 0; i--) {
 		const s = segs[i];
 		if (s.kind === 'text') { s.settled = false; break; }
@@ -82,7 +87,7 @@ function randomAckVerb(): string {
 
 const STREAM_KINDS = [
 	'task_started', 'tool_start', 'tool_end', 'tool_progress', 'progress_text',
-	'text_delta', 'context_management', 'confirmation', 'result', 'error',
+	'thinking', 'text_delta', 'context_management', 'confirmation', 'result', 'error',
 	'cancelled', 'done',
 ];
 
@@ -137,8 +142,9 @@ function createSession(): ChatSession {
 	const NOTIF_POLL_MS = 5000;
 
 	// Clone a segment (and its tool) so a keyed {#each} sees a fresh reference.
+	// text/thinking are flat; only a tool segment has a nested object to clone.
 	const cloneSeg = (s: Segment): Segment =>
-		s.kind === 'text' ? { ...s } : { ...s, tool: { ...s.tool } };
+		s.kind === 'tool' ? { ...s, tool: { ...s.tool } } : { ...s };
 
 	const updateMsg = (cid: number, fn: (m: ChatMessage) => void) => {
 		messages.update((arr) => {

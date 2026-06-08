@@ -6,6 +6,7 @@ from istota.stream_parser import (
     ContextManagementEvent,
     ResultEvent,
     TextEvent,
+    ThinkingEvent,
     ToolUseEvent,
     _describe_tool_use,
     make_stream_parser,
@@ -224,14 +225,65 @@ class TestParseStreamLine:
         line = self._make_line({"type": "assistant"})
         assert parse_stream_line(line) is None
 
-    def test_partial_event_thinking_only_skipped(self):
-        """Partial events with only thinking content should be skipped."""
+    def test_thinking_only_yields_thinking_event(self):
+        """A line carrying only a thinking block now yields a ThinkingEvent so the
+        executor can surface reasoning on stream surfaces."""
         line = self._make_line({
             "type": "assistant",
             "message": {
                 "stop_reason": None,
                 "content": [
                     {"type": "thinking", "thinking": "Let me think about this..."},
+                ],
+            },
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, ThinkingEvent)
+        assert event.text == "Let me think about this..."
+
+    def test_thinking_plus_tool_prefers_tool(self):
+        """A combined thinking+tool line still yields the tool (priority order:
+        tool > text > thinking)."""
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_tt",
+                "content": [
+                    {"type": "thinking", "thinking": "I should run a command."},
+                    {"type": "tool_use", "id": "tu_1", "name": "Bash",
+                     "input": {"command": "ls"}},
+                ],
+            },
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, ToolUseEvent)
+
+    def test_thinking_dedup_across_cm_replays(self):
+        """The same thinking block re-emitted under a CM replay (same msg id) is
+        deduped by the shared _seen set."""
+        seen: set[str] = set()
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "id": "msg_dd",
+                "content": [
+                    {"type": "thinking", "thinking": "reasoning here"},
+                ],
+            },
+        })
+        first = parse_stream_line(line, _seen=seen)
+        assert isinstance(first, ThinkingEvent)
+        # Replayed identical line → deduped → None.
+        assert parse_stream_line(line, _seen=seen) is None
+
+    def test_empty_thinking_skipped(self):
+        """A whitespace-only thinking block is skipped (returns None)."""
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": None,
+                "content": [
+                    {"type": "thinking", "thinking": "   "},
                 ],
             },
         })

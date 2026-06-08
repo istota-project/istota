@@ -1220,6 +1220,7 @@ def run_task_inline(
         if task_is_stream_surface(config, task):
             with db.get_db(config.db_path) as _prune_conn:
                 db.delete_task_events_by_kind(_prune_conn, task.id, "text_delta")
+                db.delete_task_events_by_kind(_prune_conn, task.id, "thinking")
 
     status = "completed" if success else ("cancelled" if is_cancelled else "failed")
     with db.get_db(config.db_path) as conn:
@@ -1678,6 +1679,7 @@ def process_one_task(
             if plan_web:
                 with db.get_db(config.db_path) as _prune_conn:
                     db.delete_task_events_by_kind(_prune_conn, task_id, "text_delta")
+                    db.delete_task_events_by_kind(_prune_conn, task_id, "thinking")
 
     # Process deferred operations (subtasks, transaction tracking) on success,
     # unless the task is awaiting confirmation (drain after the user confirms).

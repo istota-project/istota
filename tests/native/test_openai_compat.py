@@ -8,7 +8,13 @@ the provider never raises.
 import httpx
 
 from istota.llm.openai_compat import OpenAICompatibleProvider
-from istota.llm.provider import StreamDone, StreamError, TextDelta, ToolCallDelta
+from istota.llm.provider import (
+    StreamDone,
+    StreamError,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallDelta,
+)
 from istota.llm.types import (
     AssistantMessage,
     TextContent,
@@ -143,6 +149,39 @@ class TestSSEParsing:
         events = await self._collect(lines)
         assert isinstance(events[-1], StreamDone)
         assert events[-1].message.text == "x"
+
+    async def test_reasoning_deltas_yield_thinking_and_stay_out_of_content(self):
+        """reasoning_content deltas stream as ThinkingDelta AND assemble into the
+        message's ThinkingContent — never into the text content / result."""
+        lines = [
+            'data: {"choices":[{"delta":{"reasoning_content":"Let me "}}]}',
+            'data: {"choices":[{"delta":{"reasoning_content":"think."}}]}',
+            'data: {"choices":[{"delta":{"content":"Answer."}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        events = await self._collect(lines)
+        thinking = [e.thinking for e in events if isinstance(e, ThinkingDelta)]
+        assert thinking == ["Let me ", "think."]
+        # Streamed thinking precedes the text delta (reasoning comes first).
+        idx_think = next(i for i, e in enumerate(events) if isinstance(e, ThinkingDelta))
+        idx_text = next(i for i, e in enumerate(events) if isinstance(e, TextDelta))
+        assert idx_think < idx_text
+        done = events[-1]
+        assert isinstance(done, StreamDone)
+        # The answer content excludes the reasoning.
+        assert done.message.text == "Answer."
+
+    async def test_alternate_reasoning_field_yields_thinking(self):
+        """Some endpoints use `reasoning` (not `reasoning_content`)."""
+        lines = [
+            'data: {"choices":[{"delta":{"reasoning":"hmm"}}]}',
+            'data: {"choices":[{"delta":{"content":"ok"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        events = await self._collect(lines)
+        assert [e.thinking for e in events if isinstance(e, ThinkingDelta)] == ["hmm"]
 
     async def test_cached_tokens_mapped(self):
         lines = [

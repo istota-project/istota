@@ -37,6 +37,8 @@ from .brain import (
     StreamEvent,
     TextDeltaEvent,
     TextEvent,
+    ThinkingDeltaEvent,
+    ThinkingEvent,
     ToolEndEvent,
     ToolProgressEvent,
     ToolUseEvent,
@@ -2690,11 +2692,44 @@ def execute_task(
             ):
                 _flush_deltas()
 
+        # A SEPARATE coalescing buffer for streamed *thinking* (extended-reasoning)
+        # text. It must be independent of the answer-text buffer above because the
+        # two render to different places on a stream surface: thinking folds into
+        # the activity chip, the answer streams prominent. Same flush cadence /
+        # boundaries; emits ``thinking`` task events instead of ``text_delta``.
+        _thinking_buf: list[str] = []
+        _thinking_state = {"chars": 0, "last_flush": time.monotonic()}
+
+        def _flush_thinking() -> None:
+            if event_writer is None or not _thinking_buf:
+                return
+            text = "".join(_thinking_buf)
+            _thinking_buf.clear()
+            _thinking_state["chars"] = 0
+            _thinking_state["last_flush"] = time.monotonic()
+            try:
+                event_writer.emit("thinking", {"text": text})
+            except Exception:
+                logger.debug("thinking flush failed", exc_info=True)
+
+        def _buffer_thinking(text: str) -> None:
+            if not text:
+                return
+            _thinking_buf.append(text)
+            _thinking_state["chars"] += len(text)
+            now = time.monotonic()
+            if (
+                _thinking_state["chars"] >= _DELTA_FLUSH_CHARS
+                or (now - _thinking_state["last_flush"]) * 1000 >= _DELTA_FLUSH_MS
+            ):
+                _flush_thinking()
+
         def _on_event(event: StreamEvent) -> None:
             if event_writer is None:
                 return
             if isinstance(event, ToolUseEvent) and show_tool_use:
                 if is_stream_surface:
+                    _flush_thinking()  # tool boundary: settle the reasoning chip
                     _flush_deltas()  # tool boundary: don't straddle the chip
                 event_writer.emit("tool_start", {
                     "tool_name": event.tool_name,
@@ -2715,10 +2750,21 @@ def execute_task(
                     "tool_call_id": event.tool_call_id,
                     "text": event.text,
                 })
+            elif isinstance(event, ThinkingDeltaEvent):
+                # NativeBrain incremental reasoning. Stream surfaces only; a push
+                # task drops it (thinking is web/repl-only — no progress_text
+                # fallback).
+                if is_stream_surface:
+                    _buffer_thinking(event.thinking)
+            elif isinstance(event, ThinkingEvent):
+                # ClaudeCodeBrain whole reasoning block. Stream surfaces only.
+                if is_stream_surface:
+                    _buffer_thinking(event.text)
             elif isinstance(event, TextDeltaEvent):
                 # NativeBrain incremental answer text. Stream surfaces only; a
                 # push task drops it (the final result is delivered once).
                 if is_stream_surface:
+                    _flush_thinking()  # thinking → answer boundary: keep order
                     _delta_seen["value"] = True
                     _buffer_delta(event.text)
             elif isinstance(event, TextEvent):
@@ -2731,6 +2777,7 @@ def execute_task(
                     # ClaudeCodeBrain (no deltas): coarse streaming, one
                     # TextEvent per completed block — route through the same
                     # delta channel rather than progress_text so it renders live.
+                    _flush_thinking()  # thinking → answer boundary: keep order
                     _buffer_delta(event.text)
                 elif show_text:
                     # Push surface: deltas are dropped, so intermediate-turn
@@ -2741,6 +2788,7 @@ def execute_task(
                     event_writer.emit("progress_text", {"text": event.text})
             elif isinstance(event, ContextManagementEvent):
                 if is_stream_surface:
+                    _flush_thinking()  # turn/CM boundary
                     _flush_deltas()  # turn/CM boundary
                 event_writer.emit("context_management")
 
@@ -2828,10 +2876,12 @@ def execute_task(
                     stack.enter_context(_net_proxy_ctx)
                 brain_result = brain.execute(req)
         finally:
-            # Final flush: emit any buffered streamed text before the scheduler
-            # emits the terminal event. On success this precedes the canonical
-            # ``result`` (which replaces it in the UI); on an exception the
-            # finally still drains the buffer so the last fragment isn't lost.
+            # Final flush: emit any buffered streamed thinking + text before the
+            # scheduler emits the terminal event. Thinking first so its rows keep
+            # a lower seq than any trailing answer text. On success this precedes
+            # the canonical ``result`` (which replaces the answer in the UI); on
+            # an exception the finally still drains both buffers.
+            _flush_thinking()
             _flush_deltas()
 
         success = brain_result.success

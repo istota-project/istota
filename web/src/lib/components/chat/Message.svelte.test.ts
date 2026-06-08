@@ -14,7 +14,7 @@ function assistant(): ChatMessage {
 // Mirror chat.ts updateMsg: mutate via the real reducer, then rebuild references
 // at every keyed level so Svelte's `{#each}` re-renders.
 const cloneSeg = (s: Segment): Segment =>
-	s.kind === 'text' ? { ...s } : { ...s, tool: { ...s.tool } };
+	s.kind === 'tool' ? { ...s, tool: { ...s.tool } } : { ...s };
 
 function freshRefsUpdate(store: Writable<ChatMessage[]>, kind: string, payload: Record<string, unknown>) {
 	store.update((arr) => {
@@ -76,5 +76,28 @@ describe('live streaming reaches the DOM (Message + keyed each)', () => {
 
 		expect(container.textContent).not.toContain('THE REAL ANSWER');
 		expect(container.textContent).not.toContain('partial');
+	});
+
+	it('thinking renders in the chip, never in the prominent answer area', async () => {
+		const store = writable<ChatMessage[]>([assistant()]);
+		const { container } = render(StreamHarness, { store });
+
+		// A turn: reasoning lead-in → tool → answer → result.
+		freshRefsUpdate(store, 'thinking', { text: 'REASONING_LEADIN' });
+		freshRefsUpdate(store, 'tool_start', { tool_name: 'WebSearch', description: 'web search', tool_call_id: 'c1' });
+		freshRefsUpdate(store, 'tool_end', { tool_call_id: 'c1', success: true });
+		freshRefsUpdate(store, 'text_delta', { text: 'PROMINENT_ANSWER' });
+		freshRefsUpdate(store, 'result', { text: 'PROMINENT_ANSWER' });
+		freshRefsUpdate(store, 'done', { duration_seconds: 2 });
+		await tick();
+
+		// The answer lives in the prominent `.body.markdown` area.
+		const body = container.querySelector('.body.markdown');
+		expect(body?.textContent).toContain('PROMINENT_ANSWER');
+		// The reasoning must NOT be in the prominent answer area …
+		expect(body?.textContent ?? '').not.toContain('REASONING_LEADIN');
+		// … it lives inside the activity chip instead (with the 💭 marker).
+		const chip = container.querySelector('.activity');
+		expect(chip?.textContent ?? '').toContain('💭');
 	});
 });
