@@ -213,6 +213,12 @@
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
+		/* Lighter gray than the app base (#111) so the white text reads with
+		   softer contrast — matches the message hover-highlight shade. */
+		background: var(--surface-card);
+		/* Soften body text a touch (scoped to chat) to further ease the
+		   light-on-dark contrast. */
+		--text-primary: #c2c2c2;
 	}
 	.messages {
 		flex: 1;

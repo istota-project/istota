@@ -166,9 +166,9 @@
 	.composer {
 		padding: 0.6rem 0.75rem;
 		border-top: 1px solid var(--border-subtle);
-		background: var(--surface-base);
+		background: var(--surface-card);
 	}
-	.composer.drag { background: var(--surface-card); outline: 1px dashed var(--border-default); }
+	.composer.drag { background: var(--surface-raised); outline: 1px dashed var(--border-default); }
 	.composer-row { display: flex; align-items: flex-end; gap: 0.5rem; }
 
 	textarea {
@@ -177,7 +177,7 @@
 		max-height: 200px;
 		overflow-y: auto;
 		scrollbar-width: none;
-		background: var(--surface-card);
+		background: var(--surface-raised);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-card);
 		color: var(--text-primary);
