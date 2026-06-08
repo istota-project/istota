@@ -39,6 +39,21 @@ def _surface_for_source_type(source_type: str) -> str:
     return "talk"
 
 
+def task_is_stream_surface(config: "Config", task: "db.Task") -> bool:
+    """True when the task's primary surface is stream-class (``web``, ``repl``,
+    and any future stream transport).
+
+    The single predicate the executor's delta coalescer and the scheduler's
+    delta-prune both gate on, so "which surfaces stream" lives in one place
+    (the transport's ``surface_class``) rather than a hardcoded set. Building a
+    registry here is cheap — ``make_registry`` does no I/O."""
+    transport = make_registry(config).for_task(task)
+    return (
+        transport is not None
+        and getattr(transport.capabilities, "surface_class", "push") == "stream"
+    )
+
+
 class TransportRegistry:
     """Holds the enabled transports and resolves one for a task."""
 

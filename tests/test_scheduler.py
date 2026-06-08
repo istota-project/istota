@@ -1545,6 +1545,38 @@ class TestProcessOneTask:
         assert task.status == "completed"
         assert task.result == "All done"
 
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_web_task_prunes_text_delta_rows(self, mock_arun, db_path, tmp_path):
+        # A web (stream) task's coalesced text_delta rows are a cosmetic live
+        # preview; once the canonical result lands they're pruned, leaving only
+        # the lifecycle rows. (The 'push untouched' guard is in the executor
+        # tests; this is the stream-side prune.)
+        config = self._make_config(db_path, tmp_path)
+        config.scheduler.event_log_enabled = True
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="hi", user_id="testuser", source_type="web",
+                conversation_token="webtok", output_target="web",
+            )
+
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, workspace_dir=None, **kw):
+            if event_writer is not None:
+                event_writer.emit("text_delta", {"text": "Hel"})
+                event_writer.emit("text_delta", {"text": "lo"})
+            return (True, "Hello", None, None)
+
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec):
+            result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is True
+
+        with db.get_db(db_path) as conn:
+            kinds = [e["kind"] for e in db.get_task_events(conn, task_id)]
+        assert "text_delta" not in kinds          # pruned after result
+        assert "result" in kinds and "done" in kinds  # lifecycle survives
+
     @patch("istota.scheduler.execute_task", return_value=(True, "All done", '["📄 Reading file"]', None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_actions_taken_stored_on_success(self, mock_arun, mock_exec, db_path, tmp_path):

@@ -34,16 +34,38 @@ class TerminalSubscriber:
         if color is None:
             color = bool(getattr(self._stream, "isatty", lambda: False)())
         self._color = color
+        # Live answer text streamed via text_delta events (stream surface). We
+        # write deltas inline (no newline) so the answer appears progressively;
+        # _streamed accumulates them so the terminal `result` can skip a
+        # redundant re-print when it matches what already streamed.
+        self._streamed = ""
+        self._mid_line = False  # an un-terminated delta line is open
 
     def _c(self, code: str, text: str) -> str:
         return f"{code}{text}{_RESET}" if self._color else text
 
     def _print(self, text: str = "") -> None:
+        # Terminate any open in-flight delta line before a block print so the
+        # two don't run together on one line.
+        if self._mid_line:
+            print(file=self._stream, flush=True)
+            self._mid_line = False
         print(text, file=self._stream, flush=True)
+
+    def _write_inline(self, text: str) -> None:
+        self._stream.write(text)
+        self._stream.flush()
+        self._mid_line = True
 
     def on_event(self, event: "TaskEvent") -> None:
         kind = event.kind
         p = event.payload or {}
+        if kind == "text_delta":
+            text = p.get("text") or ""
+            if text:
+                self._streamed += text
+                self._write_inline(text)
+            return
         if kind == "tool_start":
             desc = p.get("description") or p.get("tool_name") or "tool"
             self._print(self._c(_CYAN, f"  ▸ {desc}"))
@@ -60,10 +82,19 @@ class TerminalSubscriber:
             if text:
                 self._print(text)
         elif kind == "result":
-            self._print()
-            self._print(self._c(_GREEN, p.get("text") or ""))
+            final = p.get("text") or ""
+            if self._streamed and final.strip() == self._streamed.strip():
+                # Already shown live via deltas — just terminate the line rather
+                # than re-printing the whole answer in green.
+                self._print()
+            else:
+                # No deltas, or CM-aware composition rewrote the answer: print
+                # the canonical (corrected) result.
+                self._print()
+                self._print(self._c(_GREEN, final))
             if p.get("truncated"):
                 self._print(self._c(_DIM, "[result truncated]"))
+            self._streamed = ""
         elif kind == "error":
             self._print()
             self._print(self._c(_RED, f"error: {p.get('message') or 'task failed'}"))

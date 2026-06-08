@@ -7,6 +7,7 @@ retry loop) and the streaming integration tests
 """
 
 import textwrap
+import typing
 from pathlib import Path
 
 import pytest
@@ -17,9 +18,20 @@ from istota.brain import (
     BrainRequest,
     BrainResult,
     ClaudeCodeBrain,
+    StreamEvent,
+    TextDeltaEvent,
     make_brain,
 )
 from istota.config import load_config
+
+
+class TestTextDeltaEvent:
+    def test_in_stream_event_union(self):
+        assert TextDeltaEvent in typing.get_args(StreamEvent)
+
+    def test_carries_incremental_fragment(self):
+        ev = TextDeltaEvent(text="par")
+        assert ev.text == "par"
 
 
 class TestMakeBrain:

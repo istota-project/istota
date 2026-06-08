@@ -172,6 +172,28 @@ class TestDeleteTaskEvents:
         assert rows[1]["payload"]["text"] == "ok"  # only the retry's events survive
 
 
+class TestDeleteTaskEventsByKind:
+    def test_deletes_only_named_kind_for_task(self, db_path):
+        w = EventWriter(11, str(db_path))
+        w.emit("task_started")
+        w.emit("text_delta", {"text": "hel"})
+        w.emit("text_delta", {"text": "lo"})
+        w.emit("result", {"text": "hello"})
+        with db.get_db(db_path) as conn:
+            removed = db.delete_task_events_by_kind(conn, 11, "text_delta")
+            assert removed == 2
+            kinds = [r["kind"] for r in db.get_task_events(conn, 11)]
+        # Lifecycle rows survive; only the deltas are pruned.
+        assert kinds == ["task_started", "result"]
+
+    def test_leaves_other_tasks_untouched(self, db_path):
+        EventWriter(20, str(db_path)).emit("text_delta", {"text": "a"})
+        EventWriter(21, str(db_path)).emit("text_delta", {"text": "b"})
+        with db.get_db(db_path) as conn:
+            assert db.delete_task_events_by_kind(conn, 20, "text_delta") == 1
+            assert [r["kind"] for r in db.get_task_events(conn, 21)] == ["text_delta"]
+
+
 class TestCleanupDeletesEvents:
     def test_cleanup_old_tasks_removes_events(self, db_path):
         with db.get_db(db_path) as conn:

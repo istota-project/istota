@@ -98,8 +98,14 @@
 				{/if}
 			{:else}
 				<div class="body markdown">{@html bodyHtml}</div>
-				{#if message.streaming && message.progress && !hasRunningTool}
-					<div class="progress subtle"><span class="dot"></span><span class="status-text">{message.progress}</span></div>
+				{#if message.streaming && !hasRunningTool}
+					<!-- Typing affordance while the answer streams. A status verb
+					     shows if one is set; once text_delta clears it, just the
+					     pulsing dot remains as a "still writing" cue. -->
+					<div class="progress subtle">
+						<span class="dot"></span>
+						{#if message.progress}<span class="status-text">{message.progress}</span>{/if}
+					</div>
 				{/if}
 			{/if}
 

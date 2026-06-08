@@ -1467,6 +1467,22 @@ def delete_task_events(conn: sqlite3.Connection, task_id: int) -> int:
     return cursor.rowcount
 
 
+def delete_task_events_by_kind(
+    conn: sqlite3.Connection, task_id: int, kind: str,
+) -> int:
+    """Delete a task's events of one kind only. Returns the row count.
+
+    Used to prune ephemeral ``text_delta`` rows for stream surfaces once the
+    canonical ``result`` has been emitted (web-chat streaming): the deltas were a
+    cosmetic live preview, so steady state retains zero of them. Gaps in ``seq``
+    are harmless — SSE resume is ``seq > last``. Mirrors ``delete_task_events``'
+    connection-handling convention (caller supplies the connection)."""
+    cursor = conn.execute(
+        "DELETE FROM task_events WHERE task_id = ? AND kind = ?", (task_id, kind),
+    )
+    return cursor.rowcount
+
+
 # ---------------------------------------------------------------------------
 # Web chat rooms (web chat surface)
 # ---------------------------------------------------------------------------

@@ -299,13 +299,17 @@ class TestProgressStreaming:
         edited = [name for kind, name in log if kind == "edited"]
         assert "ToolUseEvent" in received
         assert "ToolEndEvent" in received  # NativeBrain emits tool completion
-        # The intermediate "Working on it." reaches the sink as a TextEvent…
-        assert "TextEvent" in received
+        # The intermediate "Working on it." now reaches the sink as a streamed
+        # TextDeltaEvent (token-level answer streaming), and the redundant
+        # whole-turn TextEvent flush is suppressed (no double-render).
+        assert "TextDeltaEvent" in received
+        assert "TextEvent" not in received
         assert edited == received  # every callback ran to completion
 
-    def test_final_turn_text_is_suppressed(self, tmp_path):
-        # A single-turn task's answer must NOT be emitted as a TextEvent
-        # (progress) — it equals result_text and would otherwise double-render.
+    def test_streaming_suppresses_whole_turn_text_event(self, tmp_path):
+        # With delta streaming the answer arrives incrementally as
+        # TextDeltaEvents; the whole-turn TextEvent flush must be suppressed so a
+        # stream surface doesn't render the answer twice. result_text is intact.
         provider = MockProvider(
             [
                 AssistantMessage(
@@ -322,7 +326,8 @@ class TestProgressStreaming:
         assert result.success is True
         assert result.result_text == "The answer is 42."
         received = [name for kind, name in log if kind == "received"]
-        assert "TextEvent" not in received  # suppressed: it's the result
+        assert "TextDeltaEvent" in received  # answer streamed as deltas
+        assert "TextEvent" not in received   # whole-turn flush suppressed
 
     def test_progress_callback_exception_does_not_crash_run(self, tmp_path):
         provider = MockProvider(
@@ -337,6 +342,39 @@ class TestProgressStreaming:
         result = _brain(provider).execute(req)
         assert result.success is True
         assert result.result_text == "done"
+
+
+class TestAnswerStreaming:
+    """Stage 3 — provider TextDeltas are forwarded as ordered TextDeltaEvents."""
+
+    def test_text_deltas_forwarded_in_order(self, tmp_path):
+        from istota.brain import TextDeltaEvent, TextEvent
+
+        class _DeltaProvider:
+            async def stream(
+                self, system_prompt, messages, tools, *, model="", max_tokens=16384, **kw
+            ) -> AsyncIterator:
+                yield StreamStart()
+                for frag in ["Hel", "lo, ", "world"]:
+                    yield TextDelta(text=frag)
+                yield StreamDone(
+                    message=AssistantMessage(
+                        content=[TextContent(text="Hello, world")],
+                        stop_reason="end_turn",
+                    )
+                )
+
+        captured: list = []
+        req = _req("hi", tmp_path)
+        req.on_progress = lambda ev: captured.append(ev)
+        result = _brain(_DeltaProvider()).execute(req)
+
+        deltas = [e.text for e in captured if isinstance(e, TextDeltaEvent)]
+        assert deltas == ["Hel", "lo, ", "world"]  # forwarded in arrival order
+        # No whole-turn TextEvent — the deltas carried it (no double-render).
+        assert not any(isinstance(e, TextEvent) for e in captured)
+        # The canonical result still equals the assembled final-turn text.
+        assert result.result_text == "Hello, world"
 
 
 class TestTimeout:

@@ -1213,6 +1213,13 @@ def run_task_inline(
             "duration_seconds": round(event_writer.elapsed_seconds(), 1),
         })
         event_writer.finish()
+        # Prune ephemeral text_delta rows for stream surfaces (repl, web) once
+        # the terminal event has fired — the in-process subscriber already
+        # rendered them live, so retaining the rows only bloats the log.
+        from .transport.registry import task_is_stream_surface
+        if task_is_stream_surface(config, task):
+            with db.get_db(config.db_path) as _prune_conn:
+                db.delete_task_events_by_kind(_prune_conn, task.id, "text_delta")
 
     status = "completed" if success else ("cancelled" if is_cancelled else "failed")
     with db.get_db(config.db_path) as conn:
@@ -1663,6 +1670,14 @@ def process_one_task(
                 "duration_seconds": round(event_writer.elapsed_seconds(), 1),
             })
             event_writer.finish()
+            # Prune the ephemeral text_delta rows now the canonical result/
+            # confirmation/error has landed (web chat streaming). The deltas were
+            # a cosmetic live preview; steady state retains zero. Web is the only
+            # stream surface that flows through process_one_task (repl runs
+            # inline), so plan_web is the gate — push tasks never wrote any.
+            if plan_web:
+                with db.get_db(config.db_path) as _prune_conn:
+                    db.delete_task_events_by_kind(_prune_conn, task_id, "text_delta")
 
     # Process deferred operations (subtasks, transaction tracking) on success,
     # unless the task is awaiting confirmation (drain after the user confirms).

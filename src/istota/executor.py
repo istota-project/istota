@@ -35,6 +35,7 @@ from .storage import (
 from .brain import (
     ContextManagementEvent,
     StreamEvent,
+    TextDeltaEvent,
     TextEvent,
     ToolEndEvent,
     ToolProgressEvent,
@@ -2635,10 +2636,58 @@ def execute_task(
         show_tool_use = config.scheduler.progress_show_tool_use
         show_text = config.scheduler.progress_show_text
 
+        # Stream surfaces (web chat, repl) get the answer text streamed live as
+        # ``text_delta`` events; push surfaces (Talk/email/ntfy/istota_file) are
+        # completely untouched — no text_delta rows. Computed once per task.
+        from .transport.registry import task_is_stream_surface
+        is_stream_surface = task_is_stream_surface(config, task)
+
+        # Per-task coalescing buffer for streamed answer text. Incoming deltas
+        # (NativeBrain's TextDeltaEvent, or ClaudeCodeBrain's block TextEvent)
+        # are buffered and flushed as one ``text_delta`` event every ~250 ms or
+        # ~120 chars, plus a forced flush on each tool/CM boundary and a final
+        # flush after the brain finishes. This bounds row volume to tens per
+        # answer (not thousands of token rows); the scheduler prunes them once
+        # the canonical ``result`` lands, so steady state retains zero. Events
+        # arrive serialized (NativeBrain awaits each run_in_executor hop;
+        # ClaudeCodeBrain's parse loop is sequential), so no lock is needed.
+        _DELTA_FLUSH_MS = 250
+        _DELTA_FLUSH_CHARS = 120
+        _delta_buf: list[str] = []
+        _delta_state = {"chars": 0, "last_flush": time.monotonic()}
+
+        def _flush_deltas() -> None:
+            if event_writer is None or not _delta_buf:
+                return
+            text = "".join(_delta_buf)
+            _delta_buf.clear()
+            _delta_state["chars"] = 0
+            _delta_state["last_flush"] = time.monotonic()
+            # Best-effort: a flush failure means slightly less live text, never
+            # a failed task (matches EventWriter.emit's own swallow).
+            try:
+                event_writer.emit("text_delta", {"text": text})
+            except Exception:
+                logger.debug("text_delta flush failed", exc_info=True)
+
+        def _buffer_delta(text: str) -> None:
+            if not text:
+                return
+            _delta_buf.append(text)
+            _delta_state["chars"] += len(text)
+            now = time.monotonic()
+            if (
+                _delta_state["chars"] >= _DELTA_FLUSH_CHARS
+                or (now - _delta_state["last_flush"]) * 1000 >= _DELTA_FLUSH_MS
+            ):
+                _flush_deltas()
+
         def _on_event(event: StreamEvent) -> None:
             if event_writer is None:
                 return
             if isinstance(event, ToolUseEvent) and show_tool_use:
+                if is_stream_surface:
+                    _flush_deltas()  # tool boundary: don't straddle the chip
                 event_writer.emit("tool_start", {
                     "tool_name": event.tool_name,
                     "description": event.description,
@@ -2658,12 +2707,25 @@ def execute_task(
                     "tool_call_id": event.tool_call_id,
                     "text": event.text,
                 })
-            elif isinstance(event, TextEvent) and show_text:
-                # NativeBrain already suppresses the final turn's text (it
-                # becomes the result); ClaudeCodeBrain's ResultEvent is a
-                # distinct frame, so neither double-renders.
-                event_writer.emit("progress_text", {"text": event.text})
+            elif isinstance(event, TextDeltaEvent):
+                # NativeBrain incremental answer text. Stream surfaces only; a
+                # push task drops it (the final result is delivered once).
+                if is_stream_surface:
+                    _buffer_delta(event.text)
+            elif isinstance(event, TextEvent):
+                if is_stream_surface:
+                    # Coarse streaming for ClaudeCodeBrain (one TextEvent per
+                    # completed block) — route through the same delta channel
+                    # rather than progress_text, so it renders live too.
+                    _buffer_delta(event.text)
+                elif show_text:
+                    # Push surface: NativeBrain already suppresses the final
+                    # turn's text (it becomes the result); ClaudeCodeBrain's
+                    # ResultEvent is a distinct frame, so neither double-renders.
+                    event_writer.emit("progress_text", {"text": event.text})
             elif isinstance(event, ContextManagementEvent):
+                if is_stream_surface:
+                    _flush_deltas()  # turn/CM boundary
                 event_writer.emit("context_management")
 
         def _on_pid(pid: int) -> None:
@@ -2748,6 +2810,11 @@ def execute_task(
             if _net_proxy_ctx is not None:
                 stack.enter_context(_net_proxy_ctx)
             brain_result = brain.execute(req)
+
+        # Final flush: emit any buffered streamed text before the scheduler
+        # emits the terminal ``result`` (which replaces it in the UI). Guarantees
+        # no buffered delta is lost for very fast/tiny answers.
+        _flush_deltas()
 
         success = brain_result.success
         result = brain_result.result_text

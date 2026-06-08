@@ -265,9 +265,25 @@ class NativeBrain:
         # final turn's text is never forwarded as progress.
         pending_text: dict[str, str | None] = {"value": None}
 
+        # Token-level answer streaming (streaming-web-chat-responses spec): the
+        # loop already fans provider TextDeltas out as ``message_update`` events.
+        # We forward each as a ``TextDeltaEvent`` so the executor can stream it
+        # to a stream surface (web chat / repl). Because the deltas already carry
+        # every turn's text incrementally, the per-turn whole-text ``TextEvent``
+        # flush below becomes redundant double-render — so once any delta has
+        # streamed we suppress that flush entirely. The executor is the surface
+        # gate: it drops TextDeltaEvents on push tasks, so this is safe for Talk
+        # (which then simply gets no intermediate text, the default already).
+        delta_streamed = {"value": False}
+
         async def emit(event: AgentEvent) -> None:
             nonlocal last_assistant_text, last_error_message
-            if event.type == "tool_execution_start":
+            if event.type == "message_update":
+                ae = event.assistant_event
+                if isinstance(ae, TextDelta) and ae.text:
+                    delta_streamed["value"] = True
+                    await self._emit_progress(req, _text_delta_event(ae.text))
+            elif event.type == "tool_execution_start":
                 desc = _describe_tool_use(event.tool_name, event.args)
                 trace.append({"type": "tool", "text": desc})
                 actions.append(desc)
@@ -307,14 +323,19 @@ class NativeBrain:
                     if text:
                         trace.append({"type": "text", "text": text})
                         last_assistant_text = msg.text
-                        # Flush the previously-held text (now known not to be
-                        # final); hold this one. The last text-bearing turn
-                        # stays held → suppressed.
-                        if pending_text["value"] is not None:
-                            await self._emit_progress(
-                                req, _text_event(pending_text["value"])
-                            )
-                        pending_text["value"] = msg.text
+                        # When deltas have streamed, every turn's text already
+                        # reached the surface incrementally — flushing the held
+                        # whole text as a TextEvent would double-render. Skip the
+                        # pending-text bookkeeping entirely in that case.
+                        if not delta_streamed["value"]:
+                            # Flush the previously-held text (now known not to be
+                            # final); hold this one. The last text-bearing turn
+                            # stays held → suppressed.
+                            if pending_text["value"] is not None:
+                                await self._emit_progress(
+                                    req, _text_event(pending_text["value"])
+                                )
+                            pending_text["value"] = msg.text
 
         # --- compaction via prepare_next_turn -----------------------------
         compaction_state = {"summary": None, "details": None}
@@ -769,3 +790,9 @@ def _text_event(text: str):
     from ._events import TextEvent
 
     return TextEvent(text=text)
+
+
+def _text_delta_event(text: str):
+    from ._events import TextDeltaEvent
+
+    return TextDeltaEvent(text=text)
