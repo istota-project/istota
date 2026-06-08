@@ -171,15 +171,23 @@ function createSession(): ChatSession {
 					m.progress = String(payload.text ?? '');
 					break;
 				case 'text_delta':
-					// Incremental answer text streamed live (stream surfaces). Append
-					// to the body; the canonical `result` replaces it on arrival
-					// (the reconcile point). Clear the "thinking" verb — the growing
-					// text is now the live signal (a typing affordance shows below it).
+					// Incremental text streamed live (stream surfaces). It's the
+					// *current turn's* text — pre-tool narration on a tool-using turn,
+					// or the answer on the final turn. Append to the body as a live
+					// preview; `tool_start` clears it (narration, not answer) and the
+					// canonical `result` reconciles the final answer on arrival.
 					m.text = (m.text ?? '') + String(payload.text ?? '');
 					m.streaming = true;
 					m.progress = undefined;
 					break;
 				case 'tool_start': {
+					// The text streamed so far was this turn's lead-in narration, not
+					// the answer (a tool call follows it). Drop the live preview so
+					// intermediate narration doesn't pile up — concatenated and
+					// unseparated — in the body. The answer is the final turn's text,
+					// which streams in fresh after the last tool; the ToolStrip
+					// carries the activity in between. No-op when nothing streamed yet.
+					if (m.streaming) m.text = '';
 					const name = String(payload.tool_name ?? 'tool');
 					const description = String(payload.description ?? '');
 					m.tools.push({
