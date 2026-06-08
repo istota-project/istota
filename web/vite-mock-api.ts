@@ -241,8 +241,19 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 		for (const t of tasks) {
 			messages.push({ role: 'user', text: t.prompt, task_id: t.id, created_at: new Date(t.createdAt).toISOString() });
 			if (now - t.createdAt >= MOCK_TASK_DONE_MS) {
-				const ev = mockTaskEvents(t).find((e) => e.kind === 'result');
-				messages.push({ role: 'assistant', text: (ev?.payload as any).text, task_id: t.id, status: 'completed', created_at: new Date(t.createdAt).toISOString() });
+				const evs = mockTaskEvents(t);
+				const ev = evs.find((e) => e.kind === 'result');
+				// Mirror the backend: a finished turn carries its tool trace +
+				// duration so the action strip + timing persist on reload (ISSUE-122).
+				const tools = evs
+					.filter((e) => e.kind === 'tool_start')
+					.map((e) => (e.payload as any).description as string);
+				const done = evs.find((e) => e.kind === 'done');
+				messages.push({
+					role: 'assistant', text: (ev?.payload as any).text, task_id: t.id,
+					status: 'completed', created_at: new Date(t.createdAt).toISOString(),
+					tools, duration_seconds: (done?.payload as any)?.duration_seconds ?? null,
+				});
 			} else {
 				active = { id: t.id, status: 'running' };
 			}

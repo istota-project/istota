@@ -404,6 +404,13 @@ function createSession(): ChatSession {
 			if (m.role === 'system' && typeof m.notif_id === 'number') {
 				seenNotifIds.add(m.notif_id);
 			}
+			// Rebuild the action strip from the persisted trace so a finished
+			// turn stays inspectable across reloads (ISSUE-122). Descriptions
+			// only — history has no per-tool success/timing, so spinners stay
+			// off and the strip renders a neutral "done" state.
+			const tools: ToolEntry[] = (m.tools ?? []).map((d, i) => ({
+				id: `h${i}`, name: '', description: d, running: false,
+			}));
 			return {
 				cid,
 				role: m.role,
@@ -411,9 +418,10 @@ function createSession(): ChatSession {
 				taskId: m.task_id,
 				status: m.status,
 				confirmation: !!m.confirmation,
-				tools: [],
+				tools,
 				streaming: m.role === 'assistant' && inFlight(m.status),
 				createdAt: m.created_at,
+				durationSeconds: typeof m.duration_seconds === 'number' ? m.duration_seconds : undefined,
 			};
 		});
 		messages.set(msgs);

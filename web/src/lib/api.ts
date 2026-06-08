@@ -1395,6 +1395,11 @@ export interface ChatHistoryMessage {
 	status?: string;
 	confirmation?: boolean;
 	created_at: string;
+	// Finished task-backed turns carry their tool-use descriptions (in order)
+	// and wall-clock duration so the action strip + timing persist across
+	// reloads (ISSUE-122).
+	tools?: string[];
+	duration_seconds?: number | null;
 }
 
 export interface ChatHistory {
