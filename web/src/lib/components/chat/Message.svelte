@@ -44,6 +44,11 @@
 	});
 	const workSegments = $derived(answerSeg ? segments.slice(0, -1) : segments);
 	const toolCount = $derived(message.segments.filter((s) => s.kind === 'tool').length);
+	// The activity chip is tool-only — it appears solely when the turn made tool
+	// calls. Reasoning/narration are not shown; before any tool exists, the work
+	// phase is represented by the pulsing "Thinking…" cue instead.
+	const hasTools = $derived(toolCount > 0);
+	const hasAnswerText = $derived(!!(answerSeg && answerSeg.text));
 
 	// Subtle per-message metadata, revealed on hover (bottom-right).
 	const meta = $derived.by(() => {
@@ -96,19 +101,20 @@
 					</div>
 				{/if}
 			{:else}
-				<!-- The model's work (inter-tool narration + tool calls) folds into
-				     one activity chip; the final answer streams prominent below it. -->
-				{#if workSegments.length}
+				<!-- The model's tool calls fold into one activity chip; the final
+				     answer streams prominent below it. Reasoning/narration are not
+				     shown — the work phase before any tool is the cue below. -->
+				{#if hasTools}
 					<ActivityTrace steps={workSegments} streaming={message.streaming} />
 				{/if}
 
-				{#if answerSeg && answerSeg.text}
-					<div class="body markdown">{@html renderMarkdown(answerSeg.text)}</div>
+				{#if hasAnswerText}
+					<div class="body markdown">{@html renderMarkdown(answerSeg!.text)}</div>
 				{/if}
 
-				{#if message.streaming && segments.length === 0}
-					<!-- Pre-first-segment cue: the ack verb + pulsing dot, shown only
-					     until the first segment exists. -->
+				{#if message.streaming && !hasTools && !hasAnswerText}
+					<!-- Work-phase cue: the ack verb + pulsing dot, shown while the
+					     model reasons / before the first tool or answer text. -->
 					<div class="progress">
 						<span class="dot"></span>
 						<span class="status-text">{message.progress || 'Thinking…'}</span>

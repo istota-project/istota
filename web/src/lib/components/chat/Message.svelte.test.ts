@@ -78,7 +78,7 @@ describe('live streaming reaches the DOM (Message + keyed each)', () => {
 		expect(container.textContent).not.toContain('partial');
 	});
 
-	it('thinking renders in the chip, never in the prominent answer area', async () => {
+	it('reasoning is shown nowhere; the chip carries only the tool action', async () => {
 		const store = writable<ChatMessage[]>([assistant()]);
 		const { container } = render(StreamHarness, { store });
 
@@ -96,9 +96,10 @@ describe('live streaming reaches the DOM (Message + keyed each)', () => {
 		expect(body?.textContent).toContain('PROMINENT_ANSWER');
 		// The reasoning must NOT be in the prominent answer area …
 		expect(body?.textContent ?? '').not.toContain('REASONING_LEADIN');
-		// … it lives inside the activity chip instead (dim/italic, no emoji).
+		// … nor in the activity chip (reasoning is not rendered anywhere) …
 		const chip = container.querySelector('.activity');
-		expect(chip?.textContent ?? '').toContain('REASONING_LEADIN');
-		expect(chip?.textContent ?? '').not.toContain('💭');
+		expect(chip?.textContent ?? '').not.toContain('REASONING_LEADIN');
+		// … the chip carries only the tool action.
+		expect(chip?.textContent ?? '').toContain('web search');
 	});
 });
