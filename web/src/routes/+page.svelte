@@ -65,20 +65,22 @@
 	}
 	.feature-card {
 		display: block;
-		background: #1a1a1a;
-		border-radius: 0.5rem;
+		background: var(--surface-card);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-card);
 		padding: 1.25rem;
 		text-decoration: none;
-		transition: background 0.15s;
+		transition: background var(--transition-fast);
 	}
-	.feature-card:hover { background: #222; }
+	.feature-card:hover { background: var(--surface-raised); }
 	.feature-title {
 		font-weight: 600;
 		font-size: 0.9rem;
 		margin-bottom: 0.25rem;
+		color: var(--text-primary);
 	}
 	.feature-desc {
 		font-size: 0.8rem;
-		color: #888;
+		color: var(--text-muted);
 	}
 </style>
