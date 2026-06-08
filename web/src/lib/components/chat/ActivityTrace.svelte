@@ -194,14 +194,18 @@
 
 	.chain {
 		border-top: 1px solid var(--border-subtle);
-		padding: 0.35rem 0.5rem;
+		/* Left padding aligns the chain with the header's content (past the
+		   caret): head padding (0.5rem) + chevron (13px) + head gap (0.4rem).
+		   font-size matches the header so tool rows don't render larger than the
+		   progress messages (otherwise `.desc` inherits the bigger message size). */
+		padding: 0.35rem 0.5rem 0.4rem calc(0.5rem + 13px + 0.4rem);
+		font-size: var(--text-xs);
 		display: flex;
 		flex-direction: column;
 		gap: 0.3rem;
 	}
 	.step-msg {
 		font-style: italic;
-		font-size: var(--text-xs);
 		color: var(--text-dim);
 		word-break: break-word;
 		white-space: pre-wrap;
