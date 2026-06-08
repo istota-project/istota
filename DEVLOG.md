@@ -2,6 +2,38 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-07: Web chat as a user-routable delivery surface (ISSUE-121)
+
+Web chat shipped as an *interactive* surface only: you could talk to the bot in a room, but it wasn't a destination you could route logs/alerts/notifications to. The settings UI's logs/alerts route pickers offered talk/email/ntfy but not web, and the underlying reason was structural — there was no `WebTransport`, so `registry.routable_names()` (which every UI selector already reads) couldn't surface it.
+
+The wrinkle that made this more than a one-liner: web is a **stream** surface. An interactive `source_type="web"` task streams its own result over the `task_events` log (the SSE), exactly like the REPL, and `routing._STREAM_SURFACES` short-circuits `web` to a stream destination so nothing gets pushed for those tasks. A `ReplTransport.deliver` is a genuine no-op for that reason. So "route an alert to web" had nowhere to land — a notification isn't tied to a chat task the user is watching.
+
+**Resolution.** Give `web` a real delivery path without disturbing the interactive one. A new `WebTransport` (registered unconditionally, `user_routable=True`, `surface_class="stream"`) whose `deliver()` is a real write: it appends an unsolicited message to a new `web_chat_messages` table (distinct from task-backed turns, which live in `tasks` and always have an originating user prompt). The two meanings of `web` never collide — the stream path never calls `deliver`, and `deliver` never runs for a web task's own result because the planner already routed it to stream. Confirmed by review + a regression test asserting `resolve_delivery_plan` yields only stream destinations for a web-source task even with the transport registered.
+
+**Wiring.** Because the UI selectors already derive from the registry, registering the transport made web auto-appear in the logs/alerts route dropdowns, the default-destination picker, and the briefing output list — no per-surface edits, which was the issue's "single registry" ask. Delivery itself plugs into the existing notification/log paths: a `web` branch in `send_notification` (alerts), bare-`web` resolution in `effective_log_destinations` (logs; `supports_edit=False` so the log subscriber skips it live and `_finalize_log_channel` posts one summary), and a `web` probe in `is_channel_configured`. Descriptor validation accepts `web` via the registry.
+
+**Rendering.** `_chat_room_messages` merges the delivered messages into room history by `created_at` (tasks and messages share the `datetime('now')` format, and a task's user→assistant pair shares one timestamp so a stable sort never splits it) as `role:'system'`. The frontend already renders system messages; I added a per-room `notif_id` to the history payload and a tight idle poll in `chat.ts` so an open room surfaces newly-delivered notifications without a manual reload (guarded on idle + active-room, deduped via `seenNotifIds`, torn down on room switch/unmount).
+
+A scully review confirmed no must-fix issues and that the no-double-delivery invariant holds. Deferred (not defects): per-room channel picking in the routing UI (a bare `web` route lands in the user's default room); the pre-existing `ensure_default_web_chat_room` read-then-create race, narrow and only slightly widened by the new entry points.
+
+**Key changes:**
+- New `WebTransport` (`transport/web/__init__.py`) + `default_web_room_token`; registered in `make_registry`, `user_routable=True`.
+- New `web_chat_messages` table (schema + idempotent init migration) with `add_web_chat_message` / `list_web_chat_messages` / `WebChatMessage`.
+- `notifications.py`: `_send_web` + `send_notification` web branch; `effective_log_destinations` bare-`web` resolution; `is_channel_configured` web probe.
+- `_chat_room_messages` merges bot-delivered messages into room history; idle poll in `chat.ts` surfaces them live; settings labels `web` → "Web chat" and includes it in offline fallbacks.
+- Docs (AGENTS.md, transport/scheduler rules) updated; ISSUE-121 closed.
+
+**Files added/modified:**
+- `src/istota/transport/web/__init__.py` - new WebTransport + default-room helper
+- `src/istota/transport/registry.py` - register web; `for_task("web")` now resolves it
+- `src/istota/transport/__init__.py` - export WebTransport
+- `src/istota/db.py`, `schema.sql` - `web_chat_messages` table + helpers
+- `src/istota/notifications.py` - web delivery + log/probe wiring
+- `src/istota/web_app.py` - history merge in `_chat_room_messages`
+- `web/src/lib/stores/chat.ts`, `web/src/lib/api.ts` - idle notification poll + `notif_id` type
+- `web/src/routes/settings/+page.svelte` - "Web chat" label + offline fallbacks
+- `tests/test_transport_web.py` (new) + `test_notifications.py` / `test_web_chat.py` / `test_web_app.py` / `test_transport_registry.py`
+
 ## 2026-06-07: Surface-agnostic !commands — CommandContext + unified dispatch
 
 `!commands` were built around `TalkClient`: every handler took one as its last positional arg, and the web-chat path papered over it with a `run_inline` shim that handed handlers a Talk client they mostly ignored. Two commands didn't ignore it (`export`, `search`), and `!model` was outright broken on web (it's a prefix, not a command, and the web handler never parsed it — so `!model opus …` hit dispatch and errored as an unknown command). This session abstracted the command set off Talk so it works identically on every surface, and unified delivery through the transport registry.

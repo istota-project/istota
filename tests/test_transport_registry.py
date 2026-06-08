@@ -41,12 +41,17 @@ class TestSurfaceForSourceType:
         assert _surface_for_source_type("subtask") == "talk"
         assert _surface_for_source_type("totally-unknown") == "talk"
 
-    def test_for_task_web_resolves_to_no_push_transport(self):
-        # There is no WebTransport — the task_events log is the delivery — so
-        # for_task must resolve a web task to None, not to TalkTransport.
+    def test_for_task_web_resolves_to_web_transport(self):
+        # Web now has a transport, but an interactive web task's result still
+        # streams over task_events: WebTransport is stream-class and advertises
+        # no progress-ack, so for_task resolving to it (not TalkTransport) must
+        # not give a web task a Talk-style push/ack.
+        from istota.transport.web import WebTransport
         config = Config()
         registry = make_registry(config)
-        assert registry.for_task(_task("web")) is None
+        transport = registry.for_task(_task("web"))
+        assert isinstance(transport, WebTransport)
+        assert transport.capabilities.supports_progress_ack is False
 
 
 class TestMakeRegistry:
@@ -103,8 +108,9 @@ class TestRoutableNames:
         config.email.enabled = True
         reg = make_registry(config)
         routable = set(reg.routable_names())
-        # User-routable push surfaces are offered.
-        assert {"talk", "email", "ntfy"} <= routable
+        # User-routable surfaces are offered — including web chat, whose
+        # deliver() posts an unsolicited room message (ISSUE-121).
+        assert {"talk", "email", "ntfy", "web"} <= routable
         # Self-routing / inline surfaces are held back from the UI.
         assert "istota_file" not in routable
         assert "repl" not in routable
@@ -150,9 +156,9 @@ class TestForTask:
 
     def test_pollers_lists_all_registered(self):
         names = {t.name for t in self.reg.pollers()}
-        # ntfy + istota_file + repl are registered unconditionally (per-user /
-        # stream gating happens in their resolve_target/deliver).
-        assert names == {"talk", "email", "ntfy", "istota_file", "repl"}
+        # ntfy + istota_file + repl + web are registered unconditionally
+        # (per-user / stream gating happens in their resolve_target/deliver).
+        assert names == {"talk", "email", "ntfy", "istota_file", "repl", "web"}
 
 
 class TestEmptyRegistry:

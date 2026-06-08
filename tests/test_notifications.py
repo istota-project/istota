@@ -544,3 +544,79 @@ class TestSendNotificationConversationTokenOverride:
         # heartbeat pattern: surface="both", conversation_token=X → Talk leg X.
         send_notification(config, "alice", "msg", surface="both", conversation_token="roomX")
         assert mock_talk.call_args[0][3] == "roomX"
+
+
+class TestWebSurface:
+    """Web chat as a user-routable delivery surface (ISSUE-121)."""
+
+    def _config(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        config = Config(users={"alice": UserConfig()})
+        config.db_path = db_path
+        return config
+
+    def test_send_web_posts_into_default_room(self, tmp_path):
+        from istota import db
+        from istota.notifications import _send_web
+        config = self._config(tmp_path)
+        assert _send_web(config, "alice", "hello", title="Alert") is True
+        with db.get_db(config.db_path) as conn:
+            token = db.ensure_default_web_chat_room(conn, "alice").token
+            msgs = db.list_web_chat_messages(conn, token)
+        assert [m.text for m in msgs] == ["hello"]
+        assert msgs[0].title == "Alert"
+
+    def test_send_web_explicit_token(self, tmp_path):
+        from istota import db
+        from istota.notifications import _send_web
+        config = self._config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "ideas")
+        assert _send_web(config, "alice", "x", conversation_token=room.token) is True
+        with db.get_db(config.db_path) as conn:
+            assert len(db.list_web_chat_messages(conn, room.token)) == 1
+
+    @patch("istota.notifications._send_web")
+    def test_send_notification_web_surface(self, mock_web, tmp_path):
+        mock_web.return_value = True
+        config = self._config(tmp_path)
+        assert send_notification(config, "alice", "msg", surface="web") is True
+        mock_web.assert_called_once()
+
+    def test_send_notification_web_end_to_end(self, tmp_path):
+        from istota import db
+        config = self._config(tmp_path)
+        assert send_notification(config, "alice", "msg", surface="web") is True
+        with db.get_db(config.db_path) as conn:
+            token = db.ensure_default_web_chat_room(conn, "alice").token
+            msgs = db.list_web_chat_messages(conn, token)
+        assert [m.text for m in msgs] == ["msg"]
+
+    def test_alert_purpose_routes_to_web(self, tmp_path):
+        from istota import db
+        config = self._config(tmp_path)
+        config.users["alice"].routing = {"alert": "web"}
+        assert send_notification(config, "alice", "boom", purpose="alert") is True
+        with db.get_db(config.db_path) as conn:
+            token = db.ensure_default_web_chat_room(conn, "alice").token
+            assert len(db.list_web_chat_messages(conn, token)) == 1
+
+    def test_is_channel_configured_web(self, tmp_path):
+        config = self._config(tmp_path)
+        assert is_channel_configured(config, "alice", "web") is True
+
+    def test_log_route_explicit_web_token_kept(self, tmp_path):
+        config = self._config(tmp_path)
+        config.users["alice"].routing = {"log": "web:room-x"}
+        assert effective_log_destinations(config, "alice") == [Destination("web", "room-x")]
+
+    def test_log_route_bare_web_resolves_default_room(self, tmp_path):
+        from istota import db
+        config = self._config(tmp_path)
+        config.users["alice"].routing = {"log": "web"}
+        dests = effective_log_destinations(config, "alice")
+        with db.get_db(config.db_path) as conn:
+            token = db.ensure_default_web_chat_room(conn, "alice").token
+        assert dests == [Destination("web", token)]

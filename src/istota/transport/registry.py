@@ -22,11 +22,13 @@ def _surface_for_source_type(source_type: str) -> str:
     """Map a task's ``source_type`` to the delivery surface name.
 
     ``email`` → ``"email"``; ``repl`` → ``"repl"``; ``web`` → ``"web"`` (a
-    stream surface with no push transport — ``for_task`` resolves it to None,
-    since the task_events log is the delivery); everything else (talk, briefing,
-    scheduled, subtask, heartbeat, cli, istota_file, unknown) → ``"talk"``, the
-    existing default. ntfy / istota_file remain fan-out side channels handled
-    outside the registry, so they are not surfaces here.
+    stream surface — ``for_task`` resolves it to ``WebTransport``, but an
+    interactive web task's *result* still streams over the task_events log, not
+    a push: ``resolve_delivery_plan`` short-circuits ``web`` to a stream
+    destination, and ``WebTransport`` advertises no progress-ack. The transport's
+    ``deliver`` is used only by the routing paths — alerts / log / notifications
+    routed to ``web``). Everything else (talk, briefing, scheduled, subtask,
+    heartbeat, cli, istota_file, unknown) → ``"talk"``, the existing default.
     """
     if source_type == "email":
         return "email"
@@ -83,6 +85,7 @@ def make_registry(config: "Config") -> TransportRegistry:
     from .ntfy import NtfyTransport
     from .repl import ReplTransport
     from .talk import TalkTransport
+    from .web import WebTransport
 
     transports: dict[str, Transport] = {}
     if config.talk.enabled:
@@ -92,4 +95,5 @@ def make_registry(config: "Config") -> TransportRegistry:
     transports["ntfy"] = NtfyTransport(config)
     transports["istota_file"] = IstotaFileTransport(config)
     transports["repl"] = ReplTransport(config)
+    transports["web"] = WebTransport(config)
     return TransportRegistry(transports)

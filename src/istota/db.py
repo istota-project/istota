@@ -364,6 +364,26 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_web_chat_rooms_user "
             "ON web_chat_rooms (user_id, archived, id)"
         )
+        # Unsolicited (bot-delivered) messages posted into a web chat room —
+        # alerts, the verbose execution log, and any notification routed to the
+        # `web` surface. Distinct from task-backed chat turns (which live in
+        # `tasks`): these have no originating user prompt, so they render as a
+        # single system message merged into the room transcript by time.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS web_chat_messages (
+                id          INTEGER PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                token       TEXT NOT NULL,
+                role        TEXT NOT NULL DEFAULT 'system',
+                title       TEXT,
+                text        TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_web_chat_messages_token "
+            "ON web_chat_messages (token, id)"
+        )
     except sqlite3.OperationalError:
         pass
 
@@ -1559,6 +1579,66 @@ def ensure_default_web_chat_room(
     if rooms:
         return rooms[0]
     return create_web_chat_room(conn, user_id, "general")
+
+
+@dataclass
+class WebChatMessage:
+    """An unsolicited (bot-delivered) message in a web chat room.
+
+    Backs the ``web`` delivery surface: alerts, the verbose execution log, and
+    any notification routed to ``web`` post one of these into a room. Rendered
+    as a standalone ``role`` message merged into the room transcript by time —
+    there is no originating user prompt, so it never produces a user bubble.
+    """
+
+    id: int
+    user_id: str
+    token: str
+    role: str
+    title: str | None
+    text: str
+    created_at: str
+
+
+def _row_to_web_chat_message(row: sqlite3.Row) -> WebChatMessage:
+    return WebChatMessage(
+        id=row["id"],
+        user_id=row["user_id"],
+        token=row["token"],
+        role=row["role"],
+        title=row["title"],
+        text=row["text"],
+        created_at=row["created_at"],
+    )
+
+
+def add_web_chat_message(
+    conn: sqlite3.Connection,
+    user_id: str,
+    token: str,
+    text: str,
+    *,
+    role: str = "system",
+    title: str | None = None,
+) -> int:
+    """Append a bot-delivered message to a web chat room. Returns the new id."""
+    row = conn.execute(
+        "INSERT INTO web_chat_messages (user_id, token, role, title, text) "
+        "VALUES (?, ?, ?, ?, ?) RETURNING id",
+        (user_id, token, role, title, text),
+    ).fetchone()
+    return int(row["id"])
+
+
+def list_web_chat_messages(
+    conn: sqlite3.Connection, token: str, limit: int = 50,
+) -> list[WebChatMessage]:
+    """The most recent bot-delivered messages for a room, oldest-first."""
+    rows = conn.execute(
+        "SELECT * FROM web_chat_messages WHERE token = ? ORDER BY id DESC LIMIT ?",
+        (token, limit),
+    ).fetchall()
+    return [_row_to_web_chat_message(r) for r in reversed(rows)]
 
 
 def count_recent_web_tasks(

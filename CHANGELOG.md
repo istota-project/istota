@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - In-app web chat. A new always-on "Chat" tab in the web UI lets you talk to the bot without leaving the dashboard — a full-page console with Discord/Slack-style rooms in a sidebar, live streaming of tool use and intermediate text, inline `!commands`, confirmation prompts rendered as Confirm/Cancel cards, cancel, and drag-drop/paste file attachments. Each room is its own persistent conversation with its own channel memory. It complements Nextcloud Talk rather than replacing it.
 - The full `!command` set now works the same in web chat as in Nextcloud Talk, including `!export` and `!search` (export reads your conversation from the database, so it no longer needs a Talk server; search uses the memory index).
+- Web chat is now a destination you can route output to. Alerts, the verbose execution log, and notifications can be sent to a chat room — pick "Web chat" in the logs/alerts routing settings, default destination, or briefing output (it appears automatically alongside Talk, email, and ntfy). Routed messages land in your room as a system message and show up live in an open room.
 
 ### Changed
 - The `!model` model-override prefix now works in web chat. Previously `!model opus …` only worked in Nextcloud Talk; in web chat it errored as an unknown command instead of running your message on the chosen model.

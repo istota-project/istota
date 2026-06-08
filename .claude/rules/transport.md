@@ -6,22 +6,30 @@ those into tasks. Outbound, `deliver` / `edit` push a task's result to a
 resolved channel. `TransportRegistry` holds the enabled transports and resolves
 one per task.
 
-Five concrete transports ship: `TalkTransport`, `EmailTransport`,
-`NtfyTransport`, `IstotaFileTransport`, and `ReplTransport`. **Matrix and web
-chat are the designed-for next consumers** — adding one is a new `Transport`
+Six concrete transports ship: `TalkTransport`, `EmailTransport`,
+`NtfyTransport`, `IstotaFileTransport`, `ReplTransport`, and `WebTransport`.
+**Matrix is the designed-for next consumer** — adding one is a new `Transport`
 subclass plus a line in `make_registry`, not a patch across the scheduler, the
 consumers, and the notification dispatcher.
 
 Transports split into two `surface_class`es (`TransportCapabilities.surface_class`):
 - **push** (`talk`, `email`, `ntfy`, `istota_file`, future Matrix) — the daemon
   actively delivers via `Transport.deliver()` to a resolved channel.
-- **stream** (`repl`, `web`) — outbound is the `task_events` log; the
-  client tails it. `deliver()` is a no-op; the `result`/`error`/`done` events
-  satisfy delivery. The web chat surface uses `source_type="web"` /
-  `output_target="web"`; `web` is in `routing._STREAM_SURFACES` so the planner
-  resolves it to a stream destination (no push) and the `/api/chat/*` SSE
-  endpoint tails `task_events`. There is no `WebTransport` yet — the events
-  table is the delivery, exactly as for REPL.
+- **stream** (`repl`, `web`) — an *interactive* task's own result is the
+  `task_events` log the client tails. The web chat surface uses
+  `source_type="web"` / `output_target="web"`; `web` is in
+  `routing._STREAM_SURFACES` so the planner short-circuits a web task's result
+  to a stream destination (no push) and the `/api/chat/*` SSE endpoint tails
+  `task_events`. `ReplTransport.deliver` is a genuine no-op (the terminal has no
+  persistent store). `WebTransport.deliver`, by contrast, is a real write
+  (ISSUE-121): web is a *user-routable* delivery surface, so alerts / the
+  verbose execution log / any notification routed to `web` append an unsolicited
+  system message to the user's room (`web_chat_messages` table), rendered merged
+  into room history and surfaced live in an open room by an idle poll. The two
+  meanings of `web` — interactive stream vs. notification sink — don't collide:
+  the stream path never calls `deliver`, and `deliver` never runs for a
+  `source_type="web"` task's own result (the planner already routed it to
+  stream).
 
 `conversation_token` keeps its name and stays opaque at every consumer (it is
 the per-surface channel id); `source_type` stays the routing key. Neither was
@@ -46,7 +54,8 @@ transport/
 │   └── outbound.py  # deliver_email_result + structured-output parse + sent-email record
 ├── ntfy/         # ntfy push surface (push) — NtfyTransport + send_ntfy_async (the single ntfy POST)
 ├── istota_file/  # TASKS.md result write-back (push) — IstotaFileTransport
-└── repl/         # terminal REPL (stream) — ReplTransport (deliver is a no-op; outbound is task_events)
+├── repl/         # terminal REPL (stream) — ReplTransport (deliver is a no-op; outbound is task_events)
+└── web/          # web chat delivery surface (stream, user_routable) — WebTransport + default_web_room_token; deliver appends a web_chat_messages row
 ```
 
 Both surfaces are subpackages because both directions live together. For Talk:
@@ -107,7 +116,7 @@ amputating email's needs.)
 only stores credentials), so callers without a registry in scope — notably
 `notifications.send_notification`, called from heartbeat / scheduled jobs — can
 build one on demand. Talk is registered when `talk.enabled` and email when
-`email.enabled`; `ntfy`, `istota_file`, and `repl` are registered
+`email.enabled`; `ntfy`, `istota_file`, `repl`, and `web` are registered
 unconditionally (per-user / per-task gating happens in their `resolve_target` /
 `deliver`, not at construction).
 
@@ -323,9 +332,12 @@ little and would churn tightly-coupled tests.
    `deliver` / `resolve_target` behave. `make_registry` must do no network on
    construction.
 
-**Web chat** (see `Drafts/Web chat surface spec.md`): inbound via a web POST →
-`ingest_message`; outbound is already covered by the SSE `task_events` reader,
-so a `WebChatTransport` mostly needs `poll` (or a push entry) + `resolve_target`.
+**Web chat** (`transport/web/`, ISSUE-121): inbound is the `/chat` web POST →
+`ingest_message` (so `WebTransport.poll` returns `[]`); an interactive task's
+result streams over the SSE `task_events` reader. `WebTransport.deliver` is the
+*notification/log/alert* path — it appends a `web_chat_messages` row to the
+target room (`default_web_room_token` resolves a bare `web` route to the user's
+`general` room). `resolve_target` returns that default token.
 **Matrix** (see `Drafts/Matrix messaging surface spec.md`): a `MatrixTransport`
 over matrix-nio, with Matrix's bridges (WhatsApp / Signal / Telegram) riding the
 same seam.

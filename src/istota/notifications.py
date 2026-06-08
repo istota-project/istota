@@ -157,6 +157,16 @@ def effective_log_destinations(config: "Config", user_id: str):
                         "resolvable Talk channel", user_id,
                     )
                     continue
+            elif dest.surface == "web" and channel is None:
+                # Bare `web` log route lands in the user's default room.
+                from .transport.web import default_web_room_token
+                channel = default_web_room_token(config, user_id)
+                if not channel:
+                    logger.warning(
+                        "Dropping bare web log destination for user %s: no "
+                        "resolvable web room", user_id,
+                    )
+                    continue
             key = (dest.surface, channel)
             if key in seen:
                 continue
@@ -294,6 +304,31 @@ def _send_ntfy(
     )))
 
 
+def _send_web(
+    config: "Config", user_id: str, message: str,
+    conversation_token: str | None = None,
+    title: str | None = None,
+) -> bool:
+    """Post a notification into the user's web chat room. Returns True on success.
+
+    The room token is the explicit ``web:<token>`` channel if given, else the
+    user's default room. The message is appended via ``WebTransport`` (a
+    ``web_chat_messages`` row) and rendered as a system message in the room.
+    """
+    from .async_runtime import run_coro
+    from .transport._types import DeliveryOptions
+    from .transport.web import WebTransport, default_web_room_token
+
+    token = conversation_token or default_web_room_token(config, user_id)
+    if not token:
+        logger.warning("No web room for notification (user: %s)", user_id)
+        return False
+    msg_id = run_coro(WebTransport(config).deliver(
+        token, message, options=DeliveryOptions(title=title),
+    ))
+    return msg_id is not None
+
+
 def is_channel_configured(
     config: "Config",
     user_id: str,
@@ -332,7 +367,12 @@ def is_channel_configured(
     def _ntfy_ok() -> bool:
         return _ntfy_settings(config, user_id) is not None
 
-    probes = {"talk": _talk_ok, "email": _email_ok, "ntfy": _ntfy_ok}
+    def _web_ok() -> bool:
+        # Web chat is always-on; a user always has (or auto-provisions) a room.
+        from .transport.web import default_web_room_token
+        return default_web_room_token(config, user_id) is not None
+
+    probes = {"talk": _talk_ok, "email": _email_ok, "ntfy": _ntfy_ok, "web": _web_ok}
     dests = parse_output_target(surface)
     if not dests:
         return False
@@ -389,6 +429,11 @@ def send_notification(
                 sent = True
         elif dest.surface == "ntfy":
             if _send_ntfy(config, user_id, message, title=title, priority=priority, tags=tags):
+                sent = True
+        elif dest.surface == "web":
+            # A bare `web` route carries no channel; the explicit conversation_token
+            # override only applies to bare `talk`, so pass the descriptor channel.
+            if _send_web(config, user_id, message, dest.channel, title=title):
                 sent = True
         else:
             logger.warning(

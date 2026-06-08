@@ -1387,9 +1387,11 @@ export interface ChatConfig {
 }
 
 export interface ChatHistoryMessage {
-	role: 'user' | 'assistant';
+	role: 'user' | 'assistant' | 'system';
 	text: string;
-	task_id: number;
+	// Task-backed turns carry task_id; bot-delivered notifications carry notif_id.
+	task_id?: number;
+	notif_id?: number;
 	status?: string;
 	confirmation?: boolean;
 	created_at: string;
