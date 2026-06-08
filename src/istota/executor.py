@@ -2692,6 +2692,19 @@ def execute_task(
             ):
                 _flush_deltas()
 
+        def _discard_deltas() -> None:
+            # Drop buffered answer text WITHOUT emitting it. Used at a tool
+            # boundary: text that precedes a tool call is lead-in narration
+            # ("Let me search…"), never the model's final answer (a tool
+            # follows it, so the loop continues). The final answer comes after
+            # the last tool with no tool boundary after it, so it is never
+            # discarded — it streams normally. This keeps narration out of the
+            # prominent answer area entirely; only reasoning + tool actions
+            # land in the activity chip.
+            _delta_buf.clear()
+            _delta_state["chars"] = 0
+            _delta_state["last_flush"] = time.monotonic()
+
         # A SEPARATE coalescing buffer for streamed *thinking* (extended-reasoning)
         # text. It must be independent of the answer-text buffer above because the
         # two render to different places on a stream surface: thinking folds into
@@ -2727,15 +2740,22 @@ def execute_task(
         def _on_event(event: StreamEvent) -> None:
             if event_writer is None:
                 return
-            if isinstance(event, ToolUseEvent) and show_tool_use:
+            if isinstance(event, ToolUseEvent):
+                # A tool boundary settles the reasoning chip and drops any
+                # pre-tool narration. This is a property of the STREAM SURFACE,
+                # not of whether the tool row is shown — so it must run even when
+                # progress_show_tool_use is off, or pre-tool narration would
+                # flush and flash in the answer area with no tool chip to explain
+                # it.
                 if is_stream_surface:
                     _flush_thinking()  # tool boundary: settle the reasoning chip
-                    _flush_deltas()  # tool boundary: don't straddle the chip
-                event_writer.emit("tool_start", {
-                    "tool_name": event.tool_name,
-                    "description": event.description,
-                    "tool_call_id": event.tool_call_id,  # "" under ClaudeCodeBrain
-                })
+                    _discard_deltas()  # tool boundary: drop pre-tool narration
+                if show_tool_use:
+                    event_writer.emit("tool_start", {
+                        "tool_name": event.tool_name,
+                        "description": event.description,
+                        "tool_call_id": event.tool_call_id,  # "" under ClaudeCodeBrain
+                    })
             elif isinstance(event, ToolEndEvent) and show_tool_use:
                 event_writer.emit("tool_end", {
                     "tool_name": event.tool_name,

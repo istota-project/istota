@@ -818,9 +818,10 @@ class TestStreamSurfaceCoalescing:
         # Coalesced (fast test → no time/size flush): one delta carrying both blocks.
         assert "".join(e.payload["text"] for e in deltas) == "First part.Second part."
 
-    def test_stream_task_flushes_before_tool_boundary(self, tmp_path):
-        """A buffered delta is flushed before a tool_start so text doesn't
-        straddle the tool chip."""
+    def test_stream_task_discards_pretool_narration(self, tmp_path):
+        """Text that precedes a tool call is lead-in narration, not the answer —
+        it is DISCARDED (never emitted as text_delta). Only the model's final
+        answer (after the last tool) streams, and it lands after the tool."""
         config = _make_config(tmp_path)
         config.scheduler.progress_show_tool_use = True
         task = _make_task(source_type="web")
@@ -850,11 +851,55 @@ class TestStreamSurfaceCoalescing:
         success, _r, _a, _t = self._run(config, task, stream_lines, rec)
 
         assert success is True
+        deltas = [e for e in rec.events if e.kind == "text_delta"]
+        # The pre-tool narration is gone; only the final answer streamed.
+        joined = "".join(e.payload["text"] for e in deltas)
+        assert "Let me look." not in joined
+        assert joined == "All set."
+        # And that surviving answer delta lands AFTER the tool_start.
         kinds = rec.kinds()
-        first_delta = kinds.index("text_delta")
-        first_tool = kinds.index("tool_start")
-        # The pre-boundary flush put a text_delta ("Let me look.") before the tool.
-        assert first_delta < first_tool
+        assert kinds.index("text_delta") > kinds.index("tool_start")
+
+    def test_pretool_narration_discarded_even_with_tool_display_off(self, tmp_path):
+        """The pre-tool narration discard is a STREAM-SURFACE property, not a
+        tool-display one: with progress_show_tool_use=False there is no
+        tool_start row, but narration must still be dropped (not flash)."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_tool_use = False
+        task = _make_task(source_type="web")
+
+        stream_lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "Let me look."}]},
+            }) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m2", "stop_reason": "tool_use", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": "/tmp/x.txt"}},
+                ]},
+            }) + "\n",
+            json.dumps({"type": "user", "message": {"role": "user"}}) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m3", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "All set."}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": "All set."}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, _r, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        # Tool display is off → no tool_start rows at all …
+        assert "tool_start" not in rec.kinds()
+        # … but the pre-tool narration is STILL discarded; only the answer streams.
+        deltas = [e for e in rec.events if e.kind == "text_delta"]
+        joined = "".join(e.payload["text"] for e in deltas)
+        assert "Let me look." not in joined
+        assert joined == "All set."
 
     def test_stream_task_routes_thinking_to_thinking_event(self, tmp_path):
         """Stream surface (web): a ClaudeCode thinking block → coalesced

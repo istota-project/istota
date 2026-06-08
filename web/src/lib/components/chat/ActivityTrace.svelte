@@ -2,30 +2,28 @@
 	import { ChevronRight, ChevronDown, Check, X } from 'lucide-svelte';
 	import { isRenderable, type Segment } from '$lib/stores/segments';
 
-	// The model's "work" for one assistant turn: inter-tool progress messages
-	// (settled narration) and tool calls, in order. Rendered as ONE chip —
-	// collapsed shows the current/latest step (progress message + active action
-	// together); expanded shows the whole interleaved chain. The final answer is
-	// NOT here — it streams prominent outside this component.
+	// The model's "work" for one assistant turn: its reasoning (thinking) and
+	// tool calls, in order. Rendered as ONE chip — collapsed shows the latest
+	// reasoning + the active action together; expanded shows the whole chain.
+	// Plain narration text is NOT shown here (the tool actions are descriptive
+	// enough); the final answer streams prominent outside this component.
 	let { steps, streaming = false }: { steps: Segment[]; streaming?: boolean } = $props();
 
 	let expanded = $state(false);
 
-	const renderable = $derived(steps.filter(isRenderable));
+	// Chip rows are reasoning + tool calls only — narration text segments are
+	// dropped (neither chip nor answer).
+	const renderable = $derived(steps.filter((s) => s.kind !== 'text').filter(isRenderable));
 	const tools = $derived(
 		steps.filter((s): s is Extract<Segment, { kind: 'tool' }> => s.kind === 'tool'),
 	);
 	const toolCount = $derived(tools.length);
 
-	// The latest step text: the most recent narration (text) OR reasoning
-	// (thinking), whichever came last. Carries its kind so the collapsed line can
-	// mark thinking distinctly (💭).
-	const latestStep = $derived.by<{ kind: 'text' | 'thinking'; text: string } | null>(() => {
+	// The latest reasoning text — the chip's collapsed "current thought" line.
+	const latestThinking = $derived.by<string | null>(() => {
 		for (let i = steps.length - 1; i >= 0; i--) {
 			const s = steps[i];
-			if ((s.kind === 'text' || s.kind === 'thinking') && s.text.trim()) {
-				return { kind: s.kind, text: s.text.trim() };
-			}
+			if (s.kind === 'thinking' && s.text.trim()) return s.text.trim();
 		}
 		return null;
 	});
@@ -48,26 +46,30 @@
 			{#if expanded}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
 		</span>
 		<!-- Collapsed: the current progress message, then the current action on its
-		     own line below it. -->
+		     own line below it. Expanded: a static label only — the live current
+		     step is shown in the chain below, so repeating it here would duplicate
+		     the last row. -->
 		<span class="current">
-			{#if latestStep}
-				<span class="msg" class:thinking={latestStep.kind === 'thinking'}>
-					{#if latestStep.kind === 'thinking'}💭 {/if}{firstLine(latestStep.text)}
-				</span>
+			{#if expanded}
+				<span class="msg label">{busy ? 'Working…' : 'Activity'}</span>
+			{:else}
+				{#if latestThinking}
+					<span class="msg thinking">{firstLine(latestThinking)}</span>
+				{/if}
+				{#if activeTool}
+					<span class="action">
+						{#if activeTool.running}
+							<span class="run-dot"></span>
+						{:else}
+							<span class="status">
+								{#if activeTool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
+							</span>
+						{/if}
+						<span class="desc">{activeTool.description || activeTool.name}</span>
+					</span>
+				{/if}
+				{#if !latestThinking && !activeTool}<span class="msg">Working…</span>{/if}
 			{/if}
-			{#if activeTool}
-				<span class="action">
-					{#if activeTool.running}
-						<span class="run-dot"></span>
-					{:else}
-						<span class="status">
-							{#if activeTool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
-						</span>
-					{/if}
-					<span class="desc">{activeTool.description || activeTool.name}</span>
-				</span>
-			{/if}
-			{#if !latestStep && !activeTool}<span class="msg">Working…</span>{/if}
 		</span>
 		{#if toolCount > 0}<span class="count">{toolCount}</span>{/if}
 	</button>
@@ -89,9 +91,7 @@
 						<span class="desc">{step.tool.description || step.tool.name}</span>
 					</div>
 				{:else if step.kind === 'thinking'}
-					<div class="step-thinking">💭 {firstLine(step.text)}</div>
-				{:else}
-					<div class="step-msg">{firstLine(step.text)}</div>
+					<div class="step-thinking">{firstLine(step.text)}</div>
 				{/if}
 			{/each}
 		</div>
@@ -165,6 +165,9 @@
 		color: var(--text-dim);
 	}
 	.msg.thinking { opacity: 0.85; }
+	/* Expanded-header label: a quiet stand-in for the live current step (which
+	   moves into the chain below when expanded). */
+	.msg.label { font-style: normal; opacity: 0.7; }
 	.action {
 		min-width: 0;
 		display: flex;
@@ -215,14 +218,7 @@
 		flex-direction: column;
 		gap: 0.3rem;
 	}
-	.step-msg {
-		font-style: italic;
-		color: var(--text-dim);
-		word-break: break-word;
-		white-space: pre-wrap;
-	}
-	/* Reasoning rows read as the model's quiet inner voice: same dim italic as a
-	   narration row, set off only by the 💭 glyph (added in the markup). */
+	/* Reasoning rows read as the model's quiet inner voice — dim italic. */
 	.step-thinking {
 		font-style: italic;
 		color: var(--text-dim);
