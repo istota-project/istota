@@ -1,9 +1,8 @@
 <script lang="ts">
 	import { renderMarkdown } from '$lib/markdown';
 	import type { ChatMessage } from '$lib/stores/chat';
-	import { isRenderable } from '$lib/stores/segments';
-	import ToolChip from './ToolChip.svelte';
-	import TextSegment from './TextSegment.svelte';
+	import type { Segment } from '$lib/stores/segments';
+	import ActivityTrace from './ActivityTrace.svelte';
 	import ConfirmationCard from './ConfirmationCard.svelte';
 
 	let {
@@ -30,11 +29,20 @@
 	const initial = $derived((author.trim()[0] ?? '?').toUpperCase());
 
 	// System (!command) output goes through the safe markdown renderer; user text
-	// is shown verbatim and the assistant body is rendered per-segment below.
+	// is shown verbatim and the assistant body is rendered below.
 	const bodyHtml = $derived(isSystem ? renderMarkdown(message.text) : '');
 
-	// Renderable segments in order (empty settled-narration rows are suppressed).
-	const segments = $derived(message.segments.filter(isRenderable));
+	// Split the turn into "work" (inter-tool narration + tool calls → the single
+	// ActivityTrace chip) and the "answer" (the final response → prominent,
+	// streamed markdown). The answer is always the trailing text segment: settling
+	// only happens alongside a tool push, so a text segment is the last segment
+	// iff it's the open/answer block. Everything before it is work.
+	const segments = $derived(message.segments);
+	const answerSeg = $derived.by<Extract<Segment, { kind: 'text' }> | null>(() => {
+		const last = segments[segments.length - 1];
+		return last && last.kind === 'text' ? last : null;
+	});
+	const workSegments = $derived(answerSeg ? segments.slice(0, -1) : segments);
 	const toolCount = $derived(message.segments.filter((s) => s.kind === 'tool').length);
 
 	// Subtle per-message metadata, revealed on hover (bottom-right).
@@ -88,21 +96,19 @@
 					</div>
 				{/if}
 			{:else}
-				<!-- Ordered segment list: settled narration folds to a dim
-				     disclosure, tool calls render inline at their true position,
-				     the open/answer text streams live as prominent markdown. -->
-				{#each segments as seg (seg.id)}
-					{#if seg.kind === 'tool'}
-						<ToolChip tool={seg.tool} />
-					{:else}
-						<TextSegment text={seg.text} settled={seg.settled} />
-					{/if}
-				{/each}
+				<!-- The model's work (inter-tool narration + tool calls) folds into
+				     one activity chip; the final answer streams prominent below it. -->
+				{#if workSegments.length}
+					<ActivityTrace steps={workSegments} streaming={message.streaming} />
+				{/if}
+
+				{#if answerSeg && answerSeg.text}
+					<div class="body markdown">{@html renderMarkdown(answerSeg.text)}</div>
+				{/if}
 
 				{#if message.streaming && segments.length === 0}
 					<!-- Pre-first-segment cue: the ack verb + pulsing dot, shown only
-					     until the first segment exists. Once segments stream in, the
-					     open text block / pulsing tool chips carry the activity. -->
+					     until the first segment exists. -->
 					<div class="progress">
 						<span class="dot"></span>
 						<span class="status-text">{message.progress || 'Thinking…'}</span>
@@ -275,8 +281,8 @@
 	@keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
 	/* Markdown block styling is global (src/app.css `.markdown`) so it applies
-	   across component boundaries — Message's command output and TextSegment's
-	   bot prose both render through the same `.markdown` container class. */
+	   across component boundaries — the answer body and command output both
+	   render through the same `.markdown` container class. */
 
 	/* Light theme — dark-tuned chat colors remapped for white surfaces.
 	   Dark rules above are untouched. */
