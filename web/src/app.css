@@ -198,9 +198,9 @@ a:hover { color: var(--accent-hover); }
 .error-msg { color: #c66; }
 
 /* Rendered markdown — shared by every chat surface that draws bot output
-   (Message body, the narration disclosure + tool chips in TextSegment). Global
-   so the rules apply across component boundaries; the `.markdown` container
-   class scopes them to rendered output only. */
+   (the Message answer body + command output). Global so the rules apply across
+   component boundaries; the `.markdown` container class scopes them to rendered
+   output only. */
 .markdown p { margin: 0 0 1rem; }
 .markdown p:last-child { margin-bottom: 0; }
 .markdown ul,
@@ -259,9 +259,8 @@ a:hover { color: var(--accent-hover); }
 	color: #1a1a1a;
 }
 
-/* An errored assistant turn tints its rendered answer. Global because the
-   answer renders in TextSegment (a separate component scope) inside the
-   `.msg.error` row owned by Message. */
+/* An errored assistant turn tints its rendered answer. Global so it reaches the
+   `.markdown` answer body across the `.msg.error` row owned by Message. */
 .msg.error .markdown { color: #e0a0a0; }
 :root[data-theme='light'] .msg.error .markdown { color: #c0271d; }
 

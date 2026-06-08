@@ -122,42 +122,54 @@ const mockChatTasks = new Map<number, MockChatTask>();
 let mockChatRoomSeq = 1;
 let mockChatTaskSeq = 1000;
 
-// A canned event timeline for a mock task (ms offsets from creation).
+// A canned event timeline for a mock task (ms offsets from creation). Models the
+// target UX: the model's work (inter-tool narration + tool calls) collapses into
+// the single ActivityTrace chip (its "current step" updates live), and the FINAL
+// ANSWER streams token-by-token, prominent, after the last tool. Tweak the
+// timings / chunking here to eyeball the streaming behaviour in the dev frontend
+// (VITE_MOCK_API=1 npm run dev → /chat) without a live backend.
 function mockTaskEvents(task: MockChatTask) {
+	// A multi-paragraph markdown answer, chunked into small deltas so the live
+	// prominent streaming (and incremental markdown) is visible.
 	const reply =
-		`Here's a mock reply to **${task.prompt.slice(0, 60)}**.\n\n` +
-		'- The real bot runs your message through the scheduler.\n' +
-		'- Streaming, tools, and `markdown` all render here.\n\n' +
-		'Try `!help` for commands.';
-	// An interleaved text_delta / tool_start / tool_end timeline so the
-	// ordered-segment rendering can be eyeballed: lead-in narration streams live
-	// then folds to a collapsed disclosure once a tool follows; tool chips render
-	// inline in order; the final answer streams token-by-token after the last
-	// tool. Tools overlap (c1 800→3400, c2 3000→6500) so a chip is always pulsing
-	// across 800–6500ms.
-	const ans = reply.match(/.{1,18}/gs) ?? [reply];
+		`Here are today's headlines for **${task.prompt.slice(0, 48)}**:\n\n` +
+		'## Top stories\n\n' +
+		'1. **Markets** rallied as inflation cooled for a third month.\n' +
+		'2. **Tech** — a new on-device model shipped with `tool use` baked in.\n' +
+		'3. **Sports** — the tournament bracket is set for the weekend.\n\n' +
+		'> Streaming, tools, and `markdown` all render here in real time.\n\n' +
+		'Ask a follow-up, or try `!help` for commands.';
+	const answerChunks = reply.match(/.{1,14}/gs) ?? [reply];
+
 	const events: { seq: number; kind: string; payload: Record<string, unknown>; at: number }[] = [
 		{ seq: 1, kind: 'task_started', payload: { text: 'On it...' }, at: 0 },
-		{ seq: 2, kind: 'text_delta', payload: { text: 'Let me check your calendar ' }, at: 300 },
-		{ seq: 3, kind: 'text_delta', payload: { text: 'and an example page.' }, at: 500 },
-		{ seq: 4, kind: 'tool_start', payload: { tool_name: 'Bash', description: '⚙️ calendar list --date today', tool_call_id: 'c1' }, at: 800 },
-		{ seq: 5, kind: 'tool_progress', payload: { tool_call_id: 'c1', text: '2 events found' }, at: 1500 },
-		{ seq: 6, kind: 'text_delta', payload: { text: 'Now fetching the page…' }, at: 2800 },
-		{ seq: 7, kind: 'tool_start', payload: { tool_name: 'WebFetch', description: '🌐 browse get https://example.com', tool_call_id: 'c2' }, at: 3000 },
-		{ seq: 8, kind: 'tool_end', payload: { tool_name: 'Bash', tool_call_id: 'c1', success: true, duration_ms: 2600 }, at: 3400 },
-		{ seq: 9, kind: 'tool_end', payload: { tool_name: 'WebFetch', tool_call_id: 'c2', success: true, duration_ms: 3500 }, at: 6500 },
+		// Lead-in narration → folds into the activity chip when its tool starts.
+		{ seq: 2, kind: 'text_delta', payload: { text: 'Let me search for the latest headlines.' }, at: 300 },
+		{ seq: 3, kind: 'tool_start', payload: { tool_name: 'WebSearch', description: '🔎 web_search "today\'s news"', tool_call_id: 'c1' }, at: 800 },
+		{ seq: 4, kind: 'tool_progress', payload: { tool_call_id: 'c1', text: '7 results' }, at: 1600 },
+		{ seq: 5, kind: 'tool_end', payload: { tool_name: 'WebSearch', tool_call_id: 'c1', success: true, duration_ms: 1800 }, at: 2600 },
+		// Second progress message + action — the chip's "current step" updates.
+		{ seq: 6, kind: 'text_delta', payload: { text: 'Now extracting the key stories.' }, at: 2900 },
+		{ seq: 7, kind: 'tool_start', payload: { tool_name: 'WebFetch', description: '🌐 browse get justsecurity.org', tool_call_id: 'c2' }, at: 3200 },
+		{ seq: 8, kind: 'tool_end', payload: { tool_name: 'WebFetch', tool_call_id: 'c2', success: true, duration_ms: 1900 }, at: 5100 },
 	];
-	// The answer streams in after the last tool, chunked, then the canonical
-	// result reconciles it.
-	let seq = 10;
-	ans.forEach((chunk, i) => {
-		events.push({ seq: seq++, kind: 'text_delta', payload: { text: chunk }, at: 6800 + i * 60 });
+
+	// The final answer streams in, chunked, after the last tool — prominent and
+	// live — then the canonical result reconciles it.
+	let seq = 9;
+	const answerStart = 5500;
+	const perChunk = 70; // ms between chunks → visibly streaming markdown
+	answerChunks.forEach((chunk, i) => {
+		events.push({ seq: seq++, kind: 'text_delta', payload: { text: chunk }, at: answerStart + i * perChunk });
 	});
-	events.push({ seq: seq++, kind: 'result', payload: { text: reply, truncated: false }, at: 7300 });
-	events.push({ seq: seq++, kind: 'done', payload: { stop_reason: 'completed', duration_seconds: 7.4 }, at: 7400 });
+	const answerEnd = answerStart + answerChunks.length * perChunk;
+	events.push({ seq: seq++, kind: 'result', payload: { text: reply, truncated: false }, at: answerEnd + 100 });
+	events.push({ seq: seq++, kind: 'done', payload: { stop_reason: 'completed', duration_seconds: (answerEnd + 200) / 1000 }, at: answerEnd + 200 });
 	return events;
 }
-const MOCK_TASK_DONE_MS = 7400;
+// Safely past the timeline's terminal `done` (answer streams ~5.5s→~7.5s); the
+// history endpoint uses this to decide whether a task has finished streaming.
+const MOCK_TASK_DONE_MS = 8000;
 
 // Mock !command output so the command rendering (lists, code, tables) can be
 // previewed without a live backend. Returns the inline markdown for a command,

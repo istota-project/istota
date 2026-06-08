@@ -61,25 +61,20 @@ describe('live streaming reaches the DOM (Message + keyed each)', () => {
 		expect(container.textContent).toContain('do thing');
 	});
 
-	it('regression guard: in-place mutation (same refs) leaves the DOM stale', async () => {
+	it('regression guard: in-place mutation (same refs) never reaches the DOM', async () => {
 		const store = writable<ChatMessage[]>([assistant()]);
 		const { container } = render(StreamHarness, { store });
 
+		// Mutating the message + its segments in place and returning the same array
+		// does not re-render the streamed content: the keyed message reference is
+		// unchanged, so Svelte treats it as untouched. This is the bug the fresh-ref
+		// update fixes — see the test above.
 		inPlaceUpdate(store, 'text_delta', { text: 'partial' });
-		await tick();
-		expect(container.textContent).toContain('partial');
-
-		// Overwrite the answer in place — the inner `{#each segments}` sees the same
-		// segment reference and does NOT re-render the TextSegment, so the answer
-		// text stays frozen at "partial" even though the result arrived. (The
-		// message-level re-render still picks up scalar changes like the duration
-		// footer; only the nested keyed segment children go stale.) This is the bug
-		// the fresh-ref update fixes — see the test above.
 		inPlaceUpdate(store, 'result', { text: 'THE REAL ANSWER' });
 		inPlaceUpdate(store, 'done', { duration_seconds: 1 });
 		await tick();
 
 		expect(container.textContent).not.toContain('THE REAL ANSWER');
-		expect(container.textContent).toContain('partial');
+		expect(container.textContent).not.toContain('partial');
 	});
 });
