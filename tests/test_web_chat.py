@@ -41,6 +41,80 @@ def conn(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# _trace_segments — ordered history segment reconstruction
+# ---------------------------------------------------------------------------
+
+
+@_needs_web_deps
+class TestTraceSegments:
+    def _fn(self):
+        from istota.web_app import _trace_segments
+        return _trace_segments
+
+    def test_ordered_trace_skips_cm_boundary_and_canonicalizes_answer(self):
+        import json
+        trace = json.dumps([
+            {"type": "text", "text": "Let me check."},
+            {"type": "cm_boundary"},
+            {"type": "tool", "text": "calendar list"},
+            {"type": "text", "text": "draft answer"},
+        ])
+        segs = self._fn()(trace, None, "final answer")
+        assert segs == [
+            {"kind": "text", "text": "Let me check."},
+            {"kind": "tool", "text": "calendar list"},
+            {"kind": "text", "text": "final answer"},
+        ]
+
+    def test_trace_ending_in_tool_appends_result(self):
+        import json
+        trace = json.dumps([
+            {"type": "text", "text": "narration"},
+            {"type": "tool", "text": "ran a thing"},
+        ])
+        segs = self._fn()(trace, None, "the answer")
+        assert segs == [
+            {"kind": "text", "text": "narration"},
+            {"kind": "tool", "text": "ran a thing"},
+            {"kind": "text", "text": "the answer"},
+        ]
+
+    def test_no_trace_falls_back_to_actions_taken(self):
+        import json
+        actions = json.dumps(["Read a.txt", "Grep b"])
+        segs = self._fn()(None, actions, "result text")
+        assert segs == [
+            {"kind": "tool", "text": "Read a.txt"},
+            {"kind": "tool", "text": "Grep b"},
+            {"kind": "text", "text": "result text"},
+        ]
+
+    def test_neither_trace_nor_actions_returns_result_only(self):
+        assert self._fn()(None, None, "just the answer") == [
+            {"kind": "text", "text": "just the answer"},
+        ]
+
+    def test_empty_result_with_nothing_is_empty(self):
+        assert self._fn()(None, None, "") == []
+        assert self._fn()(None, None, None) == []
+
+    def test_malformed_trace_falls_back_without_raising(self):
+        segs = self._fn()("{not json", '["Tool A"]', "answer")
+        assert segs == [
+            {"kind": "tool", "text": "Tool A"},
+            {"kind": "text", "text": "answer"},
+        ]
+
+    def test_empty_result_keeps_trace_text(self):
+        import json
+        trace = json.dumps([{"type": "text", "text": "streamed"}])
+        # An empty result leaves the trace's trailing text as the answer.
+        assert self._fn()(trace, None, "") == [
+            {"kind": "text", "text": "streamed"},
+        ]
+
+
+# ---------------------------------------------------------------------------
 # DB layer: rooms + rate-limit counter
 # ---------------------------------------------------------------------------
 
@@ -511,6 +585,14 @@ class TestChatMessagesApi:
         # Tool descriptions persist (in order) so the action strip can rebuild.
         assert assistant["tools"] == ["Read config.toml", "Grep for foo"]
         assert assistant["duration_seconds"] == 7.0
+        # Ordered, interleaved segments reconstruct the live layout: tool, the
+        # mid-turn narration, tool, then the canonical answer as a trailing text.
+        assert assistant["segments"] == [
+            {"kind": "tool", "text": "Read config.toml"},
+            {"kind": "text", "text": "thinking"},
+            {"kind": "tool", "text": "Grep for foo"},
+            {"kind": "text", "text": "done!"},
+        ]
 
     async def test_history_multiple_in_flight_ordered(self, chat_client):
         """Several queued messages each surface a user msg + an in-flight

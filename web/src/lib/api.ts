@@ -1399,6 +1399,10 @@ export interface ChatHistoryMessage {
 	// and wall-clock duration so the action strip + timing persist across
 	// reloads (ISSUE-122).
 	tools?: string[];
+	// Ordered, interleaved segment list (`text` / `tool`) for a finished turn,
+	// derived server-side from the execution trace, so history reconstructs the
+	// same interleaved layout as the live stream. `tools` is kept as a fallback.
+	segments?: { kind: 'text' | 'tool'; text: string }[];
 	duration_seconds?: number | null;
 }
 
