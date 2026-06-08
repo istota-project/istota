@@ -17,7 +17,6 @@
 		type UserResourceRow,
 		type ResourceTypeSchema,
 		type UserBriefingRow,
-		type BriefingRoomOption,
 	} from '$lib/api';
 	import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
 	import {
@@ -64,7 +63,6 @@
 	let resourceSaving = $state(false);
 
 	let briefings: UserBriefingRow[] = $state([]);
-	let briefingRooms: BriefingRoomOption[] = $state([]);
 	let briefingOutputs: string[] = $state(['talk', 'email', 'ntfy', 'web']);
 	let newBriefing = $state({
 		name: '',
@@ -103,7 +101,6 @@
 			resourceTypes = resResp.types;
 			resources = resResp.resources;
 			briefings = briefResp.briefings;
-			briefingRooms = briefResp.rooms;
 			briefingOutputs = briefResp.outputs?.length
 				? briefResp.outputs
 				: ['talk', 'email', 'ntfy', 'web'];
@@ -738,7 +735,7 @@
 				</div>
 			{/if}
 
-			<form class="add-resource" onsubmit={submitBriefing}>
+			<form class="add-resource no-top-border" onsubmit={submitBriefing}>
 				<h3>Add briefing</h3>
 				<div class="add-grid">
 					<SettingsField label="Name">
@@ -763,30 +760,12 @@
 						</select>
 					</SettingsField>
 					<SettingsField label="Conversation token">
-						{#if briefingRooms.length > 0}
-							<select bind:value={newBriefing.conversation_token}>
-								<option value="">(paste token below)</option>
-								{#each briefingRooms as room (room.token)}
-									<option value={room.token}>{room.name} — {room.token}</option>
-								{/each}
-							</select>
-						{:else}
-							<input
-								type="text"
-								placeholder="Talk room token"
-								bind:value={newBriefing.conversation_token}
-							/>
-						{/if}
+						<input
+							type="text"
+							placeholder="Talk room token"
+							bind:value={newBriefing.conversation_token}
+						/>
 					</SettingsField>
-					{#if briefingRooms.length > 0}
-						<SettingsField label="Or paste a token">
-							<input
-								type="text"
-								placeholder="(optional override)"
-								bind:value={newBriefing.conversation_token}
-							/>
-						</SettingsField>
-					{/if}
 					<SettingsField label="Components (JSON)" wide>
 						<textarea
 							rows="2"
@@ -893,6 +872,11 @@
 		gap: 0.6rem;
 		padding-top: 0.4rem;
 		border-top: 1px solid var(--border-subtle);
+	}
+
+	.add-resource.no-top-border {
+		border-top: none;
+		padding-top: 0;
 	}
 
 	.add-grid {
