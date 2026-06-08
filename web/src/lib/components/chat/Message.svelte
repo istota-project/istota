@@ -299,4 +299,9 @@
 	/* The amber accent darkens in light mode, so the bot initial needs light
 	   text for contrast (dark mode keeps its dark initial on bright amber). */
 	:global(:root[data-theme='light']) .avatar.bot { color: #fff; }
+	/* The chat pane is --surface-card (#f4f4f5) in light mode, so the default
+	   --surface-raised hover (#e8e8ea) would darken the row. Hover toward white
+	   instead so the highlight reads as *lighter* than the pane, matching dark
+	   mode's direction. */
+	:global(:root[data-theme='light']) .msg:hover { background: var(--surface-base); }
 </style>
