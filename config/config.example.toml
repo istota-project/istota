@@ -254,6 +254,15 @@ progress_show_text = false
 # Write events to the task_events table. Operational kill-switch — when false,
 # in-process consumers (Talk/log/push) still work but SSE/admin have nothing to read.
 event_log_enabled = true
+# Narration gate for streamed answer text on stream surfaces (web chat / REPL).
+# A text run streams nothing until it crosses this many characters without an
+# intervening tool call; short lead-in narration ("Let me check…") stays under
+# it and is dropped at the tool boundary instead of flashing in the answer area.
+# Higher = fewer narration leaks but short answers animate less (they still
+# arrive whole via the final result); lower = more answers token-stream but
+# longer narration can leak. 0 disables the gate. Watch the `stream_gate:` logs
+# (LEAK lines = gate too low) to tune.
+stream_text_gate_chars = 200
 # A push notification fires only when a task ran longer than this (short tasks
 # don't need a ping — the user is likely still watching).
 push_notification_threshold_seconds = 30
