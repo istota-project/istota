@@ -136,11 +136,27 @@ function createSession(): ChatSession {
 	let notifTimer: ReturnType<typeof setInterval> | null = null;
 	const NOTIF_POLL_MS = 5000;
 
+	// Clone a segment (and its tool) so a keyed {#each} sees a fresh reference.
+	const cloneSeg = (s: Segment): Segment =>
+		s.kind === 'text' ? { ...s } : { ...s, tool: { ...s.tool } };
+
 	const updateMsg = (cid: number, fn: (m: ChatMessage) => void) => {
 		messages.update((arr) => {
-			const m = arr.find((x) => x.cid === cid);
-			if (m) fn(m);
-			return arr;
+			const idx = arr.findIndex((x) => x.cid === cid);
+			if (idx === -1) return arr;
+			const m = arr[idx];
+			fn(m); // the reducer + helpers mutate the message in place
+			// Rebuild references at every level — new array, new message object,
+			// new segment + tool objects — so BOTH keyed `{#each}`s (the page's over
+			// $messages, and Message's over segments) re-render. Svelte 5 treats a
+			// same-reference keyed item as unchanged and skips its child, so an
+			// in-place deep mutation (a streamed text append, the `result`
+			// overwrite) never reaches the DOM — which is exactly why a full page
+			// reload (rebuilds the array via messages.set) rendered correctly while
+			// the live in-place stream froze after the first paint.
+			const next = arr.slice();
+			next[idx] = { ...m, segments: m.segments.map(cloneSeg) };
+			return next;
 		});
 	};
 
@@ -192,7 +208,9 @@ function createSession(): ChatSession {
 			if (seq) lastSeq = Math.max(lastSeq, seq);
 			let payload: Record<string, any> = {};
 			try { payload = JSON.parse(dataStr); } catch { /* keep {} */ }
-			applyEvent(cid, kind, payload);
+			// A reducer/render throw must never wedge the stream — keep advancing
+			// so later events (notably `result` / `done`) still apply.
+			try { applyEvent(cid, kind, payload); } catch { /* swallow */ }
 			if (kind === 'confirmation') paused = true;
 			if (kind === 'done' || kind === 'cancelled') settle();
 		};

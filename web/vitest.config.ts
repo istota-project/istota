@@ -1,17 +1,22 @@
 import { resolve } from 'node:path';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vitest/config';
 
-// Standalone vitest config — the reducer under test is pure (no DOM, no Svelte
-// runtime), so we don't load the SvelteKit plugin. The `$lib` alias is provided
-// for any future test that imports across the lib boundary.
+// Component tests (`*.svelte.test.ts`) mount real Svelte components under jsdom
+// to verify rendering + reactivity; the pure reducer tests (`segments.test.ts`)
+// need no DOM but run fine here too. The Svelte plugin compiles components.
 export default defineConfig({
+	plugins: [svelte({ hot: false })],
 	resolve: {
 		alias: {
 			$lib: resolve(__dirname, 'src/lib'),
 		},
+		// Use the browser entry for Svelte so runtime imports resolve under vitest.
+		conditions: ['browser'],
 	},
 	test: {
 		include: ['src/**/*.test.ts'],
-		environment: 'node',
+		environment: 'jsdom',
+		setupFiles: ['./vitest-setup.ts'],
 	},
 });
