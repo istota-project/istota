@@ -1,17 +1,23 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
+	import { page } from '$app/state';
 	import { Plus, MessageSquare } from 'lucide-svelte';
 	import AppShell from '$lib/components/ui/AppShell.svelte';
 	import ShellHeader from '$lib/components/ui/ShellHeader.svelte';
 	import Sidebar from '$lib/components/ui/Sidebar.svelte';
 	import SidebarToggle from '$lib/components/ui/SidebarToggle.svelte';
+	import KebabMenu from '$lib/components/ui/KebabMenu.svelte';
 	import Message from '$lib/components/chat/Message.svelte';
 	import Composer from '$lib/components/chat/Composer.svelte';
+	import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
 	import { getChatSession } from '$lib/stores/chat';
-	import { getMe } from '$lib/api';
+	import { getMe, type ChatRoom } from '$lib/api';
 
 	const session = getChatSession();
 	const { rooms, activeRoomId, messages, status, loaded } = session;
+
+	// The room whose settings modal is open (null = closed).
+	let settingsRoom = $state<ChatRoom | null>(null);
 
 	let sidebarOpen = $state(false);
 	// Author labels for message headers; fall back to generic labels until /me
@@ -42,7 +48,13 @@
 	}
 
 	onMount(() => {
-		session.init();
+		session.init().then(() => {
+			// Deep link: /chat?room=<token> selects that room for this load,
+			// overriding the persisted-room default. An unknown / not-owned token
+			// isn't in the per-user list → silent fallback to the default.
+			const token = page.url.searchParams.get('room');
+			if (token) session.selectRoomByToken(token);
+		});
 		getMe()
 			.then((me) => {
 				if (me.display_name) userName = me.display_name;
@@ -75,6 +87,19 @@
 		creatingRoom = false;
 		await session.newRoom(name);
 		sidebarOpen = false;
+	}
+
+	async function saveRoomName(name: string) {
+		if (!settingsRoom) return;
+		await session.renameRoom(settingsRoom.id, name);
+		settingsRoom = null;
+	}
+
+	async function deleteRoom() {
+		if (!settingsRoom) return;
+		const id = settingsRoom.id;
+		settingsRoom = null;
+		await session.deleteRoom(id);
 	}
 </script>
 
@@ -123,15 +148,20 @@
 			{/snippet}
 
 			{#each $rooms as room (room.id)}
-				<button
-					class="room-btn"
-					class:active={room.id === $activeRoomId}
-					onclick={() => selectRoom(room.id)}
-					type="button"
-				>
-					<MessageSquare size={13} />
-					<span class="room-name">{room.name}</span>
-				</button>
+				<div class="room-row" class:active={room.id === $activeRoomId}>
+					<button
+						class="room-btn"
+						onclick={() => selectRoom(room.id)}
+						type="button"
+					>
+						<MessageSquare size={13} />
+						<span class="room-name">{room.name}</span>
+					</button>
+					<KebabMenu
+						ariaLabel="Room actions"
+						items={[{ label: 'Settings…', onSelect: () => (settingsRoom = room) }]}
+					/>
+				</div>
 			{/each}
 		</Sidebar>
 	{/snippet}
@@ -166,6 +196,15 @@
 			placeholder={activeRoom ? `Message #${activeRoom.name}…` : 'Message Istota…'}
 		/>
 	</div>
+
+	{#if settingsRoom}
+		<RoomSettings
+			room={settingsRoom}
+			onSave={saveRoomName}
+			onDelete={deleteRoom}
+			onClose={() => (settingsRoom = null)}
+		/>
+	{/if}
 </AppShell>
 
 <style>
@@ -228,11 +267,23 @@
 		outline: none;
 	}
 
+	.room-row {
+		display: flex;
+		align-items: center;
+		gap: 0.15rem;
+		border-radius: 0.3rem;
+		padding-right: 0.2rem;
+		transition: background var(--transition-fast);
+	}
+	.room-row:hover { background: var(--surface-raised); }
+	.room-row.active { background: var(--surface-raised); }
+
 	.room-btn {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
-		width: 100%;
+		flex: 1;
+		min-width: 0;
 		background: none;
 		border: none;
 		color: var(--text-muted);
@@ -242,9 +293,9 @@
 		padding: 0.35rem 0.6rem;
 		border-radius: 0.3rem;
 		text-align: left;
-		transition: background var(--transition-fast), color var(--transition-fast);
+		transition: color var(--transition-fast);
 	}
-	.room-btn:hover { background: var(--surface-raised); color: var(--text-secondary); }
-	.room-btn.active { background: var(--surface-raised); color: var(--text-primary); }
+	.room-row:hover .room-btn { color: var(--text-secondary); }
+	.room-row.active .room-btn { color: var(--text-primary); }
 	.room-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

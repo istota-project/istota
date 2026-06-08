@@ -135,6 +135,97 @@ class TestWebChatMessagesDB:
         assert [m.text for m in msgs] == ["m3", "m4"]
 
 
+def _seed_task_event(conn, task_id: int, seq: int = 1) -> None:
+    """Insert a bare task_events row for a task (mirrors EventWriter.emit)."""
+    conn.execute(
+        "INSERT INTO task_events (task_id, seq, kind, payload, created_at) "
+        "VALUES (?, ?, 'result', '{}', datetime('now'))",
+        (task_id, seq),
+    )
+
+
+class TestWebChatRoomDelete:
+    """Hard delete + cascade across every table keyed on a room's token."""
+
+    def test_delete_removes_room(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "general")
+        assert db.delete_web_chat_room(conn, room.id, "alice") is True
+        assert db.list_web_chat_rooms(conn, "alice") == []
+
+    def test_delete_cascades_tasks_and_events(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "general")
+        other = db.create_web_chat_room(conn, "alice", "keep")
+        tid = db.create_task(
+            conn, prompt="hi", user_id="alice", source_type="web",
+            conversation_token=room.token, output_target="web",
+        )
+        _seed_task_event(conn, tid)
+        # A task in another room must survive.
+        keep_tid = db.create_task(
+            conn, prompt="stay", user_id="alice", source_type="web",
+            conversation_token=other.token, output_target="web",
+        )
+        _seed_task_event(conn, keep_tid)
+
+        assert db.delete_web_chat_room(conn, room.id, "alice") is True
+
+        assert db.get_task(conn, tid) is None
+        assert db.get_task_events(conn, tid) == []
+        assert db.get_task(conn, keep_tid) is not None
+        assert len(db.get_task_events(conn, keep_tid)) == 1
+
+    def test_delete_cascades_web_chat_messages(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "general")
+        other = db.create_web_chat_room(conn, "alice", "keep")
+        db.add_web_chat_message(conn, "alice", room.token, "gone")
+        db.add_web_chat_message(conn, "alice", other.token, "stays")
+
+        assert db.delete_web_chat_room(conn, room.id, "alice") is True
+
+        assert db.list_web_chat_messages(conn, room.token) == []
+        assert [m.text for m in db.list_web_chat_messages(conn, other.token)] == ["stays"]
+
+    def test_delete_cascades_channel_sleep_state(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "general")
+        db.set_channel_sleep_cycle_last_run(conn, room.token, None)
+        assert db.get_channel_sleep_cycle_last_run(conn, room.token)[0] is not None
+
+        assert db.delete_web_chat_room(conn, room.id, "alice") is True
+
+        assert db.get_channel_sleep_cycle_last_run(conn, room.token)[0] is None
+
+    def test_delete_wrong_user_returns_false(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "general")
+        assert db.delete_web_chat_room(conn, room.id, "bob") is False
+        assert len(db.list_web_chat_rooms(conn, "alice")) == 1
+
+    def test_delete_unknown_id_returns_false(self, conn):
+        assert db.delete_web_chat_room(conn, 9999, "alice") is False
+
+    def test_count_active_web_tasks(self, conn):
+        room = db.create_web_chat_room(conn, "alice", "general")
+        other = db.create_web_chat_room(conn, "alice", "other")
+        # Two non-terminal tasks on the room token.
+        for _ in range(2):
+            db.create_task(
+                conn, prompt="hi", user_id="alice", source_type="web",
+                conversation_token=room.token, output_target="web",
+            )
+        # A terminal task on the same token must not be counted.
+        done = db.create_task(
+            conn, prompt="done", user_id="alice", source_type="web",
+            conversation_token=room.token, output_target="web",
+        )
+        db.update_task_status(conn, done, "completed", result="ok")
+        # A task in another room must not be counted.
+        db.create_task(
+            conn, prompt="elsewhere", user_id="alice", source_type="web",
+            conversation_token=other.token, output_target="web",
+        )
+
+        assert db.count_active_web_tasks(conn, room.token, "alice") == 2
+
+
 # ---------------------------------------------------------------------------
 # Delivery routing: web is a stream surface (no Talk/email push)
 # ---------------------------------------------------------------------------
@@ -528,6 +619,76 @@ class TestChatMessagesApi:
             cookies=cookies, headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 400
+
+
+@_needs_web_deps
+class TestChatDeleteApi:
+    async def _create_room(self, client, cookies, name):
+        return (await client.post(
+            "/istota/api/chat/rooms", json={"name": name}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )).json()
+
+    async def test_delete_room_ok(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        # Establish the default `general` room so deleting `scratch` leaves a
+        # room behind (deleting the only room just gets it auto-recreated).
+        await chat_client.get("/istota/api/chat/rooms", cookies=cookies)
+        room = await self._create_room(chat_client, cookies, "scratch")
+        resp = await chat_client.delete(
+            f"/istota/api/chat/rooms/{room['id']}", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+        rooms = (await chat_client.get(
+            "/istota/api/chat/rooms", cookies=cookies,
+        )).json()["rooms"]
+        assert room["id"] not in [r["id"] for r in rooms]
+
+    async def test_delete_room_with_active_task_409(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = (await chat_client.get(
+            "/istota/api/chat/rooms", cookies=cookies,
+        )).json()["rooms"][0]
+        # Sending a message creates a pending (non-terminal) task.
+        await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "do a thing"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        resp = await chat_client.delete(
+            f"/istota/api/chat/rooms/{room['id']}", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 409
+        assert "progress" in resp.json()["error"]
+
+    async def test_cannot_delete_other_users_room(self, chat_client):
+        alice = await _login(chat_client, "alice")
+        room = await self._create_room(chat_client, alice, "secret")
+        bob = await _login(chat_client, "bob")
+        resp = await chat_client.delete(
+            f"/istota/api/chat/rooms/{room['id']}", cookies=bob,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_unknown_room_404(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.delete(
+            "/istota/api/chat/rooms/99999", cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 404
+
+    async def test_delete_requires_csrf(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await self._create_room(chat_client, cookies, "scratch")
+        resp = await chat_client.delete(
+            f"/istota/api/chat/rooms/{room['id']}", cookies=cookies,
+        )
+        assert resp.status_code == 403
 
 
 @_needs_web_deps

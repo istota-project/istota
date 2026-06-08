@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import signal
 import sqlite3
 import time
@@ -1239,6 +1240,31 @@ def _chat_update_room(
     return _room_to_dict(updated) if updated else None
 
 
+def _chat_delete_room(username: str, room_id: int) -> str:
+    """Hard-delete a room and its token-scoped rows. Returns a status string:
+    ``"not_found"`` (unknown / not owned), ``"busy"`` (a task is in flight), or
+    ``"ok"``. The DB cascade is one transaction; the ``CHANNEL.md`` removal is
+    best-effort and never fails the delete."""
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        room = db.get_web_chat_room(conn, room_id)
+        if room is None or room.user_id != username:
+            return "not_found"
+        if db.count_active_web_tasks(conn, room.token, username) > 0:
+            return "busy"
+        db.delete_web_chat_room(conn, room_id, username)
+        token = room.token
+    # Best-effort: drop the channel's CHANNEL.md directory. Outside the DB
+    # transaction; a filesystem failure leaves the dir but doesn't fail the API.
+    if _config.nextcloud_mount_path:
+        channel_dir = _config.nextcloud_mount_path / "Channels" / token
+        try:
+            shutil.rmtree(channel_dir, ignore_errors=True)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("chat room delete: CHANNEL.md cleanup failed: %s", exc)
+    return "ok"
+
+
 def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     """Recent messages for a room plus the active (in-flight) task, if any.
 
@@ -1430,6 +1456,24 @@ async def chat_update_room(
     if updated is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
     return updated
+
+
+@api_router.delete("/chat/rooms/{room_id}")
+async def chat_delete_room(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    result = await asyncio.to_thread(
+        _chat_delete_room, user["username"], room_id,
+    )
+    if result == "not_found":
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    if result == "busy":
+        return JSONResponse(
+            {"error": "room has a task in progress"}, status_code=409,
+        )
+    return {"status": "ok"}
 
 
 @api_router.get("/chat/rooms/{room_id}/messages")

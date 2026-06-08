@@ -14,6 +14,8 @@ import {
 	chatStreamUrl,
 	confirmChatTask,
 	createChatRoom,
+	deleteChatRoom,
+	ChatRoomBusyError,
 	getChatConfig,
 	getRoomMessages,
 	getChatRooms,
@@ -97,9 +99,11 @@ export interface ChatSession {
 	error: Writable<string>;
 	init: () => Promise<void>;
 	selectRoom: (id: number) => Promise<void>;
+	selectRoomByToken: (token: string) => Promise<boolean>;
 	newRoom: (name: string) => Promise<void>;
 	renameRoom: (id: number, name: string) => Promise<void>;
 	archiveRoom: (id: number) => Promise<void>;
+	deleteRoom: (id: number) => Promise<void>;
 	send: (text: string, attachments?: { path: string; name: string }[]) => Promise<void>;
 	cancel: () => Promise<void>;
 	confirm: (cid: number, taskId: number) => Promise<void>;
@@ -483,6 +487,34 @@ function createSession(): ChatSession {
 		}
 	}
 
+	async function deleteRoom(id: number) {
+		try {
+			await deleteChatRoom(id);
+		} catch (e) {
+			if (e instanceof ChatRoomBusyError) {
+				error.set('This room has a task in progress — wait for it to finish or cancel it.');
+			} else {
+				error.set("Couldn't delete room.");
+			}
+			return;
+		}
+		// On success (or a 404 already-gone) drop it from the list, mirroring
+		// archiveRoom's fall-through when the active room disappears.
+		rooms.update((r) => r.filter((x) => x.id !== id));
+		if (get(activeRoomId) === id) {
+			const remaining = get(rooms);
+			if (remaining[0]) await selectRoom(remaining[0].id);
+			else { stopNotifPolling(); activeRoomId.set(null); messages.set([]); }
+		}
+	}
+
+	async function selectRoomByToken(token: string): Promise<boolean> {
+		const room = get(rooms).find((r) => r.token === token);
+		if (!room) return false;
+		await selectRoom(room.id);
+		return true;
+	}
+
 	async function send(text: string, attachments: { path: string; name: string }[] = []) {
 		const roomId = get(activeRoomId);
 		const trimmed = text.trim();
@@ -579,8 +611,8 @@ function createSession(): ChatSession {
 
 	return {
 		rooms, activeRoomId, messages, status, activeTaskId, loaded, error,
-		init, selectRoom, newRoom, renameRoom, archiveRoom,
-		send, cancel, confirm, reject, teardown,
+		init, selectRoom, selectRoomByToken, newRoom, renameRoom, archiveRoom,
+		deleteRoom, send, cancel, confirm, reject, teardown,
 	};
 }
 

@@ -1654,6 +1654,54 @@ def count_recent_web_tasks(
     return int(row[0]) if row else 0
 
 
+def count_active_web_tasks(
+    conn: sqlite3.Connection, token: str, user_id: str,
+) -> int:
+    """Count non-terminal web tasks for a room's token — backs the busy-room
+    guard on delete (won't drop a room a worker is still writing against)."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? AND user_id = ? "
+        "AND source_type = 'web' "
+        "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
+        (token, user_id),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def delete_web_chat_room(
+    conn: sqlite3.Connection, room_id: int, user_id: str,
+) -> bool:
+    """Hard-delete a room and every row keyed on its token, in one transaction.
+
+    Returns ``False`` (deleting nothing) when the room is unknown or owned by
+    another user. Removes, in order: the room's tasks' ``task_events``, those
+    tasks, its ``web_chat_messages``, its ``channel_sleep_cycle_state``, and the
+    room row itself. The ``CHANNEL.md`` directory and channel ``memory_chunks``
+    are not touched here — the caller removes the former best-effort; the latter
+    is a documented residual.
+    """
+    room = get_web_chat_room(conn, room_id)
+    if room is None or room.user_id != user_id:
+        return False
+    token = room.token
+    conn.execute(
+        "DELETE FROM task_events WHERE task_id IN "
+        "(SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ?)",
+        (token, user_id),
+    )
+    conn.execute(
+        "DELETE FROM tasks WHERE conversation_token = ? AND user_id = ?",
+        (token, user_id),
+    )
+    conn.execute("DELETE FROM web_chat_messages WHERE token = ?", (token,))
+    conn.execute(
+        "DELETE FROM channel_sleep_cycle_state WHERE conversation_token = ?",
+        (token,),
+    )
+    conn.execute("DELETE FROM web_chat_rooms WHERE id = ?", (room_id,))
+    return True
+
+
 def list_tasks(
     conn: sqlite3.Connection,
     status: str | None = None,
