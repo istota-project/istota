@@ -86,7 +86,8 @@ function randomAckVerb(): string {
 
 const STREAM_KINDS = [
 	'task_started', 'tool_start', 'tool_end', 'tool_progress', 'progress_text',
-	'context_management', 'confirmation', 'result', 'error', 'cancelled', 'done',
+	'text_delta', 'context_management', 'confirmation', 'result', 'error',
+	'cancelled', 'done',
 ];
 
 export interface ChatSession {
@@ -168,6 +169,15 @@ function createSession(): ChatSession {
 					break;
 				case 'progress_text':
 					m.progress = String(payload.text ?? '');
+					break;
+				case 'text_delta':
+					// Incremental answer text streamed live (stream surfaces). Append
+					// to the body; the canonical `result` replaces it on arrival
+					// (the reconcile point). Clear the "thinking" verb — the growing
+					// text is now the live signal (a typing affordance shows below it).
+					m.text = (m.text ?? '') + String(payload.text ?? '');
+					m.streaming = true;
+					m.progress = undefined;
 					break;
 				case 'tool_start': {
 					const name = String(payload.tool_name ?? 'tool');

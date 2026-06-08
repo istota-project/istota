@@ -40,6 +40,19 @@ class TextEvent:
 
 
 @dataclass
+class TextDeltaEvent:
+    """An *incremental* fragment of the assistant's answer text.
+
+    Unlike ``TextEvent`` (a complete text block), this carries one streaming
+    delta as it is produced. NativeBrain emits these per provider ``TextDelta``;
+    the executor coalesces them into ``text_delta`` task events for stream
+    surfaces only (push surfaces never see them). ClaudeCodeBrain does not emit
+    these — the executor routes its block-level ``TextEvent``s through the same
+    coalescer instead (coarse streaming)."""
+    text: str
+
+
+@dataclass
 class ResultEvent:
     success: bool
     text: str
@@ -72,6 +85,7 @@ class ToolProgressEvent:
 StreamEvent = (
     ToolUseEvent
     | TextEvent
+    | TextDeltaEvent
     | ResultEvent
     | ContextManagementEvent
     | ToolEndEvent

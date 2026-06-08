@@ -101,6 +101,7 @@ EventKind = Literal[
     "tool_end",            # tool call completed (success or failure) — NativeBrain only
     "tool_progress",       # incremental tool output mid-execution — NativeBrain only
     "progress_text",       # intermediate text output from the brain
+    "text_delta",          # incremental answer text — stream surfaces only, pruned after result
     "context_management",  # brain compacted context
     "confirmation",        # task paused for user confirmation
     "result",              # final output text
@@ -133,6 +134,7 @@ class TaskEvent:
       tool_end:            {"tool_name", "tool_call_id", "success", "duration_ms"}
       tool_progress:       {"tool_name", "tool_call_id", "text"}
       progress_text:       {"text"}
+      text_delta:          {"text"}
       context_management:  {}
       confirmation:        {"prompt"}
       result:              {"text", "truncated"}

@@ -22,8 +22,14 @@ from istota.config import (
     TalkConfig,
     UserConfig,
 )
+from istota.events import TaskEvent
 from istota.repl import run_session
+from istota.repl.terminal import TerminalSubscriber
 from istota.scheduler import run_task_inline
+
+
+def _ev(kind, payload=None, seq=1):
+    return TaskEvent(task_id=1, seq=seq, kind=kind, payload=payload or {}, created_at="t")
 
 
 @pytest.fixture
@@ -180,3 +186,71 @@ class TestRunTaskInline:
             assert db.get_task(conn, tid).status == "cancelled"
             events = [e["kind"] for e in db.get_task_events(conn, tid)]
         assert "cancelled" in events
+
+    def test_text_delta_rows_pruned_on_stream_surface(self, cfg, monkeypatch):
+        # repl is a stream surface: the in-process TerminalSubscriber renders
+        # deltas live, so the persisted text_delta rows are pruned once the
+        # terminal event fires — only lifecycle rows survive.
+        def _exec(task, config, user_resources, *, event_writer=None,
+                  workspace_dir=None, **kwargs):
+            if event_writer is not None:
+                event_writer.emit("text_delta", {"text": "par"})
+                event_writer.emit("text_delta", {"text": "tial"})
+            return (True, "partial", None, None)
+
+        monkeypatch.setattr("istota.scheduler.execute_task", _exec)
+        with db.get_db(cfg.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="x", user_id="alice", source_type="repl",
+                conversation_token="repl-alice-cccc", output_target="stream",
+            )
+            task = db.get_task(conn, tid)
+        from istota.events import EventWriter
+        writer = EventWriter(tid, str(cfg.db_path), enabled=True)
+        run_task_inline(cfg, task, event_writer=writer)
+        with db.get_db(cfg.db_path) as conn:
+            kinds = [e["kind"] for e in db.get_task_events(conn, tid)]
+        assert "text_delta" not in kinds
+        assert "result" in kinds and "done" in kinds
+
+
+class TestTerminalSubscriberStreaming:
+    """Stage 6 — the repl TerminalSubscriber renders text_delta events live
+    (inline, appended to the in-flight line) and reconciles on result."""
+
+    def _sub(self):
+        out = io.StringIO()
+        return TerminalSubscriber(color=False, stream=out), out
+
+    def test_deltas_appended_inline(self):
+        sub, out = self._sub()
+        sub.on_event(_ev("text_delta", {"text": "Hel"}, seq=1))
+        sub.on_event(_ev("text_delta", {"text": "lo"}, seq=2))
+        # Written inline with no intervening newline.
+        assert out.getvalue() == "Hello"
+
+    def test_result_matching_stream_not_reprinted(self):
+        sub, out = self._sub()
+        sub.on_event(_ev("text_delta", {"text": "Hello world"}, seq=1))
+        sub.on_event(_ev("result", {"text": "Hello world"}, seq=2))
+        # The answer streamed live; result only terminates the line — the body
+        # is not printed twice.
+        assert out.getvalue().count("Hello world") == 1
+
+    def test_result_diverging_from_stream_reprinted(self):
+        sub, out = self._sub()
+        sub.on_event(_ev("text_delta", {"text": "draft answer"}, seq=1))
+        # CM-aware composition rewrote the final answer → the corrected text is
+        # printed (so the user sees the authoritative version).
+        sub.on_event(_ev("result", {"text": "corrected answer"}, seq=2))
+        assert "corrected answer" in out.getvalue()
+
+    def test_tool_start_breaks_inflight_delta_line(self):
+        sub, out = self._sub()
+        sub.on_event(_ev("text_delta", {"text": "looking"}, seq=1))
+        sub.on_event(_ev("tool_start", {"description": "📄 Reading x"}, seq=2))
+        # The open delta line is terminated before the tool line, so they don't
+        # run together on one line.
+        lines = out.getvalue().splitlines()
+        assert lines[0] == "looking"
+        assert "Reading x" in lines[1]

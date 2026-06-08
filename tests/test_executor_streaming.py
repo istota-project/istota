@@ -734,6 +734,129 @@ class TestStreamingExecution:
         assert result == "Cancelled by user"
 
 
+class TestStreamSurfaceCoalescing:
+    """Stage 2 — the executor's text_delta coalescer + stream/push gating.
+
+    The 'push untouched' guard lives here: a push task (source_type → talk) must
+    emit zero text_delta rows and keep progress_text behaviour; a stream task
+    (source_type='web') routes answer text into text_delta instead.
+    """
+
+    def _make_mock_process(self, stdout_lines, returncode=0):
+        mock = MagicMock()
+        mock.stdout = iter(stdout_lines)
+        mock.stderr = iter([])
+        mock.returncode = returncode
+        mock.wait.return_value = returncode
+        mock.kill = MagicMock()
+        return mock
+
+    def _run(self, config, task, stream_lines, rec):
+        patches = _patch_executor() + [
+            patch(
+                "istota.executor.subprocess.Popen",
+                return_value=self._make_mock_process(stream_lines),
+            ),
+        ]
+        with contextmanager_chain(patches):
+            return execute_task(
+                task, config, [],
+                event_writer=_writer(task, config, subscriber=rec),
+            )
+
+    def test_push_task_emits_no_text_delta(self, tmp_path):
+        """Push surface (talk): TextEvent → progress_text, never text_delta."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_text = True
+        task = _make_task(source_type="cli")  # → talk surface (push)
+
+        stream_lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "Checking things"}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": "Done."}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, result, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        assert "text_delta" not in rec.kinds()
+        assert [e.payload["text"] for e in rec.events if e.kind == "progress_text"] == [
+            "Checking things"
+        ]
+
+    def test_stream_task_routes_text_to_text_delta(self, tmp_path):
+        """Stream surface (web): block TextEvents route into text_delta (coarse),
+        not progress_text — even with progress_show_text off."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_text = False
+        task = _make_task(source_type="web")
+
+        stream_lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "First part."}]},
+            }) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m2", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "Second part."}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success",
+                        "result": "First part. Second part."}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, result, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        assert "progress_text" not in rec.kinds()
+        deltas = [e for e in rec.events if e.kind == "text_delta"]
+        assert deltas, "stream task should produce text_delta events"
+        # Coalesced (fast test → no time/size flush): one delta carrying both blocks.
+        assert "".join(e.payload["text"] for e in deltas) == "First part.Second part."
+
+    def test_stream_task_flushes_before_tool_boundary(self, tmp_path):
+        """A buffered delta is flushed before a tool_start so text doesn't
+        straddle the tool chip."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_tool_use = True
+        task = _make_task(source_type="web")
+
+        stream_lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "Let me look."}]},
+            }) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m2", "stop_reason": "tool_use", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": "/tmp/x.txt"}},
+                ]},
+            }) + "\n",
+            json.dumps({"type": "user", "message": {"role": "user"}}) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m3", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "All set."}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": "All set."}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, _r, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        kinds = rec.kinds()
+        first_delta = kinds.index("text_delta")
+        first_tool = kinds.index("tool_start")
+        # The pre-boundary flush put a text_delta ("Let me look.") before the tool.
+        assert first_delta < first_tool
+
+
 class TestStreamingStdinDelivery:
     """Regression: the prompt must be written to the subprocess stdin
     concurrently with the on_pid callback, never gated behind it.
