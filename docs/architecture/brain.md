@@ -42,7 +42,7 @@ Every model ID in the codebase resolves through the active brain. Three layers, 
 2. **Default role targets** (per-brain, e.g. `claude_code.DEFAULT_ROLE_TARGETS`) — each brain decides what `fast` / `general` / `smart` mean for its namespace if the operator hasn't overridden.
 3. **Provider aliases** (per-brain, e.g. `claude_code.MODEL_ALIASES`) — short names like `opus-high` for `(model_id, effort)` pairs. Brain-specific.
 
-`Brain.validate_role_override(role, target)` warns on typos and provider-alias collisions at config-load time. ClaudeCodeBrain pins to versioned IDs: `OPUS = "claude-opus-4-7"`, `OPUS_46 = "claude-opus-4-6"`, `SONNET = "claude-sonnet-4-6"`, `HAIKU = "claude-haiku-4-5"`.
+`Brain.validate_role_override(role, target)` warns on typos and provider-alias collisions at config-load time. ClaudeCodeBrain pins to versioned IDs: `OPUS = "claude-opus-4-8"` (current default Opus), with prior versions kept for production pinning — `OPUS_47 = "claude-opus-4-7"` (`opus-47` / `opus-47-high` aliases), `OPUS_46 = "claude-opus-4-6"`, `SONNET = "claude-sonnet-4-6"`, `HAIKU = "claude-haiku-4-5"`. Bare alias names (`opus`, `sonnet`, `haiku`) always resolve to the current-latest constant, so bumping `OPUS` ripples through every consumer automatically.
 
 ## BrainRequest
 
@@ -79,10 +79,10 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 
 Wraps the `claude` CLI subprocess. Owns:
 
-1. **Command construction** — `claude -p - --allowedTools ... --disallowedTools Agent Workflow`, plus optional `--model`, `--effort`, `--system-prompt-file`, and (in streaming mode) `--output-format stream-json --verbose`.
+1. **Command construction** — `claude -p - --allowedTools ... --disallowedTools Agent Workflow`, plus optional `--model`, `--effort`, `--system-prompt-file`, and (in streaming mode) `--output-format stream-json --verbose --include-partial-messages`. The last flag makes the CLI emit answer / reasoning text token-by-token as `stream_event` frames *before* the whole `assistant` block lands — without it the final response would arrive as one block and dump all at once on stream surfaces (web / REPL).
 2. **Sandbox wrap** — calls `req.sandbox_wrap(cmd)` if provided so the executor's bwrap configuration applies.
 3. **Subprocess** — `Popen` (streaming) or `subprocess.run` (simple), prompt via stdin to avoid `E2BIG` on large prompts; stderr drained on a background thread to prevent deadlock.
-4. **Stream parsing** — line-by-line via `make_stream_parser()` from `_events.py`, dispatching `ResultEvent` → final result, `ToolUseEvent` / `TextEvent` → trace + on_progress, `ContextManagementEvent` → `cm_boundary` marker in trace.
+4. **Stream parsing** — line-by-line via `make_stream_parser()` from `_events.py`, dispatching `ResultEvent` → final result, `ToolUseEvent` / `TextEvent` → trace + on_progress, `ContextManagementEvent` → `cm_boundary` marker in trace. The `stream_event` partial frames parse into `TextDeltaEvent` / `ThinkingDeltaEvent` and go to `on_progress` only (never the trace); the trailing whole-block `TextEvent` / `ThinkingEvent` still records the trace and is deduped against the deltas executor-side (text via `_delta_seen`, thinking via `_thinking_seen`). On push surfaces (Talk) the deltas are dropped and `TextEvent` → `progress_text` stands.
 5. **Cancellation** — polls `req.cancel_check()` between events; final re-check after the subprocess exits catches SIGTERM-style external kills.
 6. **Timeout** — `threading.Timer` kills the process after `req.timeout_seconds`; result tagged `stop_reason="timeout"`.
 7. **OOM detection** — returncode `-9` → `stop_reason="oom"`.

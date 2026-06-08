@@ -67,6 +67,7 @@ nav:
     - architecture/database.md
   - Features:
     - features/talk.md
+    - features/web-chat.md
     - features/email.md
     - features/skills.md
     - features/memory.md

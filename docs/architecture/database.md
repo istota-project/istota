@@ -8,7 +8,7 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 
 | Table | Purpose |
 |---|---|
-| `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempts, execution trace, model/effort overrides, plus `skill` / `skill_args` for skill-task dispatch |
+| `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempts, `last_heartbeat` (worker-liveness ping for stuck-task reclaim, ISSUE-112), execution trace, model/effort overrides, plus `skill` / `skill_args` for skill-task dispatch |
 | `user_resources` | Per-user resource permissions (calendar, folder, todo_file, email_folder, ledger, etc.) |
 | `user_profiles` | Per-user profile fields (display_name, timezone, channels, worker overrides, disabled_skills, disabled_modules, email_addresses, trusted_email_senders) |
 | `briefing_configs` | DB-stored briefing configurations (cron, components, conversation_token, enabled flag) |
@@ -25,6 +25,14 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `talk_messages` | Poller-fed message cache for conversation context |
 | `processed_emails` | Email dedup with RFC 5322 thread tracking |
 | `sent_emails` | Outbound email tracking for emissary thread matching |
+| `task_events` | Task-event-streaming log: `id, task_id, seq, kind, payload (JSON), created_at`, `UNIQUE(task_id, seq)`. One persisted, typed event stream per task feeding Talk / SSE / log / push consumers. `seq` is monotonic per task (writer-assigned, resumed across retries via `get_max_task_event_seq`); rows are deleted only by `cleanup_old_tasks` (retention) |
+
+### Web chat (per-user rooms)
+
+| Table | Purpose |
+|---|---|
+| `web_chat_rooms` | One row per web chat room: `id, user_id, token (channel id), name, archived, created_at, updated_at`. One room = one `conversation_token`, each with its own `CHANNEL.md` |
+| `web_chat_messages` | Bot-delivered (unsolicited) room messages — alerts / logs / notifications routed to the `web` surface via `WebTransport.deliver`: `id, user_id, token, role, title, text, created_at`. Distinct from task-backed turns; merged into room history by time |
 
 ### Scheduling
 
@@ -41,8 +49,10 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 |---|---|
 | `sleep_cycle_state` | Per-user nightly memory extraction state |
 | `channel_sleep_cycle_state` | Per-channel memory extraction state |
-| `memory_chunks` | Text chunks for hybrid search |
+| `memory_chunks` | Text chunks for hybrid search; carries `valid_from` / `valid_until` episode-window columns (ISSUE-109) so a chunk whose episode has closed self-suppresses from recall |
 | `memory_chunks_fts` | FTS5 virtual table (trigger-synced from memory_chunks) |
+| `knowledge_facts` | Temporal subject/predicate/object triples (freeform predicates, fuzzy dedup); `valid_from` / `valid_until` bound a fact's currency |
+| `knowledge_facts_audit` | Append-only audit trail of KG fact add/invalidate/delete ops |
 | `user_skills_fingerprint` | Skills version tracking for "what's new" |
 
 ### Monitoring

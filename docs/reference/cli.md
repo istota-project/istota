@@ -27,8 +27,10 @@ istota user list                             # List configured users
 istota user lookup EMAIL                     # Find user by email
 istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
-istota user ensure -u USER --name NAME [--timezone TZ] [--log-channel TOKEN] [--alerts-channel TOKEN] [--email k=v ...] [--max-fg N] [--max-bg N] [--site-enabled]
+istota user ensure -u USER --name NAME [--timezone TZ] [--log-channel TOKEN] [--alerts-channel TOKEN] [--email k=v ...] [--max-fg N] [--max-bg N] [--site-enabled] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...]
 ```
+
+`--default-destination` sets the fallback delivery surface (`talk` | `email` | `ntfy` | `web` | `surface:channel` | comma list). `--route` is repeatable and sets a purpose-keyed override; `PURPOSE` is one of `reply`, `alert`, `log`, `briefing`, `notification`. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).
 
 ### Resources
 
@@ -43,7 +45,7 @@ Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `reminders_fi
 ### Briefings
 
 ```bash
-istota briefing ensure -u USER -n NAME -c CRON [--conversation-token TOKEN] [--output talk|email|both] [--component k=v] [--components-json '{…}'] [--disabled]
+istota briefing ensure -u USER -n NAME -c CRON [--conversation-token TOKEN] [--output talk|email|ntfy|both] [--component k=v] [--components-json '{…}'] [--disabled]
 istota briefing list   -u USER
 ```
 
@@ -103,6 +105,14 @@ istota-skill kv set-add      <ns> <key> <member> [<member>...]    # Add members 
 istota-skill kv set-remove   <ns> <key> <member> [<member>...]    # Remove members (deferred)
 ```
 
+### Interactive REPL
+
+```bash
+istota repl [-u USER] [-t TOKEN] [--workspace cwd|standard|PATH] [--model ALIAS] [--effort LEVEL]
+```
+
+A streamed, full-stack terminal assistant. Each line becomes a `source_type="repl"` task with `output_target="stream"`, run inline (no daemon needed); `task_events` stream back to the terminal. `--workspace` selects the working directory: `cwd` (default), `standard` (the per-user temp dir the daemon sandboxes), or an explicit path.
+
 ### Database
 
 ```bash
@@ -129,3 +139,15 @@ istota-skill markets quote AAPL
 ```
 
 Used by Claude Code inside the sandbox to invoke skill CLIs with credentials injected server-side.
+
+## `<namespace>-run` (production host wrapper)
+
+Ansible deploys a host wrapper named `<namespace>-run` (e.g. `istota-run`) to `/usr/local/bin/`. It self-sudoes into the service user, loads the same secret bundle (`/etc/<namespace>/secrets.env`) and admins file (`ISTOTA_ADMINS_FILE`) the systemd units use, `cd`s to the install tree so the relative config search path resolves, then passes its arguments straight through to the `istota` CLI. The caller needs sudo rights (passwordless or interactive).
+
+```bash
+istota-run repl -u alice            # interactive REPL as the service user
+istota-run list                     # any istota subcommand works
+istota-run task "..." -u alice -x
+```
+
+For `repl` it defaults `--workspace` to `standard` (the per-user temp dir), because the install tree is a protected path the sandbox refuses to bind read-write; pass `--workspace` explicitly to override.
