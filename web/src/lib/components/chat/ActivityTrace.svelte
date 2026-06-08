@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { ChevronRight, ChevronDown, Check, X } from 'lucide-svelte';
 	import { isRenderable, type Segment } from '$lib/stores/segments';
-	import ToolChip from './ToolChip.svelte';
 
 	// The model's "work" for one assistant turn: inter-tool progress messages
 	// (settled narration) and tool calls, in order. Rendered as ONE chip —
@@ -44,18 +43,20 @@
 		<span class="chev">
 			{#if expanded}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
 		</span>
-		<!-- Collapsed: current progress message AND current action, together. -->
+		<!-- Collapsed: the current progress message, then the current action on its
+		     own line below it. -->
 		<span class="current">
 			{#if latestMessage}<span class="msg">{firstLine(latestMessage)}</span>{/if}
 			{#if activeTool}
-				{#if latestMessage}<span class="sep">·</span>{/if}
 				<span class="action">
-					<span class="desc">{activeTool.description || activeTool.name}</span>
-					{#if !activeTool.running}
+					{#if activeTool.running}
+						<span class="run-dot"></span>
+					{:else}
 						<span class="status">
 							{#if activeTool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
 						</span>
 					{/if}
+					<span class="desc">{activeTool.description || activeTool.name}</span>
 				</span>
 			{/if}
 			{#if !latestMessage && !activeTool}<span class="msg">Working…</span>{/if}
@@ -64,11 +65,21 @@
 	</button>
 
 	{#if expanded}
-		<!-- Expanded: the whole interleaved chain, in order. -->
+		<!-- Expanded: the whole interleaved chain, in order. Tool calls are flat
+		     rows (no expand — that only repeated the action). -->
 		<div class="chain">
 			{#each renderable as step (step.id)}
 				{#if step.kind === 'tool'}
-					<ToolChip tool={step.tool} />
+					<div class="action chain-action">
+						{#if step.tool.running}
+							<span class="run-dot"></span>
+						{:else}
+							<span class="status">
+								{#if step.tool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
+							</span>
+						{/if}
+						<span class="desc">{step.tool.description || step.tool.name}</span>
+					</div>
 				{:else}
 					<div class="step-msg">{firstLine(step.text)}</div>
 				{/if}
@@ -126,14 +137,14 @@
 
 	.chev { display: inline-flex; align-items: center; flex: 0 0 auto; opacity: 0.6; }
 
+	/* Current step: progress message on one line, the action on its own line. */
 	.current {
 		flex: 1;
 		min-width: 0;
 		display: flex;
-		align-items: center;
-		gap: 0.35rem;
+		flex-direction: column;
+		gap: 0.15rem;
 		overflow: hidden;
-		white-space: nowrap;
 	}
 	.msg {
 		min-width: 0;
@@ -143,23 +154,34 @@
 		font-style: italic;
 		color: var(--text-dim);
 	}
-	.sep { flex: 0 0 auto; opacity: 0.5; }
 	.action {
-		flex: 0 1 auto;
 		min-width: 0;
-		display: inline-flex;
+		display: flex;
 		align-items: center;
-		gap: 0.25rem;
+		gap: 0.3rem;
 		overflow: hidden;
 	}
+	.chain-action { padding: 0.05rem 0; }
 	.desc {
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-family: ui-monospace, monospace;
+		color: var(--text-secondary);
 	}
 	.status { display: inline-flex; align-items: center; flex: 0 0 auto; }
+	/* A small pulsing dot marks the running action (in place of a status check). */
+	.run-dot {
+		flex: 0 0 auto;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--accent-amber);
+		animation: run-dot-pulse 1.1s ease-in-out infinite;
+	}
+	@keyframes run-dot-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+	@media (prefers-reduced-motion: reduce) { .run-dot { animation: none; } }
 	.count {
 		flex: 0 0 auto;
 		font-variant-numeric: tabular-nums;
