@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { ChevronRight, ChevronDown, Check, X } from 'lucide-svelte';
+	import { ChevronRight, ChevronDown, X } from 'lucide-svelte';
 	import type { Segment } from '$lib/stores/segments';
 
 	// The model's tool calls for one assistant turn, in order. Rendered as ONE
@@ -35,12 +35,8 @@
 				<span class="msg label">{busy ? 'Working…' : 'Activity'}</span>
 			{:else if activeTool}
 				<span class="action">
-					{#if activeTool.running}
-						<span class="run-dot"></span>
-					{:else}
-						<span class="status">
-							{#if activeTool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
-						</span>
+					{#if activeTool.success === false}
+						<span class="status"><X size={12} /></span>
 					{/if}
 					<span class="desc">{activeTool.description || activeTool.name}</span>
 				</span>
@@ -56,12 +52,8 @@
 		<div class="chain">
 			{#each tools as step (step.id)}
 				<div class="action chain-action">
-					{#if step.tool.running}
-						<span class="run-dot"></span>
-					{:else}
-						<span class="status">
-							{#if step.tool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
-						</span>
+					{#if step.tool.success === false}
+						<span class="status"><X size={12} /></span>
 					{/if}
 					<span class="desc">{step.tool.description || step.tool.name}</span>
 				</div>
@@ -155,18 +147,9 @@
 		font-family: ui-monospace, monospace;
 		color: var(--text-secondary);
 	}
+	/* Failed tools keep an X; success and in-progress tools show description only
+	   (no checkmark, no running dot — the chip's active shimmer signals work). */
 	.status { display: inline-flex; align-items: center; flex: 0 0 auto; }
-	/* A small pulsing dot marks the running action (in place of a status check). */
-	.run-dot {
-		flex: 0 0 auto;
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--accent-amber);
-		animation: run-dot-pulse 1.1s ease-in-out infinite;
-	}
-	@keyframes run-dot-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
-	@media (prefers-reduced-motion: reduce) { .run-dot { animation: none; } }
 	.count {
 		flex: 0 0 auto;
 		font-variant-numeric: tabular-nums;
