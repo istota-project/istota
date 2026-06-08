@@ -955,6 +955,91 @@ class TestTaskEventEndpoints:
             assert "event: done" in body
             assert "id: 4" in body
 
+    def _seed_failed_task_no_done(self, config, user_id="alice"):
+        """A terminal (failed) task whose event log has NO `done` — mimics the
+        retry path deleting + seq-resetting the log so the final attempt's
+        terminal frames are unreachable (seq below the client's cursor), or a
+        crash skipping EventWriter.finish()."""
+        from istota import db
+        from istota.events import EventWriter
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(conn, "do a thing", user_id, source_type="web")
+        w = EventWriter(tid, str(config.db_path))
+        w.emit("task_started")
+        w.emit("tool_start", {"tool_name": "Read", "description": "📄 Reading f",
+                              "tool_call_id": "t1"})
+        with db.get_db(config.db_path) as conn:
+            db.update_task_status(conn, tid, "failed",
+                                  error="Stream parsing failed (rc=-15, 17 lines)")
+        return tid
+
+    async def test_snapshot_synthesizes_terminal_for_failed_task(self, tmp_path):
+        """A failed task with no `done` in the log yields synthesized error+done
+        (seq above the client's cursor) so the poll loop settles."""
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_failed_task_no_done(config)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            # Client parked past the surviving rows (mimics a retry seq-reset).
+            resp = await client.get(
+                f"/istota/api/chat/tasks/{tid}/events?since_seq=2", cookies=cookies,
+            )
+            assert resp.status_code == 200
+            events = resp.json()["events"]
+            assert [e["kind"] for e in events] == ["error", "done"]
+            assert events[0]["payload"]["message"].startswith("Stream parsing failed")
+            assert all(e["seq"] > 2 for e in events)
+
+    async def test_snapshot_no_synthesis_while_running(self, tmp_path):
+        """A still-running task gets no synthetic terminal frame."""
+        from istota import db
+        from istota.events import EventWriter
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(conn, "x", "alice", source_type="web")
+            db.update_task_status(conn, tid, "running")
+        EventWriter(tid, str(config.db_path)).emit("task_started")
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get(
+                f"/istota/api/chat/tasks/{tid}/events?since_seq=1", cookies=cookies,
+            )
+            assert resp.json()["events"] == []
+
+    async def test_snapshot_no_double_terminal_when_done_present(self, tmp_path):
+        """The normal completed-with-done task is untouched (no extra frames)."""
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_task_with_events(config)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get(f"/istota/api/chat/tasks/{tid}/events", cookies=cookies)
+            assert [e["kind"] for e in resp.json()["events"]] == [
+                "task_started", "tool_start", "result", "done",
+            ]
+
+    async def test_sse_synthesizes_terminal_for_stuck_failed_task(self, tmp_path):
+        """SSE for a failed task whose `done` is unreachable still ends the
+        stream (synthesized error+done) instead of polling forever."""
+        config = self._config_with_admin(tmp_path)
+        tid = self._seed_failed_task_no_done(config)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get(
+                f"/istota/api/chat/tasks/{tid}/stream?since_seq=2", cookies=cookies,
+            )
+            assert resp.status_code == 200
+            body = resp.text
+            assert "event: error" in body
+            assert "event: done" in body
+
     async def test_admin_events_endpoint(self, tmp_path):
         config = self._config_with_admin(tmp_path)
         tid = self._seed_task_with_events(config, user_id="bob")

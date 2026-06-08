@@ -226,7 +226,10 @@ function createSession(): ChatSession {
 			// so later events (notably `result` / `done`) still apply.
 			try { applyEvent(cid, kind, payload); } catch { /* swallow */ }
 			if (kind === 'confirmation') paused = true;
-			if (kind === 'done' || kind === 'cancelled') settle();
+			// `done` is the normal terminal; settle on `error`/`cancelled` too so a
+			// failure that arrives without a trailing `done` (older paths, dropped
+			// connection) can't leave the room stuck on "Working…".
+			if (kind === 'done' || kind === 'cancelled' || kind === 'error') settle();
 		};
 
 		const poll = async () => {
