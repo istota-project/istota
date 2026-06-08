@@ -185,6 +185,7 @@ istota_scheduler_progress_updates: true                # Show real-time progress
 istota_scheduler_progress_show_tool_use: true          # Emit tool_start / tool_end events
 istota_scheduler_progress_show_text: false             # Emit intermediate assistant text events (noisy)
 istota_scheduler_event_log_enabled: true               # Write events to the task_events table (kill-switch)
+istota_scheduler_stream_text_gate_chars: 200           # Narration gate: hold streamed answer text until it crosses N chars w/o a tool call (web/REPL); 0 disables. Watch `stream_gate:` logs to tune
 istota_scheduler_push_notification_threshold_seconds: 30  # Min task duration before a push notification fires
 istota_scheduler_push_notification_sources: []   # source_types that trigger a completion push; empty = ntfy opt-in only
 istota_scheduler_task_timeout_minutes: 30             # Kill task execution after N minutes

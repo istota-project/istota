@@ -225,6 +225,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `max_subtask_depth` | 3 | Subtask chain depth cap (0 = unlimited) |
 | `max_subtask_prompt_chars` | 8000 | Skip deferred subtasks with prompts over this size (0 = unlimited) |
 | `log_channel_show_skills` | true | Include selected skills in log channel messages |
+| `stream_text_gate_chars` | 200 | Narration gate for streamed answer text on stream surfaces (web/REPL). A text run emits no `text_delta` until it crosses this many chars without an intervening tool call; shorter lead-in narration is discarded at the tool boundary instead of leaking into the answer area. Heuristic — never loses text (a short final answer still arrives via `result`), only animation. 0 disables. Executor logs `stream_gate:` per discard / `stream_gate: LEAK` per gate miss — tune against those. |
 
 ## Other Scheduler Functions
 

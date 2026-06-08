@@ -2665,11 +2665,13 @@ def execute_task(
         # never crosses the gate still arrives via the canonical ``result``
         # event (and the final flush in the ``finally`` releases the held
         # buffer), so gating costs only token-by-token animation on text too
-        # short to benefit. Tunable; promote to a ``[scheduler]`` knob if it
-        # needs live adjustment.
+        # short to benefit. Threshold is the ``[scheduler]`` knob
+        # ``stream_text_gate_chars`` (0 disables — deltas stream immediately,
+        # legacy behaviour); the ``stream_gate:`` telemetry below records every
+        # discard / leak so the value can be tuned against production.
         _DELTA_FLUSH_MS = 250
         _DELTA_FLUSH_CHARS = 120
-        _DELTA_GATE_CHARS = 200
+        _DELTA_GATE_CHARS = config.scheduler.stream_text_gate_chars
         _delta_buf: list[str] = []
         # ``unlocked``: this text run has crossed the narration gate; deltas now
         # stream live. Reset to False at every tool boundary (new run re-gates).
@@ -2709,6 +2711,10 @@ def execute_task(
                 # before the ceiling discards the buffer; crossing it unlocks.
                 if _delta_state["chars"] >= _DELTA_GATE_CHARS:
                     _delta_state["unlocked"] = True
+                    logger.debug(
+                        "stream_gate: unlocked at %d chars (task %s, gate=%d)",
+                        _delta_state["chars"], task.id, _DELTA_GATE_CHARS,
+                    )
                     _flush_deltas()
                 return
             now = time.monotonic()
@@ -2727,6 +2733,28 @@ def execute_task(
             # discarded — it streams normally. This keeps narration out of the
             # prominent answer area entirely; only reasoning + tool actions
             # land in the activity chip.
+            held = _delta_state["chars"]
+            if _delta_state["unlocked"]:
+                # This run already streamed before the tool boundary: narration
+                # crossed the gate and leaked into the answer area (the frontend
+                # settles it into the chip, but it flashed). The gate is too low
+                # for this narration; `held` is only the unflushed remainder, so
+                # the leaked total is larger. Counts the gate's misses — grep
+                # `stream_gate: LEAK` to see whether the knob needs raising.
+                logger.info(
+                    "stream_gate: LEAK — streamed narration crossed gate=%d "
+                    "before a tool boundary (task %s, +%d unflushed)",
+                    _DELTA_GATE_CHARS, task.id, held,
+                )
+            elif held:
+                # Normal case: narration stayed under the gate and is dropped
+                # intact, never reaching the answer area. `held` samples real
+                # narration length — the distribution to tune the gate against.
+                logger.debug(
+                    "stream_gate: discarded %d chars of held narration at a "
+                    "tool boundary (task %s, gate=%d)",
+                    held, task.id, _DELTA_GATE_CHARS,
+                )
             _delta_buf.clear()
             _delta_state["chars"] = 0
             _delta_state["last_flush"] = time.monotonic()

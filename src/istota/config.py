@@ -121,6 +121,15 @@ class SchedulerConfig:
     progress_show_tool_use: bool = True    # emit tool_start / tool_end events
     progress_show_text: bool = False       # emit progress_text events (noisy)
     event_log_enabled: bool = True         # write events to task_events table (kill-switch)
+    # Narration gate for streamed answer text (stream surfaces — web/repl). A
+    # text run emits no text_delta until it crosses this many chars without an
+    # intervening tool call; lead-in narration ("Let me check…") stays under it
+    # and is discarded at the tool boundary. Higher = fewer narration leaks but
+    # short answers token-stream less (they still arrive whole via `result`);
+    # lower = more answers animate but longer narration can leak. Watch the
+    # `stream_gate:` logs to tune. 0 disables the gate (legacy: deltas stream
+    # immediately, narration can leak).
+    stream_text_gate_chars: int = 200
     push_notification_threshold_seconds: int = 30  # min task duration before push fires
     push_notification_sources: list[str] = field(default_factory=list)  # source_types that trigger a push; empty = ntfy opt-in only (never a default surface)
     task_timeout_minutes: int = 30  # kill task execution after this
@@ -1036,6 +1045,7 @@ def load_config(config_path: Path | None = None) -> Config:
             progress_show_tool_use=sched.get("progress_show_tool_use", True),
             progress_show_text=sched.get("progress_show_text", False),
             event_log_enabled=sched.get("event_log_enabled", True),
+            stream_text_gate_chars=sched.get("stream_text_gate_chars", 200),
             push_notification_threshold_seconds=sched.get("push_notification_threshold_seconds", 30),
             push_notification_sources=sched.get("push_notification_sources", []),
             task_timeout_minutes=sched.get("task_timeout_minutes", 30),
