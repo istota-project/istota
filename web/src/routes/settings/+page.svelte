@@ -143,11 +143,6 @@
 		return s && s.length ? s : BUILTIN_SURFACES;
 	}
 
-	// Friendly labels for surface names that aren't self-explanatory.
-	function surfaceLabel(s: string): string {
-		return s === 'web' ? 'Web chat' : s;
-	}
-
 	// Per-purpose route dropdown. `emptyValue`/`emptyLabel` is the leading no-op
 	// option; `talkLabel` spells out where the bare `talk` surface resolves for
 	// this purpose (the logs room vs the alerts channel) so it isn't ambiguous.
@@ -161,7 +156,7 @@
 		const { emptyValue = '', emptyLabel = '(default)', talkLabel = 'talk' } = opts;
 		const surfaces = deliverySurfaces();
 		const out: SelectOption[] = [{ value: emptyValue, label: emptyLabel }];
-		for (const s of surfaces) out.push({ value: s, label: s === 'talk' ? talkLabel : surfaceLabel(s) });
+		for (const s of surfaces) out.push({ value: s, label: s === 'talk' ? talkLabel : s });
 		if (current && current !== emptyValue && !surfaces.includes(current))
 			out.push({ value: current, label: current });
 		return out;
@@ -171,7 +166,7 @@
 	// always a default), plus the current value if it's a custom descriptor.
 	function destinationOptions(current: string): SelectOption[] {
 		const surfaces = deliverySurfaces();
-		const out: SelectOption[] = surfaces.map((s) => ({ value: s, label: surfaceLabel(s) }));
+		const out: SelectOption[] = surfaces.map((s) => ({ value: s, label: s }));
 		if (current && !surfaces.includes(current)) out.push({ value: current, label: current });
 		return out;
 	}
@@ -763,7 +758,7 @@
 					<SettingsField label="Output">
 						<select bind:value={newBriefing.output}>
 							{#each briefingOutputs as opt (opt)}
-								<option value={opt}>{surfaceLabel(opt)}</option>
+								<option value={opt}>{opt}</option>
 							{/each}
 						</select>
 					</SettingsField>
