@@ -84,7 +84,7 @@ overrides plug in for free via `_roles.py`.
 | `effort: str` | `task.effort` or `config.effort`; brain default if empty |
 | `custom_system_prompt_path: Path \| None` | Override system prompt (claude_code-specific knob) |
 | `streaming: bool` | True when `on_progress` callback is supplied |
-| `on_progress: Callable[[StreamEvent], None] \| None` | Per-event callback. Widened `StreamEvent` union (task-event-streaming spec): `ToolUseEvent` (carries a real `tool_call_id`) \| `TextEvent` \| `TextDeltaEvent` (NativeBrain only — per-token incremental answer text) \| `ResultEvent` \| `ContextManagementEvent` \| `ToolEndEvent` (NativeBrain only — `success` + loop-measured `duration_ms`) \| `ToolProgressEvent` (NativeBrain only). The executor's `_on_brain_event` adapter maps these to `TaskEvent`s via `EventWriter` (`istota/events.py`): `TextDeltaEvent` → coalesced `text_delta` on stream surfaces (web/repl), dropped on push surfaces. A loop-based brain MUST dispatch this callback off its event loop (NativeBrain's `run_in_executor` hop) so the synchronous Talk/log subscribers' `asyncio.run` calls don't collide (ISSUE-111 generalized). NativeBrain suppresses the **final** turn's `TextEvent` (its text becomes the result) but emits each *intermediate* turn's text as a `TextEvent` *and* streams every turn's text as `TextDeltaEvent`s; the brain stays surface-agnostic and the executor dedupes deltas-vs-`TextEvent` per surface (stream: keep deltas, drop the redundant intermediate `TextEvent`; push: drop deltas, forward intermediate `TextEvent`s as `progress_text`). |
+| `on_progress: Callable[[StreamEvent], None] \| None` | Per-event callback. Widened `StreamEvent` union (task-event-streaming spec): `ToolUseEvent` (carries a real `tool_call_id`) \| `TextEvent` \| `TextDeltaEvent` (per-token incremental answer text — NativeBrain per provider `TextDelta`, ClaudeCodeBrain via the CLI's `--include-partial-messages` `text_delta` frames) \| `ResultEvent` \| `ContextManagementEvent` \| `ToolEndEvent` (NativeBrain only — `success` + loop-measured `duration_ms`) \| `ToolProgressEvent` (NativeBrain only) \| `ThinkingEvent` (whole reasoning block) \| `ThinkingDeltaEvent` (incremental reasoning — NativeBrain `reasoning` deltas, ClaudeCodeBrain `thinking_delta` partials). The executor's `_on_brain_event` adapter maps these to `TaskEvent`s via `EventWriter` (`istota/events.py`): `TextDeltaEvent` → coalesced `text_delta` on stream surfaces (web/repl), dropped on push surfaces; `ThinkingDeltaEvent`/`ThinkingEvent` → coalesced `thinking`, stream surfaces only. A loop-based brain MUST dispatch this callback off its event loop (NativeBrain's `run_in_executor` hop) so the synchronous Talk/log subscribers' `asyncio.run` calls don't collide (ISSUE-111 generalized). Both brains stay surface-agnostic — they emit both per-token deltas *and* whole-block `TextEvent`/`ThinkingEvent`s; the executor dedupes deltas-vs-whole-block per surface (stream: keep deltas, drop the redundant whole block; push: drop deltas, forward intermediate `TextEvent`s as `progress_text`, drop thinking). NativeBrain additionally suppresses the **final** turn's `TextEvent` (its text becomes the result). |
 | `cancel_check: Callable[[], bool] \| None` | Polled between events; True → kill subprocess, return `cancelled` |
 | `on_pid: Callable[[int], None] \| None` | Called once with subprocess PID after spawn |
 | `sandbox_wrap: Callable[[list[str]], list[str]] \| None` | Wraps raw cmd (e.g. with bwrap); no-op if not provided |
@@ -104,7 +104,11 @@ Wraps the `claude` CLI subprocess. Owns:
 
 1. **Command construction** — `claude -p - --allowedTools ... --disallowedTools Agent Workflow`,
    plus optional `--model`, `--effort`, `--system-prompt-file`, and
-   (in streaming mode) `--output-format stream-json --verbose`.
+   (in streaming mode) `--output-format stream-json --verbose
+   --include-partial-messages`. The last flag makes the CLI emit answer /
+   reasoning text token-by-token as `stream_event` frames *before* the whole
+   `assistant` block lands — without it the final response would arrive as one
+   block and dump all at once on stream surfaces.
 2. **Sandbox wrap** — calls `req.sandbox_wrap(cmd)` if provided so the
    executor's bwrap configuration applies without the brain knowing about
    bubblewrap.
@@ -114,7 +118,10 @@ Wraps the `claude` CLI subprocess. Owns:
 4. **Stream parsing** — line-by-line via `make_stream_parser()` from
    `_events.py`, dispatching ResultEvent → final result, ToolUseEvent /
    TextEvent → trace + on_progress, ContextManagementEvent → `cm_boundary`
-   marker in trace.
+   marker in trace. The `stream_event` partial frames parse into
+   `TextDeltaEvent` / `ThinkingDeltaEvent` and go to `on_progress` only (never
+   the trace); the trailing whole-block `TextEvent` / `ThinkingEvent` still
+   records the trace and is deduped against the deltas executor-side.
 5. **Cancellation** — polls `req.cancel_check()` between events; final
    re-check after subprocess exit catches SIGTERM-style external kills.
 6. **Timeout** — `threading.Timer` kills the process after

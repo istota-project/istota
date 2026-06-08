@@ -1078,6 +1078,83 @@ class TestStreamSurfaceCoalescing:
         assert "".join(e.payload["text"] for e in thinks) == "Planning the search."
         assert "".join(e.payload["text"] for e in deltas) == "All set."
 
+    @staticmethod
+    def _partial(inner: dict) -> str:
+        return json.dumps({"type": "stream_event", "event": inner, "session_id": "s"}) + "\n"
+
+    def test_partial_text_deltas_stream_and_whole_block_deduped(self, tmp_path):
+        """With --include-partial-messages, ClaudeCodeBrain emits text_delta
+        frames *before* the whole assistant block. The deltas stream on a stream
+        surface; the trailing whole-block TextEvent (same text) is deduped so the
+        answer is not doubled (the bug: final response dumped all at once)."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_text = False
+        task = _make_task(source_type="web")
+
+        answer = ("This is the final answer streamed token by token. " * 6).strip()  # > gate
+        # Three deltas that concatenate to `answer`, then the whole block, result.
+        third = len(answer) // 3
+        chunks = [answer[:third], answer[third:2 * third], answer[2 * third:]]
+        stream_lines = [
+            self._partial({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": c},
+            })
+            for c in chunks
+        ] + [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": answer}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": answer}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, result, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        assert result == answer
+        assert "progress_text" not in rec.kinds()
+        deltas = [e for e in rec.events if e.kind == "text_delta"]
+        assert deltas, "partial frames should produce text_delta events"
+        # Streamed exactly once — the whole-block TextEvent was deduped, not
+        # re-streamed (would be answer*2 if the dedup failed).
+        assert "".join(e.payload["text"] for e in deltas) == answer
+
+    def test_partial_thinking_deltas_stream_and_whole_block_deduped(self, tmp_path):
+        """Thinking deltas from partial frames stream as `thinking`; the trailing
+        whole thinking block is deduped (not double-counted)."""
+        config = _make_config(tmp_path)
+        task = _make_task(source_type="web")
+
+        reasoning = "Let me reason carefully about this step by step. " * 4
+        stream_lines = [
+            self._partial({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": reasoning},
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "content": [
+                    {"type": "thinking", "thinking": reasoning},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m2", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "Answer."}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": "Answer."}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, _r, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        thinks = [e for e in rec.events if e.kind == "thinking"]
+        assert thinks, "partial frames should produce thinking events"
+        # Streamed once — the whole thinking block was deduped, not doubled.
+        assert "".join(e.payload["text"] for e in thinks) == reasoning
+
 
 class TestStreamingStdinDelivery:
     """Regression: the prompt must be written to the subprocess stdin
