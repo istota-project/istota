@@ -1608,6 +1608,50 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.actions_taken is None
 
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_retry_emits_notice_and_keeps_events(self, mock_arun, db_path, tmp_path):
+        # A retry-eligible failure posts a "retrying" progress notice AND keeps
+        # the event log (no longer wiped) so a watching web client survives the
+        # retry and the next attempt's seq stays monotonic. No terminal frame.
+        config = self._make_config(db_path, tmp_path)
+        config.scheduler.event_log_enabled = True
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="hi", user_id="testuser", source_type="web",
+                conversation_token="webtok", output_target="web",
+            )
+
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, workspace_dir=None, **kw):
+            if event_writer is not None:
+                event_writer.emit("task_started")
+                event_writer.emit("tool_start", {
+                    "tool_name": "Read", "description": "📄 Reading f",
+                    "tool_call_id": "t1",
+                })
+            return (False, "Something broke", None, None)
+
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec):
+            result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is False
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+            events = db.get_task_events(conn, task_id)
+        assert task.status == "pending" and task.attempt_count == 1
+        kinds = [e["kind"] for e in events]
+        # Prior attempt's events survive (NOT wiped) …
+        assert "task_started" in kinds and "tool_start" in kinds
+        # … a retrying notice was appended, and no terminal frame yet.
+        assert "progress_text" in kinds
+        assert "done" not in kinds and "error" not in kinds
+        notice = [e for e in events if e["kind"] == "progress_text"][-1]
+        assert "retrying" in notice["payload"]["text"].lower()
+        # seq stayed monotonic across the appended notice.
+        assert [e["seq"] for e in events] == sorted(e["seq"] for e in events)
+
     @patch("istota.scheduler.execute_task", return_value=(False, "Something broke", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_failure_retries_task(self, mock_arun, mock_exec, db_path, tmp_path):

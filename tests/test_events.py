@@ -171,6 +171,33 @@ class TestDeleteTaskEvents:
         assert [r["seq"] for r in rows] == [1, 2]
         assert rows[1]["payload"]["text"] == "ok"  # only the retry's events survive
 
+    def test_resumes_seq_without_delete(self, db_path):
+        # New retry behavior: the log is NOT wiped, so a fresh writer for the
+        # same task resumes seq from the max (keeps a watching web client's
+        # resume cursor valid) instead of restarting at 1 and colliding.
+        w1 = EventWriter(30, str(db_path))
+        w1.emit("task_started")        # seq 1
+        w1.emit("tool_start", {})      # seq 2
+        w2 = EventWriter(30, str(db_path))  # same task id, no delete between
+        ev = w2.emit("progress_text", {"text": "retrying"})
+        assert ev.seq == 3
+        with db.get_db(db_path) as conn:
+            rows = db.get_task_events(conn, 30)
+        assert [r["seq"] for r in rows] == [1, 2, 3]
+
+
+class TestMaxTaskEventSeq:
+    def test_zero_when_no_events(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.get_max_task_event_seq(conn, 99) == 0
+
+    def test_returns_max(self, db_path):
+        w = EventWriter(40, str(db_path))
+        w.emit("task_started")
+        w.emit("tool_start", {})
+        with db.get_db(db_path) as conn:
+            assert db.get_max_task_event_seq(conn, 40) == 2
+
 
 class TestDeleteTaskEventsByKind:
     def test_deletes_only_named_kind_for_task(self, db_path):
