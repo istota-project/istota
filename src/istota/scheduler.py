@@ -1597,11 +1597,13 @@ def process_one_task(
                 _purge_deferred_files_for_retry(
                     task, get_user_temp_dir(config, task.user_id),
                 )
-                # Same hazard for the event log: the task keeps its id across
-                # retries, so a fresh EventWriter's seq=1 would collide with
-                # this attempt's surviving rows on UNIQUE(task_id, seq). Clear
-                # the slate so the log reflects the final attempt only.
-                db.delete_task_events(conn, task_id)
+                # The event log is intentionally NOT wiped here: keeping it lets
+                # a watching web client survive the retry (its resume cursor
+                # stays valid) and see a "retrying" notice. The next attempt's
+                # EventWriter resumes seq via get_max_task_event_seq, so there's
+                # no UNIQUE(task_id, seq) collision. The retry notice itself is
+                # emitted from the terminal-events block below (outside this DB
+                # transaction, so the writer's own connection can't contend).
             else:
                 db.update_task_status(conn, task_id, "failed", error=result)
                 db.log_task(conn, task_id, "error", f"Task failed permanently: {result[:500]}")
@@ -1640,8 +1642,10 @@ def process_one_task(
 
     # Emit terminal task events + notify subscribers (brain path only). On a
     # retry-eligible failure the task isn't done — emit nothing terminal; the
-    # event rows for this attempt were deleted in the retry branch so the next
-    # attempt's seq counter starts clean (UNIQUE(task_id, seq) collision fix).
+    # On a retry-eligible failure the task isn't done — emit a "retrying" notice
+    # (not a terminal frame) instead, so a watching web client sees why it's
+    # still working rather than a silent spinner. The log is no longer wiped, so
+    # this notice and the next attempt's events (seq resumed) reach the client.
     if event_writer is not None:
         is_cancelled = (not success) and result == "Cancelled by user"
         is_policy = (not success) and _is_policy_refusal(result)
@@ -1653,6 +1657,15 @@ def process_one_task(
             and not is_oom
             and task.attempt_count < task.max_attempts - 1
         )
+        if will_retry:
+            # Mirror the backoff the retry branch set (1, 4, 16 min). Reuses the
+            # progress_text kind — the frontend already renders it as the live
+            # progress line; it shows during the backoff gap, then the next
+            # attempt's task_started replaces it with the fresh ack verb.
+            delay = 1 << (task.attempt_count * 2)
+            event_writer.emit("progress_text", {
+                "text": f"⏳ Attempt failed — retrying in {delay} min…",
+            })
         if not will_retry:
             if is_confirmation_request:
                 event_writer.emit("confirmation", {"prompt": result[:8000]})

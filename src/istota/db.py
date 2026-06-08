@@ -1455,13 +1455,26 @@ def get_task_events(
     return events
 
 
+def get_max_task_event_seq(conn: sqlite3.Connection, task_id: int) -> int:
+    """The highest ``seq`` written for a task, or 0 if it has no events.
+
+    Lets a retry's fresh ``EventWriter`` resume the counter instead of restarting
+    at 1 — keeping ``seq`` monotonic across attempts so a watching web client's
+    resume cursor stays valid (the log is no longer wiped between attempts) and
+    UNIQUE(task_id, seq) never collides.
+    """
+    row = conn.execute(
+        "SELECT MAX(seq) FROM task_events WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    return (row[0] or 0) if row else 0
+
+
 def delete_task_events(conn: sqlite3.Connection, task_id: int) -> int:
     """Delete all events for a task. Returns the row count.
 
-    Called on retry (a task keeps its id across attempts; a fresh EventWriter
-    resets its seq counter to 1, which would collide with the prior attempt's
-    surviving rows on UNIQUE(task_id, seq)). Clearing the slate makes the event
-    log reflect the final attempt only — matching deferred-op behavior.
+    Used by retention cleanup. (No longer called on retry — the event log now
+    spans all attempts so the live stream survives a retry; ``EventWriter``
+    resumes ``seq`` via ``get_max_task_event_seq`` instead of resetting to 1.)
     """
     cursor = conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
     return cursor.rowcount

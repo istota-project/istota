@@ -182,9 +182,22 @@ class EventWriter:
         # False the DB write is skipped but subscribers are still notified, so
         # Talk progress keeps working with the table offline.
         self._enabled = enabled
-        self._seq = 0
+        # Resume seq from any rows already logged for this task so it stays
+        # monotonic across retries (the log is no longer wiped between attempts).
+        # A fresh task has none → 0. Best-effort: a read failure falls back to 0,
+        # at worst risking a seq collision on the rare retry-with-unreadable-DB.
+        self._seq = self._resume_seq() if enabled else 0
         self._start_time = time.monotonic()
         self._subscribers: list[EventSubscriber] = []
+
+    def _resume_seq(self) -> int:
+        try:
+            from . import db
+            with db.get_db(self._db_path) as conn:
+                return db.get_max_task_event_seq(conn, self._task_id)
+        except Exception:
+            logger.debug("EventWriter seq resume failed", exc_info=True)
+            return 0
 
     def subscribe(self, subscriber: EventSubscriber) -> None:
         self._subscribers.append(subscriber)
