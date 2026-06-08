@@ -28,6 +28,24 @@
 		textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
 	}
 
+	// iOS Safari auto-zooms when a focused input renders below 16px. Rather than
+	// inflating the field's font (which throws off its height vs. the buttons),
+	// pin the viewport's maximum-scale only while the textarea is focused, then
+	// restore it on blur so pinch-to-zoom keeps working everywhere else.
+	const VIEWPORT_DEFAULT = 'width=device-width, initial-scale=1';
+	const VIEWPORT_NO_ZOOM = 'width=device-width, initial-scale=1, maximum-scale=1';
+
+	function setViewport(content: string) {
+		const meta = document.querySelector('meta[name="viewport"]');
+		if (meta) meta.setAttribute('content', content);
+	}
+	function onFocus() {
+		setViewport(VIEWPORT_NO_ZOOM);
+	}
+	function onBlur() {
+		setViewport(VIEWPORT_DEFAULT);
+	}
+
 	async function upload(files: FileList | File[]) {
 		uploadError = '';
 		for (const file of Array.from(files)) {
@@ -119,6 +137,8 @@
 			oninput={autoGrow}
 			onkeydown={onKeydown}
 			onpaste={onPaste}
+			onfocus={onFocus}
+			onblur={onBlur}
 			{placeholder}
 			rows="1"
 			aria-label="Message"
@@ -155,6 +175,8 @@
 		flex: 1;
 		resize: none;
 		max-height: 200px;
+		overflow-y: auto;
+		scrollbar-width: none;
 		background: var(--surface-card);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-card);
@@ -165,6 +187,7 @@
 		padding: 0.5rem 0.65rem;
 		outline: none;
 	}
+	textarea::-webkit-scrollbar { display: none; }
 	textarea:focus { border-color: var(--text-dim); }
 
 	.icon-btn {
