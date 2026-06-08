@@ -129,17 +129,22 @@ function mockTaskEvents(task: MockChatTask) {
 		'- The real bot runs your message through the scheduler.\n' +
 		'- Streaming, tools, and `markdown` all render here.\n\n' +
 		'Try `!help` for commands.';
+	// Tools run for a continuous ~6s window (c1 800→3400ms, c2 3000→6500ms, so at
+	// least one is always running 800–6500ms) so the ToolStrip's active animation
+	// is visible long enough to preview in the dev server.
 	return [
 		{ seq: 1, kind: 'task_started', payload: { text: 'On it...' }, at: 0 },
-		{ seq: 2, kind: 'progress_text', payload: { text: 'Looking into it…' }, at: 300 },
-		{ seq: 3, kind: 'tool_start', payload: { tool_name: 'calendar', description: 'calendar list --date today', tool_call_id: 'c1' }, at: 700 },
-		{ seq: 4, kind: 'tool_end', payload: { tool_name: 'calendar', tool_call_id: 'c1', success: true, duration_ms: 420 }, at: 1300 },
-		{ seq: 5, kind: 'progress_text', payload: { text: 'Writing the answer…' }, at: 1600 },
-		{ seq: 6, kind: 'result', payload: { text: reply, truncated: false }, at: 2100 },
-		{ seq: 7, kind: 'done', payload: { stop_reason: 'completed', duration_seconds: 2.1 }, at: 2200 },
+		{ seq: 2, kind: 'progress_text', payload: { text: 'Looking into it…' }, at: 400 },
+		{ seq: 3, kind: 'tool_start', payload: { tool_name: 'Bash', description: '⚙️ calendar list --date today', tool_call_id: 'c1' }, at: 800 },
+		{ seq: 4, kind: 'tool_start', payload: { tool_name: 'WebFetch', description: '🌐 browse get https://example.com', tool_call_id: 'c2' }, at: 3000 },
+		{ seq: 5, kind: 'tool_end', payload: { tool_name: 'Bash', tool_call_id: 'c1', success: true, duration_ms: 2600 }, at: 3400 },
+		{ seq: 6, kind: 'tool_end', payload: { tool_name: 'WebFetch', tool_call_id: 'c2', success: true, duration_ms: 3500 }, at: 6500 },
+		{ seq: 7, kind: 'progress_text', payload: { text: 'Writing the answer…' }, at: 6800 },
+		{ seq: 8, kind: 'result', payload: { text: reply, truncated: false }, at: 7300 },
+		{ seq: 9, kind: 'done', payload: { stop_reason: 'completed', duration_seconds: 7.4 }, at: 7400 },
 	];
 }
-const MOCK_TASK_DONE_MS = 2200;
+const MOCK_TASK_DONE_MS = 7400;
 
 // Mock !command output so the command rendering (lists, code, tables) can be
 // previewed without a live backend. Returns the inline markdown for a command,

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Loader, Check, X, ChevronRight, ChevronDown } from 'lucide-svelte';
+	import { Check, X, ChevronRight, ChevronDown } from 'lucide-svelte';
 	import type { ToolEntry } from '$lib/stores/chat';
 
 	let { tools }: { tools: ToolEntry[] } = $props();
@@ -21,17 +21,13 @@
 	);
 </script>
 
-<div class="tool-strip" class:open={expanded}>
+<div class="tool-strip" class:open={expanded} class:active={anyRunning}>
 	<button class="head" onclick={() => (expanded = !expanded)} type="button" aria-expanded={expanded}>
-		<span class="status">
-			{#if anyRunning}
-				<Loader size={13} class="spin" />
-			{:else if anyFailed}
-				<X size={13} />
-			{:else}
-				<Check size={13} />
-			{/if}
-		</span>
+		{#if !anyRunning}
+			<span class="status">
+				{#if anyFailed}<X size={13} />{:else}<Check size={13} />{/if}
+			</span>
+		{/if}
 		<span class="summary">{summary}</span>
 		<span class="chev">
 			{#if expanded}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
@@ -42,15 +38,11 @@
 		<div class="list">
 			{#each tools as tool (tool.id)}
 				<div class="row">
-					<span class="status">
-						{#if tool.running}
-							<Loader size={12} class="spin" />
-						{:else if tool.success === false}
-							<X size={12} />
-						{:else}
-							<Check size={12} />
-						{/if}
-					</span>
+					{#if !tool.running}
+						<span class="status">
+							{#if tool.success === false}<X size={12} />{:else}<Check size={12} />{/if}
+						</span>
+					{/if}
 					<span class="row-text">
 						<span class="row-desc">{tool.description || tool.name}</span>
 						{#if tool.progress}<span class="row-progress">{tool.progress}</span>{/if}
@@ -63,8 +55,7 @@
 
 <style>
 	.tool-strip {
-		margin-bottom: 0.45rem;
-		border: 1px solid var(--border-subtle);
+		margin: 0.45rem 0;
 		border-radius: 0.4rem;
 		background: var(--surface-badge);
 		max-width: 100%;
@@ -72,6 +63,26 @@
 		min-width: 0;
 	}
 	.tool-strip.open { width: 100%; }
+
+	/* Active state: a subtle amber gradient sweeps across the strip instead of a
+	   spinning icon. */
+	.tool-strip.active {
+		background: linear-gradient(
+			100deg,
+			var(--surface-badge) 20%,
+			rgba(255, 255, 255, 0.11) 50%,
+			var(--surface-badge) 80%
+		);
+		background-size: 200% 100%;
+		animation: tool-pulse 1.5s ease-in-out infinite;
+	}
+	@keyframes tool-pulse {
+		from { background-position: 150% 0; }
+		to { background-position: -150% 0; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.tool-strip.active { animation: none; background: var(--surface-badge); }
+	}
 
 	.head {
 		display: flex;
@@ -124,7 +135,4 @@
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
-
-	:global(.tool-strip .spin) { animation: tool-spin 1s linear infinite; }
-	@keyframes tool-spin { to { transform: rotate(360deg); } }
 </style>
