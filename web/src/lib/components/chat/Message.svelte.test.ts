@@ -96,8 +96,9 @@ describe('live streaming reaches the DOM (Message + keyed each)', () => {
 		expect(body?.textContent).toContain('PROMINENT_ANSWER');
 		// The reasoning must NOT be in the prominent answer area …
 		expect(body?.textContent ?? '').not.toContain('REASONING_LEADIN');
-		// … it lives inside the activity chip instead (with the 💭 marker).
+		// … it lives inside the activity chip instead (dim/italic, no emoji).
 		const chip = container.querySelector('.activity');
-		expect(chip?.textContent ?? '').toContain('💭');
+		expect(chip?.textContent ?? '').toContain('REASONING_LEADIN');
+		expect(chip?.textContent ?? '').not.toContain('💭');
 	});
 });

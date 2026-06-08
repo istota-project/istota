@@ -211,7 +211,15 @@ function createSession(): ChatSession {
 		};
 
 		const handle = (kind: string, dataStr: string, seq: number) => {
-			if (seq) lastSeq = Math.max(lastSeq, seq);
+			// Idempotent on seq. An SSE reconnect/replay (Last-Event-ID) or a brief
+			// SSE↔poll overlap can redeliver an already-applied event; seq is
+			// writer-assigned and monotonic per task, so anything at-or-below the
+			// high-water mark is a duplicate. (Poll already fetches seq > lastSeq;
+			// this guards the SSE branch too.) seq-less events (0) bypass the guard.
+			if (seq) {
+				if (seq <= lastSeq) return;
+				lastSeq = seq;
+			}
 			let payload: Record<string, any> = {};
 			try { payload = JSON.parse(dataStr); } catch { /* keep {} */ }
 			// A reducer/render throw must never wedge the stream — keep advancing
