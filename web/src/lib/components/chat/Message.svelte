@@ -338,6 +338,9 @@
 	:global(:root[data-theme='light']) .cmd-output.error {
 		color: #c0271d;
 	}
+	/* The amber accent darkens in light mode, so the bot initial needs light
+	   text for contrast (dark mode keeps its dark initial on bright amber). */
+	:global(:root[data-theme='light']) .avatar.bot { color: #fff; }
 	:global(:root[data-theme='light']) .markdown :global(code),
 	:global(:root[data-theme='light']) .markdown :global(pre) {
 		background: #ececef;
