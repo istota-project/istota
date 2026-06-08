@@ -784,6 +784,11 @@
 	:global(:root[data-theme='light'] .current-position-marker) {
 		background: #16a34a;
 	}
+	/* Keep the browser-geolocation marker orange on light tiles too — the green
+	   override above otherwise wins on specificity and recolors it. */
+	:global(:root[data-theme='light'] .current-position-marker.browser) {
+		background: #ea580c;
+	}
 	:global(:root[data-theme='light'] .maplibregl-ctrl-group) {
 		background: #fff !important;
 		border-color: var(--border-default) !important;
