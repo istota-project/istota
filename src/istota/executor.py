@@ -2684,6 +2684,13 @@ def execute_task(
         # TextEvent on a stream surface once deltas have flowed, and forwards it
         # as progress_text on a push surface (where deltas were dropped).
         _delta_seen = {"value": False}
+        # Symmetric flag for reasoning: True once any ThinkingDeltaEvent has
+        # streamed. A brain that streams thinking deltas (NativeBrain, or
+        # ClaudeCodeBrain with --include-partial-messages) may *also* emit the
+        # whole-block ThinkingEvent afterward; on a stream surface that whole
+        # block is then a redundant re-render, so it is dropped here. Thinking is
+        # stream-surface-only either way (push drops both), so no push fallback.
+        _thinking_seen = {"value": False}
 
         def _flush_deltas() -> None:
             if event_writer is None or not _delta_buf:
@@ -2826,14 +2833,20 @@ def execute_task(
                     "text": event.text,
                 })
             elif isinstance(event, ThinkingDeltaEvent):
-                # NativeBrain incremental reasoning. Stream surfaces only; a push
-                # task drops it (thinking is web/repl-only — no progress_text
+                # Incremental reasoning (NativeBrain, or ClaudeCodeBrain with
+                # --include-partial-messages). Stream surfaces only; a push task
+                # drops it (thinking is web/repl-only — no progress_text
                 # fallback).
                 if is_stream_surface:
+                    _thinking_seen["value"] = True
                     _buffer_thinking(event.thinking)
             elif isinstance(event, ThinkingEvent):
-                # ClaudeCodeBrain whole reasoning block. Stream surfaces only.
+                # Whole reasoning block. Stream surfaces only. Dropped when
+                # thinking deltas already carried this turn's reasoning live
+                # (mirrors the TextEvent-vs-deltas dedup above).
                 if is_stream_surface:
+                    if _thinking_seen["value"]:
+                        return
                     _buffer_thinking(event.text)
             elif isinstance(event, TextDeltaEvent):
                 # NativeBrain incremental answer text. Stream surfaces only; a

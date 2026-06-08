@@ -24,7 +24,9 @@ from ._events import (
     ContextManagementEvent,
     ResultEvent,
     StreamEvent,
+    TextDeltaEvent,
     TextEvent,
+    ThinkingDeltaEvent,
     ThinkingEvent,
     ToolUseEvent,
     make_stream_parser,
@@ -281,7 +283,15 @@ class ClaudeCodeBrain:
         if req.custom_system_prompt_path and req.custom_system_prompt_path.exists():
             cmd += ["--system-prompt-file", str(req.custom_system_prompt_path)]
         if req.streaming:
-            cmd += ["--output-format", "stream-json", "--verbose"]
+            # --include-partial-messages emits content deltas as they arrive so
+            # the final answer streams token-by-token on stream surfaces instead
+            # of landing as one whole block. Without it the CLI only emits
+            # complete ``assistant`` messages, so the answer would dump all at
+            # once (the whole-block TextEvent). Parsed in brain._events.
+            cmd += [
+                "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
+            ]
         return cmd
 
     # --- non-streaming path ---
@@ -480,12 +490,24 @@ class ClaudeCodeBrain:
                     execution_trace.append({"type": "tool", "text": event.description})
                 elif isinstance(event, TextEvent):
                     execution_trace.append({"type": "text", "text": event.text})
-                # ThinkingEvent is intentionally NOT added to execution_trace:
-                # reasoning is a live-stream-only concern (a ``thinking`` task
-                # event on stream surfaces), never persisted in the trace, so
-                # result composition / history reconstruction stay unchanged.
+                # ThinkingEvent / TextDeltaEvent / ThinkingDeltaEvent are
+                # intentionally NOT added to execution_trace: reasoning and the
+                # token-level answer deltas are live-stream-only concerns
+                # (``thinking`` / ``text_delta`` task events on stream surfaces),
+                # never persisted in the trace, so result composition / history
+                # reconstruction stay unchanged. The whole-block TextEvent above
+                # is the trace's record of the answer text.
 
-                if isinstance(event, (ToolUseEvent, TextEvent, ThinkingEvent)) and req.on_progress is not None:
+                if isinstance(
+                    event,
+                    (
+                        ToolUseEvent,
+                        TextEvent,
+                        ThinkingEvent,
+                        TextDeltaEvent,
+                        ThinkingDeltaEvent,
+                    ),
+                ) and req.on_progress is not None:
                     try:
                         req.on_progress(event)
                     except Exception:

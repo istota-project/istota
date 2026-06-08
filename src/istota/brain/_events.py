@@ -45,10 +45,11 @@ class TextDeltaEvent:
 
     Unlike ``TextEvent`` (a complete text block), this carries one streaming
     delta as it is produced. NativeBrain emits these per provider ``TextDelta``;
-    the executor coalesces them into ``text_delta`` task events for stream
-    surfaces only (push surfaces never see them). ClaudeCodeBrain does not emit
-    these — the executor routes its block-level ``TextEvent``s through the same
-    coalescer instead (coarse streaming)."""
+    ClaudeCodeBrain emits them by parsing the CLI's ``--include-partial-messages``
+    ``stream_event`` frames (``content_block_delta`` / ``text_delta``). The
+    executor coalesces them into ``text_delta`` task events for stream surfaces
+    only (push surfaces never see them); the trailing whole-block ``TextEvent``
+    that follows the same text is deduped once any delta has flowed."""
     text: str
 
 
@@ -84,20 +85,22 @@ class ToolProgressEvent:
 
 @dataclass
 class ThinkingEvent:
-    """A complete extended-thinking / reasoning block. ClaudeCodeBrain only —
-    the ``claude`` CLI emits ``thinking`` content blocks as whole snapshots (one
-    per block, deduped by block id), not token deltas. The executor maps this to
-    a ``thinking`` task event on stream surfaces only (web/repl); push surfaces
-    drop it."""
+    """A complete extended-thinking / reasoning block. ClaudeCodeBrain emits the
+    ``claude`` CLI's whole ``thinking`` content blocks (one per block, deduped by
+    block id). The executor maps this to a ``thinking`` task event on stream
+    surfaces only (web/repl); push surfaces drop it. When the CLI also streams
+    ``thinking_delta`` partials (``--include-partial-messages``), the executor
+    drops this whole block as redundant once any ``ThinkingDeltaEvent`` flowed."""
     text: str
 
 
 @dataclass
 class ThinkingDeltaEvent:
     """An *incremental* fragment of the assistant's extended thinking. NativeBrain
-    only — the OpenAI-compat provider streams ``reasoning_content`` / ``reasoning``
-    deltas, which the loop forwards token-by-token. The executor coalesces these
-    into ``thinking`` task events on stream surfaces only."""
+    emits these as the OpenAI-compat provider streams ``reasoning_content`` /
+    ``reasoning`` deltas; ClaudeCodeBrain emits them from the CLI's
+    ``--include-partial-messages`` ``thinking_delta`` frames. The executor
+    coalesces these into ``thinking`` task events on stream surfaces only."""
     thinking: str
 
 
@@ -160,6 +163,30 @@ def parse_stream_line(
         success = data.get("subtype") == "success"
         text = data.get("result", "")
         return ResultEvent(success=success, text=text)
+
+    # Partial-message frames (--include-partial-messages). These wrap the raw
+    # Anthropic SSE events under ``event`` and carry the answer/thinking text
+    # token-by-token *before* the whole ``assistant`` block lands. We surface
+    # only the content deltas as TextDelta/ThinkingDelta so a stream surface
+    # (web/repl) can render the final response live instead of all-at-once; the
+    # later whole-block TextEvent/ThinkingEvent is deduped against these by the
+    # executor (it alone knows the surface). All other partial frames
+    # (message_start/_stop, content_block_start/_stop, message_delta, tool-input
+    # deltas) map to no user-visible event.
+    if event_type == "stream_event":
+        inner = data.get("event", {})
+        if inner.get("type") == "content_block_delta":
+            delta = inner.get("delta", {})
+            delta_type = delta.get("type")
+            if delta_type == "text_delta":
+                text = delta.get("text", "")
+                if text:
+                    return TextDeltaEvent(text=text)
+            elif delta_type == "thinking_delta":
+                thinking = delta.get("thinking", "")
+                if thinking:
+                    return ThinkingDeltaEvent(thinking=thinking)
+        return None
 
     if event_type == "assistant":
         message = data.get("message", {})

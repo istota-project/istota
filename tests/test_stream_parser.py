@@ -5,7 +5,9 @@ import json
 from istota.stream_parser import (
     ContextManagementEvent,
     ResultEvent,
+    TextDeltaEvent,
     TextEvent,
+    ThinkingDeltaEvent,
     ThinkingEvent,
     ToolUseEvent,
     _describe_tool_use,
@@ -383,6 +385,71 @@ class TestParseStreamLine:
         event = parse_stream_line(line)
         assert isinstance(event, ToolUseEvent)
         assert event.description == "⚙️ List files"
+
+
+class TestPartialMessageStreamEvents:
+    """``--include-partial-messages`` emits ``stream_event`` frames carrying
+    content deltas before the whole ``assistant`` block lands."""
+
+    @staticmethod
+    def _frame(inner: dict) -> str:
+        return json.dumps({"type": "stream_event", "event": inner, "session_id": "s"})
+
+    def test_text_delta_yields_text_delta_event(self):
+        line = self._frame({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello there"},
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, TextDeltaEvent)
+        assert event.text == "Hello there"
+
+    def test_thinking_delta_yields_thinking_delta_event(self):
+        line = self._frame({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Let me consider"},
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, ThinkingDeltaEvent)
+        assert event.thinking == "Let me consider"
+
+    def test_empty_text_delta_skipped(self):
+        line = self._frame({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": ""},
+        })
+        assert parse_stream_line(line) is None
+
+    def test_message_start_yields_no_event(self):
+        line = self._frame({"type": "message_start", "message": {"id": "m"}})
+        assert parse_stream_line(line) is None
+
+    def test_content_block_start_yields_no_event(self):
+        line = self._frame({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        assert parse_stream_line(line) is None
+
+    def test_content_block_stop_and_message_stop_yield_no_event(self):
+        assert parse_stream_line(
+            self._frame({"type": "content_block_stop", "index": 0})
+        ) is None
+        assert parse_stream_line(self._frame({"type": "message_stop"})) is None
+
+    def test_tool_input_json_delta_yields_no_event(self):
+        # Tool-call arguments stream as input_json_delta; we surface the tool via
+        # the whole assistant block, not the partial frames.
+        line = self._frame({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": '{"command":'},
+        })
+        assert parse_stream_line(line) is None
 
 
 # --- Integration-style: simulate a full stream ---
