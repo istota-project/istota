@@ -131,7 +131,7 @@
 		/* Anchor for the absolutely-positioned .meta-footer (top-right). */
 		position: relative;
 	}
-	.msg:not(.continuation) { margin-top: 0.7rem; padding-top: 0.15rem; }
+	.msg:not(.continuation) { margin-top: 0.7rem; padding-top: 0.45rem; }
 	.msg:hover { background: var(--surface-card); }
 	.msg:hover .hover-time { opacity: 1; }
 	.msg:hover .meta-footer { opacity: 1; }
@@ -268,11 +268,11 @@
 	}
 	@keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
-	/* Markdown content spacing — kept tight for chat. */
-	.markdown :global(p) { margin: 0 0 0.5rem; }
+	/* Markdown content spacing — roomy enough to separate blocks clearly. */
+	.markdown :global(p) { margin: 0 0 1rem; }
 	.markdown :global(p:last-child) { margin-bottom: 0; }
 	.markdown :global(ul),
-	.markdown :global(ol) { margin: 0 0 0.5rem; padding-left: 1.3rem; }
+	.markdown :global(ol) { margin: 0 0 1rem; padding-left: 1.3rem; }
 	.markdown :global(li) { margin: 0.1rem 0; }
 	.markdown :global(li > ul),
 	.markdown :global(li > ol) { margin: 0.1rem 0; }
@@ -281,7 +281,7 @@
 	.markdown :global(h3),
 	.markdown :global(h4) { margin: 0.4rem 0 0.3rem; font-size: var(--text-base); font-weight: 600; }
 	.markdown :global(blockquote) {
-		margin: 0 0 0.5rem;
+		margin: 0 0 1rem;
 		padding: 0.1rem 0.7rem;
 		border-left: 3px solid var(--border-default);
 		color: var(--text-secondary);
@@ -299,14 +299,14 @@
 		border-radius: 0.35rem;
 		padding: 0.5rem 0.65rem;
 		overflow-x: auto;
-		margin: 0 0 0.5rem;
+		margin: 0 0 1rem;
 	}
 	.markdown :global(pre code) { background: none; padding: 0; }
 	.markdown :global(a) { color: var(--accent-amber); }
 	.markdown :global(del) { color: var(--text-muted); }
 	.markdown :global(table) {
 		border-collapse: collapse;
-		margin: 0 0 0.5rem;
+		margin: 0 0 1rem;
 		font-size: var(--text-sm);
 		display: block;
 		overflow-x: auto;
