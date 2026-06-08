@@ -53,6 +53,23 @@ export interface ChatMessage {
 
 export type ChatStatus = 'idle' | 'sending' | 'streaming';
 
+// Client-side ack verbs. The backend stamps its own verb in `task_started`,
+// but that event can't arrive until the scheduler claims the task off its
+// poll queue (a second or two cold). Seeding one of these the instant we
+// create the placeholder removes the perceived "Thinking…" gap; the backend
+// `task_started` verb is then skipped (see applyEvent) so the line doesn't
+// flicker from one random verb to another. Real status (progress_text,
+// tool_start) still takes over normally.
+const ACK_VERBS = [
+	'On it…', 'Hmm…', 'Heard, chef…', 'Working on it…', 'Looking…',
+	'Thinking it through…', 'Digging in…', 'Right then…', 'Let me see…',
+	'Getting into it…',
+];
+
+function randomAckVerb(): string {
+	return ACK_VERBS[Math.floor(Math.random() * ACK_VERBS.length)];
+}
+
 const STREAM_KINDS = [
 	'task_started', 'tool_start', 'tool_end', 'tool_progress', 'progress_text',
 	'context_management', 'confirmation', 'result', 'error', 'cancelled', 'done',
@@ -120,9 +137,11 @@ function createSession(): ChatSession {
 			switch (kind) {
 				case 'task_started':
 					// Generic "working on it" verb stamped by the executor (shared
-					// with Talk). Shows a real status line until the first tool or
-					// text event replaces it.
-					if (payload.text) m.progress = String(payload.text);
+					// with Talk). We already seeded a client-side verb when the
+					// placeholder was created, so skip the overwrite to avoid a
+					// flicker from one random verb to another — real status
+					// (progress_text / tool_start) still replaces it below.
+					if (payload.text && !m.progress) m.progress = String(payload.text);
 					break;
 				case 'progress_text':
 					m.progress = String(payload.text ?? '');
@@ -428,6 +447,7 @@ function createSession(): ChatSession {
 			...a,
 			{
 				cid: phCid, role: 'assistant', text: '', tools: [], streaming: true,
+				progress: randomAckVerb(),
 				createdAt: new Date().toISOString(),
 			},
 		]);
@@ -450,6 +470,7 @@ function createSession(): ChatSession {
 			updateMsg(phCid, (m) => {
 				m.role = 'system';
 				m.text = res.inline_result || '';
+				m.progress = undefined;
 				m.streaming = false;
 			});
 			status.set('idle');

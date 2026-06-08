@@ -63,6 +63,7 @@ class TestConfigDefaults:
     def test_default_scheduler_config(self):
         cfg = Config()
         assert cfg.scheduler.poll_interval == 2
+        assert cfg.scheduler.dispatch_interval == 0.5
         assert cfg.scheduler.email_poll_interval == 60
         assert cfg.scheduler.talk_poll_interval == 10
         assert cfg.scheduler.talk_poll_timeout == 30
@@ -211,6 +212,7 @@ class TestConfigLoading:
         p.write_text(
             '[scheduler]\n'
             'poll_interval = 10\n'
+            'dispatch_interval = 0.25\n'
             'email_poll_interval = 120\n'
             'talk_poll_interval = 5\n'
             'progress_updates = false\n'
@@ -222,6 +224,7 @@ class TestConfigLoading:
         )
         cfg = load_config(p)
         assert cfg.scheduler.poll_interval == 10
+        assert cfg.scheduler.dispatch_interval == 0.25
         assert cfg.scheduler.email_poll_interval == 120
         assert cfg.scheduler.talk_poll_interval == 5
         assert cfg.scheduler.progress_updates is False

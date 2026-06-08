@@ -27,6 +27,7 @@ from istota.scheduler import (
     _is_policy_refusal,
     _post_policy_refusal_alert,
     _strip_action_prefix,
+    _dispatch_sleep,
     _execute_command_task,
     _execute_skill_task,
     _purge_obsolete_skill_jobs,
@@ -6525,3 +6526,131 @@ class TestReconcileVisitsMissingDb:
             run_cleanup_checks(config)
 
         assert "Failed to clean up location pings" not in caplog.text
+
+
+class _FakeTime:
+    """Deterministic stand-in for the scheduler module's `time` binding."""
+
+    def __init__(self):
+        self.t = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.t += seconds
+
+
+def _sched_cfg(poll_interval, dispatch_interval):
+    cfg = Config()
+    cfg.scheduler = SchedulerConfig(
+        poll_interval=poll_interval, dispatch_interval=dispatch_interval
+    )
+    return cfg
+
+
+class TestDispatchSleep:
+    """_dispatch_sleep: sub-tick re-dispatch without re-running gated checks."""
+
+    def test_slices_and_redispatches_within_one_tick(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        pool = MagicMock()
+
+        _dispatch_sleep(pool, _sched_cfg(2, 0.5), lambda: False)
+
+        # 0.5s slices across a 2s tick → dispatch after each of 4 slices.
+        assert pool.dispatch.call_count == 4
+        assert fake.sleeps == [0.5, 0.5, 0.5, 0.5]
+        # Total slept never overruns the base tick.
+        assert sum(fake.sleeps) == pytest.approx(2.0)
+
+    def test_final_slice_is_clamped_to_remaining(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        pool = MagicMock()
+
+        # 0.3s slices across 1s: 0.3, 0.3, 0.3, then a clamped 0.1.
+        _dispatch_sleep(pool, _sched_cfg(1, 0.3), lambda: False)
+
+        assert fake.sleeps == pytest.approx([0.3, 0.3, 0.3, 0.1])
+        assert sum(fake.sleeps) == pytest.approx(1.0)
+        assert pool.dispatch.call_count == 4
+
+    def test_legacy_single_sleep_when_interval_ge_base(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        pool = MagicMock()
+
+        _dispatch_sleep(pool, _sched_cfg(2, 2), lambda: False)
+
+        # dispatch_interval >= poll_interval → one sleep, no extra dispatch.
+        assert fake.sleeps == [2]
+        assert pool.dispatch.call_count == 0
+
+    def test_legacy_single_sleep_when_interval_zero(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        pool = MagicMock()
+
+        _dispatch_sleep(pool, _sched_cfg(2, 0), lambda: False)
+
+        assert fake.sleeps == [2]
+        assert pool.dispatch.call_count == 0
+
+    def test_stop_before_any_slice(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        pool = MagicMock()
+
+        _dispatch_sleep(pool, _sched_cfg(2, 0.5), lambda: True)
+
+        # Already shutting down → never sleeps or dispatches.
+        assert fake.sleeps == []
+        assert pool.dispatch.call_count == 0
+
+    def test_stop_mid_tick_returns_before_dispatch(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        pool = MagicMock()
+
+        calls = {"n": 0}
+
+        def should_stop():
+            # False on the while-guard, True on the post-sleep check.
+            calls["n"] += 1
+            return calls["n"] >= 2
+
+        _dispatch_sleep(pool, _sched_cfg(2, 0.5), should_stop)
+
+        # Slept one slice, then bailed before dispatching.
+        assert fake.sleeps == [0.5]
+        assert pool.dispatch.call_count == 0
+
+    def test_dispatch_error_does_not_abort_the_tick(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        pool = MagicMock()
+        pool.dispatch.side_effect = RuntimeError("boom")
+
+        # A dispatch failure is logged, not raised — the tick still completes.
+        _dispatch_sleep(pool, _sched_cfg(2, 0.5), lambda: False)
+
+        assert pool.dispatch.call_count == 4
+        assert sum(fake.sleeps) == pytest.approx(2.0)

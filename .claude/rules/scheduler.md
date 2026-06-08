@@ -200,6 +200,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | Param | Default | Used By |
 |---|---|---|
 | `poll_interval` | 2s | Main loop sleep, worker poll |
+| `dispatch_interval` | 0.5s | Sub-tick `pool.dispatch()` cadence inside `_dispatch_sleep` — bounds cold pending-task pickup latency without re-running the interval-gated checks. 0 or ≥ `poll_interval` = legacy one-dispatch-per-tick |
 | `talk_poll_interval` | 10s | Talk poller |
 | `talk_poll_timeout` | 30s | Talk long-poll |
 | `email_poll_interval` | 60s | Email poller |
