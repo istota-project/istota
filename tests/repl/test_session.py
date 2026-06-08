@@ -254,3 +254,22 @@ class TestTerminalSubscriberStreaming:
         lines = out.getvalue().splitlines()
         assert lines[0] == "looking"
         assert "Reading x" in lines[1]
+
+    def test_intermediate_narration_not_reprinted_with_final_answer(self):
+        # A tool-using turn streams lead-in narration, runs a tool, then the
+        # final turn streams the answer. The narration is dropped from the
+        # reconcile buffer on tool_start, so when result matches the final
+        # turn's streamed text it is NOT re-printed (no double answer, no green
+        # reprint of the accumulated narration + answer blob).
+        sub, out = self._sub()
+        sub.on_event(_ev("text_delta", {"text": "Let me check the file."}, seq=1))
+        sub.on_event(_ev("tool_start", {"description": "📄 Reading x"}, seq=2))
+        sub.on_event(_ev("tool_end", {"tool_name": "Read", "success": True}, seq=3))
+        sub.on_event(_ev("text_delta", {"text": "The file says hello."}, seq=4))
+        sub.on_event(_ev("result", {"text": "The file says hello."}, seq=5))
+        text = out.getvalue()
+        # The answer appears exactly once (streamed inline, not reprinted).
+        assert text.count("The file says hello.") == 1
+        # The narration was shown inline once but is not concatenated onto the
+        # answer line.
+        assert "Let me check the file.The file says hello." not in text

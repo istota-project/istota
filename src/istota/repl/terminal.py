@@ -69,6 +69,13 @@ class TerminalSubscriber:
         if kind == "tool_start":
             desc = p.get("description") or p.get("tool_name") or "tool"
             self._print(self._c(_CYAN, f"  ▸ {desc}"))
+            # The text streamed before this tool was the turn's lead-in
+            # narration, not the answer — it's already printed inline (a
+            # terminal can't unprint), but drop it from the reconcile buffer so
+            # `result` compares only the final turn's text. Otherwise the
+            # accumulated narration never matches the final answer and it gets
+            # re-printed in green beneath the inline log.
+            self._streamed = ""
         elif kind == "tool_end":
             if p.get("success") is False:
                 name = p.get("tool_name") or "tool"
