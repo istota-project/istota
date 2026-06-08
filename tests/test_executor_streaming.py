@@ -901,6 +901,77 @@ class TestStreamSurfaceCoalescing:
         assert "Let me look." not in joined
         assert joined == "All set."
 
+    def test_long_pretool_narration_held_by_gate_not_leaked(self, tmp_path):
+        """Regression: lead-in narration longer than the coalescer's size
+        threshold (120) but shorter than the narration gate (200) must NOT
+        leak. Pre-gate, a >120-char block flushed immediately (and in
+        production the 250ms timer flushed even short narration) — the
+        text_delta reached the browser before the tool boundary could discard
+        it. The gate holds the whole run until it crosses the ceiling, so a
+        tool-followed narration run is discarded intact."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_tool_use = True
+        task = _make_task(source_type="web")
+
+        narration = (
+            "Let me take a careful look through your calendar for the rest of "
+            "this week so I can find any scheduling conflicts before I give you "
+            "a final answer here."
+        )
+        assert 120 < len(narration) < 200  # exactly the window the old flush leaked
+
+        stream_lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": narration}]},
+            }) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m2", "stop_reason": "tool_use", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read",
+                     "input": {"file_path": "/tmp/x.txt"}},
+                ]},
+            }) + "\n",
+            json.dumps({"type": "user", "message": {"role": "user"}}) + "\n",
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m3", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "All set."}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": "All set."}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, _r, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        deltas = [e for e in rec.events if e.kind == "text_delta"]
+        joined = "".join(e.payload["text"] for e in deltas)
+        assert "calendar" not in joined  # narration never streamed
+        assert joined == "All set."
+
+    def test_over_gate_text_unlocks_and_streams(self, tmp_path):
+        """A text run longer than the gate (200) unlocks and streams — the gate
+        only suppresses short, tool-followed narration, never a real answer."""
+        config = _make_config(tmp_path)
+        task = _make_task(source_type="web")
+
+        answer = "x" * 250  # comfortably over the 200-char gate
+        stream_lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"id": "m1", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": answer}]},
+            }) + "\n",
+            json.dumps({"type": "result", "subtype": "success", "result": answer}) + "\n",
+        ]
+        rec = _RecordingSubscriber()
+        success, _r, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        deltas = [e for e in rec.events if e.kind == "text_delta"]
+        assert "".join(e.payload["text"] for e in deltas) == answer
+
     def test_stream_task_routes_thinking_to_thinking_event(self, tmp_path):
         """Stream surface (web): a ClaudeCode thinking block → coalesced
         `thinking` event, never `text_delta` / `progress_text`."""
