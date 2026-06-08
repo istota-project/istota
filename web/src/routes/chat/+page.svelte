@@ -218,7 +218,7 @@
 		background: var(--surface-card);
 		/* Soften body text a touch (scoped to chat) to further ease the
 		   light-on-dark contrast. */
-		--text-primary: #c2c2c2;
+		--text-primary: #cfcfcf;
 	}
 	.messages {
 		flex: 1;
