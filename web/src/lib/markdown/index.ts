@@ -22,6 +22,12 @@ const md = new MarkdownIt({
 	typographer: false,
 });
 
+// Disable linkify's fuzzy (schema-less) link detection. Without this, bare
+// tokens like `FILENAME.md` get auto-linked because `.md` is a real TLD
+// (Moldova) — chat text is full of `something.md` filenames that must stay
+// plain text. Bare URLs that carry an explicit http(s)://  scheme still linkify.
+md.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
+
 const SAFE_URL = /^(https?:\/\/|mailto:|\/)/i;
 
 // Restrict link + image hrefs to a safe scheme allowlist. markdown-it already
