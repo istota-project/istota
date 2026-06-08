@@ -2653,10 +2653,27 @@ def execute_task(
         # the canonical ``result`` lands, so steady state retains zero. Events
         # arrive serialized (NativeBrain awaits each run_in_executor hop;
         # ClaudeCodeBrain's parse loop is sequential), so no lock is needed.
+        #
+        # Narration gate: a text run emits NOTHING until it crosses
+        # ``_DELTA_GATE_CHARS`` without an intervening tool call. Lead-in
+        # narration ("Let me check…") is short and is always followed by a tool,
+        # so it stays under the ceiling and is discarded at the boundary — it
+        # can never have already streamed (the old time/size flush raced the
+        # tool boundary and leaked it into the answer area). Once a run crosses
+        # the ceiling it "unlocks": the held buffer flushes and subsequent
+        # deltas stream live at the cadence below. A short *final* answer that
+        # never crosses the gate still arrives via the canonical ``result``
+        # event (and the final flush in the ``finally`` releases the held
+        # buffer), so gating costs only token-by-token animation on text too
+        # short to benefit. Tunable; promote to a ``[scheduler]`` knob if it
+        # needs live adjustment.
         _DELTA_FLUSH_MS = 250
         _DELTA_FLUSH_CHARS = 120
+        _DELTA_GATE_CHARS = 200
         _delta_buf: list[str] = []
-        _delta_state = {"chars": 0, "last_flush": time.monotonic()}
+        # ``unlocked``: this text run has crossed the narration gate; deltas now
+        # stream live. Reset to False at every tool boundary (new run re-gates).
+        _delta_state = {"chars": 0, "last_flush": time.monotonic(), "unlocked": False}
         # True once any TextDeltaEvent has streamed this task. Used to dedupe a
         # NativeBrain whole-turn TextEvent against the deltas that already
         # carried the same text: the brain stays surface-agnostic (it always
@@ -2685,6 +2702,15 @@ def execute_task(
                 return
             _delta_buf.append(text)
             _delta_state["chars"] += len(text)
+            if not _delta_state["unlocked"]:
+                # Gated: hold everything (emit nothing) until the run crosses
+                # the narration ceiling. Crucially NO time-based flush here —
+                # that was the race that leaked narration. A tool boundary
+                # before the ceiling discards the buffer; crossing it unlocks.
+                if _delta_state["chars"] >= _DELTA_GATE_CHARS:
+                    _delta_state["unlocked"] = True
+                    _flush_deltas()
+                return
             now = time.monotonic()
             if (
                 _delta_state["chars"] >= _DELTA_FLUSH_CHARS
@@ -2704,6 +2730,7 @@ def execute_task(
             _delta_buf.clear()
             _delta_state["chars"] = 0
             _delta_state["last_flush"] = time.monotonic()
+            _delta_state["unlocked"] = False  # next text run re-gates
 
         # A SEPARATE coalescing buffer for streamed *thinking* (extended-reasoning)
         # text. It must be independent of the answer-text buffer above because the
