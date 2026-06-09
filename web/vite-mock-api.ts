@@ -169,7 +169,7 @@ function mockTaskEvents(task: MockChatTask) {
 	});
 	const answerEnd = answerStart + answerChunks.length * perChunk;
 	events.push({ seq: seq++, kind: 'result', payload: { text: reply, truncated: false }, at: answerEnd + 100 });
-	events.push({ seq: seq++, kind: 'done', payload: { stop_reason: 'completed', duration_seconds: (answerEnd + 200) / 1000 }, at: answerEnd + 200 });
+	events.push({ seq: seq++, kind: 'done', payload: { stop_reason: 'completed', duration_seconds: (answerEnd + 200) / 1000, model: 'claude-opus-4-8' }, at: answerEnd + 200 });
 	return events;
 }
 // Safely past the timeline's terminal `done` (answer streams ~5.5s→~7.5s); the
@@ -312,6 +312,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 					role: 'assistant', text: result, task_id: t.id,
 					status: 'completed', created_at: new Date(t.createdAt).toISOString(),
 					tools, segments, duration_seconds: (done?.payload as any)?.duration_seconds ?? null,
+					model: (done?.payload as any)?.model ?? null,
 				});
 			} else {
 				active = { id: t.id, status: 'running' };

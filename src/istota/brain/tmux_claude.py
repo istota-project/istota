@@ -223,6 +223,24 @@ def parse_transcript(path: Path) -> list[StreamEvent]:
     return events
 
 
+def _model_from_transcript(path: Path) -> str:
+    """The model id from the transcript's assistant records, or "".
+
+    Each assistant record carries ``message.model`` (the resolved model the CLI
+    actually used, including the default when ``--model`` was omitted). Returns
+    the last one seen; "" on a missing/empty/partially-flushed transcript so the
+    caller can fall back to the requested model.
+    """
+    model = ""
+    for rec in _iter_records(path):
+        if rec.get("type") != "assistant":
+            continue
+        message = rec.get("message")
+        if isinstance(message, dict) and message.get("model"):
+            model = str(message["model"])
+    return model
+
+
 def _transcript_has_final_turn(path: Path) -> bool:
     """True if the transcript's last assistant record ended the turn
     (``stop_reason == "end_turn"``).
@@ -837,12 +855,20 @@ class TmuxClaudeBrain:
         # the transcript-derived terminal text when the payload omits it.
         result_text = last_msg if last_msg else terminal_text
 
+        # The transcript records the model the CLI actually used (accurate even
+        # when --model was omitted and the default applied); fall back to the
+        # requested model when the transcript is missing/unparseable.
+        model_used = ""
+        if transcript_path:
+            model_used = _model_from_transcript(Path(transcript_path))
+
         return BrainResult(
             success=True,
             result_text=result_text,
             actions_taken=json.dumps(actions) if actions else None,
             execution_trace=json.dumps(trace) if trace else None,
             stop_reason="completed",
+            model_used=model_used or req.model,
         )
 
     def _learn_transcript_path(self, started_sentinel: Path, base_dir: Path) -> Path | None:

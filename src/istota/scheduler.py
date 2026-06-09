@@ -1310,6 +1310,7 @@ def run_task_inline(
         event_writer.emit("done", {
             "stop_reason": "completed" if success else "error",
             "duration_seconds": round(event_writer.elapsed_seconds(), 1),
+            **({"model": task.model_used} if task.model_used else {}),
         })
         event_writer.finish()
         # Prune ephemeral text_delta rows for stream surfaces (repl, web) once
@@ -1817,6 +1818,7 @@ def process_one_task(
             event_writer.emit("done", {
                 "stop_reason": "completed" if success else "error",
                 "duration_seconds": round(event_writer.elapsed_seconds(), 1),
+                **({"model": task.model_used} if task.model_used else {}),
             })
             event_writer.finish()
             # Prune the ephemeral text_delta rows now the canonical result/

@@ -393,6 +393,7 @@ function createSession(): ChatSession {
 				streaming: m.role === 'assistant' && inFlight(m.status),
 				createdAt: m.created_at,
 				durationSeconds: typeof m.duration_seconds === 'number' ? m.duration_seconds : undefined,
+				model: typeof m.model === 'string' && m.model ? m.model : undefined,
 			};
 		});
 		messages.set(msgs);

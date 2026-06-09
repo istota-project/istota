@@ -218,7 +218,12 @@ class NativeBrain:
             return asyncio.run(self._execute_async(req))
         except Exception as e:  # noqa: BLE001 — never let the brain crash the worker
             logger.exception("NativeBrain.execute raised")
-            return BrainResult(success=False, result_text=f"Execution error: {e}", stop_reason="error")
+            return BrainResult(
+                success=False,
+                result_text=f"Execution error: {e}",
+                stop_reason="error",
+                model_used=req.model or self._config.model,
+            )
 
     async def _execute_async(self, req: BrainRequest) -> BrainResult:
         abort = asyncio.Event()
@@ -535,10 +540,12 @@ class NativeBrain:
                 execution_trace=json.dumps(trace) if trace else None,
                 stop_reason="timeout",
                 usage=usage,
+                model_used=model,
             )
 
         return self._build_result(
-            final_stop["reason"], last_assistant_text, last_error_message, trace, actions, usage
+            final_stop["reason"], last_assistant_text, last_error_message,
+            trace, actions, usage, model,
         )
 
     # --- helpers -----------------------------------------------------------
@@ -613,7 +620,9 @@ class NativeBrain:
         return ""
 
     @staticmethod
-    def _build_result(stop_reason, text, error_message, trace, actions, usage) -> BrainResult:
+    def _build_result(
+        stop_reason, text, error_message, trace, actions, usage, model="",
+    ) -> BrainResult:
         # Map the loop's agent_end stop_reason to the executor's tag vocabulary.
         # The executor drops stop_reason and the scheduler dispatches purely on
         # result_text string matches (see scheduler.process_one_task), so a
@@ -630,6 +639,7 @@ class NativeBrain:
                 execution_trace=trace_json,
                 stop_reason="cancelled",
                 usage=usage,
+                model_used=model,
             )
         if stop_reason == "error":
             return BrainResult(
@@ -639,6 +649,7 @@ class NativeBrain:
                 execution_trace=trace_json,
                 stop_reason="error",
                 usage=usage,
+                model_used=model,
             )
         # "" (natural), "max_turns", "loop_detected" — all produced output.
         return BrainResult(
@@ -648,6 +659,7 @@ class NativeBrain:
             execution_trace=trace_json,
             stop_reason=stop_reason or "completed",
             usage=usage,
+            model_used=model,
         )
 
     @staticmethod

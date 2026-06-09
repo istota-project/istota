@@ -3023,6 +3023,25 @@ def execute_task(
         actions = brain_result.actions_taken
         trace = brain_result.execution_trace
 
+        # Record the model the brain actually used. Prefer the brain's reported
+        # value (accurate even when the model was the brain/CLI default); fall
+        # back to the resolved request model. Set it on the task object so the
+        # scheduler can include it in the terminal `done` event, and persist it
+        # to the dedicated `model_used` column so the web-chat history endpoint
+        # surfaces it across reloads. `task.model` (the override) is left alone
+        # so a retry of a default-model task re-resolves the current default.
+        actual_model = (brain_result.model_used or "").strip() or req.model
+        if actual_model:
+            task.model_used = actual_model
+            try:
+                if conn is not None:
+                    db.set_task_model_used(conn, task.id, actual_model)
+                else:
+                    with db.get_db(config.db_path) as _model_conn:
+                        db.set_task_model_used(_model_conn, task.id, actual_model)
+            except Exception:
+                logger.debug("persisting task model_used failed", exc_info=True)
+
         # Persist native-brain token/cost telemetry (no-op for claude_code).
         _persist_task_usage(config, conn, task.id, brain_result.usage)
 

@@ -49,6 +49,9 @@ export interface ChatMessage {
 	createdAt?: string;
 	// Total wall time in seconds, from the task's terminal `done` event.
 	durationSeconds?: number;
+	// The model that produced this answer (canonical ID), from the terminal
+	// `done` event or the history payload. Shown in the message meta.
+	model?: string;
 }
 
 // ---- Helpers ----------------------------------------------------------------
@@ -288,6 +291,9 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
 			finalizeTools(m);
 			if (typeof payload.duration_seconds === 'number') {
 				m.durationSeconds = payload.duration_seconds;
+			}
+			if (typeof payload.model === 'string' && payload.model) {
+				m.model = payload.model;
 			}
 			if (!m.text) m.text = answerText(m);
 			break;

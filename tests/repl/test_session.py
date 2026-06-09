@@ -167,6 +167,27 @@ class TestRunTaskInline:
             events = [e["kind"] for e in db.get_task_events(conn, tid)]
         assert "result" in events and "done" in events
 
+    def test_done_event_carries_model(self, cfg, monkeypatch):
+        """The model the executor records on the task surfaces in the done event."""
+        def _exec(task, config, user_resources, *, event_writer=None, **kwargs):
+            task.model_used = "claude-opus-4-8"  # mimic executor recording
+            return (True, "done", None, None)
+        monkeypatch.setattr("istota.scheduler.execute_task", _exec)
+        with db.get_db(cfg.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="x", user_id="alice", source_type="repl",
+                conversation_token="repl-alice-bbbb", output_target="stream",
+            )
+            task = db.get_task(conn, tid)
+        from istota.events import EventWriter
+        writer = EventWriter(tid, str(cfg.db_path), enabled=True)
+        run_task_inline(cfg, task, event_writer=writer)
+        with db.get_db(cfg.db_path) as conn:
+            done = next(
+                e for e in db.get_task_events(conn, tid) if e["kind"] == "done"
+            )
+        assert done["payload"]["model"] == "claude-opus-4-8"
+
     def test_cancelled_status(self, cfg, monkeypatch):
         monkeypatch.setattr(
             "istota.scheduler.execute_task",

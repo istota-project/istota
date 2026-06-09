@@ -24,6 +24,7 @@ from istota.brain._events import (
 )
 from istota.brain.tmux_claude import (
     TmuxClaudeBrain,
+    _model_from_transcript,
     _transcript_has_final_turn,
     parse_transcript,
 )
@@ -160,6 +161,24 @@ class TestParseTranscriptEdges:
         assert isinstance(events[-1], ResultEvent)
         # No final answer text → empty result, but a ToolUseEvent was emitted.
         assert any(isinstance(e, ToolUseEvent) for e in events)
+
+
+class TestModelFromTranscript:
+    def test_reads_assistant_model(self, tmp_path):
+        p = _write(tmp_path, [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            _assistant([{"type": "text", "text": "Hello."}]),
+        ])
+        assert _model_from_transcript(p) == "claude-opus-4-8"
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert _model_from_transcript(tmp_path / "nope.jsonl") == ""
+
+    def test_no_assistant_records_returns_empty(self, tmp_path):
+        p = _write(tmp_path, [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+        ])
+        assert _model_from_transcript(p) == ""
 
 
 class TestFinalTurnSignal:

@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     model TEXT,
     -- Per-task effort override (low/medium/high/xhigh/max); empty = use config default
     effort TEXT,
+    -- The model the brain actually ran (resolved canonical ID), recorded post-run.
+    -- Distinct from `model`: stays NULL for default-model tasks so retries
+    -- re-resolve the current default; surfaces (web-chat meta) read this.
+    model_used TEXT,
 
     -- Real Talk room for this task's notifications. Distinct from
     -- conversation_token, which doubles as an email-thread grouping key for
