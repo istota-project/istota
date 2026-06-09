@@ -1622,6 +1622,21 @@ def process_one_task(
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")
 
+                # Persist the assistant turn into the canonical messages store
+                # for room-surface tasks (Talk/web), so the unified history
+                # reader stays caught up and the web transcript renders this
+                # turn from messages. Idempotent; the trace stays in `tasks`.
+                if (
+                    task.source_type in ("talk", "web")
+                    and task.conversation_token
+                    and db.get_room(conn, task.conversation_token) is not None
+                ):
+                    db.store_turn_message(
+                        conn, task.conversation_token, role="assistant",
+                        body=result, task_id=task_id,
+                        origin_surface=task.source_type,
+                    )
+
                 # Index conversation for memory search (non-critical).
                 # Skip silent scheduled jobs: high-volume retrieve-and-render
                 # crons whose conversations have no recall value but inflate

@@ -74,12 +74,14 @@ class TestDeliver:
         msg_id = run_coro(transport.deliver(token, "heads up"))
         assert isinstance(msg_id, int)
 
+        # Notifications now land in the canonical messages store (role=system).
         with db.get_db(config.db_path) as conn:
-            msgs = db.list_web_chat_messages(conn, token)
+            msgs = db.list_system_messages(conn, token)
+            room = db.get_room(conn, token)
         assert len(msgs) == 1
-        assert msgs[0].text == "heads up"
+        assert msgs[0].body == "heads up"
         assert msgs[0].role == "system"
-        assert msgs[0].user_id == "alice"
+        assert room.user_id == "alice"
 
     def test_carries_title_from_options(self, tmp_path):
         config = _config(tmp_path)
@@ -88,20 +90,21 @@ class TestDeliver:
             token, "body", options=DeliveryOptions(title="Alert"),
         ))
         with db.get_db(config.db_path) as conn:
-            msgs = db.list_web_chat_messages(conn, token)
+            msgs = db.list_system_messages(conn, token)
         assert msgs[0].title == "Alert"
 
     def test_owner_derived_from_room_not_caller(self, tmp_path):
-        # A token belonging to bob is attributed to bob even if a task for a
-        # different user is passed — the room is the source of truth.
+        # A token belonging to bob is the source of truth: the message lands in
+        # bob's room regardless of a different user's task being passed.
         config = _config(tmp_path)
         bob_token = default_web_room_token(config, "bob")
         run_coro(WebTransport(config).deliver(
             bob_token, "x", task=_task("alice"),
         ))
         with db.get_db(config.db_path) as conn:
-            msgs = db.list_web_chat_messages(conn, bob_token)
-        assert msgs[0].user_id == "bob"
+            msgs = db.list_system_messages(conn, bob_token)
+            assert len(msgs) == 1
+            assert db.get_room(conn, bob_token).user_id == "bob"
 
     def test_unknown_token_with_no_task_drops(self, tmp_path):
         config = _config(tmp_path)

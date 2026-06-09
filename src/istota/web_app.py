@@ -1471,17 +1471,23 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     """
     from . import db
     with db.get_db(_config.db_path) as conn:
+        # Both interactive room surfaces, not just web: a Talk room opened in
+        # web renders its Talk turns too (unified room sync). Each surface's
+        # turns live in `tasks` keyed on the shared conversation_token; the rich
+        # status / trace / in-flight rendering and the trace both come from here.
         rows = conn.execute(
             "SELECT id, prompt, result, status, error, confirmation_prompt, "
             "created_at, actions_taken, execution_trace, started_at, completed_at, "
-            "model_used "
+            "model_used, source_type "
             "FROM tasks "
-            "WHERE conversation_token = ? AND user_id = ? AND source_type = 'web' "
+            "WHERE conversation_token = ? AND user_id = ? "
+            "AND source_type IN ('web', 'talk') "
             "ORDER BY id DESC LIMIT ?",
             (token, username, limit),
         ).fetchall()
-        # Bot-delivered messages (alerts / logs / notifications routed to web).
-        notes = db.list_web_chat_messages(conn, token, limit)
+        # Bot-delivered system messages (alerts / logs / notifications routed to
+        # web) now live in the canonical messages store (role='system').
+        notes = db.list_system_messages(conn, token, limit)
     rows = list(reversed(rows))
     messages: list[dict] = []
     # In-flight tasks, oldest-first. The room runs them one at a time (the
@@ -1547,7 +1553,7 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     # the notifications are appended after the task messages here). `notif_id`
     # gives the client a stable key so a poll can append only new ones.
     for n in notes:
-        text = f"**{n.title}**\n\n{n.text}" if n.title else n.text
+        text = f"**{n.title}**\n\n{n.body}" if n.title else n.body
         messages.append({
             "role": n.role, "text": text, "notif_id": n.id,
             "created_at": n.created_at,

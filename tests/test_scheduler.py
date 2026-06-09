@@ -1604,8 +1604,8 @@ class TestProcessOneTask:
         assert success is True
 
         with db.get_db(db_path) as conn:
-            msgs = db.list_web_chat_messages(conn, room_token)
-        assert any(m.text == "Here is the answer" for m in msgs)
+            msgs = db.list_system_messages(conn, room_token)
+        assert any(m.body == "Here is the answer" for m in msgs)
 
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_own_origin_web_task_does_not_push(self, mock_arun, db_path, tmp_path):
@@ -1629,7 +1629,7 @@ class TestProcessOneTask:
         assert result is not None
 
         with db.get_db(db_path) as conn:
-            msgs = db.list_web_chat_messages(conn, room_token)
+            msgs = db.list_system_messages(conn, room_token)
         assert msgs == []  # delivered via the event stream, not a pushed row
 
     @patch("istota.scheduler.execute_task", return_value=(True, "All done", '["📄 Reading file"]', None))
@@ -1984,9 +1984,9 @@ class TestProcessOneTask:
 
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
-            msgs = db.list_web_chat_messages(conn, room_token)
+            msgs = db.list_system_messages(conn, room_token)
         assert task.status == "completed"  # not pending_confirmation
-        assert any("confirmation" in m.text for m in msgs)
+        assert any("confirmation" in m.body for m in msgs)
 
     @patch("istota.scheduler._drain_deferred_ops")
     @patch("istota.scheduler.execute_task")
