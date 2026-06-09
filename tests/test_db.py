@@ -951,6 +951,35 @@ class TestSentEmails:
             )
             assert db.find_sent_email_by_references(conn, ["<other@x.com>"]) is None
 
+    def test_origin_target_round_trips(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<origin1@example.com>",
+                to_addr="bob@example.com",
+                conversation_token="rm_web123",
+                origin_target="web:rm_web123",
+            )
+            by_id = db.find_sent_email_by_message_id(conn, "<origin1@example.com>")
+            assert by_id is not None
+            assert by_id.origin_target == "web:rm_web123"
+            by_ref = db.find_sent_email_by_references(conn, ["<origin1@example.com>"])
+            assert by_ref is not None
+            assert by_ref.origin_target == "web:rm_web123"
+
+    def test_origin_target_defaults_none(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<noorigin@example.com>",
+                to_addr="bob@example.com",
+            )
+            found = db.find_sent_email_by_message_id(conn, "<noorigin@example.com>")
+            assert found is not None
+            assert found.origin_target is None
+
     def test_find_by_references_returns_most_recent(self, db_path):
         with db.get_db(db_path) as conn:
             db.record_sent_email(

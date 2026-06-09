@@ -241,6 +241,8 @@ def _process_deferred_sent_emails(
 
     Returns count of sent emails recorded.
     """
+    from .transport import routing
+
     loaded = _load_deferred_json(user_temp_dir, task.id, "sent_emails")
     if loaded is None:
         return 0
@@ -263,6 +265,7 @@ def _process_deferred_sent_emails(
                     task_id=task.id,
                     conversation_token=task.conversation_token,
                     talk_delivery_token=task.talk_delivery_token,
+                    origin_target=routing.origin_descriptor(task),
                 )
                 count += 1
             except Exception as e:

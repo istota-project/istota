@@ -169,6 +169,8 @@ def _record_sent_email(
     references: str | None = None,
 ) -> None:
     """Record an outbound email for emissary thread matching (non-critical)."""
+    from .. import routing
+
     try:
         with db.get_db(config.db_path) as conn:
             db.record_sent_email(
@@ -182,6 +184,7 @@ def _record_sent_email(
                 references=references,
                 conversation_token=task.conversation_token,
                 talk_delivery_token=task.talk_delivery_token,
+                origin_target=routing.origin_descriptor(task),
             )
     except Exception as e:
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)

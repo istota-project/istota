@@ -21,6 +21,7 @@ from istota.config import (
 )
 from istota.transport.routing import (
     Destination,
+    origin_descriptor,
     parse_output_target,
     plan_has_surface,
     resolve_delivery_plan,
@@ -96,6 +97,54 @@ class TestParseOutputTarget:
         assert parse_output_target("talk,,email,") == [
             Destination("talk"), Destination("email"),
         ]
+
+
+class TestOriginDescriptor:
+    def test_web_with_token(self):
+        task = _task(source_type="web", conversation_token="rm_web123")
+        assert origin_descriptor(task) == "web:rm_web123"
+
+    def test_web_without_token(self):
+        task = _task(source_type="web", conversation_token=None)
+        assert origin_descriptor(task) == "web"
+
+    def test_talk_with_real_token(self):
+        task = _task(source_type="talk", conversation_token="kvcnr723")
+        assert origin_descriptor(task) == "talk:kvcnr723"
+
+    def test_talk_prefers_delivery_token(self):
+        task = _task(source_type="talk", conversation_token="kvcnr723",
+                     talk_delivery_token="RealRoomXYZ")
+        assert origin_descriptor(task) == "talk:RealRoomXYZ"
+
+    def test_talk_with_synthetic_token(self):
+        # 16-char lowercase hex = synthetic email-thread token, not a real room.
+        task = _task(source_type="talk", conversation_token="0123456789abcdef")
+        assert origin_descriptor(task) == "talk"
+
+    def test_talk_without_token(self):
+        task = _task(source_type="talk", conversation_token=None)
+        assert origin_descriptor(task) == "talk"
+
+    def test_repl_is_none(self):
+        # No durable push target for a since-exited terminal → thread-only.
+        assert origin_descriptor(_task(source_type="repl")) is None
+
+    def test_email_is_none(self):
+        # Email is the mirror leg, not a reply origin.
+        assert origin_descriptor(_task(source_type="email")) is None
+
+    def test_cli_maps_to_talk(self):
+        # Non-stream, non-email source types resolve to the talk surface
+        # (_surface_for_source_type default). With no token → bare talk → DM
+        # at delivery, byte-identical to today's fallback under origin+thread.
+        assert origin_descriptor(_task(source_type="cli")) == "talk"
+
+    def test_scheduled_maps_to_talk(self):
+        assert origin_descriptor(_task(source_type="scheduled")) == "talk"
+
+    def test_briefing_maps_to_talk(self):
+        assert origin_descriptor(_task(source_type="briefing")) == "talk"
 
 
 class TestPlanHasSurface:
