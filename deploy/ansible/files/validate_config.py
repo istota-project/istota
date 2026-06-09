@@ -78,8 +78,8 @@ def main() -> int:
         tmux_allowlist = {
             "fallback_trip_threshold", "fallback_cooldown_seconds",
             "ready_timeout_seconds", "tmux_command_timeout", "cli_version_pin",
-            "ready_markers", "trust_markers", "bypass_warning_marker",
-            "bypass_accept_marker", "error_markers",
+            "ready_markers", "trust_markers", "theme_markers",
+            "bypass_warning_marker", "bypass_accept_marker", "error_markers",
         }
         bad_keys = sorted(k for k in tmux if k not in tmux_allowlist)
         if bad_keys:
@@ -90,7 +90,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        for list_key in ("ready_markers", "trust_markers", "error_markers"):
+        for list_key in ("ready_markers", "trust_markers", "theme_markers", "error_markers"):
             if list_key in tmux and not isinstance(tmux[list_key], list):
                 print(
                     f"validate_config: [brain.tmux] {list_key} must be a list",

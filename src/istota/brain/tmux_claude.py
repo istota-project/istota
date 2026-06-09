@@ -94,6 +94,10 @@ _READY_MARKERS = ("bypass permissions on", "? for shortcuts", "for shortcuts")
 # --dangerously-skip-permissions does NOT bypass it (Stage 1 finding).
 # Option 1 ("Yes, I trust this folder") is pre-selected → a bare Enter accepts.
 _TRUST_MARKERS = ("trust this folder", "Is this a project you")
+# Pane substrings for the first-run theme picker. Normally suppressed by the
+# seeded .claude.json (_seed_onboarding); the safety net handles it if a CLI
+# version renames the onboarding keys. A dark option is pre-selected → Enter.
+_THEME_MARKERS = ("Choose the text style", "run /theme")
 # Pane substrings for the "Bypass Permissions mode" warning. It appears under
 # the bwrap sandbox (Stage 3′ finding) because bwrap tmpfs'es ~/.claude, so the
 # CLI never remembers a prior acceptance — unlike a persistent ~/.claude (mac),
@@ -375,6 +379,7 @@ class _Params:
         self.cli_version_pin = str(g("cli_version_pin", "2.1.168"))
         self.ready_markers = tuple(g("ready_markers", _READY_MARKERS))
         self.trust_markers = tuple(g("trust_markers", _TRUST_MARKERS))
+        self.theme_markers = tuple(g("theme_markers", _THEME_MARKERS))
         self.bypass_warning_marker = str(g("bypass_warning_marker", _BYPASS_WARNING_MARKER))
         self.bypass_accept_marker = str(g("bypass_accept_marker", _BYPASS_ACCEPT_MARKER))
         self.error_markers = tuple(g("error_markers", _ERROR_MARKERS))
@@ -588,6 +593,7 @@ class TmuxClaudeBrain:
             config_dir.mkdir(parents=True, exist_ok=True)
             prompt_file.write_text(req.prompt)
             self._write_hooks(config_dir, sentinel, started_sentinel)
+            self._seed_onboarding(config_dir, base_dir)
 
             env = dict(req.env)
             env["CLAUDE_CONFIG_DIR"] = str(config_dir)
@@ -884,6 +890,35 @@ class TmuxClaudeBrain:
         (config_dir / "settings.json").write_text(json.dumps(settings))
 
     @staticmethod
+    def _seed_onboarding(config_dir: Path, launch_cwd: Path) -> None:
+        """Pre-seed ``<CLAUDE_CONFIG_DIR>/.claude.json`` so the interactive TUI
+        skips first-run onboarding — the theme picker, the workspace-trust dialog,
+        and the Bypass-Permissions warning.
+
+        The per-session config dir (the §2 clobber fix) is empty each task, so
+        without this the TUI re-runs onboarding every time and blocks at the
+        theme picker (the docker repro). These keys (verified present in the CLI
+        binary) mark the install + this project as already-onboarded. Best-effort
+        + a documented fallback: ``_wait_ready`` still scripts past the dialogs if
+        a CLI version renames a key, so a stale seed degrades to dialog-scripting
+        rather than a hang."""
+        cfg = {
+            "theme": "dark",
+            "hasCompletedOnboarding": True,
+            "bypassPermissionsModeAccepted": True,
+            "projects": {
+                str(launch_cwd): {
+                    "hasTrustDialogAccepted": True,
+                    "hasCompletedProjectOnboarding": True,
+                }
+            },
+        }
+        try:
+            (config_dir / ".claude.json").write_text(json.dumps(cfg))
+        except OSError:
+            logger.debug("tmux_brain: could not seed onboarding config", exc_info=True)
+
+    @staticmethod
     def _cleanup_legacy_hook(req: BrainRequest) -> None:
         """Best-effort one-shot removal of a shared ``base_dir/.claude`` the
         prototype wrote (§2). Old deploys must not leave a shared hook behind that
@@ -952,16 +987,27 @@ class TmuxClaudeBrain:
         """Poll the pane until the REPL is ready, scripting past the launch
         dialogs as they appear. Returns False on deadline.
 
-        Two dialogs can gate the prompt, in either order depending on prior
-        state; the loop handles whichever is on screen each tick:
+        Dialogs that can gate the prompt, in any order depending on prior state;
+        the loop handles whichever is on screen each tick:
+        - first-run theme picker ("Choose the text style…") — a dark option is
+          pre-selected, so a bare Enter accepts. Normally skipped by the seeded
+          ``.claude.json`` (_seed_onboarding); this is the safety net if a CLI
+          version renames the onboarding keys.
         - workspace trust ("Is this a project you trust?") — option 1
           pre-selected, so a bare Enter accepts.
         - "Bypass Permissions mode" warning — option 1 is "No, exit"
           (pre-selected), so we must send "2" to select "Yes, I accept" before
-          Enter. Surfaces under the bwrap sandbox (tmpfs'd ~/.claude)."""
+          Enter. Surfaces under the bwrap sandbox / a fresh config dir."""
         self._last_dialogs: list[str] = []
         while time.monotonic() < deadline:
             pane = self._capture(name)
+            if any(m in pane for m in self._p.theme_markers):
+                if "theme" not in self._last_dialogs:
+                    self._last_dialogs.append("theme")
+                # A dark theme is pre-selected → a bare Enter accepts.
+                self._tmux("send-keys", "-t", name, "Enter")
+                time.sleep(_READY_POLL_S)
+                continue
             if self._p.bypass_warning_marker in pane and self._p.bypass_accept_marker in pane:
                 if "bypass" not in self._last_dialogs:
                     self._last_dialogs.append("bypass")

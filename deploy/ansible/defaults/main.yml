@@ -185,6 +185,7 @@ istota_brain_tmux_command_timeout: 10              # per-tmux-subprocess timeout
 istota_brain_tmux_cli_version_pin: "2.1.168"       # supported claude CLI version
 istota_brain_tmux_ready_markers: []                # [] → code defaults
 istota_brain_tmux_trust_markers: []                # [] → code defaults
+istota_brain_tmux_theme_markers: []                # [] → code defaults (first-run theme picker)
 istota_brain_tmux_error_markers: []                # [] → code defaults
 istota_brain_tmux_bypass_warning_marker: ""        # "" → code default
 istota_brain_tmux_bypass_accept_marker: ""         # "" → code default

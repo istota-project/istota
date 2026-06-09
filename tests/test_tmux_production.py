@@ -451,6 +451,93 @@ class TestConfig:
         assert brain._p.fallback_trip_threshold == 4
 
 
+class TestOnboardingSeed:
+    """A fresh per-session CLAUDE_CONFIG_DIR makes the interactive TUI re-run
+    first-run onboarding (theme picker, trust, bypass). _seed_onboarding writes
+    a .claude.json that marks the install + project already-onboarded."""
+
+    def test_seed_writes_onboarding_keys(self, tmp_path):
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir()
+        TmuxClaudeBrain._seed_onboarding(cfg_dir, Path("/data/tmp/stefan"))
+        seeded = json.loads((cfg_dir / ".claude.json").read_text())
+        assert seeded["theme"] == "dark"
+        assert seeded["hasCompletedOnboarding"] is True
+        assert seeded["bypassPermissionsModeAccepted"] is True
+        proj = seeded["projects"]["/data/tmp/stefan"]
+        assert proj["hasTrustDialogAccepted"] is True
+        assert proj["hasCompletedProjectOnboarding"] is True
+
+    def test_execute_seeds_before_launch(self, monkeypatch, tmp_path):
+        # The whole-execute path writes the seed into the session config dir.
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        tr = tmp_path / "t.jsonl"
+        tr.write_text(json.dumps(_assistant([{"type": "text", "text": "x"}])) + "\n")
+        brain = TmuxClaudeBrain()
+        import istota.brain.tmux_claude as mod
+        monkeypatch.setattr(mod.shutil, "which", lambda _: "/usr/bin/tmux")
+        seen = {}
+        orig_seed = brain._seed_onboarding
+
+        def spy_seed(config_dir, launch_cwd):
+            orig_seed(config_dir, launch_cwd)  # write the real seed
+            seen["json"] = json.loads((config_dir / ".claude.json").read_text())
+
+        monkeypatch.setattr(brain, "_seed_onboarding", spy_seed)
+        for m in ("_new_session", "_launch_claude", "_inject_prompt", "_kill"):
+            monkeypatch.setattr(brain, m, lambda *a, **k: None)
+        monkeypatch.setattr(brain, "_wait_ready", lambda *a: True)
+        monkeypatch.setattr(brain, "_pane_pid", lambda *a: 1)
+        monkeypatch.setattr(brain, "_learn_transcript_path", lambda *a: None)
+
+        def wfc(name, sentinel, deadline, cancel_check):
+            Path(sentinel).write_text(json.dumps(
+                {"transcript_path": str(tr), "last_assistant_message": "x"}))
+            return ("done", "")
+
+        monkeypatch.setattr(brain, "_wait_for_completion", wfc)
+        brain.execute(_req(tmp_path, env={"ISTOTA_DEFERRED_DIR": str(deferred)}))
+        assert seen["json"]["hasCompletedOnboarding"] is True
+
+
+class TestThemeDialog:
+    """Safety net: if the seed misses (CLI renamed a key), _wait_ready scripts
+    past the first-run theme picker with a bare Enter (dark is pre-selected)."""
+
+    def test_theme_then_ready(self, monkeypatch):
+        keys = []
+        panes = [
+            "Choose the text style that looks best\n ❯ 2. Dark mode ✔\n To change this later, run /theme",
+            "bypass permissions on (shift+tab to cycle)",
+        ]
+        brain = TmuxClaudeBrain()
+        seq = iter(panes)
+        last = {"p": panes[-1]}
+
+        def capture(name):
+            try:
+                last["p"] = next(seq)
+            except StopIteration:
+                pass
+            return last["p"]
+
+        monkeypatch.setattr(brain, "_capture", capture)
+        monkeypatch.setattr(brain, "_tmux", lambda *a: keys.append(a) or _CP())
+        import istota.brain.tmux_claude as mod
+        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        import time as _t
+        assert brain._wait_ready("s", _t.monotonic() + 100) is True
+        payloads = [a[3] for a in keys if a[:3] == ("send-keys", "-t", "s")]
+        assert payloads[0] == "Enter"  # accept pre-selected dark theme
+        assert "theme" in brain._last_dialogs
+
+
+class _CP:
+    stdout = ""
+    returncode = 0
+
+
 class TestRootSandboxEnv:
     """Under root the interactive TUI refuses --dangerously-skip-permissions
     unless IS_SANDBOX=1 (the container-is-the-sandbox escape hatch)."""
