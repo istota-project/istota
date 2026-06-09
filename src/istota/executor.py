@@ -517,6 +517,13 @@ def build_clean_env(config: Config) -> dict[str, str]:
     oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     if oauth_token:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
+    # Propagate the admins-file path (a path, not a secret) so subprocess
+    # config loads — the feeds/money skill facades call load_config() —
+    # resolve the namespace-correct admins file instead of the hardcoded
+    # /etc/istota default. Unset on non-namespace deploys; harmless to omit.
+    admins_file = os.environ.get("ISTOTA_ADMINS_FILE")
+    if admins_file:
+        env["ISTOTA_ADMINS_FILE"] = admins_file
     return env
 
 

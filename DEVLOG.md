@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: Quiet subprocess config-load log noise + namespace-correct admins path
+
+Cleanup prompted by a burst of `secrets import skipped: ISTOTA_SECRET_KEY not set` and `admins_file_default_missing path=/etc/istota/admins (ISTOTA_ADMINS_FILE not set)` INFO lines on the namespace deploy. Traced to the in-process `feeds`/`money` skill facades calling `load_config()` when run as subprocesses (`python -m istota.skills.*` via `_execute_skill_task`): the subprocess env is `build_clean_env`, which carries neither `ISTOTA_SECRET_KEY` (stripped by design — the master-key boundary) nor `ISTOTA_ADMINS_FILE` (not propagated). So `load_config` → `load_admin_users()` fell back to the hardcoded `/etc/istota/admins` and `_migrate_obsolete_resources` → `import_from_user_configs` found no key, each logging at INFO. Pre-existing for a month (the secrets half landed with the modules refactor, 03a240c); not a regression from the scheduler-stats work — just newly visible because the operator was reading the logs for Stage 5.
+
+**Two changes:**
+- `build_clean_env` now propagates `ISTOTA_ADMINS_FILE` when set. It's a path, not a secret, so there's no reason to drop it — this makes subprocess config loads resolve the namespace-correct admins file instead of the hardcoded `/etc/istota` default. The secret key stays out of subprocesses (boundary unchanged).
+- Both log lines dropped INFO → DEBUG. The secrets-import-skip is *expected* in any subprocess (key intentionally absent), and the admins default-missing is moot there (no web dashboard). The env-var-set-but-file-absent case stays WARNING — that's a real misconfig.
+
+Full suite green (5963). Added two `build_clean_env` propagation tests.
+
+**Files modified:**
+- `src/istota/executor.py` - `build_clean_env` propagates `ISTOTA_ADMINS_FILE`
+- `src/istota/secrets_store.py`, `src/istota/config.py` - two log lines INFO → DEBUG
+- `tests/test_security.py` - admins-file propagation tests
+
 ## 2026-06-08: Scheduler stats health line
 
 Periodic process-health line emitted by the long-running scheduler daemon, motivated by a closed leak (a CalDAV client leak that quietly accumulated thousands of watchdog threads and CLOSE-WAIT sockets over three days, eating ~5 GB and surfacing 13 days late as whisper transcription failing on near-zero free memory). A one-line periodic emit covering thread count, fd count, and RSS would have shown that as a steadily climbing thread count from the first hour; the same line is also useful for routine deploy-verification spot checks.

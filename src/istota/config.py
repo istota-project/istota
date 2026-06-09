@@ -816,7 +816,11 @@ def load_admin_users(path: str | None = None) -> set[str]:
                     path,
                 )
             else:
-                logger.info(
+                # DEBUG, not INFO: fires on every subprocess config load
+                # (feeds/money facades call load_config()) where
+                # ISTOTA_ADMINS_FILE isn't propagated. The env-var-set-but-
+                # missing case above stays WARNING — that's a real misconfig.
+                logger.debug(
                     "admins_file_default_missing path=%s (ISTOTA_ADMINS_FILE not set; "
                     "no web admins will be recognized)",
                     path,

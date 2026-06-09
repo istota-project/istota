@@ -439,7 +439,11 @@ def import_from_user_configs(
     fallback to TOML extras.
     """
     if not secret_key_available():
-        logger.info("secrets import skipped: ISTOTA_SECRET_KEY not set")
+        # DEBUG, not INFO: this fires on every subprocess config load (the
+        # feeds/money skill facades call load_config()), where the key is
+        # intentionally absent — the master-key boundary. The daemon does the
+        # real import at its own startup with the key present.
+        logger.debug("secrets import skipped: ISTOTA_SECRET_KEY not set")
         return 0
 
     written = 0
