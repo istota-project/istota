@@ -866,6 +866,7 @@
     {% for module in user_item.value.disabled_modules | default([]) %}--disabled-module "{{ module }}" {% endfor %}
     {% for purpose, descriptor in (user_item.value.routing | default({})).items() %}--route "{{ purpose }}={{ descriptor }}" {% endfor %}
     {% if (user_item.value.default_destination | default('')) %}--default-destination "{{ user_item.value.default_destination }}"{% endif %}
+    {% if (user_item.value.email_reply_routing | default('')) %}--email-reply-routing "{{ user_item.value.email_reply_routing }}"{% endif %}
     {% if user_item.value.site_enabled | default(false) %}--site-enabled{% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"

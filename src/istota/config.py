@@ -921,6 +921,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         disabled_modules=user_data.get("disabled_modules", []),
         routing=dict(user_data.get("routing", {}) or {}),
         default_destination=user_data.get("default_destination", "talk") or "talk",
+        email_reply_routing=user_data.get("email_reply_routing", "origin+thread") or "origin+thread",
     )
 
 

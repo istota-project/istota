@@ -549,6 +549,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     disabled_modules TEXT NOT NULL DEFAULT '[]',         -- JSON array (default-on otherwise)
     routing TEXT NOT NULL DEFAULT '{}',                  -- JSON object: purpose -> output_target descriptor
     default_destination TEXT NOT NULL DEFAULT 'talk',    -- fallback delivery descriptor
+    email_reply_routing TEXT NOT NULL DEFAULT 'origin+thread', -- email-reply mirror policy: origin+thread | origin | thread
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

@@ -303,6 +303,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         pass
+    # Email-reply mirror policy: origin+thread (default) | origin | thread.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "email_reply_routing TEXT NOT NULL DEFAULT 'origin+thread'"
+        )
+    except sqlite3.OperationalError:
+        pass
 
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError

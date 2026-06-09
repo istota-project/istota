@@ -55,6 +55,8 @@ class UserProfile:
     routing: dict[str, str] = field(default_factory=dict)
     # Default delivery descriptor when no per-purpose route applies.
     default_destination: str = "talk"
+    # Email-reply mirror policy: origin+thread | origin | thread.
+    email_reply_routing: str = "origin+thread"
 
 
 _PROFILE_COLUMNS = (
@@ -63,7 +65,7 @@ _PROFILE_COLUMNS = (
     "site_enabled", "max_foreground_workers", "max_background_workers",
     "disabled_skills", "trusted_email_senders",
     "disabled_modules",
-    "routing", "default_destination",
+    "routing", "default_destination", "email_reply_routing",
 )
 
 # Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
@@ -108,6 +110,7 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         disabled_modules=_parse_json_list(row["disabled_modules"]),
         routing=_parse_json_dict(row["routing"]),
         default_destination=row["default_destination"] or "talk",
+        email_reply_routing=row["email_reply_routing"] or "origin+thread",
     )
 
 
@@ -233,6 +236,7 @@ def ensure_profile(
         disabled_modules=list(_attr(seed_from, "disabled_modules") or []),
         routing=dict(_attr(seed_from, "routing") or {}),
         default_destination=_attr(seed_from, "default_destination") or "talk",
+        email_reply_routing=_attr(seed_from, "email_reply_routing") or "origin+thread",
     )
     _insert(db_path, profile)
     logger.info("ensured user_profile user=%s (new row)", user_id)
@@ -339,6 +343,10 @@ def update_profile_with_status(
             if (current or "talk") != (value or "talk"):
                 same = False
                 break
+        elif col == "email_reply_routing":
+            if (current or "origin+thread") != (value or "origin+thread"):
+                same = False
+                break
         elif col == "site_enabled":
             if bool(current) != bool(value):
                 same = False
@@ -392,6 +400,8 @@ def update_profile(
             value = int(value or 0)
         elif col == "default_destination":
             value = str(value) if value else "talk"
+        elif col == "email_reply_routing":
+            value = str(value) if value else "origin+thread"
         else:
             value = str(value or "")
         sets.append(f"{col} = ?")
@@ -445,6 +455,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         json.dumps(list(profile.disabled_modules)),
         json.dumps(dict(profile.routing)),
         profile.default_destination or "talk",
+        profile.email_reply_routing or "origin+thread",
     )
     cols_sql = ", ".join(insert_cols)
     if replace:
@@ -506,6 +517,7 @@ def import_from_user_configs(
             disabled_modules=list(getattr(user_config, "disabled_modules", []) or []),
             routing=dict(getattr(user_config, "routing", {}) or {}),
             default_destination=getattr(user_config, "default_destination", "") or "talk",
+            email_reply_routing=getattr(user_config, "email_reply_routing", "") or "origin+thread",
         )
         try:
             _insert(db_path, profile, replace=False)
@@ -538,6 +550,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "display_name", profile.display_name or getattr(user_config, "display_name", "") or profile.user_id)
     setattr(user_config, "timezone", profile.timezone or "UTC")
     setattr(user_config, "default_destination", profile.default_destination or "talk")
+    setattr(user_config, "email_reply_routing", profile.email_reply_routing or "origin+thread")
     for attr in (
         "log_channel", "alerts_channel",
         "site_enabled", "max_foreground_workers", "max_background_workers",

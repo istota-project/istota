@@ -40,6 +40,7 @@ class _FakeArgs:
             "site_enabled": None,
             "default_destination": None,
             "route": None,
+            "email_reply_routing": None,
         }
         defaults.update(kwargs)
         self.__dict__.update(defaults)

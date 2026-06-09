@@ -335,6 +335,8 @@ istota_experimental_features: []
 #                                   # Talk streams live, email/ntfy get one summary.
 #     default_destination: "talk"   # fallback descriptor when no purpose matches;
 #                                   # omit to leave the stored value (default "talk")
+#     email_reply_routing: "origin+thread"  # where a reply to a sent email goes:
+#                                   # origin+thread (default) | origin | thread
 #     resources:
 #       - type: "folder"
 #         path: "/alice/Projects"
