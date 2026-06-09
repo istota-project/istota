@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-06-09
+
 ### Added
 - New `tmux_claude` brain that drives the interactive Claude CLI in a detached tmux session, so model traffic keeps drawing on a Claude subscription instead of the metered headless credit. Switch the whole instance to it with `brain.kind = "tmux_claude"`; the standard `claude_code` brain stays as an automatic fallback. If the tmux path can't drive a task, that task falls back to the headless brain, and after repeated failures a circuit breaker degrades to headless instance-wide and alerts the operator — so a broken CLI upgrade is one alert plus graceful degradation, not a pile of timeouts. Web/REPL still stream tool use and intermediate text live. Tunable via a new `[brain.tmux]` config block (fallback thresholds, timeouts, a pinned CLI version, and the dialog/readiness markers). Works in the Docker image (which now bundles tmux) including when the container runs as root.
 - The scheduler daemon now logs a periodic one-line health summary (thread count, open file descriptors, memory use, running tasks, and active workers) so operators can spot resource leaks early in the logs. The interval is configurable and can be turned off.
@@ -688,7 +690,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.20.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.21.0...main
+[0.21.0]: https://gitlab.com/cynium/istota/-/releases/v0.21.0
 [0.20.0]: https://gitlab.com/cynium/istota/-/releases/v0.20.0
 [0.19.0]: https://gitlab.com/cynium/istota/-/releases/v0.19.0
 [0.18.0]: https://gitlab.com/cynium/istota/-/releases/v0.18.0
