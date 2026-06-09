@@ -206,12 +206,16 @@ class TestTranscriptSurvivesRetention:
         assert asst["text"] == "durable answer"
         assert asst["segments"] == [{"kind": "text", "text": "durable answer"}]
 
-    def test_scheduled_origin_excluded(self, db_path):
-        # Scheduled briefings live in the same store (origin_surface='scheduled')
-        # but must not pollute the chat transcript.
+    def test_scheduled_assistant_shown_synthetic_prompt_hidden(self, db_path):
+        # Scheduled-job posts (e.g. the daily money sync) live in the store as
+        # origin_surface='scheduled'. The bot's post IS shown in the room — it's
+        # exactly what lands in the Talk room — but the synthetic cron *prompt*
+        # (the 'user' row) is internal, never user-authored, so it stays hidden.
         with db.get_db(db_path) as conn:
             db.register_room(conn, "tok", "u", origin="talk")
-            db.store_turn_message(conn, "tok", role="user", body="brief?", task_id=1, origin_surface="scheduled")
-            db.store_turn_message(conn, "tok", role="assistant", body="briefing", task_id=1, origin_surface="scheduled")
+            db.store_turn_message(conn, "tok", role="user", body="Run sync-monarch", task_id=1, origin_surface="scheduled")
+            db.store_turn_message(conn, "tok", role="assistant", body="4 new transactions", task_id=1, origin_surface="scheduled")
         out = self._loader(db_path)("u", "tok", 50)
-        assert all("briefing" not in (m["text"] or "") for m in out["messages"])
+        texts = [(m["role"], m["text"]) for m in out["messages"]]
+        assert ("assistant", "4 new transactions") in texts
+        assert ("user", "Run sync-monarch") not in texts

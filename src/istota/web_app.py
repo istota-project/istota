@@ -1617,7 +1617,12 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     with db.get_db(_config.db_path) as conn:
         # 1. Durable turns from the canonical store. LEFT JOIN tasks to enrich a
         #    surviving turn; a retention-deleted turn (t.* NULL) renders plain.
-        #    limit*2 because a turn is two rows (user + assistant).
+        #    web/talk turns render both sides; scheduled-job posts (the daily
+        #    money sync, etc.) render the assistant post only — the synthetic
+        #    cron prompt was never user-authored, so its 'user' row stays hidden.
+        #    limit*2 because a conversational turn is two rows (user + assistant);
+        #    scheduled posts contribute one, so this over-fetches a little for
+        #    scheduled-heavy rooms, which is harmless.
         msg_rows = conn.execute(
             "SELECT m.role AS role, m.body AS body, m.task_id AS task_id, "
             "  m.created_at AS created_at, t.status AS status, "
@@ -1625,8 +1630,10 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
             "  t.started_at AS started_at, t.completed_at AS completed_at, "
             "  t.model_used AS model_used "
             "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
-            "WHERE m.room_token = ? AND m.origin_surface IN ('web', 'talk') "
-            "  AND m.role IN ('user', 'assistant') "
+            "WHERE m.room_token = ? AND ("
+            "    (m.origin_surface IN ('web', 'talk') AND m.role IN ('user', 'assistant')) "
+            "    OR (m.origin_surface = 'scheduled' AND m.role = 'assistant') "
+            "  ) "
             "ORDER BY m.id DESC LIMIT ?",
             (token, limit * 2),
         ).fetchall()
