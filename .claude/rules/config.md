@@ -184,7 +184,10 @@ max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 =
 disabled_skills: list[str] = []           # per-user skills to exclude
 trusted_email_senders: list[str] = []     # patterns for trusted senders (email gate)
 disabled_modules: list[str] = []          # modules to opt out of (default-on otherwise)
+email_reply_routing: str = "origin+thread" # email-reply mirror policy: origin+thread | origin | thread
 ```
+
+`email_reply_routing` is a `user_profiles` column read via `Config.email_reply_routing_for(user_id)` (invalid value → default + warning). It controls where a reply to a bot-sent email is delivered — the origin surface (`web:`/`talk:` descriptor stored on `sent_emails.origin_target`), the email thread, or both. Set via `istota user ensure --email-reply-routing`. See `.claude/rules/transport.md` "Email-reply origin routing".
 
 ### `MemorySearchConfig`
 ```

@@ -2,6 +2,36 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: Email replies route back to the origin surface (web/Talk/email)
+
+Closed the "lossy hop": when the bot sent an email at the request of a web-chat room (or Talk/REPL) and the recipient replied, the inbound reply spawned a fresh `source_type="email"` task that had no memory of where it came from — it delivered only over email, never back into the room. Implemented the `email-reply-origin-routing` spec in four TDD stages, then ran Mulder (bug-hunter) + Scully (verifier) over the result and fixed everything they surfaced.
+
+**The feature (stages 1–4):**
+- **Capture origin.** New `sent_emails.origin_target` column stores an `output_target` descriptor (`web:<token>` / `talk:<token>`) identifying the surface+channel the original send came from. Computed by `routing.origin_descriptor(task)` at send time and wired into both `record_sent_email` call sites. NULL for pre-migration rows.
+- **Cross-surface stream delivery.** `_resolve_one` now distinguishes an *own-origin* stream surface (a web/REPL task whose own result streams over `task_events` → stays a no-op) from a *foreign* task routing INTO a stream surface (an email reply into a web room → resolves to a real push). Also added the missing web-push branch to `process_one_task` — `plan_web` was previously only used for the confirmation gate and delta-prune, so a resolved web push would not have been delivered at all.
+- **Inbound origin routing.** Replaced the hardcoded `output_target="talk,email"` block with policy-driven origin+mirror logic: a thread-matched reply routes back to its origin descriptor and, per the user's policy, optionally mirrors to the email thread. Legacy NULL-origin rows keep the exact old `talk,email` behavior + the Talk delivery-token ladder.
+- **Per-user policy.** New `user_profiles.email_reply_routing` (`origin+thread` default | `origin` | `thread`), threaded through `config`/`user_profiles`, `istota user ensure --email-reply-routing`, and Ansible provisioning.
+
+**Design note:** `origin_descriptor` follows the spec's code (uses `_surface_for_source_type`) over its hedged docstring — `talk`-surface source types return `talk`, so under the default policy the outcome is byte-identical to today's `talk,email` for every source type, and the per-user policy applies uniformly. Scully proved the byte-identical claim by tracing token equivalence and proved the tests non-vacuous by mutation.
+
+**Review fixes (Mulder findings — the multi-step bugs unit tests missed):**
+- **Multi-round threads lost the origin.** A reply task (`source_type="email"`) that mirrors its result to the thread recorded a NULL-origin `sent_emails` row, so the *next* reply hit the back-compat branch and misrouted to Talk using the carried-forward web/REPL room token as the Talk channel — a post to a nonexistent room. This broke the **default** flow on round 2+. Fix: `origin_descriptor` now recovers a web/Talk origin from an email continuation's `conversation_token`, and the back-compat ladder refuses `web-`/`repl-`-prefixed tokens as Talk channels.
+- **Stuck confirmation on a web-origin reply.** A web-routed email reply that produced a confirmation prompt parked in `pending_confirmation` but couldn't be surfaced or answered anywhere (the web confirm flow only works for `source_type="web"` tasks via their own SSE). Fix (option C): scope the web confirmability arm to own-origin web tasks; a foreign reply now completes and delivers the question to the room.
+- **Orphan row on a deleted room** (`_append_blocking` inserted a never-rendering row instead of dropping with a WARNING) and the **busy-room delete guard bypass** (`count_active_web_tasks` only counted `source_type="web"`, so an in-flight email reply didn't block deletion) — both fixed.
+
+Full suite green (6008). Spec moved to Done.
+
+**Files modified:**
+- `src/istota/transport/routing.py` - `origin_descriptor` (+ email-continuation recovery); `_resolve_one` own-origin-vs-foreign stream branch
+- `src/istota/transport/email/inbound.py` - policy-driven origin+mirror routing; back-compat token guard
+- `src/istota/transport/email/outbound.py`, `src/istota/scheduler_deferred.py` - stamp `origin_target` on sent emails
+- `src/istota/transport/web/__init__.py` - drop (WARN) on deleted room instead of orphan insert
+- `src/istota/scheduler.py` - web-push delivery branch; scope web confirmation gate to own-origin
+- `src/istota/db.py` - `sent_emails.origin_target` + `user_profiles.email_reply_routing` columns/migrations; `count_active_web_tasks` counts all source types
+- `src/istota/config.py`, `src/istota/user_profiles.py`, `src/istota/cli.py` - `email_reply_routing` field, `email_reply_routing_for`, CLI flag
+- `schema.sql`, `deploy/ansible/{defaults/main.yml,tasks/main.yml}` - schema parity + provisioning
+- `tests/` - routing, inbound, outbound, scheduler, web, web_chat, db, config, user_profiles, cli coverage
+
 ## 2026-06-09: Defense-in-depth for the alive-but-slow duplicate-execution residual
 
 Follow-up to the stuck-running reclaim fix. Mulder + Scully both flagged a residual the liveness-reset couldn't close: a genuinely *alive* worker whose heartbeat lapses past `worker_stuck_minutes` (GIL/thread starvation under load, or a stalled FUSE-mounted DB blocking `touch_task_heartbeat`) can be declared dead, its task reclaimed and re-run by a second worker while the first is still executing. The heartbeat-reset can't help — the row legitimately looks dead. Two mitigations, per the user's call to do both.

@@ -160,6 +160,26 @@ messages are re-polled rather than silently lost.
   to it and returns an empty list. The scheduler's email tick imports
   `poll_emails` from `transport.email` and calls it directly.
 
+  **Email-reply origin routing.** A thread-matched reply (recipient replies to a
+  mail we sent) routes back to the *surface the original send came from*, not
+  unconditionally to Talk. At send time `routing.origin_descriptor(task)` stamps
+  `sent_emails.origin_target` — a descriptor (`web:<token>` / `talk:<token>`)
+  recovered from the originating task's surface, or, for an email-*continuation*
+  task, from its `conversation_token` (a `web-`/`repl-`/synthetic token is
+  classified accordingly so multi-round threads keep their origin). On the inbound
+  reply, `poll_emails` reads that descriptor and applies the per-user
+  `Config.email_reply_routing_for(user_id)` policy (`origin+thread` default |
+  `origin` | `thread`) to build `output_target` (e.g. `web:<token>,email`), with
+  `conversation_token` set to the origin room so the reply continues that
+  conversation. A NULL `origin_target` (pre-migration row, or a non-deliverable
+  origin) falls back to the exact legacy `talk,email` behavior + the
+  `talk_delivery_token` ladder — which now refuses `web-`/`repl-`-prefixed tokens
+  as Talk channels. A *foreign* reply routed into a web room is delivered via
+  `WebTransport.deliver` (`process_one_task`'s web-push branch); it does not gate
+  confirmations (only own-origin `source_type="web"` tasks do). Policy column lives
+  in `user_profiles.email_reply_routing`; set via `istota user ensure
+  --email-reply-routing`.
+
 `ingest_message` is the only shared inbound code; it maps an `IncomingMessage`
 straight onto `db.create_task` (the duplicate-Talk-message guard returns the
 existing id rather than inserting twice). **Both** surfaces route their creates
