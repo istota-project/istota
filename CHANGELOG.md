@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - The scheduler daemon now logs a periodic one-line health summary (thread count, open file descriptors, memory use, running tasks, and active workers) so operators can spot resource leaks early in the logs. The interval is configurable and can be turned off.
+- When someone replies to an email the bot sent on your behalf, the reply now comes back to wherever you asked for it — the web chat room, Nextcloud Talk room, or email thread it started in — instead of only landing in your email. By default the reply appears in the origin surface *and* continues the email thread, so an external correspondent who replied by email still gets an email reply. A new per-user setting (`istota user ensure --email-reply-routing origin+thread|origin|thread`) switches this to origin-only or thread-only.
 
 ### Changed
 - Web chat picks up a quick follow-up message much faster. A message sent moments after a reply is now claimed within about half a second instead of waiting several seconds for the idle worker's poll cycle.
