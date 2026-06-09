@@ -47,8 +47,10 @@ features = {{ istota_experimental_features | to_json }}
 
 [brain]
 # Which model-invocation backend the executor uses.
-#   "claude_code" (default) wraps the `claude` CLI subprocess.
+#   "claude_code" (default) wraps the headless `claude -p` CLI subprocess.
 #   "native"                runs istota's own in-process agent loop.
+#   "tmux_claude"           drives the interactive `claude` TUI via tmux
+#                           (needs tmux on the host).
 # Operator runbook: docs/configuration/native-brain.md.
 kind = "{{ istota_brain_kind | default('claude_code', true) }}"
 {% if istota_brain_kind == 'native' or istota_brain_source_type_overrides %}

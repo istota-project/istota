@@ -99,12 +99,21 @@ istota_models_roles: {}
 istota_custom_system_prompt: true
 
 # Brain — selects which model-invocation backend the executor uses.
-#   "claude_code" (default) wraps the `claude` CLI subprocess.
+#   "claude_code" (default) wraps the headless `claude -p` CLI subprocess.
 #   "native"                runs istota's own in-process agent loop against an
 #                           OpenAI-compatible (or Claude-CLI) provider.
-# Both coexist behind the Brain protocol (src/istota/brain/); swapping backends
-# doesn't touch executor orchestration (memory, skills, sandbox, deferred DB
-# writes). Full operator runbook: docs/configuration/native-brain.md.
+#   "tmux_claude"           drives the interactive `claude` TUI in a detached
+#                           tmux session (prompt injection + Stop-hook sentinel
+#                           + transcript parse). Same `claude` binary + auth as
+#                           claude_code; requires `tmux` on the host. Prototype
+#                           maturity — keep claude_code as the fallback and roll
+#                           out gradually via istota_brain_source_type_overrides
+#                           before making it the instance default.
+# All three coexist behind the Brain protocol (src/istota/brain/); swapping
+# backends doesn't touch executor orchestration (memory, skills, sandbox,
+# deferred DB writes). Full operator runbook: docs/configuration/native-brain.md.
+# Switch + redeploy: set istota_brain_kind, or route one source_type via the
+# overrides map below.
 istota_brain_kind: "claude_code"
 
 # --- Native brain ([brain.native]) -------------------------------------------
@@ -144,10 +153,14 @@ istota_brain_native_api_key: ""
 # Gradual-rollout knob: map a task source_type to a brain kind, overriding
 # istota_brain_kind for matching tasks (e.g. move cron/heartbeat to native while
 # interactive talk/email stays on claude_code). Unknown kinds are logged and
-# ignored, never wedging a task. Example:
+# ignored, never wedging a task. Examples:
 #   istota_brain_source_type_overrides:
 #     scheduled: native
 #     heartbeat: native
+# To start a tmux_claude rollout on cron jobs only, leaving everything else on
+# claude_code:
+#   istota_brain_source_type_overrides:
+#     scheduled: tmux_claude
 istota_brain_source_type_overrides: {}
 
 # Claude CLI authentication

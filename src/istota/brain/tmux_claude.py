@@ -1,18 +1,15 @@
-"""TmuxClaudeBrain — drives the *interactive* `claude` TUI via a detached tmux
+"""TmuxClaudeBrain — drives the interactive `claude` TUI in a detached tmux
 session, instead of the headless `claude -p` subprocess `ClaudeCodeBrain` uses.
 
-Why this exists: starting 2026-06-15, Anthropic meters headless/SDK usage
-(`claude -p`, the Agent SDK, GitHub Actions) against a separate monthly Agent
-SDK credit, while *interactive* terminal use keeps drawing from the normal
-subscription limits. This brain is a feasibility prototype testing whether
-driving the interactive TUI programmatically (prompt injection + a `Stop` hook
-sentinel + transcript parsing) keeps Istota on subscription billing. See
-``Specs/Active/tmux-subscription-brain-feasibility.md``.
+Mechanism: spawn a detached tmux session, launch the interactive TUI, inject the
+prompt via a tmux buffer, detect turn completion with a `Stop`-hook sentinel
+file, and reconstruct the result + trace by parsing the session transcript JSONL.
+It runs the same `claude` binary and uses the same auth as ClaudeCodeBrain, so it
+delegates all four model-resolution methods to a composed ``ClaudeCodeBrain`` and
+only implements ``execute``.
 
-Stage 0 (this file's current state) is scaffold only: it satisfies the Brain
-protocol by delegating the four model-resolution methods wholesale to a composed
-``ClaudeCodeBrain`` (same CLI, same Anthropic model namespace), and stubs
-``execute`` with NotImplementedError. The real tmux flow lands in Stage 2.
+Prototype maturity — ``claude_code`` stays the default and fallback. See
+``Specs/Active/tmux-subscription-brain-feasibility.md``.
 """
 
 import itertools
