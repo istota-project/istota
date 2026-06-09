@@ -316,8 +316,16 @@ max_background_workers = 3
 # Global per-user worker defaults (individual users can override in their config)
 # user_max_foreground_workers = 2
 # user_max_background_workers = 1
-# Seconds before an idle worker thread exits
-worker_idle_timeout = 30
+# Cumulative-idle seconds a worker lingers (re-checking for new work on a fine
+# cadence) before exiting. A follow-up task arriving inside this window is
+# claimed within one worker_idle_poll_interval instead of waiting a full
+# poll_interval.
+worker_idle_timeout = 10
+# Idle re-check cadence (seconds). While a worker lingers it polls for a new
+# pending task every worker_idle_poll_interval, so a quick follow-up message is
+# picked up sub-second. Set to 0 or >= worker_idle_timeout to restore the legacy
+# single coarse wait + single recheck.
+worker_idle_poll_interval = 0.5
 
 # ============================================================================
 # Briefing Defaults

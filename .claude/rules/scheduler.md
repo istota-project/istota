@@ -164,7 +164,10 @@ class UserWorker(threading.Thread):
     def request_stop(self) -> None
 ```
 - Loops calling `process_one_task(config, user_id=user_id)`
-- Exits after `worker_idle_timeout` seconds of no tasks
+- When the queue empties, the worker lingers in `_worker_idle_wait` instead of exiting at once: it re-checks for new work every `worker_idle_poll_interval` (default 0.5s) until `worker_idle_timeout` (default 10s) of *continuous* emptiness elapses, then exits. A follow-up task arriving mid-linger is claimed within ~one idle poll (the "quick follow-up" case `dispatch()` alone can't help, because the parked worker still holds the per-user slot). A cheap `count_claimable_tasks_for_user_queue` pre-check gates the expensive `claim_task` so idle polling costs no more than a `dispatch()` scan. The deadline tracks continuous emptiness — a lost claim race does not reset it, so two idle workers can't keep each other alive forever. `worker_idle_poll_interval` ≤ 0 or ≥ `worker_idle_timeout` restores the legacy single coarse-wait + single-recheck behaviour (an interruptible `stop_event.wait`, exact pre-phase-2 parity). The fine-cadence path mirrors `_dispatch_sleep` (slice-sleep + stop/shutdown checks), so per-worker stop and global shutdown are honoured within one idle poll.
+- Both the idle pre-check and `dispatch()`'s spawn count use `db.count_claimable_tasks_for_user_queue` (not the raw `count_pending_tasks_for_user_queue`), which mirrors `claim_task`'s per-channel single-active gate via the shared `_CLAIM_CHANNEL_GATE_SQL`. A follow-up gated behind an active task in the *same* room therefore counts as 0 — `dispatch()` won't spawn a doomed extra worker for it and an idle worker keeps sleeping cheaply — while a task in a *different* room still counts. Raw `count_pending_*` survives only for status/observability (the daemon's pending-backlog status file).
+- During the linger both this worker and `dispatch()` may scan the same user; the overlap is harmless — `claim_task` is atomic (`UPDATE … RETURNING`), so at most one wins.
+- After exit, `dispatch()` re-spawns a worker on the next pending task (phase-1 sub-tick cadence, ~0.5s).
 - Each worker creates fresh DB connections and `asyncio.run()` event loops
 
 ## Poller Integrations
@@ -209,7 +212,8 @@ After task completion, if enabled + `auto_index_conversations`:
 | `shared_file_check_interval` | 120s | Shared file organizer |
 | `heartbeat_check_interval` | 60s | Heartbeat checks |
 | `db_health_check_interval` | 86400s (24h) | SQLite `quick_check` + `REINDEX` self-heal across framework + per-user feeds/health/location/money DBs (covers Nextcloud-mount FUSE/network induced index corruption) |
-| `worker_idle_timeout` | 30s | Worker thread exit |
+| `worker_idle_timeout` | 10s | Cumulative-idle linger before a worker exits. The worker re-checks for work on a fine cadence for up to this long (continuous emptiness) before exiting; resets whenever a task is claimed. (Pre-phase-2 this was effectively capped to ~one `poll_interval` with a single recheck — the knob is now honoured.) |
+| `worker_idle_poll_interval` | 0.5s | Idle re-check cadence inside `_worker_idle_wait`. A follow-up task is claimed within ~one interval instead of waiting a `poll_interval`. A cheap `count_claimable_tasks_for_user_queue` pre-check gates the `claim_task`. 0 or ≥ `worker_idle_timeout` = legacy single coarse-wait + single-recheck. |
 | `max_foreground_workers` | 5 | Instance-level fg worker cap |
 | `max_background_workers` | 3 | Instance-level bg worker cap |
 | `user_max_foreground_workers` | 2 | Global per-user fg default |

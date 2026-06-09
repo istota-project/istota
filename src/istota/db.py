@@ -593,6 +593,36 @@ _STUCK_RUNNING_PREDICATE = (
 INLINE_ONLY_SOURCE_TYPES = ("repl",)
 _INLINE_ONLY_IN = ", ".join(f"'{s}'" for s in INLINE_ONLY_SOURCE_TYPES)
 
+# Per-channel gate: one active foreground task per conversation_token.
+# A pending fg task is unclaimable while another fg task in the same channel is
+# locked/running/pending_confirmation (the latter parks the room awaiting the
+# user's confirmation, so the next queued message must wait rather than barge
+# ahead — web chat's single-active-per-room + queue). Talk is unaffected: it
+# cancels pending confirmations in the same poll transaction before creating the
+# new task. Tasks with no conversation_token (cron, email) and background-queue
+# tasks are unaffected. References the outer query's `tasks` alias.
+#
+# Shared verbatim between claim_task (what it will actually claim) and
+# count_claimable_tasks_for_user_queue (what dispatch / the idle pre-check use
+# to decide whether to spawn or poll a worker) so the count can never disagree
+# with claimability — otherwise a worker spun up for a gated task busy-polls
+# claim_task (and its stale-lock maintenance UPDATEs) until the gate clears.
+_CLAIM_CHANNEL_GATE_SQL = """
+            NOT (
+                tasks.queue = 'foreground'
+                AND tasks.conversation_token IS NOT NULL
+                AND tasks.conversation_token != ''
+                AND EXISTS (
+                    SELECT 1 FROM tasks t2
+                    WHERE t2.conversation_token = tasks.conversation_token
+                    AND t2.queue = 'foreground'
+                    AND t2.status IN ('locked', 'running', 'pending_confirmation')
+                    AND t2.cancel_requested = 0
+                    AND t2.id != tasks.id
+                )
+            )
+            """
+
 
 def _stuck_running_params(heartbeat_stuck_minutes: int, stuck_running_minutes: int) -> tuple:
     return (f"-{heartbeat_stuck_minutes}", f"-{stuck_running_minutes}")
@@ -705,33 +735,9 @@ def claim_task(
         filters.append("queue = ?")
         params.append(queue)
 
-    # Per-channel gate: one active foreground task per conversation_token.
-    # Skip pending fg tasks whose channel already has an active fg task.
-    # "Active" includes pending_confirmation: a task parked awaiting the user's
-    # confirmation still owns the room, so the next queued message must wait
-    # rather than barge ahead of it (web chat's single-active-per-room + queue).
-    # Talk is unaffected — it cancels pending confirmations in the same poll
-    # transaction before creating the new task, so none is left to block on.
-    # Tasks with no conversation_token (cron, email routed to talk later) and
-    # background-queue tasks are unaffected.
+    # Per-channel single-active-foreground gate (see _CLAIM_CHANNEL_GATE_SQL).
     if queue == "foreground" or queue is None:
-        filters.append(
-            """
-            NOT (
-                tasks.queue = 'foreground'
-                AND tasks.conversation_token IS NOT NULL
-                AND tasks.conversation_token != ''
-                AND EXISTS (
-                    SELECT 1 FROM tasks t2
-                    WHERE t2.conversation_token = tasks.conversation_token
-                    AND t2.queue = 'foreground'
-                    AND t2.status IN ('locked', 'running', 'pending_confirmation')
-                    AND t2.cancel_requested = 0
-                    AND t2.id != tasks.id
-                )
-            )
-            """
-        )
+        filters.append(_CLAIM_CHANNEL_GATE_SQL)
 
     where_clause = " AND ".join(filters)
 
@@ -3002,7 +3008,13 @@ def get_users_with_pending_bg_queue_tasks(conn: sqlite3.Connection) -> list[str]
 def count_pending_tasks_for_user_queue(
     conn: sqlite3.Connection, user_id: str, queue: str,
 ) -> int:
-    """Count pending tasks for a specific user and queue type."""
+    """Count pending tasks for a specific user and queue type.
+
+    Raw backlog: counts every ready pending row, ignoring the per-channel
+    single-active gate. Use for status / observability. For spawn-or-poll
+    decisions use count_claimable_tasks_for_user_queue, which excludes tasks
+    claim_task would currently refuse.
+    """
     cursor = conn.execute(
         """
         SELECT COUNT(*) FROM tasks
@@ -3010,6 +3022,42 @@ def count_pending_tasks_for_user_queue(
         AND (scheduled_for IS NULL OR scheduled_for <= datetime('now'))
         """,
         (user_id, queue),
+    )
+    return cursor.fetchone()[0]
+
+
+def count_claimable_tasks_for_user_queue(
+    conn: sqlite3.Connection, user_id: str, queue: str,
+) -> int:
+    """Count pending tasks for (user, queue) that claim_task could claim *now*.
+
+    Mirrors claim_task's claimability WHERE clause — same inline-only exclusion,
+    same schedule gate, and (for the foreground queue) the same per-channel
+    single-active gate via the shared _CLAIM_CHANNEL_GATE_SQL — so dispatch's
+    spawn count and the idle worker's pre-check never count a task claim_task
+    would refuse. Without this, a follow-up queued behind an active task in the
+    same room reads as "1 pending" to dispatch (spawns a doomed worker) and to
+    the idle pre-check (busy-polls claim_task every tick) for the whole lifetime
+    of the blocking task.
+
+    It does NOT replay the stale-lock / stuck-running maintenance UPDATEs
+    claim_task runs first; a soon-to-be-released stuck task is simply not counted
+    until released (a safe undercount, picked up on the next tick).
+    """
+    filters = [
+        "user_id = ?",
+        "queue = ?",
+        "status = 'pending'",
+        f"source_type NOT IN ({_INLINE_ONLY_IN})",
+        "(scheduled_for IS NULL OR scheduled_for <= datetime('now'))",
+    ]
+    params: list = [user_id, queue]
+    if queue == "foreground" or queue is None:
+        filters.append(_CLAIM_CHANNEL_GATE_SQL)
+    where_clause = " AND ".join(filters)
+    cursor = conn.execute(
+        f"SELECT COUNT(*) FROM tasks WHERE {where_clause}",
+        params,
     )
     return cursor.fetchone()[0]
 

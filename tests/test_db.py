@@ -517,6 +517,94 @@ class TestCountPendingTasksForUserQueue:
             assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 0
 
 
+class TestCountClaimableTasksForUserQueue:
+    """count_claimable_tasks_for_user_queue mirrors claim_task's claimability,
+    diverging from the raw pending count exactly where claim_task would refuse."""
+
+    def test_matches_raw_when_nothing_gated(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="t1", user_id="alice",
+                           conversation_token="room1", queue="foreground")
+            db.create_task(conn, prompt="t2", user_id="alice",
+                           conversation_token="room2", queue="foreground")
+            # Two ungated rooms — both claimable, same as the raw count.
+            assert db.count_claimable_tasks_for_user_queue(conn, "alice", "foreground") == 2
+            assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 2
+
+    def test_same_room_followup_behind_active_is_not_claimable(self, db_path):
+        with db.get_db(db_path) as conn:
+            active = db.create_task(conn, prompt="turn1", user_id="alice",
+                                    conversation_token="room1", queue="foreground")
+            db.update_task_status(conn, active, "running")
+            db.create_task(conn, prompt="turn2", user_id="alice",
+                           conversation_token="room1", queue="foreground")
+            # Raw sees the queued follow-up; claimable sees it's gated → 0.
+            assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 1
+            assert db.count_claimable_tasks_for_user_queue(conn, "alice", "foreground") == 0
+
+    def test_other_room_task_still_counts_while_one_room_active(self, db_path):
+        with db.get_db(db_path) as conn:
+            active = db.create_task(conn, prompt="turn1", user_id="alice",
+                                    conversation_token="room1", queue="foreground")
+            db.update_task_status(conn, active, "running")
+            db.create_task(conn, prompt="r1-followup", user_id="alice",
+                           conversation_token="room1", queue="foreground")
+            db.create_task(conn, prompt="r2-task", user_id="alice",
+                           conversation_token="room2", queue="foreground")
+            # room1 follow-up gated, room2 task free → exactly 1 claimable.
+            assert db.count_claimable_tasks_for_user_queue(conn, "alice", "foreground") == 1
+
+    def test_pending_confirmation_parks_the_room(self, db_path):
+        with db.get_db(db_path) as conn:
+            parked = db.create_task(conn, prompt="turn1", user_id="alice",
+                                    conversation_token="room1", queue="foreground")
+            db.update_task_status(conn, parked, "pending_confirmation")
+            db.create_task(conn, prompt="turn2", user_id="alice",
+                           conversation_token="room1", queue="foreground")
+            assert db.count_claimable_tasks_for_user_queue(conn, "alice", "foreground") == 0
+
+    def test_cancelled_active_does_not_gate(self, db_path):
+        with db.get_db(db_path) as conn:
+            active = db.create_task(conn, prompt="turn1", user_id="alice",
+                                    conversation_token="room1", queue="foreground")
+            db.update_task_status(conn, active, "running")
+            conn.execute("UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (active,))
+            conn.commit()
+            db.create_task(conn, prompt="turn2", user_id="alice",
+                           conversation_token="room1", queue="foreground")
+            assert db.count_claimable_tasks_for_user_queue(conn, "alice", "foreground") == 1
+
+    def test_unblocks_after_active_completes(self, db_path):
+        with db.get_db(db_path) as conn:
+            active = db.create_task(conn, prompt="turn1", user_id="alice",
+                                    conversation_token="room1", queue="foreground")
+            db.update_task_status(conn, active, "running")
+            db.create_task(conn, prompt="turn2", user_id="alice",
+                           conversation_token="room1", queue="foreground")
+            assert db.count_claimable_tasks_for_user_queue(conn, "alice", "foreground") == 0
+            db.update_task_status(conn, active, "completed", result="ok")
+            assert db.count_claimable_tasks_for_user_queue(conn, "alice", "foreground") == 1
+
+    def test_background_queue_ignores_gate(self, db_path):
+        with db.get_db(db_path) as conn:
+            active = db.create_task(conn, prompt="fg", user_id="alice",
+                                    conversation_token="room1", queue="foreground")
+            db.update_task_status(conn, active, "running")
+            db.create_task(conn, prompt="bg", user_id="alice",
+                           conversation_token="room1", queue="background")
+            # The fg gate never applies to the background queue.
+            assert db.count_claimable_tasks_for_user_queue(conn, "alice", "background") == 1
+
+    def test_excludes_inline_only_source_types(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="repl line", user_id="alice",
+                           source_type="repl", queue="foreground")
+            # REPL tasks run inline and are never claimed by the daemon.
+            assert db.count_claimable_tasks_for_user_queue(conn, "alice", "foreground") == 0
+            # Raw count does not exclude them — that's the divergence.
+            assert db.count_pending_tasks_for_user_queue(conn, "alice", "foreground") == 1
+
+
 class TestGetPreviousTasks:
     """Tests for get_previous_tasks (returns last N tasks unfiltered by source_type)."""
 

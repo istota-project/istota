@@ -143,7 +143,8 @@ class SchedulerConfig:
     task_retention_days: int = 7  # delete completed/failed/cancelled tasks older than this
     email_retention_days: int = 7  # delete emails older than N days from IMAP, 0 to disable
     temp_file_retention_days: int = 7  # delete temp files older than N days, 0 to disable
-    worker_idle_timeout: int = 30    # seconds before idle worker exits
+    worker_idle_timeout: int = 10    # cumulative-idle seconds a worker lingers (re-checking) before exiting
+    worker_idle_poll_interval: float = 0.5  # idle re-check cadence (0 or >= worker_idle_timeout = legacy single coarse wait + recheck)
     max_foreground_workers: int = 5  # instance-level foreground (interactive) worker cap
     max_background_workers: int = 3  # instance-level background (scheduled/briefing) worker cap
     user_max_foreground_workers: int = 2  # global per-user fg worker default
@@ -1058,7 +1059,8 @@ def load_config(config_path: Path | None = None) -> Config:
             task_retention_days=sched.get("task_retention_days", 7),
             email_retention_days=sched.get("email_retention_days", 7),
             temp_file_retention_days=sched.get("temp_file_retention_days", 7),
-            worker_idle_timeout=sched.get("worker_idle_timeout", 30),
+            worker_idle_timeout=sched.get("worker_idle_timeout", 10),
+            worker_idle_poll_interval=sched.get("worker_idle_poll_interval", 0.5),
             scheduled_job_max_consecutive_failures=sched.get("scheduled_job_max_consecutive_failures", 5),
             cron_max_staleness_minutes=sched.get("cron_max_staleness_minutes", 60),
             max_foreground_workers=sched.get("max_foreground_workers", 5),

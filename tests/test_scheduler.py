@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,7 @@ from istota.scheduler import (
     _post_policy_refusal_alert,
     _strip_action_prefix,
     _dispatch_sleep,
+    _worker_idle_wait,
     _execute_command_task,
     _execute_skill_task,
     _purge_obsolete_skill_jobs,
@@ -5741,6 +5743,69 @@ class TestMultiWorkerPerUser:
 
         pool.shutdown()
 
+    def test_no_doomed_worker_for_same_room_gated_followup(self, db_path, tmp_path):
+        """A follow-up queued behind an active task in the SAME room is gated
+        by claim_task, so dispatch must not spawn a second (doomed) worker for
+        it — the claimable count reads 0 even though a pending row exists."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=5,
+                user_max_foreground_workers=2,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            active = db.create_task(conn, prompt="turn1", user_id="alice",
+                                    conversation_token="room1", queue="foreground")
+            db.update_task_status(conn, active, "running")
+            db.create_task(conn, prompt="turn2", user_id="alice",
+                           conversation_token="room1", queue="foreground")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            # Gated follow-up → zero claimable → no worker spawned.
+            assert pool.active_count == 0
+
+        pool.shutdown()
+
+    def test_spawns_worker_for_different_room_while_one_room_active(self, db_path, tmp_path):
+        """The gate is per-room: a pending task in a DIFFERENT room from the
+        active one is still claimable, so dispatch spawns a worker for it."""
+        config = Config(
+            db_path=db_path,
+            scheduler=SchedulerConfig(
+                max_foreground_workers=5,
+                user_max_foreground_workers=2,
+                worker_idle_timeout=1, poll_interval=1,
+            ),
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+        )
+        (tmp_path / "mount").mkdir(exist_ok=True)
+
+        with db.get_db(db_path) as conn:
+            active = db.create_task(conn, prompt="turn1", user_id="alice",
+                                    conversation_token="room1", queue="foreground")
+            db.update_task_status(conn, active, "running")
+            db.create_task(conn, prompt="r1-followup", user_id="alice",
+                           conversation_token="room1", queue="foreground")
+            db.create_task(conn, prompt="r2-task", user_id="alice",
+                           conversation_token="room2", queue="foreground")
+
+        pool = WorkerPool(config)
+        with patch("istota.scheduler.process_one_task", return_value=None):
+            pool.dispatch()
+            # room1 follow-up gated, room2 task free → exactly one worker.
+            assert pool.active_count == 1
+
+        pool.shutdown()
+
     def test_dispatch_respects_per_user_fg_cap(self, db_path, tmp_path):
         """User with 3 pending fg tasks but per-user cap of 2 gets only 2 workers."""
         config = Config(
@@ -6730,3 +6795,252 @@ class TestDispatchSleep:
 
         assert pool.dispatch.call_count == 4
         assert sum(fake.sleeps) == pytest.approx(2.0)
+
+
+def _idle_cfg(poll_interval=2.0, idle_poll=0.5, idle_timeout=10):
+    cfg = Config()
+    cfg.scheduler = SchedulerConfig(
+        poll_interval=poll_interval,
+        worker_idle_poll_interval=idle_poll,
+        worker_idle_timeout=idle_timeout,
+    )
+    return cfg
+
+
+class _Counter:
+    """Records call count and returns a fixed value (or raises)."""
+
+    def __init__(self, value=None, raises=None):
+        self.value = value
+        self.raises = raises
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return self.value
+
+
+def _scripted(values):
+    """Closure returning successive values, repeating the last forever."""
+    seq = list(values)
+    state = {"i": 0}
+
+    def fn():
+        i = min(state["i"], len(seq) - 1)
+        state["i"] += 1
+        return seq[i]
+
+    return fn
+
+
+class TestWorkerIdleWait:
+    """_worker_idle_wait: fine-cadence idle re-check with a cumulative deadline."""
+
+    def test_claims_task_appearing_mid_linger(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        stop = threading.Event()
+        # Empty for the first three slices, then a task appears.
+        pending = _scripted([0, 0, 0, 1])
+        run_one = _Counter(value=(7, True))
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=10),
+            stop, lambda: False, run_one=run_one, pending_count=pending,
+        )
+
+        assert result == (7, True)
+        assert run_one.calls == 1
+        # Slept to the slice the task appeared on — not the full timeout.
+        assert fake.sleeps == pytest.approx([0.5, 0.5, 0.5, 0.5])
+
+    def test_pre_check_gates_claim(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        run_one = _Counter(value=(1, True))
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=2),
+            threading.Event(), lambda: False,
+            run_one=run_one, pending_count=lambda: 0,
+        )
+
+        # Queue stays empty → the expensive claim is never attempted.
+        assert result is None
+        assert run_one.calls == 0
+
+    def test_exits_after_idle_timeout(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        run_one = _Counter(value=(1, True))
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=2),
+            threading.Event(), lambda: False,
+            run_one=run_one, pending_count=lambda: 0,
+        )
+
+        assert result is None
+        assert run_one.calls == 0
+        # timeout / poll = 2 / 0.5 = 4 slices, summing exactly to the timeout.
+        assert fake.sleeps == pytest.approx([0.5, 0.5, 0.5, 0.5])
+        assert sum(fake.sleeps) == pytest.approx(2.0)
+
+    def test_final_slice_clamped(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.3, idle_timeout=1.0),
+            threading.Event(), lambda: False,
+            run_one=_Counter(value=None), pending_count=lambda: 0,
+        )
+
+        assert result is None
+        # Non-divisor config: last slice clamped so the total never overshoots.
+        assert fake.sleeps == pytest.approx([0.3, 0.3, 0.3, 0.1])
+        assert sum(fake.sleeps) == pytest.approx(1.0)
+
+    def test_legacy_single_wait_when_poll_ge_timeout(self):
+        run_one = _Counter(value=None)
+        # Legacy branch uses an interruptible stop_event.wait (not time.sleep),
+        # so it stays instantly wakeable on stop — exact pre-phase-2 parity.
+        stop = MagicMock()
+        stop.wait.return_value = False  # not stopped during the wait
+
+        result = _worker_idle_wait(
+            "u", "foreground",
+            _idle_cfg(poll_interval=2, idle_poll=10, idle_timeout=5),
+            stop, lambda: False,
+            run_one=run_one, pending_count=_Counter(value=1),
+        )
+
+        # One coarse interruptible wait of min(poll_interval, idle_timeout),
+        # then a single recheck — no fine slices, no pre-check.
+        assert result is None
+        stop.wait.assert_called_once_with(timeout=2)
+        assert run_one.calls == 1
+
+    def test_legacy_single_wait_when_poll_zero(self):
+        run_one = _Counter(value=None)
+        stop = MagicMock()
+        stop.wait.return_value = False
+
+        result = _worker_idle_wait(
+            "u", "foreground",
+            _idle_cfg(poll_interval=2, idle_poll=0, idle_timeout=5),
+            stop, lambda: False,
+            run_one=run_one, pending_count=_Counter(value=1),
+        )
+
+        assert result is None
+        stop.wait.assert_called_once_with(timeout=2)
+        assert run_one.calls == 1
+
+    def test_legacy_stop_during_wait_returns_none_before_run_one(self):
+        run_one = _Counter(value=(1, True))
+        stop = MagicMock()
+        stop.wait.return_value = True  # stop signalled mid-wait — wakes at once
+
+        result = _worker_idle_wait(
+            "u", "foreground",
+            _idle_cfg(poll_interval=2, idle_poll=0, idle_timeout=5),
+            stop, lambda: False,
+            run_one=run_one, pending_count=_Counter(value=1),
+        )
+
+        # Interruptible wait returns True → exit immediately, no recheck.
+        assert result is None
+        assert run_one.calls == 0
+
+    def test_stop_event_returns_none_before_run_one(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        stop = threading.Event()
+        stop.set()
+        run_one = _Counter(value=(1, True))
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=10),
+            stop, lambda: False,
+            run_one=run_one, pending_count=lambda: 1,
+        )
+
+        # Pre-set stop → exit immediately, no sleep, no claim.
+        assert result is None
+        assert fake.sleeps == []
+        assert run_one.calls == 0
+
+    def test_shutdown_mid_idle_returns_promptly(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        run_one = _Counter(value=(1, True))
+        # False on the while-guard, True on the post-sleep recheck.
+        flips = {"n": 0}
+
+        def should_stop():
+            flips["n"] += 1
+            return flips["n"] >= 2
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=10),
+            threading.Event(), should_stop,
+            run_one=run_one, pending_count=lambda: 1,
+        )
+
+        # Honoured within one idle slice; claim never attempted.
+        assert result is None
+        assert fake.sleeps == [0.5]
+        assert run_one.calls == 0
+
+    def test_claim_race_loss_keeps_polling_same_deadline(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        # Pending always positive, but every claim is lost (run_one -> None).
+        run_one = _Counter(value=None)
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=2),
+            threading.Event(), lambda: False,
+            run_one=run_one, pending_count=lambda: 1,
+        )
+
+        # Deadline is NOT reset by lost races → loop still exits at the timeout
+        # instead of spinning forever.
+        assert result is None
+        assert sum(fake.sleeps) == pytest.approx(2.0)
+        assert run_one.calls == 4
+
+    def test_pending_count_error_falls_through_to_run_one(self, monkeypatch):
+        import istota.scheduler as sched_mod
+
+        fake = _FakeTime()
+        monkeypatch.setattr(sched_mod, "time", fake)
+        run_one = _Counter(value=(5, True))
+
+        result = _worker_idle_wait(
+            "u", "foreground", _idle_cfg(idle_poll=0.5, idle_timeout=10),
+            threading.Event(), lambda: False,
+            run_one=run_one,
+            pending_count=_Counter(raises=RuntimeError("read failed")),
+        )
+
+        # A transient read error must not skip a possibly-present task.
+        assert result == (5, True)
+        assert run_one.calls == 1

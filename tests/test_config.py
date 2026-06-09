@@ -70,6 +70,8 @@ class TestConfigDefaults:
         assert cfg.scheduler.progress_updates is True
         assert cfg.scheduler.task_timeout_minutes == 30
         assert cfg.scheduler.task_retention_days == 7
+        assert cfg.scheduler.worker_idle_timeout == 10
+        assert cfg.scheduler.worker_idle_poll_interval == 0.5
 
     def test_default_logging_config(self):
         cfg = Config()
@@ -221,6 +223,8 @@ class TestConfigLoading:
             'confirmation_timeout_minutes = 60\n'
             'task_retention_days = 14\n'
             'email_retention_days = 30\n'
+            'worker_idle_timeout = 20\n'
+            'worker_idle_poll_interval = 1.5\n'
         )
         cfg = load_config(p)
         assert cfg.scheduler.poll_interval == 10
@@ -233,6 +237,8 @@ class TestConfigLoading:
         assert cfg.scheduler.confirmation_timeout_minutes == 60
         assert cfg.scheduler.task_retention_days == 14
         assert cfg.scheduler.email_retention_days == 30
+        assert cfg.scheduler.worker_idle_timeout == 20
+        assert cfg.scheduler.worker_idle_poll_interval == 1.5
 
     def test_load_logging_section(self, tmp_path):
         p = tmp_path / "config.toml"
