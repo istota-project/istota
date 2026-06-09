@@ -336,3 +336,49 @@ class TestResolveDeliveryPlanEdgeCases:
             Destination("talk", "a", "push"),
             Destination("talk", "b", "push"),
         ]
+
+
+class TestCrossSurfaceStreamDelivery:
+    """A stream surface (web) named on a *foreign* task must be pushed, while the
+    task's *own* origin stream stays a no-op (its result event covers it)."""
+
+    def test_foreign_task_into_web_pushes(self, tmp_path):
+        from istota.transport.registry import make_registry
+        config = _config(tmp_path)
+        registry = make_registry(config)
+        # An email-reply task routing into a web room.
+        task = _task(source_type="email", conversation_token="0123456789abcdef",
+                     output_target="web:rm1,email")
+        plan = resolve_delivery_plan(config, task, registry)
+        assert Destination("web", "rm1", "push") in plan
+        assert Destination("email", None, "push") in plan
+
+    def test_own_origin_web_stays_stream(self, tmp_path):
+        from istota.transport.registry import make_registry
+        config = _config(tmp_path)
+        registry = make_registry(config)
+        task = _task(source_type="web", conversation_token="rm1",
+                     output_target="web:rm1")
+        plan = resolve_delivery_plan(config, task, registry)
+        assert plan == [Destination("web", "rm1", "stream")]
+
+    def test_bare_stream_always_no_op(self, tmp_path):
+        from istota.transport.registry import make_registry
+        config = _config(tmp_path)
+        registry = make_registry(config)
+        # Even a foreign task naming bare "stream" stays a stream no-op.
+        task = _task(source_type="email", conversation_token="0123456789abcdef",
+                     output_target="stream,email")
+        plan = resolve_delivery_plan(config, task, registry)
+        assert Destination("stream", "stream", "stream") in plan
+
+    def test_unresolvable_web_channel_degrades_to_stream(self, tmp_path):
+        from istota.transport.registry import make_registry
+        config = _config(tmp_path)
+        registry = make_registry(config)
+        # Foreign task names bare "web" (no channel); resolve_target can't find a
+        # room (no real DB) → degrade to a stream no-op rather than drop the leg.
+        task = _task(source_type="email", conversation_token="0123456789abcdef",
+                     output_target="web")
+        plan = resolve_delivery_plan(config, task, registry)
+        assert plan == [Destination("web", "stream", "stream")]

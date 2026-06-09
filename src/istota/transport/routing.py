@@ -172,7 +172,23 @@ def _resolve_one(
     surface = dest.surface
 
     if surface in _STREAM_SURFACES:
-        return Destination(surface, dest.channel or "stream", "stream")
+        from .registry import _surface_for_source_type
+        is_origin = surface == _surface_for_source_type(task.source_type)
+        if is_origin or surface == "stream":
+            # Own-origin stream (a web/repl task's own result is the task_events
+            # log the client tails), or the un-pushable bare REPL surface: the
+            # result event covers it; deliver() is a no-op.
+            return Destination(surface, dest.channel or "stream", "stream")
+        # A *foreign* task routing INTO a stream surface (e.g. an email reply →
+        # web room): there is no live SSE for this task in that room, so push via
+        # the transport's deliver() (web → a web_chat_messages row).
+        transport = registry.get(surface) if registry is not None else None
+        channel = dest.channel or (transport.resolve_target(task) if transport else None)
+        if not channel:
+            # Unresolvable channel → degrade to a stream no-op rather than drop a
+            # reply outright (the interactive empty-plan fallback still covers it).
+            return Destination(surface, "stream", "stream")
+        return Destination(surface, channel, "push")
 
     if surface == "talk":
         channel = dest.channel or _resolve_talk_channel(config, task)

@@ -1531,11 +1531,19 @@ def process_one_task(
     plan_ntfy = plan_has_surface(plan, "ntfy")
     plan_file = plan_has_surface(plan, "istota_file")
     plan_web = plan_has_surface(plan, "web")
+    # A *push* web destination is a foreign task (e.g. an email reply) routing
+    # INTO a room — it must be delivered via WebTransport.deliver. An own-origin
+    # web task resolves its web leg to a stream no-op (its result event already
+    # covers the room over SSE), so it is absent here and never double-posts.
+    web_push_dests = [
+        d for d in plan if d.surface == "web" and d.kind == "push"
+    ]
 
     # Track if we need to call istota_file handler after db connection closes.
     # The transport derives success from the task's terminal status at delivery.
     call_file_handler = False
     post_ntfy = False
+    post_web = False
 
     # Track what to post after DB transaction closes
     post_talk_message = None
@@ -1655,6 +1663,8 @@ def process_one_task(
                         post_email = True
                     if plan_ntfy:
                         post_ntfy = True
+                    if web_push_dests:
+                        post_web = True
                     if plan_file:
                         call_file_handler = True
 
@@ -1928,6 +1938,19 @@ def process_one_task(
         file_transport = registry.get("istota_file")
         if file_transport is not None:
             run_coro(file_transport.deliver("", result, task=task))
+    if post_web:
+        # A foreign task (e.g. an email reply) routed into a web room: push the
+        # result as an unsolicited room message via WebTransport.deliver. The
+        # own-origin web case never reaches here (its leg resolved to stream).
+        web_transport = registry.get("web")
+        if web_transport is not None:
+            if task.source_type == "briefing":
+                pb = parse_briefing_json(result)
+                web_result = pb["body"] if pb else strip_briefing_preamble(result)
+            else:
+                web_result = result
+            for dest in web_push_dests:
+                run_coro(web_transport.deliver(dest.channel, web_result, task=task))
 
     return task_id, success
 
