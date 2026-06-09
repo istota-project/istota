@@ -692,12 +692,15 @@ def claim_task(
          f"-{max_retry_age_minutes}"),
     )
 
-    # Release recent stuck 'running' tasks for retry
+    # Release recent stuck 'running' tasks for retry. Clear last_heartbeat too:
+    # leaving the dead worker's stale heartbeat on the row would keep the
+    # _STUCK_RUNNING_PREDICATE firing after the next worker re-claims and re-runs
+    # it, letting a second concurrent claimer re-steal it (duplicate execution).
     conn.execute(
         f"""
         UPDATE tasks
         SET status = 'pending', started_at = NULL, locked_at = NULL, locked_by = NULL,
-            attempt_count = attempt_count + 1
+            last_heartbeat = NULL, attempt_count = attempt_count + 1
         WHERE status = 'running'
         AND {_STUCK_RUNNING_PREDICATE}
         AND created_at >= datetime('now', ? || ' minutes')
@@ -741,10 +744,18 @@ def claim_task(
 
     where_clause = " AND ".join(filters)
 
+    # Reset liveness (last_heartbeat + started_at) on claim so the new owner
+    # starts with a clean slate. Without this, a task re-claimed from the
+    # stuck-running path carries the dead worker's stale heartbeat into its
+    # running window — until the new worker's first ping lands — and a second
+    # worker calling claim_task in that window re-reclaims and re-runs it
+    # (the duplicate-execution race; ISSUE-112). update_task_status('running')
+    # sets started_at=now immediately after, before the row can look stuck.
     cursor = conn.execute(
         f"""
         UPDATE tasks
-        SET status = 'locked', locked_at = datetime('now'), locked_by = ?
+        SET status = 'locked', locked_at = datetime('now'), locked_by = ?,
+            last_heartbeat = NULL, started_at = NULL
         WHERE id = (
             SELECT id FROM tasks
             WHERE {where_clause}
@@ -2387,12 +2398,15 @@ def fail_stuck_locked_running_tasks(
     for row in cursor.fetchall():
         failed.append(dict(row))
 
-    # Release recent stuck 'running' tasks for retry
+    # Release recent stuck 'running' tasks for retry. Clear last_heartbeat too:
+    # leaving the dead worker's stale heartbeat on the row would keep the
+    # _STUCK_RUNNING_PREDICATE firing after the next worker re-claims and re-runs
+    # it, letting a second concurrent claimer re-steal it (duplicate execution).
     conn.execute(
         f"""
         UPDATE tasks
         SET status = 'pending', started_at = NULL, locked_at = NULL, locked_by = NULL,
-            attempt_count = attempt_count + 1
+            last_heartbeat = NULL, attempt_count = attempt_count + 1
         WHERE status = 'running'
         AND {_STUCK_RUNNING_PREDICATE}
         AND created_at >= datetime('now', ? || ' minutes')

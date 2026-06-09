@@ -1371,6 +1371,65 @@ class TestStuckRunningThreshold:
             assert task.attempt_count == 1
 
 
+class TestReclaimedTaskNotDoubleClaimed:
+    """A task reclaimed from the stuck-running path must not be re-claimed by a
+    second concurrent worker during the window before its new worker's first
+    heartbeat ping.
+
+    A restart left a task 'running' with a stale last_heartbeat. Two fg workers
+    called claim_task within milliseconds: A reclaimed + ran it, but the row
+    still carried the dead worker's old last_heartbeat, so the
+    _STUCK_RUNNING_PREDICATE kept firing and B re-stole and re-ran it — two
+    answers for one task id. claim_task must clear last_heartbeat (+ started_at)
+    on claim so the new owner starts with a clean liveness slate.
+    """
+
+    def _make_stale_running(self, conn):
+        task_id = db.create_task(
+            conn, prompt="hello", user_id="alice",
+            conversation_token="room1", queue="foreground",
+        )
+        # Dead worker: running, heartbeat 10 min silent (> default 5 min gate),
+        # created recently so it's release-eligible (not fail-too-old).
+        conn.execute(
+            """UPDATE tasks SET status = 'running',
+               started_at = datetime('now', '-10 minutes'),
+               last_heartbeat = datetime('now', '-10 minutes'),
+               created_at = datetime('now', '-10 minutes')
+            WHERE id = ?""",
+            (task_id,),
+        )
+        conn.commit()
+        return task_id
+
+    def test_second_claim_does_not_resteal_running_task(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = self._make_stale_running(conn)
+
+            # Worker A reclaims the stuck task.
+            a = db.claim_task(conn, "worker-A", queue="foreground")
+            assert a is not None and a.id == task_id
+            # Liveness slate is clean after claim (the fix).
+            hb, started = conn.execute(
+                "SELECT last_heartbeat, started_at FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            assert hb is None
+            assert started is None
+
+            # A transitions it to running (sets started_at=now), before any ping.
+            db.update_task_status(conn, task_id, "running")
+
+            # Worker B claims immediately — must NOT re-steal the same task.
+            b = db.claim_task(conn, "worker-B", queue="foreground")
+            assert b is None or b.id != task_id, (
+                "second worker re-stole the running task (duplicate execution)"
+            )
+            # The task is still running under worker A, untouched by B.
+            after = db.get_task(conn, task_id)
+            assert after.status == "running"
+
+
 class TestHeartbeatReclaim:
     """ISSUE-112 heartbeat: reclaim keys on worker liveness (last_heartbeat),
     not raw runtime. A live worker that keeps pinging is never reclaimed no
