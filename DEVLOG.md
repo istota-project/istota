@@ -2,6 +2,19 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: tmux brain — race-proof prompt submission (bracketed paste)
+
+Fourth docker test: the first web task (self-test) completed cleanly through tmux (`outcome=done tools=6`), proving the full happy path. But the follow-up task hung, and background channel-sleep-cycle extractions timed out at 120s on a loop. Same root cause for both: **the prompt didn't submit.**
+
+The interactive `claude` TUI ingests a large prompt as a *bracketed paste*, collapsing it to a `[Pasted text #N +NNN lines]` placeholder. `_inject_prompt` did `paste-buffer` then immediately `send-keys Enter` — but the Enter raced the TUI's paste ingestion and got absorbed, leaving the prompt sitting unsent in the input box. No turn started → no Stop hook → the brain polled until the hard timeout. The first task won the race by luck; the follow-up and the sleep-cycle calls (which flow through the same `_inject_prompt`, with no `session_label` → `istota-tmux-<pid>-<n>` names) lost it. Confirmed live: one manual `Enter` to the stuck pane submitted instantly and the turn ran. The `tmux_stall` halfway warning + structured `outcome=timeout` logging caught it precisely — observability working as designed.
+
+Fix: `_inject_prompt` now settles after the paste, sends Enter, then *confirms a turn actually started* — the `UserPromptSubmit` hook fired (it overwrites the pre-turn `SessionStart` payload in `started.json`, so `hook_event_name` flips) or the transcript file appeared — and only resends Enter if it didn't. Never a blind resend, so a slow-confirming successful submit can't get a stray empty Enter. Also: the live tailer no longer spams `parse_transcript: cannot read` every poll before the transcript exists (it checks existence first), and a new `_turn_started` helper backs the confirm.
+
+This was the last functional blocker — every tmux brain path (interactive tasks + background sleep-cycle/OCR/explainer calls) goes through `_inject_prompt`, so the fix is comprehensive.
+
+**Files modified:**
+- `src/istota/brain/tmux_claude.py`, `tests/test_tmux_production.py`
+
 ## 2026-06-09: tmux brain — fix _TranscriptTailer shadowing Thread._stop
 
 Third docker test got all the way through: onboarding seed worked, claude ran the full self-diagnostic, the Stop hook fired, `last_assistant_message` held the complete answer — but the task still failed with `Execution error: 'Event' object is not callable` and entered a retry loop (rerunning the expensive diagnostic each attempt). Notably no `tmux_brain session=…` line was logged, meaning `_run_session`'s `finally` aborted mid-way.

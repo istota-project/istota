@@ -78,6 +78,13 @@ _TRANSCRIPT_SETTLE_POLL_S = 0.15
 # carries transcript_path, before falling back to globbing the project dir.
 _STARTED_SENTINEL_WAIT_S = 5.0
 
+# Prompt-submission robustness (the bracketed-paste race): settle this long
+# after the paste before each Enter, confirm a turn started within this window,
+# and resend Enter up to this many times if it didn't.
+_SUBMIT_SETTLE_S = 0.8
+_SUBMIT_CONFIRM_S = 4.0
+_SUBMIT_MAX_ATTEMPTS = 3
+
 # Per-tmux-subprocess timeout default — a wedged tmux server must not hang the
 # brain. Overridable via [brain.tmux] tmux_command_timeout.
 _TMUX_COMMAND_TIMEOUT_S = 10.0
@@ -427,6 +434,10 @@ class _TranscriptTailer(threading.Thread):
             logger.debug("transcript tailer raised", exc_info=True)
 
     def _drain_once(self) -> None:
+        # The transcript doesn't exist until the turn starts writing it; polling
+        # it before then would spam _iter_records' OSError warning every tick.
+        if not self._path.exists():
+            return
         for rec_idx, raw in enumerate(_iter_records(self._path)):
             if raw.get("type") != "assistant":
                 continue
@@ -642,7 +653,7 @@ class TmuxClaudeBrain:
                     except Exception:
                         logger.debug("on_pid callback raised", exc_info=True)
 
-            self._inject_prompt(session, prompt_file)
+            self._inject_prompt(session, prompt_file, started_sentinel)
 
             # Stream surfaces: start the live tailer once we know the transcript
             # path (§10). Push/non-streaming tasks skip it (no behavior change).
@@ -1031,13 +1042,54 @@ class TmuxClaudeBrain:
             time.sleep(_READY_POLL_S)
         return False
 
-    def _inject_prompt(self, name: str, prompt_file: Path) -> None:
+    def _inject_prompt(self, name: str, prompt_file: Path, started_sentinel: Path) -> None:
         # Buffer load+paste avoids shell-escaping / pipe-buffer hazards for large
         # prompts (mirrors ClaudeCodeBrain's stdin feeder rationale).
+        #
+        # A large prompt arrives as a *bracketed paste* the TUI collapses to a
+        # "[Pasted text #N]" placeholder; an Enter sent before the paste is fully
+        # ingested is absorbed and the prompt sits unsent (the docker repro: the
+        # task then hangs until the hard timeout). So: paste, settle, Enter, then
+        # CONFIRM a turn actually started (the UserPromptSubmit hook fired, or the
+        # transcript file appeared) and only resend Enter if it didn't — never
+        # blindly, so a slow-confirming successful submit can't get a stray empty
+        # Enter on top of it.
         buf = f"istota-{name}"
         self._tmux("load-buffer", "-b", buf, str(prompt_file))
         self._tmux("paste-buffer", "-t", name, "-b", buf, "-d")
-        self._tmux("send-keys", "-t", name, "Enter")
+        for attempt in range(_SUBMIT_MAX_ATTEMPTS):
+            time.sleep(_SUBMIT_SETTLE_S)
+            self._tmux("send-keys", "-t", name, "Enter")
+            confirm_deadline = time.monotonic() + _SUBMIT_CONFIRM_S
+            while time.monotonic() < confirm_deadline:
+                if self._turn_started(started_sentinel):
+                    if attempt:
+                        logger.info(
+                            "tmux_brain: prompt submitted on Enter attempt %d (session=%s)",
+                            attempt + 1, name,
+                        )
+                    return
+                time.sleep(_READY_POLL_S)
+        logger.warning(
+            "tmux_brain: prompt submit unconfirmed after %d Enter attempts (session=%s)",
+            _SUBMIT_MAX_ATTEMPTS, name,
+        )
+
+    @staticmethod
+    def _turn_started(started_sentinel: Path) -> bool:
+        """True once a turn has actually begun — the UserPromptSubmit hook fired
+        (it overwrites the SessionStart payload, so hook_event_name flips), or the
+        session transcript file exists (claude only creates it once a turn runs).
+        Either is a definitive "the prompt submitted" signal that can't be faked
+        by the pre-turn SessionStart sentinel."""
+        try:
+            data = json.loads(started_sentinel.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        if data.get("hook_event_name") == "UserPromptSubmit":
+            return True
+        tpath = data.get("transcript_path")
+        return bool(tpath) and Path(tpath).exists()
 
     def _wait_for_completion(
         self, name: str, sentinel: Path, deadline: float, cancel_check
