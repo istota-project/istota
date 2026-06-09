@@ -159,10 +159,12 @@
 
 	/* Subtle per-message metadata at the top-right, revealed on hover. Absolutely
 	   positioned so it overlays the row's top-right corner instead of consuming a
-	   flex column — otherwise it narrows the message content (badly on mobile). */
+	   flex column — otherwise it narrows the message content (badly on mobile).
+	   `top` is set per row-type below so its baseline lines up with the time on
+	   the left, which lives in different spots: the author header on a fresh group,
+	   the gutter on a continuation. */
 	.meta-footer {
 		position: absolute;
-		top: 0.3rem;
 		right: 0.75rem;
 		pointer-events: none;
 		font-size: var(--text-xs);
@@ -172,6 +174,10 @@
 		opacity: 0;
 		transition: opacity var(--transition-fast);
 	}
+	/* Fresh group: time sits in the .meta author header (next to the name). */
+	.msg:not(.continuation) .meta-footer { top: 0.6rem; }
+	/* Continuation: time sits in the left gutter (.hover-time), higher up. */
+	.msg.continuation .meta-footer { top: 0.15rem; }
 
 	.gutter {
 		flex: 0 0 2.25rem;
