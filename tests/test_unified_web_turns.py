@@ -142,6 +142,22 @@ class TestDisplayLoaderCrossSurface:
             assert db.get_room(conn, room.token).archived is True
             assert [r.token for r in db.list_rooms(conn, "u")] == []  # hidden
 
+    def test_inflight_talk_task_surfaces_as_active(self, db_path):
+        # Stage 7 substrate: a running Talk-originated task in the room shows up
+        # as an active_task so the open web client can stream its progress live.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "cpz", "u", origin="talk")
+            db.add_room_binding(conn, "cpz", "talk", "cpz")
+            running = _add_task(conn, "cpz", "talk q", None,
+                                source_type="talk", status="running")
+            db.add_message(conn, "cpz", role="user", body="talk q",
+                           origin_surface="talk", task_id=running)
+        out = self._loader(db_path)("u", "cpz", 50)
+        active_ids = [a["id"] for a in out["active_tasks"]]
+        assert running in active_ids
+        # the user's Talk prompt is in the transcript for the client to show
+        assert ("user", "talk q") in [(m["role"], m["text"]) for m in out["messages"]]
+
     def test_system_notifications_from_messages(self, db_path):
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "u", "Chat")
