@@ -2,6 +2,17 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: tmux brain — fix _TranscriptTailer shadowing Thread._stop
+
+Third docker test got all the way through: onboarding seed worked, claude ran the full self-diagnostic, the Stop hook fired, `last_assistant_message` held the complete answer — but the task still failed with `Execution error: 'Event' object is not callable` and entered a retry loop (rerunning the expensive diagnostic each attempt). Notably no `tmux_brain session=…` line was logged, meaning `_run_session`'s `finally` aborted mid-way.
+
+Root cause: a classic `threading.Thread`-subclass gotcha. `Thread` has a private `self._stop()` **method** that `join()` calls internally (`_wait_for_tstate_lock`). `_TranscriptTailer.__init__` set `self._stop = threading.Event()`, shadowing it — so the `tailer.join(timeout=2.0)` in the `_run_session` finally called the Event instance → `TypeError: 'Event' object is not callable`. That propagated out of the brain (the finally never reached its `logger.info`), surfaced as the executor's generic "Execution error", and the scheduler retried. Only streaming tasks that actually start a tailer hit it — which is exactly the interactive web task; the feeds/command tasks (no brain tailer) were unaffected.
+
+Fix: rename the attribute to `self._stop_event` (the public `stop()` method name is fine — Thread has no public `stop`). Added a regression test that actually `start()`/`stop()`/`join()`s the tailer — the existing tests only exercised `_drain_once()` directly, never the thread lifecycle, which is how this slipped through.
+
+**Files modified:**
+- `src/istota/brain/tmux_claude.py`, `tests/test_tmux_production.py`
+
 ## 2026-06-09: tmux brain — skip first-run onboarding (theme picker repro)
 
 Second docker test, after the IS_SANDBOX fix: claude now *launches* (banner instead of the root refusal), but blocked at a new dialog the markers didn't handle — the first-run **theme picker** (`Choose the text style…`). Root cause is an interaction with the §2 per-session `CLAUDE_CONFIG_DIR` fix: a fresh, empty config dir each task means the interactive TUI sees a brand-new install and re-runs onboarding (theme → trust → bypass) every time. The prod VM never showed it because its global `~/.claude` already had onboarding state; and the container's `~/.claude.json` only ever held headless-`-p` state (which skips onboarding), so it had no `theme`/`hasCompletedOnboarding` keys either.

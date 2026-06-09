@@ -403,20 +403,23 @@ class _TranscriptTailer(threading.Thread):
         super().__init__(daemon=True, name="tmux-transcript-tailer")
         self._path = Path(path)
         self._on_progress = on_progress
-        self._stop = threading.Event()
+        # NB: NOT ``self._stop`` — threading.Thread already has a private
+        # ``_stop()`` method that ``join()`` calls internally; shadowing it with
+        # an Event makes ``join()`` raise "'Event' object is not callable".
+        self._stop_event = threading.Event()
         # Dedup: tool_use by id; text/thinking by (record_index, block_index)
         # so a partially-flushed-then-rewritten line isn't emitted twice.
         self._seen_tool_ids: set[str] = set()
         self._seen_blocks: set[tuple[int, int]] = set()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self) -> None:
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 self._drain_once()
-                if self._stop.wait(_SENTINEL_POLL_S):
+                if self._stop_event.wait(_SENTINEL_POLL_S):
                     break
             # Final drain after the stop signal so trailing blocks aren't lost.
             self._drain_once()
