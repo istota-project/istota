@@ -290,20 +290,41 @@ def _strip_action_prefix(result: str) -> tuple[bool, str]:
     Returns (should_post, result_to_post). If ACTION: found, strips prefix
     and returns True. If NO_ACTION: found, returns False. If no prefix,
     returns True with original result (fail-safe: post as-is).
-    """
-    has_no_action = "NO_ACTION:" in result
-    has_action = result.startswith("ACTION:") or "\nACTION:" in result
 
-    if has_action:
-        if result.startswith("ACTION:"):
-            return True, result[len("ACTION:"):].strip()
-        idx = result.find("\nACTION:")
-        return True, result[idx + len("\nACTION:"):].strip()
-    elif has_no_action:
+    Delegates to `db.scheduled_assistant_body` (single source of truth, shared
+    with the transcript backfill) — None there means "don't post".
+    """
+    body = db.scheduled_assistant_body(True, result)
+    if body is None:
         return False, result
-    else:
-        # No prefix — post as-is (fail-safe)
-        return True, result
+    return True, body
+
+
+def _store_scheduled_room_turn(conn, task, body: str) -> None:
+    """Mirror a scheduled (cron) job's room post into the canonical messages
+    store so the room's web view renders it (ISSUE-133).
+
+    Interactive talk/web turns are stored by the task-success branch directly,
+    but a cron post is ``source_type="scheduled"`` and was excluded — so a bot
+    notice to a Talk room (a location alert, the daily money sync) posted to
+    Talk and never reached the web mirror of that room. The web transcript
+    reader already renders ``origin_surface='scheduled'`` assistant rows (the
+    synthetic cron prompt stays hidden — there is no user-authored turn), so
+    storing the posted body here is the whole producer half of the fix.
+
+    Self-gating: only fires for ``scheduled`` tasks with a conversation token
+    whose room exists in the registry. A token with no room row isn't a
+    web-visible room, so there is nothing to mirror into; briefing / talk / web
+    source types are handled elsewhere and no-op here. Idempotent across retries
+    (``store_turn_message`` dedups on ``(room, role, task_id)``)."""
+    if task.source_type != "scheduled" or not task.conversation_token:
+        return
+    if db.get_room(conn, task.conversation_token) is None:
+        return
+    db.store_turn_message(
+        conn, task.conversation_token, role="assistant",
+        body=body, task_id=task.id, origin_surface="scheduled",
+    )
 
 
 def download_talk_attachments(config: Config, attachments: list[str]) -> list[str]:
@@ -1668,6 +1689,7 @@ def process_one_task(
                         db.log_task(conn, task_id, "info", "Silent scheduled job: action taken")
                         if talk_token:
                             post_talk_message = result_to_post
+                            _store_scheduled_room_turn(conn, task, result_to_post)
                     else:
                         db.log_task(conn, task_id, "info", "Silent scheduled job: no action needed")
 
@@ -1684,6 +1706,7 @@ def process_one_task(
                         delivery_result = result
                     if plan_talk and talk_token:
                         post_talk_message = delivery_result
+                        _store_scheduled_room_turn(conn, task, delivery_result)
                     if plan_email:
                         post_email = True
                     if plan_ntfy:

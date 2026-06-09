@@ -101,7 +101,7 @@ class TestM2MigrationMarkerOnFailure:
         conn.execute("DELETE FROM _migration_state WHERE name = 'unified_rooms_v1'")
         _add_task(conn, "cpz", "hi", "hello", source_type="talk")
         # Fail the turn-backfill step specifically.
-        proxy = self._FailOn(conn, "SELECT conversation_token, ?,")
+        proxy = self._FailOn(conn, "heartbeat_silent, created_at FROM tasks")
         db._migrate_unified_rooms(proxy)  # must not raise
         present = conn.execute(
             "SELECT 1 FROM _migration_state WHERE name = 'unified_rooms_v1'"
