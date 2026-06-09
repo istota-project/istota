@@ -119,6 +119,13 @@ _SESSION_COUNTER = itertools.count(1)
 _PANE_LOG_CHARS = 2000
 
 
+def _is_root() -> bool:
+    """True when the process runs as uid 0 (Unix). The interactive `claude` TUI
+    refuses --dangerously-skip-permissions as root unless IS_SANDBOX=1 is set."""
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
+
+
 def parse_transcript(path: Path) -> list[StreamEvent]:
     """Reconstruct StreamEvents from an interactive `claude` transcript JSONL.
 
@@ -584,6 +591,16 @@ class TmuxClaudeBrain:
 
             env = dict(req.env)
             env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+            # The interactive TUI needs --dangerously-skip-permissions (no way to
+            # answer per-tool prompts programmatically), which `claude` refuses
+            # under root/sudo unless IS_SANDBOX=1 signals an external isolation
+            # boundary. In a container running as root (bwrap disabled — the
+            # container *is* the sandbox) we set it so the pane launches; on a
+            # non-root deploy (the prod VM service user) the flag is allowed
+            # without it, so we leave it unset. Without this, every task in a
+            # root container fails readiness → fallback (the 14:30 docker repro).
+            if _is_root() and "IS_SANDBOX" not in env:
+                env["IS_SANDBOX"] = "1"
             self._new_session(session, env)
             self._launch_claude(session, req, base_dir)
 
