@@ -117,7 +117,7 @@ Per-user worker threads handle concurrency. Foreground tasks (chat) and backgrou
 
 ## Features
 
-**Messaging** — Nextcloud Talk (DMs and multi-user rooms with @mention support), email (IMAP/SMTP with threading), TASKS.md file polling, CLI.
+**Messaging** — Nextcloud Talk (DMs and multi-user rooms with @mention support), an in-app web chat, email (IMAP/SMTP with threading), TASKS.md file polling, CLI. Talk and web chat share one surface-independent room model: any conversation can be continued on either surface with full cross-surface context and one shared history, a web room can be promoted to a real Talk conversation ("Also open in Talk"), and an answer to a Talk message streams live in an open web room.
 
 **Skills** — Two-pass selection: deterministic keyword/resource matching, then optional Haiku-based semantic routing for the unselected manifest. Sticky skills carry the previous turn's set into follow-ups in the same conversation. Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/gitlab/github workflows, money (in-process beancount ledger, invoicing, transactions, work log), Google Workspace (Drive, Gmail, Calendar, Sheets, Docs), GPS location tracking (Overland), Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), native RSS/Atom/Tumblr/Are.na feed manager (in-process — `feedparser` + vendored API providers, per-user SQLite, OPML import/export), and more. Skills are a curated standard library, not a plugin marketplace.
 
