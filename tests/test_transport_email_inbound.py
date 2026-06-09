@@ -762,6 +762,125 @@ class TestPollEmailsThreadMatching:
         assert task.output_target == "talk:RealRoomXYZ,email"
         assert task.conversation_token == "RealRoomXYZ"
 
+    def _poll_reply(self, config, *, sender, to, references="<origin_out@bot.com>"):
+        """Poll a single inbound reply and return the created task (or None)."""
+        envelope = _envelope(id="40", sender=sender, subject="Re: Question")
+        email = Email(
+            id="40", subject="Re: Question", sender=sender,
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="My answer", attachments=[],
+            message_id="<r40@x.com>", references=references,
+            to=to, cc=(),
+        )
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+        if not task_ids:
+            return None
+        with db.get_db(config.db_path) as conn:
+            return db.get_task(conn, task_ids[0])
+
+    def test_self_reply_via_sender_match_recovers_origin(self, make_config):
+        # THE primary bug: the user replies from their OWN configured address, so
+        # sender-match resolves them at step 2 and thread-match (which carries the
+        # origin descriptor) used to be skipped. The origin must still be
+        # recovered, and the prompt stays the plain self-reply template (not the
+        # external-emissary one).
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(email_addresses=["stefan@test.com"])}
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="stefan", message_id="<origin_out@bot.com>",
+                to_addr="stefan@test.com", subject="Question",
+                conversation_token="rm_web123", origin_target="web:rm_web123",
+            )
+        task = self._poll_reply(config, sender="stefan@test.com", to=("bot@test.com",))
+        assert task is not None
+        assert task.output_target == "web:rm_web123,email"
+        assert task.conversation_token == "rm_web123"
+        # Self-reply → plain template, not "an external contact has replied".
+        assert "Emissary email reply" not in task.prompt
+
+    def test_self_reply_respects_policy(self, make_config):
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "stefan": UserConfig(
+                email_addresses=["stefan@test.com"], email_reply_routing="origin",
+            ),
+        }
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="stefan", message_id="<origin_out@bot.com>",
+                to_addr="stefan@test.com", subject="Question",
+                conversation_token="rm_web123", origin_target="web:rm_web123",
+            )
+        task = self._poll_reply(config, sender="stefan@test.com", to=("bot@test.com",))
+        assert task.output_target == "web:rm_web123"  # origin-only
+
+    def test_plus_address_reply_recovers_origin(self, make_config):
+        # Dormant second path: a reply addressed to the bot's plus-address is
+        # resolved at step 1, also pre-empting thread-match. The origin must
+        # still be recovered.
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(email_addresses=["stefan@test.com"])}
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="stefan", message_id="<origin_out@bot.com>",
+                to_addr="ext@x.com", subject="Question",
+                conversation_token="rm_web123", origin_target="web:rm_web123",
+            )
+        task = self._poll_reply(
+            config, sender="ext@x.com", to=("bot+stefan@test.com",),
+        )
+        assert task is not None
+        assert task.output_target == "web:rm_web123,email"
+        assert task.conversation_token == "rm_web123"
+
+    def test_external_thread_reply_keeps_emissary_prompt(self, make_config):
+        # An external contact (not a configured email, no plus-address) resolves
+        # purely by thread-match → emissary template AND origin routing.
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"stefan": UserConfig(email_addresses=["stefan@test.com"])}
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="stefan", message_id="<origin_out@bot.com>",
+                to_addr="ext@x.com", subject="Question",
+                conversation_token="rm_web123", origin_target="web:rm_web123",
+            )
+        task = self._poll_reply(config, sender="ext@x.com", to=("bot@test.com",))
+        assert task.output_target == "web:rm_web123,email"
+        assert "Emissary email reply" in task.prompt
+
+    def test_thread_row_for_other_user_not_applied(self, make_config):
+        # Defence-in-depth: a reply sender-matched to user A must not inherit the
+        # origin descriptor of a thread row owned by user B (no cross-user
+        # surface leak). Identity (sender/plus) wins; the mismatched payload is
+        # dropped, so the reply falls back to the default email plan.
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "alice": UserConfig(email_addresses=["alice@test.com"]),
+            "stefan": UserConfig(email_addresses=["stefan@test.com"]),
+        }
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn, user_id="stefan", message_id="<origin_out@bot.com>",
+                to_addr="ext@x.com", subject="Question",
+                conversation_token="rm_web123", origin_target="web:rm_web123",
+            )
+        task = self._poll_reply(config, sender="alice@test.com", to=("bot@test.com",))
+        assert task is not None
+        assert task.user_id == "alice"
+        assert task.output_target is None  # mismatched origin dropped → default
+        assert task.conversation_token != "rm_web123"
+
     def test_legacy_null_origin_with_web_token_not_used_as_talk_channel(self, make_config):
         # A legacy (pre-migration) sent_emails row with NULL origin_target whose
         # conversation_token is a web room token must NOT be used as a Talk
