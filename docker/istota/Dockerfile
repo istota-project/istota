@@ -22,6 +22,8 @@ ENV LANG=C.UTF-8
 # System deps (including weasyprint/tesseract requirements for all extras)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl git sqlite3 \
+    # tmux — required by the tmux_claude brain (drives the interactive claude TUI)
+    tmux \
     # Bubblewrap sandbox (per-invocation filesystem isolation)
     bubblewrap \
     # WeasyPrint (accounting/invoicing)
