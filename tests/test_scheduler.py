@@ -1579,6 +1579,59 @@ class TestProcessOneTask:
         assert "text_delta" not in kinds          # pruned after result
         assert "result" in kinds and "done" in kinds  # lifecycle survives
 
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_email_reply_pushes_into_web_room(self, mock_arun, db_path, tmp_path):
+        # An email-source task (e.g. a thread-matched reply) routed into a web
+        # room must push the result via WebTransport.deliver — a foreign task
+        # cross-surface into a stream surface. (Stage 2 cross-surface delivery.)
+        from istota.transport.web import default_web_room_token
+        config = self._make_config(db_path, tmp_path)
+        room_token = default_web_room_token(config, "testuser")
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="reply body", user_id="testuser",
+                source_type="email", conversation_token=room_token,
+                output_target=f"web:{room_token}",
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "Here is the answer", None, None),
+        ):
+            result = process_one_task(config)
+        assert result is not None
+        _, success = result
+        assert success is True
+
+        with db.get_db(db_path) as conn:
+            msgs = db.list_web_chat_messages(conn, room_token)
+        assert any(m.text == "Here is the answer" for m in msgs)
+
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_own_origin_web_task_does_not_push(self, mock_arun, db_path, tmp_path):
+        # A web-source task's own result streams over task_events; it must NOT
+        # also be pushed as a web_chat_messages row (no double-post).
+        from istota.transport.web import default_web_room_token
+        config = self._make_config(db_path, tmp_path)
+        config.scheduler.event_log_enabled = True
+        room_token = default_web_room_token(config, "testuser")
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="hi", user_id="testuser", source_type="web",
+                conversation_token=room_token, output_target=f"web:{room_token}",
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "streamed answer", None, None),
+        ):
+            result = process_one_task(config)
+        assert result is not None
+
+        with db.get_db(db_path) as conn:
+            msgs = db.list_web_chat_messages(conn, room_token)
+        assert msgs == []  # delivered via the event stream, not a pushed row
+
     @patch("istota.scheduler.execute_task", return_value=(True, "All done", '["📄 Reading file"]', None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_actions_taken_stored_on_success(self, mock_arun, mock_exec, db_path, tmp_path):
