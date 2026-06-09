@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A conversation can now be carried across Nextcloud Talk and the in-app web chat. A new surface-independent room registry backs both, with one canonical message store per room, so opening a Talk room in web shows its full history and a reply typed in web is mirrored into the Talk room (and onto your phone). The bot keeps full cross-surface context with no extra work, and Talk rooms the bot is in surface automatically in the web room list. (The web sidebar's "Also open in Talk" promote button and Talk-side rename propagation are still to come.)
+
 ### Changed
 - The calendar and location skill CLIs now accept the natural subcommand names the assistant tends to reach for: `calendar agenda` works as `calendar list`, and `location last` as `location current`. The assistant is also now told to confirm a skill subcommand exists (running `--help` when the skill's docs aren't loaded) instead of guessing from memory.
 
