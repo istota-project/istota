@@ -9,7 +9,7 @@ CM-aware composition) and deferred file processing stay in the executor.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -61,6 +61,12 @@ class BrainRequest:
     # ClaudeCodeBrain-specific: optional fallback file the model writes its
     # final result to when stream parsing fails. Other brains may ignore.
     result_file: Path | None = None
+
+    # Optional human-readable session label. TmuxClaudeBrain uses it to name
+    # its tmux session (for !stop correlation + log readability); other brains
+    # ignore it. Empty = the brain derives a name locally. Additive — the
+    # executor may leave it unset.
+    session_label: str = ""
 
 
 @dataclass

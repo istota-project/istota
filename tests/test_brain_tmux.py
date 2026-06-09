@@ -1,11 +1,11 @@
 """Tests for TmuxClaudeBrain — the tmux-driven interactive-TUI brain.
 
-Stage 0 (harness scaffold): wiring + routing + delegated model resolution.
-``execute`` is a stub raising NotImplementedError until Stage 2. See
+Wiring + routing + delegated model resolution (Stage 0). The full execute()
+flow is covered in tests/test_tmux_execute.py; transcript parsing in
+tests/test_tmux_transcript.py. See
 ``Specs/Active/tmux-subscription-brain-feasibility.md``.
 """
 
-import pytest
 
 from istota.brain import (
     Brain,
@@ -88,9 +88,14 @@ class TestModelResolutionDelegation:
         )
 
 
-class TestExecuteStub:
-    def test_execute_raises_not_implemented(self):
-        brain = TmuxClaudeBrain()
+class TestExecuteImplemented:
+    """execute() is implemented as of Stage 2 — full flow coverage lives in
+    tests/test_tmux_execute.py. Here we only assert it no longer stubs out."""
+
+    def test_execute_does_not_raise_not_implemented(self, monkeypatch):
+        import istota.brain.tmux_claude as mod
+        # No tmux on PATH → graceful not_found result, never NotImplementedError.
+        monkeypatch.setattr(mod.shutil, "which", lambda _: None)
         req = BrainRequest(
             prompt="hi",
             allowed_tools=[],
@@ -98,5 +103,6 @@ class TestExecuteStub:
             env={},
             timeout_seconds=60,
         )
-        with pytest.raises(NotImplementedError):
-            brain.execute(req)
+        res = TmuxClaudeBrain().execute(req)
+        assert res.stop_reason == "not_found"
+        assert res.success is False
