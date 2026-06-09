@@ -76,6 +76,39 @@ def main() -> int:
         print(f"validate_config: cannot import {package}.config: {e}", file=sys.stderr)
         return 2
 
+    # Validate brain.kind (and any source_type_overrides targets) against the
+    # kinds make_brain() actually knows. A typo like "tmux-claude" would
+    # otherwise template cleanly, pass load_config, and only blow up at task
+    # time. Best-effort: if the brain module can't be imported, skip rather than
+    # fail the play on an unrelated import error.
+    try:
+        known_kinds = __import__(
+            f"{package}.brain", fromlist=["KNOWN_BRAIN_KINDS"]
+        ).KNOWN_BRAIN_KINDS
+    except Exception:
+        known_kinds = None
+    if known_kinds is not None:
+        kind = brain.get("kind")
+        if kind is not None and kind not in known_kinds:
+            print(
+                f"validate_config: unknown [brain] kind={kind!r}; "
+                f"expected one of {sorted(known_kinds)}",
+                file=sys.stderr,
+            )
+            return 1
+        overrides = brain.get("source_type_overrides", {}) or {}
+        bad = sorted(
+            f"{st}={k!r}" for st, k in overrides.items() if k not in known_kinds
+        )
+        if bad:
+            print(
+                "validate_config: unknown brain kind in "
+                "[brain.source_type_overrides]: " + ", ".join(bad)
+                + f" — expected one of {sorted(known_kinds)}",
+                file=sys.stderr,
+            )
+            return 1
+
     try:
         c = load_config(cfg_path)
     except Exception as e:
