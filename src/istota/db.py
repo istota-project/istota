@@ -445,9 +445,20 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id)")
+        # Correct an existing deploy's looser index in place. The original keyed
+        # on (room_token, origin_surface, role, task_id); drop it so the tighter
+        # (room_token, role, task_id) form below replaces it (CREATE IF NOT
+        # EXISTS alone would keep the stale definition).
+        # Index by position, not name: _run_migrations also runs under init_db's
+        # plain (non-Row-factory) connection, where row["sql"] would raise.
+        _old_ext = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_ext'"
+        ).fetchone()
+        if _old_ext and _old_ext[0] and "origin_surface" in _old_ext[0]:
+            conn.execute("DROP INDEX idx_messages_ext")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_ext "
-            "ON messages (room_token, origin_surface, role, task_id) "
+            "ON messages (room_token, role, task_id) "
             "WHERE task_id IS NOT NULL"
         )
         conn.execute("""
@@ -1500,12 +1511,22 @@ def _conversation_history_from_messages(
 
 def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bool:
     """True when the canonical `messages` store can authoritatively serve a
-    token's history: there are no completed turns to show, or the single newest
-    completed task for the token has its assistant row present in `messages`.
+    token's history: there is at least one completed turn and *every* completed
+    task (with a result) for the token has its assistant row present in
+    `messages`.
 
-    Cheap (two scalar lookups). Until live assistant writes land for a surface,
-    a freshly-completed task won't be in `messages`, so this returns False and
-    the caller falls back to the `tasks` path — no staleness during rollout."""
+    This is a completeness check, not a newest-only check. Keying solely on the
+    single newest task (the original implementation) made the dual-read
+    all-or-nothing: once the latest turn was mirrored, the reader switched
+    entirely to `messages` and silently dropped any *older* turn that wasn't yet
+    mirrored — the exact state left by a partial migration or a mid-rollout
+    window. A single missing assistant row now keeps the reader on the
+    always-complete `tasks` path instead of truncating context to the mirrored
+    subset.
+
+    Cheap (one scalar + one bounded existence probe). Until live assistant
+    writes land for every completed turn, this returns False and the caller
+    falls back to `tasks` — no staleness during rollout."""
     row = conn.execute(
         "SELECT MAX(id) AS mx FROM tasks "
         "WHERE conversation_token = ? AND status = 'completed' AND result IS NOT NULL",
@@ -1514,12 +1535,19 @@ def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bo
     latest = row["mx"] if row else None
     if latest is None:
         return False  # no completed history -> let the tasks path return []
-    present = conn.execute(
-        "SELECT 1 FROM messages "
-        "WHERE room_token = ? AND task_id = ? AND role = 'assistant' LIMIT 1",
-        (conversation_token, latest),
+    # Any completed turn missing its assistant row -> not caught up -> fall back.
+    gap = conn.execute(
+        "SELECT 1 FROM tasks t "
+        "WHERE t.conversation_token = ? AND t.status = 'completed' "
+        "  AND t.result IS NOT NULL "
+        "  AND NOT EXISTS ("
+        "    SELECT 1 FROM messages m "
+        "    WHERE m.room_token = t.conversation_token "
+        "      AND m.task_id = t.id AND m.role = 'assistant'"
+        "  ) LIMIT 1",
+        (conversation_token,),
     ).fetchone()
-    return present is not None
+    return gap is None
 
 
 def backfill_room_messages_from_tasks(
@@ -2126,6 +2154,35 @@ def set_room_archived(conn: sqlite3.Connection, token: str, archived: bool) -> N
     )
 
 
+def archive_orphaned_talk_rooms(
+    conn: sqlite3.Connection, live_tokens: set[str],
+) -> int:
+    """Archive Talk-origin registry rooms whose token is no longer among the
+    bot's live Talk conversations (`live_tokens`) — i.e. the conversation was
+    deleted in Nextcloud, or the bot was removed from it. Without this a deleted
+    Talk room keeps surfacing in the web room list forever, because its registry
+    row is never reconciled against Nextcloud.
+
+    Archive, not hard-delete: a re-add (or a later reconcile) shouldn't destroy
+    mirrored history, and this mirrors the web-side delete of a Talk room.
+    Web-origin rooms are never touched. Returns the number archived.
+
+    The caller MUST pass a *complete* live-token set from a successful Talk
+    `list_conversations` (not a partial/failed fetch) — an empty set here means
+    the bot is genuinely in zero Talk rooms and archives all of them."""
+    rows = conn.execute(
+        "SELECT token FROM rooms WHERE origin = 'talk' AND archived = 0"
+    ).fetchall()
+    archived = 0
+    for row in rows:
+        if row["token"] not in live_tokens:
+            conn.execute(
+                "UPDATE rooms SET archived = 1 WHERE token = ?", (row["token"],)
+            )
+            archived += 1
+    return archived
+
+
 def rename_room(conn: sqlite3.Connection, token: str, name: str) -> None:
     conn.execute("UPDATE rooms SET name = ? WHERE token = ?", (name, token))
 
@@ -2338,7 +2395,24 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
     if already:
         return
 
-    try:
+    def _step(fn) -> bool:
+        """Run one backfill step. A genuinely-absent legacy table ("no such
+        table") is the fresh-install path and is benign — skip it and keep
+        going. Any other OperationalError (disk I/O, locked, constraint) is a
+        real mid-backfill failure: log it and signal abort so the completion
+        marker is *not* written and the next boot retries the whole fold. Every
+        step is structurally idempotent (INSERT OR IGNORE / NOT EXISTS), so a
+        partial first run replays cleanly."""
+        try:
+            fn()
+            return True
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e).lower():
+                return True  # legacy table absent -> nothing to fold, not a failure
+            logger.warning("unified_rooms migration step failed, will retry: %s", e)
+            return False
+
+    def _fold_web_rooms():
         # web_chat_rooms -> rooms (origin=web) + self-referential web binding.
         conn.execute(
             "INSERT OR IGNORE INTO rooms (token, user_id, name, origin, archived) "
@@ -2348,10 +2422,8 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
             "SELECT token, 'web', token FROM web_chat_rooms"
         )
-    except sqlite3.OperationalError:
-        pass
 
-    try:
+    def _fold_talk_rooms():
         # Distinct Talk conversation_tokens -> rooms (origin=talk) + talk binding.
         # Only interactive Talk tasks; scheduled/briefing/etc tokens aren't rooms.
         conn.execute(
@@ -2364,10 +2436,8 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
             "SELECT token, 'talk', token FROM rooms WHERE origin = 'talk'"
         )
-    except sqlite3.OperationalError:
-        pass
 
-    try:
+    def _fold_web_messages():
         # web_chat_messages -> messages (role=system, task_id NULL). Guarded so
         # this one-time copy isn't duplicated on the rare pre-marker re-run.
         conn.execute(
@@ -2384,10 +2454,8 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
             "    AND m.created_at = w.created_at"
             ")"
         )
-    except sqlite3.OperationalError:
-        pass
 
-    try:
+    def _backfill_turns():
         # Backfill the canonical messages store (user+assistant turns) from
         # completed tasks for every registered room, so the unified history
         # reader has the historical backlog. Live writes (Stage 3/4) keep it
@@ -2402,12 +2470,20 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
                 f"AND status = 'completed' AND result IS NOT NULL",
                 (role,),
             )
-    except sqlite3.OperationalError:
-        pass
 
-    conn.execute(
-        "INSERT OR IGNORE INTO _migration_state (name) VALUES ('unified_rooms_v1')"
-    )
+    ok = True
+    for step in (_fold_web_rooms, _fold_talk_rooms, _fold_web_messages, _backfill_turns):
+        if not _step(step):
+            ok = False
+            break
+
+    # Only mark the fold complete if every step succeeded. A swallowed
+    # mid-backfill failure used to set the marker anyway, stranding a partially
+    # populated `messages` store that never retried.
+    if ok:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('unified_rooms_v1')"
+        )
 
 
 def list_tasks(

@@ -121,6 +121,30 @@ class TestPromote:
         assert binding is not None and binding.surface_ref == "promoted-tok"
 
     @pytest.mark.asyncio
+    async def test_binding_persists_when_add_participant_fails(self, web_config, db_path):
+        # The orphan-room guard (MED1): the binding must be written immediately
+        # after the OCS create, before the best-effort add_participant/seed
+        # steps. If add_participant fails, the binding still exists, so a
+        # re-promote is a no-op rather than spawning a second Talk room.
+        from istota import web_app
+        with db.get_db(db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "Ideas")
+        fake = _fake_talk_client()
+        fake.add_participant = AsyncMock(side_effect=RuntimeError("NC down"))
+        with patch("istota.talk.TalkClient", return_value=fake):
+            result = await web_app._chat_promote_to_talk("alice", room.id)
+        assert result is not None
+        with db.get_db(db_path) as conn:
+            binding = db.get_room_binding(conn, room.token, "talk")
+        assert binding is not None and binding.surface_ref == "promoted-tok"
+        # A second promote attempt sees the binding and creates no new Talk room.
+        fake2 = _fake_talk_client()
+        with patch("istota.talk.TalkClient", return_value=fake2):
+            again = await web_app._chat_promote_to_talk("alice", room.id)
+        assert again is None
+        fake2.create_conversation.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_promote_rejects_already_bound(self, web_config, db_path):
         from istota import web_app
         with db.get_db(db_path) as conn:

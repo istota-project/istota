@@ -24,6 +24,16 @@ Closed the gap between Istota's two interactive surfaces. Talk rooms and web-cha
 - `web/src/lib/{api.ts,stores/chat.ts}`, `web/src/routes/chat/+page.svelte`, `web/src/lib/components/chat/RoomSettings.svelte` — origin/talk_token, promote action, sidebar badge, live in-flight pickup.
 - New tests: `test_unified_{rooms,history,web_turns,mirror,room_list,promote}.py`, `test_record_inbound.py`; updated web_chat/notification/scheduler/transport tests for the canonical store.
 
+## 2026-06-09: Unified room sync — post-review fixes (Mulder/Scully)
+
+A Mulder/Scully pass over the 7-stage unified-rooms diff surfaced four issues, fixed here with regression coverage in `test_unified_room_fixes.py`.
+
+- **Dual-read dropped older history (M1).** `_messages_caught_up` keyed the entire token's history source on whether the *single newest* completed task was mirrored into `messages`. Once it was, the reader switched wholesale to `messages` and silently dropped any older turn not yet mirrored — the exact partial-population state a mid-rollout window or partial migration leaves. Replaced the newest-only probe with a completeness check (any completed turn missing its assistant row → stay on the always-complete `tasks` path). Equivalence on a fully-populated store is unchanged.
+- **Migration marked itself done after a swallowed failure (M2).** Each backfill step was wrapped in `except OperationalError: pass`, then the `unified_rooms_v1` marker was written unconditionally — so a real disk/lock error mid-backfill left a partial `messages` copy that never retried. Steps now distinguish a benign "no such table" (fresh install) from a real failure; the marker is written only if every step succeeded, so a failure retries cleanly next boot. Combined with M1, a partial copy degrades to the `tasks` path instead of losing turns.
+- **Messages unique index looser than its guards (H2).** `idx_messages_ext` keyed on `(room_token, origin_surface, role, task_id)`, but every app-level idempotency guard dedupes on `(room_token, role, task_id)`. Two rows for one turn with differing `origin_surface` could slip past the index. Tightened the index (schema + an in-place drop/recreate migration for existing deploys) so it actually backstops the guards.
+- **Deleted Talk rooms lingered in web (user-reported).** A Talk conversation deleted in Nextcloud (or the bot removed) kept showing in the web room list — its registry row was never reconciled. The Talk poller now archives Talk-origin rooms absent from the bot's live conversation list each cycle (`db.archive_orphaned_talk_rooms`), guarded against a transient empty/failed fetch. Archive, not hard-delete, so a re-add or mirror history isn't destroyed.
+- Also fixed a latent `init_db` crash the index migration exposed: `_run_migrations` runs under `init_db`'s plain (non-`Row`-factory) connection, so the new `sqlite_master` lookup indexes by position.
+
 ## 2026-06-09: tmux brain — race-proof prompt submission (bracketed paste)
 
 Fourth docker test: the first web task (self-test) completed cleanly through tmux (`outcome=done tools=6`), proving the full happy path. But the follow-up task hung, and background channel-sleep-cycle extractions timed out at 120s on a loop. Same root cause for both: **the prompt didn't submit.**
