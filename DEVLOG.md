@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: Fix email-reply origin recovery for self / plus-address replies
+
+A live round-trip test exposed that the origin-routing feature (above) only worked for one of three inbound paths. The bot emailed the user from a web-chat room; the user replied from their own address; the reply came back over email only and never landed in the room. Production records (via Zorg's own investigation) confirmed the send leg captured `origin_target = web:<token>` correctly — inbound threw it away.
+
+**Root cause.** `transport/email/inbound.py` resolves the inbound user by precedence: plus-address → sender-match → thread-match. The thread-match step did double duty — it resolved the user *and* was the only place that loaded `sent_email_match` (which carries `origin_target`). But it ran only as a user-resolution fallback (`if not user_id:`). A reply from the user's own configured address resolves at sender-match (step 2), so thread-match was skipped, `sent_email_match` stayed `None`, the whole origin-routing block was bypassed, and `output_target` defaulted to email-only. Since you always reply to yourself from a configured address, the primary use case was effectively dead. A reply addressed to the bot's plus-address (`bot+user@…`) had the same failure via step 1. Only an external contact replying from an unrecognised address (pure thread-match) ever exercised the origin path — which is exactly the only case my Stage-3 tests covered (`ext@x.com` sender), so the suite was green while the real case was broken. Same handoff-drop shape as the original outbound gap: payload captured correctly, dropped at a handoff.
+
+**Fix.** Run `_match_thread` unconditionally to recover the routing payload, regardless of how the user was resolved; keep `routing_method` as the user-resolution method so the confirmation gate is unchanged. Two guards: (1) the prompt template now keys on `is_emissary_reply = routing_method == "thread_match"` so a self-reply keeps the plain "you're continuing your own conversation" template instead of the external-contact emissary one; (2) a recovered thread row is only used when `sent_email_match.user_id == user_id`, so a reply sender-matched to user A can never inherit user B's origin and route into B's surface (identity wins over payload, per the deferred-DB principle).
+
+Five regression tests added for the previously-uncovered paths (self-reply via sender-match, self-reply policy, plus-address reply, external-emissary prompt preserved, cross-user row dropped). Full suite green (6013).
+
+Known follow-up (not a routing bug): whether the web room shows the *full* reply text depends on the model — on an email-source task the email guidelines push it to compose via the email-output tool (structured body → email leg), while the web leg delivers the task's `result_text`. If those diverge the room could show less than the email. Best confirmed by a live round-trip post-deploy.
+
+**Files modified:**
+- `src/istota/transport/email/inbound.py` - unconditional thread-match recovery; `is_emissary_reply` prompt gate; cross-user origin guard
+- `tests/test_transport_email_inbound.py` - five regression tests for the self-reply / plus-address / cross-user paths
+
 ## 2026-06-09: Email replies route back to the origin surface (web/Talk/email)
 
 Closed the "lossy hop": when the bot sent an email at the request of a web-chat room (or Talk/REPL) and the recipient replied, the inbound reply spawned a fresh `source_type="email"` task that had no memory of where it came from — it delivered only over email, never back into the room. Implemented the `email-reply-origin-routing` spec in four TDD stages, then ran Mulder (bug-hunter) + Scully (verifier) over the result and fixed everything they surfaced.
