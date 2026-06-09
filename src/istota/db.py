@@ -1370,10 +1370,34 @@ def get_conversation_history(
     Returns the most recent N completed tasks (oldest-first order),
     excluding the current task if specified.
 
+    Reads from the canonical `messages` store (unified Talk/web room sync) when
+    that store is caught up to the latest completed task for the token,
+    otherwise falls back to the legacy `tasks` reconstruction. The dual-read is
+    self-healing: until live assistant-message writes land for every surface,
+    any token whose newest completed turn isn't yet mirrored into `messages`
+    transparently uses the `tasks` path, so context never goes stale.
+
     Args:
         exclude_source_types: If provided, exclude tasks with these source_types
             from the history (e.g. ["scheduled", "briefing", "heartbeat"]).
     """
+    if _messages_caught_up(conn, conversation_token):
+        return _conversation_history_from_messages(
+            conn, conversation_token, exclude_task_id, limit, exclude_source_types,
+        )
+    return _conversation_history_from_tasks(
+        conn, conversation_token, exclude_task_id, limit, exclude_source_types,
+    )
+
+
+def _conversation_history_from_tasks(
+    conn: sqlite3.Connection,
+    conversation_token: str,
+    exclude_task_id: int | None,
+    limit: int,
+    exclude_source_types: list[str] | None,
+) -> list[ConversationMessage]:
+    """Legacy path: reconstruct history from completed `tasks` rows."""
     query = """
         SELECT id, prompt, result, created_at, actions_taken, source_type, user_id
         FROM tasks
@@ -1413,6 +1437,111 @@ def get_conversation_history(
         )
         for row in reversed(rows)
     ]
+
+
+def _conversation_history_from_messages(
+    conn: sqlite3.Connection,
+    conversation_token: str,
+    exclude_task_id: int | None,
+    limit: int,
+    exclude_source_types: list[str] | None,
+) -> list[ConversationMessage]:
+    """Unified path: re-pair `messages` user/assistant rows (keyed on task_id)
+    back into the (prompt, result) ConversationMessage shape callers expect.
+
+    The user row and assistant row of one turn share a `task_id`; the join to
+    `tasks` recovers per-task metadata (source_type, user_id, actions_taken) the
+    role/body-only message rows don't carry, and applies the same
+    completed/result-present + exclusion filters as the legacy path. An in-flight
+    turn (user row, no assistant row yet) is excluded by the inner join, exactly
+    as the `result IS NOT NULL` filter excludes it today. `id` stays the task id
+    so reply-parent / memory-dedup callers keyed on it are unaffected.
+    """
+    query = """
+        SELECT t.id AS id, mu.body AS prompt, ma.body AS result,
+               t.created_at AS created_at, t.actions_taken AS actions_taken,
+               t.source_type AS source_type, t.user_id AS user_id
+        FROM messages mu
+        JOIN messages ma
+          ON ma.room_token = mu.room_token AND ma.task_id = mu.task_id
+             AND ma.role = 'assistant'
+        JOIN tasks t ON t.id = mu.task_id
+        WHERE mu.room_token = ? AND mu.role = 'user'
+          AND t.status = 'completed'
+    """
+    params: list = [conversation_token]
+
+    if exclude_task_id is not None:
+        query += " AND t.id != ?"
+        params.append(exclude_task_id)
+
+    if exclude_source_types:
+        placeholders = ", ".join("?" for _ in exclude_source_types)
+        query += f" AND t.source_type NOT IN ({placeholders})"
+        params.extend(exclude_source_types)
+
+    query += " ORDER BY t.created_at DESC, t.id DESC LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    return [
+        ConversationMessage(
+            id=row["id"],
+            prompt=row["prompt"],
+            result=row["result"],
+            created_at=row["created_at"],
+            actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
+            source_type=row["source_type"] if "source_type" in row.keys() else "talk",
+            user_id=row["user_id"] if "user_id" in row.keys() else None,
+        )
+        for row in reversed(rows)
+    ]
+
+
+def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bool:
+    """True when the canonical `messages` store can authoritatively serve a
+    token's history: there are no completed turns to show, or the single newest
+    completed task for the token has its assistant row present in `messages`.
+
+    Cheap (two scalar lookups). Until live assistant writes land for a surface,
+    a freshly-completed task won't be in `messages`, so this returns False and
+    the caller falls back to the `tasks` path — no staleness during rollout."""
+    row = conn.execute(
+        "SELECT MAX(id) AS mx FROM tasks "
+        "WHERE conversation_token = ? AND status = 'completed' AND result IS NOT NULL",
+        (conversation_token,),
+    ).fetchone()
+    latest = row["mx"] if row else None
+    if latest is None:
+        return False  # no completed history -> let the tasks path return []
+    present = conn.execute(
+        "SELECT 1 FROM messages "
+        "WHERE room_token = ? AND task_id = ? AND role = 'assistant' LIMIT 1",
+        (conversation_token, latest),
+    ).fetchone()
+    return present is not None
+
+
+def backfill_room_messages_from_tasks(
+    conn: sqlite3.Connection, conversation_token: str,
+) -> int:
+    """Populate the canonical `messages` store from completed `tasks` for a
+    room token: one user row (body=prompt) + one assistant row (body=result)
+    per completed turn, sharing the task_id. Idempotent via the partial unique
+    index (room_token, origin_surface, role, task_id). Returns rows inserted."""
+    inserted = 0
+    for role, col in (("user", "prompt"), ("assistant", "result")):
+        cur = conn.execute(
+            f"INSERT OR IGNORE INTO messages "
+            f"(room_token, role, body, task_id, origin_surface, created_at) "
+            f"SELECT conversation_token, ?, {col}, id, source_type, created_at "
+            f"FROM tasks "
+            f"WHERE conversation_token = ? AND status = 'completed' "
+            f"AND result IS NOT NULL",
+            (role, conversation_token),
+        )
+        inserted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    return inserted
 
 
 def get_previous_tasks(
@@ -2199,6 +2328,24 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
             "    AND m.created_at = w.created_at"
             ")"
         )
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        # Backfill the canonical messages store (user+assistant turns) from
+        # completed tasks for every registered room, so the unified history
+        # reader has the historical backlog. Live writes (Stage 3/4) keep it
+        # current going forward.
+        for role, col in (("user", "prompt"), ("assistant", "result")):
+            conn.execute(
+                f"INSERT OR IGNORE INTO messages "
+                f"(room_token, role, body, task_id, origin_surface, created_at) "
+                f"SELECT conversation_token, ?, {col}, id, source_type, created_at "
+                f"FROM tasks "
+                f"WHERE conversation_token IN (SELECT token FROM rooms) "
+                f"AND status = 'completed' AND result IS NOT NULL",
+                (role,),
+            )
     except sqlite3.OperationalError:
         pass
 
