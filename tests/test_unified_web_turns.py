@@ -121,6 +121,27 @@ class TestDisplayLoaderCrossSurface:
         assert ("user", "web q") in texts
         assert ("assistant", "web a") in texts
 
+    def test_rename_propagates_to_registry(self, db_path):
+        from istota import web_app
+        web_app._config = Config()
+        web_app._config.db_path = db_path
+        with db.get_db(db_path) as conn:
+            room = db.create_web_chat_room(conn, "u", "Old Name")
+        web_app._chat_update_room("u", room.id, name="New Name", archived=None)
+        with db.get_db(db_path) as conn:
+            assert db.get_room(conn, room.token).name == "New Name"
+
+    def test_archive_propagates_to_registry(self, db_path):
+        from istota import web_app
+        web_app._config = Config()
+        web_app._config.db_path = db_path
+        with db.get_db(db_path) as conn:
+            room = db.create_web_chat_room(conn, "u", "Chat")
+        web_app._chat_update_room("u", room.id, name=None, archived=True)
+        with db.get_db(db_path) as conn:
+            assert db.get_room(conn, room.token).archived is True
+            assert [r.token for r in db.list_rooms(conn, "u")] == []  # hidden
+
     def test_system_notifications_from_messages(self, db_path):
         with db.get_db(db_path) as conn:
             room = db.create_web_chat_room(conn, "u", "Chat")
