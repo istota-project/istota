@@ -109,6 +109,9 @@ ready_markers = {{ istota_brain_tmux_ready_markers | to_json }}
 {% if istota_brain_tmux_trust_markers %}
 trust_markers = {{ istota_brain_tmux_trust_markers | to_json }}
 {% endif %}
+{% if istota_brain_tmux_theme_markers %}
+theme_markers = {{ istota_brain_tmux_theme_markers | to_json }}
+{% endif %}
 {% if istota_brain_tmux_error_markers %}
 error_markers = {{ istota_brain_tmux_error_markers | to_json }}
 {% endif %}

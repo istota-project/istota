@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: tmux brain — skip first-run onboarding (theme picker repro)
+
+Second docker test, after the IS_SANDBOX fix: claude now *launches* (banner instead of the root refusal), but blocked at a new dialog the markers didn't handle — the first-run **theme picker** (`Choose the text style…`). Root cause is an interaction with the §2 per-session `CLAUDE_CONFIG_DIR` fix: a fresh, empty config dir each task means the interactive TUI sees a brand-new install and re-runs onboarding (theme → trust → bypass) every time. The prod VM never showed it because its global `~/.claude` already had onboarding state; and the container's `~/.claude.json` only ever held headless-`-p` state (which skips onboarding), so it had no `theme`/`hasCompletedOnboarding` keys either.
+
+Fix: pre-seed `<CLAUDE_CONFIG_DIR>/.claude.json` per session with the onboarding-skip keys (verified present in the CLI binary via a strings scan): `theme`, `hasCompletedOnboarding`, `bypassPermissionsModeAccepted`, and per-project `projects.<cwd>.{hasTrustDialogAccepted,hasCompletedProjectOnboarding}`. The TUI then skips the whole first-run gauntlet. As a version-tolerant safety net (if a CLI version renames a key), `_wait_ready` also scripts past the theme picker with a bare Enter (a dark option is pre-selected), via a new configurable `theme_markers` list — same pattern as the existing trust/bypass handling.
+
+**Key changes:**
+- `tmux_claude.py`: `_seed_onboarding(config_dir, launch_cwd)` writes the per-session `.claude.json`; `_run_session` calls it after `_write_hooks`. `_wait_ready` gains a theme-picker branch; new `_THEME_MARKERS` constant.
+- `config.py`: `TmuxBrainConfig.theme_markers` + parsing. `validate_config.py`, Ansible defaults/template: `theme_markers` knob.
+- Tests for the seed (keys + execute-path) and the theme-dialog safety net.
+
+**Files modified:**
+- `src/istota/brain/tmux_claude.py`, `src/istota/config.py`, `deploy/ansible/{files/validate_config.py,defaults/main.yml,templates/config.toml.j2}`, `tests/test_tmux_production.py`
+
 ## 2026-06-09: tmux brain — IS_SANDBOX for root containers (first docker test)
 
 First live test of `brain.kind = "tmux_claude"` was a local docker deploy. The fail-fast + fallback machinery worked exactly as designed — but surfaced a docker-specific blocker. The `ready_timeout` pane snapshot showed the real cause: the container runs as **root**, and the interactive `claude` TUI refuses `--dangerously-skip-permissions cannot be used with root/sudo privileges` — so claude exited at launch, never became ready, timed out (30s), and the task correctly fell back to headless `claude_code`. (The prod VM never hit this: it runs as the non-root `istota` service user, where the flag is allowed.)

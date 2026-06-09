@@ -521,6 +521,9 @@ class TmuxBrainConfig:
     trust_markers: list[str] = field(
         default_factory=lambda: ["trust this folder", "Is this a project you"]
     )
+    theme_markers: list[str] = field(
+        default_factory=lambda: ["Choose the text style", "run /theme"]
+    )
     bypass_warning_marker: str = "Bypass Permissions mode"
     bypass_accept_marker: str = "Yes, I accept"
     error_markers: list[str] = field(
@@ -1220,6 +1223,7 @@ def load_config(config_path: Path | None = None) -> Config:
             cli_version_pin=str(tmux_raw.get("cli_version_pin", _tmux_defaults.cli_version_pin)),
             ready_markers=_str_list("ready_markers"),
             trust_markers=_str_list("trust_markers"),
+            theme_markers=_str_list("theme_markers"),
             bypass_warning_marker=str(
                 tmux_raw.get("bypass_warning_marker", _tmux_defaults.bypass_warning_marker)
             ),
