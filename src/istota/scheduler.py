@@ -1528,6 +1528,10 @@ def process_one_task(
         _talk_dest.channel if _talk_dest else _talk_target_for_delivery(config, task)
     )
     plan_talk = _talk_dest is not None
+    # A mirror Talk leg (room fan-out from a non-Talk origin, e.g. a web-origin
+    # task mirrored to its bound Talk room) must not carry the confirmation
+    # prompt — confirmations stay on the originating surface (open question 7).
+    _talk_is_mirror = bool(_talk_dest and getattr(_talk_dest, "mirror", False))
     plan_email = plan_has_surface(plan, "email")
     plan_ntfy = plan_has_surface(plan, "ntfy")
     plan_file = plan_has_surface(plan, "istota_file")
@@ -1615,8 +1619,9 @@ def process_one_task(
                 db.log_task(conn, task_id, "info", "Task awaiting user confirmation")
                 # Talk confirmations post the prompt to the room; web/stream
                 # confirmations surface it via the `confirmation` task event
-                # (emitted below) and must not cross-post to Talk.
-                if plan_talk and talk_token:
+                # (emitted below) and must not cross-post to Talk. A mirror Talk
+                # leg is excluded — a web-origin confirmation stays on web.
+                if plan_talk and talk_token and not _talk_is_mirror:
                     post_talk_message = result
             else:
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
@@ -1905,6 +1910,25 @@ def process_one_task(
                 db.update_talk_response_id(conn, task_id, response_msg_id)
         except Exception as e:
             logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
+
+    # Record the mirror's Talk post id in the assistant message's external_ids
+    # ledger (loop-prevention infra — dormant for v1 since Talk self-filters bot
+    # posts by author, but makes the no-echo invariant explicit for a future
+    # surface that doesn't).
+    if response_msg_id and _talk_is_mirror and task.conversation_token:
+        try:
+            with db.get_db(config.db_path) as conn:
+                row = conn.execute(
+                    "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
+                    "AND role = 'assistant' LIMIT 1",
+                    (task.conversation_token, task_id),
+                ).fetchone()
+                if row:
+                    db.set_message_external_id(
+                        conn, row["id"], "talk", str(response_msg_id),
+                    )
+        except Exception as e:
+            logger.debug("Failed to record mirror external_id for task %d: %s", task_id, e)
 
     # Cache the result so it's immediately available for context building.
     # The result is always posted as its own message, so its real Talk ID is
