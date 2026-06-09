@@ -98,6 +98,25 @@ class TestBuildCleanEnv:
             env = build_clean_env(config)
         assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-secret"
 
+    def test_propagates_admins_file_path(self):
+        """ISTOTA_ADMINS_FILE (a path, not a secret) reaches subprocesses so a
+        custom-namespace deploy's admins file resolves instead of the hardcoded
+        /etc/istota default."""
+        config = Config()
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "HOME": "/home/test",
+            "ISTOTA_ADMINS_FILE": "/etc/zorg/admins",
+        }, clear=True):
+            env = build_clean_env(config)
+        assert env["ISTOTA_ADMINS_FILE"] == "/etc/zorg/admins"
+
+    def test_omits_admins_file_when_unset(self):
+        config = Config()
+        with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
+            env = build_clean_env(config)
+        assert "ISTOTA_ADMINS_FILE" not in env
+
 
 class TestBuildStrippedEnv:
     def test_strips_password_vars(self):
