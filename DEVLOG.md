@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-08: Sub-tick worker idle re-check (web chat pickup latency phase 2)
+
+Second of two latency cuts for cold task pickup, motivated by web chat: a freshly-enqueued `source_type="web"` task could sit `pending` for seconds before a worker claimed it and emitted the first SSE event. Phase 1 (the `_dispatch_sleep` sub-tick dispatch scan) already closed the fully-cold case. Phase 2 closes the "quick follow-up" case — the user reads a reply and sends another message while the worker that just handled the previous turn is still parked in its idle linger. `dispatch()` can't help there because the parked worker still holds the per-user slot, so pickup was gated by `poll_interval` (~5s), not the 0.5s dispatch cadence.
+
+**The idle loop.** Replaced `UserWorker.run`'s single coarse-wait + single-recheck idle branch with `_worker_idle_wait`: it re-checks for work every `worker_idle_poll_interval` (new knob, default 0.5s) until `worker_idle_timeout` of *continuous* emptiness elapses, then exits (dispatch re-spawns on the next task). A follow-up landing mid-linger is now claimed within ~one idle poll. The deadline tracks continuous emptiness — a lost claim race does not reset it, so two idle workers can't keep each other alive forever. The helper mirrors `_dispatch_sleep` (slice-sleep + stop/shutdown checks, testable with the same fake clock); stop/shutdown are honoured within one slice.
+
+**Repaired dead config.** `worker_idle_timeout` (was 30s) was effectively dead — the old single-wait branch lingered only ~one `poll_interval` regardless of the setting. It's now the genuine cumulative-idle linger; default lowered to 10s (operator-tunable middle ground between slot occupancy and absorbing realistic between-turn gaps).
+
+**Stays poll-based.** The obvious wake-on-enqueue `Event`/`Condition` doesn't work: web messages are enqueued by the *web* process, a different OS process from the scheduler daemon, so an in-process signal can't cross the boundary. Polling the shared SQLite DB is the only cross-process mechanism — same constraint as phase 1.
+
+**Post-review (Mulder/Scully).** Two fixes folded in before merge:
+- *Legacy-branch stop responsiveness.* The first cut used `time.sleep` in the legacy-parity branch too (for fake-clock testability), silently dropping the instant-wake-on-stop the pre-phase-2 code had via `stop_event.wait`. Restored `stop_event.wait` in the legacy branch only; the fine-cadence default keeps slice-sleep (meets the one-poll bound).
+- *Claimability-aware counts (scope expanded into `dispatch()`).* The cheap `count_pending_tasks_for_user_queue` pre-check was the wrong gate for the foreground queue: `claim_task` applies a per-channel single-active gate, so a follow-up queued behind an active task in the *same room* (the exact web-chat case) read as "1 pending" but was unclaimable — the idle worker would busy-poll `claim_task` (5 stale-lock maintenance UPDATEs) every 0.5s and `dispatch()` would spawn a doomed second worker, for the blocking task's whole lifetime. Factored the gate into a shared `db._CLAIM_CHANNEL_GATE_SQL`, added `db.count_claimable_tasks_for_user_queue` mirroring `claim_task`'s claimability, and used it in *both* the idle pre-check and `dispatch()`'s spawn count. A gated follow-up now counts 0 → no doomed worker, no busy-poll; a different-room task still counts. Raw `count_pending_*` kept for status/observability only. This deliberately overrode the spec's "don't touch `dispatch()`" non-goal — the doomed spawn was the larger half of the same defect.
+
+Full suite green (5949 passed). New tests: `TestWorkerIdleWait` (11 idle-loop cases), `TestCountClaimableTasksForUserQueue` (8 db cases), two `dispatch()` doomed-worker cases, config default/load assertions.
+
+**Files added/modified:**
+- `src/istota/scheduler.py` - `_worker_idle_wait` + `_count_pending` helpers; rewired `UserWorker.run` idle branch; `dispatch()` spawn count → claimable
+- `src/istota/db.py` - `_CLAIM_CHANNEL_GATE_SQL` shared constant (factored out of `claim_task`); `count_claimable_tasks_for_user_queue`
+- `src/istota/config.py` - `worker_idle_poll_interval` field + loader; `worker_idle_timeout` default 30 → 10
+- `config/config.example.toml`, `deploy/ansible/{defaults/main.yml,templates/config.toml.j2}` - new knob + changed default
+- `.claude/rules/scheduler.md` - intervals table, `UserWorker` note, claimable-count semantics
+- `tests/test_scheduler.py`, `tests/test_db.py`, `tests/test_config.py` - new test classes
+
 ## 2026-06-08: Light-mode fixes — dashboard cards + mobile sidebar toggle
 
 Two surfaces still hardcoded dark hex values instead of the theme CSS variables, so they stayed dark (with unreadable dark titles) in light mode.
