@@ -24,6 +24,7 @@ import {
 	updateChatRoom,
 	promoteChatRoom,
 	type ChatRoom,
+	type ChatHistory,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
 import { applyEvent as applySegmentEvent, type ChatMessage, type Segment, type ToolEntry } from '$lib/stores/segments';
@@ -326,10 +327,13 @@ function createSession(): ChatSession {
 		if (notifTimer) { clearInterval(notifTimer); notifTimer = null; }
 	}
 
-	// Poll the room's history while idle and surface any newly-delivered
-	// bot messages (alerts / logs / web-routed notifications). Skipped while a
-	// task streams — the stream owns the transcript then; the next idle tick
-	// picks up anything that landed meanwhile.
+	// Poll the room's history while idle and surface (a) newly-delivered bot
+	// messages (alerts / logs / web-routed notifications) and (b) a task that
+	// *started* while this room was open — most importantly a Talk-originated
+	// turn (unified room sync): its user message is shown and its progress
+	// streamed live, so the conversation animates in both surfaces at once.
+	// Skipped while a task streams — the stream owns the transcript then; the
+	// next idle tick picks up anything that landed meanwhile.
 	function startNotifPolling(roomId: number) {
 		stopNotifPolling();
 		notifTimer = setInterval(async () => {
@@ -346,7 +350,42 @@ function createSession(): ChatSession {
 					streaming: false, createdAt: m.created_at,
 				}]);
 			}
+			pickUpNewInFlightTasks(hist);
 		}, NOTIF_POLL_MS);
+	}
+
+	// Surface in-flight tasks not yet in the transcript (e.g. a Talk turn that
+	// started while the web room was open) and stream them live. Cross-surface
+	// progress: the same SSE substrate the web client already tails works for a
+	// Talk-source task because the events endpoint is ownership-gated, not
+	// source-gated. A fast turn that already completed between polls is picked up
+	// on the next room load — this path is the live, in-flight case.
+	function pickUpNewInFlightTasks(hist: ChatHistory) {
+		const actives = hist.active_tasks ?? (hist.active_task ? [hist.active_task] : []);
+		if (!actives.length) return;
+		const known = new Set<number>();
+		for (const m of get(messages)) if (typeof m.taskId === 'number') known.add(m.taskId);
+		const cur = get(activeTaskId);
+		if (cur != null) known.add(cur);
+		for (const q of streamQueue) known.add(q.taskId);
+		for (const at of actives) {
+			if (at.status === 'pending_confirmation' || known.has(at.id)) continue;
+			// Show the turn's user message first, if the room history carries it.
+			const um = hist.messages.find((m) => m.role === 'user' && m.task_id === at.id);
+			if (um) {
+				messages.update((arr) => [...arr, {
+					cid: nextCid(), role: 'user', text: um.text, taskId: at.id,
+					segments: [], streaming: false, createdAt: um.created_at,
+				}]);
+			}
+			const ph: ChatMessage = {
+				cid: nextCid(), role: 'assistant', text: '', taskId: at.id,
+				status: at.status, segments: [], streaming: true,
+				createdAt: new Date().toISOString(),
+			};
+			messages.update((arr) => [...arr, ph]);
+			enqueueStream(at.id, ph.cid);
+		}
 	}
 
 	async function loadHistory(roomId: number) {
