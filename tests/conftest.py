@@ -34,6 +34,10 @@ os.environ.setdefault("ISTOTA_FEEDS_SKIP_DEFAULT_SEED", "1")
 # expect a clean ledgers/ dir. The seed tests in test_migrate.py
 # monkeypatch this var off explicitly.
 os.environ.setdefault("ISTOTA_MONEY_SKIP_DEFAULT_SEED", "1")
+# web_app's session middleware fails closed without a signing secret
+# (ISSUE-124). Tests don't configure one, so opt into the random per-process
+# dev secret. Tests that assert the fail-closed behaviour clear this explicitly.
+os.environ.setdefault("ISTOTA_WEB_ALLOW_INSECURE_SESSION", "1")
 
 from istota import db
 from istota.config import Config, UserConfig
