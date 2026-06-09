@@ -101,6 +101,14 @@
 		settingsRoom = null;
 		await session.deleteRoom(id);
 	}
+
+	async function promoteRoom() {
+		if (!settingsRoom) return;
+		const id = settingsRoom.id;
+		await session.promoteRoom(id);
+		// Reflect the new binding in the open modal (button → "On Talk").
+		settingsRoom = $rooms.find((r) => r.id === id) ?? null;
+	}
 </script>
 
 <AppShell>
@@ -156,6 +164,9 @@
 					>
 						<MessageSquare size={13} />
 						<span class="room-name">{room.name}</span>
+						{#if room.origin === 'talk' || room.talk_token}
+							<span class="room-badge" title="Also on Nextcloud Talk">Talk</span>
+						{/if}
 					</button>
 					<KebabMenu
 						ariaLabel="Room actions"
@@ -202,6 +213,7 @@
 			room={settingsRoom}
 			onSave={saveRoomName}
 			onDelete={deleteRoom}
+			onPromote={promoteRoom}
 			onClose={() => (settingsRoom = null)}
 		/>
 	{/if}
@@ -312,4 +324,15 @@
 	.room-row:hover .room-btn { color: var(--text-secondary); }
 	.room-row.active .room-btn { color: var(--text-primary); }
 	.room-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.room-badge {
+		flex-shrink: 0;
+		font-size: 0.6rem;
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+		padding: 0.05rem 0.3rem;
+		border-radius: var(--radius-pill);
+		background: var(--surface-base);
+		color: var(--text-dim);
+		border: 1px solid var(--border-default);
+	}
 </style>

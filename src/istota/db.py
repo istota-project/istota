@@ -1844,6 +1844,23 @@ def update_web_chat_room(
     return _row_to_web_chat_room(row) if row else None
 
 
+def ensure_web_chat_handle(
+    conn: sqlite3.Connection, user_id: str, token: str, name: str,
+) -> WebChatRoom:
+    """Ensure a ``web_chat_rooms`` handle row exists for an existing registry
+    room ``token`` (used as the frontend's integer room id when the room
+    originated on another surface, e.g. a Talk room surfaced in web). Idempotent
+    on the unique token. Returns the row."""
+    conn.execute(
+        "INSERT OR IGNORE INTO web_chat_rooms (user_id, token, name) "
+        "VALUES (?, ?, ?)",
+        (user_id, token, name.strip() or "room"),
+    )
+    room = get_web_chat_room_by_token(conn, token)
+    assert room is not None
+    return room
+
+
 def ensure_default_web_chat_room(
     conn: sqlite3.Connection, user_id: str,
 ) -> WebChatRoom:

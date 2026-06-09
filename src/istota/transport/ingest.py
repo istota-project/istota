@@ -71,10 +71,20 @@ def record_inbound(
     if room_surface:
         # Lazy room registration on first sight (a Talk room the bot joined, a
         # web room created elsewhere). First writer wins on origin + name.
-        if db.get_room(conn, room_token) is None:
+        existing = db.get_room(conn, room_token)
+        if existing is None:
             db.register_room(
                 conn, room_token, user_id, origin=surface, name=channel_name,
             )
+        elif (
+            surface == "talk"
+            and existing.origin == "talk"
+            and channel_name
+            and channel_name != existing.name
+        ):
+            # Talk-side rename flows back to the registry on the next poll. Only
+            # for Talk-origin rooms — a web-origin room's user-set name wins.
+            db.rename_room(conn, room_token, channel_name)
         db.add_room_binding(conn, room_token, surface, surface_ref)
 
         # 2. Echo check (loop-prevention ledger). Dormant for v1 Talk+web.

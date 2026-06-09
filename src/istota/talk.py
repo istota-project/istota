@@ -167,6 +167,71 @@ class TalkClient:
         response.raise_for_status()
         return response.json()
 
+    async def create_conversation(
+        self, name: str, room_type: int = 2,
+    ) -> dict:
+        """Create a Talk conversation (default roomType=2, a group room) owned
+        by the configured account. Returns the new room's ``ocs.data`` dict
+        (carrying its ``token``). Used by the web "Also open in Talk" promote."""
+        url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"
+        client = await self._ensure_open()
+        response = await client.post(
+            url,
+            auth=self.auth,
+            headers={
+                "OCS-APIRequest": "true",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={"roomType": room_type, "roomName": name[:200]},
+        )
+        response.raise_for_status()
+        return response.json().get("ocs", {}).get("data", {})
+
+    async def add_participant(
+        self, conversation_token: str, participant: str, source: str = "users",
+    ) -> dict:
+        """Add a participant to a conversation (default source=users — a
+        Nextcloud user id)."""
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"
+            f"/{conversation_token}/participants"
+        )
+        client = await self._ensure_open()
+        response = await client.post(
+            url,
+            auth=self.auth,
+            headers={
+                "OCS-APIRequest": "true",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={"newParticipant": participant, "source": source},
+        )
+        response.raise_for_status()
+        return response.json().get("ocs", {}).get("data", {})
+
+    async def rename_conversation(
+        self, conversation_token: str, name: str,
+    ) -> None:
+        """Rename a Talk conversation (propagates a web room rename to Talk)."""
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"
+            f"/{conversation_token}"
+        )
+        client = await self._ensure_open()
+        response = await client.put(
+            url,
+            auth=self.auth,
+            headers={
+                "OCS-APIRequest": "true",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={"roomName": name[:200]},
+        )
+        response.raise_for_status()
+
     async def list_conversations(self) -> list[dict]:
         """List all conversations the user is part of."""
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"

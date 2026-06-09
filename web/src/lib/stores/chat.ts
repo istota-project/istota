@@ -22,6 +22,7 @@ import {
 	getTaskEvents,
 	sendChatMessage,
 	updateChatRoom,
+	promoteChatRoom,
 	type ChatRoom,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
@@ -104,6 +105,7 @@ export interface ChatSession {
 	selectRoomByToken: (token: string) => Promise<boolean>;
 	newRoom: (name: string) => Promise<void>;
 	renameRoom: (id: number, name: string) => Promise<void>;
+	promoteRoom: (id: number) => Promise<void>;
 	archiveRoom: (id: number) => Promise<void>;
 	deleteRoom: (id: number) => Promise<void>;
 	send: (text: string, attachments?: { path: string; name: string }[]) => Promise<void>;
@@ -457,6 +459,15 @@ function createSession(): ChatSession {
 		rooms.update((r) => r.map((x) => (x.id === id ? updated : x)));
 	}
 
+	async function promoteRoom(id: number) {
+		try {
+			const updated = await promoteChatRoom(id);
+			rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...updated } : x)));
+		} catch {
+			error.set("Couldn't open this room in Talk.");
+		}
+	}
+
 	async function archiveRoom(id: number) {
 		await updateChatRoom(id, { archived: true });
 		rooms.update((r) => r.filter((x) => x.id !== id));
@@ -605,7 +616,7 @@ function createSession(): ChatSession {
 
 	return {
 		rooms, activeRoomId, messages, status, activeTaskId, loaded, error,
-		init, selectRoom, selectRoomByToken, newRoom, renameRoom, archiveRoom,
+		init, selectRoom, selectRoomByToken, newRoom, renameRoom, promoteRoom, archiveRoom,
 		deleteRoom, send, cancel, confirm, reject, teardown,
 	};
 }
