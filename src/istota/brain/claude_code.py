@@ -506,11 +506,22 @@ class ClaudeCodeBrain:
         final_result: ResultEvent | None = None
         raw_stdout_lines: list[str] = []
         cancelled = False
+        # The model the CLI actually used. The stream-json ``system``/``init``
+        # frame carries it (it reflects the resolved default when --model was
+        # omitted), so this is more accurate than req.model for the default case.
+        model_seen = ""
         parse_line = make_stream_parser()
 
         try:
             for line in process.stdout:
                 raw_stdout_lines.append(line)
+                if not model_seen and '"model"' in line:
+                    try:
+                        _d = json.loads(line)
+                        if _d.get("type") == "system" and _d.get("model"):
+                            model_seen = str(_d["model"])
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
                 event = parse_line(line)
                 if event is None:
                     continue
@@ -610,12 +621,14 @@ class ClaudeCodeBrain:
                     result_text=result_text,
                     actions_taken=actions_json,
                     execution_trace=trace_json,
+                    model_used=model_seen or req.model,
                 )
             return BrainResult(
                 success=False,
                 result_text=result_text or stderr_output or "Unknown error",
                 execution_trace=trace_json,
                 stop_reason="error",
+                model_used=model_seen or req.model,
             )
 
         if req.result_file and req.result_file.exists():
@@ -626,6 +639,7 @@ class ClaudeCodeBrain:
                     result_text=output.strip(),
                     actions_taken=actions_json,
                     execution_trace=trace_json,
+                    model_used=model_seen or req.model,
                 )
             return BrainResult(
                 success=False,

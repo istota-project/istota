@@ -48,6 +48,7 @@ class Task:
     selected_skills: str | None = None  # JSON array of skill names
     model: str | None = None  # Per-task model override; empty/None = use config default
     effort: str | None = None  # Per-task effort override; empty/None = use config default
+    model_used: str | None = None  # Model the brain actually ran (resolved canonical ID), set post-run
     talk_delivery_token: str | None = None  # Real Talk room for this task's notifications; NULL falls back to conversation_token
     # Phase 1.3 (unified credential resolution refactor): skill-task
     # dispatch. Set when the task should run a single CLI skill (e.g.
@@ -171,6 +172,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("selected_skills", "TEXT"),
         ("model", "TEXT"),
         ("effort", "TEXT"),
+        # The model the brain actually used (resolved canonical ID), recorded
+        # post-run. Distinct from `model` (the per-task override): `model` stays
+        # empty for default-model tasks so retries re-resolve the current
+        # default, while `model_used` records what ran for display/audit.
+        ("model_used", "TEXT"),
         ("talk_delivery_token", "TEXT"),
         # Phase 1.3 — skill-task dispatch
         ("skill", "TEXT"),
@@ -525,7 +531,7 @@ _TASK_COLUMNS = (
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
     "reply_to_content, heartbeat_silent, skip_log_channel, scheduled_job_id, "
-    "queue, confirmed_at, selected_skills, model, effort, "
+    "queue, confirmed_at, selected_skills, model, effort, model_used, "
     "talk_delivery_token, skill, skill_args"
 )
 
@@ -572,6 +578,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         selected_skills=row["selected_skills"],
         model=row["model"],
         effort=row["effort"],
+        model_used=row["model_used"],
         talk_delivery_token=row["talk_delivery_token"],
         skill=row["skill"],
         skill_args=row["skill_args"],
@@ -2158,6 +2165,18 @@ def has_google_token(conn: sqlite3.Connection, user_id: str) -> bool:
 def update_task_pid(conn: sqlite3.Connection, task_id: int, pid: int) -> None:
     """Store the subprocess PID for a running task."""
     conn.execute("UPDATE tasks SET worker_pid = ? WHERE id = ?", (pid, task_id))
+    conn.commit()
+
+
+def set_task_model_used(conn: sqlite3.Connection, task_id: int, model: str) -> None:
+    """Record the model that actually ran a task (resolved canonical ID).
+
+    Writes the dedicated ``model_used`` column, leaving ``model`` (the per-task
+    override; empty = config default) untouched so a retry of a default-model
+    task still re-resolves the current default rather than pinning attempt 1's
+    model. Surfaces (web-chat meta) read ``model_used``.
+    """
+    conn.execute("UPDATE tasks SET model_used = ? WHERE id = ?", (model, task_id))
     conn.commit()
 
 

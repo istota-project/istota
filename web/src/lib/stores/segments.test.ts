@@ -198,6 +198,24 @@ describe('applyEvent reducer', () => {
 		expect(m.durationSeconds).toBe(3);
 	});
 
+	it('done carries the model name onto the message', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['result', { text: 'ok' }],
+			['done', { duration_seconds: 2, model: 'claude-opus-4-8' }],
+		]);
+		expect(m.model).toBe('claude-opus-4-8');
+	});
+
+	it('done without a model leaves the field unset', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['result', { text: 'ok' }],
+			['done', { duration_seconds: 2 }],
+		]);
+		expect(m.model).toBeUndefined();
+	});
+
 	it('empty whitespace narration is settled but not renderable', () => {
 		const m = freshAssistant();
 		feed(m, [

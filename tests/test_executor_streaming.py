@@ -382,6 +382,39 @@ class TestStreamingExecution:
         assert success is True
         assert result == "The answer is 42."
 
+    def test_model_recorded_from_init_event(self, tmp_path):
+        """The model from the stream-json init frame is recorded as model_used."""
+        config = _make_config(tmp_path)
+        task = _make_task()  # no per-task model; config.model empty
+
+        stream_lines = [
+            json.dumps({
+                "type": "system", "subtype": "init", "cwd": "/tmp",
+                "model": "claude-opus-4-8",
+            }) + "\n",
+            json.dumps({
+                "type": "result", "subtype": "success", "result": "done",
+            }) + "\n",
+        ]
+
+        mock_process = self._make_mock_process(stream_lines)
+
+        patches = _patch_executor() + [
+            patch("istota.executor.subprocess.Popen", return_value=mock_process),
+        ]
+        with contextmanager_chain(patches):
+            success, _result, _actions, _trace = execute_task(
+                task, config, [], event_writer=_writer(task, config),
+            )
+
+        assert success is True
+        # Executor records the actually-used model on the task object (model_used,
+        # not the override `model`) so the scheduler can surface it in the
+        # terminal `done` event / chat meta, and so a retry still re-resolves the
+        # default rather than pinning this attempt's model.
+        assert task.model_used == "claude-opus-4-8"
+        assert task.model is None
+
     def test_error_result_event(self, tmp_path):
         """Streaming executor reports failure from error ResultEvent."""
         config = _make_config(tmp_path)

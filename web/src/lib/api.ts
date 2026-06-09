@@ -1404,6 +1404,8 @@ export interface ChatHistoryMessage {
 	// same interleaved layout as the live stream. `tools` is kept as a fallback.
 	segments?: { kind: 'text' | 'tool'; text: string }[];
 	duration_seconds?: number | null;
+	// The model that produced this answer (canonical ID), null when unknown.
+	model?: string | null;
 }
 
 export interface ChatHistory {

@@ -80,6 +80,35 @@ class TestTextCompletion:
         assert provider.calls[0]["system_prompt"] == "You are a test bot."
 
 
+class TestModelUsed:
+    def test_reports_requested_model(self, tmp_path):
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="ok")],
+                    usage=Usage(input_tokens=10, output_tokens=2),
+                    stop_reason="end_turn",
+                )
+            ]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.model_used == "claude-sonnet-4-6"
+
+    def test_falls_back_to_config_model_when_request_empty(self, tmp_path):
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="ok")],
+                    stop_reason="end_turn",
+                )
+            ]
+        )
+        req = _req("hi", tmp_path)
+        req.model = ""  # no per-task model → brain falls back to its config model
+        result = _brain(provider).execute(req)
+        assert result.model_used == "claude-sonnet-4-6"
+
+
 class TestToolUse:
     def test_write_tool_then_completion(self, tmp_path):
         provider = MockProvider(

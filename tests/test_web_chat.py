@@ -605,6 +605,53 @@ class TestChatMessagesApi:
             {"kind": "text", "text": "done!"},
         ]
 
+    async def test_completed_task_history_carries_model(self, chat_client):
+        """A completed web task surfaces the model that produced it, so the
+        chat-message meta shows it on reload (verification-added test)."""
+        import istota.web_app as mod
+
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        with db.get_db(mod._config.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="hi", user_id="alice", source_type="web",
+                conversation_token=room["token"], output_target="web",
+            )
+            db.update_task_status(conn, tid, "completed", result="hello")
+            db.set_task_model_used(conn, tid, "claude-opus-4-8")
+
+        data = (await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )).json()
+        assistant = next(
+            m for m in data["messages"]
+            if m["role"] == "assistant" and m.get("task_id") == tid
+        )
+        assert assistant["model"] == "claude-opus-4-8"
+
+    async def test_history_completed_task_without_model_returns_null(self, chat_client):
+        """A completed web task with no recorded model returns model=None, not
+        an error or a missing key (verification-added test)."""
+        import istota.web_app as mod
+
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        with db.get_db(mod._config.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="hi", user_id="alice", source_type="web",
+                conversation_token=room["token"], output_target="web",
+            )
+            db.update_task_status(conn, tid, "completed", result="hello")
+
+        data = (await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )).json()
+        assistant = next(
+            m for m in data["messages"]
+            if m["role"] == "assistant" and m.get("task_id") == tid
+        )
+        assert assistant["model"] is None
+
     async def test_history_multiple_in_flight_ordered(self, chat_client):
         """Several queued messages each surface a user msg + an in-flight
         assistant placeholder, and active_tasks lists them oldest-first so the

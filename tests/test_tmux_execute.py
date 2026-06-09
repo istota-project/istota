@@ -122,6 +122,19 @@ class TestHappyPath:
         assert res.success is True
         assert res.result_text == "Hello"
         assert res.stop_reason == "completed"
+        # The model is recovered from the transcript even though _req sets none.
+        assert res.model_used == "claude-opus-4-8"
+
+    def test_model_used_falls_back_to_requested(self, monkeypatch, tmp_path):
+        # Transcript without a model field → model_used falls back to req.model.
+        tr = _write_transcript(tmp_path, [{
+            "type": "assistant", "uuid": "u-m1",
+            "message": {"id": "m1", "role": "assistant", "stop_reason": "end_turn",
+                        "content": [{"type": "text", "text": "Hi"}]},
+        }])
+        h = _Harness(monkeypatch, tmp_path, transcript=tr, last_msg="Hi")
+        res = h.brain.execute(_req(tmp_path, model="claude-sonnet-4-6"))
+        assert res.model_used == "claude-sonnet-4-6"
 
     def test_result_prefers_last_assistant_message(self, monkeypatch, tmp_path):
         # last_assistant_message from the Stop payload wins over a re-derived

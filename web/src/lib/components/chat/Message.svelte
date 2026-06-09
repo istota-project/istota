@@ -54,6 +54,9 @@
 	const meta = $derived.by(() => {
 		const parts: string[] = [];
 		if (message.taskId) parts.push(`#${message.taskId}`);
+		// Drop a provider prefix (e.g. `anthropic/`) then a leading `claude-` for
+		// a compact label; native/openrouter slugs keep their distinguishing tail.
+		if (message.model) parts.push(message.model.replace(/^[^/]+\//, '').replace(/^claude-/, ''));
 		if (typeof message.durationSeconds === 'number') parts.push(`${message.durationSeconds}s`);
 		if (toolCount) parts.push(`${toolCount} tool${toolCount === 1 ? '' : 's'}`);
 		return parts;

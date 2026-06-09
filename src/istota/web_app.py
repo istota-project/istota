@@ -1189,9 +1189,12 @@ def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
         frames.append({"seq": seq, "kind": "error",
                        "payload": {"message": (task.error or "Task failed.")[:500],
                                    "stop_reason": "error"}})
-    frames.append({"seq": seq + 1, "kind": "done",
-                   "payload": {"stop_reason":
-                               "completed" if task.status == "completed" else "error"}})
+    done_payload: dict = {
+        "stop_reason": "completed" if task.status == "completed" else "error",
+    }
+    if task.model_used:
+        done_payload["model"] = task.model_used
+    frames.append({"seq": seq + 1, "kind": "done", "payload": done_payload})
     return frames
 
 
@@ -1470,7 +1473,8 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     with db.get_db(_config.db_path) as conn:
         rows = conn.execute(
             "SELECT id, prompt, result, status, error, confirmation_prompt, "
-            "created_at, actions_taken, execution_trace, started_at, completed_at "
+            "created_at, actions_taken, execution_trace, started_at, completed_at, "
+            "model_used "
             "FROM tasks "
             "WHERE conversation_token = ? AND user_id = ? AND source_type = 'web' "
             "ORDER BY id DESC LIMIT ?",
@@ -1505,6 +1509,7 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
                     r["execution_trace"], r["actions_taken"], r["result"],
                 ),
                 "duration_seconds": duration,
+                "model": r["model_used"] or None,
             })
         elif status == "pending_confirmation":
             messages.append({
@@ -1524,6 +1529,7 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
                     r["execution_trace"], r["actions_taken"], answer,
                 ),
                 "duration_seconds": duration,
+                "model": r["model_used"] or None,
             })
         else:  # pending / locked / running
             # Emit a placeholder assistant slot so the transcript stays ordered

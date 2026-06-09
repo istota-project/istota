@@ -95,6 +95,12 @@ class BrainResult:
     # additive — the existing path is untouched.
     usage: "TaskUsage | None" = None
 
+    # The model the brain actually invoked (canonical ID). Each brain sets this
+    # to the model it used so the executor can record it on the task row and
+    # surface it (e.g. in the web-chat message meta). Empty when the brain can't
+    # determine it — the executor then falls back to the requested model.
+    model_used: str = ""
+
 
 class Brain(Protocol):
     """The single boundary every brain implementation satisfies.

@@ -142,7 +142,7 @@ class TaskEvent:
       result:              {"text", "truncated"}
       error:               {"message", "stop_reason"}
       cancelled:           {}
-      done:                {"stop_reason", "duration_seconds"}
+      done:                {"stop_reason", "duration_seconds", "model"?}
     """
 
     task_id: int
