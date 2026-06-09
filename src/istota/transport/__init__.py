@@ -18,7 +18,7 @@ from ._types import (
     TransportCapabilities,
 )
 from .email import EmailTransport
-from .ingest import ingest_message
+from .ingest import ingest_message, record_inbound
 from .registry import TransportRegistry, make_registry
 from .routing import (
     Destination,
@@ -37,6 +37,7 @@ __all__ = [
     "TransportRegistry",
     "make_registry",
     "ingest_message",
+    "record_inbound",
     "Destination",
     "parse_output_target",
     "plan_has_surface",

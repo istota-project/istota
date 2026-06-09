@@ -1600,6 +1600,7 @@ def _chat_create_web_task(
     """Rate-limited web-task creation. Returns ``("ok", task_id)`` or
     ``("rate_limited", window_seconds)``."""
     from . import db
+    from .transport import record_inbound
     chat = _config.web.chat
     with db.get_db(_config.db_path) as conn:
         # Take the write lock up front so the count and the insert are one
@@ -1610,11 +1611,13 @@ def _chat_create_web_task(
         recent = db.count_recent_web_tasks(conn, username, chat.rate_limit_window_seconds)
         if recent >= chat.rate_limit_messages:
             return ("rate_limited", chat.rate_limit_window_seconds)
-        task_id = db.create_task(
-            conn, prompt=text, user_id=username, source_type="web",
-            conversation_token=token, output_target="web", priority=5,
-            attachments=attachments or None,
-            model=model, effort=effort,
+        # Route through the shared inbound helper so the web user turn lands in
+        # the canonical `messages` store (and the room is registered) exactly
+        # like Talk — instead of living only in tasks.prompt.
+        _room_token, task_id = record_inbound(
+            conn, _config, surface="web", surface_ref=token, user_id=username,
+            text=text, source_type="web", output_target="web", priority=5,
+            attachments=attachments or None, model=model, effort=effort,
         )
     return ("ok", task_id)
 
