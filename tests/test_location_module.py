@@ -218,6 +218,55 @@ class TestLoader:
         assert list_users(None) == []
 
 
+# -- skill setup_env hook ----------------------------------------------------
+
+
+class TestSkillSetupEnv:
+    """The location skill's ``setup_env`` hook must lazily create the DB so a
+    CLI read on a fresh box (no GPS ping ever received) returns empty instead
+    of raising "unable to open database file"."""
+
+    def _ctx(self, config, user_id="alice"):
+        import types
+
+        return types.SimpleNamespace(
+            config=config,
+            task=types.SimpleNamespace(user_id=user_id),
+        )
+
+    def test_hook_lazily_inits_db_on_fresh_box(self, istota_config):
+        from istota.skills.location import setup_env
+
+        ctx = self._ctx(istota_config)
+        env = setup_env(ctx)
+
+        db_path = Path(env["LOCATION_DB_PATH"])
+        # init_db ran inside the hook → the file exists before any CLI read.
+        assert db_path.exists()
+        # And it is a usable schema, not just an empty file: the read the
+        # self-diagnostic performs no longer crashes.
+        with location_db.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM location_pings LIMIT 1"
+            ).fetchall()
+        assert rows == []
+
+    def test_hook_returns_empty_when_module_disabled(self, tmp_path):
+        from istota.skills.location import setup_env
+
+        config = Config(
+            db_path=tmp_path / "istota.db",
+            nextcloud_mount_path=tmp_path,
+            users={"alice": UserConfig(disabled_modules=["location"])},
+        )
+        env = setup_env(self._ctx(config))
+        assert env == {}
+        # No DB seeded for an opted-out user.
+        assert not (tmp_path / "alice").exists() or not list(
+            tmp_path.glob("**/location.db")
+        )
+
+
 # -- set_location_state ------------------------------------------------------
 
 

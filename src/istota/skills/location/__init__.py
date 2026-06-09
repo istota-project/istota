@@ -46,6 +46,11 @@ def setup_env(ctx) -> dict[str, str]:
         loc_ctx = _location.resolve_for_user(user_id, config)
     except _location.UserNotFoundError:
         return {}
+    # Lazy init so the CLI works even before a GPS ping has ever arrived.
+    # Mirrors the webhook receiver and the /location/* web routes, both of
+    # which init_db before connecting. Without this a read on a fresh box
+    # raises "unable to open database file" (the dir doesn't exist yet).
+    _location.init_db(loc_ctx.db_path)
     return {"LOCATION_DB_PATH": str(loc_ctx.db_path)}
 
 
