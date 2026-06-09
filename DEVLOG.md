@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: Defense-in-depth for the alive-but-slow duplicate-execution residual
+
+Follow-up to the stuck-running reclaim fix. Mulder + Scully both flagged a residual the liveness-reset couldn't close: a genuinely *alive* worker whose heartbeat lapses past `worker_stuck_minutes` (GIL/thread starvation under load, or a stalled FUSE-mounted DB blocking `touch_task_heartbeat`) can be declared dead, its task reclaimed and re-run by a second worker while the first is still executing. The heartbeat-reset can't help — the row legitimately looks dead. Two mitigations, per the user's call to do both.
+
+**1. Pre-delivery ownership guard (kills the user-visible symptom).** `process_one_task` now re-reads the task row after execution, before any delivery / status mutation / deferred-op drain, and bails if it was superseded. The discriminator is `attempt_count`, NOT `locked_by`: `get_worker_id()` is `{host}-{pid}-{user}` with no slot, so two workers in the same process for the same user share an id and can't be told apart by `locked_by` — which is exactly the original-bug topology (slots 0 and 1). The stuck-running release bumps `attempt_count` on every reclaim, so if the row's count advanced past what this worker claimed, another worker owns it now → discard the result, return `(task_id, False)`, let the superseding worker deliver + emit the terminal frame. This stops the double *delivery* ("two answers"); it doesn't stop the wasted double *execution*, which is inherent to heartbeat-liveness.
+
+**2. Raised `worker_stuck_minutes` 5 → 10 (reduces how often the race fires).** Five missed 60s pings was aggressive enough that a transient stall could false-declare a live worker dead. Ten gives more headroom; the trade-off is slower genuine-crash recovery, acceptable since the timeout-fallback (`task_timeout + grace`) still bounds no-heartbeat cases.
+
+Test: `test_superseded_task_does_not_deliver_duplicate` (fake exec bumps attempt_count mid-run → assert the worker bails, doesn't complete or store its result). Full suite green (5967).
+
+**Files modified:**
+- `src/istota/scheduler.py` - ownership guard in `process_one_task`
+- `src/istota/config.py`, `config/config.example.toml`, `deploy/ansible/{defaults/main.yml}` - `worker_stuck_minutes` 5 → 10
+- `tests/test_scheduler.py` - supersession test
+
 ## 2026-06-09: Fix duplicate task execution after stuck-running reclaim
 
 A failed/interrupted task could be claimed and executed by two workers at once — one task id, two concurrent runs, two different answers delivered. Reproduced from prod logs: a task left `running` by a scheduler restart (stale `last_heartbeat`) was, on the retry tick, picked up by two foreground workers spawned in the same dispatch pass; both produced a result ~2s apart.

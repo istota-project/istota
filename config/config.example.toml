@@ -292,8 +292,10 @@ stale_pending_fail_hours = 24
 # Reclaim uses this heartbeat to tell a slow-but-alive worker from a dead one.
 worker_heartbeat_seconds = 60
 # Reclaim a heartbeating worker's task after this many minutes of heartbeat
-# silence (default: 5). Independent of task_timeout_minutes.
-worker_stuck_minutes = 5
+# silence (default: 10). Independent of task_timeout_minutes. Higher = fewer
+# false-dead reclaims of a slow-but-alive worker (which would re-run the task),
+# at the cost of slower recovery after a genuine worker crash.
+worker_stuck_minutes = 10
 # Delete completed/failed/cancelled tasks older than N days (default: 7)
 task_retention_days = 7
 # Delete emails older than N days from IMAP inbox (default: 7, 0 to disable)

@@ -1595,6 +1595,40 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.actions_taken == '["📄 Reading file"]'
 
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_superseded_task_does_not_deliver_duplicate(self, mock_arun, db_path, tmp_path):
+        # A slow-but-alive worker whose task was reclaimed mid-run by a second
+        # worker (attempt_count bumped by the stuck-running release) must discard
+        # its result rather than mark the task completed / deliver a duplicate.
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="Hello", user_id="testuser", source_type="cli")
+
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, **kw):
+            # Simulate worker B reclaiming the task while A executes: the
+            # stuck-running release bumps attempt_count.
+            with db.get_db(db_path) as c:
+                c.execute(
+                    "UPDATE tasks SET attempt_count = attempt_count + 1 WHERE id = ?",
+                    (task.id,),
+                )
+                c.commit()
+            return (True, "Worker A's answer", None, None)
+
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec):
+            result = process_one_task(config)
+
+        assert result is not None
+        task_id, success = result
+        assert success is False  # A bailed
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        # A must NOT have completed the task or stored its result.
+        assert task.status != "completed"
+        assert task.result != "Worker A's answer"
+
     @patch("istota.scheduler.execute_task", return_value=(True, "Done", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_actions_taken_none_when_not_streaming(self, mock_arun, mock_exec, db_path, tmp_path):
