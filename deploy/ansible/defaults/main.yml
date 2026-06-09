@@ -163,6 +163,32 @@ istota_brain_native_api_key: ""
 #     scheduled: tmux_claude
 istota_brain_source_type_overrides: {}
 
+# --- Tmux-driven interactive-TUI brain ([brain.tmux]) ------------------------
+# Only emitted to config.toml when istota_brain_kind == "tmux_claude" OR a
+# source_type_overrides entry routes to "tmux_claude". Drives the interactive
+# `claude` TUI in a detached tmux session to keep traffic on subscription
+# billing (vs the metered Agent-SDK credit headless `claude -p` draws from after
+# 2026-06-15). claude_code stays the automatic fallback (a launch failure reruns
+# the task headless; a process-global circuit breaker trips after repeated
+# launch failures, alerts the operator, and degrades to headless for a cooldown).
+# A full switch routes EVERY source type through it. Requires tmux on the host
+# (already present). Operator runbook: .claude/rules/brain.md "TmuxClaudeBrain".
+#
+# All fields default in code to the prototype's pinned values; override only when
+# needed. The marker lists are pane-text heuristics pinned to a claude CLI
+# version (istota_brain_tmux_cli_version_pin) — a CLI reword that breaks readiness
+# detection is a config hotfix (set the relevant marker var), not a code release.
+istota_brain_tmux_fallback_trip_threshold: 5       # launch failures before the circuit opens
+istota_brain_tmux_fallback_cooldown_seconds: 300   # seconds the circuit stays open
+istota_brain_tmux_ready_timeout_seconds: 30        # REPL-ready deadline
+istota_brain_tmux_command_timeout: 10              # per-tmux-subprocess timeout
+istota_brain_tmux_cli_version_pin: "2.1.168"       # supported claude CLI version
+istota_brain_tmux_ready_markers: []                # [] → code defaults
+istota_brain_tmux_trust_markers: []                # [] → code defaults
+istota_brain_tmux_error_markers: []                # [] → code defaults
+istota_brain_tmux_bypass_warning_marker: ""        # "" → code default
+istota_brain_tmux_bypass_accept_marker: ""         # "" → code default
+
 # Claude CLI authentication
 # Preferred: generate a token locally with `claude setup-token`, store in vault
 # Fallback: authenticate manually with `sudo -u <namespace> claude login`

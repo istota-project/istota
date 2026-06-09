@@ -7,6 +7,8 @@ tests/test_tmux_transcript.py. See
 """
 
 
+import pytest
+
 from istota.brain import (
     Brain,
     BrainRequest,
@@ -17,6 +19,12 @@ from istota.brain import (
 from istota.brain.claude_code import ClaudeCodeBrain
 from istota.brain.tmux_claude import TmuxClaudeBrain
 from istota.config import BrainConfig, NativeBrainConfig
+
+
+@pytest.fixture(autouse=True)
+def _skip_version_probe(monkeypatch):
+    import istota.brain.tmux_claude as mod
+    monkeypatch.setattr(mod, "_VERSION_CHECKED", True)
 
 
 def _cfg(kind="claude_code", overrides=None):

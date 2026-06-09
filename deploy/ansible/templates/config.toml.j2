@@ -90,6 +90,35 @@ api_key = "{{ istota_brain_native_api_key }}"
 {% endfor %}
 {% endif %}
 {% endif %}
+{% set _tmux_routed = istota_brain_source_type_overrides.values() | select('equalto', 'tmux_claude') | list | length > 0 %}
+{% if istota_brain_kind == 'tmux_claude' or _tmux_routed %}
+
+[brain.tmux]
+# Used when kind = "tmux_claude" (or a source_type_overrides entry routes to it).
+# All fields default in code to the prototype's pinned values; emit only the
+# operability knobs here. Marker lists stay in code unless a CLI reword needs a
+# hotfix (set istota_brain_tmux_ready_markers etc. then).
+fallback_trip_threshold = {{ istota_brain_tmux_fallback_trip_threshold | default(5, true) }}
+fallback_cooldown_seconds = {{ istota_brain_tmux_fallback_cooldown_seconds | default(300, true) }}
+ready_timeout_seconds = {{ istota_brain_tmux_ready_timeout_seconds | default(30, true) }}
+tmux_command_timeout = {{ istota_brain_tmux_command_timeout | default(10, true) }}
+cli_version_pin = "{{ istota_brain_tmux_cli_version_pin | default('2.1.168', true) }}"
+{% if istota_brain_tmux_ready_markers %}
+ready_markers = {{ istota_brain_tmux_ready_markers | to_json }}
+{% endif %}
+{% if istota_brain_tmux_trust_markers %}
+trust_markers = {{ istota_brain_tmux_trust_markers | to_json }}
+{% endif %}
+{% if istota_brain_tmux_error_markers %}
+error_markers = {{ istota_brain_tmux_error_markers | to_json }}
+{% endif %}
+{% if istota_brain_tmux_bypass_warning_marker %}
+bypass_warning_marker = "{{ istota_brain_tmux_bypass_warning_marker }}"
+{% endif %}
+{% if istota_brain_tmux_bypass_accept_marker %}
+bypass_accept_marker = "{{ istota_brain_tmux_bypass_accept_marker }}"
+{% endif %}
+{% endif %}
 {% if istota_brain_source_type_overrides %}
 
 [brain.source_type_overrides]

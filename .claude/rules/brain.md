@@ -13,9 +13,16 @@ brain/
 ├── _types.py       # BrainRequest, BrainResult, BrainConfig, Brain Protocol
 ├── _events.py      # StreamEvent types + Claude Code stream-json parser
 ├── _roles.py       # Global operator role-override state (provider-agnostic)
-└── claude_code.py  # ClaudeCodeBrain — wraps `claude` CLI subprocess +
-                    # owns the Anthropic model namespace (canonical IDs,
-                    # MODEL_ALIASES, DEFAULT_ROLE_TARGETS, resolver methods)
+├── claude_code.py  # ClaudeCodeBrain — wraps `claude` CLI subprocess +
+│                   # owns the Anthropic model namespace (canonical IDs,
+│                   # MODEL_ALIASES, DEFAULT_ROLE_TARGETS, resolver methods).
+│                   # Also exports build_claude_cli_flags() — the shared
+│                   # model/effort/tool/system-prompt flag builder both the
+│                   # headless and tmux paths use.
+├── native.py       # NativeBrain — in-process agent loop (see below)
+└── tmux_claude.py  # TmuxClaudeBrain — drives the interactive `claude` TUI in
+                    # a detached tmux session (subscription billing). Composes
+                    # ClaudeCodeBrain for model resolution; see below.
 ```
 
 `stream_parser.py` at the package root is a backward-compat shim that
@@ -147,7 +154,7 @@ home is `brain/claude_code.py`.
 ## Configuration
 ```toml
 [brain]
-kind = "claude_code"  # "claude_code" | "native"
+kind = "claude_code"  # "claude_code" | "native" | "tmux_claude"
 
 [brain.native]         # only used when kind = "native" (or routed-to below)
 provider = "openai_compat"
@@ -156,6 +163,16 @@ effort = ""            # default reasoning effort; capability-gated on supports_
 base_url = "https://api.anthropic.com/v1"
 # prompt_caching       # omit to derive from base_url (on for api.anthropic.com); set true/false to force
 # api_key via ISTOTA_BRAIN_NATIVE_API_KEY env override (kept out of TOML)
+
+[brain.tmux]           # only used when kind = "tmux_claude". All defaulted —
+                       # an empty/absent block reproduces the prototype exactly.
+fallback_trip_threshold = 5       # consecutive launch failures before the circuit opens
+fallback_cooldown_seconds = 300   # how long the circuit stays open
+ready_timeout_seconds = 30        # REPL-ready deadline
+tmux_command_timeout = 10         # per-tmux-subprocess timeout
+cli_version_pin = "2.1.168"       # supported claude CLI; mismatch logs a WARNING
+# ready_markers / trust_markers / bypass_warning_marker / bypass_accept_marker /
+# error_markers — pane-substring heuristics; override on a CLI reword.
 
 [brain.source_type_overrides]   # per-source-type routing (gradual rollout)
 scheduled = "native"
@@ -199,6 +216,101 @@ interactive on claude_code). `brain.resolve_brain_kind(source_type, brain_config
 returns the routed `BrainConfig` (same object when no override applies; unknown
 target kinds are logged and ignored so a routing typo never wedges a task). The
 executor calls it per task: `make_brain(resolve_brain_kind(task.source_type, config.brain))`.
+
+## TmuxClaudeBrain (`brain/tmux_claude.py`)
+
+Drives the **interactive** `claude` TUI in a detached tmux session instead of the
+headless `claude -p` subprocess. Same `claude` binary, same `CLAUDE_CODE_OAUTH_TOKEN`
+auth — so it keeps traffic on subscription usage limits rather than the metered
+Agent-SDK credit `claude -p` draws from after 2026-06-15. Model resolution is
+delegated wholesale to a composed `ClaudeCodeBrain` (same Anthropic namespace);
+only `execute` is genuinely new. Selected with `brain.kind = "tmux_claude"` (a
+**full instance switch** — every source type, interactive chat included, routes
+through it; `claude_code` stays the constructible *fallback* kind, not a parallel
+route).
+
+**Mechanism per attempt.** Per-session workdir under `ISTOTA_DEFERRED_DIR`
+(`.tmux-<session>/`) holds a per-session `CLAUDE_CONFIG_DIR` (`config/`), the Stop
+sentinel (`stop.json`), the early sentinel (`started.json`), and the prompt file.
+`settings.json` in the config dir declares a `Stop` hook (`cat > stop.json` — its
+stdin payload carries `transcript_path` + `last_assistant_message`) plus
+`UserPromptSubmit`/`SessionStart` hooks (`cat > started.json` — early
+transcript-path signal for streaming). A detached `tmux new-session -e K=V` passes
+`req.env` + `CLAUDE_CONFIG_DIR` into the pane (the detached-session env gotcha:
+the OAuth token must reach the pane). `claude` is launched sandbox-wrapped
+(`req.sandbox_wrap` — bwrap wraps the *claude* process, never tmux, so no
+nesting). `_wait_ready` scripts past the trust + Bypass-Permissions dialogs;
+prompt is buffer-pasted; `_wait_for_completion` polls; the Stop hook fires →
+sentinel → parse the transcript JSONL → `BrainResult`. Result text prefers the
+Stop payload's `last_assistant_message`; the trace is reconstructed from the
+transcript (`parse_transcript`, settled via `_transcript_has_final_turn`).
+
+**Production hardening** (`Specs/Active/claude-tmux-production-readiness.md`):
+
+- **Per-session hook isolation (§2).** Each session's hook lives in its own
+  `CLAUDE_CONFIG_DIR`, not a shared project `.claude/` — so two concurrent
+  same-user tasks can't clobber a shared `settings.json` and cross-fire each
+  other's Stop sentinel. The whole workdir (config dir included) is `rmtree`d in
+  `finally`; a one-shot best-effort cleanup removes any legacy `base_dir/.claude`
+  a prior prototype left.
+- **Fail-fast completion (§3).** `_wait_for_completion` is multi-signal:
+  sentinel→`done`, cancel→`cancelled`, an `error_markers` pane match→`error`
+  (fail fast, classified for transient retry), dead pane→`error`, else continue
+  to the hard timeout with a one-shot `tmux_stall` warning at the halfway mark.
+- **Transient-API retry parity (§3).** An error-marker pane is run through
+  `is_transient_api_error` (reused from `claude_code`); a transient match retries
+  a **fresh session** up to `API_RETRY_MAX_ATTEMPTS` (3), `API_RETRY_DELAY_SECONDS`
+  (5) apart, **not** counting against the task's `attempt_count` — identical
+  contract to `ClaudeCodeBrain`.
+- **`stop_reason="fallback"` + circuit breaker (§4).** A launch-level failure
+  (REPL never ready, markers never matched, missing tmux→`not_found`) returns
+  `fallback`/`not_found`; the executor reruns that *same attempt* once through a
+  `claude_code` brain (no new DB row, no attempt increment) so the instance keeps
+  completing (at metered cost) instead of failing en masse. A process-global
+  `_CircuitBreaker` opens after `fallback_trip_threshold` consecutive launch
+  failures: `execute` short-circuits straight to `fallback` for
+  `fallback_cooldown_seconds` without trying tmux, logs `circuit_open`, and arms
+  one operator alert (the executor fires it via `consume_circuit_open_alert()` →
+  `notifications.send_notification(purpose="alert")`, since the brain has no
+  `Config`). Any tmux success resets it; per-process state, reset on daemon
+  restart (also when a fixed CLI version lands).
+- **Live streaming recovery (§10).** On stream-eligible tasks
+  (`req.streaming and req.on_progress`) a background `_TranscriptTailer` tails the
+  transcript JSONL *during* the turn and forwards each new `tool_use`/`text`/
+  `thinking` block to `on_progress` as it lands (dedup by tool id + block index),
+  instead of only whole-turn at Stop. The Stop-time parse stays **authoritative**
+  for the persisted result/trace — the tailer is progress-only, so a missed or
+  double-emitted block can't corrupt the result (`_build_result(forward_progress=
+  tailer is None)` avoids double emission). Tailer exceptions are caught, never
+  propagated. Token-level animation (Tier 2) stays a documented stretch, gated on
+  a partial-flush probe. The brain can't distinguish push (Talk) from stream
+  (web/repl) surfaces — `req` carries no surface — so the tailer runs whenever
+  `streaming`; push consumers coalesce the incremental events identically.
+- **Observability (§7).** One structured INFO line per attempt on logger
+  `istota.brain.tmux_claude`: `tmux_brain session=… outcome=… ready_ms=… wait_ms=…
+  dialogs=… tools=… retries=…`. Ready/error/stall events log at WARNING/ERROR with
+  a (length-capped) pane snapshot.
+
+**`[brain.tmux]` config** (`TmuxBrainConfig`, all defaulted to the prototype's
+hardcoded values, so an empty/absent block is behavioral parity):
+`fallback_trip_threshold` (5), `fallback_cooldown_seconds` (300),
+`ready_timeout_seconds` (30), `tmux_command_timeout` (10), `cli_version_pin`
+("2.1.168" — readiness/dialog markers are pinned to a CLI version; a reword is a
+config hotfix via the marker lists), `ready_markers`, `trust_markers`,
+`bypass_warning_marker`, `bypass_accept_marker`, `error_markers`.
+
+**Known gaps / live-only gates** (the spec's Stage 1/6 prod-host probes — they
+can't run off-Linux/off-bwrap):
+- `CLAUDE_CONFIG_DIR` hook discovery *under bwrap* is the §2 primary mechanism
+  (assumed working — cwd-independent). The documented fallback if it doesn't is a
+  per-session bwrap `--chdir` (a localized executor change behind the kind).
+- Interactive-TUI flag support: `build_claude_cli_flags(req, unsupported=…)` drops
+  any flag the TUI rejects and warns once. `_TMUX_UNSUPPORTED_FLAGS` is empty by
+  default (the prototype passed `--effort`/`--system-prompt-file`); populate if a
+  CLI version starts rejecting one.
+- Early-path hook reliability + the partial-flush streaming ceiling, and live
+  network isolation (`--unshare-net` + CONNECT bridge) — validated on the prod
+  host, not in unit tests.
 
 ## Adding a new brain
 1. Create `brain/<name>.py` with a class implementing `Brain.execute()`.

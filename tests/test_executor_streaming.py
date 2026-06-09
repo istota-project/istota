@@ -1531,3 +1531,95 @@ class TestSimpleExecutionRetry:
         assert success is True
         assert result == "Finally succeeded"
         assert call_count == 3
+
+
+class TestTmuxFallback:
+    """Executor in-attempt fallback (tmux-production spec §4): when the tmux
+    brain returns stop_reason="fallback"/"not_found", execute_task reruns the
+    same attempt once through claude_code — no new task, no attempt increment."""
+
+    def _fake_brain(self, kind, result):
+        from istota.brain._types import BrainResult
+
+        class _FakeBrain:
+            def __init__(self):
+                self.kind = kind
+                self.calls = 0
+
+            def execute(self, req):
+                self.calls += 1
+                return result
+
+            def resolve_model_name(self, name):
+                return (name or "").strip()
+
+            def resolve_alias(self, a):
+                return None
+
+            def list_aliases(self):
+                return []
+
+            def validate_role_override(self, r, t):
+                return []
+
+        return _FakeBrain()
+
+    def _run(self, tmp_path, monkeypatch, tmux_result):
+        from istota.config import BrainConfig
+        from istota.brain._types import BrainResult
+
+        config = _make_config(tmp_path)
+        config.brain = BrainConfig(kind="tmux_claude")
+        config.security.sandbox_enabled = False
+        task = _make_task(source_type="cli")
+
+        tmux_brain = self._fake_brain("tmux_claude", tmux_result)
+        cc_brain = self._fake_brain(
+            "claude_code", BrainResult(True, "headless answer", stop_reason="completed")
+        )
+
+        def fake_make_brain(bc):
+            return tmux_brain if getattr(bc, "kind", "") == "tmux_claude" else cc_brain
+
+        patches = _patch_executor() + [
+            patch("istota.executor.make_brain", side_effect=fake_make_brain),
+        ]
+        with contextmanager_chain(patches):
+            success, result, _actions, _trace = execute_task(task, config, [])
+        return success, result, tmux_brain, cc_brain
+
+    def test_fallback_reruns_headless_once(self, tmp_path, monkeypatch):
+        from istota.brain._types import BrainResult
+        from istota.brain import tmux_claude
+        tmux_claude.reset_circuit_breaker()
+        success, result, tmux_brain, cc_brain = self._run(
+            tmp_path, monkeypatch,
+            BrainResult(False, "not ready", stop_reason="fallback"),
+        )
+        assert success is True
+        assert result == "headless answer"
+        assert tmux_brain.calls == 1
+        assert cc_brain.calls == 1
+
+    def test_not_found_also_falls_back(self, tmp_path, monkeypatch):
+        from istota.brain._types import BrainResult
+        from istota.brain import tmux_claude
+        tmux_claude.reset_circuit_breaker()
+        success, result, tmux_brain, cc_brain = self._run(
+            tmp_path, monkeypatch,
+            BrainResult(False, "tmux missing", stop_reason="not_found"),
+        )
+        assert success is True
+        assert cc_brain.calls == 1
+
+    def test_no_fallback_on_normal_error(self, tmp_path, monkeypatch):
+        from istota.brain._types import BrainResult
+        from istota.brain import tmux_claude
+        tmux_claude.reset_circuit_breaker()
+        success, result, tmux_brain, cc_brain = self._run(
+            tmp_path, monkeypatch,
+            BrainResult(False, "boom", stop_reason="error"),
+        )
+        # A normal error is the brain's own failure → no headless rerun.
+        assert cc_brain.calls == 0
+        assert success is False

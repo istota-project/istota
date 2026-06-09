@@ -76,6 +76,64 @@ def is_transient_api_error(text: str) -> bool:
     return parsed["status_code"] in TRANSIENT_STATUS_CODES or parsed["status_code"] == 429
 
 
+# Flags already warned-about as unsupported, so the "dropped a flag" WARNING
+# fires once per flag per process rather than every task. Module-global on
+# purpose (the warning is operator-facing, not per-request).
+_WARNED_UNSUPPORTED_FLAGS: set[str] = set()
+
+
+def build_claude_cli_flags(
+    req: BrainRequest, *, unsupported: frozenset[str] = frozenset()
+) -> list[str]:
+    """Build the `claude` CLI flags shared by both the headless (`-p`) and the
+    interactive (tmux) launch paths.
+
+    Covers the model / effort / tool / system-prompt flags both brains need; it
+    deliberately does NOT add ``-p -`` or the ``--output-format stream-json``
+    flags (headless-only) nor ``--dangerously-skip-permissions`` (tmux-only) —
+    each brain appends its own path-specific flags around this common core.
+
+    ``unsupported`` names flags the *target* CLI surface rejects (the interactive
+    TUI may not accept every ``-p`` flag; Stage 1 of the tmux production spec
+    verifies which). A flag in this set is dropped from the argv and warned about
+    once per process rather than passed through to a launch failure. The default
+    (empty set) reproduces the headless argv exactly, so ``ClaudeCodeBrain``'s
+    output is byte-for-byte unchanged.
+    """
+    flags: list[str] = []
+    # Empty allowed_tools means text-only invocation (e.g. sleep cycle): skip the
+    # tool flags entirely so claude's defaults stay out of the equation. The
+    # prompt itself is what keeps the call text-only.
+    if req.allowed_tools:
+        # Disallow the harness's built-in multi-agent fan-out tool. Istota
+        # orchestrates work through its own skills, not Claude Code's Agent
+        # orchestrator.
+        #
+        # The Workflow tool used to be disallowed here too (ISSUE-110): the
+        # harness auto-injected a "use the Workflow tool" reminder whenever the
+        # word "workflow" appeared anywhere in the prompt blob, firing on
+        # essentially every task. As of Claude Code 2.1.162 the auto-inject no
+        # longer fires, so the suppression is retired; if it returns, re-add
+        # "Workflow" to the disallow list below.
+        flags += ["--allowedTools"] + req.allowed_tools + ["--disallowedTools", "Agent"]
+
+    def _add(flag: str, *values: str) -> None:
+        if flag in unsupported:
+            if flag not in _WARNED_UNSUPPORTED_FLAGS:
+                _WARNED_UNSUPPORTED_FLAGS.add(flag)
+                logger.warning("tmux_brain unsupported_flag flag=%s (dropped)", flag)
+            return
+        flags.extend([flag, *values])
+
+    if req.model:
+        _add("--model", req.model)
+    if req.effort:
+        _add("--effort", req.effort)
+    if req.custom_system_prompt_path and req.custom_system_prompt_path.exists():
+        _add("--system-prompt-file", str(req.custom_system_prompt_path))
+    return flags
+
+
 # ---------------------------------------------------------------------------
 # Anthropic model namespace
 #
@@ -258,30 +316,7 @@ class ClaudeCodeBrain:
 
     @staticmethod
     def _build_command(req: BrainRequest) -> list[str]:
-        cmd = ["claude", "-p", "-"]
-        # Empty allowed_tools means text-only invocation (e.g. sleep cycle):
-        # skip the tool flags entirely so claude's defaults stay out of the
-        # equation. The prompt itself is what keeps the call text-only.
-        if req.allowed_tools:
-            # Disallow the harness's built-in multi-agent fan-out tool. Istota
-            # orchestrates work through its own skills, not Claude Code's Agent
-            # orchestrator.
-            #
-            # The Workflow tool used to be disallowed here too (ISSUE-110): the
-            # harness auto-injected a "use the Workflow tool" reminder whenever
-            # the word "workflow" appeared anywhere in the prompt blob, firing on
-            # essentially every task. As of Claude Code 2.1.162 the auto-inject
-            # no longer fires, so the suppression is retired; if it returns,
-            # re-add "Workflow" to the disallow list below.
-            cmd += ["--allowedTools"] + req.allowed_tools + [
-                "--disallowedTools", "Agent",
-            ]
-        if req.model:
-            cmd += ["--model", req.model]
-        if req.effort:
-            cmd += ["--effort", req.effort]
-        if req.custom_system_prompt_path and req.custom_system_prompt_path.exists():
-            cmd += ["--system-prompt-file", str(req.custom_system_prompt_path)]
+        cmd = ["claude", "-p", "-"] + build_claude_cli_flags(req)
         if req.streaming:
             # --include-partial-messages emits content deltas as they arrive so
             # the final answer streams token-by-token on stream surfaces instead

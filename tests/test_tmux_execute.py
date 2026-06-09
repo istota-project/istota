@@ -10,9 +10,22 @@ permission-gated step. See ``Specs/Active/tmux-subscription-brain-feasibility.md
 import json
 from pathlib import Path
 
+import pytest
 
 from istota.brain._types import BrainRequest
-from istota.brain.tmux_claude import TmuxClaudeBrain
+from istota.brain.tmux_claude import TmuxClaudeBrain, reset_circuit_breaker
+
+
+@pytest.fixture(autouse=True)
+def _reset_breaker(monkeypatch):
+    """Circuit-breaker state is process-global; reset around every test so the
+    suite stays order-independent under xdist. Also skip the one-shot
+    `claude --version` probe."""
+    import istota.brain.tmux_claude as mod
+    monkeypatch.setattr(mod, "_VERSION_CHECKED", True)
+    reset_circuit_breaker()
+    yield
+    reset_circuit_breaker()
 
 
 class _CP:
@@ -52,7 +65,8 @@ def _assistant(content, stop_reason="end_turn", msg_id="m1"):
 
 class _Harness:
     """Wires a TmuxClaudeBrain with the tmux boundary mocked. The fake
-    _wait_sentinel writes a sentinel payload pointing at a prepared transcript."""
+    _wait_for_completion writes a sentinel payload pointing at a prepared
+    transcript (and the live tailer is disabled via _learn_transcript_path)."""
 
     def __init__(self, monkeypatch, tmp_path, *, transcript, last_msg="Hello",
                  ready=True, sentinel_status="done"):
@@ -80,18 +94,21 @@ class _Harness:
             monkeypatch.setattr(self.brain, m, rec(m))
         monkeypatch.setattr(self.brain, "_pane_pid", rec("_pane_pid"))
         monkeypatch.setattr(self.brain, "_wait_ready", rec("_wait_ready"))
+        # These orchestration tests exercise the whole-turn (non-tailer) path:
+        # no live transcript path learned, so _build_result forwards events.
+        monkeypatch.setattr(self.brain, "_learn_transcript_path", lambda *a, **k: None)
 
-        def fake_wait_sentinel(sentinel, deadline, cancel_check):
-            self.calls.append(("_wait_sentinel", (sentinel,), {}))
+        def fake_wait_for_completion(name, sentinel, deadline, cancel_check):
+            self.calls.append(("_wait_for_completion", (sentinel,), {}))
             if self._sentinel_status == "done":
                 payload = {
                     "transcript_path": str(self.transcript),
                     "last_assistant_message": self.last_msg,
                 }
                 Path(sentinel).write_text(json.dumps(payload))
-            return self._sentinel_status
+            return (self._sentinel_status, "")
 
-        monkeypatch.setattr(self.brain, "_wait_sentinel", fake_wait_sentinel)
+        monkeypatch.setattr(self.brain, "_wait_for_completion", fake_wait_for_completion)
 
     def names(self):
         return [c[0] for c in self.calls]
@@ -128,9 +145,9 @@ class TestHappyPath:
         # session created → ready gate → prompt injected → sentinel polled → killed
         assert names.index("_new_session") < names.index("_wait_ready")
         assert names.index("_wait_ready") < names.index("_inject_prompt")
-        assert names.index("_inject_prompt") < names.index("_wait_sentinel")
+        assert names.index("_inject_prompt") < names.index("_wait_for_completion")
         assert "_kill" in names
-        assert names.index("_wait_sentinel") < names.index("_kill")
+        assert names.index("_wait_for_completion") < names.index("_kill")
 
     def test_on_pid_reported(self, monkeypatch, tmp_path):
         tr = _write_transcript(tmp_path, [_assistant([{"type": "text", "text": "Hi"}])])
@@ -196,12 +213,14 @@ class TestCancelTimeout:
         assert res.stop_reason == "timeout"
         assert "_kill" in h.names()
 
-    def test_ready_failure_kills_and_errors(self, monkeypatch, tmp_path):
+    def test_ready_failure_falls_back_and_kills(self, monkeypatch, tmp_path):
+        # A REPL that never becomes ready is a launch-level failure → fallback
+        # (the executor reruns headless), not a 30-min timeout (§3/§4).
         tr = _write_transcript(tmp_path, [_assistant([{"type": "text", "text": "x"}])])
         h = _Harness(monkeypatch, tmp_path, transcript=tr, ready=False)
         res = h.brain.execute(_req(tmp_path))
         assert res.success is False
-        assert res.stop_reason in ("timeout", "error")
+        assert res.stop_reason == "fallback"
         assert "_inject_prompt" not in h.names()  # never got to inject
         assert "_kill" in h.names()
 
@@ -257,31 +276,71 @@ class TestSandboxInteraction:
         tr = _write_transcript(tmp_path, [_assistant([{"type": "text", "text": "x"}])])
         h = _Harness(monkeypatch, tmp_path, transcript=tr)
         captured = {}
-        orig = h.brain._wait_sentinel
+        orig = h.brain._wait_for_completion
 
-        def spy(sentinel, deadline, cancel_check):
+        def spy(name, sentinel, deadline, cancel_check):
             captured["sentinel"] = sentinel
-            return orig(sentinel, deadline, cancel_check)
+            return orig(name, sentinel, deadline, cancel_check)
 
-        monkeypatch.setattr(h.brain, "_wait_sentinel", spy)
+        monkeypatch.setattr(h.brain, "_wait_for_completion", spy)
         req = _req(tmp_path, env={"ISTOTA_DEFERRED_DIR": str(deferred)})
         h.brain.execute(req)
         # sentinel lives under the deferred dir (the sandbox-shared RW bind)
         assert str(captured["sentinel"]).startswith(str(deferred))
-        # project Stop-hook settings.json written under the same base
-        assert (deferred / ".claude" / "settings.json").exists()
+        # the per-session config dir (CLAUDE_CONFIG_DIR) holds the hook
+        # settings.json — under the workdir, which is under the deferred base.
+        assert str(captured["sentinel"]).endswith("stop.json")
 
-    def test_stop_hook_command_targets_sentinel(self, tmp_path):
+    def test_no_shared_claude_dir_under_base(self, monkeypatch, tmp_path):
+        # The clobber fix: hooks live in a per-session config dir, NOT a shared
+        # base_dir/.claude/. The workdir (config dir included) is rmtree'd, so
+        # nothing persists under the deferred base.
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        tr = _write_transcript(tmp_path, [_assistant([{"type": "text", "text": "x"}])])
+        h = _Harness(monkeypatch, tmp_path, transcript=tr)
+        h.brain.execute(_req(tmp_path, env={"ISTOTA_DEFERRED_DIR": str(deferred)}))
+        assert not (deferred / ".claude").exists()
+        # workdir cleaned up entirely
+        assert not list(deferred.glob(".tmux-*"))
+
+    def test_hooks_target_sentinels_in_config_dir(self, tmp_path):
         brain = TmuxClaudeBrain()
+        config_dir = tmp_path / "deferred" / ".tmux-s" / "config"
         sentinel = tmp_path / "deferred" / ".tmux-s" / "stop.json"
+        started = tmp_path / "deferred" / ".tmux-s" / "started.json"
         sentinel.parent.mkdir(parents=True)
-        claude_dir = tmp_path / "deferred" / ".claude"
-        settings = claude_dir / "settings.json"
-        brain._write_stop_hook(claude_dir, settings, sentinel)
-        cfg = json.loads(settings.read_text())
-        hook_cmd = cfg["hooks"]["Stop"][0]["hooks"][0]["command"]
-        assert hook_cmd.startswith("cat > ")
-        assert str(sentinel) in hook_cmd
+        brain._write_hooks(config_dir, sentinel, started)
+        cfg = json.loads((config_dir / "settings.json").read_text())
+        stop_cmd = cfg["hooks"]["Stop"][0]["hooks"][0]["command"]
+        assert stop_cmd.startswith("cat > ")
+        assert str(sentinel) in stop_cmd
+        # early hooks for transcript-path learning (§10)
+        start_cmd = cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        assert str(started) in start_cmd
+        assert str(started) in cfg["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+
+    def test_concurrent_sessions_isolated_config_dirs(self, monkeypatch, tmp_path):
+        # Two interleaved execute() runs with distinct labels must resolve their
+        # own sentinels — no shared hook file to cross-fire.
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        seen_sentinels = []
+        tr = _write_transcript(tmp_path, [_assistant([{"type": "text", "text": "x"}])])
+        for label in ("istota-task-1-0", "istota-task-2-0"):
+            h = _Harness(monkeypatch, tmp_path, transcript=tr)
+            orig = h.brain._wait_for_completion
+
+            def spy(name, sentinel, deadline, cancel_check, _o=orig):
+                seen_sentinels.append(str(sentinel))
+                return _o(name, sentinel, deadline, cancel_check)
+
+            monkeypatch.setattr(h.brain, "_wait_for_completion", spy)
+            h.brain.execute(_req(tmp_path, env={"ISTOTA_DEFERRED_DIR": str(deferred)},
+                                 session_label=label))
+        assert len(set(seen_sentinels)) == 2  # distinct per-session sentinels
+        assert "istota-task-1-0" in seen_sentinels[0]
+        assert "istota-task-2-0" in seen_sentinels[1]
 
 
 class TestWaitReadyDialogs:
