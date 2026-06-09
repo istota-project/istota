@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A task interrupted by a scheduler restart could be picked up and run by two workers at once on retry, producing two different answers for the same request. Reclaiming a stuck task now resets its liveness state so a second worker can't grab it mid-run, a worker that was superseded mid-run discards its result instead of delivering a duplicate, and the threshold for declaring a worker dead was widened to avoid false reclaims of a busy-but-alive worker.
 - Quieted repetitive startup log noise from background skill subprocesses (feeds/money) that loaded config without the secret key or admins-file path. These expected, harmless notices are now DEBUG, and the admins-file path is passed through so it resolves correctly on custom-namespace deployments.
 - Light mode: the dashboard feature cards no longer render with dark backgrounds and unreadable titles, and the mobile slide-out sidebar tab now matches the light theme.
+- Light mode web chat: the message area and composer now share a clean white background, with lighter code blocks and activity chips. Dark mode is unchanged.
 - When two messages are queued in the same chat room, the bot no longer briefly spins up a redundant worker that just churns the database while waiting for the first to finish.
 
 ## [0.20.0] - 2026-06-08
