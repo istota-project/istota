@@ -403,6 +403,72 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # Unified Talk / web room sync (surface-independent room registry).
+    # Created here for existing DBs; schema.sql also has these for fresh
+    # installs. The cascade clauses are decorative (PRAGMA foreign_keys unset).
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS rooms (
+                token       TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                name        TEXT,
+                origin      TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                archived    INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS room_bindings (
+                room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+                surface      TEXT NOT NULL,
+                surface_ref  TEXT NOT NULL,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (room_token, surface)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_room_bindings_ref "
+            "ON room_bindings (surface, surface_ref)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id            INTEGER PRIMARY KEY,
+                room_token    TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+                role          TEXT NOT NULL,
+                body          TEXT NOT NULL,
+                title         TEXT,
+                task_id       INTEGER,
+                origin_surface TEXT NOT NULL,
+                external_ids  TEXT,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_ext "
+            "ON messages (room_token, origin_surface, role, task_id) "
+            "WHERE task_id IS NOT NULL"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS room_read_state (
+                room_token  TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+                surface     TEXT NOT NULL,
+                last_read_message_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (room_token, surface)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS _migration_state (
+                name        TEXT PRIMARY KEY,
+                applied_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+    except sqlite3.OperationalError:
+        pass
+
+    _migrate_unified_rooms(conn)
+
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
     # decrypt-or-fail and skipped. No-op on fresh installs (table not
@@ -1603,13 +1669,21 @@ def get_web_chat_room_by_token(
 def create_web_chat_room(
     conn: sqlite3.Connection, user_id: str, name: str,
 ) -> WebChatRoom:
-    """Create a room with a freshly generated channel token."""
+    """Create a room with a freshly generated channel token.
+
+    Also registers the room in the unified `rooms` registry (origin=web) with a
+    self-referential `web` binding, so newly-created web rooms appear in the
+    cross-surface room list without waiting for the one-time migration.
+    """
     token = _new_web_chat_token(user_id)
+    display = name.strip() or "general"
     row = conn.execute(
         "INSERT INTO web_chat_rooms (user_id, token, name) VALUES (?, ?, ?) "
         "RETURNING *",
-        (user_id, token, name.strip() or "general"),
+        (user_id, token, display),
     ).fetchone()
+    register_room(conn, token, user_id, origin="web", name=display)
+    add_room_binding(conn, token, "web", token)
     return _row_to_web_chat_room(row)
 
 
@@ -1773,8 +1847,364 @@ def delete_web_chat_room(
         "DELETE FROM channel_sleep_cycle_state WHERE conversation_token = ?",
         (token,),
     )
+    # Unified-rooms tables — FK cascades are decorative (foreign_keys unset),
+    # so hand-delete every row keyed on the token.
+    conn.execute("DELETE FROM messages WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_bindings WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_read_state WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
     conn.execute("DELETE FROM web_chat_rooms WHERE id = ?", (room_id,))
     return True
+
+
+# ---------------------------------------------------------------------------
+# Unified Talk / web room sync — registry, bindings, canonical messages
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Room:
+    """A surface-independent conversation. `token` is the canonical
+    conversation_token; `origin` is the surface it was created on."""
+
+    token: str
+    user_id: str
+    name: str | None
+    origin: str
+    created_at: str
+    archived: bool
+
+
+@dataclass
+class RoomBinding:
+    """Maps a room's canonical token to one surface's native reference."""
+
+    room_token: str
+    surface: str
+    surface_ref: str
+    created_at: str
+
+
+@dataclass
+class Message:
+    """One canonical, surface-neutral message in a room transcript."""
+
+    id: int
+    room_token: str
+    role: str
+    body: str
+    title: str | None
+    task_id: int | None
+    origin_surface: str
+    external_ids: dict | None
+    created_at: str
+
+
+def _row_to_room(row: sqlite3.Row) -> Room:
+    return Room(
+        token=row["token"],
+        user_id=row["user_id"],
+        name=row["name"],
+        origin=row["origin"],
+        created_at=row["created_at"],
+        archived=bool(row["archived"]),
+    )
+
+
+def _row_to_room_binding(row: sqlite3.Row) -> RoomBinding:
+    return RoomBinding(
+        room_token=row["room_token"],
+        surface=row["surface"],
+        surface_ref=row["surface_ref"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_message(row: sqlite3.Row) -> Message:
+    raw = row["external_ids"]
+    external = json.loads(raw) if raw else None
+    return Message(
+        id=row["id"],
+        room_token=row["room_token"],
+        role=row["role"],
+        body=row["body"],
+        title=row["title"],
+        task_id=row["task_id"],
+        origin_surface=row["origin_surface"],
+        external_ids=external,
+        created_at=row["created_at"],
+    )
+
+
+def register_room(
+    conn: sqlite3.Connection,
+    token: str,
+    user_id: str,
+    *,
+    origin: str,
+    name: str | None = None,
+) -> Room:
+    """Idempotently register a room. If a row already exists for `token` it is
+    returned unchanged (name/origin are not overwritten — first writer wins)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO rooms (token, user_id, name, origin) "
+        "VALUES (?, ?, ?, ?)",
+        (token, user_id, name, origin),
+    )
+    room = get_room(conn, token)
+    assert room is not None  # just inserted or already present
+    return room
+
+
+def get_room(conn: sqlite3.Connection, token: str) -> Room | None:
+    row = conn.execute("SELECT * FROM rooms WHERE token = ?", (token,)).fetchone()
+    return _row_to_room(row) if row else None
+
+
+def list_rooms(
+    conn: sqlite3.Connection, user_id: str, include_archived: bool = False,
+) -> list[Room]:
+    """Rooms for a user, oldest-first (creation order)."""
+    sql = "SELECT * FROM rooms WHERE user_id = ?"
+    params: list = [user_id]
+    if not include_archived:
+        sql += " AND archived = 0"
+    sql += " ORDER BY created_at ASC, token ASC"
+    return [_row_to_room(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def set_room_archived(conn: sqlite3.Connection, token: str, archived: bool) -> None:
+    conn.execute(
+        "UPDATE rooms SET archived = ? WHERE token = ?",
+        (1 if archived else 0, token),
+    )
+
+
+def rename_room(conn: sqlite3.Connection, token: str, name: str) -> None:
+    conn.execute("UPDATE rooms SET name = ? WHERE token = ?", (name, token))
+
+
+def add_room_binding(
+    conn: sqlite3.Connection, room_token: str, surface: str, surface_ref: str,
+) -> None:
+    """Idempotently bind a room to a surface (PK (room_token, surface))."""
+    conn.execute(
+        "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
+        "VALUES (?, ?, ?)",
+        (room_token, surface, surface_ref),
+    )
+
+
+def get_room_binding(
+    conn: sqlite3.Connection, room_token: str, surface: str,
+) -> RoomBinding | None:
+    row = conn.execute(
+        "SELECT * FROM room_bindings WHERE room_token = ? AND surface = ?",
+        (room_token, surface),
+    ).fetchone()
+    return _row_to_room_binding(row) if row else None
+
+
+def list_room_bindings(
+    conn: sqlite3.Connection, room_token: str,
+) -> list[RoomBinding]:
+    rows = conn.execute(
+        "SELECT * FROM room_bindings WHERE room_token = ? ORDER BY surface",
+        (room_token,),
+    ).fetchall()
+    return [_row_to_room_binding(r) for r in rows]
+
+
+def resolve_room_token(
+    conn: sqlite3.Connection, surface: str, surface_ref: str,
+) -> str | None:
+    """Find the canonical room token for a surface's native reference, or None
+    if no binding exists (origin-surface case: caller treats surface_ref as the
+    canonical token)."""
+    row = conn.execute(
+        "SELECT room_token FROM room_bindings WHERE surface = ? AND surface_ref = ?",
+        (surface, surface_ref),
+    ).fetchone()
+    return row["room_token"] if row else None
+
+
+def add_message(
+    conn: sqlite3.Connection,
+    room_token: str,
+    *,
+    role: str,
+    body: str,
+    origin_surface: str,
+    title: str | None = None,
+    task_id: int | None = None,
+    external_ids: dict | None = None,
+) -> int:
+    """Append a message to a room's canonical transcript. Returns the new id."""
+    row = conn.execute(
+        "INSERT INTO messages "
+        "(room_token, role, body, title, task_id, origin_surface, external_ids) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        (
+            room_token,
+            role,
+            body,
+            title,
+            task_id,
+            origin_surface,
+            json.dumps(external_ids) if external_ids else None,
+        ),
+    ).fetchone()
+    return int(row["id"])
+
+
+def get_messages(
+    conn: sqlite3.Connection, room_token: str, limit: int | None = None,
+) -> list[Message]:
+    """A room's messages, oldest-first (by id). With `limit`, returns the most
+    recent `limit` messages, still oldest-first."""
+    if limit is None:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE room_token = ? ORDER BY id ASC",
+            (room_token,),
+        ).fetchall()
+        return [_row_to_message(r) for r in rows]
+    rows = conn.execute(
+        "SELECT * FROM messages WHERE room_token = ? ORDER BY id DESC LIMIT ?",
+        (room_token, limit),
+    ).fetchall()
+    return [_row_to_message(r) for r in reversed(rows)]
+
+
+def set_message_external_id(
+    conn: sqlite3.Connection, message_id: int, surface: str, external_id: str,
+) -> None:
+    """Record where a message has been materialized on a surface (the
+    loop-prevention ledger). Merges into the existing JSON map."""
+    row = conn.execute(
+        "SELECT external_ids FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    if row is None:
+        return
+    current = json.loads(row["external_ids"]) if row["external_ids"] else {}
+    current[surface] = external_id
+    conn.execute(
+        "UPDATE messages SET external_ids = ? WHERE id = ?",
+        (json.dumps(current), message_id),
+    )
+
+
+def message_has_external_id(
+    conn: sqlite3.Connection, room_token: str, surface: str, external_id: str,
+) -> bool:
+    """True if any message in the room already records `external_id` on
+    `surface` — used by inbound echo detection."""
+    rows = conn.execute(
+        "SELECT external_ids FROM messages "
+        "WHERE room_token = ? AND external_ids IS NOT NULL",
+        (room_token,),
+    ).fetchall()
+    for r in rows:
+        try:
+            ext = json.loads(r["external_ids"])
+        except (ValueError, TypeError):
+            continue
+        if isinstance(ext, dict) and ext.get(surface) == external_id:
+            return True
+    return False
+
+
+def get_room_read_state(
+    conn: sqlite3.Connection, room_token: str, surface: str,
+) -> int:
+    row = conn.execute(
+        "SELECT last_read_message_id FROM room_read_state "
+        "WHERE room_token = ? AND surface = ?",
+        (room_token, surface),
+    ).fetchone()
+    return int(row["last_read_message_id"]) if row else 0
+
+
+def set_room_read_state(
+    conn: sqlite3.Connection, room_token: str, surface: str, last_read_message_id: int,
+) -> None:
+    conn.execute(
+        "INSERT INTO room_read_state (room_token, surface, last_read_message_id) "
+        "VALUES (?, ?, ?) "
+        "ON CONFLICT (room_token, surface) DO UPDATE SET "
+        "last_read_message_id = excluded.last_read_message_id",
+        (room_token, surface, last_read_message_id),
+    )
+
+
+def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
+    """One-time fold of legacy stores into the unified room model.
+
+    Markered (`unified_rooms_v1`) so the heavier backfills (web_chat_messages
+    copy, distinct-Talk-token scan over `tasks`) run once. Each step is also
+    structurally idempotent (INSERT OR IGNORE / marker), so a re-run before the
+    marker is set is harmless. No-op on fresh installs (legacy tables empty or
+    not yet created — wrapped in try/except)."""
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'unified_rooms_v1'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already:
+        return
+
+    try:
+        # web_chat_rooms -> rooms (origin=web) + self-referential web binding.
+        conn.execute(
+            "INSERT OR IGNORE INTO rooms (token, user_id, name, origin, archived) "
+            "SELECT token, user_id, name, 'web', archived FROM web_chat_rooms"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
+            "SELECT token, 'web', token FROM web_chat_rooms"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        # Distinct Talk conversation_tokens -> rooms (origin=talk) + talk binding.
+        # Only interactive Talk tasks; scheduled/briefing/etc tokens aren't rooms.
+        conn.execute(
+            "INSERT OR IGNORE INTO rooms (token, user_id, name, origin) "
+            "SELECT conversation_token, user_id, NULL, 'talk' FROM tasks "
+            "WHERE source_type = 'talk' AND conversation_token IS NOT NULL "
+            "GROUP BY conversation_token"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO room_bindings (room_token, surface, surface_ref) "
+            "SELECT token, 'talk', token FROM rooms WHERE origin = 'talk'"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        # web_chat_messages -> messages (role=system, task_id NULL). Guarded so
+        # this one-time copy isn't duplicated on the rare pre-marker re-run.
+        conn.execute(
+            "INSERT INTO messages "
+            "(room_token, role, body, title, task_id, origin_surface, created_at) "
+            "SELECT w.token, w.role, w.text, w.title, NULL, 'web', w.created_at "
+            "FROM web_chat_messages w "
+            "WHERE w.token IN (SELECT token FROM rooms) "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM messages m "
+            "  WHERE m.room_token = w.token AND m.origin_surface = 'web' "
+            "    AND m.task_id IS NULL AND m.body = w.text "
+            "    AND IFNULL(m.title,'') = IFNULL(w.title,'') "
+            "    AND m.created_at = w.created_at"
+            ")"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) VALUES ('unified_rooms_v1')"
+    )
 
 
 def list_tasks(

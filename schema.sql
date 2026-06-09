@@ -591,3 +591,72 @@ CREATE TABLE IF NOT EXISTS web_chat_messages (
 
 CREATE INDEX IF NOT EXISTS idx_web_chat_messages_token
     ON web_chat_messages (token, id);
+
+-- ---------------------------------------------------------------------------
+-- Unified Talk / web room sync (surface-independent room registry).
+--
+-- A `room` is the unit of conversation, identified by its canonical
+-- `conversation_token`. For a Talk-origin room that token IS the Nextcloud
+-- room token; for a web-origin room it IS the web channel token — so no data
+-- moves. `room_bindings` maps the canonical token to each surface's native
+-- reference (only needed once a room is exposed on a surface other than its
+-- origin). `messages` is the canonical, surface-neutral transcript store.
+-- ---------------------------------------------------------------------------
+
+-- Master room registry. One row per conversation, surface-independent.
+CREATE TABLE IF NOT EXISTS rooms (
+    token       TEXT PRIMARY KEY,          -- canonical conversation_token
+    user_id     TEXT NOT NULL,
+    name        TEXT,                       -- display name (room title)
+    origin      TEXT NOT NULL,              -- 'talk' | 'web' — surface created on
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    archived    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
+
+-- One row per (room, surface) the room is exposed on.
+CREATE TABLE IF NOT EXISTS room_bindings (
+    room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    surface      TEXT NOT NULL,             -- 'talk' | 'web'
+    surface_ref  TEXT NOT NULL,             -- Talk: Nextcloud room token; web: room_token
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (room_token, surface)
+);
+CREATE INDEX IF NOT EXISTS idx_room_bindings_ref ON room_bindings (surface, surface_ref);
+
+-- Canonical message store. Folds the de-facto tasks-as-history store (user +
+-- assistant turns) and the bot-notification lane (role='system') into one
+-- surface-neutral transcript. The FK cascade is decorative (PRAGMA
+-- foreign_keys is unset) — room deletion hand-deletes from here.
+CREATE TABLE IF NOT EXISTS messages (
+    id            INTEGER PRIMARY KEY,
+    room_token    TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    role          TEXT NOT NULL,            -- 'user' | 'assistant' | 'system'
+    body          TEXT NOT NULL,            -- markdown/plaintext (final answer text)
+    title         TEXT,                     -- system msgs only (heading), else NULL
+    task_id       INTEGER,                  -- turn's task; NULL for system msgs
+    origin_surface TEXT NOT NULL,           -- surface the message was authored on
+    external_ids  TEXT,                     -- JSON {surface: external_id} mirror ledger
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);
+-- One user row + one assistant row per turn share a task_id; the partial index
+-- enforces that and excludes system rows (task_id IS NULL).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_ext
+    ON messages (room_token, origin_surface, role, task_id)
+    WHERE task_id IS NOT NULL;
+
+-- Per-surface read cursors (an unread badge in web isn't cleared by reading
+-- on the phone). Talk read state is owned by Nextcloud and not synced back.
+CREATE TABLE IF NOT EXISTS room_read_state (
+    room_token  TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    surface     TEXT NOT NULL,
+    last_read_message_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (room_token, surface)
+);
+
+-- One-time data-migration ledger (markered, so heavy backfills run once).
+CREATE TABLE IF NOT EXISTS _migration_state (
+    name        TEXT PRIMARY KEY,
+    applied_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
