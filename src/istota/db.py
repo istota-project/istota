@@ -860,7 +860,13 @@ def set_task_pending_retry(
     error: str,
     retry_delay_minutes: int,
 ) -> None:
-    """Mark task for retry after a delay."""
+    """Mark task for retry after a delay.
+
+    Clears last_heartbeat/started_at so the retried row doesn't carry the prior
+    attempt's liveness into the next claim — the claim itself also resets these
+    (defense in depth), but a pending row shouldn't advertise a dead worker's
+    heartbeat in the meantime.
+    """
     conn.execute(
         """
         UPDATE tasks
@@ -870,6 +876,8 @@ def set_task_pending_retry(
             scheduled_for = datetime('now', '+' || ? || ' minutes'),
             locked_at = NULL,
             locked_by = NULL,
+            last_heartbeat = NULL,
+            started_at = NULL,
             updated_at = datetime('now')
         WHERE id = ?
         """,

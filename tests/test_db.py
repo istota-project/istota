@@ -1429,6 +1429,65 @@ class TestReclaimedTaskNotDoubleClaimed:
             after = db.get_task(conn, task_id)
             assert after.status == "running"
 
+    def test_retry_path_does_not_double_claim(self, db_path):
+        """The retry route (set_task_pending_retry), not just the stuck-running
+        path: a task that ran (recorded a heartbeat), failed, and was scheduled
+        for retry must not carry its stale heartbeat into the next claim and get
+        re-stolen mid-run. Scully reproduced this as a distinct double-claim path
+        the claim-site liveness reset uniquely defends.
+        """
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hi", user_id="alice",
+                conversation_token="room1", queue="foreground",
+            )
+            # Simulate a first attempt that ran and recorded a (now stale) ping.
+            conn.execute(
+                """UPDATE tasks SET status = 'running',
+                   started_at = datetime('now', '-10 minutes'),
+                   last_heartbeat = datetime('now', '-10 minutes')
+                WHERE id = ?""",
+                (task_id,),
+            )
+            conn.commit()
+            # Attempt fails → scheduled for immediate retry (0 min delay).
+            db.set_task_pending_retry(conn, task_id, "boom", 0)
+
+            a = db.claim_task(conn, "worker-A", queue="foreground")
+            assert a is not None and a.id == task_id
+            db.update_task_status(conn, task_id, "running")
+
+            b = db.claim_task(conn, "worker-B", queue="foreground")
+            assert b is None or b.id != task_id, (
+                "retry-path task re-stolen by a second worker (duplicate run)"
+            )
+
+    def test_fail_stuck_release_clears_heartbeat(self, db_path):
+        """The maintenance pass's stuck-running release must clear last_heartbeat
+        so the released row can't immediately re-qualify as stuck on re-claim."""
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hi", user_id="alice",
+                conversation_token="room1", queue="foreground",
+            )
+            conn.execute(
+                """UPDATE tasks SET status = 'running',
+                   started_at = datetime('now', '-40 minutes'),
+                   last_heartbeat = datetime('now', '-40 minutes'),
+                   created_at = datetime('now', '-40 minutes')
+                WHERE id = ?""",
+                (task_id,),
+            )
+            conn.commit()
+            db.fail_stuck_locked_running_tasks(conn, stuck_running_minutes=35)
+            status, hb, started = conn.execute(
+                "SELECT status, last_heartbeat, started_at FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            assert status == "pending"
+            assert hb is None
+            assert started is None
+
 
 class TestHeartbeatReclaim:
     """ISSUE-112 heartbeat: reclaim keys on worker liveness (last_heartbeat),
