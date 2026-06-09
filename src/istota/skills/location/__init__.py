@@ -820,7 +820,7 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Location tracking CLI")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("current", help="Current location and visit")
+    sub.add_parser("current", aliases=["last"], help="Current location and visit")
 
     hist = sub.add_parser("history", help="Recent location pings")
     hist.add_argument("--limit", type=int, default=0)
@@ -891,6 +891,7 @@ def main():
 
     commands = {
         "current": cmd_current,
+        "last": cmd_current,  # alias — natural name an LLM reaches for
         "history": cmd_history,
         "places": cmd_places,
         "learn": cmd_learn,
