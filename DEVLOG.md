@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: tmux brain — IS_SANDBOX for root containers (first docker test)
+
+First live test of `brain.kind = "tmux_claude"` was a local docker deploy. The fail-fast + fallback machinery worked exactly as designed — but surfaced a docker-specific blocker. The `ready_timeout` pane snapshot showed the real cause: the container runs as **root**, and the interactive `claude` TUI refuses `--dangerously-skip-permissions cannot be used with root/sudo privileges` — so claude exited at launch, never became ready, timed out (30s), and the task correctly fell back to headless `claude_code`. (The prod VM never hit this: it runs as the non-root `istota` service user, where the flag is allowed.)
+
+A strings scan of the installed CLI binary confirmed the escape hatch: `claude` honors `IS_SANDBOX=1` to allow `--dangerously-skip-permissions` as root, signaling that an external layer provides isolation. In a container that's accurate — bwrap is disabled and the container is the sandbox boundary. Also caught: the Dockerfile didn't install `tmux` (added it; without tmux every task would `not_found` → fall back to headless).
+
+**Key changes:**
+- `tmux_claude.py`: a new `_is_root()` helper; `_run_session` sets `IS_SANDBOX=1` in the per-session pane env when running as uid 0 (and the operator hasn't already set it). Non-root deploys (the prod VM) leave it unset — the flag is allowed there without it. Targeted to the tmux path only; the headless brain doesn't use `--dangerously-skip-permissions`.
+- `docker/istota/Dockerfile`: install `tmux` (required by the brain).
+- Three tests for the root/non-root/preserve-existing env paths.
+
+**Files modified:**
+- `src/istota/brain/tmux_claude.py`, `docker/istota/Dockerfile`, `tests/test_tmux_production.py`
+
 ## 2026-06-09: TmuxClaudeBrain production hardening (stages 2–5 + docs/Ansible)
 
 Took `TmuxClaudeBrain` from feasibility prototype to production-ready, per the `claude-tmux-production-readiness` spec. The brain drives the interactive `claude` TUI in a detached tmux session (prompt injection + Stop-hook sentinel + transcript parse) so traffic stays on subscription billing rather than the metered Agent-SDK credit headless `claude -p` draws from after 2026-06-15. The switch is full-instance (`brain.kind = "tmux_claude"` routes every source type through it); `claude_code` is retained only as the automatic fallback. The spec's Stage 1 and 6 (live bwrap/network probes) and Stage 7's live rollout are prod-host-only gates not run here — code was built against the spec's documented primary choices, all config/constant-tweakable so a live finding is a tweak, not a rewrite.

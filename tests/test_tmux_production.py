@@ -451,6 +451,46 @@ class TestConfig:
         assert brain._p.fallback_trip_threshold == 4
 
 
+class TestRootSandboxEnv:
+    """Under root the interactive TUI refuses --dangerously-skip-permissions
+    unless IS_SANDBOX=1 (the container-is-the-sandbox escape hatch)."""
+
+    def _run_to_session_env(self, monkeypatch, tmp_path, *, root):
+        import istota.brain.tmux_claude as mod
+        monkeypatch.setattr(mod, "_is_root", lambda: root)
+        brain = TmuxClaudeBrain()
+        captured = {}
+        monkeypatch.setattr(brain, "_new_session",
+                            lambda name, env: captured.update(env))
+        monkeypatch.setattr(brain, "_launch_claude", lambda *a: None)
+        monkeypatch.setattr(brain, "_wait_ready", lambda *a: False)  # bail after launch
+        monkeypatch.setattr(brain, "_kill", lambda *a: None)
+        monkeypatch.setattr(brain, "_capture", lambda *a: "")
+        brain._run_session(_req(tmp_path), attempt=0)
+        return captured
+
+    def test_root_sets_is_sandbox(self, monkeypatch, tmp_path):
+        env = self._run_to_session_env(monkeypatch, tmp_path, root=True)
+        assert env.get("IS_SANDBOX") == "1"
+
+    def test_non_root_leaves_is_sandbox_unset(self, monkeypatch, tmp_path):
+        env = self._run_to_session_env(monkeypatch, tmp_path, root=False)
+        assert "IS_SANDBOX" not in env
+
+    def test_existing_is_sandbox_preserved(self, monkeypatch, tmp_path):
+        import istota.brain.tmux_claude as mod
+        monkeypatch.setattr(mod, "_is_root", lambda: True)
+        brain = TmuxClaudeBrain()
+        captured = {}
+        monkeypatch.setattr(brain, "_new_session", lambda name, env: captured.update(env))
+        monkeypatch.setattr(brain, "_launch_claude", lambda *a: None)
+        monkeypatch.setattr(brain, "_wait_ready", lambda *a: False)
+        monkeypatch.setattr(brain, "_kill", lambda *a: None)
+        monkeypatch.setattr(brain, "_capture", lambda *a: "")
+        brain._run_session(_req(tmp_path, env={"IS_SANDBOX": "custom"}), attempt=0)
+        assert captured.get("IS_SANDBOX") == "custom"
+
+
 class TestSessionLabel:
     def test_label_with_retry_suffix(self, monkeypatch, tmp_path):
         # On a retry attempt the session name gets an -rN suffix to stay unique.
