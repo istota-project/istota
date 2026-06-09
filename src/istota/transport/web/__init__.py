@@ -54,8 +54,14 @@ def default_web_room_token(config: "Config", user_id: str) -> str | None:
 def _append_blocking(
     config: "Config", token: str, text: str, title: str | None,
 ) -> int | None:
-    """Insert one ``web_chat_messages`` row for ``token``, attributed to the
+    """Insert one system ``messages`` row for ``token``, attributed to the
     room's owner. Returns the new id, or None when the room can't be resolved.
+
+    Writes to the canonical ``messages`` store (role='system', task_id NULL) —
+    the same lane the web transcript loader reads for bot-delivered alerts /
+    log / web-routed notifications. Resolving the room through the unified
+    registry means a Talk-origin room bound to web can also receive web
+    deliveries.
 
     Room tokens are minted at room creation, so a token with no room row is a
     *deleted* room — never a pending one. We drop (with a WARNING) rather than
@@ -68,14 +74,15 @@ def _append_blocking(
         return None
     try:
         with db.get_db(config.db_path) as conn:
-            room = db.get_web_chat_room_by_token(conn, token)
+            room = db.get_room(conn, token)
             if room is None:
                 logger.warning(
                     "Dropping web delivery: no room for token %r (deleted?)", token,
                 )
                 return None
-            return db.add_web_chat_message(
-                conn, room.user_id, token, text, title=title,
+            return db.add_message(
+                conn, token, role="system", body=text,
+                origin_surface="web", title=title,
             )
     except Exception as e:
         logger.warning("web delivery failed for room %r: %s", token, e)

@@ -2204,6 +2204,45 @@ def get_messages(
     return [_row_to_message(r) for r in reversed(rows)]
 
 
+def store_turn_message(
+    conn: sqlite3.Connection,
+    room_token: str,
+    *,
+    role: str,
+    body: str,
+    task_id: int,
+    origin_surface: str,
+) -> int | None:
+    """Idempotently store a turn's user/assistant message. Returns the new id,
+    or None if a row for (room_token, role, task_id) already exists — so a retry
+    that re-completes a task, or a duplicate inbound poll, won't duplicate it."""
+    existing = conn.execute(
+        "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
+        "AND role = ? LIMIT 1",
+        (room_token, task_id, role),
+    ).fetchone()
+    if existing:
+        return None
+    return add_message(
+        conn, room_token, role=role, body=body,
+        origin_surface=origin_surface, task_id=task_id,
+    )
+
+
+def list_system_messages(
+    conn: sqlite3.Connection, room_token: str, limit: int = 50,
+) -> list[Message]:
+    """The most recent bot-delivered system messages for a room (role='system',
+    task_id NULL) — alerts / verbose log / web-routed notifications. Oldest-first.
+    Replaces the legacy web_chat_messages read path."""
+    rows = conn.execute(
+        "SELECT * FROM messages WHERE room_token = ? AND role = 'system' "
+        "ORDER BY id DESC LIMIT ?",
+        (room_token, limit),
+    ).fetchall()
+    return [_row_to_message(r) for r in reversed(rows)]
+
+
 def set_message_external_id(
     conn: sqlite3.Connection, message_id: int, surface: str, external_id: str,
 ) -> None:
