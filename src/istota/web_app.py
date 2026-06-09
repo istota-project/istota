@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import signal
 import sqlite3
@@ -108,17 +109,55 @@ async def lifespan(app: FastAPI):
     yield
 
 
-# Session secret must be available at import time for SessionMiddleware.
-# Prefer env var (systemd EnvironmentFile=), fall back to a placeholder
-# that will be replaced once lifespan loads the config.
-_INSECURE_DEFAULT = "change-me-insecure-default"
-_session_secret = os.environ.get("ISTOTA_WEB_SESSION_SECRET_KEY", _INSECURE_DEFAULT)
+# Starlette's SessionMiddleware keeps the whole session in a *signed* cookie
+# (no server-side store), so the signing key is the only thing between a forged
+# cookie and an authenticated session — a shared/guessable key is a full auth
+# bypass (ISSUE-124). It must be resolved before the middleware is constructed
+# (import time). Resolution order:
+#   1. ISTOTA_WEB_SESSION_SECRET_KEY env var (Ansible EnvironmentFile path).
+#   2. config.web.session_secret_key — the Docker entrypoint generates this on
+#      first boot and persists it into config.toml on the data volume (and
+#      load_config folds the env var from (1) in too), so it's the single merged
+#      source of truth across both deploy paths.
+#   3. No real secret found → fail closed. There is deliberately no constant
+#      fallback. For local dev/test, ISTOTA_WEB_ALLOW_INSECURE_SESSION=1 opts
+#      into a random per-process key (sessions don't survive a restart).
+_ALLOW_INSECURE_SESSION_ENV = "ISTOTA_WEB_ALLOW_INSECURE_SESSION"
 
-if _session_secret == _INSECURE_DEFAULT:
-    logger.warning(
-        "ISTOTA_WEB_SESSION_SECRET_KEY not set — using insecure default. "
-        "Set this environment variable before running in production."
+
+def _resolve_session_secret() -> str:
+    env_secret = os.environ.get("ISTOTA_WEB_SESSION_SECRET_KEY", "").strip()
+    if env_secret:
+        return env_secret
+
+    # config.toml (Docker-persisted) secret. Best-effort: a missing or
+    # unreadable config must not crash import — it just means none was found.
+    try:
+        config_secret = (load_config().web.session_secret_key or "").strip()
+    except Exception:  # pragma: no cover - defensive
+        config_secret = ""
+    if config_secret:
+        return config_secret
+
+    if os.environ.get(_ALLOW_INSECURE_SESSION_ENV, "").strip().lower() in ("1", "true", "yes"):
+        logger.warning(
+            "No web session secret configured; signing with a random per-process "
+            "key because %s is set. Sessions will not survive a restart. Do not "
+            "use this in production.",
+            _ALLOW_INSECURE_SESSION_ENV,
+        )
+        return secrets.token_hex(32)
+
+    raise RuntimeError(
+        "No web session signing secret configured. Set "
+        "ISTOTA_WEB_SESSION_SECRET_KEY (or web.session_secret_key in config.toml) "
+        "to a long random value. Refusing to start with an insecure default — a "
+        "shared signing key allows forged session cookies and auth bypass "
+        f"(ISSUE-124). For local development set {_ALLOW_INSECURE_SESSION_ENV}=1."
     )
+
+
+_session_secret = _resolve_session_secret()
 
 # `https_only` defaults to True so production cookies carry `Secure`. Browsers
 # refuse Secure cookies on plaintext origins, which kills the whole auth flow

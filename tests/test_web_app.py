@@ -1109,6 +1109,67 @@ oauth2_client_id = "my-client"
 
 
 @_needs_web_deps
+class TestSessionSecretResolution:
+    """ISSUE-124: the web session signing key must never fall back to a shared
+    constant — it resolves from the env var, then config.toml, then fails
+    closed unless an explicit dev override is set."""
+
+    def test_env_var_wins(self, monkeypatch):
+        from istota import web_app
+        monkeypatch.setenv("ISTOTA_WEB_SESSION_SECRET_KEY", "env-signing-key")
+        # Even if config supplies one, the env var takes precedence.
+        cfg = MagicMock()
+        cfg.web.session_secret_key = "config-key"
+        monkeypatch.setattr(web_app, "load_config", lambda: cfg)
+        assert web_app._resolve_session_secret() == "env-signing-key"
+
+    def test_falls_back_to_config_session_secret(self, monkeypatch):
+        from istota import web_app
+        monkeypatch.delenv("ISTOTA_WEB_SESSION_SECRET_KEY", raising=False)
+        cfg = MagicMock()
+        cfg.web.session_secret_key = "config-signing-key"
+        monkeypatch.setattr(web_app, "load_config", lambda: cfg)
+        assert web_app._resolve_session_secret() == "config-signing-key"
+
+    def test_dev_override_yields_random_per_process_key(self, monkeypatch):
+        from istota import web_app
+        monkeypatch.delenv("ISTOTA_WEB_SESSION_SECRET_KEY", raising=False)
+        monkeypatch.setenv("ISTOTA_WEB_ALLOW_INSECURE_SESSION", "1")
+        cfg = MagicMock()
+        cfg.web.session_secret_key = ""
+        monkeypatch.setattr(web_app, "load_config", lambda: cfg)
+        secret = web_app._resolve_session_secret()
+        # Never the old public constant; long and random.
+        assert secret != "change-me-insecure-default"
+        assert len(secret) >= 32
+        # A second call yields a different key (per-process random, no constant).
+        assert web_app._resolve_session_secret() != secret
+
+    def test_fails_closed_without_secret_or_override(self, monkeypatch):
+        from istota import web_app
+        monkeypatch.delenv("ISTOTA_WEB_SESSION_SECRET_KEY", raising=False)
+        monkeypatch.delenv("ISTOTA_WEB_ALLOW_INSECURE_SESSION", raising=False)
+        cfg = MagicMock()
+        cfg.web.session_secret_key = ""
+        monkeypatch.setattr(web_app, "load_config", lambda: cfg)
+        with pytest.raises(RuntimeError, match="session signing secret"):
+            web_app._resolve_session_secret()
+
+    def test_config_load_failure_is_not_fatal(self, monkeypatch):
+        from istota import web_app
+        monkeypatch.delenv("ISTOTA_WEB_SESSION_SECRET_KEY", raising=False)
+        monkeypatch.setenv("ISTOTA_WEB_ALLOW_INSECURE_SESSION", "1")
+
+        def _boom():
+            raise RuntimeError("config unreadable")
+
+        monkeypatch.setattr(web_app, "load_config", _boom)
+        # A broken config must not crash resolution — it degrades to the
+        # dev-override path here, or would fail closed without it.
+        assert len(web_app._resolve_session_secret()) >= 32
+
+
+@_needs_web_deps
 class TestResolveTz:
     """Client-supplied timezone is accepted when valid, else falls back (ISSUE-049)."""
 
