@@ -860,6 +860,16 @@ def cmd_user_ensure(args):
             if descriptor:
                 routing[purpose] = descriptor
         updates["routing"] = routing
+    if args.email_reply_routing is not None:
+        valid = ("origin+thread", "origin", "thread")
+        if args.email_reply_routing not in valid:
+            print(
+                f"Error: --email-reply-routing must be one of {', '.join(valid)}, "
+                f"got {args.email_reply_routing!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        updates["email_reply_routing"] = args.email_reply_routing
 
     profile, state = user_profiles.update_profile_with_status(db_path, user_id, **updates)
 
@@ -878,6 +888,8 @@ def cmd_user_ensure(args):
         print(f"  disabled_modules: {', '.join(profile.disabled_modules)}")
     if profile.default_destination and profile.default_destination != "talk":
         print(f"  default_destination: {profile.default_destination}")
+    if profile.email_reply_routing and profile.email_reply_routing != "origin+thread":
+        print(f"  email_reply_routing: {profile.email_reply_routing}")
     if profile.routing:
         print(f"  routing: {', '.join(f'{k}={v}' for k, v in sorted(profile.routing.items()))}")
     print(f"STATE: {state}")
@@ -913,6 +925,7 @@ def cmd_user_show(args):
         "trusted_email_senders": profile.trusted_email_senders,
         "routing": profile.routing,
         "default_destination": profile.default_destination,
+        "email_reply_routing": profile.email_reply_routing,
     }, indent=2))
 
 
@@ -1387,6 +1400,15 @@ def main():
             "when passed). PURPOSE is one of reply/alert/log/briefing/"
             "notification; DESCRIPTOR is an output_target like email or "
             "matrix:<room>. Empty descriptor clears that purpose."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--email-reply-routing",
+        choices=["origin+thread", "origin", "thread"],
+        help=(
+            "Where a reply to an email this bot sent is delivered: 'origin+thread' "
+            "(default — origin surface and the email thread), 'origin' (origin "
+            "surface only), or 'thread' (email only)."
         ),
     )
     site_group = user_ensure_parser.add_mutually_exclusive_group()

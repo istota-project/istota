@@ -328,3 +328,48 @@ class TestRoutingFields:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(user_profiles)")}
         assert "routing" in cols
         assert "default_destination" in cols
+        assert "email_reply_routing" in cols
+
+
+class TestEmailReplyRouting:
+    """email_reply_routing scalar round-trip + merge (default origin+thread)."""
+
+    def test_default_on_fresh_row(self, db_path):
+        p = user_profiles.ensure_profile(db_path, "alice")
+        assert p.email_reply_routing == "origin+thread"
+
+    def test_round_trip(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice")
+        p = user_profiles.update_profile(
+            db_path, "alice", email_reply_routing="origin",
+        )
+        assert p.email_reply_routing == "origin"
+        again = user_profiles.get_profile(db_path, "alice")
+        assert again.email_reply_routing == "origin"
+
+    def test_empty_coerces_to_default(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice")
+        p = user_profiles.update_profile(db_path, "alice", email_reply_routing="")
+        assert p.email_reply_routing == "origin+thread"
+
+    def test_noop_detection(self, db_path):
+        user_profiles.update_profile_with_status(
+            db_path, "alice", email_reply_routing="thread",
+        )
+        _, state = user_profiles.update_profile_with_status(
+            db_path, "alice", email_reply_routing="thread",
+        )
+        assert state == "noop"
+
+    def test_merge_db_owns_it(self):
+        uc = UserConfig()
+        profile = UserProfile(user_id="alice", email_reply_routing="origin")
+        user_profiles.merge_into_user_config(profile, uc)
+        assert uc.email_reply_routing == "origin"
+
+    def test_import_from_toml_seeds_value(self, db_path):
+        uc = UserConfig(email_reply_routing="thread")
+        n = user_profiles.import_from_user_configs(db_path, {"alice": uc})
+        assert n == 1
+        p = user_profiles.get_profile(db_path, "alice")
+        assert p.email_reply_routing == "thread"
