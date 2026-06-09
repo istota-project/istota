@@ -132,6 +132,7 @@ features = []
 # cli_version_pin = "2.1.168"       # supported claude CLI; mismatch logs a WARNING
 # ready_markers = ["bypass permissions on", "? for shortcuts", "for shortcuts"]
 # trust_markers = ["trust this folder", "Is this a project you"]
+# theme_markers = ["Choose the text style", "run /theme"]   # first-run theme picker
 # bypass_warning_marker = "Bypass Permissions mode"
 # bypass_accept_marker = "Yes, I accept"
 # error_markers = ["API Error", "session limit reached", "Context low"]

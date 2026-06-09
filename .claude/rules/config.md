@@ -123,7 +123,7 @@ source_type_overrides: dict[str, str] = {}      # [brain.source_type_overrides] 
 `TmuxBrainConfig` (`[brain.tmux]`): `fallback_trip_threshold` (5),
 `fallback_cooldown_seconds` (300), `ready_timeout_seconds` (30),
 `tmux_command_timeout` (10), `cli_version_pin` ("2.1.168"), plus the readiness /
-dialog / error marker lists (`ready_markers`, `trust_markers`,
+dialog / error marker lists (`ready_markers`, `trust_markers`, `theme_markers`,
 `bypass_warning_marker`, `bypass_accept_marker`, `error_markers`). All defaulted
 to the prototype's hardcoded values; see `.claude/rules/brain.md` "TmuxClaudeBrain".
 Selects which `Brain` implementation handles model invocation. `source_type_overrides`
