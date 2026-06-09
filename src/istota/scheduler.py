@@ -519,6 +519,95 @@ def _finalize_log_channel(
             )
 
 
+def _count_pending(config: Config, user_id: str, queue_type: str) -> int:
+    """Cheap claimable-task read for the idle pre-check (mirrors dispatch()).
+
+    Uses the claimability-aware count so a follow-up gated behind an active task
+    in the same room reads as 0 — the idle worker keeps sleeping cheaply instead
+    of busy-polling claim_task until the gate clears.
+    """
+    with db.get_db(config.db_path) as conn:
+        return db.count_claimable_tasks_for_user_queue(conn, user_id, queue_type)
+
+
+def _worker_idle_wait(
+    user_id: str,
+    queue_type: str,
+    config: Config,
+    stop_event: threading.Event,
+    should_stop: Callable[[], bool],
+    run_one: Callable[[], "tuple[int, bool] | None"],
+    pending_count: Callable[[], int],
+) -> "tuple[int, bool] | None":
+    """Park an idle worker, re-checking for work on a fine cadence.
+
+    Polls for a pending task every ``worker_idle_poll_interval`` until
+    ``worker_idle_timeout`` of *continuous* emptiness elapses, then returns
+    ``None`` so the caller exits the worker. Returns the first non-None
+    ``run_one()`` result as soon as a task is claimed, so the caller can loop
+    back into its fast path with a fresh deadline.
+
+    The fine-cadence path mirrors ``_dispatch_sleep``: it sleeps in
+    ``time.sleep`` slices (so the fake-clock tests can drive it) and checks both
+    ``stop_event`` (per-worker stop) and ``should_stop`` (global shutdown)
+    before and after every slice, bounding stop/shutdown latency to one
+    ``worker_idle_poll_interval``. The legacy branch instead uses a single
+    interruptible ``stop_event.wait`` (instant wake on stop), exactly matching
+    pre-phase-2 behaviour; its stop latency is bounded by that one coarse wait.
+
+    The deadline tracks *continuous* emptiness: it is set once on entry and is
+    only reset by the caller re-entering after a genuine task. Losing a claim
+    race (``run_one`` returns ``None`` after a positive ``pending_count``) does
+    not reset it, so two idle workers ping-ponging empty queues cannot keep each
+    other alive forever.
+    """
+    idle_poll = config.scheduler.worker_idle_poll_interval
+    idle_timeout = config.scheduler.worker_idle_timeout
+    poll_interval = config.scheduler.poll_interval
+
+    # Legacy parity: a single coarse, interruptible wait + single recheck —
+    # exactly the pre-phase-2 behaviour, including instant wake on stop (the
+    # wait keys on stop_event, which pool.shutdown sets via request_stop). Opt
+    # back in with worker_idle_poll_interval <= 0 or >= worker_idle_timeout.
+    if idle_poll <= 0 or idle_poll >= idle_timeout:
+        if stop_event.wait(timeout=min(poll_interval, idle_timeout)):
+            return None  # per-worker stop / global shutdown
+        if should_stop():
+            return None
+        return run_one()
+
+    deadline = time.monotonic() + idle_timeout
+    while not should_stop() and not stop_event.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(idle_poll, remaining))
+        if should_stop() or stop_event.is_set():
+            return None
+        # Cheap pre-check before the expensive claim. pending_count is a
+        # claimability-aware indexed read (the same count dispatch() uses);
+        # process_one_task -> claim_task additionally executes stale-lock /
+        # stuck-task maintenance UPDATEs on every call, so only pay that when
+        # there is plausibly something we can actually claim. Because the count
+        # mirrors claim_task's per-channel gate, a follow-up parked behind an
+        # active task in this room reads as 0 here — we keep sleeping cheaply
+        # instead of busy-polling claim_task until the gate clears.
+        try:
+            if pending_count() == 0:
+                continue
+        except Exception:  # noqa: BLE001
+            # A transient SQLite/FUSE read failure must not kill the worker
+            # mid-idle; fall through to run_one (which has its own error
+            # handling) rather than skip a possibly-present task.
+            pass
+        result = run_one()
+        if result is not None:
+            return result
+        # Lost the race to dispatch()/another worker, or nothing after all —
+        # keep polling against the SAME deadline (the queue is still empty).
+    return None
+
+
 class UserWorker(threading.Thread):
     """Worker thread that processes tasks for a single user and queue serially."""
 
@@ -534,8 +623,6 @@ class UserWorker(threading.Thread):
 
     def run(self) -> None:
         logger.info("Worker started for user %s (%s)", self.user_id, self.queue_type)
-        idle_timeout = self.config.scheduler.worker_idle_timeout
-        poll_interval = self.config.scheduler.poll_interval
         try:
             while not _shutdown_requested and not self._stop_event.is_set():
                 try:
@@ -556,23 +643,24 @@ class UserWorker(threading.Thread):
                     # Processed a task — immediately check for more
                     continue
 
-                # No tasks available — wait and check again, or exit on idle timeout
-                if self._stop_event.wait(timeout=min(poll_interval, idle_timeout)):
-                    break  # stop requested
-
-                # Check if we've been idle too long
-                # We use a simple approach: if no task was found, check once more
-                # after poll_interval. If still nothing, exit.
-                try:
-                    result = process_one_task(
+                # No tasks available — linger, re-checking on a fine cadence
+                # until a new task arrives (claimed within ~one idle poll) or the
+                # cumulative idle timeout elapses. dispatch() may scan the same
+                # user concurrently while we linger; that overlap is harmless —
+                # claim_task is atomic (UPDATE ... RETURNING), so at most one of
+                # us wins and the loser simply gets None.
+                idle_result = _worker_idle_wait(
+                    self.user_id, self.queue_type, self.config,
+                    self._stop_event, lambda: _shutdown_requested,
+                    run_one=lambda: process_one_task(
                         self.config, user_id=self.user_id, queue=self.queue_type,
-                    )
-                except Exception as e:
-                    logger.error("Worker %s/%s error: %s", self.user_id, self.queue_type, e)
-                    result = None
-
-                if result is not None:
-                    task_id, success = result
+                    ),
+                    pending_count=lambda: _count_pending(
+                        self.config, self.user_id, self.queue_type,
+                    ),
+                )
+                if idle_result is not None:
+                    task_id, success = idle_result
                     status = "completed" if success else "failed"
                     logger.info(
                         "Worker %s/%s: task %d %s",
@@ -580,7 +668,8 @@ class UserWorker(threading.Thread):
                     )
                     continue
 
-                # Still no tasks — exit idle worker
+                # Idle timeout reached — exit; dispatch() re-spawns a worker on
+                # the next pending task for this user (phase-1 sub-tick cadence).
                 break
         finally:
             logger.info("Worker exiting for user %s (%s/%d)", self.user_id, self.queue_type, self.slot)
@@ -613,9 +702,14 @@ class WorkerPool:
         with db.get_db(self.config.db_path) as conn:
             fg_users = db.get_users_with_pending_fg_queue_tasks(conn)
             bg_users = db.get_users_with_pending_bg_queue_tasks(conn)
-            # Pre-fetch pending task counts for users that may need multiple workers
-            fg_pending = {uid: db.count_pending_tasks_for_user_queue(conn, uid, "foreground") for uid in fg_users}
-            bg_pending = {uid: db.count_pending_tasks_for_user_queue(conn, uid, "background") for uid in bg_users}
+            # Pre-fetch *claimable* task counts for users that may need multiple
+            # workers. Claimable (not raw pending) so a follow-up gated behind an
+            # active task in the same room counts as 0 — dispatch won't spawn a
+            # doomed extra worker that can only busy-poll claim_task until the
+            # gate clears. A task in a different, ungated room still counts, so
+            # legitimate parallelism is unaffected.
+            fg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "foreground") for uid in fg_users}
+            bg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "background") for uid in bg_users}
 
         fg_cap = self.config.scheduler.max_foreground_workers
         bg_cap = self.config.scheduler.max_background_workers
