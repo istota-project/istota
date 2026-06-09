@@ -1620,9 +1620,13 @@ def _chat_create_web_task(
         # Route through the shared inbound helper so the web user turn lands in
         # the canonical `messages` store (and the room is registered) exactly
         # like Talk — instead of living only in tasks.prompt.
+        # output_target="room" fans out by the room's live bindings: the web
+        # origin (streamed over SSE) plus a push mirror to a bound Talk room, if
+        # any. For a web-only room it resolves to just the web stream (same as
+        # the old "web").
         _room_token, task_id = record_inbound(
             conn, _config, surface="web", surface_ref=token, user_id=username,
-            text=text, source_type="web", output_target="web", priority=5,
+            text=text, source_type="web", output_target="room", priority=5,
             attachments=attachments or None, model=model, effort=effort,
         )
     return ("ok", task_id)

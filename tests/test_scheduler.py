@@ -1607,6 +1607,41 @@ class TestProcessOneTask:
             msgs = db.list_system_messages(conn, room_token)
         assert any(m.body == "Here is the answer" for m in msgs)
 
+    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
+    @patch("istota.scheduler.run_coro", return_value=4242)
+    def test_web_origin_room_mirrors_to_bound_talk(
+        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+    ):
+        # A web-origin room bound to a Talk conversation mirrors its final result
+        # into that Talk room (web's own result streams over SSE). The mirror
+        # uses the talk binding's surface_ref as the post target.
+        from istota.transport.web import default_web_room_token
+        config = self._make_config(db_path, tmp_path)
+        room_token = default_web_room_token(config, "testuser")
+        with db.get_db(db_path) as conn:
+            db.add_room_binding(conn, room_token, "talk", "talktok42")
+            db.create_task(
+                conn, prompt="hi", user_id="testuser", source_type="web",
+                conversation_token=room_token, output_target="room",
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "mirrored answer", None, None),
+        ):
+            result = process_one_task(config)
+        assert result is not None and result[1] is True
+
+        # The Talk mirror was posted to the bound Talk room.
+        assert mock_post_talk.called
+        _, kwargs = mock_post_talk.call_args
+        assert kwargs.get("target_token") == "talktok42"
+        # external_ids ledger recorded the mirror's Talk post id.
+        with db.get_db(db_path) as conn:
+            msgs = db.get_messages(conn, room_token)
+        assistant = [m for m in msgs if m.role == "assistant"][0]
+        assert assistant.external_ids == {"talk": "4242"}
+
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_own_origin_web_task_does_not_push(self, mock_arun, db_path, tmp_path):
         # A web-source task's own result streams over task_events; it must NOT

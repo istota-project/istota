@@ -18,7 +18,7 @@ an empty post-drop plan falls back to reply-to-origin so a misconfigured
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -50,11 +50,17 @@ class Destination:
     ``:channel`` (resolve at delivery); ``resolve_delivery_plan`` fills it for
     push surfaces that need a durable target (Talk). ``kind`` mirrors the
     transport's ``surface_class`` — ``"push"`` or ``"stream"``.
+
+    ``mirror`` marks a destination produced by the ``room`` fan-out for a
+    *non-origin* bound surface (e.g. a web-origin task mirrored to its bound
+    Talk room). The scheduler suppresses the confirmation prompt on a mirror
+    leg — confirmations stay on the originating surface (open question 7).
     """
 
     surface: str
     channel: str | None = None
     kind: str = "push"
+    mirror: bool = False
 
 
 def parse_output_target(spec: str | None) -> list[Destination]:
@@ -175,6 +181,40 @@ def _infer_default_plan(task: "db.Task") -> list[Destination]:
     return []
 
 
+def _expand_room_destinations(
+    config: "Config", task: "db.Task",
+) -> list[Destination]:
+    """Expand a ``room`` meta-destination by the room's live bindings: the
+    origin delivery plus a push mirror to every *non-origin push* binding.
+
+    Stream bindings (web) are skipped — their clients read the shared canonical
+    store / SSE, so a push would double-post the turn. The mirror is therefore
+    asymmetric by design: a web-origin task mirrors to its bound Talk room
+    (Talk's store is external), but a Talk-origin task pushes nothing to its
+    bound web room (the web display loader already renders Talk turns).
+    """
+    from .. import db
+    from .registry import _surface_for_source_type
+
+    dests = list(_infer_default_plan(task))  # origin delivery
+    token = task.conversation_token
+    if not token or not config.db_path:
+        return dests
+    origin_surface = _surface_for_source_type(task.source_type)
+    try:
+        with db.get_db(config.db_path) as conn:
+            bindings = db.list_room_bindings(conn, token)
+    except Exception as e:  # pragma: no cover - best-effort, never abort delivery
+        logger.warning("room binding lookup failed for task %s: %s",
+                       getattr(task, "id", "?"), e)
+        return dests
+    for b in bindings:
+        if b.surface == origin_surface or b.surface in _STREAM_SURFACES:
+            continue
+        dests.append(Destination(b.surface, b.surface_ref, mirror=True))
+    return dests
+
+
 def _resolve_talk_channel(config: "Config", task: "db.Task") -> str | None:
     # Lazy import: scheduler imports the transport package at module load.
     from ..scheduler import _talk_target_for_delivery
@@ -283,12 +323,27 @@ def resolve_delivery_plan(
     if not plan and (spec is None or not spec.strip()):
         plan = _infer_default_plan(task)
 
+    # Expand the `room` meta-destination by live bindings (not a static alias):
+    # origin delivery + a push mirror to each non-origin push-bound surface.
+    if any(d.surface == "room" for d in plan):
+        expanded: list[Destination] = []
+        for d in plan:
+            if d.surface == "room":
+                expanded.extend(_expand_room_destinations(config, task))
+            else:
+                expanded.append(d)
+        plan = expanded
+
     resolved: list[Destination] = []
     seen: set[tuple[str, str | None]] = set()
     for dest in plan:
         r = _resolve_one(config, task, registry, dest)
         if r is None:
             continue
+        # Carry the mirror flag through resolution (it governs confirmation
+        # suppression in the scheduler).
+        if dest.mirror and not r.mirror:
+            r = replace(r, mirror=True)
         key = (r.surface, r.channel)
         if key in seen:
             continue
