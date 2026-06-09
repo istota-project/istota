@@ -54,7 +54,16 @@ _SENTINEL_POLL_S = 0.4
 _READY_MARKERS = ("bypass permissions on", "? for shortcuts", "for shortcuts")
 # Pane substrings for the first-access workspace trust dialog —
 # --dangerously-skip-permissions does NOT bypass it (Stage 1 finding).
+# Option 1 ("Yes, I trust this folder") is pre-selected → a bare Enter accepts.
 _TRUST_MARKERS = ("trust this folder", "Is this a project you")
+# Pane substrings for the "Bypass Permissions mode" warning. It appears under
+# the bwrap sandbox (Stage 3′ finding) because bwrap tmpfs'es ~/.claude, so the
+# CLI never remembers a prior acceptance — unlike a persistent ~/.claude (mac),
+# where it's a one-time prompt. Here option 1 is "No, exit" (pre-selected) and
+# option 2 is "Yes, I accept", so we must actively select 2 — a bare Enter would
+# EXIT claude.
+_BYPASS_WARNING_MARKER = "Bypass Permissions mode"
+_BYPASS_ACCEPT_MARKER = "Yes, I accept"
 
 # Per-process session-name counter (BrainRequest carries no task id by default).
 _SESSION_COUNTER = itertools.count(1)
@@ -410,12 +419,26 @@ class TmuxClaudeBrain:
         return self._tmux("capture-pane", "-t", name, "-p").stdout
 
     def _wait_ready(self, name: str, deadline: float) -> bool:
-        """Poll the pane until the REPL is ready, dismissing the trust dialog if
-        it appears. Returns False on deadline."""
+        """Poll the pane until the REPL is ready, scripting past the launch
+        dialogs as they appear. Returns False on deadline.
+
+        Two dialogs can gate the prompt, in either order depending on prior
+        state; the loop handles whichever is on screen each tick:
+        - workspace trust ("Is this a project you trust?") — option 1
+          pre-selected, so a bare Enter accepts.
+        - "Bypass Permissions mode" warning — option 1 is "No, exit"
+          (pre-selected), so we must send "2" to select "Yes, I accept" before
+          Enter. Surfaces under the bwrap sandbox (tmpfs'd ~/.claude)."""
         while time.monotonic() < deadline:
             pane = self._capture(name)
+            if _BYPASS_WARNING_MARKER in pane and _BYPASS_ACCEPT_MARKER in pane:
+                # Select option 2 ("Yes, I accept") — a bare Enter would exit.
+                self._tmux("send-keys", "-t", name, "2")
+                time.sleep(_READY_POLL_S)
+                self._tmux("send-keys", "-t", name, "Enter")
+                time.sleep(_READY_POLL_S)
+                continue
             if any(m in pane for m in _TRUST_MARKERS):
-                # Option 1 ("Yes, I trust this folder") is pre-selected.
                 self._tmux("send-keys", "-t", name, "Enter")
                 time.sleep(_READY_POLL_S)
                 continue

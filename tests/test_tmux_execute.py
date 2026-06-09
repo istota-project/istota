@@ -284,6 +284,72 @@ class TestSandboxInteraction:
         assert str(sentinel) in hook_cmd
 
 
+class TestWaitReadyDialogs:
+    """_wait_ready scripts past the launch dialogs. Under bwrap (Stage 3′
+    finding) the 'Bypass Permissions mode' warning appears after trust because
+    ~/.claude is tmpfs'd; its accept option is NOT pre-selected, so a bare Enter
+    would exit claude."""
+
+    def _brain_with_panes(self, monkeypatch, panes, keys):
+        brain = TmuxClaudeBrain()
+        seq = iter(panes)
+        state = {"last": panes[-1]}
+
+        def capture(name):
+            try:
+                state["last"] = next(seq)
+            except StopIteration:
+                pass
+            return state["last"]
+
+        monkeypatch.setattr(brain, "_capture", capture)
+        monkeypatch.setattr(brain, "_tmux",
+                            lambda *a: keys.append(a) or _CP())
+        # no real sleeping
+        import istota.brain.tmux_claude as mod
+        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        return brain
+
+    def test_handles_trust_then_bypass_then_ready(self, monkeypatch):
+        keys = []
+        panes = [
+            "Quick safety check: Is this a project you trust?\n1. Yes, I trust this folder",
+            "WARNING: Claude Code running in Bypass Permissions mode\n1. No, exit\n2. Yes, I accept",
+            "Try \"fix typecheck errors\"\nbypass permissions on (shift+tab to cycle)",
+        ]
+        import time as _t
+        brain = self._brain_with_panes(monkeypatch, panes, keys)
+        assert brain._wait_ready("s", _t.monotonic() + 100) is True
+        sent = [a for a in keys if a[:3] == ("send-keys", "-t", "s")]
+        # trust → Enter; bypass → "2" then Enter
+        payloads = [a[3] for a in sent]
+        assert "Enter" in payloads
+        assert "2" in payloads
+        # the "2" must come before its following Enter (accept, not exit)
+        assert payloads.index("2") < len(payloads) - 1
+
+    def test_bypass_selects_option_2_not_bare_enter(self, monkeypatch):
+        keys = []
+        panes = [
+            "WARNING: Claude Code running in Bypass Permissions mode\n1. No, exit\n2. Yes, I accept",
+            "bypass permissions on (shift+tab to cycle)",
+        ]
+        import time as _t
+        brain = self._brain_with_panes(monkeypatch, panes, keys)
+        assert brain._wait_ready("s", _t.monotonic() + 100) is True
+        payloads = [a[3] for a in keys if a[:3] == ("send-keys", "-t", "s")]
+        # first action on the bypass dialog is "2" (select accept), then Enter
+        assert payloads[0] == "2"
+        assert payloads[1] == "Enter"
+
+    def test_timeout_returns_false(self, monkeypatch):
+        keys = []
+        panes = ["still loading…"]
+        import time as _t
+        brain = self._brain_with_panes(monkeypatch, panes, keys)
+        assert brain._wait_ready("s", _t.monotonic() - 1) is False
+
+
 class TestSessionNaming:
     def test_session_label_used_when_provided(self, monkeypatch, tmp_path):
         tr = _write_transcript(tmp_path, [_assistant([{"type": "text", "text": "x"}])])
