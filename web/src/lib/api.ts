@@ -1377,6 +1377,11 @@ export interface ChatRoom {
 	archived: boolean;
 	created_at: string;
 	updated_at: string;
+	/** Surface the room was created on. Talk-origin rooms surface here
+	 * automatically once the bot is messaged in them. */
+	origin?: 'web' | 'talk';
+	/** Set once the room has been promoted to (or originated as) a Talk room. */
+	talk_token?: string;
 }
 
 export interface ChatConfig {
@@ -1458,6 +1463,15 @@ export function updateChatRoom(
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(patch),
+	});
+}
+
+/** Create a real Nextcloud Talk conversation for a web-origin room and bind it
+ * ("Also open in Talk"). Returns the updated room (now carrying talk_token). */
+export function promoteChatRoom(id: number): Promise<ChatRoom> {
+	return apiFetch<ChatRoom>(`/chat/rooms/${id}/promote`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
 	});
 }
 

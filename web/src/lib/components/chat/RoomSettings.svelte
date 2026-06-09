@@ -8,10 +8,25 @@
 		room: ChatRoom;
 		onSave: (name: string) => void;
 		onDelete: () => void;
+		onPromote?: () => void;
 		onClose: () => void;
 	}
 
-	let { open = $bindable(true), room, onSave, onDelete, onClose }: Props = $props();
+	let { open = $bindable(true), room, onSave, onDelete, onPromote, onClose }: Props = $props();
+
+	// A room is on Talk when it originated there or has been promoted.
+	const onTalk = $derived(room.origin === 'talk' || !!room.talk_token);
+	const canPromote = $derived(room.origin !== 'talk' && !room.talk_token);
+	let promoting = $state(false);
+	async function handlePromote() {
+		if (!onPromote || promoting) return;
+		promoting = true;
+		try {
+			await onPromote();
+		} finally {
+			promoting = false;
+		}
+	}
 
 	// Local edit state. Re-seeded whenever the modal is opened for a different
 	// room so reusing one component instance across rooms never leaks state.
@@ -91,10 +106,27 @@
 		{#if copyError}<p class="copy-error">{copyError}</p>{/if}
 	</div>
 
+	<div class="field">
+		<span>Nextcloud Talk</span>
+		{#if onTalk}
+			<p class="hint talk-on">This room is also open in Nextcloud Talk — replies sync to your phone.</p>
+		{:else if onPromote}
+			<button class="talk-btn" type="button" disabled={!canPromote || promoting} onclick={handlePromote}>
+				{promoting ? 'Opening…' : 'Also open in Talk'}
+			</button>
+			<p class="hint">Creates a Nextcloud Talk conversation so this chat is reachable from the Talk apps.</p>
+		{/if}
+	</div>
+
 	{#if showDanger}
 		<div class="danger-zone">
 			<p class="danger-warn">
-				This permanently deletes this room and all its messages. This cannot be undone.
+				{#if onTalk}
+					This hides the room from web chat. The Nextcloud Talk conversation and its
+					history are not deleted.
+				{:else}
+					This permanently deletes this room and all its messages. This cannot be undone.
+				{/if}
 			</p>
 			<p class="danger-prompt">Type <code>{room.name}</code> to confirm.</p>
 			<input type="text" bind:value={confirmText} placeholder={room.name} />
@@ -177,6 +209,22 @@
 		color: var(--text-dim);
 		margin: 0.1rem 0 0;
 	}
+
+	.talk-on { color: var(--text-muted); }
+
+	.talk-btn {
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		color: var(--text-primary);
+		font: inherit;
+		font-size: var(--text-sm);
+		padding: 0.35rem 0.6rem;
+		border-radius: 0.25rem;
+		cursor: pointer;
+		transition: background var(--transition-fast), color var(--transition-fast);
+	}
+	.talk-btn:hover:not(:disabled) { background: var(--surface-raised); }
+	.talk-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 	.copy-error {
 		font-size: var(--text-xs);

@@ -54,13 +54,14 @@ class TestRecordInboundTalk:
         with db.get_db(db_path) as conn:
             record_inbound(
                 conn, config, surface="talk", surface_ref="cpzpcfx2",
-                user_id="alice", text="hi", channel_name="other-name",
+                user_id="alice", text="hi", channel_name="#renamed",
             )
         with db.get_db(db_path) as conn:
             rooms = db.list_rooms(conn, "alice")
-            assert len(rooms) == 1
-            # first-writer-wins: name not overwritten
-            assert rooms[0].name == "#istota"
+            assert len(rooms) == 1  # not duplicated
+            # Talk-side rename flows back: a Talk-origin room's name tracks the
+            # conversation's current displayName.
+            assert rooms[0].name == "#renamed"
 
     def test_idempotent_user_message_on_duplicate_poll(self, config, db_path):
         msg_args = dict(

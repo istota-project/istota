@@ -1310,11 +1310,28 @@ def _room_to_dict(room) -> dict:
 
 
 def _chat_list_rooms(username: str) -> list[dict]:
+    """The user's non-archived rooms from the unified registry — both web- and
+    Talk-origin. A Talk room the bot joined surfaces here automatically (it was
+    lazily registered on its first inbound message). Each registry room is given
+    a ``web_chat_rooms`` handle (the frontend's integer room id) and a ``web``
+    binding on first listing — that handle/binding *is* the room's web presence.
+    Each entry carries ``origin`` so the UI can badge Talk rooms and gate the
+    promote action."""
     from . import db
     with db.get_db(_config.db_path) as conn:
         db.ensure_default_web_chat_room(conn, username)
-        rooms = db.list_web_chat_rooms(conn, username, include_archived=False)
-    return [_room_to_dict(r) for r in rooms]
+        registry = db.list_rooms(conn, username, include_archived=False)
+        out: list[dict] = []
+        for r in registry:
+            handle = db.ensure_web_chat_handle(
+                conn, username, r.token, r.name or "Talk room",
+            )
+            db.add_room_binding(conn, r.token, "web", r.token)
+            d = _room_to_dict(handle)
+            d["name"] = r.name or handle.name
+            d["origin"] = r.origin
+            out.append(d)
+    return out
 
 
 def _chat_create_room(username: str, name: str) -> dict:
@@ -1367,6 +1384,13 @@ def _chat_delete_room(username: str, room_id: int) -> str:
             return "not_found"
         if db.count_active_web_tasks(conn, room.token, username) > 0:
             return "busy"
+        # A Talk-origin room is hidden (archived), not destroyed: deleting from
+        # web must not wipe a Nextcloud Talk conversation's mirrored history.
+        reg = db.get_room(conn, room.token)
+        if reg is not None and reg.origin == "talk":
+            db.set_room_archived(conn, room.token, True)
+            db.update_web_chat_room(conn, room_id, archived=True)
+            return "ok"
         db.delete_web_chat_room(conn, room_id, username)
         token = room.token
     # Best-effort: drop the channel's CHANNEL.md directory. Outside the DB
@@ -1378,6 +1402,72 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("chat room delete: CHANNEL.md cleanup failed: %s", exc)
     return "ok"
+
+
+def _room_talk_binding(username: str, room_id: int) -> str | None:
+    """The Talk room token a web room is bound to, or None. Owner-scoped."""
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        handle = db.get_web_chat_room(conn, room_id)
+        if handle is None or handle.user_id != username:
+            return None
+        binding = db.get_room_binding(conn, handle.token, "talk")
+    return binding.surface_ref if binding else None
+
+
+async def _chat_promote_to_talk(username: str, room_id: int) -> dict | None:
+    """"Also open in Talk": create a real Nextcloud Talk conversation for a
+    web-origin room, add the requesting user, bind it, and seed a single pointer
+    post (older history stays in web — open question 4's lean). Returns the
+    updated room dict, or None if the room is unknown / not owned / not a
+    web-origin room / already bound to Talk / Talk is unconfigured."""
+    from . import db
+    from .talk import TalkClient
+
+    with db.get_db(_config.db_path) as conn:
+        handle = db.get_web_chat_room(conn, room_id)
+        if handle is None or handle.user_id != username:
+            return None
+        token = handle.token
+        reg = db.get_room(conn, token)
+        if reg is None or reg.origin != "web":
+            return None  # only web-origin rooms promote
+        if db.get_room_binding(conn, token, "talk") is not None:
+            return None  # already bound
+        name = reg.name or handle.name
+    if not _config.nextcloud.url:
+        return None
+
+    # One-off OCS calls from the web process (not the scheduler delivery path),
+    # so a dedicated short-lived client is fine here.
+    client = TalkClient(_config)
+    try:
+        room = await client.create_conversation(name)
+        talk_token = room.get("token")
+        if not talk_token:
+            return None
+        try:
+            await client.add_participant(talk_token, username)
+        except Exception as e:
+            logger.warning("promote: add_participant failed for %s: %s", username, e)
+        try:
+            await client.send_message(
+                talk_token,
+                "Continued from the web chat — earlier history lives in the web app.",
+            )
+        except Exception as e:  # seed post is best-effort
+            logger.debug("promote: seed post failed: %s", e)
+    finally:
+        await client.aclose()
+
+    with db.get_db(_config.db_path) as conn:
+        db.add_room_binding(conn, token, "talk", talk_token)
+        handle = db.get_web_chat_room(conn, room_id)
+        reg = db.get_room(conn, token)
+    d = _room_to_dict(handle)
+    d["origin"] = reg.origin if reg else "web"
+    d["talk_token"] = talk_token
+    return d
 
 
 def _trace_tool_descriptions(execution_trace: str | None, actions_taken: str | None) -> list[str]:
@@ -1692,7 +1782,38 @@ async def chat_update_room(
     )
     if updated is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
+    # Propagate a rename to the bound Talk conversation, if any (best-effort).
+    if name is not None and _config.nextcloud.url:
+        talk_token = await asyncio.to_thread(
+            _room_talk_binding, user["username"], room_id,
+        )
+        if talk_token:
+            from .talk import TalkClient
+            client = TalkClient(_config)
+            try:
+                await client.rename_conversation(talk_token, updated["name"])
+            except Exception as e:  # best-effort; web rename already persisted
+                logger.warning("rename propagate to Talk failed: %s", e)
+            finally:
+                await client.aclose()
     return updated
+
+
+@api_router.post("/chat/rooms/{room_id}/promote")
+async def chat_promote_room(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Create a real Nextcloud Talk conversation for a web-origin room and bind
+    it, so the conversation is reachable from the Talk mobile clients too."""
+    result = await _chat_promote_to_talk(user["username"], room_id)
+    if result is None:
+        return JSONResponse(
+            {"error": "room not found or not eligible for promotion"},
+            status_code=404,
+        )
+    return result
 
 
 @api_router.delete("/chat/rooms/{room_id}")
