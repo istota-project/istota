@@ -483,6 +483,25 @@ class TestResolveUserTimezone:
             assert cfg.resolve_user_timezone("alice", conn=conn) == "Europe/Warsaw"
 
 
+class TestEmailReplyRouting:
+    def test_default_when_unset(self):
+        cfg = Config(users={"stefan": UserConfig()})
+        assert cfg.email_reply_routing_for("stefan") == "origin+thread"
+
+    def test_default_for_unknown_user(self):
+        cfg = Config()
+        assert cfg.email_reply_routing_for("nobody") == "origin+thread"
+
+    def test_valid_values_pass_through(self):
+        for val in ("origin+thread", "origin", "thread"):
+            cfg = Config(users={"stefan": UserConfig(email_reply_routing=val)})
+            assert cfg.email_reply_routing_for("stefan") == val
+
+    def test_invalid_value_falls_back(self):
+        cfg = Config(users={"stefan": UserConfig(email_reply_routing="bogus")})
+        assert cfg.email_reply_routing_for("stefan") == "origin+thread"
+
+
 class TestTrustedEmailSenders:
     def test_own_email_always_trusted(self):
         cfg = Config(users={

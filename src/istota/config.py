@@ -260,6 +260,7 @@ class UserConfig:
     disabled_modules: list[str] = field(default_factory=list)  # modules to disable (default-on otherwise)
     routing: dict[str, str] = field(default_factory=dict)  # purpose -> output_target descriptor
     default_destination: str = "talk"  # fallback delivery descriptor
+    email_reply_routing: str = "origin+thread"  # origin+thread | origin | thread
 
 
 @dataclass
@@ -652,6 +653,27 @@ class Config:
                 return True
 
         return False
+
+    def email_reply_routing_for(self, user_id: str) -> str:
+        """Per-user mirror policy for email replies to messages we sent.
+
+        One of ``origin+thread`` (default — deliver to the origin surface AND
+        continue the email thread), ``origin`` (origin surface only), or
+        ``thread`` (email only). An unrecognized stored value falls back to the
+        default and logs a warning.
+        """
+        valid = ("origin+thread", "origin", "thread")
+        user = self.users.get(user_id)
+        value = (getattr(user, "email_reply_routing", "") or "").strip() if user else ""
+        if not value:
+            return "origin+thread"
+        if value not in valid:
+            logger.warning(
+                "Unknown email_reply_routing %r for user %s; using 'origin+thread'",
+                value, user_id,
+            )
+            return "origin+thread"
+        return value
 
     @property
     def caldav_url(self) -> str:

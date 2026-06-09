@@ -696,6 +696,72 @@ class TestPollEmailsThreadMatching:
             # conversation_token still preserves the email-thread grouping key
             assert task.conversation_token == "talk_room_99"
 
+    def _origin_reply(self, config, *, origin_target, policy=None,
+                      sent_conversation_token="rm_web123"):
+        """Record a sent_email with origin_target, poll a thread-matched reply,
+        and return the created task. Shared by the origin-routing tests."""
+        config.email = _email_config()
+        user = UserConfig(email_addresses=["stefan@test.com"])
+        if policy is not None:
+            user.email_reply_routing = policy
+        config.users = {"stefan": user}
+
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<origin_out@bot.com>",
+                to_addr="ext@x.com",
+                subject="Question",
+                conversation_token=sent_conversation_token,
+                origin_target=origin_target,
+            )
+
+        envelope = _envelope(id="20", sender="ext@x.com", subject="Re: Question")
+        email = Email(
+            id="20", subject="Re: Question", sender="ext@x.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="My answer", attachments=[],
+            message_id="<r20@x.com>", references="<origin_out@bot.com>",
+            to=("bot@test.com",), cc=(),
+        )
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            return db.get_task(conn, task_ids[0])
+
+    def test_web_origin_default_policy_routes_origin_plus_thread(self, make_config):
+        task = self._origin_reply(make_config(), origin_target="web:rm_web123")
+        assert task.output_target == "web:rm_web123,email"
+        assert task.conversation_token == "rm_web123"
+
+    def test_web_origin_policy_origin_only(self, make_config):
+        task = self._origin_reply(
+            make_config(), origin_target="web:rm_web123", policy="origin",
+        )
+        assert task.output_target == "web:rm_web123"
+        assert task.conversation_token == "rm_web123"
+
+    def test_web_origin_policy_thread_only(self, make_config):
+        task = self._origin_reply(
+            make_config(), origin_target="web:rm_web123", policy="thread",
+        )
+        assert task.output_target == "email"
+
+    def test_talk_origin_descriptor_routes_to_token(self, make_config):
+        task = self._origin_reply(
+            make_config(), origin_target="talk:RealRoomXYZ",
+            sent_conversation_token="RealRoomXYZ",
+        )
+        assert task.output_target == "talk:RealRoomXYZ,email"
+        assert task.conversation_token == "RealRoomXYZ"
+
     def test_known_sender_resolves_talk_delivery_token_from_alerts(self, make_config):
         """plus_address / sender_match routes resolve talk_delivery_token via user config."""
         config = make_config()
@@ -1749,9 +1815,10 @@ class TestEmissaryLifecycle:
         with db.get_db(db_path) as conn:
             new_task = db.get_task(conn, task_ids[0])
         assert new_task.user_id == "alice"
-        assert new_task.talk_delivery_token == "talkroom_42"
         assert new_task.conversation_token == "talkroom_42"
-        assert new_task.output_target == "talk,email"
+        # The reply routes back to the origin Talk room via the stored origin
+        # descriptor (talk:<token>) rather than the talk_delivery_token ladder.
+        assert new_task.output_target == "talk:talkroom_42,email"
 
     def test_email_task_sends_email_reply_routes_via_alerts(
         self, db_path, tmp_path,
@@ -1827,4 +1894,6 @@ class TestEmissaryLifecycle:
         assert len(task_ids) == 1
         with db.get_db(db_path) as conn:
             new_task = db.get_task(conn, task_ids[0])
-        assert new_task.talk_delivery_token == "parent_room"
+        # Reply reaches the parent's room via the origin descriptor (talk:<token>).
+        assert new_task.conversation_token == "parent_room"
+        assert new_task.output_target == "talk:parent_room,email"
