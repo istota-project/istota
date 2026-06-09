@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-08: Scheduler stats health line
+
+Periodic process-health line emitted by the long-running scheduler daemon, motivated by a closed leak (a CalDAV client leak that quietly accumulated thousands of watchdog threads and CLOSE-WAIT sockets over three days, eating ~5 GB and surfacing 13 days late as whisper transcription failing on near-zero free memory). A one-line periodic emit covering thread count, fd count, and RSS would have shown that as a steadily climbing thread count from the first hour; the same line is also useful for routine deploy-verification spot checks.
+
+**The emit.** New `scheduler._emit_scheduler_stats(config, pool)` collects `threads` (`threading.active_count()`), `fds` + `rss_mb` (psutil), `tasks_running` (a new `db.count_running_tasks` — `SELECT COUNT(*) FROM tasks WHERE status='running'`), and `workers_active` (`WorkerPool.active_count`), and logs one space-separated `key=value` INFO line on a dedicated `istota.scheduler.stats` logger so operators can isolate it (`journalctl … | grep scheduler_stats`). Same shape as the devbox-proxy audit format. Wired into `run_daemon`'s main loop after the db-health block, gated on a new `scheduler_stats_interval` knob (default 60s, `0` disables); `last_stats_check` inits to `time.time()` so the first emit fires after one full interval, not during startup. Single-pass `run_scheduler` does not emit — daemon-only.
+
+**Defensive by design.** Every collector degrades rather than killing the daemon loop: psutil-missing omits `fds`/`rss_mb` with a once-per-process WARN (module-global latch); a DB hiccup yields `tasks_running=?`; a missing pool yields `workers_active=0`; the whole body is wrapped in a final try/except backstop.
+
+**Post-review (Mulder/Scully).** Two agents reviewed the implementation:
+- *psutil collector errors dropped the whole line (HIGH, fixed).* The first cut caught only `ImportError`, but `psutil.num_fds()` / `memory_info()` can raise `AccessDenied`, `NoSuchProcess`, or — the case this line exists to catch — `OSError(EMFILE)` (num_fds does `os.listdir("/proc/self/fd")`, which needs a fd it can't get under exhaustion). Those escaped to the outer except and emitted *no* line, blinding the operator during the exact leak scenario. Fixed by separating the import (ImportError → once-WARN) from the collectors (each field collected independently, omitted on any error, line still emits).
+- *Failure WARN routed to the stats logger* so a consumer filtering by logger name (not just grepping) sees the gap.
+- Added regression tests for the EMFILE path, the once-only WARN across multiple emits, and the outer backstop (gaps Scully flagged).
+
+Full suite green; scheduler/config/db/stats suites green post-fix. `tests/test_scheduler_stats.py` = 12 tests.
+
+**Files added/modified:**
+- `src/istota/scheduler.py` - `_emit_scheduler_stats` + `_SCHEDULER_STATS_LOGGER` + once-WARN latch; daemon-loop gate
+- `src/istota/db.py` - `count_running_tasks`
+- `src/istota/config.py` - `scheduler_stats_interval` field + loader
+- `config/config.example.toml`, `deploy/ansible/{defaults/main.yml,templates/config.toml.j2}` - new knob
+- `.claude/rules/scheduler.md` - main-loop list, poller table, intervals table
+- `tests/test_scheduler_stats.py` - new file, 12 tests
+
 ## 2026-06-08: Sub-tick worker idle re-check (web chat pickup latency phase 2)
 
 Second of two latency cuts for cold task pickup, motivated by web chat: a freshly-enqueued `source_type="web"` task could sit `pending` for seconds before a worker claimed it and emitted the first SSE event. Phase 1 (the `_dispatch_sleep` sub-tick dispatch scan) already closed the fully-cold case. Phase 2 closes the "quick follow-up" case — the user reads a reply and sends another message while the worker that just handled the previous turn is still parked in its idle linger. `dispatch()` can't help there because the parked worker still holds the per-user slot, so pickup was gated by `poll_interval` (~5s), not the 0.5s dispatch cadence.
