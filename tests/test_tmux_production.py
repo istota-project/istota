@@ -641,6 +641,19 @@ class TestTranscriptTailer:
         tailer._drain_once()  # second drain must not re-emit
         assert [type(e).__name__ for e in events] == ["ToolUseEvent"]
 
+    def test_start_stop_join_does_not_raise(self, tmp_path):
+        # Regression: Thread has a private _stop() method that join() calls;
+        # the tailer's Event must NOT be named self._stop or join() raises
+        # "'Event' object is not callable" (the docker repro that aborted the
+        # _run_session finally and triggered a retry loop).
+        path = tmp_path / "t.jsonl"
+        path.write_text(json.dumps(_assistant([{"type": "text", "text": "x"}])) + "\n")
+        tailer = _TranscriptTailer(path, lambda e: None)
+        tailer.start()
+        tailer.stop()
+        tailer.join(timeout=2.0)  # must not raise
+        assert not tailer.is_alive()
+
     def test_exception_in_callback_isolated(self, tmp_path):
         path = tmp_path / "t.jsonl"
         path.write_text(json.dumps(_assistant([{"type": "text", "text": "x"}])) + "\n")
