@@ -235,6 +235,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     # Build list of conversations to poll and initialize new ones
     poll_tasks = []
     conv_types: dict[str, int] = {}  # token -> conversation type
+    conv_names: dict[str, str] = {}  # token -> display name (lazy room registration)
     with db.get_db(config.db_path) as conn:
         for conv in conversations:
             conversation_token = conv.get("token")
@@ -244,6 +245,9 @@ async def poll_talk_conversations(config: Config) -> list[int]:
             # Conversation types: 1=one-to-one (DM), 2=group, 3=public, 4=changelog
             conv_type = conv.get("type")
             conv_types[conversation_token] = conv_type
+            display_name = conv.get("displayName") or conv.get("name")
+            if display_name:
+                conv_names[conversation_token] = display_name
 
             # Cache 1:1 DM tokens by user ID (for notification fallback)
             if conv_type == 1:
@@ -495,6 +499,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     source_type="talk",
                     surface="talk",
                     channel_token=conversation_token,
+                    channel_name=conv_names.get(conversation_token),
                     is_group_chat=is_multi_user,
                     attachments=attachments if attachments else [],
                     platform_message_id=message_id,

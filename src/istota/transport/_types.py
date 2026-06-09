@@ -41,6 +41,7 @@ class IncomingMessage:
     source_type: str                  # "talk" | "email" | ... -> Task.source_type
     surface: str                      # transport.name; the delivery surface
     channel_token: str | None         # -> Task.conversation_token (opaque)
+    channel_name: str | None = None   # room display name (for lazy room registration)
     delivery_token: str | None = None  # -> Task.talk_delivery_token (resolved room)
     platform_message_id: int | None = None      # -> Task.talk_message_id
     reply_to_message_id: int | None = None       # -> Task.reply_to_talk_id
