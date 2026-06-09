@@ -479,6 +479,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         pass
 
     _migrate_unified_rooms(conn)
+    _migrate_scheduled_transcript_cleanup(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -1368,6 +1369,13 @@ class TalkMessage:
     task_id: int | None      # parsed from referenceId
 
 
+# Source types whose turns the canonical `messages` store mirrors as
+# user+assistant pairs — i.e. genuine room conversations. Scheduled/cron,
+# briefing, and heartbeat posts are one-directional bot output (assistant-only,
+# no user turn) and don't count toward the unified-read completeness check.
+_CONVERSATIONAL_SOURCE_TYPES = ("talk", "web")
+
+
 def get_conversation_history(
     conn: sqlite3.Connection,
     conversation_token: str,
@@ -1526,50 +1534,111 @@ def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bo
 
     Cheap (one scalar + one bounded existence probe). Until live assistant
     writes land for every completed turn, this returns False and the caller
-    falls back to `tasks` — no staleness during rollout."""
+    falls back to `tasks` — no staleness during rollout.
+
+    Scoped to *conversational* source types (talk/web). The dual-read protects
+    conversational history from going stale; scheduled/cron and briefing posts
+    aren't conversational turns, are never re-paired into history by
+    `_conversation_history_from_messages` (they carry no user row), and a silent
+    NO_ACTION tick deliberately has no message row at all. Letting them gate the
+    caught-up check would peg any room with a cron job to the `tasks` path
+    forever (and re-expose the dormant-room history loss once those tasks are
+    GC'd). `_CONVERSATIONAL_SOURCE_TYPES` keys the check on the turns the store
+    actually mirrors as user+assistant pairs."""
+    placeholders = ", ".join("?" for _ in _CONVERSATIONAL_SOURCE_TYPES)
+    types = tuple(_CONVERSATIONAL_SOURCE_TYPES)
     row = conn.execute(
-        "SELECT MAX(id) AS mx FROM tasks "
-        "WHERE conversation_token = ? AND status = 'completed' AND result IS NOT NULL",
-        (conversation_token,),
+        f"SELECT MAX(id) AS mx FROM tasks "
+        f"WHERE conversation_token = ? AND status = 'completed' "
+        f"AND result IS NOT NULL AND source_type IN ({placeholders})",
+        (conversation_token, *types),
     ).fetchone()
     latest = row["mx"] if row else None
     if latest is None:
-        return False  # no completed history -> let the tasks path return []
-    # Any completed turn missing its assistant row -> not caught up -> fall back.
+        return False  # no completed conversational history -> tasks path returns []
+    # Any completed conversational turn missing its assistant row -> not caught
+    # up -> fall back.
     gap = conn.execute(
-        "SELECT 1 FROM tasks t "
-        "WHERE t.conversation_token = ? AND t.status = 'completed' "
-        "  AND t.result IS NOT NULL "
-        "  AND NOT EXISTS ("
-        "    SELECT 1 FROM messages m "
-        "    WHERE m.room_token = t.conversation_token "
-        "      AND m.task_id = t.id AND m.role = 'assistant'"
-        "  ) LIMIT 1",
-        (conversation_token,),
+        f"SELECT 1 FROM tasks t "
+        f"WHERE t.conversation_token = ? AND t.status = 'completed' "
+        f"  AND t.result IS NOT NULL AND t.source_type IN ({placeholders}) "
+        f"  AND NOT EXISTS ("
+        f"    SELECT 1 FROM messages m "
+        f"    WHERE m.room_token = t.conversation_token "
+        f"      AND m.task_id = t.id AND m.role = 'assistant'"
+        f"  ) LIMIT 1",
+        (conversation_token, *types),
     ).fetchone()
     return gap is None
+
+
+def scheduled_assistant_body(heartbeat_silent: bool, result: str) -> str | None:
+    """The transcript body for a scheduled (cron) job's assistant turn, or None
+    when the turn was never delivered and must be omitted.
+
+    Mirrors the scheduler's silent ACTION/NO_ACTION handling so a transcript
+    (live write or backfill) matches what was actually posted: a silent job's
+    `NO_ACTION:` tick posted nothing (omit), an `ACTION: X` posted "X" (store
+    stripped), anything without a prefix posted as-is (fail-safe). Non-silent
+    jobs post their raw result unchanged. Single source of truth — the scheduler
+    delivery path (`_strip_action_prefix`) delegates here."""
+    if not heartbeat_silent:
+        return result
+    if result.startswith("ACTION:"):
+        return result[len("ACTION:"):].strip()
+    idx = result.find("\nACTION:")
+    if idx != -1:
+        return result[idx + len("\nACTION:"):].strip()
+    if "NO_ACTION:" in result:
+        return None
+    return result
+
+
+def _backfill_turns_for(conn: sqlite3.Connection, where: str, params: tuple) -> int:
+    """Shared transcript backfill: fold completed `tasks` rows matching `where`
+    into the canonical `messages` store. One user row (body=prompt) + one
+    assistant row (body=result) per conversational turn; a *scheduled* job
+    contributes the assistant post only, body-normalized via
+    `scheduled_assistant_body` (its synthetic cron prompt was never
+    user-authored, so no user row, and a NO_ACTION tick is omitted entirely).
+    Idempotent via the partial unique index (room_token, origin_surface, role,
+    task_id). Returns rows inserted."""
+    rows = conn.execute(
+        f"SELECT id, conversation_token, prompt, result, source_type, "
+        f"heartbeat_silent, created_at FROM tasks "
+        f"WHERE {where} AND status = 'completed' AND result IS NOT NULL",
+        params,
+    ).fetchall()
+    inserted = 0
+    for r in rows:
+        token = r["conversation_token"]
+        st = r["source_type"]
+        created = r["created_at"]
+        if st == "scheduled":
+            body = scheduled_assistant_body(bool(r["heartbeat_silent"]), r["result"])
+            if body is None:
+                continue  # never-delivered NO_ACTION tick
+            inserted += _insert_recovered_message(
+                conn, token, "assistant", body, r["id"], created, origin_surface=st,
+            )
+            continue
+        inserted += _insert_recovered_message(
+            conn, token, "user", r["prompt"], r["id"], created, origin_surface=st,
+        )
+        inserted += _insert_recovered_message(
+            conn, token, "assistant", r["result"], r["id"], created, origin_surface=st,
+        )
+    return inserted
 
 
 def backfill_room_messages_from_tasks(
     conn: sqlite3.Connection, conversation_token: str,
 ) -> int:
-    """Populate the canonical `messages` store from completed `tasks` for a
-    room token: one user row (body=prompt) + one assistant row (body=result)
-    per completed turn, sharing the task_id. Idempotent via the partial unique
-    index (room_token, origin_surface, role, task_id). Returns rows inserted."""
-    inserted = 0
-    for role, col in (("user", "prompt"), ("assistant", "result")):
-        cur = conn.execute(
-            f"INSERT OR IGNORE INTO messages "
-            f"(room_token, role, body, task_id, origin_surface, created_at) "
-            f"SELECT conversation_token, ?, {col}, id, source_type, created_at "
-            f"FROM tasks "
-            f"WHERE conversation_token = ? AND status = 'completed' "
-            f"AND result IS NOT NULL",
-            (role, conversation_token),
-        )
-        inserted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-    return inserted
+    """Populate the canonical `messages` store from completed `tasks` for one
+    room token. See `_backfill_turns_for` for the per-turn shape."""
+    return _backfill_turns_for(
+        conn, "conversation_token = ?", (conversation_token,),
+    )
 
 
 def backfill_room_messages_from_talk_cache(
@@ -1658,16 +1727,16 @@ def backfill_room_messages_from_talk_cache(
 
 def _insert_recovered_message(
     conn: sqlite3.Connection, token: str, role: str, body: str,
-    task_id: int, created_at: str | None,
+    task_id: int, created_at: str | None, origin_surface: str = "talk",
 ) -> int:
     """INSERT OR IGNORE one recovered turn message with an explicit historical
-    `created_at`. Idempotent via the (room_token, role, task_id) unique index.
-    Returns 1 if a row was inserted, else 0."""
+    `created_at`. Idempotent via the (room_token, origin_surface, role,
+    task_id) unique index. Returns 1 if a row was inserted, else 0."""
     cur = conn.execute(
         "INSERT OR IGNORE INTO messages "
         "(room_token, role, body, task_id, origin_surface, created_at) "
-        "VALUES (?, ?, ?, ?, 'talk', COALESCE(?, datetime('now')))",
-        (token, role, body, task_id, created_at),
+        "VALUES (?, ?, ?, ?, ?, COALESCE(?, datetime('now')))",
+        (token, role, body, task_id, origin_surface, created_at),
     )
     return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
@@ -2559,17 +2628,11 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
         # Backfill the canonical messages store (user+assistant turns) from
         # completed tasks for every registered room, so the unified history
         # reader has the historical backlog. Live writes (Stage 3/4) keep it
-        # current going forward.
-        for role, col in (("user", "prompt"), ("assistant", "result")):
-            conn.execute(
-                f"INSERT OR IGNORE INTO messages "
-                f"(room_token, role, body, task_id, origin_surface, created_at) "
-                f"SELECT conversation_token, ?, {col}, id, source_type, created_at "
-                f"FROM tasks "
-                f"WHERE conversation_token IN (SELECT token FROM rooms) "
-                f"AND status = 'completed' AND result IS NOT NULL",
-                (role,),
-            )
+        # current going forward. Scheduled-job turns are normalized (assistant
+        # post only, NO_ACTION ticks omitted) — see `_backfill_turns_for`.
+        _backfill_turns_for(
+            conn, "conversation_token IN (SELECT token FROM rooms)", (),
+        )
 
     ok = True
     for step in (_fold_web_rooms, _fold_talk_rooms, _fold_web_messages, _backfill_turns):
@@ -2584,6 +2647,55 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT OR IGNORE INTO _migration_state (name) VALUES ('unified_rooms_v1')"
         )
+
+
+def _migrate_scheduled_transcript_cleanup(conn: sqlite3.Connection) -> None:
+    """Repair scheduled-job rows the earlier blanket backfill folded into the
+    canonical `messages` store verbatim (ISSUE-133 follow-up).
+
+    `_migrate_unified_rooms._backfill_turns` originally copied every completed
+    task's raw `result` into `messages`, so silent location/monitor crons left a
+    trail of literal `NO_ACTION:` and `ACTION: …`-prefixed assistant rows plus
+    empty synthetic-prompt user rows — all of which the web transcript reader
+    renders (it shows `origin_surface='scheduled'` assistant posts). This brings
+    the historical rows in line with what was actually delivered:
+
+      * drop scheduled `user` rows (the cron prompt was never user-authored),
+      * drop scheduled `NO_ACTION:` assistant rows (never posted anywhere),
+      * strip the `ACTION:` prefix from the rest.
+
+    Markered (`scheduled_transcript_cleanup_v1`); idempotent regardless. No-op on
+    fresh installs (nothing matches)."""
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'scheduled_transcript_cleanup_v1'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already:
+        return
+    try:
+        conn.execute(
+            "DELETE FROM messages WHERE origin_surface = 'scheduled' AND role = 'user'"
+        )
+        conn.execute(
+            "DELETE FROM messages WHERE origin_surface = 'scheduled' "
+            "AND role = 'assistant' AND body LIKE 'NO_ACTION:%'"
+        )
+        conn.execute(
+            "UPDATE messages SET body = TRIM(SUBSTR(body, 8)) "
+            "WHERE origin_surface = 'scheduled' AND role = 'assistant' "
+            "AND body LIKE 'ACTION:%'"
+        )
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return  # fresh install, messages not created yet
+        logger.warning("scheduled transcript cleanup failed: %s", e)
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) "
+        "VALUES ('scheduled_transcript_cleanup_v1')"
+    )
 
 
 def list_tasks(
