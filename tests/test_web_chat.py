@@ -501,7 +501,9 @@ class TestChatMessagesApi:
         with db.get_db(mod._config.db_path) as c:
             task = db.get_task(c, body["task_id"])
         assert task.source_type == "web"
-        assert task.output_target == "web"
+        # output_target="room" fans out by the room's live bindings (a web-only
+        # room resolves to just the web stream, same as the old "web").
+        assert task.output_target == "room"
         assert task.conversation_token == room["token"]
 
     async def test_empty_text_rejected(self, chat_client):
@@ -539,9 +541,12 @@ class TestChatMessagesApi:
         from istota.web_app import _config
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)
+        # Bot-delivered notifications now land in the canonical messages store
+        # (role='system') — the same lane WebTransport.deliver writes.
         with db.get_db(_config.db_path) as conn:
-            db.add_web_chat_message(
-                conn, "alice", room["token"], "disk almost full", title="Alert",
+            db.add_message(
+                conn, room["token"], role="system", body="disk almost full",
+                origin_surface="web", title="Alert",
             )
         data = (await chat_client.get(
             f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
