@@ -538,6 +538,65 @@ class _CP:
     returncode = 0
 
 
+class TestPromptSubmission:
+    """The bracketed-paste race: _inject_prompt must confirm a turn started and
+    resend Enter only if it didn't (never blindly — no stray empty Enter)."""
+
+    def test_turn_started_via_userpromptsubmit(self, tmp_path):
+        s = tmp_path / "started.json"
+        s.write_text(json.dumps({"hook_event_name": "UserPromptSubmit"}))
+        assert TmuxClaudeBrain._turn_started(s) is True
+
+    def test_turn_started_via_transcript_exists(self, tmp_path):
+        tr = tmp_path / "t.jsonl"
+        tr.write_text("{}")
+        s = tmp_path / "started.json"
+        s.write_text(json.dumps({"hook_event_name": "SessionStart",
+                                 "transcript_path": str(tr)}))
+        assert TmuxClaudeBrain._turn_started(s) is True
+
+    def test_turn_not_started_sessionstart_no_transcript(self, tmp_path):
+        s = tmp_path / "started.json"
+        s.write_text(json.dumps({"hook_event_name": "SessionStart",
+                                 "transcript_path": str(tmp_path / "missing.jsonl")}))
+        assert TmuxClaudeBrain._turn_started(s) is False
+        # missing sentinel → not started
+        assert TmuxClaudeBrain._turn_started(tmp_path / "nope.json") is False
+
+    def test_inject_submits_once_when_confirmed(self, monkeypatch, tmp_path):
+        brain = TmuxClaudeBrain()
+        import istota.brain.tmux_claude as mod
+        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        keys = []
+        monkeypatch.setattr(brain, "_tmux", lambda *a: keys.append(a) or _CP())
+        # Turn starts immediately after the first Enter.
+        monkeypatch.setattr(brain, "_turn_started", lambda s: True)
+        brain._inject_prompt("s", tmp_path / "p.txt", tmp_path / "started.json")
+        enters = [a for a in keys if a[:1] == ("send-keys",) and a[-1] == "Enter"]
+        assert len(enters) == 1  # exactly one Enter — no stray resend
+
+    def test_inject_resends_until_turn_starts(self, monkeypatch, tmp_path):
+        brain = TmuxClaudeBrain()
+        import istota.brain.tmux_claude as mod
+        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        # monotonic advances so the per-attempt confirm window expires quickly.
+        ticks = iter([float(i) for i in range(0, 200)])
+        monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks, 999.0))
+        keys = []
+        monkeypatch.setattr(brain, "_tmux", lambda *a: keys.append(a) or _CP())
+        # Not started for the first two attempts, then started.
+        calls = {"n": 0}
+
+        def started(s):
+            calls["n"] += 1
+            return calls["n"] > 6  # a few confirm-polls fail, then succeeds
+
+        monkeypatch.setattr(brain, "_turn_started", started)
+        brain._inject_prompt("s", tmp_path / "p.txt", tmp_path / "started.json")
+        enters = [a for a in keys if a[:1] == ("send-keys",) and a[-1] == "Enter"]
+        assert len(enters) >= 2  # resent at least once
+
+
 class TestRootSandboxEnv:
     """Under root the interactive TUI refuses --dangerously-skip-permissions
     unless IS_SANDBOX=1 (the container-is-the-sandbox escape hatch)."""
