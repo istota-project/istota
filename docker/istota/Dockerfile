@@ -52,6 +52,13 @@ COPY config/ config/
 # Install all deps (core + all optional extras)
 RUN uv sync --frozen --no-dev --extra all
 
+# Put the venv bin dir on the default PATH so the console scripts (istota,
+# istota-scheduler, istota-skill, money) resolve from any shell or subprocess
+# without relying on `uv run` or a per-process PATH injection surviving the
+# interactive TUI's profile re-initialization (the tmux_claude brain otherwise
+# sees "istota-skill: command not found" when it shells out).
+ENV PATH="/app/.venv/bin:${PATH}"
+
 # SvelteKit static build (from web-builder stage)
 COPY --from=web-builder /app/web/build /app/web/build
 
