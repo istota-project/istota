@@ -101,6 +101,7 @@ class SentEmail:
     conversation_token: str | None
     sent_at: str
     talk_delivery_token: str | None = None  # Originating task's resolved Talk room
+    origin_target: str | None = None  # output_target descriptor of the originating surface
 
 
 @dataclass
@@ -184,6 +185,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # thread-match follow-ups can deliver to the right channel without re-resolving.
     for col, col_type in [
         ("talk_delivery_token", "TEXT"),
+        ("origin_target", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE sent_emails ADD COLUMN {col} {col_type}")
@@ -1858,18 +1860,21 @@ def record_sent_email(
     references: str | None = None,
     conversation_token: str | None = None,
     talk_delivery_token: str | None = None,
+    origin_target: str | None = None,
 ) -> int:
     """Record an outbound email for thread matching."""
     cursor = conn.execute(
         """
         INSERT INTO sent_emails
             (user_id, task_id, message_id, to_addr, subject, thread_id,
-             in_reply_to, "references", conversation_token, talk_delivery_token)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             in_reply_to, "references", conversation_token, talk_delivery_token,
+             origin_target)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (user_id, task_id, message_id, to_addr, subject, thread_id,
-         in_reply_to, references, conversation_token, talk_delivery_token),
+         in_reply_to, references, conversation_token, talk_delivery_token,
+         origin_target),
     )
     return cursor.fetchone()[0]
 
@@ -1883,7 +1888,7 @@ def find_sent_email_by_message_id(
         """
         SELECT id, user_id, task_id, message_id, to_addr, subject, thread_id,
                in_reply_to, "references", conversation_token, sent_at,
-               talk_delivery_token
+               talk_delivery_token, origin_target
         FROM sent_emails
         WHERE message_id = ?
         """,
@@ -1905,6 +1910,7 @@ def find_sent_email_by_message_id(
         conversation_token=row["conversation_token"],
         sent_at=row["sent_at"],
         talk_delivery_token=row["talk_delivery_token"] if "talk_delivery_token" in row.keys() else None,
+        origin_target=row["origin_target"] if "origin_target" in row.keys() else None,
     )
 
 
@@ -1924,7 +1930,7 @@ def find_sent_email_by_references(
         f"""
         SELECT id, user_id, task_id, message_id, to_addr, subject, thread_id,
                in_reply_to, "references", conversation_token, sent_at,
-               talk_delivery_token
+               talk_delivery_token, origin_target
         FROM sent_emails
         WHERE message_id IN ({placeholders})
         ORDER BY sent_at DESC
@@ -1948,6 +1954,7 @@ def find_sent_email_by_references(
         conversation_token=row["conversation_token"],
         sent_at=row["sent_at"],
         talk_delivery_token=row["talk_delivery_token"] if "talk_delivery_token" in row.keys() else None,
+        origin_target=row["origin_target"] if "origin_target" in row.keys() else None,
     )
 
 

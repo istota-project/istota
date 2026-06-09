@@ -106,6 +106,36 @@ def parse_output_target(spec: str | None) -> list[Destination]:
     return out
 
 
+def origin_descriptor(task: "db.Task") -> str | None:
+    """The ``output_target`` descriptor that routes a follow-up back to the
+    surface this task came from, stored on ``sent_emails`` at send time and read
+    at inbound-reply time with zero re-resolution.
+
+    Resolves the task's primary surface via ``_surface_for_source_type`` and
+    emits ``surface:channel`` (or bare ``surface`` when no durable channel is
+    known — delivery resolves it, e.g. a Talk DM). Returns ``None`` for surfaces
+    that cannot anchor a pushed reply: ``repl`` (the terminal is gone by reply
+    time) and ``email`` (email is the mirror leg, not an origin). A ``None``
+    caller falls back to the legacy ``talk,email`` branch. Never raises — an
+    unexpected ``source_type`` resolves to the ``talk`` surface like any other.
+    """
+    from ..email_support import is_synthetic_email_thread_token
+    from .registry import _surface_for_source_type
+
+    surface = _surface_for_source_type(task.source_type)
+    if surface == "web":
+        tok = task.conversation_token
+        return f"web:{tok}" if tok else "web"
+    if surface == "talk":
+        tok = task.talk_delivery_token or task.conversation_token
+        # A synthetic email-thread token is not a real Talk room — don't echo it.
+        if tok and not is_synthetic_email_thread_token(tok):
+            return f"talk:{tok}"
+        return "talk"  # bare talk → resolve_target / DM at delivery
+    # repl (no durable push target) and email (the mirror leg) are not origins.
+    return None
+
+
 def plan_has_surface(plan: list[Destination], surface: str) -> bool:
     """True if any destination in ``plan`` targets ``surface``. The replacement
     for the old ``target in ("talk", "both", "all")`` string checks."""

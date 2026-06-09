@@ -412,6 +412,7 @@ CREATE TABLE IF NOT EXISTS sent_emails (
     "references" TEXT,                 -- RFC 5322 References thread chain
     conversation_token TEXT,           -- Talk conversation where send was requested
     talk_delivery_token TEXT,          -- Originating task's resolved Talk room (real, not synthetic)
+    origin_target TEXT,                -- output_target descriptor of the originating surface (web:tok / talk:tok)
     sent_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
 );
