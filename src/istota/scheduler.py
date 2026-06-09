@@ -1487,6 +1487,28 @@ def process_one_task(
                 task, config, user_resources, dry_run=dry_run, event_writer=event_writer,
             )
 
+    # Duplicate-execution guard (ISSUE-112 follow-up). A slow-but-alive worker
+    # whose heartbeat lapsed past the stuck threshold can have its task reclaimed
+    # and re-run by a second worker while it's still executing — two answers for
+    # one task id. We can't key on locked_by: get_worker_id() has no slot, so two
+    # workers in the same process for the same user share an id. attempt_count is
+    # the reliable token — the stuck-running release bumps it on every reclaim. If
+    # the row's attempt_count has advanced past what we claimed, another worker
+    # superseded us; abandon our result rather than deliver a duplicate or
+    # double-apply deferred ops. The superseding worker owns delivery + the
+    # terminal event frame (its EventWriter resumes seq), so we just bail.
+    if not dry_run:
+        with db.get_db(config.db_path) as conn:
+            _current = db.get_task(conn, task_id)
+        if _current is None or _current.attempt_count != task.attempt_count:
+            logger.warning(
+                "Task %d superseded mid-run (claimed attempt=%s, now=%s) — "
+                "discarding this worker's result without delivering",
+                task_id, task.attempt_count,
+                _current.attempt_count if _current else "deleted",
+            )
+            return (task_id, False)
+
     # Resolve the delivery plan: the single source of truth for where this
     # task's result goes. Replaces the hardcoded output_target fan-out — the
     # plan parses task.output_target descriptors (talk/email/ntfy/istota_file/
