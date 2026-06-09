@@ -255,7 +255,7 @@ a:hover { color: var(--accent-hover); }
 
 :root[data-theme='light'] .markdown code,
 :root[data-theme='light'] .markdown pre {
-	background: #ececef;
+	background: #f3f3f5;
 	color: #1a1a1a;
 }
 

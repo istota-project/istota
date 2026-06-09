@@ -221,9 +221,12 @@
 		--text-primary: #cfcfcf;
 	}
 	/* Light theme: the chat-scoped soften must flip to a soft *dark* text,
-	   otherwise the #cfcfcf above is unreadable on the light pane. */
+	   otherwise the #cfcfcf above is unreadable on the light pane. A white
+	   message area (the composer paints its own --surface-card, so the input
+	   section keeps the soft-gray fill). */
 	:global(:root[data-theme='light']) .chat-pane {
 		--text-primary: #2a2a2e;
+		background: #ffffff;
 	}
 	.messages {
 		flex: 1;

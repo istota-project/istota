@@ -171,6 +171,11 @@
 		gap: 0.3rem;
 	}
 
+	/* Light theme — lighter-gray chip fill (cascades into the .active gradient
+	   below, which reads the same --surface-badge). */
+	:global(:root[data-theme='light']) .activity {
+		--surface-badge: #eeeef0;
+	}
 	/* Light theme — the active shimmer washes out on a light surface; use a
 	   subtle dark tint instead. */
 	:global(:root[data-theme='light']) .activity.active {
