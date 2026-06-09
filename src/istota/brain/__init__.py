@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # validates override targets against this set so a typo in
 # ``[brain.source_type_overrides]`` falls back to the base kind instead of
 # raising and wedging the task.
-KNOWN_BRAIN_KINDS = frozenset({"claude_code", "native"})
+KNOWN_BRAIN_KINDS = frozenset({"claude_code", "native", "tmux_claude"})
 
 
 def make_brain(brain_config: BrainConfig) -> Brain:
@@ -62,6 +62,10 @@ def make_brain(brain_config: BrainConfig) -> Brain:
         from .native import NativeBrain
 
         return NativeBrain(brain_config.native)
+    if kind == "tmux_claude":
+        from .tmux_claude import TmuxClaudeBrain
+
+        return TmuxClaudeBrain()
     raise ValueError(f"Unknown brain kind: {kind!r}")
 
 
