@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: Fix duplicate task execution after stuck-running reclaim
+
+A failed/interrupted task could be claimed and executed by two workers at once — one task id, two concurrent runs, two different answers delivered. Reproduced from prod logs: a task left `running` by a scheduler restart (stale `last_heartbeat`) was, on the retry tick, picked up by two foreground workers spawned in the same dispatch pass; both produced a result ~2s apart.
+
+**Root cause.** `claim_task` never reset a task's liveness fields when (re)claiming it. The stuck-running *release* step set `started_at=NULL` but left the dead worker's `last_heartbeat` on the row, and the *claim* step touched neither. So after worker A reclaimed the task and set it `running`, the `_STUCK_RUNNING_PREDICATE`'s first clause (`last_heartbeat IS NOT NULL AND last_heartbeat < now-5min`) was *still* true until A's first heartbeat ping landed — a multi-second window in which worker B's `claim_task` re-ran the same stuck-running recovery, re-released the task, and re-claimed it. Both executed. The ISSUE-112 heartbeat-liveness reclaim is the latent cause; the phase-2 idle-recheck/dispatch work (commit c281804, same day) is what made two workers call `claim_task` near-simultaneously and expose the window.
+
+**Fix.** Give every claim a clean liveness slate: the atomic claim now sets `last_heartbeat = NULL, started_at = NULL`, and the stuck-running release also clears `last_heartbeat` (both the inline `claim_task` recovery and the standalone `fail_stuck_locked_running_tasks` maintenance pass). `update_task_status('running')` sets `started_at=now` immediately after the claim, so the predicate's fallback (`last_heartbeat IS NULL AND started_at < now-5min`) reads fresh — no window for a second claimer. claim_task atomicity (UPDATE…RETURNING) already prevents two workers claiming the *same pending row*; the bug was purely the stale heartbeat re-qualifying an already-claimed task as stuck.
+
+Deterministic regression test (`TestReclaimedTaskNotDoubleClaimed`): stage a stale-running task, claim it (A), transition to running, then a second claim (B) must return None / a different id. Verified it fails without the fix and passes with it. Full suite green (5964).
+
+**Files modified:**
+- `src/istota/db.py` - `claim_task` claim + both stuck-running release sites clear `last_heartbeat`/`started_at`
+- `tests/test_db.py` - `TestReclaimedTaskNotDoubleClaimed`
+
 ## 2026-06-09: Quiet subprocess config-load log noise + namespace-correct admins path
 
 Cleanup prompted by a burst of `secrets import skipped: ISTOTA_SECRET_KEY not set` and `admins_file_default_missing path=/etc/istota/admins (ISTOTA_ADMINS_FILE not set)` INFO lines on the namespace deploy. Traced to the in-process `feeds`/`money` skill facades calling `load_config()` when run as subprocesses (`python -m istota.skills.*` via `_execute_skill_task`): the subprocess env is `build_clean_env`, which carries neither `ISTOTA_SECRET_KEY` (stripped by design — the master-key boundary) nor `ISTOTA_ADMINS_FILE` (not propagated). So `load_config` → `load_admin_users()` fell back to the hardcoded `/etc/istota/admins` and `_migrate_obsolete_resources` → `import_from_user_configs` found no key, each logging at INFO. Pre-existing for a month (the secrets half landed with the modules refactor, 03a240c); not a regression from the scheduler-stats work — just newly visible because the operator was reading the logs for Stage 5.

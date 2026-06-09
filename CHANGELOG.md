@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web chat picks up a quick follow-up message much faster. A message sent moments after a reply is now claimed within about half a second instead of waiting several seconds for the idle worker's poll cycle.
 
 ### Fixed
+- A task interrupted by a scheduler restart could be picked up and run by two workers at once on retry, producing two different answers for the same request. Reclaiming a stuck task now resets its liveness state so a second worker can't grab it mid-run.
 - Quieted repetitive startup log noise from background skill subprocesses (feeds/money) that loaded config without the secret key or admins-file path. These expected, harmless notices are now DEBUG, and the admins-file path is passed through so it resolves correctly on custom-namespace deployments.
 - Light mode: the dashboard feature cards no longer render with dark backgrounds and unreadable titles, and the mobile slide-out sidebar tab now matches the light theme.
 - When two messages are queued in the same chat room, the bot no longer briefly spins up a redundant worker that just churns the database while waiting for the first to finish.
