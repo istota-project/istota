@@ -3005,6 +3005,17 @@ def get_users_with_pending_bg_queue_tasks(conn: sqlite3.Connection) -> list[str]
     return [row[0] for row in cursor.fetchall()]
 
 
+def count_running_tasks(conn: sqlite3.Connection) -> int:
+    """Count all tasks currently in the ``running`` state.
+
+    Process-wide denominator for the scheduler_stats health line — a thread
+    or fd spike with zero running tasks is a leak, the same spike during
+    heavy task processing is expected.
+    """
+    cursor = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'")
+    return cursor.fetchone()[0]
+
+
 def count_pending_tasks_for_user_queue(
     conn: sqlite3.Connection, user_id: str, queue: str,
 ) -> int:

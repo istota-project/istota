@@ -23,6 +23,11 @@ from zoneinfo import ZoneInfo
 from croniter import croniter
 
 logger = logging.getLogger("istota.scheduler")
+# Dedicated logger so operators can isolate the periodic health line from the
+# noisy general scheduler logger (`journalctl … | grep scheduler_stats`).
+_SCHEDULER_STATS_LOGGER = logging.getLogger("istota.scheduler.stats")
+# Warn at most once when psutil is unavailable rather than on every emit.
+_psutil_unavailable_warned = False
 
 from . import db
 from .brain import make_brain
@@ -2235,6 +2240,79 @@ def check_db_health(config: Config) -> list[CheckReport]:
     return reports
 
 
+def _emit_scheduler_stats(config: Config, pool: "WorkerPool | None") -> None:
+    """Emit one ``scheduler_stats`` health line for the long-running daemon.
+
+    Process-wide signal designed to surface resource leaks (the kind that ate
+    the host in ISSUE-101) within single-digit minutes instead of days. Shape
+    is space-separated ``key=value`` pairs, matching the devbox-proxy audit
+    format, on the dedicated ``istota.scheduler.stats`` logger::
+
+        scheduler_stats threads=42 fds=87 rss_mb=312 tasks_running=2 workers_active=3
+
+    Cheap (sub-millisecond) and defensive: every collector degrades rather than
+    raising. psutil-derived fields (fds, rss_mb) are omitted when psutil is
+    unavailable (a single startup-style WARN, not one per emit); a DB hiccup
+    yields ``tasks_running=?``; a missing pool yields ``workers_active=0``. The
+    whole body is wrapped so a stats failure can never kill the daemon loop.
+    """
+    global _psutil_unavailable_warned
+    try:
+        parts = [f"threads={threading.active_count()}"]
+
+        # fds + rss_mb via psutil. Each field is collected independently and
+        # omitted on *any* failure (not just ImportError) — the line must still
+        # emit. This matters most under fd exhaustion (the ISSUE-101 class):
+        # psutil.num_fds() does os.listdir("/proc/self/fd"), which raises
+        # OSError(EMFILE) precisely when the leak this line exists to catch is
+        # at its worst. Dropping the whole line there would blind the operator
+        # exactly when threads= is the signal they need.
+        proc = None
+        try:
+            import psutil  # noqa: PLC0415  -- optional dep, lazy by design
+
+            proc = psutil.Process()
+        except ImportError:
+            if not _psutil_unavailable_warned:
+                logger.warning(
+                    "scheduler_stats: psutil unavailable — "
+                    "omitting fds/rss_mb from the health line",
+                )
+                _psutil_unavailable_warned = True
+        except Exception:  # noqa: BLE001  -- AccessDenied / NoSuchProcess etc.
+            pass
+
+        if proc is not None:
+            try:
+                parts.append(f"fds={proc.num_fds()}")
+            except Exception:  # noqa: BLE001  -- e.g. EMFILE under fd exhaustion
+                pass
+            try:
+                parts.append(f"rss_mb={int(proc.memory_info().rss / 1024 / 1024)}")
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Running-task denominator. Never let a locked / mid-repair DB abort
+        # the emit — degrade to '?' instead.
+        try:
+            with db.get_db(config.db_path) as conn:
+                running = db.count_running_tasks(conn)
+            parts.append(f"tasks_running={running}")
+        except Exception:  # noqa: BLE001
+            parts.append("tasks_running=?")
+
+        workers_active = pool.active_count if pool is not None else 0
+        parts.append(f"workers_active={workers_active}")
+
+        _SCHEDULER_STATS_LOGGER.info("scheduler_stats " + " ".join(parts))
+    except Exception as exc:  # noqa: BLE001  -- stats must never crash the loop
+        # Route to the stats logger so a consumer filtering by logger name (not
+        # just grepping the message) sees the gap rather than silent absence.
+        _SCHEDULER_STATS_LOGGER.warning(
+            "scheduler_stats emit failed: %s", exc, exc_info=True,
+        )
+
+
 def run_cleanup_checks(config: Config) -> None:
     """
     Run all cleanup checks for scheduler robustness.
@@ -3295,6 +3373,9 @@ def run_daemon(config: Config) -> None:
     last_db_health_check = 0.0
     last_status_write = 0.0
     last_trigger_check = 0.0
+    # Init to "now" (not 0.0) so the first stats line fires after one full
+    # interval — avoids a noisy emit during startup while state is hydrating.
+    last_stats_check = time.time()
 
     while not _shutdown_requested:
         # Dispatch worker threads first — minimizes latency for pending tasks
@@ -3430,6 +3511,15 @@ def run_daemon(config: Config) -> None:
             except Exception as e:  # noqa: BLE001
                 logger.error("Error running DB health checks: %s", e)
             last_db_health_check = now
+
+        # Emit the periodic process-health line (threads / fds / rss /
+        # running-tasks / active-workers). interval == 0 disables it.
+        if (
+            config.scheduler.scheduler_stats_interval
+            and now - last_stats_check >= config.scheduler.scheduler_stats_interval
+        ):
+            _emit_scheduler_stats(config, pool)
+            last_stats_check = now
 
         # Check heartbeats periodically
         if now - last_heartbeat_check >= config.scheduler.heartbeat_check_interval:

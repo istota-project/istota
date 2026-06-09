@@ -241,6 +241,11 @@ email_poll_interval = 60
 briefing_check_interval = 60
 # Seconds between polling TASKS.md files for new tasks
 tasks_file_poll_interval = 30
+# Seconds between scheduler_stats health-line emits (threads / fds / rss /
+# running-tasks / active-workers). One key=value INFO line per interval on the
+# istota.scheduler.stats logger — grep it in journalctl to catch resource leaks
+# early. 0 disables the emit.
+scheduler_stats_interval = 60
 
 # Progress / event streaming.
 # Every task produces a typed, persisted event stream (the task_events table)

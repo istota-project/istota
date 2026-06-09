@@ -24,6 +24,7 @@ def run_daemon(config: Config) -> None
    - Run cleanup checks (every `briefing_check_interval`)
    - Check heartbeats (every `heartbeat_check_interval`)
    - Sweep SQLite DBs (framework + per-user feeds/health/location/money) with `PRAGMA quick_check` + self-healing `REINDEX` (every `db_health_check_interval`, default 24h; runs immediately on the first tick of the daemon so a fresh deploy surfaces latent index corruption without waiting a day)
+   - Emit the `scheduler_stats` health line (every `scheduler_stats_interval`, default 60s; first emit after one full interval; `0` disables)
    - Check invoice schedules (every `briefing_check_interval`)
    - `pool.dispatch()`
    - Sleep `poll_interval`
@@ -179,6 +180,7 @@ class UserWorker(threading.Thread):
 | TASKS.md | `poll_all_tasks_files()` (tasks_file_poller.py) | `tasks_file_poll_interval` | `istota_file_tasks` |
 | Heartbeat | `check_heartbeats()` (heartbeat.py) | `heartbeat_check_interval` | `heartbeat_state` |
 | DB health | `check_db_health()` → `db_health.check_and_repair()` | `db_health_check_interval` | — (logs only) |
+| Scheduler stats | `_emit_scheduler_stats()` (daemon-only) | `scheduler_stats_interval` | — (logs only) |
 | Shared files | `discover_and_organize_shared_files()` (shared_file_organizer.py) | `shared_file_check_interval` | `user_resources` |
 | Briefings | `check_briefings()` | `briefing_check_interval` | `briefing_state` |
 | Scheduled jobs | `check_scheduled_jobs()` | `briefing_check_interval` | `scheduled_jobs` |
@@ -212,6 +214,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `shared_file_check_interval` | 120s | Shared file organizer |
 | `heartbeat_check_interval` | 60s | Heartbeat checks |
 | `db_health_check_interval` | 86400s (24h) | SQLite `quick_check` + `REINDEX` self-heal across framework + per-user feeds/health/location/money DBs (covers Nextcloud-mount FUSE/network induced index corruption) |
+| `scheduler_stats_interval` | 60s | One `scheduler_stats threads=… fds=… rss_mb=… tasks_running=… workers_active=…` INFO line per interval on logger `istota.scheduler.stats`, daemon-only. Surfaces resource leaks (ISSUE-101 class) in minutes via `journalctl … \| grep scheduler_stats`. psutil-derived fields (`fds`/`rss_mb`) omitted with a one-time WARN when psutil is unavailable; DB hiccup → `tasks_running=?`. First emit after one full interval. `0` disables. |
 | `worker_idle_timeout` | 10s | Cumulative-idle linger before a worker exits. The worker re-checks for work on a fine cadence for up to this long (continuous emptiness) before exiting; resets whenever a task is claimed. (Pre-phase-2 this was effectively capped to ~one `poll_interval` with a single recheck — the knob is now honoured.) |
 | `worker_idle_poll_interval` | 0.5s | Idle re-check cadence inside `_worker_idle_wait`. A follow-up task is claimed within ~one interval instead of waiting a `poll_interval`. A cheap `count_claimable_tasks_for_user_queue` pre-check gates the `claim_task`. 0 or ≥ `worker_idle_timeout` = legacy single coarse-wait + single-recheck. |
 | `max_foreground_workers` | 5 | Instance-level fg worker cap |

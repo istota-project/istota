@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The scheduler daemon now logs a periodic one-line health summary (thread count, open file descriptors, memory use, running tasks, and active workers) so operators can spot resource leaks early in the logs. The interval is configurable and can be turned off.
+
 ### Changed
 - Web chat picks up a quick follow-up message much faster. A message sent moments after a reply is now claimed within about half a second instead of waiting several seconds for the idle worker's poll cycle.
 
