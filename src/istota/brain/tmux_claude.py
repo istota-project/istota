@@ -44,6 +44,13 @@ _READY_TIMEOUT_S = 30.0
 _READY_POLL_S = 0.4
 # Sentinel poll cadence while waiting for the Stop hook to fire.
 _SENTINEL_POLL_S = 0.4
+# After the Stop hook fires, the assistant's final turn may still be flushing to
+# the transcript JSONL. Poll briefly for the final turn to land before parsing so
+# the execution trace isn't truncated/empty (the result text is unaffected — it
+# comes from the Stop payload). Best-effort: parse whatever exists after the
+# budget rather than block.
+_TRANSCRIPT_SETTLE_S = 3.0
+_TRANSCRIPT_SETTLE_POLL_S = 0.15
 
 # Pane substrings that mean the REPL is ready to accept a prompt. Pinned to
 # claude 2.1.168 during the Stage 1 spike; heuristic, may need updating on CLI
@@ -150,6 +157,27 @@ def parse_transcript(path: Path) -> list[StreamEvent]:
     # assistant records at all) means the turn never produced output.
     events.append(ResultEvent(success=saw_assistant, text=result_text))
     return events
+
+
+def _transcript_has_final_turn(path: Path) -> bool:
+    """True if the transcript's last assistant record ended the turn
+    (``stop_reason == "end_turn"``).
+
+    This is the structural "the final turn is fully written" signal used to
+    settle the post-Stop flush race. The tmux brain runs one prompt per session,
+    so the only ``end_turn`` record is this turn's — when it appears, the turn
+    (and everything before it) has flushed. Returns False on a missing/empty/
+    partially-flushed transcript."""
+    last_assistant = None
+    for rec in _iter_records(path):
+        if rec.get("type") == "assistant":
+            last_assistant = rec
+    if last_assistant is None:
+        return False
+    message = last_assistant.get("message")
+    if not isinstance(message, dict):
+        return False
+    return message.get("stop_reason") == "end_turn"
 
 
 def _iter_records(path: Path):
@@ -290,6 +318,24 @@ class TmuxClaudeBrain:
 
     # --- Result assembly --------------------------------------------------
 
+    def _parse_transcript_settled(self, path: Path) -> list[StreamEvent]:
+        """Parse the transcript once its final turn has flushed.
+
+        The Stop hook fires the sentinel at turn end, but the assistant's final
+        record may still be flushing to the JSONL — reading immediately can yield
+        a truncated or empty trace (the result text is unaffected; it comes from
+        the Stop payload). Poll the structural completion signal for a bounded
+        budget, then parse. Falls through to a best-effort parse if the signal
+        never appears (e.g. a session that ended on a tool_use turn) so the trace
+        degrades rather than blocks."""
+        deadline = time.monotonic() + _TRANSCRIPT_SETTLE_S
+        while not _transcript_has_final_turn(path):
+            if time.monotonic() >= deadline:
+                logger.debug("transcript did not settle within budget: %s", path)
+                break
+            time.sleep(_TRANSCRIPT_SETTLE_POLL_S)
+        return parse_transcript(path)
+
     def _build_result(self, sentinel: Path, req: BrainRequest) -> BrainResult:
         """Read the Stop-hook payload + transcript, emit progress events, and
         compose the BrainResult with the same actions/trace shapes ClaudeCodeBrain
@@ -308,7 +354,7 @@ class TmuxClaudeBrain:
 
         events: list[StreamEvent] = []
         if transcript_path:
-            events = parse_transcript(Path(transcript_path))
+            events = self._parse_transcript_settled(Path(transcript_path))
 
         # Forward whole-turn events to on_progress (no token-level streaming —
         # the Stop hook fires at turn end). ResultEvent is the return value, not

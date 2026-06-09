@@ -22,7 +22,11 @@ from istota.brain._events import (
     ThinkingEvent,
     ToolUseEvent,
 )
-from istota.brain.tmux_claude import parse_transcript
+from istota.brain.tmux_claude import (
+    TmuxClaudeBrain,
+    _transcript_has_final_turn,
+    parse_transcript,
+)
 
 
 def _write(tmp_path, records) -> Path:
@@ -156,6 +160,78 @@ class TestParseTranscriptEdges:
         assert isinstance(events[-1], ResultEvent)
         # No final answer text → empty result, but a ToolUseEvent was emitted.
         assert any(isinstance(e, ToolUseEvent) for e in events)
+
+
+class TestFinalTurnSignal:
+    def test_end_turn_present(self, tmp_path):
+        p = _write(tmp_path, [_assistant([{"type": "text", "text": "done"}])])
+        assert _transcript_has_final_turn(p) is True
+
+    def test_only_tool_use_turn_not_final(self, tmp_path):
+        p = _write(tmp_path, [
+            _assistant([{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+                       stop_reason="tool_use"),
+        ])
+        assert _transcript_has_final_turn(p) is False
+
+    def test_missing_file_not_final(self, tmp_path):
+        assert _transcript_has_final_turn(tmp_path / "nope.jsonl") is False
+
+    def test_empty_file_not_final(self, tmp_path):
+        p = tmp_path / "e.jsonl"
+        p.write_text("")
+        assert _transcript_has_final_turn(p) is False
+
+
+class TestParseSettled:
+    """The post-Stop flush-race guard: poll for the final turn before parsing."""
+
+    def test_returns_immediately_when_already_settled(self, tmp_path, monkeypatch):
+        p = _write(tmp_path, [_assistant([{"type": "text", "text": "hi"}])])
+        import istota.brain.tmux_claude as mod
+        slept = []
+        monkeypatch.setattr(mod.time, "sleep", lambda s: slept.append(s))
+        events = TmuxClaudeBrain()._parse_transcript_settled(p)
+        assert slept == []  # no polling needed
+        assert events[-1].text == "hi"
+
+    def test_polls_until_final_turn_appears(self, tmp_path, monkeypatch):
+        p = _write(tmp_path, [
+            _assistant([{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+                       stop_reason="tool_use"),
+        ])
+        import istota.brain.tmux_claude as mod
+        calls = {"n": 0}
+        real = mod._transcript_has_final_turn
+
+        def flaky(path):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return False
+            # third check: the final turn has now "flushed"
+            p.write_text(p.read_text() + json.dumps(
+                _assistant([{"type": "text", "text": "final"}], msg_id="m2")) + "\n")
+            return real(p)
+
+        monkeypatch.setattr(mod, "_transcript_has_final_turn", flaky)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        events = TmuxClaudeBrain()._parse_transcript_settled(p)
+        assert calls["n"] >= 3
+        assert events[-1].text == "final"
+        assert any(isinstance(e, ToolUseEvent) for e in events)
+
+    def test_best_effort_after_budget(self, tmp_path, monkeypatch):
+        # Final turn never appears (session ended on tool_use); must not hang.
+        p = _write(tmp_path, [
+            _assistant([{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+                       stop_reason="tool_use"),
+        ])
+        import istota.brain.tmux_claude as mod
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        # collapse the budget so the loop exits after one check
+        monkeypatch.setattr(mod, "_TRANSCRIPT_SETTLE_S", 0.0)
+        events = TmuxClaudeBrain()._parse_transcript_settled(p)
+        assert isinstance(events[-1], ResultEvent)  # best-effort parse returned
 
 
 @pytest.mark.skipif(
