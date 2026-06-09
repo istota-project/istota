@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-09: Unified Talk / web-chat room sync (all 7 stages)
+
+Closed the gap between Istota's two interactive surfaces. Talk rooms and web-chat rooms used to be two disjoint namespaces with two disjoint histories — a conversation started in Talk couldn't be picked up in web and vice versa. They now share one surface-independent room model, so any conversation can be continued on either surface with full cross-surface context, one history per room, and one `CHANNEL.md`. Implemented in a worktree, stage by stage with TDD, fast-forwarded onto main after each stage.
+
+**Key changes:**
+- **Data model.** New `rooms` registry (PK = canonical `conversation_token`, `origin` talk|web), `room_bindings` (per-surface ref), `messages` (canonical transcript: role user|assistant|system + title + task_id + origin_surface + external_ids), `room_read_state`, and a `_migration_state` marker. A one-time markered migration folds `web_chat_rooms` → registry + web bindings, `web_chat_messages` → system messages, and distinct Talk tokens → talk rooms, and backfills `messages` from completed tasks. Note: the partial unique index on `messages` keys on `role` too — the spec's `(room_token, origin_surface, task_id)` would have rejected a turn's assistant row (same task_id as its user row).
+- **History unification.** `get_conversation_history` repointed at `messages` with re-pairing (user+assistant rows keyed on a shared `task_id` fold back into the `(prompt, result)` shape callers expect; `id` stays the task id). A self-healing dual-read serves `messages` only when caught up to the latest completed task, else falls back to the legacy `tasks` query — so context never goes stale mid-rollout. Talk keeps its metadata-rich `_build_talk_api_context` for Talk-origin context.
+- **Inbound.** Extracted `record_inbound` as the single inbound choke point (resolve canonical token → echo-check → store user message → create task), wired into both `ingest_message` (Talk/email) and the web POST path (which previously called `create_task` directly and never stored the web user turn). The Talk poller threads each conversation's display name through for lazy room registration; Talk-side renames flow back to the registry.
+- **Outbound / mirror.** `output_target="room"` expands at resolve time by the room's live bindings. The mirror is asymmetric: web→Talk is a real push (Talk's store is external); Talk→web pushes nothing (the web display loader already renders Talk turns from the shared store, so a push would double-post). Confirmations are never mirrored — they stay on the originating surface where the accept affordance lives.
+- **Web turns + display.** The scheduler persists the assistant turn to `messages` on completion; `WebTransport.deliver` writes a `role='system'` message instead of the legacy `web_chat_messages`; the web display loader reads cross-surface turns (`source_type IN web,talk`) and system notifications from `messages`.
+- **Room-list sync + UI.** The web room list is driven by the registry — a Talk room the bot joined surfaces automatically, given a `web_chat_rooms` handle (the frontend's integer id) + a web binding on first listing. Deleting a Talk-origin room from web archives it instead of destroying its mirrored history. New OCS `TalkClient` methods (create / add-participant / rename) back an "Also open in Talk" promote action and two-way rename propagation. Frontend: a "Talk" sidebar badge, a promote button in room settings, and an accurate archive-not-delete danger message.
+- **Live cross-surface progress.** When a Talk turn starts while a web room is open, the web client's idle poll picks it up and streams its progress live (the SSE events endpoint is ownership-gated, not source-gated, so a Talk-source task streams to web with no new substrate).
+
+**Files added/modified:**
+- `schema.sql`, `src/istota/db.py` — new tables, registry/binding/message helpers, migration, re-paired history reader, room-list handle.
+- `src/istota/transport/{ingest,routing,_types,web/__init__}.py` — `record_inbound`, `room` fan-out + `Destination.mirror`, `channel_name`, canonical-store delivery.
+- `src/istota/scheduler.py` — assistant-turn persistence, mirror confirmation-suppression + external-id ledger.
+- `src/istota/talk.py` — OCS `create_conversation` / `add_participant` / `rename_conversation`.
+- `src/istota/web_app.py` — registry-driven room list, promote + rename-propagation endpoints, cross-surface display loader.
+- `web/src/lib/{api.ts,stores/chat.ts}`, `web/src/routes/chat/+page.svelte`, `web/src/lib/components/chat/RoomSettings.svelte` — origin/talk_token, promote action, sidebar badge, live in-flight pickup.
+- New tests: `test_unified_{rooms,history,web_turns,mirror,room_list,promote}.py`, `test_record_inbound.py`; updated web_chat/notification/scheduler/transport tests for the canonical store.
+
 ## 2026-06-09: tmux brain — race-proof prompt submission (bracketed paste)
 
 Fourth docker test: the first web task (self-test) completed cleanly through tmux (`outcome=done tools=6`), proving the full happy path. But the follow-up task hung, and background channel-sleep-cycle extractions timed out at 120s on a loop. Same root cause for both: **the prompt didn't submit.**
