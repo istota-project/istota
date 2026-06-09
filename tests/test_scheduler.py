@@ -1952,6 +1952,42 @@ class TestProcessOneTask:
         # cross-posted to Talk.
         assert mock_runcoro.call_count == 0
 
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_web_push_email_reply_does_not_gate_confirmation(self, mock_arun, db_path, tmp_path):
+        # Option C: a *foreign* email reply pushed into a web room must NOT enter
+        # pending_confirmation on a confirmation-shaped result — the web confirm
+        # flow only works for source_type="web" tasks (their own SSE stream), so
+        # gating an email task there would strand it unanswerable. It completes
+        # and the question text is delivered to the room instead.
+        from istota.transport.web import default_web_room_token
+        config = self._make_config(db_path, tmp_path)
+        room_token = default_web_room_token(config, "testuser")
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="reply", user_id="testuser", source_type="email",
+                conversation_token=room_token,
+                output_target=f"web:{room_token}",
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(
+                True,
+                "I need your confirmation before deleting the file. Reply yes or no.",
+                None, None,
+            ),
+        ):
+            result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is True
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+            msgs = db.list_web_chat_messages(conn, room_token)
+        assert task.status == "completed"  # not pending_confirmation
+        assert any("confirmation" in m.text for m in msgs)
+
     @patch("istota.scheduler._drain_deferred_ops")
     @patch("istota.scheduler.execute_task")
     @patch("istota.scheduler.run_coro", return_value=None)

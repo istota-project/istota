@@ -299,6 +299,17 @@ class TestWebChatRoomDelete:
 
         assert db.count_active_web_tasks(conn, room.token, "alice") == 2
 
+    def test_count_active_web_tasks_includes_foreign_push(self, conn):
+        # An email reply routed INTO a room (source_type="email") targets the
+        # room via conversation_token and will write to it — the busy-room
+        # delete guard must count it, not just source_type="web" tasks.
+        room = db.create_web_chat_room(conn, "alice", "general")
+        db.create_task(
+            conn, prompt="email reply", user_id="alice", source_type="email",
+            conversation_token=room.token, output_target=f"web:{room.token},email",
+        )
+        assert db.count_active_web_tasks(conn, room.token, "alice") == 1
+
 
 # ---------------------------------------------------------------------------
 # Delivery routing: web is a stream surface (no Talk/email push)

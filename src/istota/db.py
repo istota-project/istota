@@ -1721,11 +1721,15 @@ def count_recent_web_tasks(
 def count_active_web_tasks(
     conn: sqlite3.Connection, token: str, user_id: str,
 ) -> int:
-    """Count non-terminal web tasks for a room's token — backs the busy-room
-    guard on delete (won't drop a room a worker is still writing against)."""
+    """Count non-terminal tasks targeting a room's token — backs the busy-room
+    guard on delete (won't drop a room a worker is still writing against).
+
+    Counts every source_type, not just ``web``: a foreign task routed into the
+    room (e.g. an email reply with ``conversation_token`` set to the room token)
+    will also write to it via WebTransport.deliver, so deletion must wait on it
+    too."""
     row = conn.execute(
         "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? AND user_id = ? "
-        "AND source_type = 'web' "
         "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
         (token, user_id),
     ).fetchone()

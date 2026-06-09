@@ -53,11 +53,15 @@ def default_web_room_token(config: "Config", user_id: str) -> str | None:
 
 def _append_blocking(
     config: "Config", token: str, text: str, title: str | None,
-    fallback_user_id: str | None,
 ) -> int | None:
-    """Insert one ``web_chat_messages`` row for ``token``. The owning user comes
-    from the room (defence-in-depth); ``fallback_user_id`` covers a token with
-    no room row. Returns the new id, or None if the room/user can't be resolved."""
+    """Insert one ``web_chat_messages`` row for ``token``, attributed to the
+    room's owner. Returns the new id, or None when the room can't be resolved.
+
+    Room tokens are minted at room creation, so a token with no room row is a
+    *deleted* room — never a pending one. We drop (with a WARNING) rather than
+    insert an orphan row that can never render: the room is gone, and under
+    ``origin+thread`` the email mirror leg still delivers; under ``origin``-only
+    the reply is a logged drop, the configured trade-off."""
     from ... import db
 
     if not config.db_path:
@@ -65,14 +69,13 @@ def _append_blocking(
     try:
         with db.get_db(config.db_path) as conn:
             room = db.get_web_chat_room_by_token(conn, token)
-            user_id = room.user_id if room else fallback_user_id
-            if not user_id:
+            if room is None:
                 logger.warning(
-                    "Dropping web delivery: no user for room token %r", token,
+                    "Dropping web delivery: no room for token %r (deleted?)", token,
                 )
                 return None
             return db.add_web_chat_message(
-                conn, user_id, token, text, title=title,
+                conn, room.user_id, token, text, title=title,
             )
     except Exception as e:
         logger.warning("web delivery failed for room %r: %s", token, e)
@@ -122,10 +125,9 @@ class WebTransport:
         if not token:
             return None
         title = options.title if options else None
-        fallback_user_id = task.user_id if task else None
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, _append_blocking, self._config, token, text, title, fallback_user_id,
+            None, _append_blocking, self._config, token, text, title,
         )
 
     async def edit(self, target: str, message_id: int, text: str) -> None:

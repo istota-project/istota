@@ -130,9 +130,31 @@ class TestOriginDescriptor:
         # No durable push target for a since-exited terminal → thread-only.
         assert origin_descriptor(_task(source_type="repl")) is None
 
-    def test_email_is_none(self):
-        # Email is the mirror leg, not a reply origin.
-        assert origin_descriptor(_task(source_type="email")) is None
+    def test_email_no_token_is_none(self):
+        # A genuine email-only task (no origin continuation) → no origin.
+        assert origin_descriptor(_task(source_type="email", conversation_token=None)) is None
+
+    def test_email_synthetic_token_is_none(self):
+        # A real inbound email thread carries a synthetic 16-hex thread token —
+        # that is an email-only thread, not a recoverable origin surface.
+        task = _task(source_type="email", conversation_token="0123456789abcdef")
+        assert origin_descriptor(task) is None
+
+    def test_email_web_continuation_recovers_web_origin(self):
+        # An email reply that is a continuation of a web-room origin carries the
+        # web token as conversation_token — recover it so the next round routes
+        # back to the room (issue: multi-round threads lost the origin).
+        task = _task(source_type="email", conversation_token="web-alice-abc123")
+        assert origin_descriptor(task) == "web:web-alice-abc123"
+
+    def test_email_talk_continuation_recovers_talk_origin(self):
+        task = _task(source_type="email", conversation_token="kvcnr723")
+        assert origin_descriptor(task) == "talk:kvcnr723"
+
+    def test_email_repl_continuation_is_none(self):
+        # A REPL terminal is gone by reply time — not a pushable origin.
+        task = _task(source_type="email", conversation_token="repl-alice-abc123")
+        assert origin_descriptor(task) is None
 
     def test_cli_maps_to_talk(self):
         # Non-stream, non-email source types resolve to the talk surface
