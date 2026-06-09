@@ -147,16 +147,25 @@ def poll_emails(config: Config) -> list[int]:
                 if user_id:
                     routing_method = "sender_match"
 
-            # 3. Thread match
-            if not user_id:
-                sent_email_match = _match_thread(conn, email)
-                if sent_email_match:
-                    user_id = sent_email_match.user_id
-                    routing_method = "thread_match"
-                    logger.info(
-                        "Thread match: email from %s is a reply to sent email %s (user %s)",
-                        envelope.sender, sent_email_match.message_id, user_id,
-                    )
+            # 3. Thread match. This step does double duty: it resolves the user
+            #    (fallback, when plus-address/sender-match didn't) AND it recovers
+            #    the matched `sent_emails` row, which carries the `origin_target`
+            #    descriptor that routes the reply back to its source surface. We
+            #    run it UNCONDITIONALLY — not only as a user-resolution fallback —
+            #    because a reply from the user's own address (sender-match) or to
+            #    the bot's plus-address resolves the user at step 1/2 and would
+            #    otherwise skip origin recovery entirely (the primary self-reply
+            #    case). `routing_method` stays the *user-resolution* method so the
+            #    confirmation gate and the emissary-vs-self prompt choice below are
+            #    unchanged; only the origin payload is recovered here.
+            sent_email_match = _match_thread(conn, email)
+            if sent_email_match and not user_id:
+                user_id = sent_email_match.user_id
+                routing_method = "thread_match"
+                logger.info(
+                    "Thread match: email from %s is a reply to sent email %s (user %s)",
+                    envelope.sender, sent_email_match.message_id, user_id,
+                )
 
             # 4. Discard — no route found
             if not user_id:
@@ -168,6 +177,22 @@ def poll_emails(config: Config) -> list[int]:
                     routing_method="discarded",
                 )
                 continue
+
+            # Defence-in-depth: only use a recovered thread row's routing payload
+            # (its origin descriptor / conversation token) when it belongs to the
+            # resolved user. A reply sender-matched to user A must never inherit
+            # user B's origin and route into B's surface. Identity always wins
+            # over the payload (mirrors the deferred-DB principle). When the user
+            # was resolved BY thread-match, this holds trivially.
+            if sent_email_match and sent_email_match.user_id != user_id:
+                sent_email_match = None
+
+            # An *emissary* reply — an external contact replying to a mail we sent
+            # — is one resolved purely by the thread (we don't recognise the
+            # sender otherwise). That drives the prompt template; a self-reply
+            # (plus-address / sender-match) stays the plain template even though
+            # it now also carries a recovered origin for routing.
+            is_emissary_reply = routing_method == "thread_match"
 
             # Download attachments directly to target directory
             attachment_id = uuid.uuid4().hex[:8]
@@ -212,7 +237,7 @@ def poll_emails(config: Config) -> list[int]:
                 )
 
             # For emissary thread replies, include routing context in the prompt
-            if sent_email_match:
+            if is_emissary_reply:
                 prompt = f"""Emissary email reply — an external contact has replied to an email you sent on behalf of this user.
 
 <email_metadata>
