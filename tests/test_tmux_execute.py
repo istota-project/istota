@@ -15,6 +15,12 @@ from istota.brain._types import BrainRequest
 from istota.brain.tmux_claude import TmuxClaudeBrain
 
 
+class _CP:
+    """Stand-in for subprocess.CompletedProcess from a mocked _tmux."""
+    stdout = ""
+    returncode = 0
+
+
 def _req(tmp_path, **kw):
     base = dict(
         prompt="say hello",
@@ -207,6 +213,75 @@ class TestPreconditions:
         res = TmuxClaudeBrain().execute(_req(tmp_path))
         assert res.success is False
         assert res.stop_reason == "not_found"
+
+
+class TestSandboxInteraction:
+    """Production-viability: under bwrap the claude pane process must be
+    sandbox-wrapped, and the sentinel/settings must live in the shared RW region
+    (ISTOTA_DEFERRED_DIR) — not a private /tmp dir that becomes the sandbox's
+    own tmpfs. See spec §4."""
+
+    def test_launch_applies_sandbox_wrap(self, monkeypatch, tmp_path):
+        brain = TmuxClaudeBrain()
+        sent = []
+        monkeypatch.setattr(brain, "_tmux",
+                            lambda *a: sent.append(a) or _CP())
+        def wrap(cmd):
+            return ["bwrap", "--die-with-parent", "--", *cmd]
+
+        req = _req(tmp_path, allowed_tools=["Bash"], model="claude-opus-4-8",
+                   sandbox_wrap=wrap)
+        brain._launch_claude("s1", req, tmp_path)
+        # the literal send-keys command is the 5th element of the send-keys -l call
+        literal = next(a for a in sent if a[:4] == ("send-keys", "-t", "s1", "-l"))
+        cmd = literal[4]
+        assert "bwrap --die-with-parent --" in cmd
+        assert "claude" in cmd
+        assert "--model claude-opus-4-8" in cmd
+        assert "--dangerously-skip-permissions" in cmd
+        assert str(tmp_path) in cmd  # cd <launch_cwd>
+
+    def test_no_sandbox_wrap_launches_bare_claude(self, monkeypatch, tmp_path):
+        brain = TmuxClaudeBrain()
+        sent = []
+        monkeypatch.setattr(brain, "_tmux", lambda *a: sent.append(a) or _CP())
+        req = _req(tmp_path, sandbox_wrap=None)
+        brain._launch_claude("s1", req, tmp_path)
+        literal = next(a for a in sent if a[:4] == ("send-keys", "-t", "s1", "-l"))
+        assert "bwrap" not in literal[4]
+        assert "claude" in literal[4]
+
+    def test_sentinel_under_deferred_dir(self, monkeypatch, tmp_path):
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        tr = _write_transcript(tmp_path, [_assistant([{"type": "text", "text": "x"}])])
+        h = _Harness(monkeypatch, tmp_path, transcript=tr)
+        captured = {}
+        orig = h.brain._wait_sentinel
+
+        def spy(sentinel, deadline, cancel_check):
+            captured["sentinel"] = sentinel
+            return orig(sentinel, deadline, cancel_check)
+
+        monkeypatch.setattr(h.brain, "_wait_sentinel", spy)
+        req = _req(tmp_path, env={"ISTOTA_DEFERRED_DIR": str(deferred)})
+        h.brain.execute(req)
+        # sentinel lives under the deferred dir (the sandbox-shared RW bind)
+        assert str(captured["sentinel"]).startswith(str(deferred))
+        # project Stop-hook settings.json written under the same base
+        assert (deferred / ".claude" / "settings.json").exists()
+
+    def test_stop_hook_command_targets_sentinel(self, tmp_path):
+        brain = TmuxClaudeBrain()
+        sentinel = tmp_path / "deferred" / ".tmux-s" / "stop.json"
+        sentinel.parent.mkdir(parents=True)
+        claude_dir = tmp_path / "deferred" / ".claude"
+        settings = claude_dir / "settings.json"
+        brain._write_stop_hook(claude_dir, settings, sentinel)
+        cfg = json.loads(settings.read_text())
+        hook_cmd = cfg["hooks"]["Stop"][0]["hooks"][0]["command"]
+        assert hook_cmd.startswith("cat > ")
+        assert str(sentinel) in hook_cmd
 
 
 class TestSessionNaming:
