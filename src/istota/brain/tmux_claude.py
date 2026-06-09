@@ -22,7 +22,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -206,18 +205,30 @@ class TmuxClaudeBrain:
             )
 
         session = req.session_label or f"istota-tmux-{os.getpid()}-{next(_SESSION_COUNTER)}"
-        workdir = Path(tempfile.mkdtemp(prefix="tmux-brain-"))
-        sentinel = workdir / f"{session}.stop.json"
-        prompt_file = workdir / f"{session}.prompt.txt"
-        claude_dir = req.cwd / ".claude"
+
+        # Base everything in the sandbox-shared RW region. Under bwrap the Stop
+        # hook runs *inside* the sandbox and writes the sentinel; the brain reads
+        # it from *outside*. Only ISTOTA_DEFERRED_DIR (= user_temp_dir) is
+        # RW-bound at the same path inside and out AND is bwrap's --chdir target,
+        # so the sentinel, the prompt file, and the project .claude/settings.json
+        # (discovered from the sandbox cwd) must live there. A private mkdtemp in
+        # /tmp would land on the sandbox's own tmpfs — invisible to the brain.
+        # Off-sandbox (mac/dev/Docker) ISTOTA_DEFERRED_DIR may be unset; fall
+        # back to req.cwd.
+        base_dir = Path(req.env.get("ISTOTA_DEFERRED_DIR") or req.cwd)
+        workdir = base_dir / f".tmux-{session}"
+        sentinel = workdir / "stop.json"
+        prompt_file = workdir / "prompt.txt"
+        claude_dir = base_dir / ".claude"
         settings_path = claude_dir / "settings.json"
 
         try:
+            workdir.mkdir(parents=True, exist_ok=True)
             prompt_file.write_text(req.prompt)
             self._write_stop_hook(claude_dir, settings_path, sentinel)
 
             self._new_session(session, req.env)
-            self._launch_claude(session, req)
+            self._launch_claude(session, req, base_dir)
 
             ready_deadline = time.monotonic() + min(_READY_TIMEOUT_S, req.timeout_seconds)
             if not self._wait_ready(session, ready_deadline):
@@ -364,7 +375,7 @@ class TmuxClaudeBrain:
             args += ["-e", f"{k}={v}"]
         self._tmux(*args)
 
-    def _launch_claude(self, name: str, req: BrainRequest) -> None:
+    def _launch_claude(self, name: str, req: BrainRequest, launch_cwd: Path) -> None:
         parts = ["claude"]
         if req.model:
             parts += ["--model", req.model]
@@ -378,8 +389,18 @@ class TmuxClaudeBrain:
         if req.allowed_tools:
             parts += ["--allowedTools", *req.allowed_tools, "--disallowedTools", "Agent"]
         parts += ["--dangerously-skip-permissions"]
+
+        # Sandbox the *claude* process, not tmux. The brain + tmux server run
+        # unsandboxed in the daemon; sandbox_wrap turns the claude argv into a
+        # `bwrap … -- claude …` argv that the pane runs. No nesting: tmux itself
+        # is never wrapped. No-op off-sandbox (mac/dev) — sandbox_wrap returns
+        # the cmd unchanged. bwrap supplies its own --chdir, so the leading `cd`
+        # only matters for the unwrapped path.
+        if req.sandbox_wrap is not None:
+            parts = req.sandbox_wrap(parts)
+
         launch = " ".join(shlex.quote(p) for p in parts)
-        cmd = f"cd {shlex.quote(str(req.cwd))} && {launch}"
+        cmd = f"cd {shlex.quote(str(launch_cwd))} && {launch}"
         # -l sends the command literally (no key-name interpretation), then a
         # separate Enter submits it.
         self._tmux("send-keys", "-t", name, "-l", cmd)
