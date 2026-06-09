@@ -142,6 +142,36 @@ class TestReplyBranch:
         assert recorded.in_reply_to == "<msg-2@example.com>"
 
     @pytest.mark.asyncio
+    async def test_web_continuation_mirror_carries_origin_forward(self, db_path, tmp_path):
+        # Multi-round regression: a web-origin email reply mirrors its result to
+        # the thread. The mirror's sent_emails row must carry the web origin so
+        # the *next* reply still routes back to the room (not misroute to Talk).
+        config = _config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="reply", user_id="alice", source_type="email",
+                conversation_token="web-alice-rm1",
+                output_target="web:web-alice-rm1,email",
+            )
+            task = db.get_task(conn, tid)
+        _link_inbound_email(db_path, task.id, message_id="<round1@x.com>")
+
+        with (
+            patch(
+                "istota.transport.email.outbound.reply_to_email",
+                return_value="<mirror@bot.example.com>",
+            ),
+            patch("istota.transport.email.outbound.send_email"),
+        ):
+            ok = await deliver_email_result(config, task, _structured())
+
+        assert ok is True
+        with db.get_db(db_path) as conn:
+            recorded = db.find_sent_email_by_message_id(conn, "<mirror@bot.example.com>")
+        assert recorded is not None
+        assert recorded.origin_target == "web:web-alice-rm1"
+
+    @pytest.mark.asyncio
     async def test_reply_falls_back_to_original_subject(self, db_path, tmp_path):
         config = _config(db_path, tmp_path)
         task = _make_task(db_path)

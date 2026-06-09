@@ -113,11 +113,16 @@ def origin_descriptor(task: "db.Task") -> str | None:
 
     Resolves the task's primary surface via ``_surface_for_source_type`` and
     emits ``surface:channel`` (or bare ``surface`` when no durable channel is
-    known — delivery resolves it, e.g. a Talk DM). Returns ``None`` for surfaces
-    that cannot anchor a pushed reply: ``repl`` (the terminal is gone by reply
-    time) and ``email`` (email is the mirror leg, not an origin). A ``None``
-    caller falls back to the legacy ``talk,email`` branch. Never raises — an
-    unexpected ``source_type`` resolves to the ``talk`` surface like any other.
+    known — delivery resolves it, e.g. a Talk DM). A ``None`` caller falls back
+    to the legacy ``talk,email`` branch. Never raises — an unexpected
+    ``source_type`` resolves to the ``talk`` surface like any other.
+
+    An ``email``-source task is the subtle case: it may be a *continuation* of a
+    non-email origin (we are handling a reply to an email a web/Talk conversation
+    asked us to send), in which case ``conversation_token`` still holds the origin
+    room and we recover the origin from it so the *next* round routes back there
+    too. A genuine email-only thread carries a synthetic thread token → no origin.
+    ``repl`` is never a pushable origin (the terminal is gone by reply time).
     """
     from ..email_support import is_synthetic_email_thread_token
     from .registry import _surface_for_source_type
@@ -132,8 +137,19 @@ def origin_descriptor(task: "db.Task") -> str | None:
         if tok and not is_synthetic_email_thread_token(tok):
             return f"talk:{tok}"
         return "talk"  # bare talk → resolve_target / DM at delivery
-    # repl (no durable push target) and email (the mirror leg) are not origins.
-    return None
+    if surface == "email":
+        # Recover the origin of an email continuation from its conversation_token.
+        tok = task.conversation_token
+        if not tok or is_synthetic_email_thread_token(tok):
+            return None  # genuine email-only thread — no recoverable origin
+        if tok.startswith("web-"):
+            return f"web:{tok}"
+        if tok.startswith("repl-"):
+            return None  # a since-exited REPL terminal can't be pushed
+        # A non-synthetic, non-web/repl token on an email task is a real Talk
+        # room set by our own inbound continuation routing.
+        return f"talk:{tok}"
+    return None  # repl: no durable push target
 
 
 def plan_has_surface(plan: list[Destination], surface: str) -> bool:

@@ -762,6 +762,50 @@ class TestPollEmailsThreadMatching:
         assert task.output_target == "talk:RealRoomXYZ,email"
         assert task.conversation_token == "RealRoomXYZ"
 
+    def test_legacy_null_origin_with_web_token_not_used_as_talk_channel(self, make_config):
+        # A legacy (pre-migration) sent_emails row with NULL origin_target whose
+        # conversation_token is a web room token must NOT be used as a Talk
+        # delivery channel (that would post to a nonexistent Talk room).
+        config = make_config()
+        config.email = _email_config()
+        config.users = {
+            "stefan": UserConfig(
+                email_addresses=["stefan@test.com"], alerts_channel="alerts_room",
+            ),
+        }
+        with db.get_db(config.db_path) as conn:
+            db.record_sent_email(
+                conn,
+                user_id="stefan",
+                message_id="<legacy_web@bot.com>",
+                to_addr="ext@x.com",
+                subject="Q",
+                conversation_token="web-stefan-deadbeef",
+                origin_target=None,  # legacy row
+            )
+        envelope = _envelope(id="30", sender="ext@x.com", subject="Re: Q")
+        email = Email(
+            id="30", subject="Re: Q", sender="ext@x.com",
+            date="Mon, 01 Jan 2026 12:00:00 +0000",
+            body="answer", attachments=[],
+            message_id="<r30@x.com>", references="<legacy_web@bot.com>",
+            to=("bot@test.com",), cc=(),
+        )
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+        ):
+            task_ids = poll_emails(config)
+        assert len(task_ids) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+        assert task.output_target == "talk,email"
+        # The web token must not leak in as the Talk channel; the ladder falls
+        # through to the resolved alerts room instead.
+        assert task.talk_delivery_token != "web-stefan-deadbeef"
+        assert task.talk_delivery_token == "alerts_room"
+
     def test_known_sender_resolves_talk_delivery_token_from_alerts(self, make_config):
         """plus_address / sender_match routes resolve talk_delivery_token via user config."""
         config = make_config()

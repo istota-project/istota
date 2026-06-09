@@ -1589,13 +1589,17 @@ def process_one_task(
 
     # A confirmation prompt is answerable on an interactive surface: a Talk
     # reply (Talk is a resolved destination, and not the "all" broadcast
-    # fan-out, which pushes ntfy), or the web /chat confirm endpoint (a
-    # web/stream task — the confirmation rides the task_events SSE stream and is
-    # answered by POST /chat/tasks/{id}/confirm). Without the web arm the gate
-    # never fired for web tasks and the whole web confirmation flow was dead
-    # code. Computed once and reused by the status, event-emission, and
+    # fan-out, which pushes ntfy), or the web /chat confirm endpoint — but only
+    # for a task whose OWN origin is web (source_type="web"), whose confirmation
+    # rides its task_events SSE stream and is answered by POST
+    # /chat/tasks/{id}/confirm. A *foreign* task merely pushed into a web room
+    # (e.g. an email reply routed there) has no such SSE the room tails and no
+    # answerable affordance, so it must not gate — it completes and the question
+    # text is delivered to the room as a normal result (the user answers by
+    # replying). Computed once and reused by the status, event-emission, and
     # deferred-op-skip branches below.
-    _confirmable_surface = (plan_talk and talk_token and not plan_ntfy) or plan_web
+    _own_origin_web = plan_web and task.source_type == "web"
+    _confirmable_surface = (plan_talk and talk_token and not plan_ntfy) or _own_origin_web
     is_confirmation_request = bool(
         success
         and _confirmable_surface

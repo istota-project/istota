@@ -110,17 +110,18 @@ class TestDeliver:
         with db.get_db(config.db_path) as conn:
             assert db.list_web_chat_messages(conn, "web-ghost-000") == []
 
-    def test_unknown_token_falls_back_to_task_user(self, tmp_path):
+    def test_missing_room_drops_even_with_task(self, tmp_path):
         config = _config(tmp_path)
-        # A token with no room row but a task present attributes to the task user
-        # (e.g. an explicit web:<token> route to a not-yet-created room).
+        # Room tokens are minted at room creation, so a token with no room row is
+        # a *deleted* room (never a pending one). Delivery must drop + WARN rather
+        # than insert an orphan row that can never render — even with a task
+        # present (e.g. an email reply routed to a since-deleted origin room).
         msg_id = run_coro(WebTransport(config).deliver(
-            "web-fresh-000", "x", task=_task("carol"),
+            "web-gone-000", "x", task=_task("carol"),
         ))
-        assert isinstance(msg_id, int)
+        assert msg_id is None
         with db.get_db(config.db_path) as conn:
-            msgs = db.list_web_chat_messages(conn, "web-fresh-000")
-        assert msgs[0].user_id == "carol"
+            assert db.list_web_chat_messages(conn, "web-gone-000") == []
 
     def test_empty_target_with_no_task_returns_none(self, tmp_path):
         config = _config(tmp_path)
