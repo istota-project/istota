@@ -171,8 +171,9 @@ fallback_cooldown_seconds = 300   # how long the circuit stays open
 ready_timeout_seconds = 30        # REPL-ready deadline
 tmux_command_timeout = 10         # per-tmux-subprocess timeout
 cli_version_pin = "2.1.168"       # supported claude CLI; mismatch logs a WARNING
-# ready_markers / trust_markers / bypass_warning_marker / bypass_accept_marker /
-# error_markers — pane-substring heuristics; override on a CLI reword.
+# ready_markers / trust_markers / theme_markers / bypass_warning_marker /
+# bypass_accept_marker / error_markers — pane-substring heuristics; override on a
+# CLI reword.
 
 [brain.source_type_overrides]   # per-source-type routing (gradual rollout)
 scheduled = "native"
@@ -235,15 +236,25 @@ sentinel (`stop.json`), the early sentinel (`started.json`), and the prompt file
 `settings.json` in the config dir declares a `Stop` hook (`cat > stop.json` — its
 stdin payload carries `transcript_path` + `last_assistant_message`) plus
 `UserPromptSubmit`/`SessionStart` hooks (`cat > started.json` — early
-transcript-path signal for streaming). A detached `tmux new-session -e K=V` passes
-`req.env` + `CLAUDE_CONFIG_DIR` into the pane (the detached-session env gotcha:
-the OAuth token must reach the pane). `claude` is launched sandbox-wrapped
-(`req.sandbox_wrap` — bwrap wraps the *claude* process, never tmux, so no
-nesting). `_wait_ready` scripts past the trust + Bypass-Permissions dialogs;
-prompt is buffer-pasted; `_wait_for_completion` polls; the Stop hook fires →
-sentinel → parse the transcript JSONL → `BrainResult`. Result text prefers the
-Stop payload's `last_assistant_message`; the trace is reconstructed from the
-transcript (`parse_transcript`, settled via `_transcript_has_final_turn`).
+transcript-path signal for streaming). `_seed_onboarding` also pre-writes a
+per-session `.claude.json` (`theme`, `hasCompletedOnboarding`,
+`bypassPermissionsModeAccepted`, per-project trust keys) so the fresh config dir
+doesn't re-trigger first-run onboarding. A detached `tmux new-session -e K=V`
+passes `req.env` + `CLAUDE_CONFIG_DIR` into the pane (the detached-session env
+gotcha: the OAuth token must reach the pane); under uid 0 the brain also sets
+`IS_SANDBOX=1` so the TUI accepts `--dangerously-skip-permissions` as root (the
+container-as-sandbox case — left unset on a non-root deploy where the flag is
+allowed without it). `claude` is launched sandbox-wrapped (`req.sandbox_wrap` —
+bwrap wraps the *claude* process, never tmux, so no nesting). `_wait_ready`
+scripts past the first-run theme picker, the workspace-trust dialog, and the
+Bypass-Permissions warning as a version-tolerant safety net; the prompt is
+buffer-pasted, submitted, and the submit is confirmed (`_turn_started`) before
+`_wait_for_completion` polls; the Stop hook fires → sentinel → parse the
+transcript JSONL → `BrainResult`. Result text prefers the Stop payload's
+`last_assistant_message`; the trace is reconstructed from the transcript
+(`parse_transcript`, settled via `_transcript_has_final_turn`). The host needs
+`tmux` on `PATH` (a missing binary → `not_found` → headless fallback); the Docker
+image installs it.
 
 **Production hardening** (`Specs/Active/claude-tmux-production-readiness.md`):
 
@@ -291,13 +302,37 @@ transcript (`parse_transcript`, settled via `_transcript_has_final_turn`).
   dialogs=… tools=… retries=…`. Ready/error/stall events log at WARNING/ERROR with
   a (length-capped) pane snapshot.
 
+**Interactive-TUI launch hardening** (surfaced during the live docker rollout):
+
+- **First-run onboarding.** The per-session `CLAUDE_CONFIG_DIR` is empty each
+  task, so the interactive TUI would re-run onboarding (theme picker → trust →
+  bypass) every time. `_seed_onboarding` writes a per-session `.claude.json` with
+  the onboarding-skip keys so the gauntlet is skipped. `_wait_ready` still scripts
+  past the theme picker (`theme_markers`, a dark option pre-selected → bare
+  `Enter`) as a safety net if a CLI version renames a seeded key.
+- **Root containers.** When the process runs as uid 0 (`_is_root`), the brain
+  sets `IS_SANDBOX=1` in the pane env so `claude` allows
+  `--dangerously-skip-permissions` (it refuses it as root otherwise). Accurate in
+  a container where the container itself is the isolation boundary and bwrap is
+  off. Non-root deploys leave it unset. The Docker image installs `tmux` (without
+  it every task would `not_found` → fall back to headless).
+- **Race-proof prompt submission.** A large prompt arrives as a bracketed paste
+  the TUI collapses to a `[Pasted text]` placeholder; an `Enter` sent before the
+  paste is ingested gets absorbed, leaving the prompt unsent (the turn then hangs
+  to the hard timeout). `_inject_prompt` pastes, settles, sends `Enter`, then
+  confirms a turn actually started (`_turn_started` — the `UserPromptSubmit` hook
+  fired, or the transcript file appeared) and only resends `Enter` if it didn't,
+  up to `_SUBMIT_MAX_ATTEMPTS` — never a blind resend that could append a stray
+  empty `Enter`. Every tmux path (interactive tasks + background sleep-cycle / OCR
+  / explainer calls) goes through this.
+
 **`[brain.tmux]` config** (`TmuxBrainConfig`, all defaulted to the prototype's
 hardcoded values, so an empty/absent block is behavioral parity):
 `fallback_trip_threshold` (5), `fallback_cooldown_seconds` (300),
 `ready_timeout_seconds` (30), `tmux_command_timeout` (10), `cli_version_pin`
 ("2.1.168" — readiness/dialog markers are pinned to a CLI version; a reword is a
 config hotfix via the marker lists), `ready_markers`, `trust_markers`,
-`bypass_warning_marker`, `bypass_accept_marker`, `error_markers`.
+`theme_markers`, `bypass_warning_marker`, `bypass_accept_marker`, `error_markers`.
 
 **Known gaps / live-only gates** (the spec's Stage 1/6 prod-host probes — they
 can't run off-Linux/off-bwrap):
