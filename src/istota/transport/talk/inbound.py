@@ -248,6 +248,21 @@ async def poll_talk_conversations(config: Config) -> list[int]:
             display_name = conv.get("displayName") or conv.get("name")
             if display_name:
                 conv_names[conversation_token] = display_name
+                # Proactively backfill the registry room title from Talk's
+                # displayName every poll, not only when a new inbound message
+                # arrives (record_inbound). Migrated Talk rooms were folded in
+                # with NULL names; without this they'd show the generic "Talk
+                # room" in web chat until their next message. Only touch rooms
+                # that already exist in the registry (don't surface rooms the
+                # user never interacted with) and only Talk-origin rooms (a
+                # web-origin room's user-set name wins).
+                existing_room = db.get_room(conn, conversation_token)
+                if (
+                    existing_room is not None
+                    and existing_room.origin == "talk"
+                    and existing_room.name != display_name
+                ):
+                    db.rename_room(conn, conversation_token, display_name)
 
             # Cache 1:1 DM tokens by user ID (for notification fallback)
             if conv_type == 1:

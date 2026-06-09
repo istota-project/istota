@@ -1898,6 +1898,15 @@ def process_one_task(
     # Talk subscriber never posts the result, so no dedup is needed.
     response_msg_id = None
     if post_talk_message:
+        # For a web-origin mirror leg, repost the user's question (attributed)
+        # before the reply so the Talk transcript isn't an orphaned answer. Pure
+        # Talk-surface post — never persisted to the canonical messages store.
+        if _talk_is_mirror and task.source_type == "web" and task.prompt:
+            run_coro(post_result_to_talk(
+                config, task, _format_mirror_user_repost(config, task),
+                reference_id=f"istota:task:{task.id}:prompt",
+                target_token=talk_token,
+            ))
         response_msg_id = run_coro(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
             reference_id=f"istota:task:{task.id}:result",
@@ -1998,6 +2007,21 @@ def process_one_task(
                 run_coro(web_transport.deliver(dest.channel, web_result, task=task))
 
     return task_id, success
+
+
+def _format_mirror_user_repost(config: Config, task: db.Task) -> str:
+    """Attributed repost of a web-origin user turn for a Talk mirror leg.
+
+    The bot can't post as the user in Talk, so a web-origin turn mirrored into a
+    bound Talk room would otherwise show an orphaned bot answer with no visible
+    question. The bot reposts the question (attributed) as its own message, then
+    its reply in the next post. This is a pure Talk-surface artifact — it is
+    never written to the canonical `messages` store, so web history / context is
+    unaffected.
+    """
+    uc = config.get_user(task.user_id)
+    display = uc.display_name if uc and uc.display_name else task.user_id
+    return f"💬 {display} (via web):\n{task.prompt}"
 
 
 async def post_result_to_talk(

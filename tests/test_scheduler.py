@@ -1642,6 +1642,104 @@ class TestProcessOneTask:
         assistant = [m for m in msgs if m.role == "assistant"][0]
         assert assistant.external_ids == {"talk": "4242"}
 
+    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
+    @patch("istota.scheduler.run_coro", return_value=4242)
+    def test_web_origin_mirror_reposts_user_question(
+        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+    ):
+        # A web-origin turn mirrored into a bound Talk room reposts the user's
+        # question (attributed) first, then the reply — otherwise the Talk
+        # transcript shows an orphaned answer (the bot can't post as the user).
+        from istota.transport.web import default_web_room_token
+        config = self._make_config(db_path, tmp_path)
+        config.users = {"testuser": UserConfig(display_name="Stefan")}
+        room_token = default_web_room_token(config, "testuser")
+        with db.get_db(db_path) as conn:
+            db.add_room_binding(conn, room_token, "talk", "talktok42")
+            db.create_task(
+                conn, prompt="what's the weather?", user_id="testuser",
+                source_type="web", conversation_token=room_token,
+                output_target="room",
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "It's sunny.", None, None),
+        ):
+            result = process_one_task(config)
+        assert result is not None and result[1] is True
+
+        # Two Talk posts to the bound room: the attributed question, then reply.
+        talk_calls = [
+            c for c in mock_post_talk.call_args_list
+            if c.kwargs.get("target_token") == "talktok42"
+        ]
+        assert len(talk_calls) == 2
+        repost_body = talk_calls[0].args[2]
+        reply_body = talk_calls[1].args[2]
+        assert "Stefan" in repost_body
+        assert "what's the weather?" in repost_body
+        assert reply_body == "It's sunny."
+
+    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
+    @patch("istota.scheduler.run_coro", return_value=4242)
+    def test_mirror_repost_not_written_to_canonical_store(
+        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+    ):
+        # The repost is a pure Talk-surface artifact: it must never land in the
+        # canonical `messages` store (where web reads its history), so it can't
+        # create a duplicate user turn or pollute cross-surface context.
+        from istota.transport.web import default_web_room_token
+        config = self._make_config(db_path, tmp_path)
+        config.users = {"testuser": UserConfig(display_name="Stefan")}
+        room_token = default_web_room_token(config, "testuser")
+        with db.get_db(db_path) as conn:
+            db.add_room_binding(conn, room_token, "talk", "talktok42")
+            db.create_task(
+                conn, prompt="ping", user_id="testuser", source_type="web",
+                conversation_token=room_token, output_target="room",
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "pong", None, None),
+        ):
+            process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            msgs = db.get_messages(conn, room_token)
+        # Only the assistant turn was persisted (no user row was created by this
+        # direct-create test, and the repost added none).
+        assert [m.role for m in msgs] == ["assistant"]
+        assert all("ping" not in m.body for m in msgs if m.role == "user")
+
+    @patch("istota.scheduler.post_result_to_talk", return_value=4242)
+    @patch("istota.scheduler.run_coro", return_value=4242)
+    def test_talk_origin_does_not_repost(
+        self, mock_run_coro, mock_post_talk, db_path, tmp_path,
+    ):
+        # A Talk-origin task delivers a single reply — no repost (the user's
+        # message is already natively in the Talk room).
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "talkroom", "testuser", origin="talk")
+            db.create_task(
+                conn, prompt="hi", user_id="testuser", source_type="talk",
+                conversation_token="talkroom",
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "hello", None, None),
+        ):
+            process_one_task(config)
+
+        talk_calls = [
+            c for c in mock_post_talk.call_args_list
+            if c.kwargs.get("reference_id", "").endswith((":result", ":prompt"))
+        ]
+        assert all(not c.kwargs["reference_id"].endswith(":prompt") for c in talk_calls)
+
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_own_origin_web_task_does_not_push(self, mock_arun, db_path, tmp_path):
         # A web-source task's own result streams over task_events; it must NOT
