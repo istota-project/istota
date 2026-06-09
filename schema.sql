@@ -641,9 +641,13 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);
 -- One user row + one assistant row per turn share a task_id; the partial index
--- enforces that and excludes system rows (task_id IS NULL).
+-- enforces that and excludes system rows (task_id IS NULL). Keyed on
+-- (room_token, role, task_id) — NOT origin_surface — so it actually backstops
+-- the app-level idempotency guards (store_turn_message / record_inbound), which
+-- dedupe on those three columns. Including origin_surface here would let two
+-- rows for the same turn with differing surfaces both slip past.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_ext
-    ON messages (room_token, origin_surface, role, task_id)
+    ON messages (room_token, role, task_id)
     WHERE task_id IS NOT NULL;
 
 -- Per-surface read cursors (an unread badge in web isn't cleared by reading

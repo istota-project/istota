@@ -324,6 +324,20 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 )
             )
 
+        # Reconcile the unified registry against Nextcloud: a Talk room the bot
+        # is no longer in (deleted in NC, or bot removed) drops out of the
+        # conversation list, so archive its registry row — otherwise it keeps
+        # surfacing in the web room list forever. `conversations` is the bot's
+        # *complete* room list; only reconcile when it's non-empty so a transient
+        # empty/failed fetch can't mass-archive every room.
+        live_talk_tokens = {
+            c.get("token") for c in conversations if c.get("token")
+        }
+        if live_talk_tokens:
+            n = db.archive_orphaned_talk_rooms(conn, live_talk_tokens)
+            if n:
+                logger.info("Archived %d Talk room(s) no longer in Nextcloud", n)
+
     if not poll_tasks:
         return []
 

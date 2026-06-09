@@ -1446,6 +1446,16 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> dict | None:
         talk_token = room.get("token")
         if not talk_token:
             return None
+        # Persist the binding *immediately* — before the best-effort
+        # add_participant / seed-post steps, which can hang or crash. Otherwise a
+        # failure between the OCS create and a binding write that trailed those
+        # slow calls would leave an orphaned Talk room with no binding, and a
+        # re-promote (which only checks for a missing binding) would create a
+        # *second* Talk room. The write is its own short transaction; the
+        # subsequent steps are recoverable, the binding is not. Idempotent
+        # (INSERT OR IGNORE), so the trailing re-read block is safe too.
+        with db.get_db(_config.db_path) as conn:
+            db.add_room_binding(conn, token, "talk", talk_token)
         try:
             await client.add_participant(talk_token, username)
         except Exception as e:
@@ -1461,7 +1471,6 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> dict | None:
         await client.aclose()
 
     with db.get_db(_config.db_path) as conn:
-        db.add_room_binding(conn, token, "talk", talk_token)
         handle = db.get_web_chat_room(conn, room_id)
         reg = db.get_room(conn, token)
     d = _room_to_dict(handle)

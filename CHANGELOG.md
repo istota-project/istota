@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A question you type in web chat is now reposted into the mirrored Talk room (attributed to you) just above the bot's reply, so the Talk side reads as a normal exchange rather than an answer with no visible question. The repost is Talk-only — it never duplicates your message in web history or cross-surface context.
 - The calendar and location skill CLIs now accept the natural subcommand names the assistant tends to reach for: `calendar agenda` works as `calendar list`, and `location last` as `location current`. The assistant is also now told to confirm a skill subcommand exists (running `--help` when the skill's docs aren't loaded) instead of guessing from memory.
 
+### Fixed
+- A Nextcloud Talk room you delete (or remove the bot from) no longer lingers in the web chat room list. The bot now reconciles its room list against Nextcloud each poll and hides rooms it's no longer part of.
+- Closed a path where the bot could silently lose earlier conversation history. The unified history reader now falls back to its complete source whenever any past turn isn't yet mirrored into the new message store, instead of switching over as soon as the latest turn was. Relatedly, the one-time room-sync migration no longer marks itself done if a step fails partway, so it retries cleanly on the next start rather than stranding a partial copy.
+
 ## [0.21.0] - 2026-06-09
 
 ### Added
