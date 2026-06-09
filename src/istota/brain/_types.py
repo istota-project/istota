@@ -85,7 +85,10 @@ class BrainResult:
     result_text: str
     actions_taken: str | None = None
     execution_trace: str | None = None
-    stop_reason: str = "completed"  # completed/cancelled/timeout/oom/transient_api_error/error/not_found
+    # completed/cancelled/timeout/oom/transient_api_error/error/not_found,
+    # plus "fallback" (TmuxClaudeBrain: this attempt couldn't be driven via tmux —
+    # the executor reruns it once through claude_code within the same attempt).
+    stop_reason: str = "completed"
 
     # Native-brain only: per-task token + cost telemetry. ClaudeCodeBrain leaves
     # this None (the CLI doesn't surface per-call usage), so it's purely

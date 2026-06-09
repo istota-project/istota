@@ -495,12 +495,48 @@ class NativeBrainConfig:
 
 
 @dataclass
+class TmuxBrainConfig:
+    """Settings for the tmux-driven interactive-TUI brain (``brain.kind =
+    "tmux_claude"``). All fields default to the values the prototype hardcoded,
+    so an empty (or absent) ``[brain.tmux]`` block behaves exactly like the
+    pre-config prototype.
+
+    Operability knobs (``fallback_*``) drive the §4 circuit breaker; the marker
+    lists let a ``claude`` CLI reword be a config hotfix rather than a code
+    release (the readiness / dialog / error heuristics are pane-text substring
+    matches pinned to a CLI version — see ``cli_version_pin``).
+    """
+
+    # Operability / fallback (§4)
+    fallback_trip_threshold: int = 5          # consecutive launch failures before the circuit opens
+    fallback_cooldown_seconds: float = 300.0  # how long the circuit stays open
+    ready_timeout_seconds: float = 30.0       # REPL-ready deadline
+    tmux_command_timeout: float = 10.0        # per-tmux-subprocess timeout
+    # CLI pinning (§6) — mismatch logs a WARNING at brain construction.
+    cli_version_pin: str = "2.1.168"
+    # Dialog / readiness / error markers (§6). Defaults match the pinned CLI.
+    ready_markers: list[str] = field(
+        default_factory=lambda: ["bypass permissions on", "? for shortcuts", "for shortcuts"]
+    )
+    trust_markers: list[str] = field(
+        default_factory=lambda: ["trust this folder", "Is this a project you"]
+    )
+    bypass_warning_marker: str = "Bypass Permissions mode"
+    bypass_accept_marker: str = "Yes, I accept"
+    error_markers: list[str] = field(
+        default_factory=lambda: ["API Error", "session limit reached", "Context low"]
+    )
+
+
+@dataclass
 class BrainConfig:
     """Selects which brain implementation handles model invocation.
 
     ``"claude_code"`` (default) wraps the ``claude`` CLI subprocess.
     ``"native"`` runs istota's own agent loop in-process; its settings live in
     the nested ``native`` block (``[brain.native]`` in TOML).
+    ``"tmux_claude"`` drives the interactive ``claude`` TUI via tmux; its
+    settings live in ``[brain.tmux]``.
 
     ``source_type_overrides`` maps a task ``source_type`` (``scheduled``,
     ``heartbeat``, ``talk``, …) to a brain kind, overriding ``kind`` for
@@ -510,6 +546,7 @@ class BrainConfig:
     """
     kind: str = "claude_code"
     native: NativeBrainConfig = field(default_factory=NativeBrainConfig)
+    tmux: TmuxBrainConfig = field(default_factory=TmuxBrainConfig)
     source_type_overrides: dict[str, str] = field(default_factory=dict)
 
 
@@ -1156,9 +1193,45 @@ def load_config(config_path: Path | None = None) -> Config:
         overrides_raw = br.get("source_type_overrides", {})
         if not isinstance(overrides_raw, dict):
             overrides_raw = {}
+        tmux_raw = br.get("tmux", {})
+        if not isinstance(tmux_raw, dict):
+            tmux_raw = {}
+        _tmux_defaults = TmuxBrainConfig()
+
+        def _str_list(key: str) -> list[str]:
+            raw = tmux_raw.get(key)
+            if not isinstance(raw, list):
+                return list(getattr(_tmux_defaults, key))
+            return [str(x) for x in raw]
+
+        tmux_cfg = TmuxBrainConfig(
+            fallback_trip_threshold=int(
+                tmux_raw.get("fallback_trip_threshold", _tmux_defaults.fallback_trip_threshold)
+            ),
+            fallback_cooldown_seconds=float(
+                tmux_raw.get("fallback_cooldown_seconds", _tmux_defaults.fallback_cooldown_seconds)
+            ),
+            ready_timeout_seconds=float(
+                tmux_raw.get("ready_timeout_seconds", _tmux_defaults.ready_timeout_seconds)
+            ),
+            tmux_command_timeout=float(
+                tmux_raw.get("tmux_command_timeout", _tmux_defaults.tmux_command_timeout)
+            ),
+            cli_version_pin=str(tmux_raw.get("cli_version_pin", _tmux_defaults.cli_version_pin)),
+            ready_markers=_str_list("ready_markers"),
+            trust_markers=_str_list("trust_markers"),
+            bypass_warning_marker=str(
+                tmux_raw.get("bypass_warning_marker", _tmux_defaults.bypass_warning_marker)
+            ),
+            bypass_accept_marker=str(
+                tmux_raw.get("bypass_accept_marker", _tmux_defaults.bypass_accept_marker)
+            ),
+            error_markers=_str_list("error_markers"),
+        )
         config.brain = BrainConfig(
             kind=br.get("kind", "claude_code"),
             native=native,
+            tmux=tmux_cfg,
             source_type_overrides={
                 str(k): str(v) for k, v in overrides_raw.items()
             },

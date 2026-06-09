@@ -83,12 +83,16 @@ temp_dir = "/tmp/istota"
 # features = ["money_tax", "money_wash_sales"]
 features = []
 
-# Brain — selects the model-invocation backend. Two kinds coexist behind the
+# Brain — selects the model-invocation backend. Three kinds coexist behind the
 # same protocol (src/istota/brain/), so swapping backends doesn't touch executor
 # orchestration (memory, skills, sandbox, etc.):
-#   "claude_code" (default) — wraps the `claude` CLI subprocess.
+#   "claude_code" (default) — wraps the headless `claude -p` CLI subprocess.
 #   "native"                — istota's own in-process agent loop against an
 #                             OpenAI-compatible (or Claude-CLI) provider.
+#   "tmux_claude"           — drives the interactive `claude` TUI in a detached
+#                             tmux session (keeps traffic on subscription
+#                             billing). Full instance switch; claude_code stays
+#                             the automatic fallback + circuit breaker.
 # [brain]
 # kind = "claude_code"
 #
@@ -113,6 +117,24 @@ features = []
 #                                            #   to force either way (a plain-OpenAI / local
 #                                            #   endpoint that rejects cache_control needs
 #                                            #   `false`).
+#
+# Tmux-driven interactive-TUI brain (only used when kind = "tmux_claude", or via
+# a routing override below). All fields default in code to the prototype's pinned
+# values, so an empty/absent block is behavioral parity. The marker lists are
+# pane-text heuristics pinned to a claude CLI version — a CLI reword that breaks
+# readiness detection is a config hotfix (override the relevant marker), not a
+# code release.
+# [brain.tmux]
+# fallback_trip_threshold = 5       # consecutive launch failures before the circuit opens
+# fallback_cooldown_seconds = 300   # how long the circuit stays open (headless fallback)
+# ready_timeout_seconds = 30        # REPL-ready deadline
+# tmux_command_timeout = 10         # per-tmux-subprocess timeout
+# cli_version_pin = "2.1.168"       # supported claude CLI; mismatch logs a WARNING
+# ready_markers = ["bypass permissions on", "? for shortcuts", "for shortcuts"]
+# trust_markers = ["trust this folder", "Is this a project you"]
+# bypass_warning_marker = "Bypass Permissions mode"
+# bypass_accept_marker = "Yes, I accept"
+# error_markers = ["API Error", "session limit reached", "Context low"]
 #
 # Per-source-type brain routing (gradual rollout): map a task's source_type to
 # a brain kind, overriding `kind` for matching tasks. Lets cron/heartbeat run on

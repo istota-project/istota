@@ -2961,6 +2961,10 @@ def execute_task(
             on_pid=_on_pid,
             sandbox_wrap=_sandbox_wrap,
             result_file=result_file,
+            # Task-derived tmux session label (no-op for other brains): threads
+            # the task id into the session name, structured log line, and
+            # on_pid/!stop correlation.
+            session_label=f"istota-{task.id}-{task.attempt_count}",
         )
 
         try:
@@ -2970,6 +2974,41 @@ def execute_task(
                 if _net_proxy_ctx is not None:
                     stack.enter_context(_net_proxy_ctx)
                 brain_result = brain.execute(req)
+                # Automatic headless fallback (tmux-production spec §4): when the
+                # tmux brain can't drive a usable session it returns
+                # stop_reason="fallback" (or "not_found" for a missing-tmux host
+                # on a full switch). Re-run this same attempt once through
+                # claude_code — no new DB row, no attempt increment — so the
+                # instance keeps completing (at Agent-SDK credit cost) instead of
+                # failing en masse. Loud in the logs; the circuit breaker turns a
+                # systemic break into one operator alert.
+                if (
+                    _brain_config.kind == "tmux_claude"
+                    and brain_result.stop_reason in ("fallback", "not_found")
+                ):
+                    logger.error(
+                        "tmux_brain in-attempt fallback to claude_code: "
+                        "task=%d reason=%s",
+                        task.id, brain_result.stop_reason,
+                    )
+                    try:
+                        from .brain.tmux_claude import consume_circuit_open_alert
+                        if consume_circuit_open_alert():
+                            from . import notifications
+                            notifications.send_notification(
+                                config, task.user_id,
+                                "⚠️ tmux_claude brain circuit opened — falling "
+                                "back to claude_code (headless, metered). Check "
+                                "the claude CLI version / readiness markers.",
+                                purpose="alert",
+                            )
+                    except Exception:
+                        logger.debug("circuit-open alert failed", exc_info=True)
+                    import dataclasses as _dc
+                    _fallback_brain = make_brain(
+                        _dc.replace(_brain_config, kind="claude_code")
+                    )
+                    brain_result = _fallback_brain.execute(req)
         finally:
             # Final flush: emit any buffered streamed thinking + text before the
             # scheduler emits the terminal event. Thinking first so its rows keep

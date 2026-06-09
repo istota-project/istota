@@ -65,7 +65,7 @@ def make_brain(brain_config: BrainConfig) -> Brain:
     if kind == "tmux_claude":
         from .tmux_claude import TmuxClaudeBrain
 
-        return TmuxClaudeBrain()
+        return TmuxClaudeBrain(getattr(brain_config, "tmux", None))
     raise ValueError(f"Unknown brain kind: {kind!r}")
 
 

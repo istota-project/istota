@@ -115,10 +115,17 @@ semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeou
 
 ### `BrainConfig`
 ```
-kind: str = "claude_code"                       # "claude_code" | "native"
+kind: str = "claude_code"                       # "claude_code" | "native" | "tmux_claude"
 native: NativeBrainConfig                       # [brain.native] block (native harness)
+tmux: TmuxBrainConfig                           # [brain.tmux] block (tmux-driven interactive TUI)
 source_type_overrides: dict[str, str] = {}      # [brain.source_type_overrides] — per-source-type routing
 ```
+`TmuxBrainConfig` (`[brain.tmux]`): `fallback_trip_threshold` (5),
+`fallback_cooldown_seconds` (300), `ready_timeout_seconds` (30),
+`tmux_command_timeout` (10), `cli_version_pin` ("2.1.168"), plus the readiness /
+dialog / error marker lists (`ready_markers`, `trust_markers`,
+`bypass_warning_marker`, `bypass_accept_marker`, `error_markers`). All defaulted
+to the prototype's hardcoded values; see `.claude/rules/brain.md` "TmuxClaudeBrain".
 Selects which `Brain` implementation handles model invocation. `source_type_overrides`
 maps a task `source_type` to a brain kind, overriding `kind` for matching tasks
 (gradual rollout: cron/heartbeat on native, interactive on claude_code). The

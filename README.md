@@ -111,7 +111,7 @@ TASKS.md ──────>│
 CLI ───────────>┘
 ```
 
-Messages arrive through Talk polling, IMAP, TASKS.md file watching, or the CLI. The scheduler claims tasks from a SQLite queue, builds a prompt with the user's resources, skills, memory, and conversation context, then hands it to a **Brain** in a sandbox. Two brains ship: one wraps the Claude Code CLI; the other is Istota's own in-process agentic loop, which can drive any OpenAI-compatible model. Responses go back through the same channel.
+Messages arrive through Talk polling, IMAP, TASKS.md file watching, or the CLI. The scheduler claims tasks from a SQLite queue, builds a prompt with the user's resources, skills, memory, and conversation context, then hands it to a **Brain** in a sandbox. Three brains ship: one wraps the headless Claude Code CLI; one is Istota's own in-process agentic loop, which can drive any OpenAI-compatible model; and one drives the interactive Claude CLI in a tmux session to keep traffic on a Claude subscription (with the headless brain as an automatic fallback). Responses go back through the same channel.
 
 Per-user worker threads handle concurrency. Foreground tasks (chat) and background tasks (scheduled jobs, briefings) run on separate pools so a long-running job never blocks a conversation.
 

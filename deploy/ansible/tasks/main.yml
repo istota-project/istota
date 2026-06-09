@@ -91,6 +91,32 @@
         2. (Manual) sudo -u {{ istota_user }} HOME={{ istota_home }} claude login
   when: not istota_update_only and not istota_web_only and not (claude_check.stat.exists | default(true))
 
+# tmux_claude brain: its readiness/dialog detection is pinned to a claude CLI
+# version (istota_brain_tmux_cli_version_pin). A reword in a newer CLI silently
+# breaks readiness → every routed task times out at the ready gate. Warn (don't
+# fail) on mismatch so the operator notices before the rollout.
+- name: Check Claude CLI version against the tmux_claude pin
+  shell: "sudo -u {{ istota_user }} HOME={{ istota_home }} claude --version 2>/dev/null"
+  register: claude_version_check
+  changed_when: false
+  failed_when: false
+  when: >
+    not istota_web_only
+    and (istota_brain_kind == 'tmux_claude'
+         or 'tmux_claude' in (istota_brain_source_type_overrides | default({}) | dict2items | map(attribute='value') | list))
+
+- name: Warn if Claude CLI version doesn't match the tmux_claude pin
+  debug:
+    msg: |
+      WARNING: tmux_claude brain pins claude CLI {{ istota_brain_tmux_cli_version_pin }}
+      but the host reports: {{ claude_version_check.stdout | default('(unknown)') }}.
+      If routed tasks start timing out at readiness, update the [brain.tmux]
+      marker lists (istota_brain_tmux_ready_markers etc.) or re-pin.
+  when: >
+    claude_version_check is defined
+    and claude_version_check.stdout is defined
+    and istota_brain_tmux_cli_version_pin not in (claude_version_check.stdout | default(''))
+
 - name: Create Claude config directory
   file:
     path: "{{ istota_home }}/.claude"
