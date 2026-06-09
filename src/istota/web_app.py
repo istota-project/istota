@@ -1345,6 +1345,13 @@ def _chat_update_room(
         updated = db.update_web_chat_room(
             conn, room_id, name=name, archived=archived,
         )
+        # Keep the unified room registry in sync (the cross-surface room list /
+        # future sidebar reads it, not web_chat_rooms).
+        if updated is not None:
+            if name is not None:
+                db.rename_room(conn, updated.token, updated.name)
+            if archived is not None:
+                db.set_room_archived(conn, updated.token, bool(archived))
     return _room_to_dict(updated) if updated else None
 
 
