@@ -1568,23 +1568,74 @@ def _task_duration_seconds(started_at: str | None, completed_at: str | None) -> 
     return round(delta, 1) if delta >= 0 else None
 
 
+def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool = False) -> dict:
+    """Build a transcript assistant-message dict from a row that carries the
+    enrichment columns (status / actions_taken / execution_trace / started_at /
+    completed_at / model_used) — a `messages`⋈`tasks` row or a `tasks` row. When
+    the task has been retention-deleted those columns are NULL and the turn
+    degrades to a plain `text` bubble. `_row_get` tolerates either source."""
+    if confirmation:
+        return {
+            "role": "assistant", "text": text, "task_id": _row_get(row, "task_id") or _row_get(row, "id"),
+            "status": status, "confirmation": True, "created_at": _row_get(row, "created_at"),
+        }
+    trace = _row_get(row, "execution_trace")
+    actions = _row_get(row, "actions_taken")
+    return {
+        "role": "assistant", "text": text,
+        "task_id": _row_get(row, "task_id") or _row_get(row, "id"),
+        "status": status, "created_at": _row_get(row, "created_at"),
+        "tools": _trace_tool_descriptions(trace, actions),
+        "segments": _trace_segments(trace, actions, text),
+        "duration_seconds": _task_duration_seconds(
+            _row_get(row, "started_at"), _row_get(row, "completed_at"),
+        ),
+        "model": _row_get(row, "model_used") or None,
+    }
+
+
+def _row_get(row, key: str):
+    """sqlite3.Row.get() equivalent — returns None for a column absent from the
+    row's keys instead of raising (the two source queries differ in columns)."""
+    return row[key] if key in row.keys() else None
+
+
 def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     """Recent messages for a room plus the active (in-flight) task, if any.
 
-    Each task contributes a user message (its prompt) and, once terminal, an
-    assistant message (its result / error / confirmation prompt). Non-terminal
-    tasks surface as ``active_task`` so a reload mid-stream can resume the SSE.
+    The transcript is read from the **durable** canonical `messages` store, not
+    the `tasks` table: `cleanup_old_tasks` GCs completed tasks after a few days,
+    so a `tasks`-sourced transcript silently lost a dormant room's history and
+    surfaced only the stray cancelled/failed tasks retention happens to keep
+    (ISSUE-126). Surviving `tasks` rows are joined in only to *enrich* a stored
+    turn (trace / timing / model) and to *fill* turns the store doesn't hold —
+    failed/cancelled answers (the scheduler stores only successful turns), the
+    in-flight assistant slot, and any legacy turn not yet backfilled. Dedup is
+    keyed on `(role, task_id)`: the store is authoritative, `tasks` fills gaps.
     """
     from . import db
     with db.get_db(_config.db_path) as conn:
-        # Both interactive room surfaces, not just web: a Talk room opened in
-        # web renders its Talk turns too (unified room sync). Each surface's
-        # turns live in `tasks` keyed on the shared conversation_token; the rich
-        # status / trace / in-flight rendering and the trace both come from here.
-        rows = conn.execute(
+        # 1. Durable turns from the canonical store. LEFT JOIN tasks to enrich a
+        #    surviving turn; a retention-deleted turn (t.* NULL) renders plain.
+        #    limit*2 because a turn is two rows (user + assistant).
+        msg_rows = conn.execute(
+            "SELECT m.role AS role, m.body AS body, m.task_id AS task_id, "
+            "  m.created_at AS created_at, t.status AS status, "
+            "  t.actions_taken AS actions_taken, t.execution_trace AS execution_trace, "
+            "  t.started_at AS started_at, t.completed_at AS completed_at, "
+            "  t.model_used AS model_used "
+            "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
+            "WHERE m.room_token = ? AND m.origin_surface IN ('web', 'talk') "
+            "  AND m.role IN ('user', 'assistant') "
+            "ORDER BY m.id DESC LIMIT ?",
+            (token, limit * 2),
+        ).fetchall()
+        # 2. Tasks fill gaps the store doesn't hold (failed/cancelled answers,
+        #    in-flight slots, un-backfilled legacy turns). Same surface filter.
+        task_rows = conn.execute(
             "SELECT id, prompt, result, status, error, confirmation_prompt, "
             "created_at, actions_taken, execution_trace, started_at, completed_at, "
-            "model_used, source_type "
+            "model_used "
             "FROM tasks "
             "WHERE conversation_token = ? AND user_id = ? "
             "AND source_type IN ('web', 'talk') "
@@ -1592,79 +1643,74 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
             (token, username, limit),
         ).fetchall()
         # Bot-delivered system messages (alerts / logs / notifications routed to
-        # web) now live in the canonical messages store (role='system').
+        # web) live in the canonical messages store (role='system').
         notes = db.list_system_messages(conn, token, limit)
-    rows = list(reversed(rows))
+
     messages: list[dict] = []
-    # In-flight tasks, oldest-first. The room runs them one at a time (the
-    # per-channel claim gate serializes them), so the client streams them in
-    # this order: resume the first, queue the rest. `active_task` is kept as
-    # the oldest for back-compat.
-    active_tasks: list[dict] = []
-    for r in rows:
-        messages.append({
-            "role": "user", "text": r["prompt"], "task_id": r["id"],
-            "created_at": r["created_at"],
-        })
-        status = r["status"]
-        # Tool trace + wall-clock duration so a finished turn renders its action
-        # strip as a persisted, inspectable "done" state and shows timing in the
-        # metadata after a reload / room switch (ISSUE-122).
-        tools = _trace_tool_descriptions(r["execution_trace"], r["actions_taken"])
-        duration = _task_duration_seconds(r["started_at"], r["completed_at"])
-        if status == "completed":
+    seen: set[tuple[str, object]] = set()  # (role, task_id) already rendered
+
+    # 1. Durable store turns (authoritative).
+    for r in reversed(msg_rows):  # oldest-first
+        tid = r["task_id"]
+        if r["role"] == "user":
             messages.append({
-                "role": "assistant", "text": r["result"] or "", "task_id": r["id"],
-                "status": status, "created_at": r["created_at"],
-                "tools": tools,
-                "segments": _trace_segments(
-                    r["execution_trace"], r["actions_taken"], r["result"],
-                ),
-                "duration_seconds": duration,
-                "model": r["model_used"] or None,
-            })
-        elif status == "pending_confirmation":
-            messages.append({
-                "role": "assistant",
-                "text": r["confirmation_prompt"] or r["result"] or "",
-                "task_id": r["id"], "status": status, "confirmation": True,
+                "role": "user", "text": r["body"], "task_id": tid,
                 "created_at": r["created_at"],
             })
-            active_tasks.append({"id": r["id"], "status": status})
-        elif status in ("failed", "cancelled"):
-            answer = r["result"] or r["error"] or ""
+        else:  # assistant — a stored assistant row is by definition a completed turn
+            messages.append(_assistant_message_dict(r, r["body"], r["status"] or "completed"))
+        if tid is not None:
+            seen.add((r["role"], tid))
+
+    # 2. Tasks fill the gaps, oldest-first. The room runs tasks one at a time
+    #    (the per-channel claim gate serializes them), so in-flight ones stream
+    #    in this order. `active_task` is kept as the oldest for back-compat.
+    active_tasks: list[dict] = []
+    for r in reversed(task_rows):
+        tid = r["id"]
+        if ("user", tid) not in seen:
             messages.append({
-                "role": "assistant", "text": answer,
-                "task_id": r["id"], "status": status, "created_at": r["created_at"],
-                "tools": tools,
-                "segments": _trace_segments(
-                    r["execution_trace"], r["actions_taken"], answer,
-                ),
-                "duration_seconds": duration,
-                "model": r["model_used"] or None,
+                "role": "user", "text": r["prompt"], "task_id": tid,
+                "created_at": r["created_at"],
             })
-        else:  # pending / locked / running
-            # Emit a placeholder assistant slot so the transcript stays ordered
-            # (user msg → its in-flight reply) and the client has a cid to bind
-            # this task's stream to on reload.
+            seen.add(("user", tid))
+        status = r["status"]
+        if ("assistant", tid) in seen:
+            continue  # the store already rendered (and enriched) this answer
+        if status == "completed":
+            messages.append(_assistant_message_dict(r, r["result"] or "", status))
+        elif status == "pending_confirmation":
+            messages.append(_assistant_message_dict(
+                r, r["confirmation_prompt"] or r["result"] or "", status, confirmation=True,
+            ))
+            active_tasks.append({"id": tid, "status": status})
+        elif status in ("failed", "cancelled"):
+            messages.append(_assistant_message_dict(r, r["result"] or r["error"] or "", status))
+        else:  # pending / locked / running — placeholder slot to stream into
             messages.append({
-                "role": "assistant", "text": "", "task_id": r["id"],
+                "role": "assistant", "text": "", "task_id": tid,
                 "status": status, "created_at": r["created_at"],
             })
-            active_tasks.append({"id": r["id"], "status": status})
-    # Merge bot-delivered messages in by time. Task created_at and message
-    # created_at share the `datetime('now')` string format, so a stable sort on
-    # created_at interleaves notifications between tasks while keeping each
-    # task's user→assistant pair adjacent (equal timestamps preserve order, and
-    # the notifications are appended after the task messages here). `notif_id`
-    # gives the client a stable key so a poll can append only new ones.
+            active_tasks.append({"id": tid, "status": status})
+
+    # Merge bot-delivered messages in by time. `notif_id` gives the client a
+    # stable key so an idle poll appends only ones that arrived later.
     for n in notes:
         text = f"**{n.title}**\n\n{n.body}" if n.title else n.body
         messages.append({
             "role": n.role, "text": text, "notif_id": n.id,
             "created_at": n.created_at,
         })
-    messages.sort(key=lambda m: m.get("created_at") or "")
+    # Order chronologically, but break created_at ties by (task_id, role) so a
+    # turn's user→assistant pair stays adjacent even when several rapid in-flight
+    # sends share a timestamp (the store and tasks contribute the two halves
+    # separately now). Notes (no task_id) sort after task turns at equal time.
+    _role_rank = {"user": 0, "assistant": 1, "system": 2}
+    messages.sort(key=lambda m: (
+        m.get("created_at") or "",
+        m.get("task_id") if m.get("task_id") is not None else float("inf"),
+        _role_rank.get(m["role"], 3),
+    ))
     return {
         "messages": messages,
         "active_task": active_tasks[0] if active_tasks else None,

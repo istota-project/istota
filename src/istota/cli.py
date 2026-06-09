@@ -1141,6 +1141,36 @@ def cmd_kv_namespaces(args):
     print(json.dumps({"status": "ok", "namespaces": namespaces}))
 
 
+def cmd_chat_backfill_history(args):
+    """Recover dormant rooms' transcripts from the Talk message cache.
+
+    The web transcript reads the durable `messages` store; rooms whose turns
+    were task-retention-deleted before the unified-room-sync migration came out
+    empty (their tasks were already GC'd). This folds the surviving
+    `talk_messages` copy back into the store. Idempotent — safe to re-run.
+    """
+    config = load_config(Path(args.config) if args.config else None)
+    with db.get_db(config.db_path) as conn:
+        if args.token:
+            tokens = [args.token]
+        else:
+            rows = conn.execute(
+                "SELECT token FROM rooms WHERE origin = 'talk'"
+            ).fetchall()
+            tokens = [r["token"] for r in rows]
+        total = 0
+        per_room = []
+        for tok in tokens:
+            n = db.backfill_room_messages_from_talk_cache(conn, tok)
+            total += n
+            if n:
+                per_room.append({"token": tok, "inserted": n})
+    print(json.dumps({
+        "status": "ok", "rooms_scanned": len(tokens),
+        "rows_inserted": total, "per_room": per_room,
+    }, indent=2))
+
+
 def cmd_tasks_file_status(args):
     """Show status of TASKS.md file tasks."""
     config = load_config(Path(args.config) if args.config else None)
@@ -1483,6 +1513,17 @@ def main():
     kv_ns_parser = kv_subparsers.add_parser("namespaces", help="List namespaces")
     kv_ns_parser.add_argument("-u", "--user", required=True, help="User ID")
 
+    # chat (with subparsers)
+    chat_parser = subparsers.add_parser("chat", help="Web chat room maintenance")
+    chat_subparsers = chat_parser.add_subparsers(dest="chat_action", required=True)
+    chat_backfill_parser = chat_subparsers.add_parser(
+        "backfill-history",
+        help="Recover dormant rooms' transcripts from the Talk message cache",
+    )
+    chat_backfill_parser.add_argument(
+        "-t", "--token", help="Single room token (default: all Talk-origin rooms)",
+    )
+
     # money (with subparsers)
     from istota import cli_money
     cli_money.add_subparser(subparsers)
@@ -1544,6 +1585,11 @@ def main():
             "namespaces": cmd_kv_namespaces,
         }
         kv_commands[args.kv_action](args)
+    elif args.command == "chat":
+        chat_commands = {
+            "backfill-history": cmd_chat_backfill_history,
+        }
+        chat_commands[args.chat_action](args)
     elif args.command == "money":
         rc = cli_money.dispatch(args, config)
         if rc:

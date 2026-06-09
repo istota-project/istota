@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The calendar and location skill CLIs now accept the natural subcommand names the assistant tends to reach for: `calendar agenda` works as `calendar list`, and `location last` as `location current`. The assistant is also now told to confirm a skill subcommand exists (running `--help` when the skill's docs aren't loaded) instead of guessing from memory.
 
 ### Fixed
+- Web chat now shows a room's real history even after its turns age out. The transcript is read from the durable message store instead of the task queue, which is cleaned up after a few days — so a dormant room used to open to a handful of stale, out-of-context messages while its actual conversation had been pruned. A one-time recovery (`istota chat backfill-history`) rebuilds older rooms' history from the Talk message cache.
+- Web chat messages now show their date, not just the time of day. Days are separated by a divider row labelled "Today", "Yesterday", a weekday, or a date, so backfilled history is no longer ambiguous.
+- The web chat composer placeholder is now a plain "Your message…" instead of prepending the room name with a "#".
+- Talk-origin rooms in the web chat sidebar are now marked with a small cloud icon on the left of the name instead of a trailing "Talk" chip, so long room names get the full row width.
 - A Nextcloud Talk room you delete (or remove the bot from) no longer lingers in the web chat room list. The bot now reconciles its room list against Nextcloud each poll and hides rooms it's no longer part of.
 - Closed a path where the bot could silently lose earlier conversation history. The unified history reader now falls back to its complete source whenever any past turn isn't yet mirrored into the new message store, instead of switching over as soon as the latest turn was. Relatedly, the one-time room-sync migration no longer marks itself done if a step fails partway, so it retries cleanly on the next start rather than stranding a partial copy.
 

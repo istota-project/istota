@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { page } from '$app/state';
-	import { Plus, MessageSquare } from 'lucide-svelte';
+	import { Plus, MessageSquare, Cloud } from 'lucide-svelte';
 	import AppShell from '$lib/components/ui/AppShell.svelte';
 	import ShellHeader from '$lib/components/ui/ShellHeader.svelte';
 	import Sidebar from '$lib/components/ui/Sidebar.svelte';
@@ -40,11 +40,52 @@
 		const prev = $messages[i - 1];
 		const cur = $messages[i];
 		if (!prev || prev.role !== cur.role || cur.role === 'system') return false;
+		// A message that opens a new day starts a fresh group (full header) under
+		// the day divider, even from the same author within the window.
+		if (startsNewDay(i)) return false;
 		if (prev.createdAt && cur.createdAt) {
 			const gap = new Date(cur.createdAt).getTime() - new Date(prev.createdAt).getTime();
 			if (Number.isFinite(gap) && gap > GROUP_WINDOW_MS) return false;
 		}
 		return true;
+	}
+
+	// Day-divider support (ISSUE-127). Time-only stamps are ambiguous once
+	// backfilled history lands older messages in a room; a divider row between
+	// days resolves "is this today or last month" without stamping a full date on
+	// every bubble. Day boundaries use the viewer's local timezone, not UTC, so
+	// "Today" matches the user's clock.
+	function localDayKey(iso: string): string | null {
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return null;
+		return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+	}
+	// True when message i is the first (rendered) message of its calendar day —
+	// i.e. its day differs from the previous message's (or it's the very first).
+	function startsNewDay(i: number): boolean {
+		const cur = $messages[i]?.createdAt;
+		if (!cur) return false;
+		const curKey = localDayKey(cur);
+		if (!curKey) return false;
+		if (i === 0) return true;
+		const prev = $messages[i - 1]?.createdAt;
+		const prevKey = prev ? localDayKey(prev) : null;
+		return curKey !== prevKey;
+	}
+	function dayLabel(iso: string): string {
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return '';
+		const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+		const today = startOfDay(new Date());
+		const that = startOfDay(d);
+		const days = Math.round((today.getTime() - that.getTime()) / 86400000);
+		if (days === 0) return 'Today';
+		if (days === 1) return 'Yesterday';
+		if (days > 1 && days < 7) return d.toLocaleDateString([], { weekday: 'long' });
+		const sameYear = d.getFullYear() === today.getFullYear();
+		return d.toLocaleDateString([], sameYear
+			? { month: 'short', day: 'numeric' }
+			: { year: 'numeric', month: 'short', day: 'numeric' });
 	}
 
 	onMount(() => {
@@ -156,17 +197,27 @@
 			{/snippet}
 
 			{#each $rooms as room (room.id)}
+				{@const isTalk = room.origin === 'talk' || !!room.talk_token}
 				<div class="room-row" class:active={room.id === $activeRoomId}>
 					<button
 						class="room-btn"
 						onclick={() => selectRoom(room.id)}
 						type="button"
 					>
-						<MessageSquare size={13} />
-						<span class="room-name">{room.name}</span>
-						{#if room.origin === 'talk' || room.talk_token}
-							<span class="room-badge" title="Also on Nextcloud Talk">Talk</span>
+						{#if isTalk}
+							<!-- Leading origin glyph: a tinted cloud marks a room mirrored
+							     to Nextcloud Talk. Sits in its own flex slot before the
+							     title so it never eats name width or gets clipped by the
+							     title's ellipsis (ISSUE-129). -->
+							<span class="room-origin talk" title="Also on Nextcloud Talk">
+								<Cloud size={13} />
+							</span>
+						{:else}
+							<span class="room-origin" title="Web room">
+								<MessageSquare size={13} />
+							</span>
 						{/if}
+						<span class="room-name">{room.name}</span>
 					</button>
 					<KebabMenu
 						ariaLabel="Room actions"
@@ -189,6 +240,11 @@
 				</div>
 			{:else}
 				{#each $messages as message, i (message.cid)}
+					{#if message.createdAt && startsNewDay(i)}
+						<div class="day-divider" role="separator">
+							<span class="day-label">{dayLabel(message.createdAt)}</span>
+						</div>
+					{/if}
 					<Message
 						{message}
 						continuation={isContinuation(i)}
@@ -204,7 +260,7 @@
 			onSend={(t, atts) => session.send(t, atts)}
 			onCancel={() => session.cancel()}
 			busy={busy}
-			placeholder={activeRoom ? `Message #${activeRoom.name}…` : 'Message Istota…'}
+			placeholder="Your message…"
 		/>
 	</div>
 
@@ -265,6 +321,31 @@
 	.chat-empty p { margin: 0.2rem 0 0; color: var(--text-muted); font-size: var(--text-base); }
 	.chat-empty .hint { font-size: var(--text-sm); }
 
+	/* Day divider (ISSUE-127): a centered date pill on a hairline rule, marking
+	   the boundary between calendar days in the transcript. */
+	.day-divider {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		margin: 0.9rem 0 0.3rem;
+		padding: 0 0.75rem;
+	}
+	.day-divider::before,
+	.day-divider::after {
+		content: '';
+		flex: 1;
+		height: 1px;
+		background: var(--border-subtle);
+	}
+	.day-label {
+		flex-shrink: 0;
+		font-size: var(--text-xs);
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		color: var(--text-dim);
+		text-transform: uppercase;
+	}
+
 	.room-new { padding: 0 0.25rem 0.4rem; }
 	.room-add {
 		display: flex;
@@ -324,15 +405,14 @@
 	.room-row:hover .room-btn { color: var(--text-secondary); }
 	.room-row.active .room-btn { color: var(--text-primary); }
 	.room-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.room-badge {
+	/* Leading origin glyph. Fixed slot before the title so a long room name
+	   still gets the full row width and the icon never enters the title's
+	   truncation box. */
+	.room-origin {
 		flex-shrink: 0;
-		font-size: 0.6rem;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-		padding: 0.05rem 0.3rem;
-		border-radius: var(--radius-pill);
-		background: var(--surface-base);
+		display: inline-flex;
+		align-items: center;
 		color: var(--text-dim);
-		border: 1px solid var(--border-default);
 	}
+	.room-origin.talk { color: var(--accent-amber); }
 </style>

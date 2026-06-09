@@ -6,7 +6,7 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -1570,6 +1570,106 @@ def backfill_room_messages_from_tasks(
         )
         inserted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     return inserted
+
+
+def backfill_room_messages_from_talk_cache(
+    conn: sqlite3.Connection, conversation_token: str,
+) -> int:
+    """Recover a room's durable transcript from the Talk message cache.
+
+    The web transcript is rebuilt from the canonical `messages` store, but for a
+    room whose conversation predates the unified-room-sync migration (or the
+    task-retention window) the originating `tasks` rows are gone — the only
+    surviving copy of those turns is `talk_messages`. This folds them in: one
+    user row (the prompt) + one assistant row (the result) per completed Talk
+    turn, keyed on the task id parsed from the bot result's
+    `istota:task:<id>:result` reference. Idempotent via the messages unique
+    index. Returns the number of message rows inserted.
+
+    A turn is reconstructed from the cache's shape (message_id ascending):
+
+        [human  comment]            -> the prompt
+        [bot    :ack    comment]    -> skipped
+        [bot    system  "edited"]   -> skipped
+        [bot    :result comment]    -> the answer, carries the task id
+
+    The prompt is the nearest preceding human comment before the result; an
+    unpaired result (its prompt predates the cache window) yields the assistant
+    row alone. Failed/cancelled turns have no `:result` cache row, so this only
+    recovers completed turns — which is exactly the set task-retention GCs.
+    """
+    rows = conn.execute(
+        "SELECT message_id, actor_id, message_type, reference_id, message_text, "
+        "timestamp FROM talk_messages "
+        "WHERE conversation_token = ? AND deleted = 0 "
+        "ORDER BY message_id ASC",
+        (conversation_token,),
+    ).fetchall()
+    if not rows:
+        return 0
+    # The bot is whoever authors the istota:task:* references.
+    bot_actor: str | None = None
+    for r in rows:
+        if (r["reference_id"] or "").startswith("istota:task:"):
+            bot_actor = r["actor_id"]
+            break
+    if bot_actor is None:
+        return 0  # no bot turns cached -> nothing to recover
+
+    def _iso(ts) -> str | None:
+        try:
+            return datetime.fromtimestamp(
+                int(ts), tz=timezone.utc,
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError, OSError, OverflowError):
+            return None
+
+    inserted = 0
+    pending_user: tuple[str, object] | None = None  # (text, ts), unconsumed
+    for r in rows:
+        if r["message_type"] != "comment":
+            continue  # system notices ("You edited a message"), etc.
+        ref = r["reference_id"] or ""
+        is_bot_ref = ref.startswith("istota:task:")
+        if r["actor_id"] != bot_actor and not is_bot_ref:
+            # A human comment — the candidate prompt for the next bot result.
+            pending_user = (r["message_text"], r["timestamp"])
+            continue
+        if is_bot_ref and ref.endswith(":result"):
+            parts = ref.split(":")
+            try:
+                task_id = int(parts[2])
+            except (IndexError, ValueError):
+                continue
+            # User row first so id/created_at order matches the conversation.
+            if pending_user is not None:
+                inserted += _insert_recovered_message(
+                    conn, conversation_token, "user",
+                    pending_user[0], task_id, _iso(pending_user[1]),
+                )
+                pending_user = None
+            inserted += _insert_recovered_message(
+                conn, conversation_token, "assistant",
+                r["message_text"], task_id, _iso(r["timestamp"]),
+            )
+        # ack rows (:ack) and any other bot comment fall through (skipped).
+    return inserted
+
+
+def _insert_recovered_message(
+    conn: sqlite3.Connection, token: str, role: str, body: str,
+    task_id: int, created_at: str | None,
+) -> int:
+    """INSERT OR IGNORE one recovered turn message with an explicit historical
+    `created_at`. Idempotent via the (room_token, role, task_id) unique index.
+    Returns 1 if a row was inserted, else 0."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO messages "
+        "(room_token, role, body, task_id, origin_surface, created_at) "
+        "VALUES (?, ?, ?, ?, 'talk', COALESCE(?, datetime('now')))",
+        (token, role, body, task_id, created_at),
+    )
+    return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
 
 def get_previous_tasks(
