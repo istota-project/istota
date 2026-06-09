@@ -252,6 +252,20 @@ class TestBuildParserUpdateSubcommand:
         with pytest.raises(SystemExit):
             parser.parse_args(["list", "--week", "--date", "tomorrow"])
 
+    def test_agenda_alias_parses_as_list(self):
+        # `agenda` is an alias an LLM naturally reaches for; it must accept
+        # the same flags as `list` and dispatch to cmd_list.
+        parser = build_parser()
+        args = parser.parse_args(["agenda", "--week", "--tz", "UTC"])
+        assert args.command == "agenda"
+        assert args.week is True
+
+    def test_agenda_alias_dispatches_to_cmd_list(self):
+        from istota.skills.calendar import cmd_list, main
+        with patch("istota.skills.calendar.cmd_list", return_value={"status": "ok"}) as m:
+            main(["agenda"])
+        assert m.called
+
 
 class TestCmdUpdate:
     @patch("istota.skills.calendar.update_event")

@@ -632,7 +632,7 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     # list
-    p_list = sub.add_parser("list", help="List calendar events")
+    p_list = sub.add_parser("list", aliases=["agenda"], help="List calendar events")
     p_list.add_argument("--calendar", "-c", help="Calendar URL (omit to query all)")
     date_group = p_list.add_mutually_exclusive_group()
     date_group.add_argument(
@@ -688,6 +688,7 @@ def main(argv=None):
 
     commands = {
         "list": cmd_list,
+        "agenda": cmd_list,  # alias — natural name an LLM reaches for
         "create": cmd_create,
         "delete": cmd_delete,
         "update": cmd_update,

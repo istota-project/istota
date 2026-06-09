@@ -101,6 +101,8 @@ istota-skill location restore-dismissed 7
 
 ### current
 
+Aliased as `last` (`istota-skill location last`).
+
 ```json
 {
   "last_ping": {

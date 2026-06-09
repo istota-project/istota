@@ -3567,3 +3567,19 @@ class TestReconcileVisits:
             assert len(visits) == 1
             assert visits[0].entered_at == "2026-04-29T03:38:00Z"
             assert visits[0].exited_at == "2026-04-29T03:49:30Z"
+
+
+class TestCurrentLastAlias:
+    """`last` is an alias for `current` — the natural name an LLM reaches for."""
+
+    def test_last_alias_parses(self):
+        from istota.skills.location import build_parser
+        args = build_parser().parse_args(["last"])
+        assert args.command == "last"
+
+    def test_last_alias_dispatches_to_cmd_current(self):
+        from istota.skills.location import main
+        with patch("istota.skills.location.cmd_current") as m, \
+                patch.object(sys, "argv", ["loc", "last"]):
+            main()
+        assert m.called

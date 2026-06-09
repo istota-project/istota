@@ -21,7 +21,7 @@ Calendar operations use CalDAV. Credentials are available via environment variab
 The simplest way to interact with calendars is via the CLI:
 
 ```bash
-# List today's events from all calendars
+# List today's events from all calendars (`agenda` is an alias for `list`)
 istota-skill calendar list --tz "America/Los_Angeles"
 
 # List tomorrow's events
