@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A conversation can now be carried across Nextcloud Talk and the in-app web chat. A new surface-independent room registry backs both, with one canonical message store per room, so opening a Talk room in web shows its full history and a reply typed in web is mirrored into the Talk room (and onto your phone). The bot keeps full cross-surface context with no extra work. Talk rooms the bot is in surface automatically in the web room list; a web room can be promoted to Talk ("Also open in Talk") to create a real Nextcloud Talk conversation, and renames propagate both ways. When a room is open in web while a Talk message is being answered, the reply streams live in both places.
 
 ### Changed
+- Talk rooms shown in the web chat room list now display their real Talk titles, pulled automatically on each poll, instead of a generic "Talk room". A room folded in from before this change picks up its title the next time the bot polls.
+- A question you type in web chat is now reposted into the mirrored Talk room (attributed to you) just above the bot's reply, so the Talk side reads as a normal exchange rather than an answer with no visible question. The repost is Talk-only — it never duplicates your message in web history or cross-surface context.
 - The calendar and location skill CLIs now accept the natural subcommand names the assistant tends to reach for: `calendar agenda` works as `calendar list`, and `location last` as `location current`. The assistant is also now told to confirm a skill subcommand exists (running `--help` when the skill's docs aren't loaded) instead of guessing from memory.
 
 ## [0.21.0] - 2026-06-09

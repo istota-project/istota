@@ -639,6 +639,99 @@ class TestDmTokenCache:
         assert get_dm_token("stranger") is None
 
 
+class TestRoomTitleBackfill:
+    """The poller proactively backfills registry room titles from Talk's
+    displayName each cycle — not only when a new inbound message arrives — so a
+    migrated Talk room (folded in with a NULL name) stops showing the generic
+    'Talk room' in web chat once the bot next polls."""
+
+    @pytest.mark.asyncio
+    async def test_null_name_talk_room_backfilled(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "grouptok", "alice", origin="talk", name=None)
+            db.set_talk_poll_state(conn, "grouptok", 50)
+
+        conversations = [
+            {"token": "grouptok", "type": 2, "displayName": "Project X"},
+        ]
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            room = db.get_room(conn, "grouptok")
+        assert room.name == "Project X"
+
+    @pytest.mark.asyncio
+    async def test_talk_side_rename_flows_back(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "grouptok", "alice", origin="talk", name="Old")
+            db.set_talk_poll_state(conn, "grouptok", 50)
+
+        conversations = [
+            {"token": "grouptok", "type": 2, "displayName": "New Name"},
+        ]
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            room = db.get_room(conn, "grouptok")
+        assert room.name == "New Name"
+
+    @pytest.mark.asyncio
+    async def test_no_room_is_not_created(self, make_config):
+        """Backfill only touches rooms already in the registry — it must not
+        surface every Talk conversation the bot happens to be in."""
+        config = make_config()
+        config.users = {"alice": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "unseen", 50)
+
+        conversations = [
+            {"token": "unseen", "type": 2, "displayName": "Some Room"},
+        ]
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, "unseen") is None
+
+    @pytest.mark.asyncio
+    async def test_web_origin_room_name_not_overwritten(self, make_config):
+        """A web-origin room's user-set name wins over Talk's displayName."""
+        config = make_config()
+        config.users = {"alice": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "webtok", "alice", origin="web", name="My Room")
+            db.add_room_binding(conn, "webtok", "talk", "webtok")
+            db.set_talk_poll_state(conn, "webtok", 50)
+
+        conversations = [
+            {"token": "webtok", "type": 2, "displayName": "Talk Title"},
+        ]
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            room = db.get_room(conn, "webtok")
+        assert room.name == "My Room"
+
+
 class TestPollTalkConversations:
     @pytest.mark.asyncio
     async def test_disabled_returns_empty(self, make_config):
