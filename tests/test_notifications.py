@@ -564,8 +564,8 @@ class TestWebSurface:
         assert _send_web(config, "alice", "hello", title="Alert") is True
         with db.get_db(config.db_path) as conn:
             token = db.ensure_default_web_chat_room(conn, "alice").token
-            msgs = db.list_web_chat_messages(conn, token)
-        assert [m.text for m in msgs] == ["hello"]
+            msgs = db.list_system_messages(conn, token)
+        assert [m.body for m in msgs] == ["hello"]
         assert msgs[0].title == "Alert"
 
     def test_send_web_explicit_token(self, tmp_path):
@@ -576,7 +576,7 @@ class TestWebSurface:
             room = db.create_web_chat_room(conn, "alice", "ideas")
         assert _send_web(config, "alice", "x", conversation_token=room.token) is True
         with db.get_db(config.db_path) as conn:
-            assert len(db.list_web_chat_messages(conn, room.token)) == 1
+            assert len(db.list_system_messages(conn, room.token)) == 1
 
     @patch("istota.notifications._send_web")
     def test_send_notification_web_surface(self, mock_web, tmp_path):
@@ -591,8 +591,8 @@ class TestWebSurface:
         assert send_notification(config, "alice", "msg", surface="web") is True
         with db.get_db(config.db_path) as conn:
             token = db.ensure_default_web_chat_room(conn, "alice").token
-            msgs = db.list_web_chat_messages(conn, token)
-        assert [m.text for m in msgs] == ["msg"]
+            msgs = db.list_system_messages(conn, token)
+        assert [m.body for m in msgs] == ["msg"]
 
     def test_alert_purpose_routes_to_web(self, tmp_path):
         from istota import db
@@ -601,7 +601,7 @@ class TestWebSurface:
         assert send_notification(config, "alice", "boom", purpose="alert") is True
         with db.get_db(config.db_path) as conn:
             token = db.ensure_default_web_chat_room(conn, "alice").token
-            assert len(db.list_web_chat_messages(conn, token)) == 1
+            assert len(db.list_system_messages(conn, token)) == 1
 
     def test_is_channel_configured_web(self, tmp_path):
         config = self._config(tmp_path)
