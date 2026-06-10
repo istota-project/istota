@@ -206,6 +206,29 @@ class TestTranscriptSurvivesRetention:
         assert asst["text"] == "durable answer"
         assert asst["segments"] == [{"kind": "text", "text": "durable answer"}]
 
+    def test_created_at_normalized_to_iso_utc(self, db_path):
+        # The store holds naive-UTC timestamps (SQLite datetime('now'), and the
+        # Talk-cache backfill's strftime). Returned raw, the browser's new Date()
+        # parses a space-separated marker-less string as *local* time, so an
+        # imported-from-Talk turn renders hours off. The loader must hand the
+        # frontend an explicit ...Z UTC string (matching the live path's
+        # new Date().toISOString()).
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="talk")
+            t = _task(conn, "tok", "q", "a")
+            db.store_turn_message(conn, "tok", role="user", body="q", task_id=t, origin_surface="talk")
+            db.store_turn_message(conn, "tok", role="assistant", body="a", task_id=t, origin_surface="talk")
+            # Pin both turns to a known naive-UTC instant so we can assert the
+            # value is reformatted, not shifted.
+            conn.execute(
+                "UPDATE messages SET created_at = '2023-11-14 22:13:20' WHERE room_token = ?",
+                ("tok",),
+            )
+        out = self._loader(db_path)("u", "tok", 50)
+        assert out["messages"], "expected the turn to render"
+        for m in out["messages"]:
+            assert m["created_at"] == "2023-11-14T22:13:20Z", m
+
     def test_scheduled_assistant_shown_synthetic_prompt_hidden(self, db_path):
         # Scheduled-job posts (e.g. the daily money sync) live in the store as
         # origin_surface='scheduled'. The bot's post IS shown in the room — it's
