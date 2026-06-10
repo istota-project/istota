@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Rewrote the assistant's built-in operating instructions (the opt-in custom system prompt) to track Claude Code's current guidance more closely. It now leads with the outcome, carries stronger coding-craft rules, and adds a self-check step that has the assistant prod its own work — re-reading the change, running the real command, reporting honestly — before answering. Aimed at better, more reliable coding output. Takes effect on the next deploy.
+
 ## [0.22.0] - 2026-06-09
 
 ### Added

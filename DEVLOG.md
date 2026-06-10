@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-10: Rewrite the custom system prompt (config/system-prompt.md)
+
+The opt-in custom system prompt (prod runs with `custom_system_prompt = true`, so it *replaces* Claude Code's default via `--system-prompt-file`) had drifted into a thinned, slightly stale paraphrase of CC's own system-prompt building blocks — plus a chunk of redundancy. Symptom the user noticed: coding output quality felt worse than vanilla Claude Code.
+
+Diagnosis, after comparing against the upstream block set (Piebald-AI/claude-code-system-prompts, tracking CC 2.1.170): our file was a hand-condensed subset that (a) dropped the communication-style block entirely, (b) flattened the `doing-tasks-*` guidance into weaker negative-only bullets, (c) restated the Edit/Write/Read/Grep tool *parameters* in prose — which has no equivalent in CC's real prompt (CC leans on the tool schemas) and just burns tokens + risks drift, and (d) kept an implicit software-engineering framing without adapting it to Istota's general-assistant reality.
+
+Key design call: the three prompt layers divide labor. **Emissaries** (user message) own values/safety-of-conscience; **persona** (user message) owns voice/conciseness/emoji-avoidance; the **system prompt** should be the universal *operational substrate* (tool judgment, code craft, blast-radius rules, file conventions). But briefings skip both emissaries and persona, and sleep-cycle is text-only — so the system prompt is the only layer present on *every* task. That argued for keeping it self-contained: a minimal name-free identity line + an outcome-first communication block of its own, rather than offloading everything to persona. (Name-free because this file is passed raw to `--system-prompt-file` — no `{BOT_NAME}` templating runs on it, unlike persona.)
+
+New structure: Identity → Communicating (outcome-first, "your text is all the user sees", folds in the existing "don't narrate tool mechanics" line) → Tools (judgment only; param docs dropped, Bash trimmed to `&&`-vs-`;` / no-interactive / no-sleep) → Doing the work (general framing + a scoped "when writing or changing code" block carrying the full-strength current upstream wording for no-additions / no-error-handling / no-compat-hacks / security / comment-why-only, plus `file_path:line_number`) → **Check your work** (new: adversarial self-verification — treat the first answer as a draft, try to break your own conclusion, run the real command and read real output, then report truthfully without claiming unverified success; merges the user's request with CC's truthful-reporting clause) → Executing actions with care (refreshed) → File conventions / `agents:` frontmatter (kept verbatim, Istota-unique).
+
+Net: shorter overall, redundancy gone, coding guidance strengthened rather than dropped, and the self-check nudge added. Ships on next Ansible deploy; no code change.
+
+**Files modified:**
+- `config/system-prompt.md` — full rewrite
+
 ## 2026-06-10: Startup orphan recovery for tasks interrupted by a scheduler restart
 
 Reproduced from prod: a web-chat task streaming a response when the scheduler restarted was left `running` with a dead worker — a hung spinner in the UI, with the cancel button doing nothing (`cancel_requested=1` but no worker to honor it). It self-healed only after `worker_stuck_minutes` (10) of heartbeat silence — the time-based reclaim in `run_cleanup_checks` had to *infer* the worker was dead.
