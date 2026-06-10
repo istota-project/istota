@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-10: Web chat unread room indicators — bold names + count chip in the sidebar
+
+The web chat sidebar gave no signal that a room had new content the user hadn't seen — a bot-delivered alert, a scheduled post, or a mirrored Talk turn could land in a room you weren't looking at with nothing to draw your eye. Added the standard unread affordance: a room with unread messages renders its name bold and shows a count chip (capped `99+`) to the right of the name; opening the room clears it.
+
+Most of the plumbing already existed. The unified Talk/web room-sync work shipped a per-user, per-surface `room_read_state` table (`last_read_message_id`) with `get_room_read_state`/`set_room_read_state`, but nothing on the web surface read or wrote it, and the rooms-list payload carried no unread data. So this was mostly wiring, not new infrastructure. The `idx_messages_room (room_token, id)` index already covered the count query — no schema change at all.
+
+Design calls: **server-computed counts** in the `/chat/rooms` payload (`COUNT(*)` over `messages` past the cursor, excluding `role='user'` so the user's own turns — including Talk-mirrored ones — never ring their own room). An **explicit `POST /chat/rooms/{id}/read`** endpoint rather than a side-effect on the GET messages call, so the client can withhold mark-read while the browser tab is backgrounded (`document.visibilityState`). **First-surface cursor init**: the first time a room gets a `web` read-state row, seed it to the room's current max id, so a freshly-surfaced Talk room (or the first listing after this deploys) doesn't show its whole backlog as unread. **Poll-based sidebar refresh** (a 5s timer re-fetching the rooms list and merging counts by id, active room forced to 0) rather than extending the per-task SSE substrate to cross-room counts.
+
+Client mark-read fires on room open (optimistic local zero + persist), on the active room's notif-poll append, on stream settle, and on `visibilitychange` back to visible — so messages that arrived while you were on another tab stay unread until you actually look. The active room's display is held at 0 by the refresh regardless, so the badge can't flicker on the room you're in. Built strict-TDD: failing tests first at each layer (db, endpoint, store), then implementation. svelte-check clean; the chip sits in its own non-shrink flex slot so the name's ellipsis can't clip it.
+
+Spec: `Specs/Active/web-chat-unread-room-indicators.md` (all 4 stages done).
+
+**Files added/modified:**
+- `src/istota/db.py` — `room_max_message_id`, `count_unread_messages`, `initialize_room_read_state`
+- `src/istota/web_app.py` — `_chat_list_rooms` seeds + computes `unread_count` (per-room try/except); `_chat_mark_room_read` + `POST /chat/rooms/{id}/read`
+- `web/src/lib/api.ts` — `ChatRoom.unread_count`, `markRoomRead()`
+- `web/src/lib/stores/chat.ts` — rooms-refresh timer + merge-by-id, visibility-gated mark-read on open/append/settle/visibilitychange, teardown
+- `web/src/routes/chat/+page.svelte` — bold `.room-name` + `.unread-chip` pill in a non-shrink slot
+- `tests/test_db.py`, `tests/test_web_app.py`, `web/src/lib/stores/chat.unread.test.ts` (new) — db/endpoint/store coverage
+
 ## 2026-06-10: Per-user room membership — group Talk rooms now surface in web chat for every participant (ISSUE-134)
 
 A group Nextcloud Talk room (bot + two humans) was the only room missing from one user's web chat room list. Root cause: the unified room model keyed a room to a single user. `rooms.token` is a PK and `web_chat_rooms.token` was globally `UNIQUE`, and the web list filtered on `rooms.user_id` — so a shared Talk conversation (one token) could only ever belong to one user. The one-time fold-in migration (`_fold_talk_rooms`) registered each Talk room with `SELECT user_id … GROUP BY conversation_token`, and SQLite's arbitrary pick under a bare grouped column resolved to the *earliest* talk-task sender. The other participant(s) never saw the room, and later inbound from them hit `register_room`'s `INSERT OR IGNORE` (first-writer-wins) and no-op'd.

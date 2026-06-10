@@ -2673,6 +2673,31 @@ def count_unread_messages(
     return int(row["n"])
 
 
+def initialize_room_read_state(
+    conn: sqlite3.Connection, room_token: str, surface: str, user_id: str = "",
+) -> bool:
+    """Seed a read cursor for a room the first time it's surfaced on a surface.
+
+    When no `room_read_state` row yet exists for `(room_token, surface,
+    user_id)`, insert one at the room's current `MAX(messages.id)` so a
+    pre-existing backlog (e.g. a Talk room newly mirrored into web) reads as
+    already-seen instead of flooding the unread indicator. Returns True if it
+    seeded a row, False if one already existed (left untouched)."""
+    existing = conn.execute(
+        "SELECT 1 FROM room_read_state "
+        "WHERE room_token = ? AND surface = ? AND user_id = ?",
+        (room_token, surface, user_id),
+    ).fetchone()
+    if existing:
+        return False
+    conn.execute(
+        "INSERT INTO room_read_state "
+        "(room_token, surface, user_id, last_read_message_id) VALUES (?, ?, ?, ?)",
+        (room_token, surface, user_id, room_max_message_id(conn, room_token)),
+    )
+    return True
+
+
 def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
     """One-time fold of legacy stores into the unified room model.
 

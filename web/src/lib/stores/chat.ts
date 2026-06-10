@@ -20,6 +20,7 @@ import {
 	getRoomMessages,
 	getChatRooms,
 	getTaskEvents,
+	markRoomRead,
 	sendChatMessage,
 	updateChatRoom,
 	promoteChatRoom,
@@ -143,6 +144,14 @@ function createSession(): ChatSession {
 	const seenNotifIds = new Set<number>();
 	let notifTimer: ReturnType<typeof setInterval> | null = null;
 	const NOTIF_POLL_MS = 5000;
+	// Sidebar unread badges. A separate timer re-fetches the room list (counts
+	// included) so a notification / scheduled post / mirrored Talk turn landing
+	// in a *non-active* room lights it up without a reload. Runs regardless of
+	// which room is active (unlike the notif poll, which is scoped to the open
+	// room) but is cheap — one rooms-list call.
+	let roomsTimer: ReturnType<typeof setInterval> | null = null;
+	const ROOMS_REFRESH_MS = 5000;
+	let onVisibility: (() => void) | null = null;
 
 	// Clone a segment (and its tool) so a keyed {#each} sees a fresh reference.
 	// text/thinking are flat; only a tool segment has a nested object to clone.
@@ -311,6 +320,10 @@ function createSession(): ChatSession {
 		}
 		status.set('idle');
 		activeTaskId.set(null);
+		// A turn finished in the open room — its reply is now on screen, so mark
+		// the room read (visibility-gated) before the user switches away.
+		const rid = get(activeRoomId);
+		if (rid != null) markActiveRead(rid);
 	}
 
 	// Halt the active stream and drop the queue without advancing — for room
@@ -327,6 +340,62 @@ function createSession(): ChatSession {
 		if (notifTimer) { clearInterval(notifTimer); notifTimer = null; }
 	}
 
+	// Set a single room's unread badge locally (optimistic clears + merge).
+	function setRoomUnread(id: number, n: number) {
+		rooms.update((r) => r.map((x) => (x.id === id ? { ...x, unread_count: n } : x)));
+	}
+
+	// Persist "I've read this room up to now" — but only while the tab is
+	// actually showing it (a background tab shouldn't eat the badge). The open
+	// room's *display* is held at 0 by refreshRooms regardless; this call makes
+	// that durable so the badge stays clear after switching away.
+	function markActiveRead(roomId: number) {
+		if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+		setRoomUnread(roomId, 0);
+		markRoomRead(roomId).catch(() => { /* transient; next open/poll retries */ });
+	}
+
+	// Re-fetch the room list and merge fresh unread counts (and any name/origin
+	// backfill) into the existing entries by id — no reorder, no drop of local
+	// state. The active room is forced to 0 so looking at it always reads as
+	// clear, even if a count lands before the mark-read round-trips.
+	async function refreshRooms() {
+		let list: ChatRoom[];
+		try { ({ rooms: list } = await getChatRooms()); } catch { return; }
+		const byId = new Map(list.map((r) => [r.id, r]));
+		const active = get(activeRoomId);
+		const unreadFor = (r: ChatRoom) => (r.id === active ? 0 : (r.unread_count ?? 0));
+		rooms.update((cur) => {
+			const seen = new Set<number>();
+			const merged = cur.map((r) => {
+				const fresh = byId.get(r.id);
+				seen.add(r.id);
+				if (!fresh) return r; // transiently absent — keep as-is
+				return {
+					...r,
+					name: fresh.name,
+					origin: fresh.origin,
+					talk_token: fresh.talk_token,
+					unread_count: unreadFor(fresh),
+				};
+			});
+			// Append rooms that newly surfaced (e.g. a Talk room first mirrored in).
+			for (const fresh of list) {
+				if (!seen.has(fresh.id)) merged.push({ ...fresh, unread_count: unreadFor(fresh) });
+			}
+			return merged;
+		});
+	}
+
+	function startRoomsRefresh() {
+		if (roomsTimer) return;
+		roomsTimer = setInterval(() => { void refreshRooms(); }, ROOMS_REFRESH_MS);
+	}
+
+	function stopRoomsRefresh() {
+		if (roomsTimer) { clearInterval(roomsTimer); roomsTimer = null; }
+	}
+
 	// Poll the room's history while idle and surface (a) newly-delivered bot
 	// messages (alerts / logs / web-routed notifications) and (b) a task that
 	// *started* while this room was open — most importantly a Talk-originated
@@ -341,15 +410,20 @@ function createSession(): ChatSession {
 			let hist;
 			try { hist = await getRoomMessages(roomId); } catch { return; }
 			if (get(activeRoomId) !== roomId) return;
+			let appended = false;
 			for (const m of hist.messages) {
 				if (m.role !== 'system' || typeof m.notif_id !== 'number') continue;
 				if (seenNotifIds.has(m.notif_id)) continue;
 				seenNotifIds.add(m.notif_id);
+				appended = true;
 				messages.update((arr) => [...arr, {
 					cid: nextCid(), role: 'system', text: m.text, segments: [],
 					streaming: false, createdAt: m.created_at,
 				}]);
 			}
+			// A notification just landed in the open room — persist the read cursor
+			// past it (visibility-gated) so it doesn't resurface as unread later.
+			if (appended) markActiveRead(roomId);
 			pickUpNewInFlightTasks(hist);
 		}, NOTIF_POLL_MS);
 	}
@@ -470,9 +544,22 @@ function createSession(): ChatSession {
 			const target = list.find((r) => r.id === persisted) ?? list[0];
 			if (target) {
 				activeRoomId.set(target.id);
+				setRoomUnread(target.id, 0);
 				await loadHistory(target.id);
+				markRoomRead(target.id).catch(() => {});
 			}
 			loaded.set(true);
+			// Keep sidebar badges live, and clear the open room when the tab regains
+			// focus (messages that arrived while backgrounded were held unread).
+			startRoomsRefresh();
+			if (typeof document !== 'undefined') {
+				onVisibility = () => {
+					if (document.visibilityState !== 'visible') return;
+					const rid = get(activeRoomId);
+					if (rid != null) markActiveRead(rid);
+				};
+				document.addEventListener('visibilitychange', onVisibility);
+			}
 		} catch (e) {
 			error.set('Failed to load chat');
 		}
@@ -483,8 +570,10 @@ function createSession(): ChatSession {
 		stopActive();
 		activeRoomId.set(id);
 		saveSetting('chat.activeRoomId', id);
+		setRoomUnread(id, 0); // optimistic — chip vanishes immediately on click
 		messages.set([]);
 		await loadHistory(id);
+		markRoomRead(id).catch(() => { /* non-fatal; refresh/poll will retry */ });
 	}
 
 	async function newRoom(name: string) {
@@ -651,6 +740,11 @@ function createSession(): ChatSession {
 	// persisted task_events via loadHistory, so no progress is lost.
 	function teardown() {
 		stopActive();
+		stopRoomsRefresh();
+		if (onVisibility && typeof document !== 'undefined') {
+			document.removeEventListener('visibilitychange', onVisibility);
+			onVisibility = null;
+		}
 	}
 
 	return {

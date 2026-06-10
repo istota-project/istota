@@ -1336,6 +1336,20 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d = _room_to_dict(handle)
             d["name"] = r.name or handle.name
             d["origin"] = r.origin
+            # Unread badge. Seed the web read cursor on first surface so a
+            # pre-existing backlog doesn't read as unread, then count messages
+            # past it. Per-room try/except so one bad count can't abort the
+            # whole listing.
+            try:
+                db.initialize_room_read_state(conn, r.token, "web", username)
+                d["unread_count"] = db.count_unread_messages(
+                    conn, r.token, "web", username,
+                )
+            except Exception:
+                logger.warning(
+                    "unread count failed for room %s", r.token, exc_info=True,
+                )
+                d["unread_count"] = 0
             out.append(d)
     return out
 
@@ -1355,6 +1369,19 @@ def _chat_owned_room(username: str, room_id: int):
     if room is None or room.user_id != username:
         return None
     return room
+
+
+def _chat_mark_room_read(username: str, room_id: int) -> int | None:
+    """Advance the user's web read cursor for a room to its current newest
+    message. Returns the new cursor, or None if the room isn't the user's."""
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        room = db.get_web_chat_room(conn, room_id)
+        if room is None or room.user_id != username:
+            return None
+        max_id = db.room_max_message_id(conn, room.token)
+        db.set_room_read_state(conn, room.token, "web", max_id, username)
+    return max_id
 
 
 def _chat_update_room(
@@ -1934,6 +1961,22 @@ async def chat_room_messages(
     return await asyncio.to_thread(
         _chat_room_messages, user["username"], room.token, limit,
     )
+
+
+@api_router.post("/chat/rooms/{room_id}/read")
+async def chat_mark_room_read(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Mark a room read on the web surface — advances the per-user web read
+    cursor to the room's newest message so the sidebar unread badge clears."""
+    cursor = await asyncio.to_thread(
+        _chat_mark_room_read, user["username"], room_id,
+    )
+    if cursor is None:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    return {"ok": True, "last_read_message_id": cursor}
 
 
 @api_router.post("/chat/rooms/{room_id}/messages")

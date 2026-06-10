@@ -1382,6 +1382,9 @@ export interface ChatRoom {
 	origin?: 'web' | 'talk';
 	/** Set once the room has been promoted to (or originated as) a Talk room. */
 	talk_token?: string;
+	/** Unread bot/system messages on the web surface (server-computed; excludes
+	 * the user's own turns). Absent on older backends → treat as 0. */
+	unread_count?: number;
 }
 
 export interface ChatConfig {
@@ -1497,6 +1500,17 @@ export async function deleteChatRoom(id: number): Promise<{ status: string }> {
 
 export function getRoomMessages(id: number, limit = 50): Promise<ChatHistory> {
 	return apiFetch<ChatHistory>(`/chat/rooms/${id}/messages?limit=${limit}`);
+}
+
+/** Mark a room read on the web surface — clears its sidebar unread badge by
+ * advancing the per-user read cursor to the room's newest message. */
+export function markRoomRead(
+	id: number,
+): Promise<{ ok: boolean; last_read_message_id: number }> {
+	return apiFetch<{ ok: boolean; last_read_message_id: number }>(
+		`/chat/rooms/${id}/read`,
+		{ method: 'POST', headers: { 'Content-Type': 'application/json' } },
+	);
 }
 
 export async function sendChatMessage(
