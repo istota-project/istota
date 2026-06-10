@@ -4215,6 +4215,37 @@ class TestDeferredOperations:
         # File cleaned up
         assert not (user_temp / f"task_{parent_id}_subtasks.json").exists()
 
+    def test_process_deferred_subtasks_warns_on_command_key(self, db_path, tmp_path, caplog):
+        """ISSUE-135: an entry using the unsupported 'command' key (or any entry
+        with no 'prompt') must warn loudly, not be dropped silently."""
+        import logging
+        from istota.scheduler import _process_deferred_subtasks
+        config = self._make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+
+        with db.get_db(db_path) as conn:
+            parent_id = db.create_task(
+                conn, prompt="Parent", user_id="alice", source_type="talk",
+                conversation_token="room1",
+            )
+            parent = db.get_task(conn, parent_id)
+
+        # One bad entry (command key), one good entry — the good one still runs.
+        subtasks = [
+            {"command": "rm /tmp/stray.png"},
+            {"prompt": "Delete the stray files"},
+        ]
+        (user_temp / f"task_{parent_id}_subtasks.json").write_text(json.dumps(subtasks))
+
+        with caplog.at_level(logging.WARNING):
+            count = _process_deferred_subtasks(config, parent, user_temp)
+
+        assert count == 1  # only the well-formed entry created a task
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "no 'prompt'" in msgs
+        assert "command" in msgs
+
     def test_process_deferred_subtasks_inherits_queue(self, db_path, tmp_path):
         """Subtasks should inherit the parent's queue."""
         from istota.scheduler import _process_deferred_subtasks
@@ -5186,6 +5217,21 @@ class TestWarnUnconsumedDeferredFiles:
         assert len(warnings) == 1
         assert "task_123_unknown_op.json" in warnings[0]
 
+    def test_warns_on_id_suffixed_descriptive_name(self, tmp_path, caplog):
+        # ISSUE-135: the exact shape that hit prod — the model wrote a
+        # descriptive name with the task id as a trailing token
+        # ("cleanup_stray_files_{id}.json") rather than the canonical
+        # "task_{id}_subtasks.json", so neither the consumer lookup nor the
+        # old prefix-only scanner saw it.
+        from istota.scheduler import _warn_unconsumed_deferred_files
+        task = self._task(178574)
+        (tmp_path / "cleanup_stray_files_178574.json").write_text("{}")
+        with caplog.at_level("WARNING"):
+            _warn_unconsumed_deferred_files(task, tmp_path)
+        warnings = [r.message for r in caplog.records if "Unrecognized deferred file" in r.message]
+        assert len(warnings) == 1
+        assert "cleanup_stray_files_178574.json" in warnings[0]
+
     def test_does_not_warn_on_other_tasks_files(self, tmp_path, caplog):
         # User temp dir is shared across tasks for the same user; warning
         # should be scoped to the current task id.
@@ -5194,6 +5240,7 @@ class TestWarnUnconsumedDeferredFiles:
         (tmp_path / "task_456_subtasks.json").write_text("{}")
         (tmp_path / "task_4567_unknown.json").write_text("{}")
         (tmp_path / "456_skip_log.json").write_text("{}")
+        (tmp_path / "cleanup_456.json").write_text("{}")  # id-suffix, other task
         with caplog.at_level("WARNING"):
             _warn_unconsumed_deferred_files(task, tmp_path)
         assert not any("Unrecognized deferred file" in r.message for r in caplog.records)
