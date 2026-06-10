@@ -111,6 +111,15 @@ def navigate(url, timeout_s=30):
     time.sleep(0.2)
     xdo_type(url)
     time.sleep(0.15)
+    # Chrome inline-autocompletes the address bar from history: typing
+    # "apnews.com" appends a highlighted suffix like "/some-old-article",
+    # and Return would navigate to that completed URL instead of what we
+    # typed. The completion is *selected* text to the right of the cursor,
+    # so a forward-Delete removes exactly that suffix. With no completion
+    # the cursor is at end-of-line with nothing selected, so it's a no-op
+    # (it can NOT eat the last typed char — that would be BackSpace).
+    xdo_key("Delete")
+    time.sleep(0.1)
     xdo_key("Return")
     time.sleep(1.0)
     deadline = time.time() + timeout_s
