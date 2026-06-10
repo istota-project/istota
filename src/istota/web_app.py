@@ -1647,8 +1647,39 @@ def _row_get(row, key: str):
     return row[key] if key in row.keys() else None
 
 
-def _chat_room_messages(username: str, token: str, limit: int) -> dict:
-    """Recent messages for a room plus the active (in-flight) task, if any.
+# Surface filter shared by the spine query and its `has_more` probe: web/talk
+# turns render both halves; scheduled posts render the assistant only (the
+# synthetic cron prompt was never user-authored).
+_SPINE_SURFACE = (
+    "((m.origin_surface IN ('web', 'talk') AND m.role IN ('user', 'assistant')) "
+    "OR (m.origin_surface = 'scheduled' AND m.role = 'assistant'))"
+)
+# Columns the spine query selects: the durable turn + the LEFT JOIN tasks
+# enrichment (trace / timing / model). `m.id AS msg_id` is the raw keyset
+# tiebreaker for the cursor.
+_SPINE_COLUMNS = (
+    "SELECT m.role AS role, m.body AS body, m.task_id AS task_id, "
+    "  m.id AS msg_id, m.created_at AS created_at, t.status AS status, "
+    "  t.actions_taken AS actions_taken, t.execution_trace AS execution_trace, "
+    "  t.started_at AS started_at, t.completed_at AS completed_at, "
+    "  t.model_used AS model_used "
+    "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
+)
+# Columns the aux (`tasks`) gap-fill query selects.
+_AUX_COLUMNS = (
+    "SELECT id, prompt, result, status, error, confirmation_prompt, "
+    "created_at, actions_taken, execution_trace, started_at, completed_at, "
+    "model_used FROM tasks "
+)
+
+
+def _chat_room_messages(
+    username: str,
+    token: str,
+    limit: int,
+    before: tuple[str, int] | None = None,
+) -> dict:
+    """A page of a room's transcript plus (on first load) its active tasks.
 
     The transcript is read from the **durable** canonical `messages` store, not
     the `tasks` table: `cleanup_old_tasks` GCs completed tasks after a few days,
@@ -1659,46 +1690,161 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     failed/cancelled answers (the scheduler stores only successful turns), the
     in-flight assistant slot, and any legacy turn not yet backfilled. Dedup is
     keyed on `(role, task_id)`: the store is authoritative, `tasks` fills gaps.
+
+    Paging (ISSUE-131). The `messages` store is the **spine** — it holds every
+    successful turn and every system message — so it drives keyset pagination.
+    `before` is the `(created_at, id)` of the oldest spine row the client already
+    holds (its *raw* stored `created_at`, NOT the `_iso_utc`-normalized display
+    value — see the cursor note below). `None` → first load (the most-recent
+    window). Each page's spine defines a half-open time band `[page_lo, before)`;
+    the aux `tasks` gap-fill and system rows for an older page are filtered to
+    that band so the timeline tiles with no gap and no overlap. `active_tasks`
+    is returned only on the first load — an older page never carries an in-flight
+    slot.
+
+    ISSUE-130: the window is ordered `created_at DESC, id DESC` (not `id DESC`),
+    so a backfilled room whose `id` order inverts `created_at` order keeps its
+    most-recent-by-time turns instead of admitting stale-but-high-id rows.
+
+    Cursor format (load-bearing): `oldest_cursor.ts` is the **raw** stored
+    `created_at` (`YYYY-MM-DD HH:MM:SS`), kept separate from the `_iso_utc`
+    display value (`…T…Z`). The two are not byte-comparable — `'T' > ' '` — so a
+    cursor shipped in display format sorts as *newer* than its own row and the
+    keyset predicate re-returns page 1 forever. The client passes `ts` back
+    verbatim as `before_ts`.
     """
     from . import db
     with db.get_db(_config.db_path) as conn:
-        # 1. Durable turns from the canonical store. LEFT JOIN tasks to enrich a
-        #    surviving turn; a retention-deleted turn (t.* NULL) renders plain.
-        #    web/talk turns render both sides; scheduled-job posts (the daily
-        #    money sync, etc.) render the assistant post only — the synthetic
-        #    cron prompt was never user-authored, so its 'user' row stays hidden.
-        #    limit*2 because a conversational turn is two rows (user + assistant);
-        #    scheduled posts contribute one, so this over-fetches a little for
-        #    scheduled-heavy rooms, which is harmless.
-        msg_rows = conn.execute(
-            "SELECT m.role AS role, m.body AS body, m.task_id AS task_id, "
-            "  m.created_at AS created_at, t.status AS status, "
-            "  t.actions_taken AS actions_taken, t.execution_trace AS execution_trace, "
-            "  t.started_at AS started_at, t.completed_at AS completed_at, "
-            "  t.model_used AS model_used "
-            "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
-            "WHERE m.room_token = ? AND ("
-            "    (m.origin_surface IN ('web', 'talk') AND m.role IN ('user', 'assistant')) "
-            "    OR (m.origin_surface = 'scheduled' AND m.role = 'assistant') "
-            "  ) "
-            "ORDER BY m.id DESC LIMIT ?",
-            (token, limit * 2),
-        ).fetchall()
-        # 2. Tasks fill gaps the store doesn't hold (failed/cancelled answers,
-        #    in-flight slots, un-backfilled legacy turns). Same surface filter.
-        task_rows = conn.execute(
-            "SELECT id, prompt, result, status, error, confirmation_prompt, "
-            "created_at, actions_taken, execution_trace, started_at, completed_at, "
-            "model_used "
-            "FROM tasks "
-            "WHERE conversation_token = ? AND user_id = ? "
-            "AND source_type IN ('web', 'talk') "
-            "ORDER BY id DESC LIMIT ?",
-            (token, username, limit),
-        ).fetchall()
-        # Bot-delivered system messages (alerts / logs / notifications routed to
-        # web) live in the canonical messages store (role='system').
-        notes = db.list_system_messages(conn, token, limit)
+        # 1. Spine: durable turns, keyset-paginated. limit*2 because a turn is
+        #    two rows (user + assistant); scheduled posts contribute one, so this
+        #    over-fetches a little for scheduled-heavy rooms, which is harmless.
+        if before is None:
+            msg_rows = conn.execute(
+                _SPINE_COLUMNS + f"WHERE m.room_token = ? AND {_SPINE_SURFACE} "
+                "ORDER BY m.created_at DESC, m.id DESC LIMIT ?",
+                (token, limit * 2),
+            ).fetchall()
+        else:
+            before_ts, before_id = before
+            msg_rows = conn.execute(
+                _SPINE_COLUMNS + f"WHERE m.room_token = ? AND {_SPINE_SURFACE} "
+                "AND (m.created_at, m.id) < (?, ?) "
+                "ORDER BY m.created_at DESC, m.id DESC LIMIT ?",
+                (token, before_ts, before_id, limit * 2),
+            ).fetchall()
+
+        # 2. Aux gap-fill (failed/cancelled answers, in-flight slots, legacy
+        #    turns). The read shape depends on the page:
+        if before is None:
+            if msg_rows:
+                # First load with a spine: failed/cancelled banded to >= the
+                # page's oldest spine `created_at` (so a failed turn at the
+                # window boundary isn't dropped — flaw #2), plus active/in-flight
+                # slots unconditionally (they're the newest and must always show).
+                # Completed turns are NOT read here — they live wholly in the
+                # spine; pulling them by `created_at >= t1` would re-render a
+                # completed turn whose spine rows the LIMIT cut at the t1 second.
+                t1 = msg_rows[-1]["created_at"]
+                task_rows = conn.execute(
+                    _AUX_COLUMNS
+                    + "WHERE conversation_token = ? AND user_id = ? "
+                    "AND source_type IN ('web', 'talk') "
+                    "AND (status IN ('pending', 'locked', 'running', 'pending_confirmation') "
+                    "     OR (status IN ('failed', 'cancelled') AND created_at >= ?)) "
+                    "ORDER BY created_at DESC, id DESC",
+                    (token, username, t1),
+                ).fetchall()
+            else:
+                # Empty-spine fallback (un-backfilled legacy / failed-only room):
+                # no spine to page, so keep today's behavior exactly — the most
+                # recent tasks window, no cursor offered.
+                task_rows = conn.execute(
+                    _AUX_COLUMNS
+                    + "WHERE conversation_token = ? AND user_id = ? "
+                    "AND source_type IN ('web', 'talk') "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (token, username, limit),
+                ).fetchall()
+        else:
+            before_ts, before_id = before
+            if msg_rows:
+                # Older page with a spine: failed/cancelled tasks banded to the
+                # page's [page_lo, before) window. Failed/cancelled only — a
+                # completed turn lives wholly in the spine, so reading it here
+                # would re-render a turn whose spine rows the LIMIT split across
+                # this page's boundary. An older page never carries an in-flight
+                # slot.
+                page_lo = msg_rows[-1]["created_at"]
+                task_rows = conn.execute(
+                    _AUX_COLUMNS
+                    + "WHERE conversation_token = ? AND user_id = ? "
+                    "AND source_type IN ('web', 'talk') "
+                    "AND status IN ('failed', 'cancelled') "
+                    "AND created_at >= ? AND created_at < ? "
+                    "ORDER BY created_at DESC, id DESC",
+                    (token, username, page_lo, before_ts),
+                ).fetchall()
+            else:
+                # Aux-only tail (flaw #3): the spine is exhausted but failed/
+                # cancelled tasks older than the cursor remain (spineless, legacy
+                # rows). Page them directly by keyset so none are stranded.
+                task_rows = conn.execute(
+                    _AUX_COLUMNS
+                    + "WHERE conversation_token = ? AND user_id = ? "
+                    "AND source_type IN ('web', 'talk') "
+                    "AND status IN ('failed', 'cancelled') "
+                    "AND (created_at, id) < (?, ?) "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (token, username, before_ts, before_id, limit),
+                ).fetchall()
+
+        # 3. Bot-delivered system messages (alerts / logs / notifications routed
+        #    to web) live in the canonical store (role='system'). First load uses
+        #    the existing most-recent window; an older page bands them into
+        #    [page_lo, before) so they ride along with their turns.
+        if before is None:
+            notes = db.list_system_messages(conn, token, limit)
+        else:
+            page_lo = (
+                msg_rows[-1]["created_at"] if msg_rows
+                else (task_rows[-1]["created_at"] if task_rows else before[0])
+            )
+            notes = db.list_system_messages_in_band(
+                conn, token, lo_ts=page_lo, hi_ts=before[0],
+            )
+
+        # 4. Paging metadata: the page's oldest spine (or aux-only) row gives the
+        #    next cursor; `has_more` ORs a spine probe with a band-eligible
+        #    failed/cancelled aux probe (flaw #3 — an aux-only tail must keep
+        #    has_more true until it's paged through).
+        has_more = False
+        oldest_cursor: dict | None = None
+        if msg_rows:
+            page_lo_ts = msg_rows[-1]["created_at"]
+            page_lo_id = msg_rows[-1]["msg_id"]
+            oldest_cursor = {"ts": page_lo_ts, "id": page_lo_id}
+            spine_more = conn.execute(
+                f"SELECT 1 FROM messages m WHERE m.room_token = ? AND {_SPINE_SURFACE} "
+                "AND (m.created_at, m.id) < (?, ?) LIMIT 1",
+                (token, page_lo_ts, page_lo_id),
+            ).fetchone() is not None
+            aux_more = conn.execute(
+                "SELECT 1 FROM tasks WHERE conversation_token = ? AND user_id = ? "
+                "AND source_type IN ('web', 'talk') AND status IN ('failed', 'cancelled') "
+                "AND created_at < ? LIMIT 1",
+                (token, username, page_lo_ts),
+            ).fetchone() is not None
+            has_more = spine_more or aux_more
+        elif before is not None and task_rows:
+            page_lo_ts = task_rows[-1]["created_at"]
+            page_lo_id = task_rows[-1]["id"]
+            oldest_cursor = {"ts": page_lo_ts, "id": page_lo_id}
+            has_more = conn.execute(
+                "SELECT 1 FROM tasks WHERE conversation_token = ? AND user_id = ? "
+                "AND source_type IN ('web', 'talk') AND status IN ('failed', 'cancelled') "
+                "AND (created_at, id) < (?, ?) LIMIT 1",
+                (token, username, page_lo_ts, page_lo_id),
+            ).fetchone() is not None
 
     messages: list[dict] = []
     seen: set[tuple[str, object]] = set()  # (role, task_id) already rendered
@@ -1718,7 +1864,9 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
 
     # 2. Tasks fill the gaps, oldest-first. The room runs tasks one at a time
     #    (the per-channel claim gate serializes them), so in-flight ones stream
-    #    in this order. `active_task` is kept as the oldest for back-compat.
+    #    in this order. `active_task` is kept as the oldest for back-compat. An
+    #    older page (before set) carries terminal statuses only, so active_tasks
+    #    stays empty there.
     active_tasks: list[dict] = []
     for r in reversed(task_rows):
         tid = r["id"]
@@ -1774,8 +1922,15 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
     ))
     return {
         "messages": messages,
-        "active_task": active_tasks[0] if active_tasks else None,
-        "active_tasks": active_tasks,
+        # Active tasks resume only on the first load. An older page never carries
+        # an in-flight slot (it reads terminal statuses only), so the client must
+        # not re-resume anything from it.
+        "active_task": active_tasks[0] if (before is None and active_tasks) else None,
+        "active_tasks": active_tasks if before is None else [],
+        # Paging metadata: older history exists, and the cursor to fetch it (raw
+        # stored created_at + id — NOT the normalized display value).
+        "has_more": has_more,
+        "oldest_cursor": oldest_cursor,
     }
 
 
@@ -1952,14 +2107,27 @@ async def chat_delete_room(
 
 @api_router.get("/chat/rooms/{room_id}/messages")
 async def chat_room_messages(
-    room_id: int, limit: int = 50, user: dict = Depends(_require_api_auth),
+    room_id: int,
+    limit: int = 50,
+    before_ts: str | None = None,
+    before_id: int | None = None,
+    user: dict = Depends(_require_api_auth),
 ):
     room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)
     if room is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
+    # The keyset cursor is two params that must travel together: both present →
+    # an older page, both absent → first load. One without the other is a client
+    # bug, not a half-cursor we can guess at.
+    if (before_ts is None) != (before_id is None):
+        return JSONResponse(
+            {"error": "before_ts and before_id must be supplied together"},
+            status_code=400,
+        )
+    before = (before_ts, before_id) if before_ts is not None else None
     limit = max(1, min(limit, 200))
     return await asyncio.to_thread(
-        _chat_room_messages, user["username"], room.token, limit,
+        _chat_room_messages, user["username"], room.token, limit, before,
     )
 
 
