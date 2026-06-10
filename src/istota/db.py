@@ -2581,6 +2581,21 @@ def list_system_messages(
     return [_row_to_message(r) for r in reversed(rows)]
 
 
+def list_system_messages_in_band(
+    conn: sqlite3.Connection, room_token: str, *, lo_ts: str, hi_ts: str,
+) -> list[Message]:
+    """System messages within the half-open band ``lo_ts <= created_at < hi_ts``
+    (the web-chat older-page path — ISSUE-131). Oldest-first. ``lo_ts`` / ``hi_ts``
+    are *raw* stored `created_at` strings (`YYYY-MM-DD HH:MM:SS`), the same format
+    the keyset cursor travels in — not the `_iso_utc` display value."""
+    rows = conn.execute(
+        "SELECT * FROM messages WHERE room_token = ? AND role = 'system' "
+        "AND created_at >= ? AND created_at < ? ORDER BY id DESC",
+        (room_token, lo_ts, hi_ts),
+    ).fetchall()
+    return [_row_to_message(r) for r in reversed(rows)]
+
+
 def set_message_external_id(
     conn: sqlite3.Connection, message_id: int, surface: str, external_id: str,
 ) -> None:
