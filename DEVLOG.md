@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-10: Per-user room membership — group Talk rooms now surface in web chat for every participant (ISSUE-134)
+
+A group Nextcloud Talk room (bot + two humans) was the only room missing from one user's web chat room list. Root cause: the unified room model keyed a room to a single user. `rooms.token` is a PK and `web_chat_rooms.token` was globally `UNIQUE`, and the web list filtered on `rooms.user_id` — so a shared Talk conversation (one token) could only ever belong to one user. The one-time fold-in migration (`_fold_talk_rooms`) registered each Talk room with `SELECT user_id … GROUP BY conversation_token`, and SQLite's arbitrary pick under a bare grouped column resolved to the *earliest* talk-task sender. The other participant(s) never saw the room, and later inbound from them hit `register_room`'s `INSERT OR IGNORE` (first-writer-wins) and no-op'd.
+
+The fix models membership as many-to-many while keeping the transcript shared. A room is still one token / one `messages` transcript / one binding set, but a new `room_members` table records each participant, and the web list resolves through it (`list_member_rooms`) instead of the single-owner `rooms.user_id`. `web_chat_rooms` is now `UNIQUE(user_id, token)` so each member gets their own frontend handle for the same Talk token. The global `rooms.archived` flag is reserved for "the bot left the Nextcloud room" (`archive_orphaned_talk_rooms`), and a fresh inbound un-archives it; per-user delete/hide now drops only that user's membership, never the shared flag. `room_read_state` gained `user_id` in its PK (dead/future code, so cheap to change now).
+
+Migrations are guarded/markered and idempotent: `web_chat_rooms` is rebuilt in place (ids preserved, so live frontend room ids stay valid), `room_read_state` is dropped+recreated (ephemeral, no readers), and `room_members_v1` backfills membership from the registry owner, every web handle, and every distinct Talk-task sender. Reviewed by two agents (skeptical bug-hunter + spec-conformance); their medium findings were fixed: stale per-user `archived` flag cleared at list time, hard-delete now drops every participant's handle for the token (no orphan that yields an empty room list), the migration's "no such table" tolerance scoped to the `tasks` insert only, and `get_web_chat_room_by_token` made honest (`LIMIT 1` + doc) now that a token maps to many handles.
+
+Validated end-to-end by running the real migration against a consistent snapshot of the production database: the group room ends up with both participants as members, all web handles preserved with ids intact, no duplicates, and a second run is a clean no-op. Applies automatically on the next deploy/restart.
+
+**Files modified:**
+- `src/istota/db.py` — `room_members` table + CRUD (`add_room_member`/`remove_room_member`/`is_room_member`/`list_room_members`/`list_member_rooms`); `register_room` adds membership; `ensure_web_chat_handle` user-scoped; `web_chat_rooms` `UNIQUE(user_id, token)`; `room_read_state.user_id`; three migrations (`_migrate_web_chat_rooms_peruser`, `_migrate_room_read_state_peruser`, `_migrate_room_members`); `delete_web_chat_room` drops handles by token
+- `src/istota/transport/ingest.py` — `record_inbound` adds the sender as a member and un-archives a re-joined Talk room
+- `src/istota/web_app.py` — web room list resolves via membership; per-user hide/delete drops membership instead of the global archive flag; stale per-user archived flag cleared on listing
+- `schema.sql` — `room_members`, `web_chat_rooms` composite unique, `room_read_state.user_id`
+- `tests/test_room_membership.py` (new), `tests/test_unified_room_list.py` — membership, per-user hide isolation, legacy-schema migration, review-fix edge cases
+- `AGENTS.md`, `.claude/rules/scheduler.md` — membership model documented
+
 ## 2026-06-10: Rewrite the custom system prompt (config/system-prompt.md)
 
 The opt-in custom system prompt (prod runs with `custom_system_prompt = true`, so it *replaces* Claude Code's default via `--system-prompt-file`) had drifted into a thinned, slightly stale paraphrase of CC's own system-prompt building blocks — plus a chunk of redundancy. Symptom the user noticed: coding output quality felt worse than vanilla Claude Code.

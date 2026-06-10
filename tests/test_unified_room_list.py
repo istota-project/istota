@@ -55,7 +55,7 @@ class TestRoomListSurfacesTalk:
 
 
 class TestDeleteGuard:
-    def test_delete_talk_room_archives_not_destroys(self, web_config, db_path):
+    def test_delete_talk_room_drops_membership_not_destroys(self, web_config, db_path):
         from istota import web_app
         with db.get_db(db_path) as conn:
             db.register_room(conn, "cpz", "alice", origin="talk", name="#istota")
@@ -67,10 +67,13 @@ class TestDeleteGuard:
 
         assert web_app._chat_delete_room("alice", handle_id) == "ok"
         with db.get_db(db_path) as conn:
-            # registry room archived, not gone; messages preserved
-            assert db.get_room(conn, "cpz").archived is True
+            # Shared room is per-user-hidden, not globally archived or destroyed:
+            # the registry row, its transcript, and the global flag all survive
+            # so other participants keep seeing it (ISSUE-134).
+            assert db.get_room(conn, "cpz").archived is False
+            assert not db.is_room_member(conn, "cpz", "alice")
             assert len(db.get_messages(conn, "cpz")) == 1
-        # hidden from the list
+        # hidden from the requester's list
         assert "cpz" not in {r["token"] for r in web_app._chat_list_rooms("alice")}
 
     def test_delete_web_room_hard_deletes(self, web_config, db_path):

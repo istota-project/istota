@@ -365,15 +365,19 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # conversation_token used by its tasks, so each room gets its own
     # CHANNEL.md + sleep-cycle handling.
     try:
+        # `token` is NOT globally unique: a shared Talk room (one Nextcloud
+        # conversation) has one handle row per participant so it can surface in
+        # each member's web room list (ISSUE-134). Uniqueness is per (user, token).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS web_chat_rooms (
                 id          INTEGER PRIMARY KEY,
                 user_id     TEXT NOT NULL,
-                token       TEXT NOT NULL UNIQUE,
+                token       TEXT NOT NULL,
                 name        TEXT NOT NULL,
                 archived    INTEGER NOT NULL DEFAULT 0,
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (user_id, token)
             )
         """)
         conn.execute(
@@ -418,6 +422,21 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived)")
+        # Per-user room membership (ISSUE-134). A room is shared (one token, one
+        # transcript) but each participant has a membership row; web visibility is
+        # resolved through this, not the single-owner `rooms.user_id`.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS room_members (
+                room_token  TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+                user_id     TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (room_token, user_id)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_room_members_user "
+            "ON room_members (user_id)"
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS room_bindings (
                 room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
@@ -461,12 +480,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             "ON messages (room_token, role, task_id) "
             "WHERE task_id IS NOT NULL"
         )
+        # Read cursors are per (room, surface, user) — an unread badge in one
+        # member's web view isn't cleared by another member reading (ISSUE-134).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS room_read_state (
                 room_token  TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
                 surface     TEXT NOT NULL,
+                user_id     TEXT NOT NULL DEFAULT '',
                 last_read_message_id INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (room_token, surface)
+                PRIMARY KEY (room_token, surface, user_id)
             )
         """)
         conn.execute("""
@@ -480,6 +502,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
     _migrate_unified_rooms(conn)
     _migrate_scheduled_transcript_cleanup(conn)
+    _migrate_web_chat_rooms_peruser(conn)
+    _migrate_room_read_state_peruser(conn)
+    _migrate_room_members(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -1986,8 +2011,12 @@ def get_web_chat_room(conn: sqlite3.Connection, room_id: int) -> WebChatRoom | N
 def get_web_chat_room_by_token(
     conn: sqlite3.Connection, token: str,
 ) -> WebChatRoom | None:
+    """Return *any one* handle for `token`. A token no longer maps to a unique
+    handle — a shared Talk room has one handle per participant (ISSUE-134) — so
+    this is only safe for reading token-invariant fields (e.g. the room name).
+    Callers needing a specific user's handle must scope by `user_id`."""
     row = conn.execute(
-        "SELECT * FROM web_chat_rooms WHERE token = ?", (token,)
+        "SELECT * FROM web_chat_rooms WHERE token = ? LIMIT 1", (token,)
     ).fetchone()
     return _row_to_web_chat_room(row) if row else None
 
@@ -2044,18 +2073,22 @@ def update_web_chat_room(
 def ensure_web_chat_handle(
     conn: sqlite3.Connection, user_id: str, token: str, name: str,
 ) -> WebChatRoom:
-    """Ensure a ``web_chat_rooms`` handle row exists for an existing registry
-    room ``token`` (used as the frontend's integer room id when the room
-    originated on another surface, e.g. a Talk room surfaced in web). Idempotent
-    on the unique token. Returns the row."""
+    """Ensure a ``web_chat_rooms`` handle row exists for ``user_id`` against an
+    existing registry room ``token`` (used as the frontend's integer room id when
+    the room originated on another surface, e.g. a Talk room surfaced in web).
+    Idempotent on (user_id, token) — a shared Talk room has one handle per
+    participant (ISSUE-134). Returns the requesting user's handle."""
     conn.execute(
         "INSERT OR IGNORE INTO web_chat_rooms (user_id, token, name) "
         "VALUES (?, ?, ?)",
         (user_id, token, name.strip() or "room"),
     )
-    room = get_web_chat_room_by_token(conn, token)
-    assert room is not None
-    return room
+    row = conn.execute(
+        "SELECT * FROM web_chat_rooms WHERE user_id = ? AND token = ?",
+        (user_id, token),
+    ).fetchone()
+    assert row is not None
+    return _row_to_web_chat_room(row)
 
 
 def ensure_default_web_chat_room(
@@ -2195,8 +2228,13 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM messages WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_bindings WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_read_state WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_members WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
-    conn.execute("DELETE FROM web_chat_rooms WHERE id = ?", (room_id,))
+    # Drop every participant's handle for the token, not just the requester's
+    # (room_id): a promoted web room can accrue handles for other members, and
+    # leaving an orphan handle pointing at a now-deleted room would suppress
+    # their default-room creation and yield an empty room list (ISSUE-134).
+    conn.execute("DELETE FROM web_chat_rooms WHERE token = ?", (token,))
     return True
 
 
@@ -2288,15 +2326,72 @@ def register_room(
     name: str | None = None,
 ) -> Room:
     """Idempotently register a room. If a row already exists for `token` it is
-    returned unchanged (name/origin are not overwritten — first writer wins)."""
+    returned unchanged (name/origin are not overwritten — first writer wins).
+
+    The registering user is recorded as a member either way: `rooms.user_id` is
+    only the creator/origin owner, but visibility is resolved through
+    `room_members` (ISSUE-134), so a second participant registering against an
+    existing room still becomes a member."""
     conn.execute(
         "INSERT OR IGNORE INTO rooms (token, user_id, name, origin) "
         "VALUES (?, ?, ?, ?)",
         (token, user_id, name, origin),
     )
+    add_room_member(conn, token, user_id)
     room = get_room(conn, token)
     assert room is not None  # just inserted or already present
     return room
+
+
+def add_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
+    """Idempotently record that `user_id` is a participant in `room_token`."""
+    conn.execute(
+        "INSERT OR IGNORE INTO room_members (room_token, user_id) VALUES (?, ?)",
+        (room_token, user_id),
+    )
+
+
+def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
+    """Drop `user_id`'s membership — the per-user "hide this room" switch. The
+    shared room, its transcript, and other members are untouched."""
+    conn.execute(
+        "DELETE FROM room_members WHERE room_token = ? AND user_id = ?",
+        (room_token, user_id),
+    )
+
+
+def is_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM room_members WHERE room_token = ? AND user_id = ? LIMIT 1",
+        (room_token, user_id),
+    ).fetchone()
+    return row is not None
+
+
+def list_room_members(conn: sqlite3.Connection, room_token: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT user_id FROM room_members WHERE room_token = ? ORDER BY user_id",
+        (room_token,),
+    ).fetchall()
+    return [r["user_id"] for r in rows]
+
+
+def list_member_rooms(
+    conn: sqlite3.Connection, user_id: str, include_archived: bool = False,
+) -> list[Room]:
+    """Rooms `user_id` is a member of, oldest-first. This is the visibility query
+    for the web room list (ISSUE-134) — it replaces the single-owner
+    `list_rooms`, so a shared Talk room surfaces for every participant."""
+    sql = (
+        "SELECT r.* FROM rooms r "
+        "JOIN room_members m ON m.room_token = r.token "
+        "WHERE m.user_id = ?"
+    )
+    params: list = [user_id]
+    if not include_archived:
+        sql += " AND r.archived = 0"
+    sql += " ORDER BY r.created_at ASC, r.token ASC"
+    return [_row_to_room(r) for r in conn.execute(sql, params).fetchall()]
 
 
 def get_room(conn: sqlite3.Connection, token: str) -> Room | None:
@@ -2525,26 +2620,57 @@ def message_has_external_id(
 
 
 def get_room_read_state(
-    conn: sqlite3.Connection, room_token: str, surface: str,
+    conn: sqlite3.Connection, room_token: str, surface: str, user_id: str = "",
 ) -> int:
     row = conn.execute(
         "SELECT last_read_message_id FROM room_read_state "
-        "WHERE room_token = ? AND surface = ?",
-        (room_token, surface),
+        "WHERE room_token = ? AND surface = ? AND user_id = ?",
+        (room_token, surface, user_id),
     ).fetchone()
     return int(row["last_read_message_id"]) if row else 0
 
 
 def set_room_read_state(
-    conn: sqlite3.Connection, room_token: str, surface: str, last_read_message_id: int,
+    conn: sqlite3.Connection,
+    room_token: str,
+    surface: str,
+    last_read_message_id: int,
+    user_id: str = "",
 ) -> None:
     conn.execute(
-        "INSERT INTO room_read_state (room_token, surface, last_read_message_id) "
-        "VALUES (?, ?, ?) "
-        "ON CONFLICT (room_token, surface) DO UPDATE SET "
+        "INSERT INTO room_read_state "
+        "(room_token, surface, user_id, last_read_message_id) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (room_token, surface, user_id) DO UPDATE SET "
         "last_read_message_id = excluded.last_read_message_id",
-        (room_token, surface, last_read_message_id),
+        (room_token, surface, user_id, last_read_message_id),
     )
+
+
+def room_max_message_id(conn: sqlite3.Connection, room_token: str) -> int:
+    """The highest `messages.id` in a room, or 0 when the room is empty. Used to
+    seed / advance a read cursor to "everything so far"."""
+    row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS m FROM messages WHERE room_token = ?",
+        (room_token,),
+    ).fetchone()
+    return int(row["m"])
+
+
+def count_unread_messages(
+    conn: sqlite3.Connection, room_token: str, surface: str, user_id: str = "",
+) -> int:
+    """Number of unread bot/system messages in a room for a user on a surface:
+    messages past the surface's read cursor, excluding the user's own turns
+    (`role = 'user'`) so a user's input — including Talk turns mirrored into the
+    canonical store — never rings their own room as unread."""
+    cursor = get_room_read_state(conn, room_token, surface, user_id)
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM messages "
+        "WHERE room_token = ? AND id > ? AND role != 'user'",
+        (room_token, cursor),
+    ).fetchone()
+    return int(row["n"])
 
 
 def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
@@ -2647,6 +2773,141 @@ def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT OR IGNORE INTO _migration_state (name) VALUES ('unified_rooms_v1')"
         )
+
+
+def _migrate_web_chat_rooms_peruser(conn: sqlite3.Connection) -> None:
+    """Rebuild `web_chat_rooms` so `token` is unique per (user, token) rather
+    than globally (ISSUE-134), letting every participant of a shared Talk room
+    hold their own handle. Self-guarding: inspects the live table DDL and only
+    rebuilds the legacy single-token-UNIQUE shape, so it's a no-op on fresh
+    installs (already composite) and on re-runs."""
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'web_chat_rooms'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return
+    sql = row[0] if row and row[0] else ""
+    if not sql or "UNIQUE (user_id, token)" in sql:
+        return  # already migrated (or fresh install with the new DDL)
+    try:
+        conn.execute("ALTER TABLE web_chat_rooms RENAME TO _web_chat_rooms_old")
+        conn.execute("""
+            CREATE TABLE web_chat_rooms (
+                id          INTEGER PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                token       TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                archived    INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (user_id, token)
+            )
+        """)
+        # Preserve ids so any in-flight frontend room id stays valid.
+        conn.execute(
+            "INSERT INTO web_chat_rooms "
+            "(id, user_id, token, name, archived, created_at, updated_at) "
+            "SELECT id, user_id, token, name, archived, created_at, updated_at "
+            "FROM _web_chat_rooms_old"
+        )
+        conn.execute("DROP TABLE _web_chat_rooms_old")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_web_chat_rooms_user "
+            "ON web_chat_rooms (user_id, archived, id)"
+        )
+    except sqlite3.OperationalError as e:
+        logger.warning("web_chat_rooms per-user rebuild failed: %s", e)
+
+
+def _migrate_room_read_state_peruser(conn: sqlite3.Connection) -> None:
+    """Add `user_id` to `room_read_state`'s key (ISSUE-134) so an unread cursor
+    is per participant. Read cursors are ephemeral and there are no readers yet,
+    so the legacy table is dropped and recreated rather than backfilled.
+    Self-guarding on the DDL; no-op once `user_id` is present."""
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'room_read_state'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return
+    sql = row[0] if row and row[0] else ""
+    if not sql or "user_id" in sql:
+        return
+    try:
+        conn.execute("DROP TABLE room_read_state")
+        conn.execute("""
+            CREATE TABLE room_read_state (
+                room_token  TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+                surface     TEXT NOT NULL,
+                user_id     TEXT NOT NULL DEFAULT '',
+                last_read_message_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (room_token, surface, user_id)
+            )
+        """)
+    except sqlite3.OperationalError as e:
+        logger.warning("room_read_state per-user rebuild failed: %s", e)
+
+
+def _migrate_room_members(conn: sqlite3.Connection) -> None:
+    """Backfill `room_members` for existing deploys (ISSUE-134). Folds in every
+    participant of every registered room so a shared Talk room surfaces for all
+    of them, not just the arbitrary `rooms.user_id` the unified-rooms fold picked.
+
+    Markered (`room_members_v1`); each insert is `OR IGNORE` so a pre-marker
+    re-run is harmless. Sources: the registry owner, every web handle's user, and
+    every distinct Talk-task sender for a token that is a room."""
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'room_members_v1'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already:
+        return
+
+    # `rooms` / `web_chat_rooms` always exist by now (created in init_db's CREATE
+    # block before migrations run), so a failure on those is a real error and
+    # must NOT mark the migration done. `tasks`, however, is created by schema.sql
+    # which runs *after* migrations on a fresh install — its absence is the
+    # benign fresh-install case (nothing to backfill), tolerated like
+    # `_migrate_unified_rooms._step` does. Mirrors that per-step contract.
+    try:
+        # The registry owner is always a member.
+        conn.execute(
+            "INSERT OR IGNORE INTO room_members (room_token, user_id) "
+            "SELECT token, user_id FROM rooms"
+        )
+        # Every web handle's owner (covers web-origin rooms + any prior handle).
+        conn.execute(
+            "INSERT OR IGNORE INTO room_members (room_token, user_id) "
+            "SELECT token, user_id FROM web_chat_rooms "
+            "WHERE token IN (SELECT token FROM rooms)"
+        )
+    except sqlite3.OperationalError as e:
+        logger.warning("room_members backfill failed, will retry: %s", e)
+        return  # leave the marker unset so the next boot retries
+
+    try:
+        # Every distinct human who sent an interactive Talk turn into the room.
+        conn.execute(
+            "INSERT OR IGNORE INTO room_members (room_token, user_id) "
+            "SELECT conversation_token, user_id FROM tasks "
+            "WHERE source_type = 'talk' AND conversation_token IS NOT NULL "
+            "AND conversation_token IN (SELECT token FROM rooms) "
+            "GROUP BY conversation_token, user_id"
+        )
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e).lower():
+            logger.warning("room_members talk backfill failed, will retry: %s", e)
+            return
+        # `tasks` absent → fresh install, nothing to fold; fall through and mark.
+
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_members_v1')"
+    )
 
 
 def _migrate_scheduled_transcript_cleanup(conn: sqlite3.Connection) -> None:

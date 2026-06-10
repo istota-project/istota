@@ -1320,12 +1320,18 @@ def _chat_list_rooms(username: str) -> list[dict]:
     from . import db
     with db.get_db(_config.db_path) as conn:
         db.ensure_default_web_chat_room(conn, username)
-        registry = db.list_rooms(conn, username, include_archived=False)
+        registry = db.list_member_rooms(conn, username, include_archived=False)
         out: list[dict] = []
         for r in registry:
             handle = db.ensure_web_chat_handle(
                 conn, username, r.token, r.name or "Talk room",
             )
+            # Membership says this room is visible to the user, so a leftover
+            # per-user archived flag (set when they previously hid the room, then
+            # were re-added by a new inbound) is stale — clear it so the payload
+            # doesn't report a shown room as archived (ISSUE-134).
+            if handle.archived:
+                handle = db.update_web_chat_room(conn, handle.id, archived=False) or handle
             db.add_room_binding(conn, r.token, "web", r.token)
             d = _room_to_dict(handle)
             d["name"] = r.name or handle.name
@@ -1368,7 +1374,17 @@ def _chat_update_room(
             if name is not None:
                 db.rename_room(conn, updated.token, updated.name)
             if archived is not None:
-                db.set_room_archived(conn, updated.token, bool(archived))
+                reg = db.get_room(conn, updated.token)
+                if reg is not None and reg.origin == "talk":
+                    # Shared Talk room: hide per-user via membership, never via
+                    # the global archived flag (ISSUE-134) — that would hide it
+                    # from the other participants too.
+                    if archived:
+                        db.remove_room_member(conn, updated.token, username)
+                    else:
+                        db.add_room_member(conn, updated.token, username)
+                else:
+                    db.set_room_archived(conn, updated.token, bool(archived))
     return _room_to_dict(updated) if updated else None
 
 
@@ -1384,11 +1400,15 @@ def _chat_delete_room(username: str, room_id: int) -> str:
             return "not_found"
         if db.count_active_web_tasks(conn, room.token, username) > 0:
             return "busy"
-        # A Talk-origin room is hidden (archived), not destroyed: deleting from
-        # web must not wipe a Nextcloud Talk conversation's mirrored history.
+        # A Talk-origin room is hidden per-user, not destroyed: deleting from web
+        # must not wipe a Nextcloud Talk conversation's mirrored history, and —
+        # because the room is shared (ISSUE-134) — must not hide it from the
+        # other participants. Drop only this user's membership + archive their own
+        # handle; the global `rooms.archived` flag stays reserved for "the bot
+        # left the Nextcloud room" (archive_orphaned_talk_rooms).
         reg = db.get_room(conn, room.token)
         if reg is not None and reg.origin == "talk":
-            db.set_room_archived(conn, room.token, True)
+            db.remove_room_member(conn, room.token, username)
             db.update_web_chat_room(conn, room_id, archived=True)
             return "ok"
         db.delete_web_chat_room(conn, room_id, username)

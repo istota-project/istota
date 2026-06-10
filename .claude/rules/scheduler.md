@@ -292,7 +292,8 @@ After task completion, if enabled + `auto_index_conversations`:
 | `talk_messages` / `talk_poll_state` | — | Talk poller state + message cache |
 | `istota_kv` | — | user_id, namespace, key, value (JSON) — backs the `kv` skill |
 | `trusted_email_senders` | — | user_id, pattern (fnmatch) — email-gate allowlist |
-| `web_chat_rooms` | `WebChatRoom` | id, user_id, token (channel id), name, archived, created_at, updated_at — backs the web chat surface; one room = one `conversation_token` |
+| `web_chat_rooms` | `WebChatRoom` | id, user_id, token (channel id), name, archived, created_at, updated_at — backs the web chat surface; the frontend's integer room id. `UNIQUE(user_id, token)` (NOT globally unique on token): a shared Talk room has one handle row per participant so it surfaces in each member's list (ISSUE-134) |
+| `room_members` | — | room_token, user_id, created_at; `PRIMARY KEY (room_token, user_id)` — per-user membership of a shared room (ISSUE-134). A room is shared (one token, one transcript) but visibility is resolved through membership (`list_member_rooms`), not the single-owner `rooms.user_id`. Populated by `register_room` / inbound senders / the `room_members_v1` backfill |
 | `web_chat_messages` | `WebChatMessage` | id, user_id, token, role, title, text, created_at — bot-delivered (unsolicited) room messages: alerts / logs / notifications routed to the `web` surface via `WebTransport.deliver`. Distinct from task-backed turns; merged into room history by time |
 
 ## Key DB Functions
