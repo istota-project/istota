@@ -9,6 +9,7 @@ from istota.skills._loader import (
     _get_attachment_extensions,
     _parse_frontmatter,
     compute_skills_fingerprint,
+    eligible_skill_names,
     get_skill_availability,
     load_skill_index,
     load_skills,
@@ -1520,3 +1521,188 @@ class TestExperimentalSkillGating:
         )
         assert "exp" in index
         assert index["exp"].experimental is True
+
+
+class TestEligibleSkillNames:
+    """The shared eligibility filter backing the progressive-disclosure
+    catalogue index (and formerly the Pass-2 manifest)."""
+
+    def _make_index(self) -> dict[str, SkillMeta]:
+        return {
+            "files": SkillMeta(name="files", description="File ops", always_include=True),
+            "developer": SkillMeta(name="developer", description="Git", keywords=["git"]),
+            "email": SkillMeta(name="email", description="Mail", keywords=["mail"]),
+            "tasks": SkillMeta(name="tasks", description="Subtasks", admin_only=True),
+            "broken": SkillMeta(
+                name="broken", description="Broken", dependencies=["nonexistent_pkg_xyz"]
+            ),
+            "labrat": SkillMeta(name="labrat", description="Experimental", experimental=True),
+        }
+
+    def test_includes_plain_unselected_skill(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert "developer" in names
+        assert "email" in names
+
+    def test_excludes_already_selected(self):
+        names = eligible_skill_names(self._make_index(), exclude={"email"})
+        assert "email" not in names
+        assert "developer" in names
+
+    def test_excludes_always_include(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert "files" not in names
+
+    def test_excludes_disabled(self):
+        names = eligible_skill_names(
+            self._make_index(), exclude=set(), disabled_skills={"developer"}
+        )
+        assert "developer" not in names
+
+    def test_excludes_admin_only_for_non_admin(self):
+        names = eligible_skill_names(self._make_index(), exclude=set(), is_admin=False)
+        assert "tasks" not in names
+        names_admin = eligible_skill_names(self._make_index(), exclude=set(), is_admin=True)
+        assert "tasks" in names_admin
+
+    def test_excludes_missing_deps(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert "broken" not in names
+
+    def test_excludes_experimental_unless_flagged(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert "labrat" not in names
+        flagged = eligible_skill_names(
+            self._make_index(), exclude=set(),
+            enabled_experimental_features=frozenset({"skill_labrat"}),
+        )
+        assert "labrat" in flagged
+
+    def test_sorted(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert names == sorted(names)
+
+
+class TestFrontmatterParsing:
+    """Tests for YAML frontmatter in skill.md files."""
+
+    def _make_skill_dir(self, tmp_path, name, toml_content, md_content):
+        bundled = tmp_path / "bundled"
+        skill_dir = bundled / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "skill.toml").write_text(toml_content)
+        (skill_dir / "skill.md").write_text(md_content)
+        return bundled
+
+    def test_frontmatter_triggers_override_toml_keywords(self, tmp_path):
+        bundled = self._make_skill_dir(
+            tmp_path, "developer",
+            toml_content='keywords = ["old_keyword"]\n',
+            md_content=(
+                "---\n"
+                "name: developer\n"
+                "triggers: [git, fix bug, patch, code change]\n"
+                "description: Git workflows and code changes\n"
+                "---\n"
+                "\n"
+                "# Developer\n\nInstructions here.\n"
+            ),
+        )
+        config_skills = tmp_path / "config_skills"
+        config_skills.mkdir()
+        index = load_skill_index(config_skills, bundled_dir=bundled)
+        assert "developer" in index
+        assert index["developer"].keywords == ["git", "fix bug", "patch", "code change"]
+        assert "old_keyword" not in index["developer"].keywords
+
+    def test_frontmatter_description_overrides_toml(self, tmp_path):
+        bundled = self._make_skill_dir(
+            tmp_path, "developer",
+            toml_content='description = "Old description"\n',
+            md_content=(
+                "---\n"
+                "name: developer\n"
+                "triggers: [git]\n"
+                "description: New description from frontmatter\n"
+                "---\n"
+                "\n"
+                "# Developer\n"
+            ),
+        )
+        config_skills = tmp_path / "config_skills"
+        config_skills.mkdir()
+        index = load_skill_index(config_skills, bundled_dir=bundled)
+        assert index["developer"].description == "New description from frontmatter"
+
+    def test_no_frontmatter_falls_back_to_toml(self, tmp_path):
+        bundled = self._make_skill_dir(
+            tmp_path, "email",
+            toml_content='description = "Email ops"\nkeywords = ["email", "mail"]\n',
+            md_content="# Email\n\nInstructions here.\n",
+        )
+        config_skills = tmp_path / "config_skills"
+        config_skills.mkdir()
+        index = load_skill_index(config_skills, bundled_dir=bundled)
+        assert index["email"].description == "Email ops"
+        assert index["email"].keywords == ["email", "mail"]
+
+    def test_frontmatter_stripped_from_skill_doc(self, tmp_path):
+        """When loading skill docs, frontmatter should not appear in the output."""
+        bundled = self._make_skill_dir(
+            tmp_path, "developer",
+            toml_content="",
+            md_content=(
+                "---\n"
+                "name: developer\n"
+                "triggers: [git]\n"
+                "description: Git workflows\n"
+                "---\n"
+                "\n"
+                "# Developer\n\nDo git things.\n"
+            ),
+        )
+        config_skills = tmp_path / "config_skills"
+        config_skills.mkdir()
+        index = load_skill_index(config_skills, bundled_dir=bundled)
+        result = load_skills(config_skills, ["developer"], skill_index=index, bundled_dir=bundled)
+        assert "triggers:" not in result
+        assert "Do git things." in result
+
+    def test_partial_frontmatter_only_overrides_present_fields(self, tmp_path):
+        """Frontmatter with only triggers should override keywords but keep toml description."""
+        bundled = self._make_skill_dir(
+            tmp_path, "calendar",
+            toml_content='description = "CalDAV operations"\nkeywords = ["calendar"]\n',
+            md_content=(
+                "---\n"
+                "triggers: [calendar, event, meeting, appointment]\n"
+                "---\n"
+                "\n"
+                "# Calendar\n"
+            ),
+        )
+        config_skills = tmp_path / "config_skills"
+        config_skills.mkdir()
+        index = load_skill_index(config_skills, bundled_dir=bundled)
+        assert index["calendar"].keywords == ["calendar", "event", "meeting", "appointment"]
+        assert index["calendar"].description == "CalDAV operations"  # from toml
+
+    def test_frontmatter_with_invalid_yaml_ignored(self, tmp_path):
+        """If YAML frontmatter is malformed, fall back to toml values."""
+        bundled = self._make_skill_dir(
+            tmp_path, "email",
+            toml_content='description = "Email"\nkeywords = ["email"]\n',
+            md_content=(
+                "---\n"
+                "triggers: [unclosed bracket\n"
+                "---\n"
+                "\n"
+                "# Email\n"
+            ),
+        )
+        config_skills = tmp_path / "config_skills"
+        config_skills.mkdir()
+        index = load_skill_index(config_skills, bundled_dir=bundled)
+        # Should fall back gracefully
+        assert index["email"].keywords == ["email"]
+        assert index["email"].description == "Email"

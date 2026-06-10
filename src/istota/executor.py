@@ -2177,7 +2177,6 @@ def execute_task(
     from .skills._loader import (
         load_skill_index, select_skills, load_skills,
         compute_skills_fingerprint, load_skills_changelog,
-        classify_skills,
     )
 
     is_admin = config.is_admin(task.user_id)
@@ -2232,60 +2231,6 @@ def execute_task(
         sticky_skills=sticky_skills or None,
         enabled_experimental_features=frozenset(config.experimental.features),
     )
-
-    # Pass 2: LLM-based semantic routing. Inference goes through the brain that
-    # will run the task (honoring per-source-type routing), so the native brain
-    # uses its own provider/model instead of shelling out to the `claude` CLI it
-    # isn't using. Role aliases like "fast" only make sense in the claude_code
-    # namespace; under native we classify with the endpoint's own model.
-    if config.skills.semantic_routing:
-        from .brain import resolve_brain_kind
-        _routed_brain = resolve_brain_kind(task.source_type, config.brain)
-        _pass2_classifier = None
-        _pass2_model = make_brain(config.brain).resolve_model_name(
-            config.skills.semantic_routing_model
-        )
-        _pass2_skip = False
-        if _routed_brain.kind == "native":
-            _pass2_native = _native_with_user_key(
-                _routed_brain.native, config, task.user_id
-            )
-            _pass2_classifier = _build_native_completer(
-                _pass2_native, config.skills.semantic_routing_timeout
-            )
-            _pass2_model = _pass2_native.model
-            # If the native classifier couldn't be built, skip Pass 2 rather
-            # than falling back to `claude --model <native-id>` (wrong CLI).
-            _pass2_skip = _pass2_classifier is None
-
-        extra_skills = (
-            []
-            if _pass2_skip
-            else classify_skills(
-                prompt=task.prompt,
-                skill_index=skill_index,
-                already_selected=set(selected_skills),
-                disabled_skills=_disabled if _disabled else None,
-                is_admin=is_admin,
-                model=_pass2_model,
-                timeout=config.skills.semantic_routing_timeout,
-                user_resource_types=user_resource_types,
-                enabled_experimental_features=frozenset(config.experimental.features),
-                classifier=_pass2_classifier,
-            )
-        )
-        if extra_skills:
-            all_selected = set(selected_skills) | set(extra_skills)
-            # Re-apply exclude_skills (Pass 1 already applied, but new skills may trigger new exclusions)
-            excluded = set()
-            for n in list(all_selected):
-                m = skill_index.get(n)
-                if m:
-                    for ex in m.exclude_skills:
-                        if ex in all_selected:
-                            excluded.add(ex)
-            all_selected -= excluded
-            selected_skills = sorted(all_selected)
 
     # Persist selected skills for conversation stickiness
     if task.id and selected_skills:

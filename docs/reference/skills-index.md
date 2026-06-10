@@ -119,10 +119,7 @@ Codifies a spec-driven development workflow. Specs live in `{notes_folder}/Specs
 
 ## Selection triggers
 
-Skills are selected through a two-pass system:
-
-1. **Pass 1** (keyword matching): `keywords` in prompt, `resource_types` match, `source_types` match, `file_types` match, `always_include`, `companion_skills`
-2. **Pass 2** (semantic routing): LLM-based classification catches implied needs that keywords miss
+Skills are selected by a single deterministic pass: `keywords` in prompt, `resource_types` match, `source_types` match, `file_types` match, `always_include`, `companion_skills`. Progressive disclosure then widens the on-demand index to the full eligible catalogue so the model can load any relevant skill that keyword matching didn't surface.
 
 See [skills](../features/skills.md) for details on the selection system.
 

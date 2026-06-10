@@ -467,19 +467,13 @@ class MoneymanConfig:
 @dataclass
 class SkillsConfig:
     """Skill routing configuration."""
-    # Pass 2 LLM skill classification. OFF by default: it spawns a fresh
-    # `claude -p` subprocess per task whose cold-start cost dominates (and times
-    # out in production), and progressive disclosure's widened catalogue index
-    # now surfaces every eligible skill for the main model to self-load instead.
-    # Reachable for operators who still want the pre-router.
-    semantic_routing: bool = False
-    semantic_routing_model: str = "fast"  # role alias — resolves to HAIKU by default; operator-overridable
-    semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
-    # Progressive skill disclosure (Part A). ON by default: selected skills are
+    # Progressive skill disclosure. ON by default: selected skills are
     # partitioned eager (full body) / lazy (one-line index entry), and the
     # on-demand index is widened to the full eligible catalogue so the model can
     # load any skill via `istota-skill skills show <name>`. Set False for the
-    # legacy all-eager-no-index behaviour.
+    # legacy all-eager-no-index behaviour. (This superseded the removed Pass-2
+    # LLM "semantic routing" pre-router, whose per-task `claude -p` cold-start
+    # dominated and timed out in production.)
     progressive_disclosure: bool = True
     # When > 0, a CLI skill whose body exceeds this many chars defaults to lazy
     # disclosure even without an explicit ``disclosure: lazy`` frontmatter key.
@@ -1204,10 +1198,7 @@ def load_config(config_path: Path | None = None) -> Config:
     if "skills" in data:
         sk = data["skills"]
         config.skills = SkillsConfig(
-            semantic_routing=sk.get("semantic_routing", True),
-            semantic_routing_model=sk.get("semantic_routing_model", "fast"),
-            semantic_routing_timeout=sk.get("semantic_routing_timeout", 3.0),
-            progressive_disclosure=sk.get("progressive_disclosure", False),
+            progressive_disclosure=sk.get("progressive_disclosure", True),
             auto_lazy_threshold_chars=sk.get("auto_lazy_threshold_chars", 0),
             always_eager=list(
                 sk.get(
