@@ -9,56 +9,91 @@ from .config import Config
 
 logger = logging.getLogger("istota.talk")
 
-# Pattern to extract file attachment info from Talk messages
-# Format: {file0} placeholder in message, actual file shared in bot's Talk folder
-FILE_PLACEHOLDER_PATTERN = re.compile(r'\{file(\d+)\}')
-
-# Pattern to match mention placeholders in Talk messages
+# Backward-compat exports: a few tests / callers still import these. The
+# resolver no longer drives off them — it walks messageParameters and
+# dispatches on each param's `type` (see _resolve_param) — but the bare-{file}
+# leak (ISSUE-132) is why the old `\d+`-anchored file pattern is gone.
+FILE_PLACEHOLDER_PATTERN = re.compile(r'\{file\d*\}')
 MENTION_PLACEHOLDER_PATTERN = re.compile(r'\{(mention-(?:user|call|federated-user)\d+)\}')
+
+
+def _resolve_param(key: str, param: dict, bot_username: str | None) -> str | None:
+    """Render a single Nextcloud Talk rich-object param to its display form.
+
+    Dispatches on the param's `type` so the whole class of objects is covered
+    at once instead of one regex per type (ISSUE-132). `key` (the placeholder
+    name, e.g. ``file0`` / ``mention-user1``) is a fallback when a cached/legacy
+    param omits `type`. Returns the replacement string, or ``None`` to mean
+    "strip" (the bot's own mention).
+    """
+    obj_type = param.get("type", "")
+    name = param.get("name") or param.get("id") or ""
+
+    # Legacy / cache params often omit `type`; fall back to the key prefix so a
+    # bare {file0} (name-only param) still renders as a file attachment.
+    if not obj_type:
+        if key.startswith("file"):
+            obj_type = "file"
+        elif key.startswith("mention-"):
+            obj_type = "user"
+
+    if obj_type in ("user", "federated-user"):
+        if bot_username is not None and param.get("id") == bot_username:
+            return None  # strip the bot's own mention from the prompt
+        return f"@{name}" if name else ""
+    if obj_type == "guest":
+        return f"@{name}" if name else ""
+    if obj_type in ("call", "mention-call"):
+        return "@all"
+    if obj_type == "file":
+        return f"[{param.get('name', 'file')}]"
+    if obj_type == "talk-poll":
+        return f"[poll: {name}]" if name else "[poll]"
+    if obj_type == "deck-card":
+        return f"[card: {name}]" if name else "[card]"
+    if obj_type in ("geo-location", "location"):
+        return f"[location: {name}]" if name else "[location]"
+    # Unknown rich object: best-effort name/id, else strip the token.
+    return name
 
 
 def clean_message_content(message: dict, bot_username: str | None = None) -> str:
     """
-    Clean up message content, replacing file and mention placeholders with readable text.
+    Clean up message content, replacing rich-object placeholders with readable text.
 
-    When bot_username is provided, the bot's own mention placeholder is stripped
-    (cleaned from the prompt). Other mentions are replaced with @DisplayName.
+    Walks ``messageParameters`` and substitutes every ``{key}`` it finds in the
+    body with the param's display form, dispatched on its ``type`` — files,
+    @mentions (user / federated / guest / call), polls, deck cards, locations,
+    and an id/name fallback for anything else. This resolves the whole family of
+    Nextcloud Talk rich objects rather than the two narrow cases (``{fileN}`` /
+    ``{mention-…N}``) the old regex pair handled, so single-file ``{file}``
+    shares and every non-mention object stop leaking literal tokens into the web
+    transcript (ISSUE-132).
+
+    When ``bot_username`` is provided, the bot's own @mention is stripped from
+    the body (so its prompt reads naturally); other mentions become @DisplayName.
     """
     content = message.get("message", "")
     message_params = message.get("messageParameters", {})
 
-    # Handle case where messageParameters is an empty list instead of dict
-    if not isinstance(message_params, dict):
+    # Handle case where messageParameters is an empty list instead of dict.
+    if not isinstance(message_params, dict) or not message_params:
         return content
 
-    # Replace {fileN} placeholders with [filename]
-    def replace_file(match):
-        file_key = f"file{match.group(1)}"
-        if file_key in message_params:
-            filename = message_params[file_key].get("name", "file")
-            return f"[{filename}]"
-        return match.group(0)
+    stripped_any = False
+    for key, param in message_params.items():
+        token = "{" + key + "}"
+        if token not in content or not isinstance(param, dict):
+            continue
+        replacement = _resolve_param(key, param, bot_username)
+        if replacement is None:
+            replacement = ""
+            stripped_any = True
+        content = content.replace(token, replacement)
 
-    content = FILE_PLACEHOLDER_PATTERN.sub(replace_file, content)
-
-    # Replace mention placeholders
-    if bot_username is not None:
-        def replace_mention(match):
-            key = match.group(1)
-            param = message_params.get(key)
-            if not isinstance(param, dict):
-                return match.group(0)
-            # Strip bot's own mention from the prompt
-            if param.get("id") == bot_username:
-                return ""
-            # Replace other mentions with @DisplayName
-            display_name = param.get("name", param.get("id", ""))
-            if display_name:
-                return f"@{display_name}"
-            return match.group(0)
-
-        content = MENTION_PLACEHOLDER_PATTERN.sub(replace_mention, content)
-        # Clean up extra whitespace from stripped bot mentions
+    # Collapse whitespace left behind by a stripped bot mention. Gated on the
+    # strip actually happening so other content is returned byte-for-byte.
+    if stripped_any:
         content = re.sub(r'  +', ' ', content).strip()
 
     return content

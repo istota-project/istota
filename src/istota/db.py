@@ -1694,7 +1694,7 @@ def backfill_room_messages_from_talk_cache(
     """
     rows = conn.execute(
         "SELECT message_id, actor_id, message_type, reference_id, message_text, "
-        "timestamp FROM talk_messages "
+        "message_parameters, timestamp FROM talk_messages "
         "WHERE conversation_token = ? AND deleted = 0 "
         "ORDER BY message_id ASC",
         (conversation_token,),
@@ -1718,6 +1718,26 @@ def backfill_room_messages_from_talk_cache(
         except (ValueError, TypeError, OSError, OverflowError):
             return None
 
+    # Resolve Talk rich-object placeholders ({file}, {mention-…}, polls, …)
+    # against the cached messageParameters before folding text into the durable
+    # store — the cache holds the *raw* body, so without this the recovered
+    # transcript leaks literal placeholder tokens to the web UI (ISSUE-132). The
+    # live inbound path already resolves; only this cache-recovery path didn't.
+    from .talk import clean_message_content
+
+    def _resolved(row) -> str:
+        params = row["message_parameters"]
+        if params:
+            try:
+                params = json.loads(params)
+            except (json.JSONDecodeError, TypeError):
+                params = {}
+        else:
+            params = {}
+        return clean_message_content(
+            {"message": row["message_text"] or "", "messageParameters": params}
+        )
+
     inserted = 0
     pending_user: tuple[str, object] | None = None  # (text, ts), unconsumed
     for r in rows:
@@ -1727,7 +1747,7 @@ def backfill_room_messages_from_talk_cache(
         is_bot_ref = ref.startswith("istota:task:")
         if r["actor_id"] != bot_actor and not is_bot_ref:
             # A human comment — the candidate prompt for the next bot result.
-            pending_user = (r["message_text"], r["timestamp"])
+            pending_user = (_resolved(r), r["timestamp"])
             continue
         if is_bot_ref and ref.endswith(":result"):
             parts = ref.split(":")
@@ -1744,7 +1764,7 @@ def backfill_room_messages_from_talk_cache(
                 pending_user = None
             inserted += _insert_recovered_message(
                 conn, conversation_token, "assistant",
-                r["message_text"], task_id, _iso(r["timestamp"]),
+                _resolved(r), task_id, _iso(r["timestamp"]),
             )
         # ack rows (:ack) and any other bot comment fall through (skipped).
     return inserted
