@@ -1235,8 +1235,10 @@ class TestCleanMessageContentMentions:
         assert "@Alice" in result
         assert "about the meeting?" in result
 
-    def test_no_bot_username_preserves_all(self):
-        """When bot_username is None, mention placeholders are not processed."""
+    def test_no_bot_username_resolves_mentions(self):
+        """Without bot_username we can't single out the bot's own mention to
+        strip, but mentions still resolve to @name rather than leaking the
+        literal placeholder (ISSUE-132 — the cache/is-bot display path)."""
         msg = _msg(
             message="{mention-user0} hello",
             message_params={
@@ -1244,10 +1246,11 @@ class TestCleanMessageContentMentions:
             },
         )
         result = clean_message_content(msg)
-        assert result == "{mention-user0} hello"
+        assert result == "@Istota hello"
 
-    def test_mention_call_preserved(self):
-        """@all mentions are replaced with display name, not stripped."""
+    def test_mention_call_becomes_at_all(self):
+        """A call mention resolves to @all — Nextcloud's semantics for a
+        {mention-call} / call-type rich object (ISSUE-132)."""
         msg = _msg(
             message="{mention-call0} meeting in 5 mins",
             message_params={
@@ -1255,7 +1258,7 @@ class TestCleanMessageContentMentions:
             },
         )
         result = clean_message_content(msg, bot_username="istota")
-        assert "@Engineering" in result
+        assert result == "@all meeting in 5 mins"
 
 
 # =============================================================================

@@ -542,3 +542,84 @@ class TestCleanMessageContent:
     def test_empty_params_list(self):
         msg = {"message": "Hello {file0}", "messageParameters": []}
         assert clean_message_content(msg) == "Hello {file0}"
+
+    # ISSUE-132 — generic messageParameters resolver. The old code only
+    # resolved {fileN} and {mention-…N}; every other rich-object type and the
+    # bare {file} (single-file share, no numeric suffix) leaked literally into
+    # the web transcript.
+    def test_bare_file_placeholder_no_suffix(self):
+        msg = {
+            "message": "{file}",
+            "messageParameters": {"file": {"type": "file", "name": "report.pdf"}},
+        }
+        assert clean_message_content(msg) == "[report.pdf]"
+
+    def test_talk_poll_object(self):
+        msg = {
+            "message": "{talk-poll}",
+            "messageParameters": {"talk-poll": {"type": "talk-poll", "name": "Lunch?"}},
+        }
+        assert clean_message_content(msg) == "[poll: Lunch?]"
+
+    def test_geo_location_object(self):
+        msg = {
+            "message": "here: {location}",
+            "messageParameters": {"location": {"type": "geo-location", "name": "Targowa 5"}},
+        }
+        assert clean_message_content(msg) == "here: [location: Targowa 5]"
+
+    def test_deck_card_object(self):
+        msg = {
+            "message": "{deck-card}",
+            "messageParameters": {"deck-card": {"type": "deck-card", "name": "Ship it"}},
+        }
+        assert clean_message_content(msg) == "[card: Ship it]"
+
+    def test_call_mention_all(self):
+        msg = {
+            "message": "{mention-call1} heads up",
+            "messageParameters": {"mention-call1": {"type": "call", "name": "Room"}},
+        }
+        assert clean_message_content(msg, bot_username="istota") == "@all heads up"
+
+    def test_guest_mention(self):
+        msg = {
+            "message": "Hi {mention-guest0}",
+            "messageParameters": {"mention-guest0": {"type": "guest", "name": "Guest"}},
+        }
+        assert clean_message_content(msg) == "Hi @Guest"
+
+    def test_unknown_object_falls_back_to_name(self):
+        msg = {
+            "message": "{circle1}",
+            "messageParameters": {"circle1": {"type": "circle", "name": "Team A"}},
+        }
+        assert clean_message_content(msg) == "Team A"
+
+    def test_unknown_object_no_name_stripped(self):
+        msg = {
+            "message": "x{highlight1}y",
+            "messageParameters": {"highlight1": {"type": "highlight"}},
+        }
+        assert clean_message_content(msg) == "xy"
+
+    def test_system_actor_token_resolved(self):
+        # The {user1}/{actor} system-message tokens the issue flagged: even if
+        # one reaches the resolver, it now renders @name instead of leaking.
+        msg = {
+            "message": "{actor} shared {file}",
+            "messageParameters": {
+                "actor": {"type": "user", "id": "alice", "name": "Alice"},
+                "file": {"type": "file", "name": "a.txt"},
+            },
+        }
+        assert clean_message_content(msg) == "@Alice shared [a.txt]"
+
+    def test_mention_without_bot_username_still_resolved(self):
+        # Bot's-own-message path passes bot_username=None; a non-bot mention
+        # should still resolve rather than leak the literal placeholder.
+        msg = {
+            "message": "thanks {mention-user0}",
+            "messageParameters": {"mention-user0": {"type": "user", "id": "alice", "name": "Alice"}},
+        }
+        assert clean_message_content(msg) == "thanks @Alice"

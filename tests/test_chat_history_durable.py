@@ -80,6 +80,23 @@ class TestTalkCacheRecovery:
             ("assistant", "It is 4.", 5),
         ]
 
+    def test_resolves_rich_object_placeholders(self, conn):
+        # ISSUE-132 — the cache holds the raw body, so a {file0} / {mention-…}
+        # placeholder must be resolved against the cached messageParameters when
+        # folded into the durable store, else it leaks literally into the web UI.
+        db.register_room(conn, "tok", "u", origin="talk")
+        conn.execute(
+            "INSERT INTO talk_messages (conversation_token, message_id, actor_id, "
+            "message_type, message_text, message_parameters, reference_id, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("tok", 1, "stefan", "comment", "look at {file0}",
+             json.dumps({"file0": {"type": "file", "name": "scan.pdf"}}), "h", 100),
+        )
+        self._tm(conn, "tok", 2, "zorg", "Got it.", ref="istota:task:9:result", ts=102)
+        db.backfill_room_messages_from_talk_cache(conn, "tok")
+        bodies = [(m.role, m.body) for m in db.get_messages(conn, "tok")]
+        assert bodies == [("user", "look at [scan.pdf]"), ("assistant", "Got it.")]
+
     def test_skips_acks_and_system_and_is_idempotent(self, conn):
         db.register_room(conn, "tok", "u", origin="talk")
         self._tm(conn, "tok", 1, "stefan", "q", ref="h", ts=100)
