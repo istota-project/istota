@@ -57,13 +57,47 @@ if [ ! -d "$BARE_DIR" ]; then
     mkdir -p "$(dirname "$BARE_DIR")"
     # Use $GITLAB_URL or $GITHUB_URL depending on where the repo lives
     git clone --bare "$GITLAB_URL/namespace/project.git" "$BARE_DIR"
-    # Configure fetch to get all branches
+    # Configure fetch to track remote branches under refs/remotes/origin/*
     git -C "$BARE_DIR" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+    git -C "$BARE_DIR" fetch origin
+
+    # Delete the clone-day local heads and repoint HEAD at the remote default.
+    # WHY (ISSUE-125): `git clone --bare` populates refs/heads/* once, at clone
+    # time, and the remote-tracking refspec above never updates them again — so
+    # a local `main`/`master` stays frozen at clone day while origin/main moves
+    # on. `git show main:db.py` then silently returns clone-day source. Deleting
+    # the fossils turns that silent-wrong into a loud `unknown revision`: you
+    # can't act on stale bytes you can't read. Worktree creation is unaffected —
+    # it branches from `origin/$DEFAULT_BRANCH` (below), not a local head.
+    DEFAULT_BRANCH=$(git -C "$BARE_DIR" remote show origin | sed -n 's/.*HEAD branch: //p')
+    git -C "$BARE_DIR" symbolic-ref HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+    # Skip any head currently checked out by a worktree (a zorg/<task> branch);
+    # only the unused clone-day main/master get dropped.
+    CHECKED_OUT=$(git -C "$BARE_DIR" worktree list --porcelain | sed -n 's/^branch refs\/heads\///p')
+    for ref in $(git -C "$BARE_DIR" for-each-ref --format='%(refname:short)' refs/heads/); do
+        echo "$CHECKED_OUT" | grep -qx "$ref" || git -C "$BARE_DIR" branch -D "$ref"
+    done
 fi
 
 # Always fetch latest
 git -C "$BARE_DIR" fetch origin
 ```
+
+### Reading current source from a bare clone
+
+**Invariant: in a bare clone, never name a local branch — always `origin/<branch>`
+or `origin/HEAD`.** A local `main`/`master` is a clone-day fossil (deleted by the
+setup above, but the habit still bites on an older clone). To read the live tree
+in one fetch-then-read step that can't point at a stale ref, use:
+
+```bash
+# dev-show <BARE_DIR> <path> — current source from origin/HEAD, always fetched.
+git -C "$BARE_DIR" fetch -q origin && git -C "$BARE_DIR" show origin/HEAD:"$path"
+```
+
+Use this (or `git -C "$BARE_DIR" log origin/HEAD`, `git -C "$BARE_DIR" show
+origin/main:<path>`) for any hand-rolled verification read. Never `git show
+main:<path>` / `git log master` against a bare clone.
 
 ## Creating a Worktree for Development
 
