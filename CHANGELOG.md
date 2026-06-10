@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - The assistant can now learn reusable "playbooks" — step-by-step procedures for tasks it has done before. After a successful multi-step task, the nightly memory cycle distils how it was done and, when a similar request comes up later, recalls that approach so it gets it right on the first try. Playbooks are plain guidance the assistant reads, never code it runs. Off by default; an operator enables it.
-- Optional progressive skill loading reduces prompt size on tasks that pull in large skills (like the developer or health tools). Instead of loading a heavy skill's full instructions up front, the assistant sees a one-line summary and loads the details on demand only if it actually needs them. Off by default; an operator enables it.
+- Progressive skill loading is now the default way the assistant picks its tools. Heavy skills (like the developer or health tools) load as a one-line summary up front, and the assistant pulls the full instructions on demand only when it needs them. The summary list now covers every skill it could use, so it can reach for the right tool even when a task doesn't obviously call for it — while the prompt stays small.
 - Web chat now flags rooms with unread messages: the room name goes bold in the sidebar and a small count chip appears to its right. Opening a room clears it, and a room that receives a notification or scheduled post while you're elsewhere lights up on its own. Unread is tracked per person and only for the web view, so reading on the phone via Talk doesn't change it.
 
 ### Changed
+- The assistant no longer runs a separate helper model to pre-guess which extra skills a task needs. That step started a fresh process on every task and added several seconds of delay before any work began (and was timing out in production). It's now off by default — the wider skill summary list above gives the main model everything it needs to choose its own tools, with no per-task delay. Operators who still want the helper can re-enable it.
 - Rewrote the assistant's built-in operating instructions (the opt-in custom system prompt) to track Claude Code's current guidance more closely. It now leads with the outcome, carries stronger coding-craft rules, and adds a self-check step that has the assistant prod its own work — re-reading the change, running the real command, reporting honestly — before answering. Aimed at better, more reliable coding output. Takes effect on the next deploy.
 
 ### Fixed

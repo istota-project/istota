@@ -390,10 +390,10 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # skill needs that keywords miss (e.g., "fix the bug" implies developer skill).
 
 # [skills]
-# semantic_routing = true              # enable LLM-based Pass 2 skill classification
+# semantic_routing = false             # Pass 2 LLM pre-router (default OFF — replaced by the widened disclosure catalogue below)
 # semantic_routing_model = "fast"      # role alias (resolves to Haiku); accepts canonical / provider / role aliases
 # semantic_routing_timeout = 3.0       # seconds, falls back to Pass 1 on timeout
-# progressive_disclosure = false       # defer heavy/lazy skill bodies; model loads them via `istota-skill skills show <name>`
+# progressive_disclosure = true        # default ON: defer lazy skill bodies + widen the on-demand index to the full eligible catalogue (model loads via `istota-skill skills show <name>`)
 # auto_lazy_threshold_chars = 0        # >0: a CLI skill over N chars defaults to lazy (0 = explicit `disclosure: lazy` frontmatter only)
 # always_eager = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]  # never deferred
 

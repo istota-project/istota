@@ -64,7 +64,11 @@ _HEAVY_PATCHES = [
 ]
 
 
-def _write_skill(bundled: Path, name: str, body: str, *, disclosure: str = "", triggers=None, cli=True):
+def _write_skill(
+    bundled: Path, name: str, body: str, *, disclosure: str = "", triggers=None,
+    cli=True, exclude_skills=None, always_include=False, admin_only=False,
+    experimental=False, dependencies=None,
+):
     d = bundled / name
     d.mkdir(parents=True, exist_ok=True)
     fm = ["---", f"name: {name}", "description: the {0} skill".format(name), f"cli: {'true' if cli else 'false'}"]
@@ -72,6 +76,16 @@ def _write_skill(bundled: Path, name: str, body: str, *, disclosure: str = "", t
         fm.append(f"disclosure: {disclosure}")
     if triggers:
         fm.append(f"triggers: [{', '.join(triggers)}]")
+    if exclude_skills:
+        fm.append(f"exclude_skills: [{', '.join(exclude_skills)}]")
+    if always_include:
+        fm.append("always_include: true")
+    if admin_only:
+        fm.append("admin_only: true")
+    if experimental:
+        fm.append("experimental: true")
+    if dependencies:
+        fm.append(f"dependencies: [{', '.join(dependencies)}]")
     fm.append("---")
     (d / "skill.md").write_text("\n".join(fm) + "\n" + body)
 
@@ -130,3 +144,77 @@ class TestExecuteTaskDisclosure:
         assert "load on demand" not in prompt
         assert "DEVELOPER_BODY_MARKER" in prompt
         assert "CALENDAR_BODY_MARKER" in prompt
+
+
+# ---- widened catalogue index (Pass 2 replacement) --------------------------
+
+
+def _catalogue_config(tmp_path, *, semantic_routing=False, always_eager=None) -> Config:
+    """Bundled set with selected (developer/calendar) + unselected eligible
+    (bookmarks), an excluded skill (devbox, excluded by calendar), a pinned
+    always_eager skill (safety), and a gated-off experimental skill (labrat)."""
+    bundled = tmp_path / "bundled"
+    _write_skill(bundled, "developer", "DEVELOPER_BODY_MARKER", disclosure="lazy", triggers=["deploy"])
+    _write_skill(
+        bundled, "calendar", "CALENDAR_BODY_MARKER", triggers=["deploy"],
+        exclude_skills=["devbox"],
+    )
+    _write_skill(bundled, "bookmarks", "BOOKMARKS_BODY_MARKER")        # unselected, eligible
+    _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER")              # unselected, excluded by calendar
+    _write_skill(bundled, "safety", "SAFETY_BODY_MARKER")              # unselected, always_eager
+    _write_skill(bundled, "labrat", "LABRAT_BODY_MARKER", experimental=True)  # gated off
+    skills_dir = tmp_path / "ops_skills"
+    skills_dir.mkdir(parents=True)
+    db.init_db(tmp_path / "t.db")
+    return Config(
+        db_path=tmp_path / "t.db",
+        skills_dir=skills_dir,
+        bundled_skills_dir=bundled,
+        temp_dir=tmp_path / "temp",
+        users={"alice": UserConfig()},
+        skills=SkillsConfig(
+            semantic_routing=semantic_routing,
+            progressive_disclosure=True,
+            always_eager=always_eager if always_eager is not None else ["safety"],
+        ),
+    )
+
+
+class TestWidenedCatalogueIndex:
+    def test_unselected_eligible_skill_in_index(self, tmp_path):
+        prompt = _run_dry(_catalogue_config(tmp_path))
+        # bookmarks was never selected, but appears in the on-demand catalogue.
+        assert "Available skills (load on demand)" in prompt
+        assert "  - bookmarks:" in prompt
+        assert "BOOKMARKS_BODY_MARKER" not in prompt  # index entry only, no body
+
+    def test_selected_lazy_skill_still_indexed(self, tmp_path):
+        prompt = _run_dry(_catalogue_config(tmp_path))
+        assert "  - developer:" in prompt
+        assert "DEVELOPER_BODY_MARKER" not in prompt
+
+    def test_eager_selected_skill_full_body_not_indexed(self, tmp_path):
+        prompt = _run_dry(_catalogue_config(tmp_path))
+        assert "CALENDAR_BODY_MARKER" in prompt
+        assert "  - calendar:" not in prompt
+
+    def test_excluded_skill_absent_from_index(self, tmp_path):
+        prompt = _run_dry(_catalogue_config(tmp_path))
+        # calendar excludes devbox → devbox is not surfaced anywhere.
+        assert "  - devbox:" not in prompt
+        assert "DEVBOX_BODY_MARKER" not in prompt
+
+    def test_always_eager_skill_absent_from_index(self, tmp_path):
+        prompt = _run_dry(_catalogue_config(tmp_path))
+        # safety is pinned always_eager → never offered for on-demand load.
+        assert "  - safety:" not in prompt
+
+    def test_experimental_gated_skill_absent_from_index(self, tmp_path):
+        prompt = _run_dry(_catalogue_config(tmp_path))
+        assert "  - labrat:" not in prompt
+
+    def test_pass2_not_invoked_under_defaults(self, tmp_path):
+        config = _catalogue_config(tmp_path, semantic_routing=False)
+        with patch("istota.skills._loader.classify_skills") as mock_classify:
+            _run_dry(config)
+        mock_classify.assert_not_called()

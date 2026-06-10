@@ -467,13 +467,20 @@ class MoneymanConfig:
 @dataclass
 class SkillsConfig:
     """Skill routing configuration."""
-    semantic_routing: bool = True  # enable LLM-based Pass 2 skill classification
+    # Pass 2 LLM skill classification. OFF by default: it spawns a fresh
+    # `claude -p` subprocess per task whose cold-start cost dominates (and times
+    # out in production), and progressive disclosure's widened catalogue index
+    # now surfaces every eligible skill for the main model to self-load instead.
+    # Reachable for operators who still want the pre-router.
+    semantic_routing: bool = False
     semantic_routing_model: str = "fast"  # role alias — resolves to HAIKU by default; operator-overridable
     semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
-    # Progressive skill disclosure (Part A). When False (default), every
-    # selected skill is rendered eager (full body) and no index section is
-    # emitted — byte-for-byte the legacy behaviour.
-    progressive_disclosure: bool = False
+    # Progressive skill disclosure (Part A). ON by default: selected skills are
+    # partitioned eager (full body) / lazy (one-line index entry), and the
+    # on-demand index is widened to the full eligible catalogue so the model can
+    # load any skill via `istota-skill skills show <name>`. Set False for the
+    # legacy all-eager-no-index behaviour.
+    progressive_disclosure: bool = True
     # When > 0, a CLI skill whose body exceeds this many chars defaults to lazy
     # disclosure even without an explicit ``disclosure: lazy`` frontmatter key.
     # 0 = only explicit frontmatter opts a skill into lazy.
