@@ -547,9 +547,16 @@ def load_skills(
     return f"## Skills Reference (v: {fingerprint})\n\n" + "\n\n".join(parts)
 
 
-# Skills whose body length read failed / mode was force-overridden — tracked
-# so the override WARN fires once per process per skill, not every task.
+# Skills whose mode was force-overridden — tracked so the always_eager override
+# WARN fires once per process per skill, not every task. Process-global by
+# design (warn-once per daemon lifetime); tests that exercise the warning call
+# reset_disclosure_warnings() to avoid cross-test cache bleed under xdist.
 _disclosure_warned: set[str] = set()
+
+
+def reset_disclosure_warnings() -> None:
+    """Clear the warn-once cache. For test isolation only."""
+    _disclosure_warned.clear()
 
 
 def resolve_disclosure_mode(
@@ -754,8 +761,16 @@ def eligible_skill_names(
     Excludes ``exclude`` (already-selected), ``always_include`` skills (already
     loaded eager), disabled skills, ``admin_only`` skills for non-admins,
     experimental skills whose ``skill_<name>`` flag isn't enabled, and skills
-    with unmet dependencies. Shared by the Pass-2 manifest and the
-    progressive-disclosure catalogue index so both apply the same gate.
+    with unmet dependencies. The progressive-disclosure catalogue index uses
+    this so the model self-selects from the full eligible menu.
+
+    Note: no resource gate (unlike ``select_skills``' Pass-1 keyword path). The
+    catalogue surfaces the full eligible menu so the model self-selects;
+    re-narrowing it to Pass-1's resource match would defeat that. No bundled
+    skill currently declares ``resource_types`` anyway — the former holdouts
+    (``notes`` / ``spec`` / ``todos``) are doc-only convention skills with
+    sensible defaults (``notes`` falls back to ``{BOT_DIR}/notes/``) and dropped
+    the field. The gate mechanism stays for any future resource-backed skill.
     """
     disabled = disabled_skills or set()
     names = []

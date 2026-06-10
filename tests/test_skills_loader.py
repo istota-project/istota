@@ -1578,9 +1578,50 @@ class TestEligibleSkillNames:
         )
         assert "labrat" in flagged
 
+    def test_resource_gated_skill_still_eligible(self):
+        # Doc-only resource_types skills (notes/spec/todos) have sensible
+        # defaults, so the catalogue surfaces them regardless of declared
+        # resources — there is deliberately no resource gate here.
+        index = self._make_index()
+        index["notes"] = SkillMeta(
+            name="notes", description="Notes", keywords=["note"],
+            resource_types=["notes_folder"],
+        )
+        names = eligible_skill_names(index, exclude=set())
+        assert "notes" in names
+
     def test_sorted(self):
         names = eligible_skill_names(self._make_index(), exclude=set())
         assert names == sorted(names)
+
+
+class TestBundledDocSkillsNoResourceGate:
+    """Option A: the doc-only convention skills (notes/spec/todos) dropped
+    resource_types so they're keyword-selectable without a declared resource,
+    and spec is lazy. Guards against a regression that re-adds the gate."""
+
+    def _real_index(self):
+        # skills_dir nonexistent → loader uses the real bundled directory.
+        return load_skill_index(Path("/nonexistent-ops-skills-dir"))
+
+    def test_no_bundled_skill_declares_resource_types(self):
+        index = self._real_index()
+        offenders = {n: m.resource_types for n, m in index.items() if m.resource_types}
+        assert offenders == {}, f"unexpected resource_types holdouts: {offenders}"
+
+    def test_notes_selected_by_keyword_without_resource(self):
+        index = self._real_index()
+        result = select_skills("save this as a note in markdown", "talk", set(), index)
+        assert "notes" in result
+
+    def test_todos_selected_by_keyword_without_resource(self):
+        index = self._real_index()
+        result = select_skills("add a todo to my checklist", "talk", set(), index)
+        assert "todos" in result
+
+    def test_spec_is_lazy(self):
+        index = self._real_index()
+        assert index["spec"].disclosure == "lazy"
 
 
 class TestFrontmatterParsing:

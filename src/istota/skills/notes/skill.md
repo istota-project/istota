@@ -2,7 +2,6 @@
 name: notes
 triggers: [note, save, write, markdown]
 description: Markdown file conventions and note-saving procedures
-resource_types: [notes_folder]
 ---
 ## File format
 

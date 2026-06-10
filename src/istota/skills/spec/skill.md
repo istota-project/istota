@@ -2,7 +2,7 @@
 name: spec
 triggers: [spec, specs, draft spec, design doc, design document, write a spec, new spec, start spec, finish spec]
 description: Manage specs for spec-driven development. Specs live in the user's notes_folder under Specs/ with three lifecycle subfolders — Drafts, Active, Done.
-resource_types: [notes_folder]
+disclosure: lazy
 companion_skills: [files, notes]
 ---
 
