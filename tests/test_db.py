@@ -1336,6 +1336,148 @@ class TestFailStuckLockedRunningTasks:
             assert db.has_active_foreground_task_for_channel(conn, "room1") is False
 
 
+class TestRecoverOrphanedTasks:
+    """Startup orphan recovery: under the daemon flock every 'running'/'locked'
+    row is an orphan of a dead instance, recovered immediately rather than
+    waiting out worker_stuck_minutes."""
+
+    def _make_running(self, conn, **kw):
+        defaults = dict(
+            prompt="hello", user_id="alice",
+            conversation_token="room1", queue="foreground",
+        )
+        defaults.update(kw)
+        source_type = defaults.pop("source_type", "web")
+        task_id = db.create_task(conn, source_type=source_type, **defaults)
+        conn.execute(
+            "UPDATE tasks SET status = 'running', started_at = datetime('now'), "
+            "last_heartbeat = datetime('now'), locked_at = datetime('now'), "
+            "locked_by = 'dead-host-123', worker_pid = 999 WHERE id = ?",
+            (task_id,),
+        )
+        conn.commit()
+        return task_id
+
+    def test_releases_retry_eligible_task_to_pending(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(conn)
+
+            recovered = db.recover_orphaned_tasks(conn)
+
+            assert len(recovered) == 1
+            assert recovered[0]["id"] == task_id
+            assert recovered[0]["action"] == "released"
+            task = db.get_task(conn, task_id)
+            assert task.status == "pending"
+            assert task.attempt_count == 1  # bumped from 0
+            # Liveness columns cleared so the stuck predicate can't re-fire.
+            row = conn.execute(
+                "SELECT last_heartbeat, started_at, locked_at, locked_by, worker_pid "
+                "FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            assert tuple(row) == (None, None, None, None, None)
+
+    def test_locked_orphan_also_recovered(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hi", user_id="alice", queue="foreground",
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'locked', locked_at = datetime('now'), "
+                "locked_by = 'dead-host' WHERE id = ?", (task_id,),
+            )
+            conn.commit()
+
+            recovered = db.recover_orphaned_tasks(conn)
+            assert len(recovered) == 1
+            assert db.get_task(conn, task_id).status == "pending"
+
+    def test_cancelled_orphan_marked_cancelled_not_requeued(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(conn)
+            conn.execute(
+                "UPDATE tasks SET cancel_requested = 1 WHERE id = ?", (task_id,)
+            )
+            conn.commit()
+
+            recovered = db.recover_orphaned_tasks(conn)
+
+            assert recovered[0]["action"] == "cancelled"
+            task = db.get_task(conn, task_id)
+            assert task.status == "cancelled"
+            assert task.attempt_count == 0  # not bumped — never re-queued
+
+    def test_exhausted_orphan_marked_failed(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(conn)
+            conn.execute(
+                "UPDATE tasks SET attempt_count = 3, max_attempts = 3 WHERE id = ?",
+                (task_id,),
+            )
+            conn.commit()
+
+            recovered = db.recover_orphaned_tasks(conn)
+
+            assert recovered[0]["action"] == "failed"
+            assert db.get_task(conn, task_id).status == "failed"
+
+    def test_too_old_orphan_marked_failed(self, db_path):
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(conn)
+            conn.execute(
+                "UPDATE tasks SET created_at = datetime('now', '-120 minutes') "
+                "WHERE id = ?", (task_id,),
+            )
+            conn.commit()
+
+            recovered = db.recover_orphaned_tasks(conn, max_retry_age_minutes=60)
+
+            assert recovered[0]["action"] == "failed"
+            assert db.get_task(conn, task_id).status == "failed"
+
+    def test_inline_only_orphan_failed_not_released(self, db_path):
+        """REPL tasks run inline in a separate process; the daemon never claims
+        them, so a released one would sit pending forever. Fail instead."""
+        with db.get_db(db_path) as conn:
+            task_id = self._make_running(conn, source_type="repl", conversation_token=None)
+
+            recovered = db.recover_orphaned_tasks(conn)
+
+            assert recovered[0]["action"] == "failed"
+            assert db.get_task(conn, task_id).status == "failed"
+
+    def test_pending_confirmation_untouched(self, db_path):
+        """A task awaiting the user's confirmation is not an orphan."""
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="hi", user_id="alice")
+            conn.execute(
+                "UPDATE tasks SET status = 'pending_confirmation' WHERE id = ?",
+                (task_id,),
+            )
+            conn.commit()
+
+            recovered = db.recover_orphaned_tasks(conn)
+            assert recovered == []
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+
+    def test_pending_and_terminal_tasks_untouched(self, db_path):
+        with db.get_db(db_path) as conn:
+            pending = db.create_task(conn, prompt="a", user_id="alice")
+            done = db.create_task(conn, prompt="b", user_id="alice")
+            db.update_task_status(conn, done, "completed", result="ok")
+            conn.commit()
+
+            recovered = db.recover_orphaned_tasks(conn)
+            assert recovered == []
+            assert db.get_task(conn, pending).status == "pending"
+            assert db.get_task(conn, done).status == "completed"
+
+    def test_no_orphans_returns_empty(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="hi", user_id="alice")
+            assert db.recover_orphaned_tasks(conn) == []
+
+
 class TestStuckRunningThreshold:
     """ISSUE-112: a 'running' task must not be reclaimed before it has had a
     chance to hit its own timeout. The reclaim window is configurable

@@ -194,6 +194,59 @@ def _task_heartbeat(config: Config, task_id: int):
         thread.join(timeout=5)
 
 
+def recover_orphaned_tasks_on_startup(config: Config) -> None:
+    """Reclaim tasks abandoned mid-execution by a dead prior daemon instance.
+
+    Runs once at startup under the flock, before any worker spawns, so every
+    ``running``/``locked`` row is an orphan (see ``db.recover_orphaned_tasks``).
+    This recovers a scheduler restart in seconds instead of waiting out
+    ``worker_stuck_minutes``; the time-based reclaim in ``run_cleanup_checks``
+    then only has to cover the rarer worker-died-but-daemon-survived case.
+
+    For orphans that won't re-run (cancelled / failed) we emit a terminal event
+    frame so a watching web client gets immediate closure instead of a hung
+    spinner. The ``EventWriter`` resumes ``seq`` above any partial events the
+    dead attempt streamed, and runs with no subscribers — the SSE/snapshot
+    clients pick the frame up by polling the ``task_events`` table. Released
+    orphans emit nothing: their re-run streams a fresh ``task_started`` and the
+    client resumes from its cursor (the documented retry-continuity path).
+    """
+    with db.get_db(config.db_path) as conn:
+        recovered = db.recover_orphaned_tasks(
+            conn, config.scheduler.max_retry_age_minutes,
+        )
+    if not recovered:
+        return
+
+    counts = {"released": 0, "cancelled": 0, "failed": 0}
+    for info in recovered:
+        action = info["action"]
+        counts[action] = counts.get(action, 0) + 1
+        if action == "released":
+            continue  # re-run emits its own task_started; nothing to emit here
+
+        writer = EventWriter(
+            info["id"], str(config.db_path),
+            enabled=config.scheduler.event_log_enabled,
+        )
+        if action == "cancelled":
+            writer.emit("cancelled")
+            writer.emit("done", {"stop_reason": "cancelled", "duration_seconds": 0})
+        else:  # failed
+            writer.emit("error", {
+                "message": "Interrupted by a scheduler restart and not retried.",
+                "stop_reason": "error",
+            })
+            writer.emit("done", {"stop_reason": "error", "duration_seconds": 0})
+        writer.finish()
+
+    logger.warning(
+        "STARTUP Recovered %d orphaned task(s) from a prior instance "
+        "(released=%d, cancelled=%d, failed=%d)",
+        len(recovered), counts["released"], counts["cancelled"], counts["failed"],
+    )
+
+
 def _is_policy_refusal(error_text: str) -> bool:
     """Check if a task failure is an API policy/safety refusal (non-retryable)."""
     parsed = parse_api_error(error_text)
@@ -3473,6 +3526,15 @@ def run_daemon(config: Config) -> None:
             _purge_obsolete_skill_jobs(conn, _idx)
     except Exception as e:  # noqa: BLE001
         logger.warning("Skill-job purge skipped: %s", e)
+
+    # Reclaim tasks abandoned mid-execution by a dead prior instance before any
+    # worker runs. Under the flock every running/locked row is an orphan, so
+    # this recovers a restart in seconds instead of waiting out
+    # worker_stuck_minutes (DB-only; doesn't need the asyncio runtime).
+    try:
+        recover_orphaned_tasks_on_startup(config)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Startup orphan recovery skipped: %s", e)
 
     # Start the persistent asyncio runtime that hosts all Talk (and other) I/O
     # on one loop with one pooled httpx client. Explicit start here surfaces a

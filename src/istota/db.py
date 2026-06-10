@@ -3403,6 +3403,92 @@ def fail_stuck_locked_running_tasks(
     return failed
 
 
+def recover_orphaned_tasks(
+    conn: sqlite3.Connection, max_retry_age_minutes: int = 60,
+) -> list[dict]:
+    """Reclaim tasks left mid-execution by a dead prior daemon instance.
+
+    Called once at daemon startup, under the singleton flock and before any
+    worker spawns, so every ``running``/``locked`` row is definitionally an
+    orphan — no live worker owns it. Unlike ``fail_stuck_locked_running_tasks``
+    there is no time-based liveness guess: a fresh daemon knows the previous
+    one is gone, so recovery is immediate instead of waiting out
+    ``worker_stuck_minutes``. ``pending_confirmation`` is left alone (it's
+    legitimately awaiting the user).
+
+    Each orphan is resolved one of three ways, in priority order:
+
+    - **cancelled** — ``cancel_requested`` was set (the user asked to cancel
+      during the orphan window). Resolve straight to ``cancelled`` rather than
+      re-running the whole task just to cancel on its first event.
+    - **failed** — retries exhausted, too old to retry, or an inline-only
+      source type (REPL runs in a separate process the daemon never claims, so
+      releasing it would strand it ``pending`` forever).
+    - **released** — otherwise: back to ``pending`` with ``attempt_count``
+      bumped and every liveness column cleared, for a fresh attempt by the next
+      worker.
+
+    Returns one dict per recovered task — ``id``, ``user_id``,
+    ``conversation_token``, ``source_type``, ``action`` (cancelled/failed/
+    released) — so the caller can emit terminal event frames for the non-rerun
+    cases. Ordering matches the branch priority above; each UPDATE filters on
+    ``status IN ('running','locked')`` so a row resolved by an earlier branch
+    is excluded from the later ones.
+    """
+    recovered: list[dict] = []
+
+    # 1. User asked to cancel — honor it without a re-run.
+    cursor = conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'cancelled', error = 'Cancelled by user',
+            updated_at = datetime('now')
+        WHERE status IN ('running', 'locked') AND cancel_requested = 1
+        RETURNING id, user_id, conversation_token, source_type
+        """
+    )
+    for row in cursor.fetchall():
+        recovered.append({**dict(row), "action": "cancelled"})
+
+    # 2. Not worth retrying: out of attempts, too old, or inline-only source.
+    cursor = conn.execute(
+        f"""
+        UPDATE tasks
+        SET status = 'failed', completed_at = datetime('now'),
+            error = 'Worker died mid-task (scheduler restart); not retried',
+            updated_at = datetime('now')
+        WHERE status IN ('running', 'locked')
+        AND (
+            attempt_count >= max_attempts
+            OR created_at < datetime('now', ? || ' minutes')
+            OR source_type IN ({_INLINE_ONLY_IN})
+        )
+        RETURNING id, user_id, conversation_token, source_type
+        """,
+        (f"-{max_retry_age_minutes}",),
+    )
+    for row in cursor.fetchall():
+        recovered.append({**dict(row), "action": "failed"})
+
+    # 3. Retry-eligible: requeue with liveness cleared so the stuck predicate
+    # can't re-fire and a second claimer can't re-steal it.
+    cursor = conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'pending', attempt_count = attempt_count + 1,
+            last_heartbeat = NULL, started_at = NULL,
+            locked_at = NULL, locked_by = NULL, worker_pid = NULL,
+            updated_at = datetime('now')
+        WHERE status IN ('running', 'locked')
+        RETURNING id, user_id, conversation_token, source_type
+        """
+    )
+    for row in cursor.fetchall():
+        recovered.append({**dict(row), "action": "released"})
+
+    return recovered
+
+
 def cleanup_old_tasks(conn: sqlite3.Connection, retention_days: int) -> int:
     """
     Delete old completed/failed/cancelled tasks and their logs.

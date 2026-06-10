@@ -38,6 +38,7 @@ from istota.scheduler import (
     check_scheduled_jobs,
     post_result_to_email,
     process_one_task,
+    recover_orphaned_tasks_on_startup,
     _stuck_running_minutes,
     _task_heartbeat,
     post_result_to_talk,
@@ -128,6 +129,111 @@ class TestTaskHeartbeat:
                 "SELECT last_heartbeat FROM tasks WHERE id = ?", (task_id,)
             ).fetchone()[0]
         assert hb is None  # no pinger started
+
+
+class TestRecoverOrphanedTasksOnStartup:
+    """Startup orphan recovery emits a terminal event frame for the cases that
+    won't re-run (cancelled / failed), so a watching web client gets immediate
+    closure instead of a hung spinner. Released tasks emit nothing — the re-run
+    streams a fresh task_started and the SSE client resumes from its cursor."""
+
+    def _config(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "orphan.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(),
+            temp_dir=tmp_path / "temp",
+        )
+
+    def _make_running(self, conn, **kw):
+        task_id = db.create_task(
+            conn, prompt="hi", user_id="alice",
+            conversation_token="room1", source_type=kw.pop("source_type", "web"),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'running', last_heartbeat = datetime('now') "
+            "WHERE id = ?", (task_id,),
+        )
+        for col, val in kw.items():
+            conn.execute(f"UPDATE tasks SET {col} = ? WHERE id = ?", (val, task_id))
+        conn.commit()
+        return task_id
+
+    def _events(self, config, task_id):
+        with db.get_db(config.db_path) as conn:
+            return db.get_task_events(conn, task_id)
+
+    def test_released_task_emits_no_terminal_event(self, tmp_path):
+        config = self._config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = self._make_running(conn)
+
+        recover_orphaned_tasks_on_startup(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending"
+        kinds = [e["kind"] for e in self._events(config, task_id)]
+        assert "done" not in kinds  # re-run will emit a fresh task_started
+
+    def test_cancelled_orphan_emits_terminal_frame(self, tmp_path):
+        config = self._config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = self._make_running(conn, cancel_requested=1)
+
+        recover_orphaned_tasks_on_startup(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "cancelled"
+        kinds = [e["kind"] for e in self._events(config, task_id)]
+        assert "cancelled" in kinds
+        assert kinds[-1] == "done"
+
+    def test_failed_orphan_emits_terminal_frame(self, tmp_path):
+        config = self._config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = self._make_running(conn, attempt_count=3, max_attempts=3)
+
+        recover_orphaned_tasks_on_startup(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "failed"
+        kinds = [e["kind"] for e in self._events(config, task_id)]
+        assert "error" in kinds
+        assert kinds[-1] == "done"
+
+    def test_terminal_frame_seq_continues_after_streamed_deltas(self, tmp_path):
+        """The terminal frame must resume seq above any partial events the dead
+        attempt already streamed, so a watching client's cursor stays valid."""
+        config = self._config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = self._make_running(conn, cancel_requested=1)
+            # Simulate partial stream from the interrupted attempt.
+            for seq in (1, 2, 3):
+                conn.execute(
+                    "INSERT INTO task_events (task_id, seq, kind, payload, created_at) "
+                    "VALUES (?, ?, 'text_delta', '{}', datetime('now'))",
+                    (task_id, seq),
+                )
+            conn.commit()
+
+        recover_orphaned_tasks_on_startup(config)
+
+        seqs = [e["seq"] for e in self._events(config, task_id)]
+        assert seqs == sorted(seqs)
+        assert min(s for e, s in zip(self._events(config, task_id), seqs)
+                   if e["kind"] in ("cancelled", "done")) > 3
+
+    def test_no_orphans_is_noop(self, tmp_path):
+        config = self._config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.create_task(conn, prompt="hi", user_id="alice")
+        # Should not raise.
+        recover_orphaned_tasks_on_startup(config)
 
 
 class TestConfirmationPattern:
