@@ -122,6 +122,34 @@ const mockChatTasks = new Map<number, MockChatTask>();
 let mockChatRoomSeq = 1;
 let mockChatTaskSeq = 1000;
 
+// Seed a large past-dated backlog in the `general` room so scroll-up paging +
+// virtualization (ISSUE-131) and day-dividers are exercisable on the dev server
+// (VITE_MOCK_API=1 npm run dev → /chat). Tasks are stamped well in the past so
+// the history endpoint renders them as finished turns (not in-flight), spread
+// every ~5h across ~25 days so several day boundaries fall inside the transcript.
+// ids 1..N stay below the live-send sequence (1000) so they never collide.
+(() => {
+	const SEED_COUNT = 120;
+	const STEP_MS = 5 * 60 * 60 * 1000; // 5h between turns
+	const SEED_PROMPTS = [
+		'today\'s headlines', 'summarize my unread email', 'what\'s on my calendar tomorrow',
+		'draft a reply to the landlord', 'how do I rebase onto main', 'remind me to call the dentist',
+		'weather this weekend', 'explain keyset pagination', 'add milk to the shopping list',
+		'status of the deploy', 'convert 20 miles to km', 'what did we decide about the schema',
+	];
+	const newest = Date.now() - 60_000; // 60s ago — safely past the done threshold
+	for (let i = 0; i < SEED_COUNT; i++) {
+		const id = i + 1; // 1..120
+		// i=0 is the OLDEST; the last is the newest, just under `newest`.
+		const createdAt = newest - (SEED_COUNT - 1 - i) * STEP_MS;
+		mockChatTasks.set(id, {
+			id, roomToken: 'web-stefan-general',
+			prompt: `${SEED_PROMPTS[i % SEED_PROMPTS.length]} (#${id})`,
+			createdAt,
+		});
+	}
+})();
+
 // A canned event timeline for a mock task (ms offsets from creation). Models the
 // target UX: the model's work (inter-tool narration + tool calls) collapses into
 // the single ActivityTrace chip (its "current step" updates live), and the FINAL
