@@ -1423,6 +1423,13 @@ export interface ChatHistory {
 	// All in-flight tasks for the room, oldest-first. The room runs them one at
 	// a time; the client resumes the first and queues the rest in this order.
 	active_tasks?: { id: number; status: string }[];
+	// Older history exists below this page (ISSUE-131). Absent on a pre-paging
+	// backend, so the client treats `undefined` as "no more".
+	has_more?: boolean;
+	// Pass back as before_ts/before_id to fetch the next older page. `ts` is the
+	// RAW stored created_at (`YYYY-MM-DD HH:MM:SS`), never the display value —
+	// the keyset breaks if it's round-tripped through a normalized timestamp.
+	oldest_cursor?: { ts: string; id: number } | null;
 }
 
 export interface SendResult {
@@ -1498,8 +1505,19 @@ export async function deleteChatRoom(id: number): Promise<{ status: string }> {
 	return resp.json();
 }
 
-export function getRoomMessages(id: number, limit = 50): Promise<ChatHistory> {
-	return apiFetch<ChatHistory>(`/chat/rooms/${id}/messages?limit=${limit}`);
+export function getRoomMessages(
+	id: number,
+	opts: { limit?: number; before?: { ts: string; id: number } | null } = {},
+): Promise<ChatHistory> {
+	const limit = opts.limit ?? 50;
+	const params = new URLSearchParams({ limit: String(limit) });
+	// Both cursor params travel together (the backend rejects a half-cursor) and
+	// `before.ts` is the raw stored created_at, passed back verbatim.
+	if (opts.before) {
+		params.set('before_ts', opts.before.ts);
+		params.set('before_id', String(opts.before.id));
+	}
+	return apiFetch<ChatHistory>(`/chat/rooms/${id}/messages?${params.toString()}`);
 }
 
 /** Mark a room read on the web surface — clears its sidebar unread badge by
