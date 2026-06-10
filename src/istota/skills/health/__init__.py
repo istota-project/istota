@@ -88,6 +88,17 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _panel_id_arg(raw: str):
+    """argparse type for add-biomarker's panel id: an int, or a ``@NAME`` ref
+    that resolves to a panel created by ``add-panel --ref NAME`` earlier in the
+    same deferred batch (ISSUE-092). Returns an int or the ``@NAME`` string."""
+    if raw.startswith("@"):
+        if len(raw) < 2:
+            raise argparse.ArgumentTypeError("@ref must name a panel (e.g. @cbc)")
+        return raw
+    return int(raw)  # ValueError -> argparse surfaces a clean error
+
+
 def _defer_op(op: dict) -> bool:
     """Append a write op to the per-task deferred file. Returns True when
     deferred; False when no sandbox context is set (caller writes directly).
@@ -333,6 +344,8 @@ def cmd_add_panel(args: argparse.Namespace) -> None:
         "panel_type": args.type,
         "notes": args.notes,
     }
+    if getattr(args, "ref", None):
+        op["ref"] = args.ref
     if _defer_op(op):
         _emit({"status": "ok", "deferred": True, "op": op})
         return
@@ -352,9 +365,12 @@ def cmd_add_panel(args: argparse.Namespace) -> None:
 
 
 def cmd_add_biomarker(args: argparse.Namespace) -> None:
+    # panel_id is an int, or a "@NAME" ref to a panel created earlier in the
+    # same deferred batch (ISSUE-092). A ref only resolves at deferred-apply
+    # time, so it's meaningless outside a sandboxed task.
+    is_ref = isinstance(args.panel_id, str) and args.panel_id.startswith("@")
     op = {
         "op": "insert_biomarker",
-        "panel_id": args.panel_id,
         "name": args.name,
         "value": float(args.value),
         "unit": args.unit,
@@ -362,8 +378,21 @@ def cmd_add_biomarker(args: argparse.Namespace) -> None:
         "ref_range_high": args.ref_high,
         "flag": args.flag,
     }
+    if is_ref:
+        op["panel_ref"] = args.panel_id[1:]
+    else:
+        op["panel_id"] = args.panel_id
     if _defer_op(op):
         _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    if is_ref:
+        _emit({
+            "status": "error",
+            "error": (
+                f"panel ref {args.panel_id!r} can only be resolved inside a "
+                "deferred (sandboxed) task; pass a numeric panel id directly"
+            ),
+        })
         return
     from istota.health import db as health_db
 
@@ -1437,9 +1466,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_panel.add_argument("--lab")
     add_panel.add_argument("--type", dest="type")
     add_panel.add_argument("--notes")
+    add_panel.add_argument(
+        "--ref",
+        help="Symbolic name for this panel so add-biomarker calls in the same "
+        "sandboxed task can reference it as @NAME before the real id exists "
+        "(deferred chaining, ISSUE-092).",
+    )
 
     add_bio = sub.add_parser("add-biomarker", help="Add a biomarker to a panel")
-    add_bio.add_argument("panel_id", type=int)
+    add_bio.add_argument(
+        "panel_id", type=_panel_id_arg,
+        help="Panel id (int), or @NAME to reference a panel created by an "
+        "add-panel --ref NAME call earlier in the same sandboxed task.",
+    )
     add_bio.add_argument("name")
     add_bio.add_argument("value")
     add_bio.add_argument("unit")

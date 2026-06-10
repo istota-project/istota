@@ -40,6 +40,14 @@ istota-skill health panel 12                              # show panel + biomark
 istota-skill health add-panel --drawn-at 2026-05-08 --lab Kaiser --type CBC
 istota-skill health add-biomarker 12 Hemoglobin 14.8 g/dL --ref-low 13.5 --ref-high 17.5
 istota-skill health add-biomarker 12 WBC 12.5 10^3/uL --flag H
+
+# Adding a panel and its biomarkers in ONE sandboxed task: the panel id
+# doesn't exist yet (the write is deferred), so give the panel a --ref name
+# and reference it as @name from add-biomarker instead of a numeric id.
+istota-skill health add-panel --drawn-at 2026-05-08 --lab Kaiser --type CBC --ref cbc
+istota-skill health add-biomarker @cbc Hemoglobin 14.8 g/dL --ref-low 13.5 --ref-high 17.5
+istota-skill health add-biomarker @cbc WBC 12.5 10^3/uL --flag H
+
 istota-skill health trend Cholesterol_Total --since 2026-01-01
 istota-skill health upload /path/to/lab.pdf --drawn-at 2026-05-08 --lab Kaiser
 

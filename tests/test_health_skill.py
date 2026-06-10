@@ -79,6 +79,37 @@ class TestPanelsCli:
         assert out["panel"]["lab_name"] == "Quest"
         assert out["biomarkers"][0]["name"] == "Hemoglobin"
 
+    def test_deferred_panel_ref_emission(self, ready, tmp_path):
+        """ISSUE-092: in deferred mode, add-panel --ref NAME emits `ref` and
+        add-biomarker @NAME emits `panel_ref` (no real panel_id needed)."""
+        db_path, env = ready
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = {**env, "ISTOTA_DEFERRED_DIR": str(deferred), "ISTOTA_TASK_ID": "55"}
+        out = _run([
+            "add-panel", "--drawn-at", "2026-05-08", "--lab", "Quest",
+            "--type", "CBC", "--ref", "cbc",
+        ], env)
+        assert out["deferred"] is True
+        out = _run(["add-biomarker", "@cbc", "Hemoglobin", "14.8", "g/dL"], env)
+        assert out["deferred"] is True
+        ops = json.loads((deferred / "task_55_health_ops.json").read_text())
+        assert ops[0]["op"] == "insert_panel" and ops[0]["ref"] == "cbc"
+        assert ops[1]["op"] == "insert_biomarker"
+        assert ops[1]["panel_ref"] == "cbc"
+        assert "panel_id" not in ops[1]
+
+    def test_panel_ref_direct_mode_errors(self, ready):
+        """A @ref is meaningless outside a deferred batch — direct mode rejects
+        it with an error envelope instead of crashing or misfiling."""
+        db_path, env = ready  # ready = direct mode (no deferred dir)
+        out = _run(
+            ["add-biomarker", "@cbc", "Hemoglobin", "14.8", "g/dL"],
+            env, expect_success=False,
+        )
+        assert out["status"] == "error"
+        assert "deferred" in out["error"]
+
 
 class TestSettingsCli:
     def test_set_height_parses_imperial(self, ready):
