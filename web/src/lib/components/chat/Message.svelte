@@ -107,7 +107,18 @@
 				     are dropped — the pre-tool work phase is the cue below. -->
 				{#each groups as g, gi (g.id)}
 					{#if g.kind === 'activity'}
-						<ActivityTrace steps={g.steps} streaming={message.streaming && gi === lastActivityIdx} />
+						<!-- A chip sandwiched between paragraphs needs room to breathe;
+						     the first group sits tight under the meta, like a no-tool
+						     text answer. Spacing is neighbour-aware (chips never abut —
+						     tool runs coalesce — so a chip's neighbours are prose or the
+						     message edge). -->
+						<div
+							class="chip-slot"
+							class:gap-above={groups[gi - 1]?.kind === 'prose'}
+							class:gap-below={groups[gi + 1]?.kind === 'prose'}
+						>
+							<ActivityTrace steps={g.steps} streaming={message.streaming && gi === lastActivityIdx} />
+						</div>
 					{:else}
 						<div class="body markdown">{@html renderMarkdown(g.text)}</div>
 					{/if}
@@ -236,6 +247,15 @@
 		max-width: 900px;
 	}
 	.user-body { white-space: pre-wrap; }
+
+	/* Activity-chip spacing. Base is flush (a tool-first turn puts the chip
+	   directly under the meta, like a text answer). When a chip neighbours a
+	   prose block it gets a paragraph-sized gap on that side so it doesn't crowd
+	   the surrounding text. (ActivityTrace's own margin is 0 so this is the sole
+	   source of vertical spacing.) */
+	.chip-slot { margin: 0; }
+	.chip-slot.gap-above { margin-top: 0.85rem; }
+	.chip-slot.gap-below { margin-bottom: 0.85rem; }
 
 	.msg.error .body,
 	.cmd-output.error { color: #e0a0a0; }
