@@ -2,6 +2,18 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-10: Remove the Pass-2 semantic-routing wiring entirely
+
+Immediate follow-up to the default-flip below. With Pass 2 already off by default and superseded by the widened disclosure catalogue, keeping the dead pre-router around (reachable via `semantic_routing = true`) bought nothing, so it's deleted outright.
+
+- **`_loader.py`**: removed `classify_skills`, `_claude_cli_classify`, and `build_skill_manifest` (its only caller was `classify_skills`); dropped the now-unused `subprocess` / `re` / `Callable` imports. `eligible_skill_names` (the shared eligibility gate) stays — it's what the widened catalogue uses.
+- **`config.py`**: dropped the `semantic_routing` / `semantic_routing_model` / `semantic_routing_timeout` fields from `SkillsConfig` and their TOML parse; fixed the `progressive_disclosure` parse default to `True` (matched the dataclass).
+- **`executor.py`**: removed the whole Pass-2 block (brain-routed classifier build, `classify_skills` call, union + exclude re-apply) and the `classify_skills` import. `_native_with_user_key` / `_build_native_completer` stay (used by the main brain path + triage completer).
+- **Tests**: deleted `test_semantic_routing.py`; relocated its survivors (`TestEligibleSkillNames`, `TestFrontmatterParsing`) into `test_skills_loader.py`; moved the `SkillsConfig` default assertion into `test_executor_disclosure.py` (and asserted `not hasattr(cfg, "semantic_routing")`).
+- **Deploy/docs**: dropped `istota_skills_semantic_routing` (defaults + `config.toml.j2` — the `[skills]` block now renders only when disclosure is off or a threshold is set), the example-config keys, and every `semantic_routing` / Pass-2 mention across `AGENTS.md`, the `.claude/rules/*`, and `docs/*` (config reference, native-brain, features/skills with a new "Progressive disclosure" section, task-lifecycle, security, skills-index).
+
+Full suite green (6,353 passed, 7 skipped); no new lint findings.
+
 ## 2026-06-10: Make progressive disclosure the default + widen the index to replace Pass 2
 
 Follow-up to the disclosure work below, prompted by a production check on zorg-01: Pass 2 semantic routing was timing out on 100% of tasks. Root cause is structural, not tuning — `classify_skills` spawns a fresh `claude -p -` subprocess per task (`_claude_cli_classify`), so the 3s budget is eaten by CLI cold-start (Node boot, auth, model init), not inference. Raising the timeout to 5–10s just pays that boot tax on every task. Since the same-day disclosure feature makes surfacing a skill nearly free (a cached one-line index entry), the per-task pre-router no longer earns its latency.

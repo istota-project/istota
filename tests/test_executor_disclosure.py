@@ -110,7 +110,6 @@ def _disclosure_config(tmp_path, *, progressive: bool) -> Config:
         temp_dir=tmp_path / "temp",
         users={"alice": UserConfig()},
         skills=SkillsConfig(
-            semantic_routing=False,  # no Pass 2 / no CLI shell-out
             progressive_disclosure=progressive,
             always_eager=[],
         ),
@@ -149,7 +148,7 @@ class TestExecuteTaskDisclosure:
 # ---- widened catalogue index (Pass 2 replacement) --------------------------
 
 
-def _catalogue_config(tmp_path, *, semantic_routing=False, always_eager=None) -> Config:
+def _catalogue_config(tmp_path, *, always_eager=None) -> Config:
     """Bundled set with selected (developer/calendar) + unselected eligible
     (bookmarks), an excluded skill (devbox, excluded by calendar), a pinned
     always_eager skill (safety), and a gated-off experimental skill (labrat)."""
@@ -173,7 +172,6 @@ def _catalogue_config(tmp_path, *, semantic_routing=False, always_eager=None) ->
         temp_dir=tmp_path / "temp",
         users={"alice": UserConfig()},
         skills=SkillsConfig(
-            semantic_routing=semantic_routing,
             progressive_disclosure=True,
             always_eager=always_eager if always_eager is not None else ["safety"],
         ),
@@ -213,8 +211,9 @@ class TestWidenedCatalogueIndex:
         prompt = _run_dry(_catalogue_config(tmp_path))
         assert "  - labrat:" not in prompt
 
-    def test_pass2_not_invoked_under_defaults(self, tmp_path):
-        config = _catalogue_config(tmp_path, semantic_routing=False)
-        with patch("istota.skills._loader.classify_skills") as mock_classify:
-            _run_dry(config)
-        mock_classify.assert_not_called()
+    def test_skillsconfig_defaults(self):
+        # Progressive disclosure is the default selection model; the removed
+        # Pass-2 semantic-routing knobs are gone.
+        cfg = SkillsConfig()
+        assert cfg.progressive_disclosure is True
+        assert not hasattr(cfg, "semantic_routing")

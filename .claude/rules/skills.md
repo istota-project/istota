@@ -34,15 +34,10 @@ select_skills(prompt, source_type, user_resource_types, skill_index,
               is_admin=True, attachments=None, disabled_skills=None,
               sticky_skills=None,
               enabled_experimental_features=frozenset()) -> list[str]
-classify_skills(prompt, skill_index, already_selected,
-                disabled_skills=None, is_admin=True,
-                model="haiku", timeout=3.0,
-                enabled_experimental_features=frozenset()) -> list[str]  # Pass 2 LLM classification
-build_skill_manifest(skill_index, exclude, disabled_skills=None, is_admin=True,
-                     user_resource_types=None,
-                     enabled_experimental_features=frozenset()) -> str
-    # When user_resource_types is given, prepends "User has resources: …" header
-    # and appends [needs resource: …] hints per skill — helps Pass 2 disambiguate.
+eligible_skill_names(skill_index, exclude, disabled_skills=None, is_admin=True,
+                     enabled_experimental_features=frozenset()) -> list[str]
+    # Shared membership gate for the disclosure catalogue: sorted names excluding
+    # already-selected / always_include / disabled / admin-gated / experimental-gated / missing-deps.
 compute_skills_fingerprint(skills_dir: Path) -> str               # SHA-256, first 12 hex chars
 load_skills_changelog(skills_dir: Path) -> str | None             # CHANGELOG.md
 load_skills(skills_dir: Path, skill_names: list[str], bot_name, bot_dir, skill_index=None, bundled_dir=None) -> str
@@ -82,9 +77,9 @@ main model self-selects what to load — instead of a per-task `claude -p` Pass-
 pre-router guessing inclusion (its cold-start cost dominated and timed out in
 production). `eligible_skill_names` (`_loader.py`) is the shared membership gate
 (excludes already-selected / `always_include` / disabled / admin-gated /
-experimental-gated / missing-deps) reused by both the catalogue and the Pass-2
-manifest. The executor logs `disclosure: eager=N lazy=M catalogue=K` per task.
-With disclosure off, no index is emitted (legacy all-eager prompt).
+experimental-gated / missing-deps). The executor logs `disclosure: eager=N
+lazy=M catalogue=K` per task. With disclosure off, no index is emitted (legacy
+all-eager prompt).
 
 The on-demand loader is the `skills` core skill (`always_include`, `cli: true`):
 `istota-skill skills show <name>` renders a skill's full body (same frontmatter
@@ -95,13 +90,13 @@ the loaded config + `ISTOTA_USER_ID` so a deferred body can't bypass them; unkno
 enumerates the loadable (guard-filtered) skills. It runs server-side via the skill
 proxy (unsandboxed), so `load_config()` and the admins file are reachable.
 
-### Two-Pass Skill Selection
+### Skill Selection
 
-**Pass 1: Deterministic matching** (`select_skills`) — fast, zero-cost.
+**Pass 1: Deterministic matching** (`select_skills`) — fast, zero-cost. The only selection pass (the former LLM Pass 2 was removed — see below).
 
 Filters applied to every candidate before any rule fires:
 - `admin_only=True` skipped when `is_admin=False`
-- `experimental=True` skipped unless `skill_<name>` is in `enabled_experimental_features` — the gate fires on the main loop, the sticky path, the companion pull-in, and the Pass-2 post-filter so an unenabled experimental skill cannot leak into selection via any path
+- `experimental=True` skipped unless `skill_<name>` is in `enabled_experimental_features` — the gate fires on the main loop, the sticky path, the companion pull-in, and the disclosure-catalogue filter (`eligible_skill_names`) so an unenabled experimental skill cannot leak into selection or the on-demand index via any path
 - Unmet `dependencies` (missing Python packages) skipped via `_check_dependencies()`
 - Names in `disabled_skills` (instance-level + per-user, merged) skipped
 
@@ -124,15 +119,17 @@ After execution, the resolved skill set is persisted via `db.save_task_selected_
 
 **Pre-transcription**: before skill selection, `_pre_transcribe_attachments()` (`executor.py:225`) transcribes audio attachments and enriches `task.prompt` with the spoken text so keyword rules match voice memos.
 
-**Pass 2: Semantic routing** (`classify_skills`) — LLM-based, additive to Pass 1, **off by default** (`config.skills.semantic_routing = False`). When enabled, a Haiku call sees the task prompt + a manifest of unselected skills (filtered for admin_only/disabled/deps) plus the user's resource types (so it can reason "user has karakeep → bookmarks is plausible"), and returns additional skill names. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only. Pass 2 is now superseded by the **widened progressive-disclosure catalogue** (see "Progressive disclosure" above): rather than a per-task `claude -p` subprocess (cold-start dominated, timed out in prod) pre-promoting skills, every eligible skill is listed in the on-demand index and the main model self-loads. Kept reachable for operators who prefer the pre-router.
-
-After the union, the executor (`executor.py:1815-1823`) re-applies `exclude_skills` because newly added skills may exclude previously-selected ones.
-
-Config: `[skills]` section — `semantic_routing` (bool), `semantic_routing_model` (str), `semantic_routing_timeout` (float).
+**Pass 2 (LLM semantic routing) was removed.** It ran a per-task `claude -p`
+subprocess to pre-guess extra skills; the cold-start cost dominated and timed out
+on every production task. The widened progressive-disclosure catalogue (above)
+replaces it — every eligible skill is in the on-demand index and the main model
+self-loads, no pre-router. `classify_skills` / `build_skill_manifest` / the
+`semantic_routing*` config knobs are gone; `eligible_skill_names` is the surviving
+shared gate.
 
 Returns sorted list of skill names.
 
-**Selection observability**: `select_skills` emits a single INFO log per task with each selected skill annotated by the rule that fired (`pass1_selection count=N: foo(always_include), bar(keyword='kw'), …`). `classify_skills` emits `pass2_added skills=…` on additions, `pass2_no_additions` when nothing was added, and `pass2_timeout after=Xs` when Haiku exceeded the timeout. Use these to reconcile selection misses against runtime proxy rejections (see executor.md).
+**Selection observability**: `select_skills` emits a single INFO log per task with each selected skill annotated by the rule that fired (`pass1_selection count=N: foo(always_include), bar(keyword='kw'), …`); the executor emits `disclosure: eager=N lazy=M catalogue=K`. Use these to reconcile selection misses against runtime proxy rejections (see executor.md).
 
 ### Skill Metadata (YAML frontmatter)
 All metadata lives in YAML frontmatter at the top of each `skill.md` file:

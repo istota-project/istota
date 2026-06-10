@@ -51,7 +51,7 @@ If the task has a `command` field (shell scheduled jobs), it runs via `_execute_
 
 For all other tasks, `execute_task()` handles the full pipeline:
 
-1. **Skill selection** (two-pass: keyword matching, then LLM routing)
+1. **Skill selection** (deterministic keyword/resource matching) + progressive-disclosure partition
 2. **Persist selected skills** to DB via `save_task_selected_skills()`
 3. **Load skill docs** and resolve env vars
 4. **Context loading** (Talk message cache or email thread)

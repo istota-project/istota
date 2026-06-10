@@ -59,7 +59,7 @@ The proxy's Unix socket path includes the host process PID — `istota-proxy-{pi
 
 ### Authorization model
 
-Credential authorization is **decoupled from skill selection**. A skill is authorized for credential access if any of its sensitive `EnvSpec`s actually resolves under the task's context — that is, if the user has the corresponding resource configured (Karakeep, etc.) or the relevant instance config is set (SMTP, GitLab/GitHub tokens). Selection (Pass 1 keyword matching + Pass 2 semantic routing) controls only which skill *docs* go into the prompt, not which credentials can be requested at runtime.
+Credential authorization is **decoupled from skill selection**. A skill is authorized for credential access if any of its sensitive `EnvSpec`s actually resolves under the task's context — that is, if the user has the corresponding resource configured (Karakeep, etc.) or the relevant instance config is set (SMTP, GitLab/GitHub tokens). Selection (keyword matching) controls only which skill *docs* go into the prompt, not which credentials can be requested at runtime.
 
 This avoids the failure mode where a keyword miss locks a skill out: e.g. a user has a Karakeep resource configured, the prompt didn't say "bookmark", `bookmarks` wasn't selected — under the old model the proxy would refuse to inject `KARAKEEP_API_KEY` and the CLI invocation would fail mysteriously. Under the new model the credential is injectable as soon as Claude decides it needs the bookmarks skill, regardless of selection.
 
@@ -84,7 +84,7 @@ Reason codes: `unknown_skill` (skill name not in the CLI whitelist), `not_author
 
 Rejection responses include the structured `reason` field and, for unknown skills, an `authorized_skills` list — surfaced to the model via the client's stderr so it can adapt rather than retry blindly.
 
-Use these logs together with the Pass 1/Pass 2 selection logs (see [skills](../features/skills.md#selection-observability)) to count selection misses and decide whether the semantic-routing prompt or timeout needs tuning.
+Use these logs together with the selection logs (`pass1_selection`, `disclosure:`; see [skills](../features/skills.md#selection-observability)) to count selection misses and decide whether a skill's keywords or disclosure mode need tuning.
 
 ## Admin-gated job types
 

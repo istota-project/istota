@@ -9,7 +9,7 @@ For module-specific internals, see `.claude/rules/`:
 - `executor.md` — `execute_task()`, env mapping, prompt assembly, security
 - `scheduler.md` — daemon loop, worker pool, DB tables, deferred ops
 - `config.md` — every dataclass field + TOML mapping
-- `skills.md` — skill metadata, two-pass selection, CLI modules
+- `skills.md` — skill metadata, selection + progressive disclosure, CLI modules
 - `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for)
 
 ## Project Structure
@@ -111,7 +111,7 @@ Admin user IDs in `/etc/istota/admins` (empty = all admin). Non-admins: scoped m
 Operator-scoped feature flags for in-tree-but-off-by-default work. Configured via `[experimental] features = [...]` in `config.toml` (or `istota_experimental_features` in Ansible). Off by default; never exposed in the web UI; not toggleable per user. The flag list flows to every subprocess builder as `ISTOTA_EXPERIMENTAL_FEATURES` (CSV), so subprocess-paths see the same gate as the LLM path. Four surfaces honor the gate:
 
 - **CLI subcommands** — `@requires_feature("name")` Click decorator (`src/istota/experimental.py`). Gated-off calls emit the standard `{"status":"error","error":"…"}` JSON envelope; in `_execute_command_task` / `_execute_skill_task` the envelope detector reclassifies stdout-OK exits as task failures with the human-readable message intact. Currently used by `money lots` (`money_tax`) and `money wash-sales` (`money_wash_sales`).
-- **Skills** — `experimental: true` in `skill.md` frontmatter requires `skill_<name>` in the enabled set. The gate fires in the Pass-1 main loop, the sticky path, the companion pull-in, and the Pass-2 post-filter; `build_skill_manifest` also strips gated-off skills so they don't reach the Pass-2 prompt.
+- **Skills** — `experimental: true` in `skill.md` frontmatter requires `skill_<name>` in the enabled set. The gate fires in the Pass-1 main loop, the sticky path, the companion pull-in, and the disclosure-catalogue filter (`eligible_skill_names`) so a gated-off skill reaches neither selection nor the on-demand index.
 - **Modules** — `EXPERIMENTAL_MODULES` mapping in `modules.py` (currently empty). When populated, `Config.is_module_enabled` AND-s the flag in before the per-user DB read; the `/settings/modules` web endpoint and `_coerce_profile_value("disabled_modules", …)` validation consult the same gate so a disabled experimental module never appears in the user-facing surface at all.
 - **Web routes** — module-shaped surfaces only register when the gate is on; `/api/me` filters its `features` payload through the same check.
 
@@ -142,7 +142,7 @@ What it IS: a one-way push channel (bot → device) used by heartbeat alerts, sc
 ```
 
 ### Skills
-Self-contained `src/istota/skills/<name>/skill.md` (YAML frontmatter + body). Selection: deterministic Pass 1 (always_include / source_types / file_types / triggers / sticky / companions / excludes), plus an optional LLM Pass 2 semantic router (`skills.semantic_routing`, **off by default** — it spawns a per-task `claude -p` subprocess whose cold-start cost dominates). CLI skills expose `python -m istota.skills.<name>` and run through the credential-injecting skill proxy. **Progressive disclosure** (`skills.progressive_disclosure`, **on by default**): a selected skill is rendered eager (full body) or lazy (a one-line "load on demand" index entry; the model pulls the body via `istota-skill skills show <name>`), and the on-demand index is **widened to the full eligible catalogue** (every loadable skill not already eager) so the main model self-selects from the menu — this replaces Pass 2. Mode comes from frontmatter `disclosure: eager|lazy` > size threshold (CLI-only) > eager, with `skills.always_eager` pinning the behavioral/safety skills. The `skills` core skill is the on-demand loader. Full details in `.claude/rules/skills.md`.
+Self-contained `src/istota/skills/<name>/skill.md` (YAML frontmatter + body). Selection is a single deterministic pass (`select_skills`: always_include / source_types / file_types / triggers / sticky / companions / excludes). CLI skills expose `python -m istota.skills.<name>` and run through the credential-injecting skill proxy. **Progressive disclosure** (`skills.progressive_disclosure`, **on by default**): a selected skill is rendered eager (full body) or lazy (a one-line "load on demand" index entry; the model pulls the body via `istota-skill skills show <name>`), and the on-demand index is **widened to the full eligible catalogue** (every loadable skill not already eager, via `eligible_skill_names`) so the main model self-selects from the menu. Mode comes from frontmatter `disclosure: eager|lazy` > size threshold (CLI-only) > eager, with `skills.always_eager` pinning the behavioral/safety skills. The `skills` core skill is the on-demand loader. (The former LLM "Pass 2 semantic routing" pre-router was removed — its per-task `claude -p` cold-start timed out in production; the widened catalogue replaced it.) Full details in `.claude/rules/skills.md`.
 
 ### Input Channels
 - **Talk**: long-poll, message cache, ack/progress/result via referenceId. `!commands` intercepted in poller.

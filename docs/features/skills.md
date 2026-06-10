@@ -6,11 +6,9 @@ Skills are self-contained directories under `src/istota/skills/`, each with a `s
 
 Skills are not plugins or extensions. They are curated documentation and tooling that gets selectively loaded into Claude's prompt based on what's relevant to the current task. When a user asks about their calendar, the calendar skill docs are included so Claude knows how to use the CalDAV CLI. When they ask about email, the email skill docs are loaded instead.
 
-## Selection: two-pass system
+## Selection: keyword matching
 
-### Pass 1: keyword matching (deterministic, zero-cost)
-
-A skill is selected if any of these match:
+A single deterministic pass selects skills (the former LLM "Pass 2 semantic routing" was removed — see [Progressive disclosure](#progressive-disclosure) for what replaced it). A skill is selected if any of these match:
 
 - `always_include = true` (files, sensitive_actions, memory, scripts, memory_search, kv)
 - `source_types` matches the task's source type (e.g., `briefing` -> calendar, markets)
@@ -22,19 +20,15 @@ If a skill declares both `keywords` and `resource_types`, the user must have at 
 
 Admin-only skills are filtered out for non-admin users. Skills with unmet `dependencies` are skipped. Skills listed in `disabled_skills` (instance or per-user) are excluded.
 
-### Pass 2: semantic routing (LLM-based, additive)
-
-When `semantic_routing` is enabled (default), a fast-model call (the `fast` role alias, Haiku by default, resolved through the active brain) sees the task prompt, a manifest of unselected skills, and the user's resource types (so it can reason "user has feeds configured → feeds is plausibly relevant" without keyword overlap). It returns additional skills to load. Results are merged with Pass 1. On timeout or error, falls back to Pass 1 only.
-
 ### Selection observability
 
-Pass 1 emits an INFO log per task with each selected skill annotated by the rule that fired:
+Selection emits an INFO log per task with each selected skill annotated by the rule that fired:
 
 ```
 pass1_selection count=5: files(always_include), markets(source_type=briefing), email(keyword='email'), …
 ```
 
-Pass 2 emits `pass2_added skills=…` on additions, `pass2_no_additions` when nothing was added, and `pass2_timeout after=Xs` (WARNING) when the Haiku call exceeded its timeout. These logs make it easy to count selection misses against runtime credential-proxy rejections (see [security](../deployment/security.md#credential-proxy)).
+The executor also logs `disclosure: eager=N lazy=M catalogue=K` (see [Progressive disclosure](#progressive-disclosure)). These logs make it easy to count selection misses against runtime credential-proxy rejections (see [security](../deployment/security.md#credential-proxy)).
 
 ### Pre-transcription
 
@@ -49,6 +43,12 @@ This means if you ask about your calendar and then say "also add that to my todo
 ### Exclude rules
 
 Skills can exclude other skills via `exclude_skills` (e.g., the briefing skill excludes email to prevent delivery interference).
+
+## Progressive disclosure
+
+On by default (`skills.progressive_disclosure`). A selected skill is rendered either **eager** (full instructions inline) or **lazy** (a one-line entry in an "Available skills (load on demand)" section). For a lazy skill the model loads the full body on demand with `istota-skill skills show <name>`. Per-skill mode: frontmatter `disclosure: eager|lazy` wins, else a size threshold (`auto_lazy_threshold_chars`, CLI skills only), else eager; `always_eager` skills (the behavioral/safety set) are never deferred.
+
+The on-demand index is **widened to the full eligible catalogue** — every loadable skill that isn't already eager (excluding always-included, disabled, admin-gated, experimental-gated, missing-dependency, and excluded skills). So the model can reach for any relevant tool even when keyword matching didn't surface it, while the prompt stays small. This replaced an earlier LLM "semantic routing" pre-pass that ran a separate model call per task; the cold-start cost dominated and timed out in production, and the widened catalogue gives the main model the full menu for free. Set `progressive_disclosure = false` for legacy all-eager rendering with no index.
 
 ## Skill anatomy
 
@@ -115,9 +115,9 @@ See [adding skills](../development/adding-skills.md) for a step-by-step guide.
 
 ```toml
 [skills]
-semantic_routing = true           # Enable LLM-based Pass 2
-semantic_routing_model = "fast"   # Role/model alias for classification (default fast → Haiku)
-semantic_routing_timeout = 3.0    # Seconds, falls back to Pass 1 on timeout
+progressive_disclosure = true     # default; defer lazy bodies + widen the on-demand catalogue index
+auto_lazy_threshold_chars = 0     # >0: a CLI skill over N chars defaults to lazy (0 = explicit frontmatter only)
+# always_eager = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]  # never deferred
 ```
 
 Instance-wide and per-user skill exclusion:

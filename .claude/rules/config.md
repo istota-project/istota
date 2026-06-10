@@ -108,9 +108,6 @@ network: NetworkConfig = NetworkConfig()
 
 ### `SkillsConfig`
 ```
-semantic_routing: bool = False         # Pass 2 LLM pre-router (OFF by default — see below)
-semantic_routing_model: str = "fast"   # model for classification (role alias)
-semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
 progressive_disclosure: bool = True    # Part A master gate — ON by default; defer lazy bodies + widen index to full catalogue
 auto_lazy_threshold_chars: int = 0     # >0: a CLI skill over N chars defaults to lazy (0 = explicit frontmatter only)
 always_eager: list[str] = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]
@@ -128,11 +125,11 @@ frontmatter. `developer`/`health`/`money`/`location`/`browse`/`calendar` ship
 marked `disclosure: lazy`. **The on-demand index is widened** beyond the
 selected-lazy skills to the *full eligible catalogue* — every loadable skill
 (`eligible_skill_names`) that isn't already eager-selected, pinned
-`always_eager`, or excluded by a selected skill. This replaces Pass 2: the
-capable main model self-selects from the menu instead of a per-task `claude -p`
-pre-router (whose cold-start cost dominated and timed out in production).
-`semantic_routing` (Pass 2) is therefore **off by default** but stays reachable
-for operators who want the pre-router.
+`always_eager`, or excluded by a selected skill. This replaced the **removed**
+Pass-2 LLM semantic router: the capable main model self-selects from the menu
+instead of a per-task `claude -p` pre-router (whose cold-start cost dominated and
+timed out in production). The `semantic_routing*` knobs, `classify_skills`, and
+`build_skill_manifest` are gone.
 
 ### `PlaybooksConfig`
 ```
@@ -181,9 +178,9 @@ by `set_role_overrides(config.models.roles)` so every consumer that calls
 `brain.resolve_model_name(...)` picks up the operator mapping. Custom
 role names beyond the three defaults are accepted (e.g. `deep`,
 `cheap`). Every wired field that takes a model name (`selection_model`,
-`extraction_model`, `curation_model`, `semantic_routing_model`, the
-top-level `model`, per-task `model`, `[[jobs]] model`) accepts canonical
-IDs, provider aliases, or role aliases.
+`extraction_model`, `curation_model`, the top-level `model`, per-task
+`model`, `[[jobs]] model`) accepts canonical IDs, provider aliases, or
+role aliases.
 
 ### `ExperimentalConfig`
 ```
@@ -193,7 +190,7 @@ Operator-scoped feature flags. Flat list of feature names; off by default.
 `is_enabled(feature) -> bool` is the check used by `Config.is_module_enabled`
 (via `EXPERIMENTAL_MODULES` in `modules.py`), by the `@requires_feature`
 Click decorator (`src/istota/experimental.py`), and by `select_skills` /
-`build_skill_manifest` / `classify_skills` (gated on `skill_<name>` flags).
+`eligible_skill_names` (gated on `skill_<name>` flags).
 `load_config()` logs a warning when a configured name isn't in the
 `KNOWN_FEATURES` registry but keeps the entry — operators can graduate
 features in code without breaking deployments that still list them.

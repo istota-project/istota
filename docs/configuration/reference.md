@@ -161,9 +161,9 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 
 | Setting | Default | Description |
 |---|---|---|
-| `semantic_routing` | `true` | Enable LLM-based Pass 2 skill selection |
-| `semantic_routing_model` | `"fast"` | Role alias for classification (resolves to Haiku by default) |
-| `semantic_routing_timeout` | `3.0` | Seconds, falls back to Pass 1 |
+| `progressive_disclosure` | `true` | Defer lazy skill bodies to a one-line index and widen that index to the full eligible catalogue (model loads bodies on demand via `istota-skill skills show`). Set `false` for legacy all-eager rendering. |
+| `auto_lazy_threshold_chars` | `0` | `>0`: a CLI skill whose body exceeds N chars defaults to lazy (`0` = explicit `disclosure: lazy` frontmatter only) |
+| `always_eager` | `["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]` | Skills never deferred (their rules must stay fully in context) |
 
 ## `[models.roles]`
 

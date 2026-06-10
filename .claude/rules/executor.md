@@ -15,7 +15,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 ### Flow
 1. **Setup temp dir**: `config.temp_dir / task.user_id`
 2. **Merge resources**: DB resources + config resources → `db.UserResource` list
-3. **Load skills**: `load_skill_index()` → `select_skills()` (Pass 1; optional Pass 2 `classify_skills`, default off) → (when `skills.progressive_disclosure`, default on) `partition_skills_for_disclosure()` splits selected into eager/lazy → `load_skills(eager)` for the body + `build_disclosure_index(lazy ∪ eligible_skill_names(...))` for the **widened** on-demand catalogue index (`skills_index`, replaces Pass 2); off → `load_skills(all_selected)`, no index (legacy)
+3. **Load skills**: `load_skill_index()` → `select_skills()` (Pass 1 deterministic matching, the only selection pass) → (when `skills.progressive_disclosure`, default on) `partition_skills_for_disclosure()` splits selected into eager/lazy → `load_skills(eager)` for the body + `build_disclosure_index(lazy ∪ eligible_skill_names(...))` for the **widened** on-demand catalogue index (`skills_index`, which replaced the removed LLM Pass 2); off → `load_skills(all_selected)`, no index (legacy)
 4. **Skills changelog**: fingerprint compare, interactive only
 5. **Context loading**: skip for scheduled/briefing
 6. **User memory**: `read_user_memory_v2()`, skip for briefings
@@ -193,7 +193,7 @@ remains in the source as a dead helper but is no longer called.
 | `build_allowed_tools(is_admin, skill_names)` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash"]`. All Bash allowed — clean env is the boundary. |
 | `_PROXY_CREDENTIAL_VARS` | Frozenset of specific env vars stripped when proxy enabled (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, MONARCH_SESSION_ID, MONARCH_CSRFTOKEN, GOOGLE_WORKSPACE_CLI_TOKEN) |
 | `_CREDENTIAL_SKILL_MAP` | Maps each credential env var to the set of skills that need it (scopes proxy responses) |
-| `_authorized_skills_from_credentials(skill_index, credential_env)` | Returns skills authorized for credential access this task — any skill in `_CREDENTIAL_SKILL_MAP` is authorized if at least one of its mapped credentials is present in `credential_env`. Includes doc-only skills (notably `developer`) whose creds are consumed via `credential-fetch` lookups from helper scripts the executor writes (git credential helper, gitlab-api wrapper). Decoupled from skill selection: a keyword miss in Pass 1 / Pass 2 doesn't lock out a skill the user has clearly configured. Threat model is unchanged because `credential_env` only contains creds the user's resources / instance config supplied. |
+| `_authorized_skills_from_credentials(skill_index, credential_env)` | Returns skills authorized for credential access this task — any skill in `_CREDENTIAL_SKILL_MAP` is authorized if at least one of its mapped credentials is present in `credential_env`. Includes doc-only skills (notably `developer`) whose creds are consumed via `credential-fetch` lookups from helper scripts the executor writes (git credential helper, gitlab-api wrapper). Decoupled from skill selection: a keyword miss in Pass 1 doesn't lock out a skill the user has clearly configured. Threat model is unchanged because `credential_env` only contains creds the user's resources / instance config supplied. |
 
 ## Skill Proxy Authorization Model
 
@@ -201,7 +201,7 @@ The proxy (`skill_proxy.py`) takes two distinct skill sets:
 - `allowed_skills` (frozenset): all CLI skills (`cli: true`) — global whitelist used to reject typos / non-existent skill names.
 - `authorized_skills` (frozenset): per-task subset returned by `_authorized_skills_from_credentials()`. Used purely for the informative-rejection error message returned to the client, and logged at proxy startup as `proxy_authorization task_id=… selected=… authorized=… …`.
 
-The `skill_credential_map` (built from `authorized_skills` via `_build_skill_credential_map`) controls which credential env vars actually get injected for a given skill CLI invocation — that is the real enforcement boundary. Selection (Pass 1 + Pass 2) controls only which skill *docs* go in the prompt; it no longer gates credential access.
+The `skill_credential_map` (built from `authorized_skills` via `_build_skill_credential_map`) controls which credential env vars actually get injected for a given skill CLI invocation — that is the real enforcement boundary. Selection (Pass 1) controls only which skill *docs* go in the prompt; it no longer gates credential access.
 
 Every proxy rejection emits a structured WARNING — `proxy_rejected task_id=… type=skill|credential … reason=unknown_skill|not_authorized|not_authorized_credential|credential_not_present`. Use these to count selection misses vs. real abuse attempts.
 
