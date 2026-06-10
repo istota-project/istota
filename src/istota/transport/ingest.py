@@ -76,16 +76,24 @@ def record_inbound(
             db.register_room(
                 conn, room_token, user_id, origin=surface, name=channel_name,
             )
-        elif (
-            surface == "talk"
-            and existing.origin == "talk"
-            and channel_name
-            and channel_name != existing.name
-        ):
+        elif surface == "talk" and existing.origin == "talk":
             # Talk-side rename flows back to the registry on the next poll. Only
             # for Talk-origin rooms — a web-origin room's user-set name wins.
-            db.rename_room(conn, room_token, channel_name)
+            if channel_name and channel_name != existing.name:
+                db.rename_room(conn, room_token, channel_name)
+            if existing.archived:
+                # A fresh inbound means the bot is demonstrably back in this Talk
+                # room, so un-hide it for all members (archive_orphaned_talk_rooms
+                # globally archived it when the bot left the Nextcloud room).
+                # Without this a re-joined room stays invisible to everyone even
+                # though they're still members (ISSUE-134).
+                db.set_room_archived(conn, room_token, False)
         db.add_room_binding(conn, room_token, surface, surface_ref)
+        # Every sender is a member, so a shared (multi-human) Talk room surfaces
+        # in each participant's web room list — not just the first one who
+        # registered it (ISSUE-134). Idempotent; covers the already-registered
+        # path where register_room above didn't run.
+        db.add_room_member(conn, room_token, user_id)
 
         # 2. Echo check (loop-prevention ledger). Dormant for v1 Talk+web.
         if external_id is not None and db.message_has_external_id(

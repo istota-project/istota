@@ -562,14 +562,18 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 -- token used as the task's conversation_token, so every room gets its own
 -- CHANNEL.md memory and sleep-cycle treatment with no special-casing.
 -- Always-on surface: there is no per-user opt-out.
+-- `token` is unique per (user, token), NOT globally: a shared Talk room (one
+-- Nextcloud conversation) has one handle row per participant so it surfaces in
+-- each member's web room list (ISSUE-134).
 CREATE TABLE IF NOT EXISTS web_chat_rooms (
     id          INTEGER PRIMARY KEY,
     user_id     TEXT NOT NULL,
-    token       TEXT NOT NULL UNIQUE,            -- conversation_token (channel id)
+    token       TEXT NOT NULL,                   -- conversation_token (channel id)
     name        TEXT NOT NULL,
     archived    INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, token)
 );
 
 CREATE INDEX IF NOT EXISTS idx_web_chat_rooms_user
@@ -614,6 +618,17 @@ CREATE TABLE IF NOT EXISTS rooms (
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
 
+-- Per-user room membership (ISSUE-134). A room is shared (one token, one
+-- transcript) but each participant has a membership row; web visibility is
+-- resolved through this, not the single-owner `rooms.user_id`.
+CREATE TABLE IF NOT EXISTS room_members (
+    room_token  TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (room_token, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members (user_id);
+
 -- One row per (room, surface) the room is exposed on.
 CREATE TABLE IF NOT EXISTS room_bindings (
     room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
@@ -655,8 +670,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_ext
 CREATE TABLE IF NOT EXISTS room_read_state (
     room_token  TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
     surface     TEXT NOT NULL,
+    user_id     TEXT NOT NULL DEFAULT '',
     last_read_message_id INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (room_token, surface)
+    PRIMARY KEY (room_token, surface, user_id)
 );
 
 -- One-time data-migration ledger (markered, so heavy backfills run once).
