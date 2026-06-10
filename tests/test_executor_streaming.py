@@ -1005,6 +1005,77 @@ class TestStreamSurfaceCoalescing:
         deltas = [e for e in rec.events if e.kind == "text_delta"]
         assert "".join(e.payload["text"] for e in deltas) == answer
 
+    def test_substantial_block_before_tool_preserved_in_full(self, tmp_path):
+        """A substantial intermediate block (the model writes analysis, then acts
+        on it via a tool) must reach the stream IN FULL — its unflushed tail at
+        the tool boundary is flushed, not discarded. Delivered as token-level
+        partial deltas so a flush window remains buffered at the boundary (the
+        gap the old discard-everything path dropped); the whole-block dedup then
+        suppresses the trailing TextEvent, so the streamed text equals the block
+        exactly (no doubling)."""
+        config = _make_config(tmp_path)
+        config.scheduler.progress_show_tool_use = True
+        task = _make_task(source_type="web")
+
+        # 250 chars in 10-char tokens: unlocks at 200 (flush), then 50 chars stay
+        # buffered (< the 120 flush window) until the tool boundary.
+        block = "".join(f"{i:09d}." for i in range(25))  # 25 * 10 = 250 chars
+        assert len(block) == 250
+        tokens = [block[i:i + 10] for i in range(0, len(block), 10)]
+
+        stream_lines = (
+            [
+                self._partial({
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": tok},
+                })
+                for tok in tokens
+            ]
+            + [
+                json.dumps({
+                    "type": "assistant",
+                    "message": {"id": "m1", "stop_reason": "end_turn",
+                                "content": [{"type": "text", "text": block}]},
+                }) + "\n",
+                json.dumps({
+                    "type": "assistant",
+                    "message": {"id": "m2", "stop_reason": "tool_use", "content": [
+                        {"type": "tool_use", "id": "t1", "name": "Edit",
+                         "input": {"file_path": "/tmp/x.txt"}},
+                    ]},
+                }) + "\n",
+                json.dumps({"type": "user", "message": {"role": "user"}}) + "\n",
+                json.dumps({
+                    "type": "assistant",
+                    "message": {"id": "m3", "stop_reason": "end_turn",
+                                "content": [{"type": "text", "text": "Done."}]},
+                }) + "\n",
+                json.dumps({"type": "result", "subtype": "success", "result": "Done."}) + "\n",
+            ]
+        )
+        rec = _RecordingSubscriber()
+        success, result, _a, _t = self._run(config, task, stream_lines, rec)
+
+        assert success is True
+        deltas = [e for e in rec.events if e.kind == "text_delta"]
+        joined = "".join(e.payload["text"] for e in deltas)
+        # The full intermediate block survived the tool boundary (tail flushed,
+        # not dropped) and streamed exactly once (the trailing whole-block
+        # TextEvent was deduped).
+        assert block in joined
+        assert joined.count("000000024.") == 1  # the tail token, exactly once
+        # The short final answer ("Done.", after the last tool) never crosses the
+        # gate and rides the canonical result event rather than the delta channel
+        # (where it would be deduped against the already-streamed deltas). So the
+        # delta stream is exactly the substantial block, and the answer is the
+        # result. Both reach the UI: the block as its own prose group, the answer
+        # as the trailing text.
+        assert joined == block
+        assert result == "Done."
+        # The substantial block streamed BEFORE the tool boundary.
+        kinds = rec.kinds()
+        assert kinds.index("text_delta") < kinds.index("tool_start")
+
     def test_stream_task_routes_thinking_to_thinking_event(self, tmp_path):
         """Stream surface (web): a ClaudeCode thinking block → coalesced
         `thinking` event, never `text_delta` / `progress_text`."""

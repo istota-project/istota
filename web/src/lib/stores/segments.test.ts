@@ -3,9 +3,17 @@ import {
 	applyEvent,
 	answerText,
 	isRenderable,
+	renderGroups,
+	SUBSTANTIAL_TEXT_CHARS,
 	type ChatMessage,
 	type Segment,
 } from './segments';
+
+/** A text block over the "substantial" threshold (real intermediate content,
+ * not a lead-in). */
+function long(marker = 'X'): string {
+	return marker + 'y'.repeat(SUBSTANTIAL_TEXT_CHARS);
+}
 
 function freshAssistant(): ChatMessage {
 	return {
@@ -342,5 +350,135 @@ describe('applyEvent — thinking segments', () => {
 		]);
 		expect(thinks(m)).toHaveLength(0);
 		expect(answerText(m)).toBe('answer');
+	});
+});
+
+describe('renderGroups — body layout', () => {
+	function kinds(groups: ReturnType<typeof renderGroups>): string[] {
+		return groups.map((g) => g.kind);
+	}
+	function proseTexts(groups: ReturnType<typeof renderGroups>): string[] {
+		return groups.filter((g) => g.kind === 'prose').map((g) => (g as any).text);
+	}
+
+	it('no-tool turn: a single prose group', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['text_delta', { text: 'The answer is 42.' }],
+			['result', { text: 'The answer is 42.' }],
+		]);
+		const groups = renderGroups(m);
+		expect(kinds(groups)).toEqual(['prose']);
+		expect(proseTexts(groups)).toEqual(['The answer is 42.']);
+	});
+
+	it('short lead-in before a tool is dropped from the body', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['text_delta', { text: 'Let me check the calendar.' }],
+			['tool_start', { tool_name: 'Bash', description: 'calendar list', tool_call_id: 'c1' }],
+			['tool_end', { tool_call_id: 'c1', success: true }],
+			['result', { text: 'You have 2 events today.' }],
+		]);
+		const groups = renderGroups(m);
+		// The lead-in narration never renders; only the activity chip + answer.
+		expect(kinds(groups)).toEqual(['activity', 'prose']);
+		expect(proseTexts(groups)).toEqual(['You have 2 events today.']);
+	});
+
+	it('substantial intermediate text BEFORE a tool survives as its own prose group', () => {
+		// The 179848 failure: a meaty analysis block, then an edit tool, then a
+		// terse-ish final summary. The analysis must NOT vanish.
+		const meaty = long('Two sharpenings worth making explicit. ');
+		const m = freshAssistant();
+		feed(m, [
+			['text_delta', { text: meaty }],
+			['tool_start', { tool_name: 'Edit', description: 'edit note', tool_call_id: 'e1' }],
+			['tool_end', { tool_call_id: 'e1', success: true }],
+			['result', { text: 'Added it as the Guiding principle section.' }],
+		]);
+		const groups = renderGroups(m);
+		expect(kinds(groups)).toEqual(['prose', 'activity', 'prose']);
+		expect(proseTexts(groups)).toEqual([meaty, 'Added it as the Guiding principle section.']);
+	});
+
+	it('the final answer always renders even when short', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['tool_start', { tool_name: 'Bash', description: 'ls', tool_call_id: 'c1' }],
+			['tool_end', { tool_call_id: 'c1', success: true }],
+			['result', { text: 'Done.' }],
+		]);
+		const groups = renderGroups(m);
+		expect(kinds(groups)).toEqual(['activity', 'prose']);
+		expect(proseTexts(groups)).toEqual(['Done.']);
+	});
+
+	it('consecutive tools (and short narration between them) coalesce into one chip', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['tool_start', { tool_name: 'Bash', description: 'a', tool_call_id: 'c1' }],
+			['text_delta', { text: 'one sec' }],
+			['tool_start', { tool_name: 'Bash', description: 'b', tool_call_id: 'c2' }],
+			['result', { text: 'ok' }],
+		]);
+		const groups = renderGroups(m);
+		// The short 'one sec' is dropped, so the two tools stay in one chip.
+		expect(kinds(groups)).toEqual(['activity', 'prose']);
+		const activity = groups[0] as Extract<ReturnType<typeof renderGroups>[number], { kind: 'activity' }>;
+		expect(activity.steps).toHaveLength(2);
+	});
+
+	it('thinking never reaches the body', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['thinking', { text: long('reasoning ') }],
+			['text_delta', { text: 'The answer.' }],
+			['result', { text: 'The answer.' }],
+		]);
+		const groups = renderGroups(m);
+		expect(kinds(groups)).toEqual(['prose']);
+		expect(proseTexts(groups)).toEqual(['The answer.']);
+	});
+
+	it('full 179848-shape turn: meaty block kept, lead-ins dropped, interleaved order', () => {
+		const meaty = long('You named the move that decouples hard from easy. ');
+		const m = freshAssistant();
+		feed(m, [
+			['text_delta', { text: 'This is the right principle. Let me fold it in.' }],
+			['tool_start', { tool_name: 'Bash', description: 'find note', tool_call_id: 'c1' }],
+			['tool_start', { tool_name: 'Read', description: 'read note', tool_call_id: 'c2' }],
+			['text_delta', { text: meaty }],
+			['tool_start', { tool_name: 'Edit', description: 'edit note', tool_call_id: 'c3' }],
+			['text_delta', { text: 'Now clean up the redundant line.' }],
+			['tool_start', { tool_name: 'Edit', description: 'edit note', tool_call_id: 'c4' }],
+			['result', { text: 'Added it as the Guiding principle.' }],
+		]);
+		const groups = renderGroups(m);
+		expect(kinds(groups)).toEqual(['activity', 'prose', 'activity', 'prose']);
+		expect(proseTexts(groups)).toEqual([meaty, 'Added it as the Guiding principle.']);
+	});
+
+	it('history layout (all earlier text settled) keeps a substantial intermediate block', () => {
+		// Mirrors a reloaded turn: every text segment settled except the trailing
+		// answer. renderGroups is settled-agnostic, so the layout matches the live
+		// stream.
+		const meaty = long('detailed analysis ');
+		const m: ChatMessage = {
+			cid: 1,
+			role: 'assistant',
+			text: 'final answer',
+			streaming: false,
+			segments: [
+				{ kind: 'text', id: 's0', text: 'short lead-in', settled: true },
+				{ kind: 'tool', id: 'h1', tool: { id: 'h1', name: '', description: 'edit', running: false } },
+				{ kind: 'text', id: 's2', text: meaty, settled: true },
+				{ kind: 'tool', id: 'h3', tool: { id: 'h3', name: '', description: 'edit', running: false } },
+				{ kind: 'text', id: 's4', text: 'final answer', settled: false },
+			],
+		};
+		const groups = renderGroups(m);
+		expect(kinds(groups)).toEqual(['activity', 'prose', 'activity', 'prose']);
+		expect(proseTexts(groups)).toEqual([meaty, 'final answer']);
 	});
 });

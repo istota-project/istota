@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { renderMarkdown } from '$lib/markdown';
 	import type { ChatMessage } from '$lib/stores/chat';
-	import type { Segment } from '$lib/stores/segments';
+	import { renderGroups } from '$lib/stores/segments';
 	import ActivityTrace from './ActivityTrace.svelte';
 	import ConfirmationCard from './ConfirmationCard.svelte';
 
@@ -32,23 +32,20 @@
 	// is shown verbatim and the assistant body is rendered below.
 	const bodyHtml = $derived(isSystem ? renderMarkdown(message.text) : '');
 
-	// Split the turn into "work" (inter-tool narration + tool calls → the single
-	// ActivityTrace chip) and the "answer" (the final response → prominent,
-	// streamed markdown). The answer is always the trailing text segment: settling
-	// only happens alongside a tool push, so a text segment is the last segment
-	// iff it's the open/answer block. Everything before it is work.
-	const segments = $derived(message.segments);
-	const answerSeg = $derived.by<Extract<Segment, { kind: 'text' }> | null>(() => {
-		const last = segments[segments.length - 1];
-		return last && last.kind === 'text' ? last : null;
-	});
-	const workSegments = $derived(answerSeg ? segments.slice(0, -1) : segments);
+	// The turn's body is an ordered list of render groups (substantial prose +
+	// activity chips), interleaved in the model's true block order. A substantial
+	// intermediate text block — analysis the model wrote, then acted on — renders
+	// as its own prominent prose group rather than vanishing into a tool-only
+	// chip; short lead-in narration is dropped. The trailing text is always the
+	// answer. See renderGroups for the rule.
+	const groups = $derived(renderGroups(message));
 	const toolCount = $derived(message.segments.filter((s) => s.kind === 'tool').length);
-	// The activity chip is tool-only — it appears solely when the turn made tool
-	// calls. Reasoning/narration are not shown; before any tool exists, the work
-	// phase is represented by the pulsing "Thinking…" cue instead.
-	const hasTools = $derived(toolCount > 0);
-	const hasAnswerText = $derived(!!(answerSeg && answerSeg.text));
+	// Index of the last activity group, so only the trailing chip pulses while
+	// the message is still streaming.
+	const lastActivityIdx = $derived.by(() => {
+		for (let i = groups.length - 1; i >= 0; i--) if (groups[i].kind === 'activity') return i;
+		return -1;
+	});
 
 	// Subtle per-message metadata, revealed on hover (bottom-right).
 	const meta = $derived.by(() => {
@@ -104,18 +101,19 @@
 					</div>
 				{/if}
 			{:else}
-				<!-- The model's tool calls fold into one activity chip; the final
-				     answer streams prominent below it. Reasoning/narration are not
-				     shown — the work phase before any tool is the cue below. -->
-				{#if hasTools}
-					<ActivityTrace steps={workSegments} streaming={message.streaming} />
-				{/if}
+				<!-- The turn renders as ordered groups: substantial prose blocks
+				     (prominent markdown) interleaved with activity chips (tool runs
+				     fold into one chip each). Short lead-in narration and reasoning
+				     are dropped — the pre-tool work phase is the cue below. -->
+				{#each groups as g, gi (g.id)}
+					{#if g.kind === 'activity'}
+						<ActivityTrace steps={g.steps} streaming={message.streaming && gi === lastActivityIdx} />
+					{:else}
+						<div class="body markdown">{@html renderMarkdown(g.text)}</div>
+					{/if}
+				{/each}
 
-				{#if hasAnswerText}
-					<div class="body markdown">{@html renderMarkdown(answerSeg!.text)}</div>
-				{/if}
-
-				{#if message.streaming && !hasTools && !hasAnswerText}
+				{#if message.streaming && groups.length === 0}
 					<!-- Work-phase cue: the ack verb + pulsing dot, shown while the
 					     model reasons / before the first tool or answer text. -->
 					<div class="progress">

@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-10: Keep substantial intermediate text in stream output — meaty blocks no longer vanish into the activity chip
+
+With live streaming in the web chat UI, a turn where the model writes a substantial analysis block, *then* acts on it (an Edit), then gives a short confirmation would stream the analysis live and then drop it — the final answer area showed only the terse confirmation, and the detailed block disappeared. The content the user most wanted was the part that got thrown away.
+
+Root cause was a rendering-model error, not a streaming bug. Both render paths (live SSE in `segments.ts`, history-from-`execution_trace` in `web_app._trace_segments` + `historySegments`) encoded the same rule: *only the trailing text segment is the answer; every earlier text block is narration.* `Message.svelte` then routed all non-trailing segments to a **tool-only** `ActivityTrace` chip that renders no prose. So any text the model emitted before its final block — including a 1500-char analysis — was settled the instant the next tool arrived and silently dropped from view. The heuristic conflated "text followed by a tool" with "throwaway lead-in," but an agent routinely writes real content, acts on it, then confirms tersely.
+
+The fix promotes substantial intermediate text to visible body content, keeping short lead-ins suppressed. Approach (agreed with the user): reuse the 200-char bar, render in true order, stream surfaces only.
+
+- **Frontend body model.** New pure `renderGroups(message)` in `segments.ts` reduces the ordered segment list into interleaved render groups: a `text` segment renders as a prominent `prose` block iff its trimmed length ≥ `SUBSTANTIAL_TEXT_CHARS` (200) *or* it's the trailing answer (always shown, however short); runs of consecutive tools (and any short narration skipped between them) coalesce into one `activity` chip; `thinking` never reaches the body. `Message.svelte` iterates the groups instead of "all tools in one chip + trailing answer only," so a meaty block renders in place between the chips. Pure + settled-agnostic, so the live stream and a reloaded-from-trace turn build identical groups — no backend `result`/composition change needed (the trace already carries every block).
+- **Executor stream gate, now a substance classifier.** Renamed `_discard_deltas` → `_settle_deltas_at_tool_boundary`. A short lead-in that stayed under the gate is still dropped intact (never streamed → can't flash). A substantial block that crossed the gate now **flushes its unflushed tail** instead of discarding it, so the full block reaches the stream. This mattered for token-streaming NativeBrain (up to ~120 chars of tail was lost at each tool boundary; whole-block ClaudeCodeBrain already flushed on unlock). The old `stream_gate: LEAK` log is gone — crossing the gate before a tool is now intended, not a leak.
+
+Symmetry that keeps it low-risk: the executor only streams a text run once it crosses the 200 gate, so the live path only ever *received* substantial intermediate text already; the same bar in `renderGroups` drops sub-threshold lead-ins on the history path, keeping the two layouts consistent.
+
+Reproduced against a real production task's `execution_trace` (a multi-step note edit) before and after. Built strict-TDD: failing tests first at each layer (renderGroups reducer, Message DOM, executor tail-preservation), then implementation. Full web suite (59) + Python streaming/events/scheduler/native (721) green; svelte-check clean. The obsolete in-place-mutation regression guard was rewritten — the refactor removed an accidental `$derived(message.segments)` memoization barrier, so in-place updates now also reach the DOM (production still rebuilds refs in `chat.ts`, unchanged).
+
+**Files modified:**
+- `web/src/lib/stores/segments.ts` — `renderGroups` + `SUBSTANTIAL_TEXT_CHARS`; `RenderGroup` type
+- `web/src/lib/components/chat/Message.svelte` — render groups in order (prose + activity chips); only the last chip pulses while streaming
+- `src/istota/executor.py` — `_settle_deltas_at_tool_boundary` (flush substantial tail, drop short lead-ins); updated gate comment
+- `web/src/lib/stores/segments.test.ts`, `web/src/lib/components/chat/Message.svelte.test.ts`, `tests/test_executor_streaming.py` — reducer/DOM/executor coverage
+- `AGENTS.md`, `.claude/rules/scheduler.md` — gate-as-substance-classifier + web-chat body render model
+
 ## 2026-06-10: Web chat unread room indicators — bold names + count chip in the sidebar
 
 The web chat sidebar gave no signal that a room had new content the user hadn't seen — a bot-delivered alert, a scheduled post, or a mirrored Talk turn could land in a room you weren't looking at with nothing to draw your eye. Added the standard unread affordance: a room with unread messages renders its name bold and shows a count chip (capped `99+`) to the right of the name; opening the room clears it.

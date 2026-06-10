@@ -2664,20 +2664,24 @@ def execute_task(
         # ClaudeCodeBrain's parse loop is sequential), so no lock is needed.
         #
         # Narration gate: a text run emits NOTHING until it crosses
-        # ``_DELTA_GATE_CHARS`` without an intervening tool call. Lead-in
-        # narration ("Let me check…") is short and is always followed by a tool,
-        # so it stays under the ceiling and is discarded at the boundary — it
-        # can never have already streamed (the old time/size flush raced the
-        # tool boundary and leaked it into the answer area). Once a run crosses
-        # the ceiling it "unlocks": the held buffer flushes and subsequent
-        # deltas stream live at the cadence below. A short *final* answer that
-        # never crosses the gate still arrives via the canonical ``result``
-        # event (and the final flush in the ``finally`` releases the held
-        # buffer), so gating costs only token-by-token animation on text too
-        # short to benefit. Threshold is the ``[scheduler]`` knob
-        # ``stream_text_gate_chars`` (0 disables — deltas stream immediately,
-        # legacy behaviour); the ``stream_gate:`` telemetry below records every
-        # discard / leak so the value can be tuned against production.
+        # ``_DELTA_GATE_CHARS`` without an intervening tool call. This splits a
+        # text-then-tool block into two cases at the boundary (see
+        # ``_settle_deltas_at_tool_boundary``): a short lead-in ("Let me check…")
+        # stays under the ceiling, never streams, and is dropped; a SUBSTANTIAL
+        # block crosses the ceiling, "unlocks" (the held buffer flushes and
+        # subsequent deltas stream live at the cadence below), and is KEPT —
+        # flushed at the tool boundary so the full block reaches the stream
+        # surface, where the web client renders it as its own prose block rather
+        # than throwaway narration. The gate is thus a substance classifier, not
+        # an answer-vs-narration one: the final answer (after the last tool)
+        # always streams, and a short *final* answer that never crosses the gate
+        # still arrives via the canonical ``result`` event (and the final flush
+        # in the ``finally`` releases the held buffer), so gating costs only
+        # token-by-token animation on text too short to benefit. Threshold is
+        # the ``[scheduler]`` knob ``stream_text_gate_chars`` (0 disables —
+        # deltas stream immediately, legacy behaviour); the ``stream_gate:``
+        # telemetry below records every flush / discard so the value can be
+        # tuned against production.
         _DELTA_FLUSH_MS = 250
         _DELTA_FLUSH_CHARS = 120
         _DELTA_GATE_CHARS = config.scheduler.stream_text_gate_chars
@@ -2740,40 +2744,41 @@ def execute_task(
             ):
                 _flush_deltas()
 
-        def _discard_deltas() -> None:
-            # Drop buffered answer text WITHOUT emitting it. Used at a tool
-            # boundary: text that precedes a tool call is lead-in narration
-            # ("Let me search…"), never the model's final answer (a tool
-            # follows it, so the loop continues). The final answer comes after
-            # the last tool with no tool boundary after it, so it is never
-            # discarded — it streams normally. This keeps narration out of the
-            # prominent answer area entirely; only reasoning + tool actions
-            # land in the activity chip.
+        def _settle_deltas_at_tool_boundary() -> None:
+            # Resolve the buffered answer text at a tool boundary. Text before a
+            # tool is one of two things, and the narration gate already told them
+            # apart:
+            #   (a) a SUBSTANTIAL block (the run crossed _DELTA_GATE_CHARS and
+            #       unlocked — analysis the model wrote, then acted on). It has
+            #       been streaming; FLUSH its unflushed tail so the full block
+            #       reaches the stream surface and renders as its own prose block
+            #       (the web client keeps substantial intermediate blocks — they
+            #       are not narration). A token-streaming brain (NativeBrain)
+            #       leaves up to one flush-window buffered here; a whole-block
+            #       brain already flushed everything on unlock, so this is a
+            #       no-op for it.
+            #   (b) a short LEAD-IN ("Let me search…", under the gate). It was
+            #       held and never emitted; DROP it intact so it doesn't flash in
+            #       the prominent answer area. Only reasoning + tool actions land
+            #       in the activity chip.
             held = _delta_state["chars"]
             if _delta_state["unlocked"]:
-                # This run already streamed before the tool boundary: narration
-                # crossed the gate and leaked into the answer area (the frontend
-                # settles it into the chip, but it flashed). The gate is too low
-                # for this narration; `held` is only the unflushed remainder, so
-                # the leaked total is larger. Counts the gate's misses — grep
-                # `stream_gate: LEAK` to see whether the knob needs raising.
-                logger.info(
-                    "stream_gate: LEAK — streamed narration crossed gate=%d "
-                    "before a tool boundary (task %s, +%d unflushed)",
-                    _DELTA_GATE_CHARS, task.id, held,
-                )
-            elif held:
-                # Normal case: narration stayed under the gate and is dropped
-                # intact, never reaching the answer area. `held` samples real
-                # narration length — the distribution to tune the gate against.
-                logger.debug(
-                    "stream_gate: discarded %d chars of held narration at a "
-                    "tool boundary (task %s, gate=%d)",
-                    held, task.id, _DELTA_GATE_CHARS,
-                )
-            _delta_buf.clear()
-            _delta_state["chars"] = 0
-            _delta_state["last_flush"] = time.monotonic()
+                if held:
+                    logger.debug(
+                        "stream_gate: flushed %d-char tail of a substantial "
+                        "block at a tool boundary (task %s)", held, task.id,
+                    )
+                _flush_deltas()  # clears buf + resets chars/last_flush
+            else:
+                if held:
+                    logger.debug(
+                        "stream_gate: discarded %d chars of held narration at a "
+                        "tool boundary (task %s, gate=%d)",
+                        held, task.id, _DELTA_GATE_CHARS,
+                    )
+                _delta_buf.clear()
+                _delta_state["chars"] = 0
+                _delta_state["last_flush"] = time.monotonic()
             _delta_state["unlocked"] = False  # next text run re-gates
 
         # A SEPARATE coalescing buffer for streamed *thinking* (extended-reasoning)
@@ -2820,7 +2825,7 @@ def execute_task(
                 # it.
                 if is_stream_surface:
                     _flush_thinking()  # tool boundary: settle the reasoning chip
-                    _discard_deltas()  # tool boundary: drop pre-tool narration
+                    _settle_deltas_at_tool_boundary()  # keep substantial, drop lead-ins
                 if show_tool_use:
                     event_writer.emit("tool_start", {
                         "tool_name": event.tool_name,

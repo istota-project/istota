@@ -61,21 +61,62 @@ describe('live streaming reaches the DOM (Message + keyed each)', () => {
 		expect(container.textContent).toContain('do thing');
 	});
 
-	it('regression guard: in-place mutation (same refs) never reaches the DOM', async () => {
+	it('the body recomputes from segments on every store emit (no stale memo barrier)', async () => {
 		const store = writable<ChatMessage[]>([assistant()]);
 		const { container } = render(StreamHarness, { store });
 
-		// Mutating the message + its segments in place and returning the same array
-		// does not re-render the streamed content: the keyed message reference is
-		// unchanged, so Svelte treats it as untouched. This is the bug the fresh-ref
-		// update fixes — see the test above.
-		inPlaceUpdate(store, 'text_delta', { text: 'partial' });
+		// The body is derived through `renderGroups(message)`, which reads the
+		// segment list afresh on each re-render — there is no intermediate
+		// reference-equal `$derived(message.segments)` hop to short-circuit
+		// propagation. So even an in-place mutation that returns the same array
+		// reaches the DOM once the store emits. (Production still rebuilds refs in
+		// chat.ts:updateMsg for the page-level keyed `{#each}` — belt and braces.)
 		inPlaceUpdate(store, 'result', { text: 'THE REAL ANSWER' });
 		inPlaceUpdate(store, 'done', { duration_seconds: 1 });
 		await tick();
 
-		expect(container.textContent).not.toContain('THE REAL ANSWER');
-		expect(container.textContent).not.toContain('partial');
+		expect(container.textContent).toContain('THE REAL ANSWER');
+	});
+
+	it('a substantial intermediate block survives a tool boundary into the body', async () => {
+		// The 179848 regression: meaty analysis → edit tool → terse final summary.
+		// The analysis must stay visible (its own prose block), not vanish into the
+		// tool-only chip when the edit settles it.
+		const meaty = 'Two sharpenings worth making explicit. ' + 'detail '.repeat(40);
+		const store = writable<ChatMessage[]>([assistant()]);
+		const { container } = render(StreamHarness, { store });
+
+		freshRefsUpdate(store, 'text_delta', { text: meaty });
+		freshRefsUpdate(store, 'tool_start', { tool_name: 'Edit', description: 'edit note', tool_call_id: 'e1' });
+		freshRefsUpdate(store, 'tool_end', { tool_call_id: 'e1', success: true });
+		freshRefsUpdate(store, 'result', { text: 'Added it as the Guiding principle.' });
+		freshRefsUpdate(store, 'done', { duration_seconds: 4 });
+		await tick();
+
+		// Both the meaty analysis and the final summary are present in the body.
+		expect(container.textContent).toContain('Two sharpenings worth making explicit.');
+		expect(container.textContent).toContain('Added it as the Guiding principle.');
+		// Two distinct prose bodies (intermediate + answer), plus the edit chip.
+		expect(container.querySelectorAll('.body.markdown').length).toBe(2);
+		expect(container.querySelector('.activity')?.textContent ?? '').toContain('edit note');
+	});
+
+	it('a short lead-in before a tool is NOT shown in the body', async () => {
+		const store = writable<ChatMessage[]>([assistant()]);
+		const { container } = render(StreamHarness, { store });
+
+		freshRefsUpdate(store, 'text_delta', { text: 'Let me check the calendar.' });
+		freshRefsUpdate(store, 'tool_start', { tool_name: 'Bash', description: 'calendar list', tool_call_id: 'c1' });
+		freshRefsUpdate(store, 'tool_end', { tool_call_id: 'c1', success: true });
+		freshRefsUpdate(store, 'result', { text: 'You have 2 events today.' });
+		freshRefsUpdate(store, 'done', { duration_seconds: 1 });
+		await tick();
+
+		const body = container.querySelector('.body.markdown');
+		expect(body?.textContent).toContain('You have 2 events today.');
+		// Only the answer renders as a body; the lead-in is dropped.
+		expect(container.querySelectorAll('.body.markdown').length).toBe(1);
+		expect(container.textContent).not.toContain('Let me check the calendar.');
 	});
 
 	it('reasoning is shown nowhere; the chip carries only the tool action', async () => {
