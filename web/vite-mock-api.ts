@@ -269,8 +269,29 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 	if (msgMatch && method === 'GET') {
 		const room = mockChatRooms.find((r) => r.id === Number(msgMatch[1]));
 		if (!room) return { error: 'room not found' };
+		const q = new URL(`http://x${url}`).searchParams;
+		const limit = Math.max(1, Math.min(Number(q.get('limit') || '50'), 200));
+		const beforeTs = q.get('before_ts');
+		const beforeId = q.get('before_id');
+		const before = beforeTs != null && beforeId != null
+			? { ts: Date.parse(beforeTs), id: Number(beforeId) }
+			: null;
 		const now = Date.now();
-		const tasks = [...mockChatTasks.values()].filter((t) => t.roomToken === room.token).sort((a, b) => a.id - b.id);
+		// Keyset over (createdAt, id): newest-first window, optional `before` cut.
+		// The mock treats each task as one spine unit; the cursor is the oldest
+		// task in the page. (Faithful enough to exercise the client's scroll-up.)
+		const all = [...mockChatTasks.values()]
+			.filter((t) => t.roomToken === room.token)
+			.sort((a, b) => (a.createdAt - b.createdAt) || (a.id - b.id));
+		const older = before
+			? all.filter((t) => t.createdAt < before.ts || (t.createdAt === before.ts && t.id < before.id))
+			: all;
+		const page = older.slice(Math.max(0, older.length - limit));
+		const oldest = page[0];
+		const hasMore = oldest
+			? older.some((t) => t.createdAt < oldest.createdAt || (t.createdAt === oldest.createdAt && t.id < oldest.id))
+			: false;
+		const tasks = page;
 		const messages: any[] = [];
 		let active: any = null;
 		for (const t of tasks) {
@@ -318,7 +339,16 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 				active = { id: t.id, status: 'running' };
 			}
 		}
-		return { messages, active_task: active };
+		// active_tasks resume only on the first load; an older page carries none.
+		return {
+			messages,
+			active_task: before ? null : active,
+			active_tasks: before || !active ? [] : [active],
+			has_more: hasMore,
+			oldest_cursor: oldest
+				? { ts: new Date(oldest.createdAt).toISOString(), id: oldest.id }
+				: null,
+		};
 	}
 	if (msgMatch && method === 'POST') {
 		const room = mockChatRooms.find((r) => r.id === Number(msgMatch[1]));

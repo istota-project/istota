@@ -14,7 +14,7 @@
 	import { getMe, type ChatRoom } from '$lib/api';
 
 	const session = getChatSession();
-	const { rooms, activeRoomId, messages, status, loaded } = session;
+	const { rooms, activeRoomId, messages, status, loaded, hasMore, loadingOlder } = session;
 
 	// The room whose settings modal is open (null = closed).
 	let settingsRoom = $state<ChatRoom | null>(null);
@@ -108,9 +108,42 @@
 	// doesn't linger; remounting re-subscribes from persisted events.
 	onDestroy(() => session.teardown());
 
-	// Auto-scroll to the newest message whenever the list changes.
+	// Stick-to-bottom only when the user is already at the bottom (B1). A plain
+	// (non-reactive) latch sampled by the scroll handler *before* the store grows
+	// the DOM — recomputing it inside the post-update effect would read the
+	// already-grown height and always look "not at bottom". Starts true so the
+	// first load and new sends pin to the newest message.
+	let atBottom = true;
+	const BOTTOM_THRESHOLD = 64; // px slack counted as "at the bottom"
+	const TOP_THRESHOLD = 160; // px from the top that triggers an older-page load
+
+	function sampleAtBottom() {
+		if (!listEl) return;
+		atBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight <= BOTTOM_THRESHOLD;
+	}
+
+	async function onScroll() {
+		if (!listEl) return;
+		sampleAtBottom();
+		// Near the top with older history available → fetch the previous page and
+		// restore the scroll anchor so the viewport stays put (scroll-anchored
+		// prepend). The store's loadingOlder guard makes this re-entrancy-safe.
+		if (listEl.scrollTop <= TOP_THRESHOLD && $hasMore && !$loadingOlder) {
+			const prevHeight = listEl.scrollHeight;
+			const prevTop = listEl.scrollTop;
+			await session.loadOlder();
+			await tick();
+			if (listEl) listEl.scrollTop = listEl.scrollHeight - prevHeight + prevTop;
+		}
+	}
+
+	// Auto-scroll to the newest message when the list changes — but only if we
+	// were at the bottom before the change (a streamed delta, a new send, a
+	// notification append while reading the latest). A scroll-up prepend leaves
+	// atBottom false, so the anchor restore in onScroll owns the viewport instead.
 	$effect(() => {
 		$messages;
+		if (!atBottom) return;
 		tick().then(() => {
 			if (listEl) listEl.scrollTop = listEl.scrollHeight;
 		});
@@ -236,7 +269,7 @@
 	{/snippet}
 
 	<div class="chat-pane">
-		<div class="messages" bind:this={listEl} role="log" aria-live="polite">
+		<div class="messages" bind:this={listEl} role="log" aria-live="polite" onscroll={onScroll}>
 			{#if !$loaded}
 				<div class="chat-empty">Loading…</div>
 			{:else if $messages.length === 0}
@@ -246,6 +279,13 @@
 					<span class="hint">Configuration help, quick tasks, or one-off questions.</span>
 				</div>
 			{:else}
+				<!-- Older-history affordance (B3): a spinner while a page loads, a
+				     quiet marker once the start of the conversation is reached. -->
+				{#if $loadingOlder}
+					<div class="older-status" role="status">Loading older messages…</div>
+				{:else if !$hasMore}
+					<div class="older-status begin">Beginning of conversation</div>
+				{/if}
 				{#each $messages as message, i (message.cid)}
 					{#if message.createdAt && startsNewDay(i)}
 						<div class="day-divider" role="separator">
@@ -327,6 +367,20 @@
 	}
 	.chat-empty p { margin: 0.2rem 0 0; color: var(--text-muted); font-size: var(--text-base); }
 	.chat-empty .hint { font-size: var(--text-sm); }
+
+	/* Older-history affordance (ISSUE-131): a centered, low-key status row at the
+	   top of the transcript while a previous page loads or once the start is
+	   reached. */
+	.older-status {
+		text-align: center;
+		color: var(--text-dim);
+		font-size: var(--text-sm);
+		padding: 0.5rem 0.75rem 0.7rem;
+	}
+	.older-status.begin {
+		color: var(--text-dim);
+		opacity: 0.6;
+	}
 
 	/* Day divider (ISSUE-127): a centered date pill on a hairline rule, marking
 	   the boundary between calendar days in the transcript. */

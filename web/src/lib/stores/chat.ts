@@ -102,6 +102,11 @@ export interface ChatSession {
 	activeTaskId: Writable<number | null>;
 	loaded: Writable<boolean>;
 	error: Writable<string>;
+	// Older-history paging (ISSUE-131): whether an older page exists, an
+	// in-flight guard, and the fetch-and-prepend action the scroll handler calls.
+	hasMore: Writable<boolean>;
+	loadingOlder: Writable<boolean>;
+	loadOlder: () => Promise<void>;
 	init: () => Promise<void>;
 	selectRoom: (id: number) => Promise<void>;
 	selectRoomByToken: (token: string) => Promise<boolean>;
@@ -125,6 +130,17 @@ function createSession(): ChatSession {
 	const activeTaskId = writable<number | null>(null);
 	const loaded = writable(false);
 	const error = writable('');
+	// Older-history paging (ISSUE-131). `oldestCursor` is the keyset to fetch the
+	// next older page (raw stored created_at + id), `hasMore` whether one exists,
+	// `loadingOlder` a re-entrancy guard the scroll handler reads. Reset per room.
+	const hasMore = writable(false);
+	const loadingOlder = writable(false);
+	let oldestCursor: { ts: string; id: number } | null = null;
+	function resetPaging() {
+		oldestCursor = null;
+		hasMore.set(false);
+		loadingOlder.set(false);
+	}
 
 	let cidCounter = 0;
 	const nextCid = () => ++cidCounter;
@@ -332,6 +348,7 @@ function createSession(): ChatSession {
 		if (activeStream) { activeStream.stop(); activeStream = null; }
 		streamQueue = [];
 		stopNotifPolling();
+		resetPaging();
 		status.set('idle');
 		activeTaskId.set(null);
 	}
@@ -462,56 +479,67 @@ function createSession(): ChatSession {
 		}
 	}
 
+	const inFlight = (s?: string) => s === 'pending' || s === 'locked' || s === 'running';
+
+	// Build a render-ready ChatMessage from a server history row. Shared by the
+	// first load and the scroll-up older-page prepend so both reconstruct the
+	// segment list identically (ISSUE-122 / ISSUE-131).
+	function buildHistoryMessage(m: ChatHistory['messages'][number]): ChatMessage {
+		// Rebuild the ordered segment list from the persisted trace so a finished
+		// turn renders the same interleaved layout across reloads. Prefer the
+		// server's ordered `segments`; fall back to the flat `tools` descriptions +
+		// answer for an in-flight turn or an old payload. History has no per-tool
+		// success/timing, so chips render a neutral "done" state. An in-flight
+		// assistant turn starts empty — its resumed SSE rebuilds the segments live.
+		let segments: Segment[] = [];
+		if (m.role === 'assistant') {
+			if (m.segments && m.segments.length) {
+				segments = historySegments(m.segments);
+			} else if (!inFlight(m.status)) {
+				segments = historySegments([
+					...(m.tools ?? []).map((d) => ({ kind: 'tool', text: d })),
+					...(m.text ? [{ kind: 'text', text: m.text }] : []),
+				]);
+			}
+		}
+		return {
+			cid: nextCid(),
+			role: m.role,
+			text: m.text,
+			taskId: m.task_id,
+			status: m.status,
+			confirmation: !!m.confirmation,
+			segments,
+			streaming: m.role === 'assistant' && inFlight(m.status),
+			createdAt: m.created_at,
+			durationSeconds: typeof m.duration_seconds === 'number' ? m.duration_seconds : undefined,
+			model: typeof m.model === 'string' && m.model ? m.model : undefined,
+		};
+	}
+
 	async function loadHistory(roomId: number) {
 		const hist = await getRoomMessages(roomId);
 		// taskId → cid for assistant placeholders, so an in-flight task's stream
 		// binds to the message the server already laid out in order.
 		const cidByTask = new Map<number, number>();
-		const inFlight = (s?: string) => s === 'pending' || s === 'locked' || s === 'running';
 		// Reset the per-room dedup set, then record every notification already in
 		// the transcript so the idle poller only appends ones that arrive later.
 		seenNotifIds.clear();
 		const msgs: ChatMessage[] = hist.messages.map((m) => {
-			const cid = nextCid();
+			const cm = buildHistoryMessage(m);
 			if (m.role === 'assistant' && typeof m.task_id === 'number') {
-				cidByTask.set(m.task_id, cid);
+				cidByTask.set(m.task_id, cm.cid);
 			}
 			if (m.role === 'system' && typeof m.notif_id === 'number') {
 				seenNotifIds.add(m.notif_id);
 			}
-			// Rebuild the ordered segment list from the persisted trace so a
-			// finished turn renders the same interleaved layout across reloads
-			// (ISSUE-122). Prefer the server's ordered `segments`; fall back to the
-			// flat `tools` descriptions + answer for an in-flight turn or an old
-			// payload. History has no per-tool success/timing, so chips render a
-			// neutral "done" state. An in-flight assistant turn starts empty — its
-			// resumed SSE rebuilds the segments live.
-			let segments: Segment[] = [];
-			if (m.role === 'assistant') {
-				if (m.segments && m.segments.length) {
-					segments = historySegments(m.segments);
-				} else if (!inFlight(m.status)) {
-					segments = historySegments([
-						...(m.tools ?? []).map((d) => ({ kind: 'tool', text: d })),
-						...(m.text ? [{ kind: 'text', text: m.text }] : []),
-					]);
-				}
-			}
-			return {
-				cid,
-				role: m.role,
-				text: m.text,
-				taskId: m.task_id,
-				status: m.status,
-				confirmation: !!m.confirmation,
-				segments,
-				streaming: m.role === 'assistant' && inFlight(m.status),
-				createdAt: m.created_at,
-				durationSeconds: typeof m.duration_seconds === 'number' ? m.duration_seconds : undefined,
-				model: typeof m.model === 'string' && m.model ? m.model : undefined,
-			};
+			return cm;
 		});
 		messages.set(msgs);
+		// Seed paging state from the first-load response.
+		oldestCursor = hist.oldest_cursor ?? null;
+		hasMore.set(!!hist.has_more);
+		loadingOlder.set(false);
 		startNotifPolling(roomId);
 
 		// Resume the room's in-flight tasks in order: the first streams, the rest
@@ -531,6 +559,48 @@ function createSession(): ChatSession {
 				cid = ph.cid;
 			}
 			enqueueStream(at.id, cid);
+		}
+	}
+
+	// Fetch the next older page and prepend it (scroll-up paging). The scroll
+	// handler captures the scroll anchor before calling and restores it after the
+	// store updates, so the viewport stays put. Never touches active_tasks /
+	// enqueueStream — an older page carries no in-flight slot, and resuming one
+	// here would double-stream a task.
+	async function loadOlder() {
+		const roomId = get(activeRoomId);
+		if (roomId == null || !get(hasMore) || get(loadingOlder) || !oldestCursor) return;
+		loadingOlder.set(true);
+		try {
+			const hist = await getRoomMessages(roomId, { before: oldestCursor });
+			// Switched rooms mid-fetch — drop the page rather than prepend it into
+			// the wrong transcript.
+			if (get(activeRoomId) !== roomId) return;
+			// Dedup against what's already on screen by the same identity the server
+			// dedups on: (role, taskId) for task-backed turns, notif_id for system
+			// rows. The band tiling already prevents overlap; this guards a
+			// created_at tie straddling the page boundary.
+			const haveTask = new Set<string>();
+			for (const m of get(messages)) {
+				if (typeof m.taskId === 'number') haveTask.add(`${m.role}:${m.taskId}`);
+			}
+			const fresh = hist.messages.filter((m) => {
+				if (typeof m.notif_id === 'number') {
+					if (seenNotifIds.has(m.notif_id)) return false;
+					seenNotifIds.add(m.notif_id);
+					return true;
+				}
+				if (typeof m.task_id === 'number') return !haveTask.has(`${m.role}:${m.task_id}`);
+				return true;
+			});
+			const page = fresh.map(buildHistoryMessage);
+			if (page.length) messages.update((cur) => [...page, ...cur]);
+			oldestCursor = hist.oldest_cursor ?? null;
+			hasMore.set(!!hist.has_more);
+		} catch {
+			// Transient — leave the cursor untouched so the next scroll retries.
+		} finally {
+			loadingOlder.set(false);
 		}
 	}
 
@@ -749,6 +819,7 @@ function createSession(): ChatSession {
 
 	return {
 		rooms, activeRoomId, messages, status, activeTaskId, loaded, error,
+		hasMore, loadingOlder, loadOlder,
 		init, selectRoom, selectRoomByToken, newRoom, renameRoom, promoteRoom, archiveRoom,
 		deleteRoom, send, cancel, confirm, reject, teardown,
 	};
