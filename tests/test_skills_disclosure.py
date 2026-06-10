@@ -6,13 +6,26 @@ build_disclosure_index in istota.skills._loader.
 
 from pathlib import Path
 
+import pytest
+
 from istota.config import SkillsConfig
 from istota.skills._loader import (
     build_disclosure_index,
     partition_skills_for_disclosure,
+    reset_disclosure_warnings,
     resolve_disclosure_mode,
 )
 from istota.skills._types import SkillMeta
+
+
+@pytest.fixture(autouse=True)
+def _clear_disclosure_warnings():
+    """The always_eager-override warning is warn-once per process; clear the
+    cache around each test so an assertion on the warning is deterministic
+    regardless of test order under xdist."""
+    reset_disclosure_warnings()
+    yield
+    reset_disclosure_warnings()
 
 
 def _meta(name, *, cli=True, disclosure="", description="desc"):

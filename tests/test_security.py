@@ -117,6 +117,23 @@ class TestBuildCleanEnv:
             env = build_clean_env(config)
         assert "ISTOTA_ADMINS_FILE" not in env
 
+    def test_propagates_config_path(self):
+        """The loaded config file reaches subprocesses so a `-c /custom` daemon's
+        on-demand `skills` loader re-applies guards from the SAME config that
+        built the catalogue, not the default search order."""
+        from pathlib import Path
+        config = Config()
+        config.config_path = Path("/srv/app/zorg/config.toml")
+        with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
+            env = build_clean_env(config)
+        assert env["ISTOTA_CONFIG_PATH"] == "/srv/app/zorg/config.toml"
+
+    def test_omits_config_path_when_unset(self):
+        config = Config()  # config_path defaults to None
+        with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
+            env = build_clean_env(config)
+        assert "ISTOTA_CONFIG_PATH" not in env
+
 
 class TestBuildStrippedEnv:
     def test_strips_password_vars(self):

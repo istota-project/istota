@@ -8,7 +8,7 @@ import pytest
 from istota.config import Config, UserConfig
 
 
-def _write_skill(bundled, name, body, *, admin_only=False, experimental=False, cli=True):
+def _write_skill(bundled, name, body, *, admin_only=False, experimental=False, cli=True, dependencies=None, resource_types=None):
     d = bundled / name
     d.mkdir(parents=True, exist_ok=True)
     fm = ["---", f"name: {name}", "description: the {0} skill".format(name), f"cli: {'true' if cli else 'false'}"]
@@ -16,6 +16,10 @@ def _write_skill(bundled, name, body, *, admin_only=False, experimental=False, c
         fm.append("admin_only: true")
     if experimental:
         fm.append("experimental: true")
+    if dependencies:
+        fm.append("dependencies: [" + ", ".join(dependencies) + "]")
+    if resource_types:
+        fm.append("resource_types: [" + ", ".join(resource_types) + "]")
     fm.append("---")
     (d / "skill.md").write_text("\n".join(fm) + "\n" + body)
     return d
@@ -27,6 +31,8 @@ def ctx(tmp_path, monkeypatch):
     _write_skill(bundled, "developer", "# Developer\n\nUse {scripts_dir} for {user_id}'s scripts.\n")
     _write_skill(bundled, "secret_admin", "# Admin only\n", admin_only=True)
     _write_skill(bundled, "labs", "# Experimental\n", experimental=True)
+    _write_skill(bundled, "needy", "# Needs deps\n", dependencies=["nonexistent_pkg_xyz"])
+    _write_skill(bundled, "noteskill", "# Notes\n", resource_types=["notes_folder"])
 
     config = Config(
         db_path=tmp_path / "istota.db",
@@ -94,6 +100,29 @@ class TestShow:
         payload = json.loads(capsys.readouterr().out)
         assert "disabled" in payload["error"]
 
+    def test_show_missing_deps_refused(self, ctx, capsys):
+        # A skill whose Python deps aren't installed can't be selected; the
+        # on-demand loader must refuse it too, not serve a body for an
+        # unrunnable skill.
+        from istota.skills.skills import cmd_show
+
+        with pytest.raises(SystemExit) as e:
+            cmd_show(argparse.Namespace(name="needy"))
+        assert e.value.code == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "depend" in payload["error"].lower()
+
+    def test_show_resource_gated_skill_loadable_without_resource(self, ctx, capsys):
+        # notes/spec/todos are doc-only conventions with sensible defaults, so a
+        # resource_types skill is loadable even when the user declared no
+        # matching resource — there is deliberately no resource gate.
+        from istota.skills.skills import cmd_show
+
+        cmd_show(argparse.Namespace(name="noteskill"))
+        out = capsys.readouterr().out
+        assert "# Notes" in out
+
 
 class TestList:
     def test_list_excludes_restricted_skills(self, ctx, capsys):
@@ -107,6 +136,10 @@ class TestList:
         # admin_only + experimental skills are filtered for this non-admin caller.
         assert "secret_admin" not in names
         assert "labs" not in names
+        # missing-dependency skills are filtered too (mirrors the catalogue gate).
+        assert "needy" not in names
+        # resource_types doc skills are NOT resource-gated (sensible defaults).
+        assert "noteskill" in names
 
     def test_admin_sees_admin_only(self, ctx, capsys, monkeypatch):
         ctx.admin_users = {"alice"}

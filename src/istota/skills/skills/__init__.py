@@ -5,8 +5,10 @@ a skill (the body that progressive disclosure deferred out of the prompt).
 ``istota-skill skills list`` enumerates the skills the caller is allowed to
 load. Both re-apply the same guards the selection path enforces
 (``disabled_skills`` instance + per-user, ``admin_only`` vs the caller's admin
-status, and the ``skill_<name>`` experimental gate) so a deferred body can
-never be used to bypass them.
+status, the ``skill_<name>`` experimental gate, and unmet Python dependencies)
+so a deferred body can never be used to bypass them. There is intentionally no
+resource gate, matching ``eligible_skill_names`` (no bundled skill declares
+``resource_types`` now; the former holdouts were doc-only conventions).
 
 Invoked server-side by the skill proxy (or directly when the proxy is off), so
 ``load_config()`` and the admins file are reachable here.
@@ -64,6 +66,8 @@ def _load_context():
 
 def _guard_skill(name: str, ctx: dict) -> str | None:
     """Return an error message if the caller may not load ``name``, else None."""
+    from istota.skills._loader import _check_dependencies
+
     skill_index = ctx["skill_index"]
     meta = skill_index.get(name)
     if meta is None:
@@ -74,6 +78,11 @@ def _guard_skill(name: str, ctx: dict) -> str | None:
         return f"skill {name!r} is restricted to admins"
     if meta.experimental and f"skill_{name}" not in ctx["enabled_features"]:
         return f"skill {name!r} is not available"
+    if not _check_dependencies(meta):
+        return f"skill {name!r} is unavailable (missing dependencies)"
+    # No resource gate — matches eligible_skill_names. No bundled skill declares
+    # resource_types now; the former holdouts (notes/spec/todos) were doc-only
+    # conventions with sensible defaults.
     return None
 
 

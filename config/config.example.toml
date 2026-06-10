@@ -393,7 +393,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # [skills]
 # progressive_disclosure = true        # default ON: defer lazy skill bodies + widen the on-demand index to the full eligible catalogue (set false for legacy all-eager)
 # auto_lazy_threshold_chars = 0        # >0: a CLI skill over N chars defaults to lazy (0 = explicit `disclosure: lazy` frontmatter only)
-# always_eager = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]  # never deferred
+# always_eager = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory", "skills"]  # never deferred
 
 # [playbooks]                          # Learned playbooks (procedural memory) — off by default
 # enabled = false                      # master gate

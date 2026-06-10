@@ -480,10 +480,13 @@ class SkillsConfig:
     # 0 = only explicit frontmatter opts a skill into lazy.
     auto_lazy_threshold_chars: int = 0
     # Skills that are never deferred regardless of size or frontmatter — their
-    # rules must always be fully in context.
+    # rules must always be fully in context. ``skills`` is the on-demand loader
+    # itself: deferring its body would be circular (the model needs the loader's
+    # instructions to load any skill, including this one), so it is pinned eager.
     always_eager: list[str] = field(
         default_factory=lambda: [
             "sensitive_actions", "untrusted_input", "files", "scripts", "memory",
+            "skills",
         ]
     )
 
@@ -1203,7 +1206,7 @@ def load_config(config_path: Path | None = None) -> Config:
             always_eager=list(
                 sk.get(
                     "always_eager",
-                    ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"],
+                    ["sensitive_actions", "untrusted_input", "files", "scripts", "memory", "skills"],
                 )
             ),
         )

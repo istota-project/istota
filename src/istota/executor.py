@@ -524,6 +524,16 @@ def build_clean_env(config: Config) -> dict[str, str]:
     admins_file = os.environ.get("ISTOTA_ADMINS_FILE")
     if admins_file:
         env["ISTOTA_ADMINS_FILE"] = admins_file
+    # Propagate the config file actually loaded so subprocess load_config()
+    # calls — the on-demand `skills` loader re-applies disabled/admin/
+    # experimental guards from a fresh load_config(), and the feeds/money
+    # facades load config too — resolve the SAME file the daemon used rather
+    # than falling back to the default search order. Without this a daemon
+    # started with `-c /custom/path` would re-apply guards from a different
+    # config than the one that built the catalogue. Mirrors the scheduler's
+    # command/skill-task env builders.
+    if config.config_path is not None:
+        env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
     return env
 
 

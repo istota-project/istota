@@ -38,6 +38,9 @@ eligible_skill_names(skill_index, exclude, disabled_skills=None, is_admin=True,
                      enabled_experimental_features=frozenset()) -> list[str]
     # Shared membership gate for the disclosure catalogue: sorted names excluding
     # already-selected / always_include / disabled / admin-gated / experimental-gated / missing-deps.
+    # NO resource gate (unlike select_skills' Pass-1 keyword path). No bundled skill
+    # declares resource_types now; the former holdouts (notes/spec/todos) were doc-only
+    # conventions with defaults and dropped the field. Mechanism kept for future skills.
 compute_skills_fingerprint(skills_dir: Path) -> str               # SHA-256, first 12 hex chars
 load_skills_changelog(skills_dir: Path) -> str | None             # CHANGELOG.md
 load_skills(skills_dir: Path, skill_names: list[str], bot_name, bot_dir, skill_index=None, bundled_dir=None) -> str
@@ -46,6 +49,62 @@ resolve_disclosure_mode(name, meta, body_len, config_skills) -> "eager" | "lazy"
 partition_skills_for_disclosure(selected, skill_index, skills_dir, config_skills, bundled_dir=None) -> (eager, lazy)
 build_disclosure_index(lazy_names, skill_index) -> str            # "" when no lazy skills
 ```
+
+### Two axes: selection vs. disclosure
+
+Skill handling splits into two **orthogonal** questions. Conflating them is the
+usual source of confusion (why does a skill carry `always_include` *and*
+`disclosure`? why do some carry neither?).
+
+- **Axis 1 — selection** (`select_skills`, Pass 1): *is this skill in the
+  per-task set at all?* Driven by `always_include`, keyword / `source_types` /
+  `file_types` / `resource_types` matches, and sticky / companion pull-in.
+- **Axis 2 — disclosure** (`resolve_disclosure_mode`): *for a skill that IS
+  selected, do we inline its full body (**eager**) or emit a one-line menu entry
+  (**lazy**)?* Driven by frontmatter `disclosure`, the size threshold, and the
+  `always_eager` override.
+
+A skill carries a frontmatter field only to **deviate from the defaults**; both
+axes default sensibly, so most small task-specific skills (`todos`, `notes`,
+`markets`, …) carry **neither** field — "selected only on a keyword/source
+match, inlined when selected." You add `always_include` to force Axis 1
+(always select), or `disclosure: lazy` to force Axis 2 (defer the body).
+
+`always_include` and `always_eager` are **not** the same field and name
+*different* skill sets — they live on different axes:
+
+- `always_include` (Axis 1, per-skill frontmatter) = `files`,
+  `sensitive_actions`, `memory`, `scripts`, `memory_search`, `kv`, `skills` —
+  "always **select** me."
+- `always_eager` (Axis 2, a `SkillsConfig` name list) = `sensitive_actions`,
+  `untrusted_input`, `files`, `scripts`, `memory`, `skills` — "if selected,
+  **force eager** (safety/behavioral rules — and the on-demand loader's own
+  instructions — must be in context)."
+
+The sets differ deliberately: `untrusted_input` is `always_eager` but **not**
+`always_include` (it loads only when a companion pulls it in for untrusted
+content, but must be eager when it does); `memory_search` / `kv` are
+`always_include` but **not** `always_eager` (always loaded, fine at
+default-eager without pinning). `skills` is in **both**: it's always selected
+*and* pinned eager — deferring the loader's own body would be circular (the
+model needs the loader instructions to load any skill, itself included). It was
+eager anyway via the `always_include` default-eager path; the pin makes that
+immune to a stray `disclosure: lazy`.
+
+**Consequence of the widened catalogue (below): selecting a lazy skill is a
+prompt-level no-op.** Because the on-demand index is widened to the *full
+eligible catalogue*, a lazy skill that keyword-matched renders the **identical**
+one-line menu entry as a skill that was never selected (`build_disclosure_index`
+treats `lazy_selected` and the rest of the catalogue the same). So for a lazy
+skill, Axis-1 keyword selection does **not** change what the model sees in the
+prompt. The `triggers` lists on the companionless lazy skills (`developer`,
+`health`, `money`, `location`) are therefore inert for prompt assembly — they're
+kept for documentation/observability, not routing. Selecting a lazy skill still
+has two live effects: it fires that skill's `companion_skills` (notably the
+`untrusted_input` safety skill on the seven ingest skills — the reason
+keyword-selecting a lazy *ingest* skill matters), and it seeds
+sticky-skill persistence for follow-up tasks. The only Axis-1 selection that
+changes the *body* set is selection of an **eager** skill.
 
 ### Progressive disclosure (Part A)
 
@@ -58,15 +117,16 @@ via `istota-skill skills show <name>`). `SkillMeta.disclosure`
 `resolve_disclosure_mode` order: frontmatter `disclosure` wins → else the size
 threshold (`auto_lazy_threshold_chars`, CLI skills only) → else eager. One safety
 carve-out forces eager: the name is in `skills.always_eager` (default
-`sensitive_actions`, `untrusted_input`, `files`, `scripts`, `memory`). The no-CLI
+`sensitive_actions`, `untrusted_input`, `files`, `scripts`, `memory`, `skills`). The no-CLI
 carve-out was **dropped** (so the doc-only `developer` skill can be lazy), but the
 size threshold still requires `cli: true`, so a no-CLI skill is deferred only via
 explicit frontmatter. `partition_skills_for_disclosure` reads each skill's body
 length (defaults to **eager** on a read failure — safe, content present) and
 splits the selection; the executor calls `load_skills(eager)` +
 `build_disclosure_index(...)` and passes the index to `build_prompt` as
-`skills_index`. `developer`, `health`, `money`, `location`, `browse`, `calendar`
-ship marked `disclosure: lazy`.
+`skills_index`. `developer`, `health`, `money`, `location`, `browse`, `calendar`,
+`spec` ship marked `disclosure: lazy` (`spec` because its body is ~7KB and the
+workflow is used rarely — kept a one-line menu entry, pulled on demand).
 
 **Widened catalogue index (replaces Pass 2).** The on-demand index is not just
 the selected-lazy skills — the executor widens it to the *full eligible
@@ -84,11 +144,15 @@ all-eager prompt).
 The on-demand loader is the `skills` core skill (`always_include`, `cli: true`):
 `istota-skill skills show <name>` renders a skill's full body (same frontmatter
 strip + `{BOT_NAME}`/`{BOT_DIR}`/`{scripts_dir}`/`{user_id}` substitution as
-`load_skills`), re-applying the disabled / `admin_only` / experimental guards from
-the loaded config + `ISTOTA_USER_ID` so a deferred body can't bypass them; unknown
-/ disallowed → `{"status":"error",...}` + exit 1. `istota-skill skills list`
-enumerates the loadable (guard-filtered) skills. It runs server-side via the skill
-proxy (unsandboxed), so `load_config()` and the admins file are reachable.
+`load_skills`), re-applying the disabled / `admin_only` / experimental /
+missing-deps guards from the loaded config + `ISTOTA_USER_ID` so a deferred body
+can't bypass them; unknown / disallowed → `{"status":"error",...}` + exit 1.
+`istota-skill skills list` enumerates the loadable (guard-filtered) skills. (No
+resource gate — the `resource_types` skills are doc-only conventions with
+defaults, matching the catalogue. The task-local `exclude_skills` set isn't
+knowable in the subprocess either, but devbox's real boundary is the
+docker-socket bwrap gate, not catalogue visibility.) It runs server-side via the
+skill proxy (unsandboxed), so `load_config()` and the admins file are reachable.
 
 ### Skill Selection
 
@@ -158,9 +222,9 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `kv` | yes | — | — | — |
 | `skills` | yes | — | — | — |
 | `devbox` | — | devbox, install package, pip install, apt install, dig, nslookup, traceroute, whois, ping, nmap, ... | — | — |
-| `email` | — | email, mail, send, inbox, reply, message | email_folder | email |
-| `calendar` | — | calendar, event, meeting, schedule, appointment, caldav | calendar | briefing |
-| `todos` | — | todo, task, checklist, reminder, done, complete | todo_file | — |
+| `email` | — | email, mail, send, inbox, reply, message | — | email |
+| `calendar` | — | calendar, event, meeting, schedule, appointment, caldav | — | briefing |
+| `todos` | — | todo, task, checklist, reminder, done, complete | — | — |
 | `tasks` | — | subtask, queue, background, later | — | — | admin_only |
 | `markets` | — | market, stock, stocks, ticker, index, indices, futures, ... | — | briefing |
 | `reminders` | — | remind, reminder, remind me, alert me, notify me, don't forget, ... | — | — |
@@ -172,7 +236,7 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `heartbeat` | — | heartbeat, monitoring, health check, alert, ... | — | — |
 | `transcribe` | — | transcribe, ocr, screenshot, scan, image, ... | — | — |
 | `whisper` | — | transcribe, whisper, audio, voice, speech, dictation, ... | — | — |
-| `notes` | — | note, save, write, markdown | notes_folder | — |
+| `notes` | — | note, save, write, markdown | — | — |
 | `developer` | — | git, gitlab, repo, repository, commit, branch, MR, ... | — | — |
 | `location` | — | location, gps, where, place, tracking, ... | — | — |
 | `bookmarks` | — | bookmark, karakeep, save, read later, ... | — | — |
@@ -186,6 +250,8 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 Note: `money` is the sole accounting skill. It runs in-process via the vendored `money` package (no subprocess, no HTTP).
 
 **Module-shaped skills (`feeds`, `money`, `bookmarks`, `location`)** dropped their `resource_types` fields with Phase 1 of the modules / connected services refactor. Selection is keyword-only — the credential / module gate enforced by the proxy + the in-process loader (`feeds.resolve_for_user`, `money.resolve_for_user`) decides whether the skill can actually do anything. The bookmarks `env` block reads both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` from the encrypted `secrets` table via the new `from: "secret"` env-spec source.
+
+**No bundled skill declares `resource_types` anymore.** The last holdouts — the doc-only convention skills `notes`, `spec`, `todos` — dropped the field too: they're pure instruction docs with sensible defaults (`notes` writes to `{BOT_DIR}/notes/` when no `notes_folder` is declared; `spec`/`todos` similar), so gating their *selection* on a declared resource wrongly hid useful conventions from users on the default folder. They're now plain keyword skills. `spec` is `disclosure: lazy` (its ~7KB body is a catalogue entry, pulled on demand) while `notes`/`todos` are small enough to inline eager on a keyword hit. The `resource_types` selection gate in `select_skills` (Pass-1 keyword path) remains as a mechanism for any future resource-backed skill, but is currently exercised by none.
 
 `untrusted_input` is a doc-only companion skill — no triggers, no source_types, never selected directly. It loads via `companion_skills` declarations on the seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`) so its rules ride along whenever a task is processing content from outside the trust boundary. Paired with `sensitive_actions`: outbound rules in that one, inbound-reading rules here, per-action authorization principle stated in both.
 
