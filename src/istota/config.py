@@ -130,7 +130,7 @@ class SchedulerConfig:
     # lower = more answers animate but longer narration can leak. Watch the
     # `stream_gate:` logs to tune. 0 disables the gate (legacy: deltas stream
     # immediately, narration can leak).
-    stream_text_gate_chars: int = 200
+    stream_text_gate_chars: int = 280
     push_notification_threshold_seconds: int = 30  # min task duration before push fires
     push_notification_sources: list[str] = field(default_factory=list)  # source_types that trigger a push; empty = ntfy opt-in only (never a default surface)
     task_timeout_minutes: int = 30  # kill task execution after this
@@ -1115,7 +1115,7 @@ def load_config(config_path: Path | None = None) -> Config:
             progress_show_tool_use=sched.get("progress_show_tool_use", True),
             progress_show_text=sched.get("progress_show_text", False),
             event_log_enabled=sched.get("event_log_enabled", True),
-            stream_text_gate_chars=sched.get("stream_text_gate_chars", 200),
+            stream_text_gate_chars=sched.get("stream_text_gate_chars", 280),
             push_notification_threshold_seconds=sched.get("push_notification_threshold_seconds", 30),
             push_notification_sources=sched.get("push_notification_sources", []),
             task_timeout_minutes=sched.get("task_timeout_minutes", 30),
