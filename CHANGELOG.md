@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Talk-origin rooms in the web chat sidebar are now marked with a small cloud icon on the left of the name instead of a trailing "Talk" chip, so long room names get the full row width.
 - A Nextcloud Talk room you delete (or remove the bot from) no longer lingers in the web chat room list. The bot now reconciles its room list against Nextcloud each poll and hides rooms it's no longer part of.
 - Closed a path where the bot could silently lose earlier conversation history. The unified history reader now falls back to its complete source whenever any past turn isn't yet mirrored into the new message store, instead of switching over as soon as the latest turn was. Relatedly, the one-time room-sync migration no longer marks itself done if a step fails partway, so it retries cleanly on the next start rather than stranding a partial copy.
+- A task that was mid-response when the scheduler restarted no longer hangs as an uncancellable spinner in web chat. On startup the scheduler now reclaims tasks the previous run left in progress right away — retrying them, or cleanly cancelling and closing the ones you'd already asked to stop — instead of waiting out the several-minute stale-worker timeout.
+- Scheduled and recurring jobs that post to a room (a location alert, a daily sync) now also appear in that room's web chat view, not just in Talk, so a room whose only recent activity was scheduled output no longer looks frozen at its last conversation. A one-time cleanup also clears noise an earlier history backfill left in some web rooms — literal "NO_ACTION" lines and empty placeholder prompts.
+- The hover metadata under a web chat message now lines up with the message's timestamp instead of floating above it.
 
 ## [0.21.0] - 2026-06-09
 
