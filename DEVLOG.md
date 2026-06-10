@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-10: Startup orphan recovery for tasks interrupted by a scheduler restart
+
+Reproduced from prod: a web-chat task streaming a response when the scheduler restarted was left `running` with a dead worker — a hung spinner in the UI, with the cancel button doing nothing (`cancel_requested=1` but no worker to honor it). It self-healed only after `worker_stuck_minutes` (10) of heartbeat silence — the time-based reclaim in `run_cleanup_checks` had to *infer* the worker was dead.
+
+But a scheduler restart is deterministic, not a guess: the daemon holds a singleton flock, so the moment a fresh instance boots, every `running`/`locked` row is definitionally an orphan of the dead instance. `recover_orphaned_tasks_on_startup` (called once under the flock, before any worker spawns) reclaims them immediately instead of waiting out the window. Each orphan resolves three ways: `cancel_requested` → straight to `cancelled` (no re-running the whole prompt just to cancel on its first event); retries-exhausted / too-old / inline-only (REPL — the daemon never claims it, so releasing would strand it) → `failed`; otherwise → released to `pending` with `attempt_count` bumped and liveness cleared. For the cancelled/failed cases it emits a terminal event frame (seq resumed above the dead attempt's partial deltas, no subscribers — the SSE client polls the table) so a watching web client gets immediate closure rather than a spinner; released orphans emit nothing, since the re-run streams its own `task_started`.
+
+`worker_stuck_minutes` keeps its job for the residual worker-died-but-daemon-survived case (rare — workers are threads with a broad `except`), so it can stay conservative without the restart case being what hurts.
+
+Tests: `TestRecoverOrphanedTasks` (db: released/cancelled/failed/inline/too-old/exhausted/locked + pending-confirmation untouched) and `TestRecoverOrphanedTasksOnStartup` (scheduler: terminal-frame emission, seq continuity after partial deltas, released-emits-nothing). Full db + scheduler suites green (498).
+
+**Files modified:**
+- `src/istota/db.py` — `recover_orphaned_tasks`
+- `src/istota/scheduler.py` — `recover_orphaned_tasks_on_startup` + `run_daemon` wiring
+- `tests/test_db.py`, `tests/test_scheduler.py`
+
 ## 2026-06-09: Unified Talk / web-chat room sync (all 7 stages)
 
 Closed the gap between Istota's two interactive surfaces. Talk rooms and web-chat rooms used to be two disjoint namespaces with two disjoint histories — a conversation started in Talk couldn't be picked up in web and vice versa. They now share one surface-independent room model, so any conversation can be continued on either surface with full cross-surface context, one history per room, and one `CHANNEL.md`. Implemented in a worktree, stage by stage with TDD, fast-forwarded onto main after each stage.

@@ -10,6 +10,7 @@ def run_daemon(config: Config) -> None
 2. Set SIGTERM/SIGINT handlers
 3. Hydrate user configs from Nextcloud API
 4. Ensure user directories
+4a. `recover_orphaned_tasks_on_startup(config)` — reclaim tasks left `running`/`locked` by a dead prior instance (see "Startup orphan recovery" below)
 4b. Start the persistent `AsyncRuntime` (`async_runtime.get_async_runtime()`) — see below
 5. Start Talk polling in daemon thread
 6. Create `WorkerPool`
@@ -334,7 +335,7 @@ get_users_with_pending_background_tasks(conn) -> list[str]
 Steps 3–5 (and the standalone `fail_stuck_locked_running_tasks()` maintenance
 pass) share `_STUCK_RUNNING_PREDICATE` to decide "stuck" by **worker liveness**,
 not raw runtime (ISSUE-112). A `running` task is stuck when its `last_heartbeat`
-has been silent longer than `worker_stuck_minutes` (default 5); when no heartbeat
+has been silent longer than `worker_stuck_minutes` (default 10); when no heartbeat
 was ever recorded it falls back to `started_at` older than `task_timeout_minutes`
 + grace (`scheduler._stuck_running_minutes`). The running worker pings
 `last_heartbeat` every `worker_heartbeat_seconds` via the `_task_heartbeat`
@@ -342,6 +343,29 @@ context manager (`db.touch_task_heartbeat`), so a slow-but-alive worker — nota
 the in-process native brain, which has no killable PID — is never reclaimed,
 while a crashed worker is recovered in minutes. (Distinct from the health-check
 heartbeat system in `heartbeat.py`.)
+
+### Startup orphan recovery (`recover_orphaned_tasks_on_startup`)
+The time-based stuck-reclaim *infers* a dead worker from heartbeat silence — fine
+for the rare worker-died-but-daemon-survived case, but slow (≤ `worker_stuck_minutes`)
+for the common one: a **scheduler restart** that kills a worker mid-task and leaves
+its row `running`. A restart is deterministic, not a guess — the daemon holds a
+singleton flock, so the instant a fresh instance boots, every `running`/`locked`
+row is definitionally an orphan of the dead instance. `run_daemon` calls
+`recover_orphaned_tasks_on_startup(config)` once under the flock, **before any
+worker spawns** (step 4a), so there's no live owner to race. `db.recover_orphaned_tasks`
+resolves each orphan in priority order: `cancel_requested` → `cancelled` (no
+re-run); retries-exhausted / older than `max_retry_age_minutes` / inline-only
+source (`INLINE_ONLY_SOURCE_TYPES` — REPL is never daemon-claimed, so releasing
+would strand it `pending`) → `failed`; otherwise → `pending` with `attempt_count`
+bumped and every liveness column cleared (so the stuck predicate can't re-fire /
+a second claimer can't re-steal). For the cancelled/failed cases the scheduler
+emits a terminal event frame via a subscriber-less `EventWriter` (seq resumed
+above the dead attempt's partial deltas) so a watching web/SSE client gets
+immediate closure instead of a hung spinner; released orphans emit nothing — the
+re-run streams its own `task_started` and the client resumes from its cursor (the
+retry-continuity path). `attempt_count` is the same supersession token the
+`process_one_task` ownership guard keys on, so the two compose. `pending_confirmation`
+is left untouched (legitimately awaiting the user).
 
 ### Conversation & Context
 ```python
