@@ -1708,6 +1708,13 @@ def _chat_room_messages(username: str, token: str, limit: int) -> dict:
             "role": n.role, "text": text, "notif_id": n.id,
             "created_at": n.created_at,
         })
+    # Normalize every turn's created_at to explicit ISO 8601 UTC. The stored
+    # values are naive UTC (SQLite datetime('now') / strftime, and the Talk-cache
+    # backfill), which the browser's new Date() parses as *local* time — the
+    # imported-from-Talk turns then render hours ahead. Doing it before the sort
+    # also keeps the sort key in one uniform format.
+    for m in messages:
+        m["created_at"] = _iso_utc(m.get("created_at"))
     # Order chronologically, but break created_at ties by (task_id, role) so a
     # turn's user→assistant pair stays adjacent even when several rapid in-flight
     # sends share a timestamp (the store and tasks contribute the two halves
