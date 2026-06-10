@@ -24,6 +24,18 @@ Reproduced against a real production task's `execution_trace` (a multi-step note
 - `web/src/lib/stores/segments.test.ts`, `web/src/lib/components/chat/Message.svelte.test.ts`, `tests/test_executor_streaming.py` — reducer/DOM/executor coverage
 - `AGENTS.md`, `.claude/rules/scheduler.md` — gate-as-substance-classifier + web-chat body render model
 
+**Follow-ups (same day): review, threshold bump, spacing, mock data.**
+
+- **Mulder + Scully review.** A two-agent pass (skeptical bug-hunter + spec-conformance verifier) confirmed the mechanism is sound end-to-end and falsified the new tests (reverting either half breaks them). One MEDIUM was a real regression I'd introduced: `renderGroups` always emitted the trailing text as a prose group, so an empty/whitespace answer rendered a blank padded `.body` div (the old `{#if hasAnswerText}` guard had suppressed that, and `isRenderable`'s empty-settled suppression had gone dead on the body path). Fixed by skipping whitespace-only blocks in `renderGroups`, with a test. A LOW (the frontend `SUBSTANTIAL_TEXT_CHARS` and backend `stream_text_gate_chars` are independent constants that must stay equal) got a strengthened coupling comment.
+- **Threshold bumped 200 → 280** at the user's request, moving *both* coupled constants together plus every mirror (`config.py` default + parse fallback, `SUBSTANTIAL_TEXT_CHARS`, Ansible default, `config.example.toml`, AGENTS.md / scheduler.md, and the two executor tests whose fixtures hardcoded 200-relative block sizes). The frontend `long()` test helper and the Message DOM test scale off the constant, so they adapted automatically.
+- **Activity-chip vertical spacing.** All chip spacing now lives on a neighbour-aware `.chip-slot` wrapper in `Message.svelte` (and `ActivityTrace`'s own margin is zeroed, single source of truth): a chip gets a paragraph-sized gap (`0.85rem`) on whichever side touches a prose block, but stays flush when it's the first group — so a tool-first turn's chip sits directly under the meta like a no-tool text answer. Chips never abut (tool runs coalesce), so a chip's neighbours are always prose or the message edge. Also capped the *expanded* activity box at `max-width: 900px` to align with `.body`.
+- **Mock multi-round turns.** Seeded two finished multi-round assistant turns in the dev mock (`vite-mock-api.ts`) that produce chip → substantial intermediate prose → chip → final answer, plus a `multiround` keyword that streams the same shape live, so the new layout is previewable on the `VITE_MOCK_API=1` dev server without a backend. Verified in-browser: both turns render the intended interleaved layout and the expanded chip caps at the body width.
+
+**Additional files modified (follow-ups):**
+- `src/istota/config.py`, `deploy/ansible/defaults/main.yml`, `config/config.example.toml` — gate default 200 → 280
+- `web/src/lib/components/chat/ActivityTrace.svelte` — zero own margin; expanded box `max-width: 900px`
+- `web/vite-mock-api.ts` — `mockMultiRoundTaskEvents` + two seeded multi-round turns + `multiround` live trigger
+
 ## 2026-06-10: Web chat unread room indicators — bold names + count chip in the sidebar
 
 The web chat sidebar gave no signal that a room had new content the user hadn't seen — a bot-delivered alert, a scheduled post, or a mirrored Talk turn could land in a room you weren't looking at with nothing to draw your eye. Added the standard unread affordance: a room with unread messages renders its name bold and shows a count chip (capped `99+`) to the right of the name; opening the room clears it.
