@@ -156,6 +156,72 @@ export function isRenderable(seg: Segment): boolean {
 	return true;
 }
 
+// ---- Body layout (render groups) --------------------------------------------
+
+/** A non-trailing text block is kept in the rendered body iff its trimmed length
+ * crosses this bar — i.e. it is substantive content the model wrote and then
+ * acted on (an analysis before an edit), not throwaway lead-in narration ("Let
+ * me check…"). Mirrors the backend's `stream_text_gate_chars` (default 200): on
+ * a stream surface the executor only ever *streams* a text run once it crosses
+ * that gate, so a sub-threshold intermediate block can only arrive via the
+ * history (`execution_trace`) path — and the same bar drops it there, keeping
+ * the live and reloaded layouts identical. The trailing answer is exempt: it
+ * always renders, however short. */
+export const SUBSTANTIAL_TEXT_CHARS = 200;
+
+/** One renderable unit of an assistant turn's body, in true segment order. */
+export type RenderGroup =
+	| { kind: 'prose'; id: string; text: string }
+	| { kind: 'activity'; id: string; steps: Segment[] };
+
+/** Reduce an assistant turn's ordered segments into the body's render groups —
+ * substantial prose blocks and activity chips, interleaved in the model's true
+ * block order.
+ *
+ * A `text` segment renders as a `prose` group iff it is substantial (trimmed
+ * length ≥ `threshold`) OR it is the final text segment (the canonical answer
+ * always renders). Shorter intermediate text — lead-in narration — is dropped.
+ * `thinking` never reaches the body (it folds into the activity cue). Runs of
+ * consecutive `tool` segments (including any short narration skipped between
+ * them) coalesce into one `activity` group, so the chip count matches the
+ * model's actual work phases.
+ *
+ * Pure — same input → same output — so it drives both the live stream and a
+ * reloaded-from-history turn identically. */
+export function renderGroups(m: ChatMessage, threshold = SUBSTANTIAL_TEXT_CHARS): RenderGroup[] {
+	let lastTextIdx = -1;
+	for (let i = m.segments.length - 1; i >= 0; i--) {
+		if (m.segments[i].kind === 'text') {
+			lastTextIdx = i;
+			break;
+		}
+	}
+	const groups: RenderGroup[] = [];
+	let toolRun: Segment[] = [];
+	const flushTools = (): void => {
+		if (toolRun.length) {
+			groups.push({ kind: 'activity', id: `act-${toolRun[0].id}`, steps: toolRun });
+			toolRun = [];
+		}
+	};
+	m.segments.forEach((s, i) => {
+		if (s.kind === 'tool') {
+			toolRun.push(s);
+			return;
+		}
+		if (s.kind === 'thinking') return; // reasoning never renders in the body
+		const substantial = s.text.trim().length >= threshold;
+		if (i === lastTextIdx || substantial) {
+			flushTools();
+			groups.push({ kind: 'prose', id: s.id, text: s.text });
+		}
+		// else: short intermediate narration — drop it, letting the tool run on
+		// either side coalesce into one chip.
+	});
+	flushTools();
+	return groups;
+}
+
 // ---- Reducer ----------------------------------------------------------------
 
 /** Apply one `task_event` to an assistant message, mutating it in place.
