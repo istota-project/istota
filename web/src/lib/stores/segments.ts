@@ -161,7 +161,7 @@ export function isRenderable(seg: Segment): boolean {
 /** A non-trailing text block is kept in the rendered body iff its trimmed length
  * crosses this bar — i.e. it is substantive content the model wrote and then
  * acted on (an analysis before an edit), not throwaway lead-in narration ("Let
- * me check…"). Mirrors the backend's `stream_text_gate_chars` (default 200): on
+ * me check…"). Mirrors the backend's `stream_text_gate_chars` (default 280): on
  * a stream surface the executor only ever *streams* a text run once it crosses
  * that gate, so a sub-threshold intermediate block can only arrive via the
  * history (`execution_trace`) path — and the same bar drops it there, keeping
@@ -169,11 +169,11 @@ export function isRenderable(seg: Segment): boolean {
  * always renders, however short.
  *
  * MUST stay equal to the backend `scheduler.stream_text_gate_chars` default
- * (`config.py`, 200). They are independent constants; if that knob is tuned away
- * from 200 in production, this value has to move with it, or the live stream
+ * (`config.py`, 280). They are independent constants; if that knob is tuned away
+ * from 280 in production, this value has to move with it, or the live stream
  * (gated server-side) and a reloaded-from-trace turn (gated here) would classify
  * a borderline block differently. */
-export const SUBSTANTIAL_TEXT_CHARS = 200;
+export const SUBSTANTIAL_TEXT_CHARS = 280;
 
 /** One renderable unit of an assistant turn's body, in true segment order. */
 export type RenderGroup =

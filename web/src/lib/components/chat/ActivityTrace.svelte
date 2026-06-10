@@ -71,7 +71,9 @@
 		width: fit-content;
 		min-width: 0;
 	}
-	.activity.open { width: 100%; }
+	/* Expanded: span the row but cap at the same 900px as `.body` in Message,
+	   so the open chain aligns with the answer content width. */
+	.activity.open { width: 100%; max-width: 900px; }
 
 	/* Active sweep while the turn is live (no spinning icon). */
 	.activity.active {

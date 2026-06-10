@@ -984,12 +984,12 @@ class TestStreamSurfaceCoalescing:
         assert joined == "All set."
 
     def test_over_gate_text_unlocks_and_streams(self, tmp_path):
-        """A text run longer than the gate (200) unlocks and streams — the gate
+        """A text run longer than the gate (280) unlocks and streams — the gate
         only suppresses short, tool-followed narration, never a real answer."""
         config = _make_config(tmp_path)
         task = _make_task(source_type="web")
 
-        answer = "x" * 250  # comfortably over the 200-char gate
+        answer = "x" * 360  # comfortably over the 280-char gate
         stream_lines = [
             json.dumps({
                 "type": "assistant",
@@ -1017,10 +1017,10 @@ class TestStreamSurfaceCoalescing:
         config.scheduler.progress_show_tool_use = True
         task = _make_task(source_type="web")
 
-        # 250 chars in 10-char tokens: unlocks at 200 (flush), then 50 chars stay
+        # 320 chars in 10-char tokens: unlocks at 280 (flush), then 40 chars stay
         # buffered (< the 120 flush window) until the tool boundary.
-        block = "".join(f"{i:09d}." for i in range(25))  # 25 * 10 = 250 chars
-        assert len(block) == 250
+        block = "".join(f"{i:09d}." for i in range(32))  # 32 * 10 = 320 chars
+        assert len(block) == 320
         tokens = [block[i:i + 10] for i in range(0, len(block), 10)]
 
         stream_lines = (
@@ -1063,7 +1063,7 @@ class TestStreamSurfaceCoalescing:
         # not dropped) and streamed exactly once (the trailing whole-block
         # TextEvent was deduped).
         assert block in joined
-        assert joined.count("000000024.") == 1  # the tail token, exactly once
+        assert joined.count("000000031.") == 1  # the tail token, exactly once
         # The short final answer ("Done.", after the last tool) never crosses the
         # gate and rides the canonical result event rather than the delta channel
         # (where it would be deduped against the already-streamed deltas). So the
