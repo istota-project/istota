@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { page } from '$app/state';
-	import { Plus, MessageSquare, Cloud } from 'lucide-svelte';
+	import { Plus, MessageSquare, Cloud, ChevronDown } from 'lucide-svelte';
 	import AppShell from '$lib/components/ui/AppShell.svelte';
 	import ShellHeader from '$lib/components/ui/ShellHeader.svelte';
 	import Sidebar from '$lib/components/ui/Sidebar.svelte';
@@ -117,9 +117,22 @@
 	const BOTTOM_THRESHOLD = 64; // px slack counted as "at the bottom"
 	const TOP_THRESHOLD = 160; // px from the top that triggers an older-page load
 
+	// Reactive mirror of `atBottom` for the jump-to-latest affordance. Kept
+	// separate from the (non-reactive) `atBottom` latch so reading it never makes
+	// the bottom-pin effect re-run on scroll.
+	let showJumpToLatest = $state(false);
+
 	function sampleAtBottom() {
 		if (!listEl) return;
 		atBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight <= BOTTOM_THRESHOLD;
+		showJumpToLatest = !atBottom;
+	}
+
+	function jumpToLatest() {
+		if (!listEl) return;
+		listEl.scrollTo({ top: listEl.scrollHeight, behavior: 'smooth' });
+		atBottom = true;
+		showJumpToLatest = false;
 	}
 
 	async function onScroll() {
@@ -269,6 +282,7 @@
 	{/snippet}
 
 	<div class="chat-pane">
+		<div class="messages-wrap">
 		<div class="messages" bind:this={listEl} role="log" aria-live="polite" onscroll={onScroll}>
 			{#if !$loaded}
 				<div class="chat-empty">Loading…</div>
@@ -302,6 +316,13 @@
 					/>
 				{/each}
 			{/if}
+		</div>
+		<!-- Jump-to-latest: shown only when scrolled up off the bottom. -->
+		{#if showJumpToLatest}
+			<button class="jump-latest" onclick={jumpToLatest} aria-label="Scroll to latest message" title="Scroll to latest">
+				<ChevronDown size={20} />
+			</button>
+		{/if}
 		</div>
 		<Composer
 			onSend={(t, atts) => session.send(t, atts)}
@@ -343,6 +364,15 @@
 		--text-primary: #2a2a2e;
 		background: #ffffff;
 	}
+	/* Wrapper anchors the floating jump-to-latest button to the bottom-right of
+	   the scroll area, above the composer, independent of composer height. */
+	.messages-wrap {
+		position: relative;
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+	}
 	.messages {
 		flex: 1;
 		min-height: 0;
@@ -354,6 +384,30 @@
 	}
 	.messages::-webkit-scrollbar { width: 4px; }
 	.messages::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
+
+	/* Jump-to-latest FAB — appears bottom-right when the user scrolls up off the
+	   newest message; click smooth-scrolls back to the bottom. */
+	.jump-latest {
+		position: absolute;
+		right: 1rem;
+		bottom: 0.75rem;
+		z-index: 5;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 2.25rem;
+		height: 2.25rem;
+		border-radius: 999px;
+		border: 1px solid var(--border-default);
+		background: var(--surface-overlay, var(--surface-card));
+		color: var(--text-primary);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+		cursor: pointer;
+		opacity: 0.9;
+		transition: opacity 0.12s ease, transform 0.12s ease;
+	}
+	.jump-latest:hover { opacity: 1; transform: translateY(-1px); }
+	.jump-latest:active { transform: translateY(0); }
 
 	.chat-empty {
 		height: 100%;
