@@ -47,7 +47,41 @@ compute_skills_fingerprint(skills_dir: Path) -> str               # SHA-256, fir
 load_skills_changelog(skills_dir: Path) -> str | None             # CHANGELOG.md
 load_skills(skills_dir: Path, skill_names: list[str], bot_name, bot_dir, skill_index=None, bundled_dir=None) -> str
     # Concatenate skill docs (strips frontmatter)
+resolve_disclosure_mode(name, meta, body_len, config_skills) -> "eager" | "lazy"
+partition_skills_for_disclosure(selected, skill_index, skills_dir, config_skills, bundled_dir=None) -> (eager, lazy)
+build_disclosure_index(lazy_names, skill_index) -> str            # "" when no lazy skills
 ```
+
+### Progressive disclosure (Part A)
+
+When `skills.progressive_disclosure` is on, a *selected* skill is rendered
+**eager** (full body in `skills_doc`, unchanged) or **lazy** (a one-line entry in
+the "Available skills (load on demand)" prompt section; the model pulls the body
+via `istota-skill skills show <name>`). Selection (Pass 1 + Pass 2) is untouched
+— this only changes how a selected skill is *rendered*. `SkillMeta.disclosure`
+(`"" | "eager" | "lazy"`) is parsed from frontmatter.
+
+`resolve_disclosure_mode` order: frontmatter `disclosure` wins → else the size
+threshold (`auto_lazy_threshold_chars`, CLI skills only) → else eager. One safety
+carve-out forces eager: the name is in `skills.always_eager` (default
+`sensitive_actions`, `untrusted_input`, `files`, `scripts`, `memory`). The no-CLI
+carve-out was **dropped** (so the doc-only `developer` skill can be lazy), but the
+size threshold still requires `cli: true`, so a no-CLI skill is deferred only via
+explicit frontmatter. `partition_skills_for_disclosure` reads each skill's body
+length (defaults to **eager** on a read failure — safe, content present) and
+splits the selection; the executor calls `load_skills(eager)` +
+`build_disclosure_index(lazy)` and passes the index to `build_prompt` as
+`skills_index`. Off by default (byte-identical legacy prompt). `developer`,
+`health`, `money`, `location`, `browse`, `calendar` ship marked `disclosure: lazy`.
+
+The on-demand loader is the `skills` core skill (`always_include`, `cli: true`):
+`istota-skill skills show <name>` renders a skill's full body (same frontmatter
+strip + `{BOT_NAME}`/`{BOT_DIR}`/`{scripts_dir}`/`{user_id}` substitution as
+`load_skills`), re-applying the disabled / `admin_only` / experimental guards from
+the loaded config + `ISTOTA_USER_ID` so a deferred body can't bypass them; unknown
+/ disallowed → `{"status":"error",...}` + exit 1. `istota-skill skills list`
+enumerates the loadable (guard-filtered) skills. It runs server-side via the skill
+proxy (unsandboxed), so `load_config()` and the admins file are reachable.
 
 ### Two-Pass Skill Selection
 
@@ -114,6 +148,7 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `scripts` | yes | — | — | — |
 | `memory_search` | yes | — | — | — |
 | `kv` | yes | — | — | — |
+| `skills` | yes | — | — | — |
 | `devbox` | — | devbox, install package, pip install, apt install, dig, nslookup, traceroute, whois, ping, nmap, ... | — | — |
 | `email` | — | email, mail, send, inbox, reply, message | email_folder | email |
 | `calendar` | — | calendar, event, meeting, schedule, appointment, caldav | calendar | briefing |

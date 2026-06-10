@@ -78,5 +78,11 @@ class SkillMeta:
     # ``skill_<name>`` entry in ``[experimental] features``. Filtered out of
     # ``select_skills`` otherwise.
     experimental: bool = False
+    # Progressive-disclosure mode hint. "" = decide by config; "eager" =
+    # always inject the full body; "lazy" = inject only an index entry and
+    # let the model pull the body via ``istota-skill skills show <name>``.
+    # Safety carve-outs (no CLI, or name in ``skills.always_eager``) force
+    # eager regardless of this value. See resolve_disclosure_mode().
+    disclosure: str = ""
     # Where the skill was loaded from (for doc/code resolution)
     skill_dir: str = ""

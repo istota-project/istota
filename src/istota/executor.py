@@ -1627,6 +1627,57 @@ def _recall_memories(
     return "\n".join(parts)
 
 
+def _recall_playbooks(
+    config: Config,
+    conn: "db.sqlite3.Connection | None",
+    task: db.Task,
+    skip_memory: bool = False,
+) -> str | None:
+    """Recall learned playbooks relevant to the task prompt (Part B).
+
+    Mirrors `_recall_memories` but queries only `source_type="playbook"`,
+    user-scoped, top-`playbooks.recall_limit`. Gated on `playbooks.enabled`,
+    skipped for automated tasks (briefings/scheduled, like all personal memory)
+    and when a selected skill set `skip_memory`.
+    """
+    if not config.playbooks.enabled:
+        return None
+    if skip_memory or _is_automated_task(task):
+        return None
+
+    try:
+        from .memory.search import search
+    except ImportError:
+        return None
+
+    try:
+        if conn is not None:
+            results = search(
+                conn, task.user_id, task.prompt,
+                limit=config.playbooks.recall_limit,
+                source_types=["playbook"],
+            )
+        else:
+            with db.get_db(config.db_path) as temp_conn:
+                results = search(
+                    temp_conn, task.user_id, task.prompt,
+                    limit=config.playbooks.recall_limit,
+                    source_types=["playbook"],
+                )
+    except Exception:
+        logger.debug("Playbook recall search failed", exc_info=True)
+        return None
+
+    if not results:
+        return None
+
+    parts = []
+    for r in results:
+        snippet = r.content.strip()
+        parts.append(f"- {snippet}")
+    return "\n\n".join(parts)
+
+
 def _apply_memory_cap(
     config: Config,
     user_memory: str | None,
@@ -1634,15 +1685,19 @@ def _apply_memory_cap(
     channel_memory: str | None,
     recalled_memories: str | None,
     knowledge_facts: str | None = None,
-) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    playbooks: str | None = None,
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
     """Truncate memory components if total exceeds max_memory_chars.
 
-    Truncation order: recalled → knowledge facts → dated → (warn about user/channel).
-    Returns updated (user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts).
+    Truncation order: recalled → knowledge facts → dated → playbooks →
+    (warn about user/channel). Playbooks are truncated late because an
+    actionable procedure is higher-value than recalled snippets, dated context,
+    or KG triples (cap-ladder open question resolved in favour of protecting
+    playbooks). Returns the updated components.
     """
     cap = config.max_memory_chars
     if cap <= 0:
-        return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts
+        return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts, playbooks
 
     total = (
         len(user_memory or "")
@@ -1650,9 +1705,10 @@ def _apply_memory_cap(
         + len(channel_memory or "")
         + len(recalled_memories or "")
         + len(knowledge_facts or "")
+        + len(playbooks or "")
     )
     if total <= cap:
-        return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts
+        return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts, playbooks
 
     over = total - cap
 
@@ -1683,14 +1739,23 @@ def _apply_memory_cap(
             dated_memories = dated_memories[:len(dated_memories) - over] + "\n...[truncated]"
             over = 0
 
+    # Then playbooks (most protected of the recall-tier sources)
+    if playbooks and over > 0:
+        if over >= len(playbooks):
+            over -= len(playbooks)
+            playbooks = None
+        else:
+            playbooks = playbooks[:len(playbooks) - over] + "\n...[truncated]"
+            over = 0
+
     if over > 0:
         logger.warning(
-            "Memory cap (%d) exceeded by %d chars after truncating recalled/dated; "
+            "Memory cap (%d) exceeded by %d chars after truncating recalled/dated/playbooks; "
             "user_memory=%d, channel_memory=%d chars remain",
             cap, over, len(user_memory or ""), len(channel_memory or ""),
         )
 
-    return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts
+    return user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts, playbooks
 
 
 def build_prompt(
@@ -1710,9 +1775,11 @@ def build_prompt(
     source_type: str | None = None,
     output_target: str | None = None,
     recalled_memories: str | None = None,
+    playbooks: str | None = None,
     excluded_resource_types: set[str] | None = None,
     skip_persona: bool = False,
     cli_skills_text: str | None = None,
+    skills_index: str | None = None,
     confirmation_context: str | None = None,
     knowledge_facts: str | None = None,
     conn: "db.sqlite3.Connection | None" = None,
@@ -1885,6 +1952,20 @@ The following past context was automatically retrieved based on relevance to the
 
 """
 
+    # Build learned-playbooks section (Part B). Procedures distilled from past
+    # successful tasks — guidance, not gospel; verify before acting.
+    playbooks_section = ""
+    if playbooks:
+        playbooks_section = f"""
+## Learned Playbooks
+
+Previously-successful approaches to similar tasks, distilled from past work.
+Treat these as guidance — verify each step still applies before acting:
+
+{playbooks}
+
+"""
+
     # Build conversation context section
     context_section = ""
     if conversation_context:
@@ -1935,6 +2016,14 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
     # CLI skills list (generated from skill index metadata)
     cli_skills_section = cli_skills_text or ""
+
+    # Progressive-disclosure index (lazy skills the model can load on demand).
+    # Appended after the CLI-tools list; empty when no skill was deferred.
+    if skills_index:
+        cli_skills_section = (
+            (cli_skills_section + "\n" + skills_index)
+            if cli_skills_section else skills_index
+        )
 
     # Compute user's local time
     user_tz, user_tz_str = _resolve_user_tz(config, task.user_id, conn=conn)
@@ -2007,7 +2096,7 @@ Output target: {output_target or 'text'}{per_user_email_line}
 ## User's accessible resources
 
 {resources_text}
-{memory_section}{knowledge_facts_section}{channel_memory_section}{dated_memories_section}{recalled_section}## Available tools
+{memory_section}{knowledge_facts_section}{channel_memory_section}{dated_memories_section}{recalled_section}{playbooks_section}## Available tools
 
 You have access to:
 {file_tools}{browser_tool}
@@ -2212,8 +2301,29 @@ def execute_task(
         except Exception:
             logger.warning("Failed to save selected_skills for task %d", task.id, exc_info=True)
 
+    # Progressive disclosure (Part A): render heavy/speculative skills as a
+    # one-line index the model loads on demand, instead of full body up front.
+    # Off by default → every selected skill is eager (legacy behaviour).
+    skills_index = None
+    if config.skills.progressive_disclosure:
+        from .skills._loader import (
+            build_disclosure_index, partition_skills_for_disclosure,
+        )
+        eager_skills, lazy_skills = partition_skills_for_disclosure(
+            selected_skills, skill_index, config.skills_dir, config.skills,
+            bundled_dir=_bundled_dir,
+        )
+        skills_index = build_disclosure_index(lazy_skills, skill_index)
+        if lazy_skills:
+            logger.info(
+                "disclosure: eager=%d lazy=%s",
+                len(eager_skills), ",".join(sorted(lazy_skills)),
+            )
+    else:
+        eager_skills = selected_skills
+
     skills_doc = load_skills(
-        config.skills_dir, selected_skills, config.bot_name, config.bot_dir_name,
+        config.skills_dir, eager_skills, config.bot_name, config.bot_dir_name,
         skill_index=skill_index, bundled_dir=_bundled_dir,
     )
     if skills_doc:
@@ -2361,6 +2471,10 @@ def execute_task(
         exclude_task_ids=context_task_ids or None,
     )
 
+    # Recall learned playbooks (Part B). Independent of _recall_memories;
+    # gated on config.playbooks.enabled inside the helper.
+    playbooks_text = _recall_playbooks(config, conn, task, skip_memory=_skip_memory)
+
     # Load knowledge graph facts (filtered by relevance to prompt)
     knowledge_facts_text = None
     if not _skip_memory:
@@ -2393,8 +2507,8 @@ def execute_task(
             pass  # Graceful degradation
 
     # Apply memory size cap
-    user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts_text = _apply_memory_cap(
-        config, user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts_text,
+    user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts_text, playbooks_text = _apply_memory_cap(
+        config, user_memory, dated_memories, channel_memory, recalled_memories, knowledge_facts_text, playbooks_text,
     )
 
     # Get user's email addresses for confirmation policy
@@ -2432,9 +2546,11 @@ def execute_task(
         source_type=task.source_type,
         output_target=effective_output_target,
         recalled_memories=recalled_memories,
+        playbooks=playbooks_text,
         excluded_resource_types=_excluded_resource_types or None,
         skip_persona=_skip_persona,
         cli_skills_text=cli_skills_text,
+        skills_index=skills_index,
         confirmation_context=_confirmation_context,
         knowledge_facts=knowledge_facts_text,
         conn=conn,

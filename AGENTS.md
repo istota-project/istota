@@ -18,7 +18,7 @@ For module-specific internals, see `.claude/rules/`:
 src/istota/
 ├── brain/                # Pluggable model invocation (Brain protocol)
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
-├── skills/               # 29 self-contained skills (skill.md + optional CLI)
+├── skills/               # 30 self-contained skills (skill.md + optional CLI)
 ├── cli.py                # Local CLI (task, resource, briefing, secret, user, run, …)
 ├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── context.py            # Hybrid conversation context selection
@@ -127,7 +127,8 @@ What it IS: a one-way push channel (bot → device) used by heartbeat alerts, sc
 - `CHANNEL.md` — loaded with `conversation_token`. Same CLI with `--channel TOKEN` (token must match `ISTOTA_CONVERSATION_TOKEN`). Channel writes are not audited (no per-channel audit infrastructure yet) and do not update `USER.md.last_seen.json`; the audit/curation pipeline is USER.md-only.
 - `memories/YYYY-MM-DD.md` — last N days auto-loaded (`auto_load_dated_days`).
 - Knowledge graph (`knowledge_facts`) — temporal subject/predicate/object triples, freeform predicates, fuzzy dedup (predicate-equality gated), audited. Sandboxed runtime writes via `istota-skill memory_search add-fact|invalidate|delete-fact` are deferred as `task_<id>_kg_ops.json` and applied by the scheduler post-task.
-- Classification gate in `memory/skill.md`: temporal events and stable factual claims → KG; behavioral instructions → USER.md.
+- Classification gate in `memory/skill.md`: temporal events and stable factual claims → KG; behavioral instructions → USER.md; reusable task procedures → playbooks (sleep-cycle-generated in v1).
+- Learned playbooks (`playbooks.enabled`, off by default) — per-user markdown task procedures distilled by the sleep cycle from successful multi-step tasks, stored under the user's bot `playbooks/` dir, indexed into `memory_chunks` as `source_type="playbook"`, and recalled by relevance into a "## Learned Playbooks" prompt section. Markdown-only, never executed; excluded from briefings. See `.claude/rules/scheduler.md` (generation) + `.claude/rules/executor.md` (recall).
 - Nightly curator self-heals: bypass-write detection (`USER.md.last_seen.json` sidecar), sha256 re-read after the LLM call, agents-header migration, Phase-A lint pass logs date-stamped USER.md bullets without migrating them.
 - Memory recall (BM25 + vector) — opt-in via `auto_recall`.
 - Briefings exclude all personal memory.
@@ -141,7 +142,7 @@ What it IS: a one-way push channel (bot → device) used by heartbeat alerts, sc
 ```
 
 ### Skills
-Self-contained `src/istota/skills/<name>/skill.md` (YAML frontmatter + body). Two-pass selection: deterministic Pass 1 (always_include / source_types / file_types / triggers / sticky / companions / excludes), then optional LLM Pass 2 (Haiku). CLI skills expose `python -m istota.skills.<name>` and run through the credential-injecting skill proxy. Full details in `.claude/rules/skills.md`.
+Self-contained `src/istota/skills/<name>/skill.md` (YAML frontmatter + body). Two-pass selection: deterministic Pass 1 (always_include / source_types / file_types / triggers / sticky / companions / excludes), then optional LLM Pass 2 (Haiku). CLI skills expose `python -m istota.skills.<name>` and run through the credential-injecting skill proxy. **Progressive disclosure** (`skills.progressive_disclosure`, off by default): a selected skill is rendered eager (full body) or lazy (a one-line "load on demand" index entry; the model pulls the body via `istota-skill skills show <name>`). Mode comes from frontmatter `disclosure: eager|lazy` > size threshold (CLI-only) > eager, with `skills.always_eager` pinning the behavioral/safety skills. The `skills` core skill is the on-demand loader. Full details in `.claude/rules/skills.md`.
 
 ### Input Channels
 - **Talk**: long-poll, message cache, ack/progress/result via referenceId. `!commands` intercepted in poller.

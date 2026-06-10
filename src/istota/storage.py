@@ -387,6 +387,11 @@ def get_user_scripts_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_base_path(user_id)}/{bot_dir}/scripts"
 
 
+def get_user_playbooks_path(user_id: str, bot_dir: str) -> str:
+    """Get the path to a user's learned-playbooks directory (inside bot dir)."""
+    return f"{get_user_base_path(user_id)}/{bot_dir}/playbooks"
+
+
 def get_user_briefings_path(user_id: str, bot_dir: str) -> str:
     """Get the path to a user's BRIEFINGS.md file."""
     return f"{get_user_config_path(user_id, bot_dir)}/BRIEFINGS.md"

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The assistant can now learn reusable "playbooks" — step-by-step procedures for tasks it has done before. After a successful multi-step task, the nightly memory cycle distils how it was done and, when a similar request comes up later, recalls that approach so it gets it right on the first try. Playbooks are plain guidance the assistant reads, never code it runs. Off by default; an operator enables it.
+- Optional progressive skill loading reduces prompt size on tasks that pull in large skills (like the developer or health tools). Instead of loading a heavy skill's full instructions up front, the assistant sees a one-line summary and loads the details on demand only if it actually needs them. Off by default; an operator enables it.
 - Web chat now flags rooms with unread messages: the room name goes bold in the sidebar and a small count chip appears to its right. Opening a room clears it, and a room that receives a notification or scheduled post while you're elsewhere lights up on its own. Unread is tracked per person and only for the web view, so reading on the phone via Talk doesn't change it.
 
 ### Changed

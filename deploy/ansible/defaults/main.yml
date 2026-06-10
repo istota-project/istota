@@ -619,6 +619,21 @@ istota_memory_search_recency_half_life_days: 180   # recency decay half-life for
 # Skills routing (LLM-based semantic routing for skill selection)
 istota_skills_semantic_routing: true  # enable Pass 2 LLM classification
 
+# Progressive skill disclosure — defer heavy/lazy skill bodies; the model loads
+# them on demand via `istota-skill skills show <name>`. Off by default (the
+# `disclosure: lazy` markers on developer/health/money/location/browse/calendar
+# are inert until this is true). always_eager skills are never deferred.
+istota_skills_progressive_disclosure: false
+istota_skills_auto_lazy_threshold_chars: 0   # >0: a CLI skill over N chars defaults to lazy (0 = explicit frontmatter only)
+
+# Learned playbooks (procedural memory) — per-user markdown task procedures the
+# sleep cycle distills from successful multi-step tasks, recalled by relevance.
+# Off by default.
+istota_playbooks_enabled: false
+istota_playbooks_recall_limit: 3      # top-K playbooks injected per task
+istota_playbooks_min_tool_calls: 4    # a task must use >= this many tools to qualify
+istota_playbooks_retention_days: 0    # 0 = keep forever; >0 = age-prune
+
 # Sleep cycle settings (nightly memory extraction, cron evaluated per-user timezone)
 istota_sleep_cycle_enabled: true
 istota_sleep_cycle_cron: "0 2 * * *"

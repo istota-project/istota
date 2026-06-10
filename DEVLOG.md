@@ -2,6 +2,34 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-10: Progressive skill disclosure + learned playbooks (procedural memory)
+
+Implemented the `progressive-skill-selection-and-playbooks` spec end to end (7 stages, strict TDD). Two independent, default-off features inspired by a study of the Hermes Agent skill system, rebuilt to fit Istota's architecture. Full suite green (6,377 passed, 7 skipped); no new lint findings in the touched code.
+
+**Part A — progressive skill disclosure.** Selection (deterministic Pass 1 + Haiku Pass 2) is unchanged; only how a *selected* skill is *rendered* changes. A new per-skill mode — eager (full body in `skills_doc`, as before) or lazy (a one-line "Available skills (load on demand)" index entry) — is resolved by `resolve_disclosure_mode`: frontmatter `disclosure: eager|lazy` wins, else a size threshold (`auto_lazy_threshold_chars`, CLI skills only), else eager. `partition_skills_for_disclosure` splits the selection (eager on any body-read failure — safe, content present); `build_disclosure_index` emits the index; the executor passes it to `build_prompt` as `skills_index`. The model pulls a deferred body via a new `skills` core skill (`istota-skill skills show <name>` / `list`), which re-applies the disabled/admin/experimental guards from the loaded config so a deferred body can't bypass them. Gated by `skills.progressive_disclosure` (off → byte-identical legacy prompt). Marked `developer`/`health`/`money`/`location`/`browse`/`calendar` `disclosure: lazy`; measured ~5,870 tokens saved (~50% of the skills doc) on a developer+calendar task.
+
+**Decision (mid-build, user-confirmed): dropped the spec's "no-CLI → force eager" carve-out.** It conflicted with deferring the doc-only `developer` skill (`cli: false`), the biggest target. Resolution: `skills.always_eager` is the sole force-eager safety boundary (it already lists every shipped behavioral/safety skill); the size-threshold path still requires `cli: true`, so a no-CLI skill is deferred only via explicit frontmatter. The `skills show` mechanism works regardless of whether the deferred skill has its own CLI, so this is safe.
+
+**Part B — learned playbooks (procedural memory).** A playbook is a per-user markdown task procedure ("here's the multi-step way to do X") distilled by the nightly sleep cycle from a successful, multi-tool task, recalled by relevance through the existing memory-search path. Storage rides existing infra: files under the user's bot `playbooks/` dir, indexed into `memory_chunks` with `source_type="playbook"` (free-form column, no schema/migration). The extraction prompt gains a conditional `PLAYBOOKS:` section (gated on `playbooks.min_tool_calls` + success + reusability, with an explicit do-NOT list incl. "never executable"); each completed task now carries a compact `tool_summary` line (count + emoji-stripped tool descriptions from `execution_trace`) so the LLM can judge worthiness. `_parse_structured_extraction` returns a 4-tuple; `_process_extracted_playbooks` writes + indexes + dedups by slug (update in place); `cleanup_old_playbooks` age-prunes by `retention_days`. Recall: `_recall_playbooks` (`source_type="playbook"`, gated on enabled + not-automated + not-skip_memory) injects a "## Learned Playbooks" section; `_apply_memory_cap` grows to a 6-tuple with playbooks truncated last (most protected — actionable procedure outranks recalled snippets; resolves the cap-ladder open question). Markdown-only, never executed; excluded from briefings.
+
+**Generation is sleep-cycle-only in v1** — no in-loop authoring fork, no executable `scripts/`-bearing skills (the key divergence from Hermes). Both features ship behind default-off flags (`skills.progressive_disclosure`, `playbooks.enabled`), so the change is inert until measured and flipped.
+
+**Ansible.** Wired default-off toggles (`istota_skills_progressive_disclosure`, `istota_skills_auto_lazy_threshold_chars`, `istota_playbooks_*`) into the role defaults + `config.toml.j2`; with defaults neither the `[skills]` extension nor the `[playbooks]` block renders, so existing deployments produce a byte-identical config. No required operator changes.
+
+**Files added/modified:**
+- `src/istota/skills/_types.py` — `SkillMeta.disclosure` field
+- `src/istota/skills/_loader.py` — `resolve_disclosure_mode` / `partition_skills_for_disclosure` / `build_disclosure_index` + frontmatter parse
+- `src/istota/skills/skills/` — new `skills` core CLI skill (`skill.md`, `__init__.py`, `__main__.py`)
+- `src/istota/config.py` — `SkillsConfig` knobs (`progressive_disclosure`, `auto_lazy_threshold_chars`, `always_eager`) + new `PlaybooksConfig` + `[playbooks]` parse
+- `src/istota/executor.py` — disclosure partition wiring; `skills_index` / `playbooks` `build_prompt` params + sections; `_recall_playbooks`; `_apply_memory_cap` 6-tuple
+- `src/istota/memory/sleep_cycle.py` — `tool_summary`, `PLAYBOOKS:` prompt section, 4-tuple parse, `_process_extracted_playbooks`, `_render_playbook`, `_playbook_slug`, `cleanup_old_playbooks`
+- `src/istota/storage.py` — `get_user_playbooks_path`
+- `src/istota/skills/{developer,health,money,location,browse,calendar}/skill.md` — `disclosure: lazy`
+- `src/istota/skills/memory/skill.md` — playbook branch in the classification gate
+- `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2`, `config/config.example.toml` — default-off toggles
+- `AGENTS.md`, `.claude/rules/{skills,executor,config,scheduler}.md`, `README.md` — docs
+- `tests/test_skills_disclosure.py`, `tests/test_skills_loader_cli.py`, `tests/test_executor_disclosure.py`, `tests/test_sleep_cycle_playbooks.py`, `tests/test_executor_playbook_recall.py` — new coverage; `tests/test_executor.py`, `tests/test_sleep_cycle.py` — updated for the tuple-shape changes
+
 ## 2026-06-10: Issue-triage sweep — six open issues closed (Talk placeholders, deferred-subtask reliability, deferred ref-chaining, stale bare clones)
 
 Triaged the open issue tracker and closed six. One (ISSUE-130) was already fixed in code by the keyset-paging work and just needed the tracker flipped; four got fresh fixes; one (ISSUE-131) was advanced (paging half done, virtualization remains). All four code fixes built strict-TDD (failing test → implementation → green) and committed separately.

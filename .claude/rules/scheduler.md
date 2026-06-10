@@ -188,6 +188,8 @@ class UserWorker(threading.Thread):
 | Sleep cycle | `check_sleep_cycles()` (memory/sleep_cycle.py) | `briefing_check_interval` | `sleep_cycle_state` |
 | Channel sleep | `check_channel_sleep_cycles()` (memory/sleep_cycle.py) | `briefing_check_interval` | `channel_sleep_cycle_state` |
 
+When `playbooks.enabled`, `process_user_sleep_cycle` also distills **learned playbooks** (Part B): the extraction prompt gains a `PLAYBOOKS:` section (gated on `playbooks.min_tool_calls` tool calls + success + reusability), `_parse_structured_extraction` returns a 4th `playbooks` list, and `_process_extracted_playbooks` writes each to `{workspace}/Users/<uid>/<bot_dir>/playbooks/<slug>.md` (dedup by slug → update in place), indexing it into `memory_chunks` with `source_type="playbook"`. `cleanup_old_playbooks` age-prunes by `playbooks.retention_days` (mtime; 0 = keep). Markdown-only, never executed; recalled via `executor._recall_playbooks`.
+
 ## Cleanup (`run_cleanup_checks`)
 1. Expire stale confirmations → notify user via Talk
 2. Log warnings for stale pending tasks

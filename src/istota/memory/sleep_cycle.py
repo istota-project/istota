@@ -17,6 +17,7 @@ from ..storage import (
     _get_mount_path,
     get_user_memories_path,
     get_user_memory_path,
+    get_user_playbooks_path,
     get_channel_memories_path,
     get_channel_memory_path,
     read_user_memory_v2,
@@ -218,11 +219,57 @@ def _excerpt(text: str, budget: int) -> str:
     return text[:head_size] + marker + text[-tail_size:]
 
 
+# Cap the per-task tool list so a runaway trajectory can't blow the day-data
+# budget; the count is still reported in full.
+_MAX_TOOL_NAMES = 25
+# Leading emoji + whitespace that the trace descriptions are prefixed with.
+_TOOL_DESC_PREFIX = re.compile(r"^[^\w(]+")
+
+
+def tool_summary(execution_trace_json: str | None) -> tuple[int, list[str]]:
+    """Summarize a task's tool usage from its ``execution_trace`` JSON.
+
+    Returns ``(count, ordered_labels)`` where ``count`` is the number of tool
+    entries and ``ordered_labels`` are short, emoji-stripped descriptions of
+    each tool call (truncated, capped at ``_MAX_TOOL_NAMES``). Used both to gate
+    playbook-worthiness (``playbooks.min_tool_calls``) and to give the extraction
+    LLM the procedure's shape. Never raises — malformed/empty → ``(0, [])``.
+    """
+    if not execution_trace_json:
+        return 0, []
+    try:
+        trace = json.loads(execution_trace_json)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return 0, []
+    if not isinstance(trace, list):
+        return 0, []
+
+    labels: list[str] = []
+    count = 0
+    for entry in trace:
+        if not isinstance(entry, dict) or entry.get("type") != "tool":
+            continue
+        count += 1
+        if len(labels) >= _MAX_TOOL_NAMES:
+            continue
+        text = str(entry.get("text", "")).strip()
+        text = _TOOL_DESC_PREFIX.sub("", text).strip()
+        if len(text) > 80:
+            text = text[:77] + "..."
+        labels.append(text or "tool")
+    return count, labels
+
+
 def _format_task_section(
     tasks: list,
     per_task_budget: int,
 ) -> list[str]:
-    """Format a group of tasks with conversation grouping and budget control."""
+    """Format a group of tasks with conversation grouping and budget control.
+
+    Each task carries a compact tool summary (count + ordered tool labels from
+    ``execution_trace``) so the extraction LLM can judge whether a task was a
+    non-trivial, reusable procedure worth distilling into a playbook.
+    """
     from collections import defaultdict
 
     groups: dict[str | None, list] = defaultdict(list)
@@ -240,10 +287,19 @@ def _format_task_section(
             result_budget = per_task_budget - prompt_budget
             prompt_text = _excerpt(task.prompt or "", prompt_budget)
             result_text = _excerpt(task.result or "", result_budget)
+            tool_count, tool_labels = tool_summary(
+                getattr(task, "execution_trace", None)
+            )
+            tools_line = ""
+            if tool_count:
+                tools_line = (
+                    f"Tools ({tool_count}): " + " | ".join(tool_labels) + "\n"
+                )
             parts.append(
                 f"--- Task {task.id} ({task.source_type}, {task.created_at or 'unknown'}) ---\n"
                 f"User: {prompt_text}\n"
                 f"Bot: {result_text}\n"
+                f"{tools_line}"
             )
     return parts
 
@@ -321,6 +377,8 @@ def build_memory_extraction_prompt(
     existing_memory: str | None,
     date_str: str,
     existing_facts: str | None = None,
+    playbooks_enabled: bool = False,
+    min_tool_calls: int = 4,
 ) -> str:
     """
     Build the prompt that instructs Claude to extract memories from the day's interactions.
@@ -362,6 +420,34 @@ out a stale fact).
     predicates_str = "\n".join(
         f"  - {pred}: {hint}" for pred, hint in SUGGESTED_PREDICATES.items()
     )
+
+    playbooks_section = ""
+    if playbooks_enabled:
+        playbooks_section = f"""
+
+PLAYBOOKS:
+(JSON array of reusable task procedures distilled from today's interactions)
+A playbook captures "here is the multi-step way to do task X" so a future task
+can follow a known-good approach instead of rediscovering it. Each entry:
+{{"title": "short imperative title", "triggers": ["keyword", ...], "steps": "numbered markdown steps, which skills/CLIs to use, and known pitfalls"}}
+
+Only distill a playbook when a task in today's interactions:
+- completed successfully, AND
+- used at least {min_tool_calls} tool calls (see the "Tools (N): ..." line under each task), AND
+- generalizes beyond this one instance (the same procedure would help a similar future request).
+
+Do NOT create a playbook for:
+- environment-specific failures or one-off troubleshooting that won't recur
+- anything containing secrets, tokens, passwords, or personal data
+- a one-off narrative ("summarized this article") with no reusable procedure
+- trivial single-step tasks
+- executable code or scripts — a playbook is markdown guidance that REFERENCES
+  existing skills/CLIs by name; it never ships code to run
+
+Write the steps as you would teach them to your future self: name the skills
+and CLI subcommands used, the order, and any gotcha hit along the way.
+
+If no reusable procedures emerged today, output an empty array: []"""
 
     return f"""You are extracting important memories from a day of interactions with user '{user_id}'.
 
@@ -513,7 +599,7 @@ TOPICS:
 (JSON object mapping each task ref to a topic category)
 Topics: work, tech, personal, finance, admin, learning, meta
 Example: {{"ref:1234": "tech", "ref:1235": "personal"}}
-If no topics to classify, output: {{}}
+If no topics to classify, output: {{}}{playbooks_section}
 
 If you cannot produce the structured sections, output only the bullet points (the MEMORIES section).
 Do not include any preamble or explanation outside these sections."""
@@ -554,35 +640,48 @@ def _normalize_fact(fact: dict) -> dict:
     return fact
 
 
-def _parse_structured_extraction(output: str) -> tuple[str, list[dict], dict[str, str]]:
+def _parse_structured_extraction(
+    output: str,
+) -> tuple[str, list[dict], dict[str, str], list[dict]]:
     """Parse structured extraction output into components.
 
-    Returns (memories_text, facts_list, topics_dict).
+    Returns (memories_text, facts_list, topics_dict, playbooks_list).
     Falls back gracefully: if structured sections are missing, treats entire
-    output as memories with empty facts/topics.
+    output as memories with empty facts/topics/playbooks. A missing or
+    malformed PLAYBOOKS section yields an empty list (the feature is opt-in;
+    older outputs simply have no PLAYBOOKS marker).
     """
     facts: list[dict] = []
     topics: dict[str, str] = {}
+    playbooks: list[dict] = []
 
-    # Try to find MEMORIES: section (allow optional newline after marker)
+    # Section markers, in the order they appear in the prompt. Each section
+    # runs from its marker to the start of the next present marker (or EOF).
     memories_match = re.search(r"(?:^|\n)MEMORIES:\s*\n?", output)
     facts_match = re.search(r"(?:^|\n)FACTS:\s*\n?", output)
     topics_match = re.search(r"(?:^|\n)TOPICS:\s*\n?", output)
+    playbooks_match = re.search(r"(?:^|\n)PLAYBOOKS:\s*\n?", output)
 
     if not memories_match:
         # No structured format — treat entire output as memories
-        return output.strip(), facts, topics
+        return output.strip(), facts, topics, playbooks
 
-    # Extract memories text (from MEMORIES: to FACTS: or end)
+    def _section_end(after_pos: int) -> int:
+        """First marker start strictly after ``after_pos``, else EOF."""
+        starts = [
+            m.start()
+            for m in (facts_match, topics_match, playbooks_match)
+            if m and m.start() > after_pos
+        ]
+        return min(starts) if starts else len(output)
+
+    # Memories: from MEMORIES: to the next section.
     mem_start = memories_match.end()
-    mem_end = facts_match.start() if facts_match else (topics_match.start() if topics_match else len(output))
-    memories_text = output[mem_start:mem_end].strip()
+    memories_text = output[mem_start:_section_end(mem_start)].strip()
 
-    # Extract facts JSON
+    # Facts JSON.
     if facts_match:
-        facts_start = facts_match.end()
-        facts_end = topics_match.start() if topics_match else len(output)
-        facts_raw = output[facts_start:facts_end].strip()
+        facts_raw = output[facts_match.end():_section_end(facts_match.end())].strip()
         try:
             parsed = json.loads(facts_raw)
             if isinstance(parsed, list):
@@ -590,9 +689,9 @@ def _parse_structured_extraction(output: str) -> tuple[str, list[dict], dict[str
         except (json.JSONDecodeError, ValueError):
             logger.debug("Failed to parse FACTS section: %s", facts_raw[:200])
 
-    # Extract topics JSON
+    # Topics JSON.
     if topics_match:
-        topics_raw = output[topics_match.end():].strip()
+        topics_raw = output[topics_match.end():_section_end(topics_match.end())].strip()
         try:
             parsed = json.loads(topics_raw)
             if isinstance(parsed, dict):
@@ -600,7 +699,26 @@ def _parse_structured_extraction(output: str) -> tuple[str, list[dict], dict[str
         except (json.JSONDecodeError, ValueError):
             logger.debug("Failed to parse TOPICS section: %s", topics_raw[:200])
 
-    return memories_text, facts, topics
+    # Playbooks JSON.
+    if playbooks_match:
+        pb_raw = output[playbooks_match.end():_section_end(playbooks_match.end())].strip()
+        try:
+            parsed = json.loads(pb_raw)
+            if isinstance(parsed, list):
+                playbooks = [p for p in parsed if _validate_playbook(p)]
+        except (json.JSONDecodeError, ValueError):
+            logger.debug("Failed to parse PLAYBOOKS section: %s", pb_raw[:200])
+
+    return memories_text, facts, topics, playbooks
+
+
+def _validate_playbook(pb: dict) -> bool:
+    """A playbook needs a non-empty title and non-empty steps."""
+    if not isinstance(pb, dict):
+        return False
+    title = str(pb.get("title", "")).strip()
+    steps = str(pb.get("steps", "")).strip()
+    return bool(title) and bool(steps)
 
 
 def process_user_sleep_cycle(
@@ -649,6 +767,8 @@ def process_user_sleep_cycle(
     prompt = build_memory_extraction_prompt(
         user_id, day_data, existing_memory, date_str,
         existing_facts=existing_facts,
+        playbooks_enabled=config.playbooks.enabled,
+        min_tool_calls=config.playbooks.min_tool_calls,
     )
 
     ok, output = _run_sleep_cycle_brain(
@@ -666,8 +786,10 @@ def process_user_sleep_cycle(
         _update_state(config, conn, user_id, last_task_id)
         return False
 
-    # Parse structured output (memories + facts + topics)
-    memories_text, extracted_facts, extracted_topics = _parse_structured_extraction(output)
+    # Parse structured output (memories + facts + topics + playbooks)
+    memories_text, extracted_facts, extracted_topics, extracted_playbooks = (
+        _parse_structured_extraction(output)
+    )
 
     if not memories_text or memories_text == NO_NEW_MEMORIES:
         logger.info("Sleep cycle for %s: no memories after parsing", user_id)
@@ -768,11 +890,25 @@ def process_user_sleep_cycle(
         except Exception as e:
             logger.debug("Memory search indexing failed for %s: %s", memory_file.name, e)
 
+    # Write + index learned playbooks (Part B). Best-effort: a failure here
+    # must not lose the memories/facts already persisted above.
+    if config.playbooks.enabled and extracted_playbooks:
+        try:
+            _process_extracted_playbooks(
+                config, conn, user_id, extracted_playbooks, date_str, last_task_id,
+            )
+        except Exception as e:
+            logger.warning("Playbook processing failed for %s: %s", user_id, e)
+
     # Update state
     _update_state(config, conn, user_id, last_task_id)
 
     # Clean up old memory files
     cleanup_old_memory_files(config, user_id, sleep_config.memory_retention_days)
+
+    # Clean up old playbooks (age-based; 0 = keep forever)
+    if config.playbooks.enabled:
+        cleanup_old_playbooks(config, user_id, config.playbooks.retention_days)
 
     # Clean up old ephemeral memory_chunks (conversation, memory_file,
     # channel_memory). Reuses the same retention setting as the file cleanup
@@ -1239,6 +1375,130 @@ def cleanup_old_memory_files(
     if deleted:
         logger.info("Cleaned up %d old memory file(s) for %s", deleted, user_id)
 
+    return deleted
+
+
+# --- Learned playbooks (Part B) --------------------------------------------
+
+_PLAYBOOK_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _playbook_slug(title: str) -> str:
+    """Filesystem-safe slug from a playbook title (lowercase-dashed)."""
+    slug = _PLAYBOOK_SLUG_RE.sub("-", title.strip().lower()).strip("-")
+    slug = slug[:80].strip("-")
+    return slug or "playbook"
+
+
+def _render_playbook(pb: dict, date_str: str) -> tuple[str, str]:
+    """Render a playbook dict into (markdown_file_text, searchable_text).
+
+    The file carries YAML frontmatter (title/triggers/created/ref_task_id/
+    source) + the numbered steps. The searchable text (title + triggers +
+    steps) is what gets indexed into memory_chunks so recall matches on
+    triggers and title, not just the body.
+    """
+    title = str(pb.get("title", "")).strip()
+    triggers = [str(t).strip() for t in pb.get("triggers", []) if str(t).strip()]
+    steps = str(pb.get("steps", "")).strip()
+    ref = pb.get("ref") or pb.get("ref_task_id") or ""
+
+    fm_lines = [
+        "---",
+        f"title: {title}",
+        f"triggers: [{', '.join(triggers)}]",
+        f"created: {date_str}",
+        f"ref_task_id: {ref}",
+        "source: sleep_cycle",
+        "---",
+    ]
+    body = f"# {title}\n\n{steps}\n"
+    file_text = "\n".join(fm_lines) + "\n\n" + body
+    searchable = f"{title}\n{' '.join(triggers)}\n\n{steps}"
+    return file_text, searchable
+
+
+def _process_extracted_playbooks(
+    config: Config,
+    conn: "db.sqlite3.Connection",
+    user_id: str,
+    playbooks: list[dict],
+    date_str: str,
+    last_task_id: int | None,
+) -> None:
+    """Write each extracted playbook to a markdown file and index it.
+
+    Dedup is by slug: re-deriving a playbook with the same title overwrites the
+    existing file in place (and ``index_file`` replaces its chunks for that
+    path) rather than proliferating near-duplicates. Requires mount mode.
+    """
+    if not config.use_mount:
+        logger.warning("Playbooks require mount mode, skipping writes for %s", user_id)
+        return
+
+    pb_dir = _get_mount_path(config, get_user_playbooks_path(user_id, config.bot_dir_name))
+    pb_dir.mkdir(parents=True, exist_ok=True)
+
+    index_enabled = (
+        config.memory_search.enabled and config.memory_search.auto_index_memory_files
+    )
+
+    for pb in playbooks:
+        title = str(pb.get("title", "")).strip()
+        slug = _playbook_slug(title)
+        file_text, searchable = _render_playbook(pb, date_str)
+        pb_path = pb_dir / f"{slug}.md"
+        existed = pb_path.exists()
+        pb_path.write_text(file_text)
+        logger.info(
+            "playbook_written slug=%s ref=%s updated=%s user=%s",
+            slug, pb.get("ref") or pb.get("ref_task_id") or "", existed, user_id,
+        )
+
+        if index_enabled:
+            try:
+                from .search import index_file as _index_file
+                _index_file(conn, user_id, str(pb_path), searchable, "playbook")
+            except Exception as e:
+                logger.debug("Playbook indexing failed for %s: %s", pb_path.name, e)
+
+
+def cleanup_old_playbooks(
+    config: Config,
+    user_id: str,
+    retention_days: int,
+) -> int:
+    """Delete learned-playbook files older than ``retention_days``.
+
+    Returns the number deleted. ``retention_days <= 0`` keeps everything
+    (the default). Age is measured by file mtime — playbooks carry a `created`
+    date in frontmatter, but mtime is refreshed on each re-derivation, which is
+    the behaviour we want (a still-useful, re-distilled playbook stays fresh).
+    """
+    if retention_days <= 0:
+        return 0
+    if not config.use_mount:
+        return 0
+
+    pb_dir = _get_mount_path(config, get_user_playbooks_path(user_id, config.bot_dir_name))
+    if not pb_dir.exists():
+        return 0
+
+    cutoff = datetime.now(tz=ZoneInfo("UTC")) - timedelta(days=retention_days)
+    cutoff_ts = cutoff.timestamp()
+
+    deleted = 0
+    for path in pb_dir.iterdir():
+        if path.is_file() and path.suffix == ".md":
+            try:
+                if path.stat().st_mtime < cutoff_ts:
+                    path.unlink()
+                    deleted += 1
+            except OSError:
+                continue
+
+    if deleted:
+        logger.info("Cleaned up %d old playbook(s) for %s", deleted, user_id)
     return deleted
 
 

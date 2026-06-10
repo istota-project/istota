@@ -111,7 +111,35 @@ network: NetworkConfig = NetworkConfig()
 semantic_routing: bool = True          # enable LLM-based Pass 2 skill classification
 semantic_routing_model: str = "fast"   # model for classification (role alias)
 semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
+progressive_disclosure: bool = False   # Part A master gate — defer lazy skill bodies to on-demand
+auto_lazy_threshold_chars: int = 0     # >0: a CLI skill over N chars defaults to lazy (0 = explicit frontmatter only)
+always_eager: list[str] = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]
 ```
+Progressive skill disclosure (Part A): when `progressive_disclosure` is on, a
+*selected* skill is rendered either **eager** (full body in `skills_doc`, as
+today) or **lazy** (a one-line entry in the "Available skills (load on demand)"
+prompt section; the model pulls the body via `istota-skill skills show <name>`).
+Per-skill mode comes from `resolve_disclosure_mode`: frontmatter
+`disclosure: eager|lazy` wins, else the size threshold (CLI skills only), else
+eager; `always_eager` names are always eager. The no-CLI carve-out was dropped
+so a doc-only reference skill (`developer`) can be deferred — but the size
+threshold still requires a CLI, so a no-CLI skill is only deferred via explicit
+frontmatter. `developer`/`health`/`money`/`location`/`browse`/`calendar` ship
+marked `disclosure: lazy`. Off by default (inert until measured + flipped).
+
+### `PlaybooksConfig`
+```
+enabled: bool = False        # Part B master gate (learned playbooks / procedural memory)
+recall_limit: int = 3        # top-K playbooks injected per task
+min_tool_calls: int = 4      # a task must use >= this many tools to qualify (LLM-judged in the extraction prompt)
+retention_days: int = 0      # 0 = keep forever; >0 = age-prune by file mtime
+max_chars: int = 0           # 0 = share the global max_memory_chars budget
+```
+Parsed from `[playbooks]`. A playbook is a per-user markdown procedure distilled
+by the sleep cycle from a successful multi-step task, stored under the user's
+bot `playbooks/` dir, indexed into `memory_chunks` with `source_type="playbook"`,
+and recalled by relevance (`executor._recall_playbooks`). Off by default.
+`extraction_model` is reused from `[sleep_cycle]` (no new model knob).
 
 ### `BrainConfig`
 ```
@@ -238,7 +266,8 @@ logging: LoggingConfig
 briefing_defaults: BriefingDefaultsConfig   skills: SkillsConfig
 brain: BrainConfig                          # selects model-invocation backend
 security: SecurityConfig
-memory_search: MemorySearchConfig   sleep_cycle: SleepCycleConfig
+memory_search: MemorySearchConfig   playbooks: PlaybooksConfig
+sleep_cycle: SleepCycleConfig
 channel_sleep_cycle: ChannelSleepCycleConfig
 developer: DeveloperConfig          site: SiteConfig
 location: LocationReceiverConfig

@@ -190,6 +190,7 @@ def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
         exclude_resources=_get_list("exclude_resources"),
         cli=_get_bool("cli"),
         experimental=_get_bool("experimental"),
+        disclosure=str(_get("disclosure", "") or "").strip().lower(),
         skill_dir=str(skill_dir),
     )
 
@@ -547,6 +548,131 @@ def load_skills(
 
     fingerprint = compute_skills_fingerprint(skills_dir, bundled_dir)
     return f"## Skills Reference (v: {fingerprint})\n\n" + "\n\n".join(parts)
+
+
+# Skills whose body length read failed / mode was force-overridden — tracked
+# so the override WARN fires once per process per skill, not every task.
+_disclosure_warned: set[str] = set()
+
+
+def resolve_disclosure_mode(
+    name: str,
+    meta: SkillMeta,
+    body_len: int,
+    config_skills,
+) -> str:
+    """Resolve whether a selected skill is rendered eager (full body) or lazy
+    (index entry + on-demand load).
+
+    Resolution order:
+    1. Explicit frontmatter ``disclosure: eager|lazy`` wins (for any skill,
+       CLI or not — a doc-only reference skill like ``developer`` can be
+       deferred and its body pulled via ``istota-skill skills show``).
+    2. Else, when ``skills.auto_lazy_threshold_chars > 0`` and the skill has a
+       CLI and its body exceeds the threshold → lazy. The auto-lazy path is
+       gated on ``cli`` because a no-CLI skill is not a capability skill that
+       should be silently deferred by size alone.
+    3. Else eager.
+
+    One hard safety carve-out overrides the above and forces **eager**: the
+    skill name is in ``skills.always_eager`` (the behavioral/safety skills whose
+    rules must always be in context). ``config_skills`` is a ``SkillsConfig``.
+    """
+    fm = (meta.disclosure or "").strip().lower()
+    if fm in ("eager", "lazy"):
+        base = fm
+        base_reason = "frontmatter"
+    elif (
+        getattr(config_skills, "auto_lazy_threshold_chars", 0) > 0
+        and meta.cli
+        and body_len > config_skills.auto_lazy_threshold_chars
+    ):
+        base = "lazy"
+        base_reason = "threshold"
+    else:
+        base = "eager"
+        base_reason = "default"
+
+    # Safety carve-out: always_eager skills are never deferred.
+    always_eager = set(getattr(config_skills, "always_eager", []) or [])
+    if name in always_eager:
+        if base == "lazy" and name not in _disclosure_warned:
+            _disclosure_warned.add(name)
+            logger.warning(
+                "disclosure: forced eager skill=%s reason=always_eager "
+                "(frontmatter requested lazy but skill is pinned eager)",
+                name,
+            )
+        return "eager"
+
+    if base == "lazy":
+        logger.info("disclosure: mode=lazy skill=%s reason=%s", name, base_reason)
+    return base
+
+
+def partition_skills_for_disclosure(
+    selected: list[str],
+    skill_index: dict[str, SkillMeta],
+    skills_dir: Path,
+    config_skills,
+    bundled_dir: Path | None = None,
+) -> tuple[list[str], list[str]]:
+    """Split selected skills into ``(eager_names, lazy_names)``.
+
+    Body length is read via the same doc-path resolution + frontmatter strip as
+    ``load_skills``. A read failure (or an unknown skill) defaults the skill to
+    **eager** — the safe choice, since the content is then present rather than
+    deferred. Selection order is preserved within each list.
+    """
+    eager: list[str] = []
+    lazy: list[str] = []
+    for name in selected:
+        meta = skill_index.get(name)
+        if meta is None:
+            eager.append(name)
+            continue
+        body_len = 0
+        try:
+            doc_path = _resolve_skill_doc_path(name, meta, skills_dir, bundled_dir)
+            if doc_path is not None:
+                body_len = len(_strip_frontmatter(doc_path.read_text()))
+        except Exception:
+            logger.debug(
+                "disclosure: body-length read failed skill=%s, defaulting eager",
+                name, exc_info=True,
+            )
+            eager.append(name)
+            continue
+        mode = resolve_disclosure_mode(name, meta, body_len, config_skills)
+        (lazy if mode == "lazy" else eager).append(name)
+    return eager, lazy
+
+
+def build_disclosure_index(
+    lazy_names: list[str],
+    skill_index: dict[str, SkillMeta],
+) -> str:
+    """Build the "Available skills (load on demand)" prompt section.
+
+    One ``- <name>: <description>`` line per lazy skill, under a header that
+    tells the model to run ``istota-skill skills show <name>`` to load the full
+    instructions before using the skill. Returns ``""`` when there are no lazy
+    skills (so the section is omitted and the prompt stays byte-identical to the
+    all-eager path).
+    """
+    if not lazy_names:
+        return ""
+    lines = []
+    for name in sorted(lazy_names):
+        meta = skill_index.get(name)
+        desc = (meta.description if meta else "") or ""
+        lines.append(f"  - {name}: {desc}")
+    header = (
+        "- Available skills (load on demand). These skills are relevant to this "
+        "task but their full instructions are NOT included below. Before using "
+        "one, run `istota-skill skills show <name>` to load its documentation:"
+    )
+    return header + "\n" + "\n".join(lines)
 
 
 def compute_skills_fingerprint(
