@@ -9,6 +9,7 @@ import subprocess
 from istota.skills._loader import (
     build_skill_manifest,
     classify_skills,
+    eligible_skill_names,
     load_skill_index,
     load_skills,
     select_skills,
@@ -28,7 +29,11 @@ class TestSkillsConfig:
 
     def test_defaults(self):
         cfg = SkillsConfig()
-        assert cfg.semantic_routing is True
+        # Pass 2 semantic routing is OFF by default: the per-task `claude -p`
+        # cold-start cost it incurs is replaced by progressive disclosure's
+        # widened on-demand catalogue index (the smart model self-loads).
+        assert cfg.semantic_routing is False
+        assert cfg.progressive_disclosure is True
         # Default uses the "fast" role alias, which resolves to Haiku via
         # brain.claude_code.DEFAULT_ROLE_TARGETS. Operators rebind via
         # [models.roles].
@@ -193,6 +198,66 @@ class TestBuildSkillManifest:
         }
         manifest = build_skill_manifest(index, exclude=set())
         assert "[needs resource: karakeep]" in manifest
+
+
+class TestEligibleSkillNames:
+    """The shared eligibility filter backing both the Pass-2 manifest and the
+    progressive-disclosure catalogue index."""
+
+    def _make_index(self) -> dict[str, SkillMeta]:
+        return {
+            "files": SkillMeta(name="files", description="File ops", always_include=True),
+            "developer": SkillMeta(name="developer", description="Git", keywords=["git"]),
+            "email": SkillMeta(name="email", description="Mail", keywords=["mail"]),
+            "tasks": SkillMeta(name="tasks", description="Subtasks", admin_only=True),
+            "broken": SkillMeta(
+                name="broken", description="Broken", dependencies=["nonexistent_pkg_xyz"]
+            ),
+            "labrat": SkillMeta(name="labrat", description="Experimental", experimental=True),
+        }
+
+    def test_includes_plain_unselected_skill(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert "developer" in names
+        assert "email" in names
+
+    def test_excludes_already_selected(self):
+        names = eligible_skill_names(self._make_index(), exclude={"email"})
+        assert "email" not in names
+        assert "developer" in names
+
+    def test_excludes_always_include(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert "files" not in names
+
+    def test_excludes_disabled(self):
+        names = eligible_skill_names(
+            self._make_index(), exclude=set(), disabled_skills={"developer"}
+        )
+        assert "developer" not in names
+
+    def test_excludes_admin_only_for_non_admin(self):
+        names = eligible_skill_names(self._make_index(), exclude=set(), is_admin=False)
+        assert "tasks" not in names
+        names_admin = eligible_skill_names(self._make_index(), exclude=set(), is_admin=True)
+        assert "tasks" in names_admin
+
+    def test_excludes_missing_deps(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert "broken" not in names
+
+    def test_excludes_experimental_unless_flagged(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert "labrat" not in names
+        flagged = eligible_skill_names(
+            self._make_index(), exclude=set(),
+            enabled_experimental_features=frozenset({"skill_labrat"}),
+        )
+        assert "labrat" in flagged
+
+    def test_sorted(self):
+        names = eligible_skill_names(self._make_index(), exclude=set())
+        assert names == sorted(names)
 
 
 class TestClassifySkills:

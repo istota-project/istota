@@ -108,24 +108,31 @@ network: NetworkConfig = NetworkConfig()
 
 ### `SkillsConfig`
 ```
-semantic_routing: bool = True          # enable LLM-based Pass 2 skill classification
+semantic_routing: bool = False         # Pass 2 LLM pre-router (OFF by default — see below)
 semantic_routing_model: str = "fast"   # model for classification (role alias)
 semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
-progressive_disclosure: bool = False   # Part A master gate — defer lazy skill bodies to on-demand
+progressive_disclosure: bool = True    # Part A master gate — ON by default; defer lazy bodies + widen index to full catalogue
 auto_lazy_threshold_chars: int = 0     # >0: a CLI skill over N chars defaults to lazy (0 = explicit frontmatter only)
 always_eager: list[str] = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]
 ```
-Progressive skill disclosure (Part A): when `progressive_disclosure` is on, a
-*selected* skill is rendered either **eager** (full body in `skills_doc`, as
-today) or **lazy** (a one-line entry in the "Available skills (load on demand)"
-prompt section; the model pulls the body via `istota-skill skills show <name>`).
-Per-skill mode comes from `resolve_disclosure_mode`: frontmatter
+Progressive skill disclosure (Part A): when `progressive_disclosure` is on
+(**default**), a *selected* skill is rendered either **eager** (full body in
+`skills_doc`) or **lazy** (a one-line entry in the "Available skills (load on
+demand)" prompt section; the model pulls the body via `istota-skill skills show
+<name>`). Per-skill mode comes from `resolve_disclosure_mode`: frontmatter
 `disclosure: eager|lazy` wins, else the size threshold (CLI skills only), else
 eager; `always_eager` names are always eager. The no-CLI carve-out was dropped
 so a doc-only reference skill (`developer`) can be deferred — but the size
 threshold still requires a CLI, so a no-CLI skill is only deferred via explicit
 frontmatter. `developer`/`health`/`money`/`location`/`browse`/`calendar` ship
-marked `disclosure: lazy`. Off by default (inert until measured + flipped).
+marked `disclosure: lazy`. **The on-demand index is widened** beyond the
+selected-lazy skills to the *full eligible catalogue* — every loadable skill
+(`eligible_skill_names`) that isn't already eager-selected, pinned
+`always_eager`, or excluded by a selected skill. This replaces Pass 2: the
+capable main model self-selects from the menu instead of a per-task `claude -p`
+pre-router (whose cold-start cost dominated and timed out in production).
+`semantic_routing` (Pass 2) is therefore **off by default** but stays reachable
+for operators who want the pre-router.
 
 ### `PlaybooksConfig`
 ```

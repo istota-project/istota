@@ -745,27 +745,23 @@ def load_skills_changelog(
     return None
 
 
-def build_skill_manifest(
+def eligible_skill_names(
     skill_index: dict[str, SkillMeta],
     exclude: set[str],
     disabled_skills: set[str] | None = None,
     is_admin: bool = True,
-    user_resource_types: set[str] | None = None,
     enabled_experimental_features: frozenset[str] = frozenset(),
-) -> str:
-    """Build a compact manifest of available skills for LLM classification.
+) -> list[str]:
+    """Sorted names of skills eligible to be surfaced to the model.
 
-    Excludes already-selected skills, always_include skills (already loaded),
-    disabled skills, admin_only skills for non-admins, and skills with
-    unmet dependencies. Also excludes experimental skills whose
-    ``skill_<name>`` flag isn't enabled.
-
-    When user_resource_types is provided, prepends a "User resources" line so
-    the classifier can disambiguate (e.g. user has karakeep → bookmarks is
-    plausible even without keyword overlap).
+    Excludes ``exclude`` (already-selected), ``always_include`` skills (already
+    loaded eager), disabled skills, ``admin_only`` skills for non-admins,
+    experimental skills whose ``skill_<name>`` flag isn't enabled, and skills
+    with unmet dependencies. Shared by the Pass-2 manifest and the
+    progressive-disclosure catalogue index so both apply the same gate.
     """
     disabled = disabled_skills or set()
-    lines = []
+    names = []
     for name in sorted(skill_index):
         if name in exclude:
             continue
@@ -780,6 +776,32 @@ def build_skill_manifest(
             continue
         if not _check_dependencies(meta):
             continue
+        names.append(name)
+    return names
+
+
+def build_skill_manifest(
+    skill_index: dict[str, SkillMeta],
+    exclude: set[str],
+    disabled_skills: set[str] | None = None,
+    is_admin: bool = True,
+    user_resource_types: set[str] | None = None,
+    enabled_experimental_features: frozenset[str] = frozenset(),
+) -> str:
+    """Build a compact manifest of available skills for LLM classification.
+
+    Uses :func:`eligible_skill_names` for the membership gate, then renders one
+    ``- name: description. Triggers: …`` line per skill.
+
+    When user_resource_types is provided, prepends a "User resources" line so
+    the classifier can disambiguate (e.g. user has karakeep → bookmarks is
+    plausible even without keyword overlap).
+    """
+    lines = []
+    for name in eligible_skill_names(
+        skill_index, exclude, disabled_skills, is_admin, enabled_experimental_features
+    ):
+        meta = skill_index[name]
         triggers = ", ".join(meta.keywords[:10]) if meta.keywords else "none"
         resource_hint = (
             f" [needs resource: {', '.join(meta.resource_types)}]"

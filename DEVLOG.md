@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-10: Make progressive disclosure the default + widen the index to replace Pass 2
+
+Follow-up to the disclosure work below, prompted by a production check on zorg-01: Pass 2 semantic routing was timing out on 100% of tasks. Root cause is structural, not tuning — `classify_skills` spawns a fresh `claude -p -` subprocess per task (`_claude_cli_classify`), so the 3s budget is eaten by CLI cold-start (Node boot, auth, model init), not inference. Raising the timeout to 5–10s just pays that boot tax on every task. Since the same-day disclosure feature makes surfacing a skill nearly free (a cached one-line index entry), the per-task pre-router no longer earns its latency.
+
+**Change.** Flipped the defaults and widened the index:
+- `SkillsConfig.semantic_routing` default `True → False`; `progressive_disclosure` default `False → True`.
+- The on-demand index is widened from "selected-but-lazy skills" to the **full eligible catalogue**: `index_names = lazy_selected ∪ eligible_skill_names(exclude = selected ∪ always_eager ∪ ⋃ exclude_skills_of_selected)`. The capable main model self-selects from the menu instead of a weak pre-router guessing. Pass 1 (deterministic, high-precision) is untouched and still renders obvious matches eager so they need no round-trip.
+- Extracted the eligibility gate out of `build_skill_manifest` into a shared `eligible_skill_names` (`_loader.py`) — same filter (already-selected / `always_include` / disabled / admin-gated / experimental-gated / missing-deps) now backs both the catalogue and the Pass-2 manifest.
+- Executor log is now `disclosure: eager=N lazy=M catalogue=K` per task.
+
+`classify_skills` / `_claude_cli_classify` and the Pass-2 executor block are kept (reachable via `semantic_routing = true`), only defaulted off — minimal blast radius. Strict TDD; updated `test_semantic_routing` defaults, added `TestEligibleSkillNames`, extended `test_executor_disclosure` with a `TestWidenedCatalogueIndex` class (unselected-eligible appears; excluded / always_eager / experimental-gated absent; eager-selected full-body-not-indexed; Pass 2 not invoked under defaults).
+
+**Files:** `src/istota/config.py` (defaults), `src/istota/skills/_loader.py` (`eligible_skill_names` + manifest refactor), `src/istota/executor.py` (widened index + log), `deploy/ansible/defaults/main.yml` + `config/config.example.toml` (default flip), `AGENTS.md` + `.claude/rules/{skills,config,executor}.md` (docs), `tests/test_semantic_routing.py` + `tests/test_executor_disclosure.py`.
+
+**Deploy note:** prod already sets `progressive_disclosure = true` and leaves `semantic_routing` unset, so a redeploy of this code stops Pass 2 on the new default and widens the index — no prod config edit needed.
+
 ## 2026-06-10: Progressive skill disclosure + learned playbooks (procedural memory)
 
 Implemented the `progressive-skill-selection-and-playbooks` spec end to end (7 stages, strict TDD). Two independent, default-off features inspired by a study of the Hermes Agent skill system, rebuilt to fit Istota's architecture. Full suite green (6,377 passed, 7 skipped); no new lint findings in the touched code.

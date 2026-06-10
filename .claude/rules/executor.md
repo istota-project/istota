@@ -15,7 +15,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 ### Flow
 1. **Setup temp dir**: `config.temp_dir / task.user_id`
 2. **Merge resources**: DB resources + config resources → `db.UserResource` list
-3. **Load skills**: `load_skill_index()` → `select_skills()` → (when `skills.progressive_disclosure`) `partition_skills_for_disclosure()` splits selected into eager/lazy → `load_skills(eager)` for the body + `build_disclosure_index(lazy)` for the on-demand index (`skills_index`); off → `load_skills(all_selected)` as before
+3. **Load skills**: `load_skill_index()` → `select_skills()` (Pass 1; optional Pass 2 `classify_skills`, default off) → (when `skills.progressive_disclosure`, default on) `partition_skills_for_disclosure()` splits selected into eager/lazy → `load_skills(eager)` for the body + `build_disclosure_index(lazy ∪ eligible_skill_names(...))` for the **widened** on-demand catalogue index (`skills_index`, replaces Pass 2); off → `load_skills(all_selected)`, no index (legacy)
 4. **Skills changelog**: fingerprint compare, interactive only
 5. **Context loading**: skip for scheduled/briefing
 6. **User memory**: `read_user_memory_v2()`, skip for briefings

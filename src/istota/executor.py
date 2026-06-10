@@ -2301,23 +2301,43 @@ def execute_task(
         except Exception:
             logger.warning("Failed to save selected_skills for task %d", task.id, exc_info=True)
 
-    # Progressive disclosure (Part A): render heavy/speculative skills as a
-    # one-line index the model loads on demand, instead of full body up front.
-    # Off by default → every selected skill is eager (legacy behaviour).
+    # Progressive disclosure (Part A): selected skills are partitioned into
+    # eager (full body inline) / lazy (one-line index entry), and the on-demand
+    # index is widened to the full eligible catalogue — every skill the model
+    # could load that isn't already eager. The widened catalogue replaces Pass 2
+    # semantic routing: instead of a per-task pre-router guessing inclusion, the
+    # main model self-selects from the menu via `istota-skill skills show`.
+    # Off → every selected skill is eager, no index (legacy behaviour).
     skills_index = None
     if config.skills.progressive_disclosure:
         from .skills._loader import (
             build_disclosure_index, partition_skills_for_disclosure,
+            eligible_skill_names,
         )
         eager_skills, lazy_skills = partition_skills_for_disclosure(
             selected_skills, skill_index, config.skills_dir, config.skills,
             bundled_dir=_bundled_dir,
         )
-        skills_index = build_disclosure_index(lazy_skills, skill_index)
-        if lazy_skills:
+        # Catalogue = eligible skills that aren't already eager-selected,
+        # pinned always_eager, or excluded by a selected skill.
+        catalogue_exclude = set(selected_skills) | set(config.skills.always_eager or [])
+        for n in selected_skills:
+            m = skill_index.get(n)
+            if m:
+                catalogue_exclude.update(m.exclude_skills)
+        catalogue = eligible_skill_names(
+            skill_index,
+            exclude=catalogue_exclude,
+            disabled_skills=_disabled if _disabled else None,
+            is_admin=is_admin,
+            enabled_experimental_features=frozenset(config.experimental.features),
+        )
+        index_names = list(lazy_skills) + [c for c in catalogue if c not in lazy_skills]
+        skills_index = build_disclosure_index(index_names, skill_index)
+        if index_names:
             logger.info(
-                "disclosure: eager=%d lazy=%s",
-                len(eager_skills), ",".join(sorted(lazy_skills)),
+                "disclosure: eager=%d lazy=%d catalogue=%d",
+                len(eager_skills), len(lazy_skills), len(index_names) - len(lazy_skills),
             )
     else:
         eager_skills = selected_skills

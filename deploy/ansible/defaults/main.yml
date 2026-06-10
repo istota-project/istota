@@ -616,14 +616,17 @@ istota_memory_search_auto_recall: false           # BM25 search using task promp
 istota_memory_search_auto_recall_limit: 5          # max results for auto-recall
 istota_memory_search_recency_half_life_days: 180   # recency decay half-life for recall (0 = off)
 
-# Skills routing (LLM-based semantic routing for skill selection)
-istota_skills_semantic_routing: true  # enable Pass 2 LLM classification
+# Skills routing. Pass 2 LLM semantic routing is OFF by default: it spawns a
+# per-task `claude -p` subprocess whose cold-start cost dominates, and the
+# widened progressive-disclosure catalogue index (below) replaces it — the main
+# model self-loads any eligible skill on demand. Set true to restore the pre-router.
+istota_skills_semantic_routing: false  # Pass 2 LLM classification (off by default)
 
-# Progressive skill disclosure — defer heavy/lazy skill bodies; the model loads
-# them on demand via `istota-skill skills show <name>`. Off by default (the
-# `disclosure: lazy` markers on developer/health/money/location/browse/calendar
-# are inert until this is true). always_eager skills are never deferred.
-istota_skills_progressive_disclosure: false
+# Progressive skill disclosure — ON by default. Heavy/lazy skill bodies are
+# deferred to a one-line index and the index is widened to the full eligible
+# catalogue; the model loads a body on demand via `istota-skill skills show
+# <name>`. always_eager skills are never deferred. Set false for legacy all-eager.
+istota_skills_progressive_disclosure: true
 istota_skills_auto_lazy_threshold_chars: 0   # >0: a CLI skill over N chars defaults to lazy (0 = explicit frontmatter only)
 
 # Learned playbooks (procedural memory) — per-user markdown task procedures the

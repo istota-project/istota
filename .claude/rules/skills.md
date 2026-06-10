@@ -54,11 +54,10 @@ build_disclosure_index(lazy_names, skill_index) -> str            # "" when no l
 
 ### Progressive disclosure (Part A)
 
-When `skills.progressive_disclosure` is on, a *selected* skill is rendered
-**eager** (full body in `skills_doc`, unchanged) or **lazy** (a one-line entry in
+When `skills.progressive_disclosure` is on (**default**), a *selected* skill is
+rendered **eager** (full body in `skills_doc`) or **lazy** (a one-line entry in
 the "Available skills (load on demand)" prompt section; the model pulls the body
-via `istota-skill skills show <name>`). Selection (Pass 1 + Pass 2) is untouched
-— this only changes how a selected skill is *rendered*. `SkillMeta.disclosure`
+via `istota-skill skills show <name>`). `SkillMeta.disclosure`
 (`"" | "eager" | "lazy"`) is parsed from frontmatter.
 
 `resolve_disclosure_mode` order: frontmatter `disclosure` wins → else the size
@@ -70,9 +69,22 @@ size threshold still requires `cli: true`, so a no-CLI skill is deferred only vi
 explicit frontmatter. `partition_skills_for_disclosure` reads each skill's body
 length (defaults to **eager** on a read failure — safe, content present) and
 splits the selection; the executor calls `load_skills(eager)` +
-`build_disclosure_index(lazy)` and passes the index to `build_prompt` as
-`skills_index`. Off by default (byte-identical legacy prompt). `developer`,
-`health`, `money`, `location`, `browse`, `calendar` ship marked `disclosure: lazy`.
+`build_disclosure_index(...)` and passes the index to `build_prompt` as
+`skills_index`. `developer`, `health`, `money`, `location`, `browse`, `calendar`
+ship marked `disclosure: lazy`.
+
+**Widened catalogue index (replaces Pass 2).** The on-demand index is not just
+the selected-lazy skills — the executor widens it to the *full eligible
+catalogue*: `index_names = lazy_selected ∪ eligible_skill_names(exclude =
+selected ∪ always_eager ∪ ⋃ exclude_skills_of_selected)`. So every loadable
+skill the model isn't already given eager appears in the menu, and the capable
+main model self-selects what to load — instead of a per-task `claude -p` Pass-2
+pre-router guessing inclusion (its cold-start cost dominated and timed out in
+production). `eligible_skill_names` (`_loader.py`) is the shared membership gate
+(excludes already-selected / `always_include` / disabled / admin-gated /
+experimental-gated / missing-deps) reused by both the catalogue and the Pass-2
+manifest. The executor logs `disclosure: eager=N lazy=M catalogue=K` per task.
+With disclosure off, no index is emitted (legacy all-eager prompt).
 
 The on-demand loader is the `skills` core skill (`always_include`, `cli: true`):
 `istota-skill skills show <name>` renders a skill's full body (same frontmatter
@@ -112,8 +124,7 @@ After execution, the resolved skill set is persisted via `db.save_task_selected_
 
 **Pre-transcription**: before skill selection, `_pre_transcribe_attachments()` (`executor.py:225`) transcribes audio attachments and enriches `task.prompt` with the spoken text so keyword rules match voice memos.
 
-**Pass 2: Semantic routing** (`classify_skills`) — LLM-based, additive to Pass 1.
-When `config.skills.semantic_routing` is enabled (default: true), a Haiku call sees the task prompt + a manifest of unselected skills (filtered for admin_only/disabled/deps) plus the user's resource types (so it can reason "user has karakeep → bookmarks is plausible"), and returns additional skill names. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only.
+**Pass 2: Semantic routing** (`classify_skills`) — LLM-based, additive to Pass 1, **off by default** (`config.skills.semantic_routing = False`). When enabled, a Haiku call sees the task prompt + a manifest of unselected skills (filtered for admin_only/disabled/deps) plus the user's resource types (so it can reason "user has karakeep → bookmarks is plausible"), and returns additional skill names. Results are unioned with Pass 1. On timeout/error, falls back to Pass 1 only. Pass 2 is now superseded by the **widened progressive-disclosure catalogue** (see "Progressive disclosure" above): rather than a per-task `claude -p` subprocess (cold-start dominated, timed out in prod) pre-promoting skills, every eligible skill is listed in the on-demand index and the main model self-loads. Kept reachable for operators who prefer the pre-router.
 
 After the union, the executor (`executor.py:1815-1823`) re-applies `exclude_skills` because newly added skills may exclude previously-selected ones.
 
