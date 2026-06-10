@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-06-09
+
 ### Added
 - A conversation can now be carried across Nextcloud Talk and the in-app web chat. A new surface-independent room registry backs both, with one canonical message store per room, so opening a Talk room in web shows its full history and a reply typed in web is mirrored into the Talk room (and onto your phone). The bot keeps full cross-surface context with no extra work. Talk rooms the bot is in surface automatically in the web room list; a web room can be promoted to Talk ("Also open in Talk") to create a real Nextcloud Talk conversation, and renames propagate both ways. When a room is open in web while a Talk message is being answered, the reply streams live in both places.
 
@@ -709,7 +711,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.21.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.22.0...main
+[0.22.0]: https://gitlab.com/cynium/istota/-/releases/v0.22.0
 [0.21.0]: https://gitlab.com/cynium/istota/-/releases/v0.21.0
 [0.20.0]: https://gitlab.com/cynium/istota/-/releases/v0.20.0
 [0.19.0]: https://gitlab.com/cynium/istota/-/releases/v0.19.0
