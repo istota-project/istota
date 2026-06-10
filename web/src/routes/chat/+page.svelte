@@ -404,10 +404,14 @@
 		border: 1px solid var(--border-default);
 		background: var(--surface-overlay, var(--surface-card));
 		color: var(--text-primary);
-		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
 		cursor: pointer;
 		opacity: 0.9;
 		transition: opacity 0.12s ease, transform 0.12s ease;
+	}
+	/* Light mode: a heavy black shadow reads harsh on the white pane — soften it. */
+	:global(:root[data-theme='light']) .jump-latest {
+		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 	}
 	.jump-latest:hover { opacity: 1; transform: translateY(-1px); }
 	.jump-latest:active { transform: translateY(0); }
