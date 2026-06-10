@@ -289,7 +289,7 @@
 			{:else if $messages.length === 0}
 				<div class="chat-empty">
 					<MessageSquare size={28} />
-					<p>Ask {activeRoom ? `in #${activeRoom.name}` : 'Istota'} anything.</p>
+					<p>{activeRoom ? `Ask anything in #${activeRoom.name.replace(/^#+/, '')}.` : 'Ask Istota anything.'}</p>
 					<span class="hint">Configuration help, quick tasks, or one-off questions.</span>
 				</div>
 			{:else}
