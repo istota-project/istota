@@ -166,7 +166,6 @@
 	.meta-footer {
 		position: absolute;
 		right: 0.75rem;
-		pointer-events: none;
 		font-size: var(--text-xs);
 		color: var(--text-dim);
 		font-variant-numeric: tabular-nums;
