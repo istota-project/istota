@@ -389,14 +389,17 @@
 	   newest message; click smooth-scrolls back to the bottom. */
 	.jump-latest {
 		position: absolute;
-		right: 1rem;
+		/* Right edge aligned with the composer's send button: the composer has
+		   0.75rem of horizontal padding and the 36px send button sits flush
+		   against it, so matching `right` + width lines the two up vertically. */
+		right: 0.75rem;
 		bottom: 0.75rem;
 		z-index: 5;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 2.25rem;
-		height: 2.25rem;
+		width: 36px;
+		height: 36px;
 		border-radius: 999px;
 		border: 1px solid var(--border-default);
 		background: var(--surface-overlay, var(--surface-card));
