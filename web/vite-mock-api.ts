@@ -114,7 +114,7 @@ const user = {
 
 // ---- Web chat mock state ----
 interface MockChatRoom { id: number; token: string; name: string; archived: boolean; created_at: string; updated_at: string; }
-interface MockChatTask { id: number; roomToken: string; prompt: string; createdAt: number; }
+interface MockChatTask { id: number; roomToken: string; prompt: string; createdAt: number; variant?: 'simple' | 'multiround'; }
 const mockChatRooms: MockChatRoom[] = [
 	{ id: 1, token: 'web-stefan-general', name: 'general', archived: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
 ];
@@ -150,13 +150,78 @@ let mockChatTaskSeq = 1000;
 	}
 })();
 
+// Seed a couple of finished MULTI-ROUND turns at the very bottom of `general`
+// (newer than the backlog above, but well past the done threshold so they render
+// as history). These exercise the render-group layout: activity chip →
+// substantial intermediate prose → another activity chip → final answer. ids
+// 200/201 sit between the backlog (1..120) and the live-send sequence (1000).
+(() => {
+	const base = Date.now() - 40_000; // 40s ago, finished
+	mockChatTasks.set(200, { id: 200, roomToken: 'web-stefan-general', prompt: 'tighten the moving-plan note', createdAt: base, variant: 'multiround' });
+	mockChatTasks.set(201, { id: 201, roomToken: 'web-stefan-general', prompt: 'fix the near-expiry 401s in auth', createdAt: base + 12_000, variant: 'multiround' });
+})();
+
 // A canned event timeline for a mock task (ms offsets from creation). Models the
 // target UX: the model's work (inter-tool narration + tool calls) collapses into
 // the single ActivityTrace chip (its "current step" updates live), and the FINAL
 // ANSWER streams token-by-token, prominent, after the last tool. Tweak the
 // timings / chunking here to eyeball the streaming behaviour in the dev frontend
 // (VITE_MOCK_API=1 npm run dev → /chat) without a live backend.
+// A MULTI-ROUND turn: the model does some work (a chip), writes a substantial
+// intermediate analysis block (prose — kept because it's ≥ the substance bar),
+// does more work (a second chip), then gives the final answer (prose). Exercises
+// the render-group layout chip → text → chip → text. The intermediate block must
+// stay over SUBSTANTIAL_TEXT_CHARS (280) so renderGroups renders it instead of
+// folding it into the chip.
+function mockMultiRoundTaskEvents(task: MockChatTask) {
+	const SCENARIOS: Record<number, { tools1: [string, string][]; intermediate: string; tools2: [string, string][]; final: string }> = {
+		200: {
+			tools1: [['c1', '⚙️ find the note'], ['c2', '📄 read "moving plan.md"']],
+			intermediate:
+				'Two things worth making explicit before I edit. First, the keep/decide step is the real bottleneck — sorting, listing, and scheduling are all blocked until it is done, so it belongs at the very top as the gating milestone rather than buried in the middle of the list. Second, the three vendor tracks are independent once that gate clears, so they should be grouped under one heading and marked as running in parallel, not sequentially.',
+			tools2: [['c3', '✏️ edit "moving plan.md"']],
+			final:
+				'Done — restructured the note so the keep/decide step is the top gating milestone, with the three vendor tracks grouped under a single "parallel once unblocked" heading below it. I also removed the duplicated reframe line further down so it is not stated twice.',
+		},
+		201: {
+			tools1: [['c1', '🔎 grep verify_session'], ['c2', '📄 read auth/middleware.py']],
+			intermediate:
+				'Before changing anything, the core constraint: the session-token check lives in two places — the middleware and the login handler — and they have drifted. The middleware accepts an expired token inside a short grace window while the handler rejects it outright, which is the source of the intermittent 401s near expiry. I will consolidate both onto a single `verify_session` helper so the grace logic exists in exactly one place, then document the window, which currently is not written down anywhere.',
+			tools2: [['c3', '✏️ edit auth/session.py'], ['c4', '✏️ edit docs/auth.md']],
+			final:
+				'Refactored both call sites onto a shared `verify_session` helper and documented the five-minute grace window in the auth README. The middleware and handler now agree on expiry, so the intermittent 401s on near-expiry tokens should stop.',
+		},
+	};
+	const s = SCENARIOS[task.id] ?? SCENARIOS[200];
+	const events: { seq: number; kind: string; payload: Record<string, unknown>; at: number }[] = [];
+	let seq = 1;
+	let at = 0;
+	const push = (kind: string, payload: Record<string, unknown>, dt: number) => {
+		at += dt;
+		events.push({ seq: seq++, kind, payload, at });
+	};
+	const stream = (text: string) => {
+		for (const chunk of text.match(/.{1,14}/gs) ?? [text]) push('text_delta', { text: chunk }, 55);
+	};
+	push('task_started', { text: 'On it...' }, 0);
+	push('thinking', { text: 'Let me look at the current state first. ' }, 200);
+	for (const [id, desc] of s.tools1) {
+		push('tool_start', { tool_name: 'Tool', description: desc, tool_call_id: id }, 300);
+		push('tool_end', { tool_name: 'Tool', tool_call_id: id, success: true, duration_ms: 700 }, 700);
+	}
+	stream(s.intermediate); // intermediate analysis — prominent prose, then a tool follows
+	for (const [id, desc] of s.tools2) {
+		push('tool_start', { tool_name: 'Edit', description: desc, tool_call_id: id }, 300);
+		push('tool_end', { tool_name: 'Edit', tool_call_id: id, success: true, duration_ms: 700 }, 700);
+	}
+	stream(s.final); // final answer
+	push('result', { text: s.final, truncated: false }, 100);
+	push('done', { stop_reason: 'completed', duration_seconds: at / 1000, model: 'claude-opus-4-8' }, 200);
+	return events;
+}
+
 function mockTaskEvents(task: MockChatTask) {
+	if (task.variant === 'multiround') return mockMultiRoundTaskEvents(task);
 	// A multi-paragraph markdown answer, chunked into small deltas so the live
 	// prominent streaming (and incremental markdown) is visible.
 	const reply =
@@ -389,7 +454,10 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 			// !model <alias> <prompt> falls through to a real task (override carried).
 		}
 		const id = ++mockChatTaskSeq;
-		mockChatTasks.set(id, { id, roomToken: room.token, prompt: text, createdAt: Date.now() });
+		// Type a message containing "multiround" to stream the multi-step shape
+		// (chip → intermediate prose → chip → final) live, not just in history.
+		const variant: 'simple' | 'multiround' = /multiround/i.test(text) ? 'multiround' : 'simple';
+		mockChatTasks.set(id, { id, roomToken: room.token, prompt: text, createdAt: Date.now(), variant });
 		return { task_id: id, status: 'pending', stream_url: `/istota/api/chat/tasks/${id}/stream`, snapshot_url: `/istota/api/chat/tasks/${id}/events` };
 	}
 

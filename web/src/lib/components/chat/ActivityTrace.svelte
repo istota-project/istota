@@ -64,7 +64,9 @@
 
 <style>
 	.activity {
-		margin: 0.3rem 0;
+		/* Vertical spacing is owned by Message's `.chip-slot` (neighbour-aware);
+		   keep this margin 0 so a tool-first chip sits flush under the meta. */
+		margin: 0;
 		border-radius: 0.4rem;
 		background: var(--surface-badge);
 		max-width: 100%;
