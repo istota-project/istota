@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-10: Issue-triage sweep — six open issues closed (Talk placeholders, deferred-subtask reliability, deferred ref-chaining, stale bare clones)
+
+Triaged the open issue tracker and closed six. One (ISSUE-130) was already fixed in code by the keyset-paging work and just needed the tracker flipped; four got fresh fixes; one (ISSUE-131) was advanced (paging half done, virtualization remains). All four code fixes built strict-TDD (failing test → implementation → green) and committed separately.
+
+**Key changes:**
+
+- **ISSUE-132 — Talk rich-object placeholders leaking into the web transcript.** `clean_message_content` (`talk.py`) only resolved two narrow regexes (`{fileN}` / `{mention-…N}`), so bare `{file}` single-file shares and every other rich-object type (`{actor}`, polls, deck cards, locations, guest/call mentions) rendered as literal tokens. Replaced both regexes with one generic resolver that walks `messageParameters` and dispatches on each param's `type`. The *actual* web-transcript leak turned out to be the cache-recovery path, not system messages: the live inbound path already resolves and already skips Talk system messages (`messageType == "system"`), but `db.backfill_room_messages_from_talk_cache` folded the cache's raw `message_text` into the durable `messages` store unresolved (dormant/legacy rooms). It now resolves against the cached `message_parameters` before insert. `call`/`mention-call` now render `@all` (Nextcloud semantics); mentions resolve even with no `bot_username` (the is-bot / cache display path). Two old tests that pinned the previous quirks were updated to the new contract.
+
+- **ISSUE-135 — deferred subtasks silently failing.** Two silent modes. (1) `_process_deferred_subtasks` dropped any entry without a `prompt` via a bare `continue`, so an entry using the unsupported `command` key vanished with no log — now it warns loudly (naming the keys, calling out `command`) and still creates well-formed siblings; non-dict entries guarded too. (2) `_warn_unconsumed_deferred_files` only scanned the `task_{id}_*` and `{id}_*` name shapes, so a descriptive name with the id as a *trailing* token (the shape that triggered this) was invisible — added a third glob `*_{id}.json` and deduped the scan. Net: a deferred subtask with a wrong key or hallucinated filename is now diagnosable from the logs instead of disappearing.
+
+- **ISSUE-092 — deferred skill CLI can't chain dependent writes.** Inside the sandbox, `add-panel` returns no id (the write is deferred), so a follow-up `add-biomarker` had no `panel_id` to chain to. Landed Option 1 (within-batch ref resolution): `add-panel --ref NAME` stamps a symbolic ref on the deferred op; `add-biomarker @NAME` emits `panel_ref`; `_process_deferred_health_ops` keeps a `{ref → real id}` map as it replays and substitutes. An unresolved `panel_ref` fails loudly (ERROR + the existing failure sidecar), never silently misfiled; a `@ref` in direct mode is rejected with an error envelope. The `ref`/`*_ref` convention is generic enough to extend to any future parent→child deferred chain.
+
+- **ISSUE-125 — bare clones serve stale source.** `git clone --bare` populates `refs/heads/*` once; the remote-tracking refspec never advances them, so a local `main` freezes at clone day while `origin/main` moves on, and `git show main:file` silently returns clone-day source. Hardened the `developer` skill's clone setup (lever 2): after fetch it repoints the bare `HEAD` to the remote default and `branch -D`s every clone-day local head — guarded by a worktree checked-out-branch skip so a live work branch is never deleted. Now `git show main:file` errors with `unknown revision` instead of returning wrong bytes. Added the "always `origin/<branch>`, never a local branch" invariant and a `dev-show` safe-read verb to the skill doc.
+
+- **ISSUE-130 (already fixed) / ISSUE-131 (advanced).** 130 (transcript LIMIT ordered by id not time) was already resolved by the keyset-paging commits with a regression test — tracker flipped to closed. 131's paging half (backend cursor + scroll-up + stick-to-bottom) shipped; DOM virtualization remains, so it stays open with a status note.
+
+**Files added/modified:**
+- `src/istota/talk.py` — generic `_resolve_param` + rewritten `clean_message_content`
+- `src/istota/db.py` — `backfill_room_messages_from_talk_cache` resolves placeholders via cached params
+- `src/istota/scheduler_deferred.py` — loud warn on prompt-less subtask entries; broadened unconsumed-file scan; within-batch panel-ref resolution in `_process_deferred_health_ops`
+- `src/istota/skills/health/__init__.py` — `--ref` / `@ref` panel-ref chaining for `add-panel` / `add-biomarker`
+- `src/istota/skills/health/skill.md` — documents the `@ref` pattern
+- `src/istota/skills/developer/skill.md` — clone-setup fossil deletion + `dev-show` verb + invariant
+- `tests/test_talk.py`, `tests/test_transport_talk_inbound.py`, `tests/test_chat_history_durable.py`, `tests/test_scheduler.py`, `tests/test_health_csv_io.py`, `tests/test_health_skill.py` — coverage for all four fixes
+
 ## 2026-06-10: Keep substantial intermediate text in stream output — meaty blocks no longer vanish into the activity chip
 
 With live streaming in the web chat UI, a turn where the model writes a substantial analysis block, *then* acts on it (an Edit), then gives a short confirmation would stream the analysis live and then drop it — the final answer area showed only the terse confirmation, and the detailed block disappeared. The content the user most wanted was the part that got thrown away.
