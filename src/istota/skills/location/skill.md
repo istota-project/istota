@@ -3,6 +3,7 @@ name: location
 triggers: [location, gps, where, place, places, visit, visits, track, position, coordinates, attendance, reverse geocode, day summary, neighborhood, summary]
 description: Location tracking, place recognition, visit history, and calendar attendance
 cli: true
+disclosure: lazy
 env: [{"var":"LOCATION_DB_PATH","from":"setup_env"},{"var":"CALDAV_URL","from":"config","config_path":"caldav_url","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_USERNAME","from":"config","config_path":"caldav_username","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_PASSWORD","from":"config","config_path":"caldav_password","when":"caldav_url","gate_has_discovered_calendars":true,"sensitive":true}]
 ---
 # Location Skill

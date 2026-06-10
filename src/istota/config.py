@@ -277,6 +277,21 @@ class MemorySearchConfig:
 
 
 @dataclass
+class PlaybooksConfig:
+    """Learned-playbook (procedural memory) configuration (Part B).
+
+    A playbook is a per-user markdown procedure distilled by the sleep cycle
+    from a successful multi-step task, recalled by relevance through the memory
+    search path. Off by default; the master gate is ``enabled``.
+    """
+    enabled: bool = False           # master gate for Part B
+    recall_limit: int = 3           # top-K playbooks injected per task
+    min_tool_calls: int = 4         # a task must use >= this many tools to qualify
+    retention_days: int = 0         # 0 = keep forever; >0 = age-prune
+    max_chars: int = 0              # 0 = share the global max_memory_chars budget
+
+
+@dataclass
 class DeveloperConfig:
     """Developer skill configuration for git + GitLab/GitHub workflows."""
     enabled: bool = False
@@ -455,6 +470,21 @@ class SkillsConfig:
     semantic_routing: bool = True  # enable LLM-based Pass 2 skill classification
     semantic_routing_model: str = "fast"  # role alias — resolves to HAIKU by default; operator-overridable
     semantic_routing_timeout: float = 3.0  # seconds, falls back to Pass 1 on timeout
+    # Progressive skill disclosure (Part A). When False (default), every
+    # selected skill is rendered eager (full body) and no index section is
+    # emitted — byte-for-byte the legacy behaviour.
+    progressive_disclosure: bool = False
+    # When > 0, a CLI skill whose body exceeds this many chars defaults to lazy
+    # disclosure even without an explicit ``disclosure: lazy`` frontmatter key.
+    # 0 = only explicit frontmatter opts a skill into lazy.
+    auto_lazy_threshold_chars: int = 0
+    # Skills that are never deferred regardless of size or frontmatter — their
+    # rules must always be fully in context.
+    always_eager: list[str] = field(
+        default_factory=lambda: [
+            "sensitive_actions", "untrusted_input", "files", "scripts", "memory",
+        ]
+    )
 
 
 @dataclass
@@ -611,6 +641,7 @@ class Config:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
+    playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
     sleep_cycle: SleepCycleConfig = field(default_factory=SleepCycleConfig)
     channel_sleep_cycle: ChannelSleepCycleConfig = field(default_factory=ChannelSleepCycleConfig)
     developer: DeveloperConfig = field(default_factory=DeveloperConfig)
@@ -1169,6 +1200,14 @@ def load_config(config_path: Path | None = None) -> Config:
             semantic_routing=sk.get("semantic_routing", True),
             semantic_routing_model=sk.get("semantic_routing_model", "fast"),
             semantic_routing_timeout=sk.get("semantic_routing_timeout", 3.0),
+            progressive_disclosure=sk.get("progressive_disclosure", False),
+            auto_lazy_threshold_chars=sk.get("auto_lazy_threshold_chars", 0),
+            always_eager=list(
+                sk.get(
+                    "always_eager",
+                    ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"],
+                )
+            ),
         )
 
     if "brain" in data:
@@ -1292,6 +1331,16 @@ def load_config(config_path: Path | None = None) -> Config:
             auto_index_memory_files=ms.get("auto_index_memory_files", True),
             auto_recall=ms.get("auto_recall", False),
             auto_recall_limit=ms.get("auto_recall_limit", 5),
+        )
+
+    if "playbooks" in data:
+        pb = data["playbooks"]
+        config.playbooks = PlaybooksConfig(
+            enabled=pb.get("enabled", False),
+            recall_limit=pb.get("recall_limit", 3),
+            min_tool_calls=pb.get("min_tool_calls", 4),
+            retention_days=pb.get("retention_days", 0),
+            max_chars=pb.get("max_chars", 0),
         )
 
     if "sleep_cycle" in data:

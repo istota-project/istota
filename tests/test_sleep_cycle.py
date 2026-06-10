@@ -1105,7 +1105,7 @@ class TestParseStructuredExtraction:
     def test_plain_text_fallback(self):
         """Output without structured markers is treated as plain memories."""
         output = "- Memory one (2026-04-08, ref:1)\n- Memory two (2026-04-08, ref:2)"
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert "Memory one" in memories
         assert "Memory two" in memories
         assert facts == []
@@ -1122,7 +1122,7 @@ FACTS:
 TOPICS:
 {"ref:1234": "tech", "ref:1235": "personal"}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert "Stefan switched to FastAPI" in memories
         assert "Prefers dark mode" in memories
         assert len(facts) == 1
@@ -1140,7 +1140,7 @@ FACTS:
 TOPICS:
 {}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert "Just a memory" in memories
         assert facts == []
         assert topics == {}
@@ -1155,7 +1155,7 @@ not valid json
 TOPICS:
 {"ref:1": "tech"}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert "A memory" in memories
         assert facts == []
         assert topics == {"ref:1": "tech"}
@@ -1170,7 +1170,7 @@ FACTS:
 TOPICS:
 broken json"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert len(facts) == 1
         assert topics == {}
 
@@ -1181,7 +1181,7 @@ broken json"""
 TOPICS:
 {"ref:1": "tech"}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert "A memory" in memories
         assert facts == []
         assert topics == {"ref:1": "tech"}
@@ -1193,7 +1193,7 @@ TOPICS:
 FACTS:
 [{"subject": "stefan", "predicate": "knows", "object": "python"}]"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert "A memory" in memories
         assert len(facts) == 1
         assert topics == {}
@@ -1209,7 +1209,7 @@ FACTS:
 TOPICS:
 {}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert len(facts) == 1
         assert facts[0]["subject"] == "stefan"
 
@@ -1227,7 +1227,7 @@ FACTS:
 TOPICS:
 {"ref:1": "work"}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert len(facts) == 3
 
     def test_freeform_predicates_accepted(self):
@@ -1245,7 +1245,7 @@ FACTS:
 TOPICS:
 {}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert len(facts) == 3
         predicates = {f["predicate"] for f in facts}
         assert predicates == {"knows", "allergic_to", "favorite_color"}
@@ -1261,7 +1261,7 @@ FACTS:
 TOPICS:
 {}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert facts == []
 
     def test_empty_object_filtered(self):
@@ -1275,7 +1275,7 @@ FACTS:
 TOPICS:
 {}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert facts == []
 
     def test_fact_values_normalized(self):
@@ -1289,7 +1289,7 @@ FACTS:
 TOPICS:
 {}"""
 
-        memories, facts, topics = _parse_structured_extraction(output)
+        memories, facts, topics, _playbooks = _parse_structured_extraction(output)
         assert len(facts) == 1
         assert facts[0]["subject"] == "stefan"
         assert facts[0]["predicate"] == "works_at"

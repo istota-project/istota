@@ -393,6 +393,16 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # semantic_routing = true              # enable LLM-based Pass 2 skill classification
 # semantic_routing_model = "fast"      # role alias (resolves to Haiku); accepts canonical / provider / role aliases
 # semantic_routing_timeout = 3.0       # seconds, falls back to Pass 1 on timeout
+# progressive_disclosure = false       # defer heavy/lazy skill bodies; model loads them via `istota-skill skills show <name>`
+# auto_lazy_threshold_chars = 0        # >0: a CLI skill over N chars defaults to lazy (0 = explicit `disclosure: lazy` frontmatter only)
+# always_eager = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]  # never deferred
+
+# [playbooks]                          # Learned playbooks (procedural memory) — off by default
+# enabled = false                      # master gate
+# recall_limit = 3                     # top-K playbooks injected per task
+# min_tool_calls = 4                   # a task must use >= this many tools to qualify
+# retention_days = 0                   # 0 = keep forever; >0 = age-prune
+# max_chars = 0                        # 0 = share the global max_memory_chars budget
 
 # ============================================================================
 # Model role aliases (operator override) — optional

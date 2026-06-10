@@ -15,7 +15,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 ### Flow
 1. **Setup temp dir**: `config.temp_dir / task.user_id`
 2. **Merge resources**: DB resources + config resources → `db.UserResource` list
-3. **Load skills**: `load_skill_index()` → `select_skills()` → `load_skills()`
+3. **Load skills**: `load_skill_index()` → `select_skills()` → (when `skills.progressive_disclosure`) `partition_skills_for_disclosure()` splits selected into eager/lazy → `load_skills(eager)` for the body + `build_disclosure_index(lazy)` for the on-demand index (`skills_index`); off → `load_skills(all_selected)` as before
 4. **Skills changelog**: fingerprint compare, interactive only
 5. **Context loading**: skip for scheduled/briefing
 6. **User memory**: `read_user_memory_v2()`, skip for briefings
@@ -24,7 +24,8 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 8b. **Dated memories**: `read_dated_memories()`, skip for briefings, controlled by `auto_load_dated_days`
 8c. **Memory recall**: `_recall_memories()`, BM25 search using task prompt, skip for briefings
 8d. **Knowledge facts**: load from `knowledge_graph`, relevance-filtered by prompt, capped by `max_knowledge_facts`
-8e. **Memory cap**: `_apply_memory_cap()`, truncates recalled → knowledge facts → dated if `max_memory_chars` exceeded
+8d2. **Playbook recall**: `_recall_playbooks()`, BM25/vector over `source_type="playbook"`, gated on `playbooks.enabled`, skipped for automated/`skip_memory` tasks (Part B)
+8e. **Memory cap**: `_apply_memory_cap()`, truncates recalled → knowledge facts → dated → playbooks if `max_memory_chars` exceeded (playbooks truncated last — most protected; returns a 6-tuple)
 9. **Confirmation context**: load from `task.confirmation_prompt` if confirmed task
 10. **Build prompt**: includes `confirmation_context` when set
 11. **Dry run check**: return prompt text
@@ -46,9 +47,11 @@ def build_prompt(
     is_admin: bool = True, emissaries: str | None = None,
     source_type: str | None = None, output_target: str | None = None,
     recalled_memories: str | None = None,
+    playbooks: str | None = None,
     excluded_resource_types: set[str] | None = None,
     skip_persona: bool = False,
     cli_skills_text: str | None = None,
+    skills_index: str | None = None,
     confirmation_context: str | None = None,
     knowledge_facts: str | None = None,
 ) -> str:
@@ -64,14 +67,15 @@ def build_prompt(
 6. Channel memory: CHANNEL.md
 7. Dated memories: auto-loaded from `memories/YYYY-MM-DD.md` (configurable via `auto_load_dated_days`)
 7b. Recalled memories: BM25 search results (when `auto_recall` enabled)
+7c. Learned Playbooks: `_recall_playbooks` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated/`skip_memory` tasks)
 8. Confirmation context: previous bot output for confirmed actions
-9. Tools: file access, browser, CalDAV, sqlite3, email
+9. Tools: file access, browser, CalDAV, sqlite3, email, then `skills_index` ("Available skills (load on demand)") when progressive disclosure deferred any skill
 10. Rules: resource restrictions, confirmation, subtasks, output
 11. Context: previous messages
 12. Request: prompt + attachments
 13. Guidelines: `config/guidelines/{source_type}.md`
 14. Skills changelog
-15. Skills doc
+15. Skills doc (eager skills only when progressive disclosure is on)
 
 ## Environment Variable Mapping
 

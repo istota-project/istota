@@ -14,13 +14,15 @@ Reading is automatic. You never need to `cat` USER.md or query the KG before wri
 
 ### Classify before writing
 
-Before storing anything in memory, decide which of these three branches it falls into:
+Before storing anything in memory, decide which of these branches it falls into:
 
 **Temporal event** — something happened, a decision was made, an item was acquired or disposed of, status changed. Cue: you would naturally write `(noted YYYY-MM-DD)` or "on YYYY-MM-DD" next to it. Verbs: ordered, bought, returned, decided, started, stopped, moved, joined, left, became, finished. → Use `istota-skill memory_search add-fact` with `--from YYYY-MM-DD`.
 
 **Stable factual claim** — a property of the user that is true regardless of date: identity, family, biography, languages spoken, places lived, employer, role. For medical: allergies and named chronic/serious conditions (`allergic_to penicillin`, `has_condition type_1_diabetes`) belong here. Quantitative health data does NOT — see "Health data" below. Cue: a noun phrase about the person, not a verb-headed instruction. Even without a date, these belong in the knowledge graph. → Use `istota-skill memory_search add-fact` (no `--from`).
 
 **Behavioral instruction** — how I should act, communication style, defaults, persistent preferences for my own behavior. Cue: it would still be true a year from now without re-confirmation, AND it tells me what to do. Phrasings: "always", "never", "default to", "prefer", "treat X as Y", "draft as", "send as". → Use `istota-skill memory append`.
+
+**Reusable task procedure** — "here is the multi-step way to do task X" distilled from a successful run (which skills/CLIs, in what order, with what gotchas). Cue: it's a *how-to*, not a fact about the user or a behavioral default. These are **learned playbooks**, stored as markdown files under `playbooks/` and recalled by relevance. In v1 they are generated only by the nightly sleep cycle from successful multi-step task trajectories — there is no runtime `playbooks add` write yet, so this branch is informational. Do not try to hand-write a playbook mid-task.
 
 **Both** (rare) — write the behavioral rule to USER.md AND store the triggering event as a fact. Example: the user tells you they've switched to a new email client and from now on prefers shorter replies. The preference is behavioral; the switch event is a fact.
 
