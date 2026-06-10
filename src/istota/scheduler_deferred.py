@@ -142,8 +142,30 @@ def _process_deferred_subtasks(
                     task.id, max_subtasks,
                 )
                 break
+            # A malformed entry must never be dropped silently (ISSUE-135): a
+            # deferred subtask that goes unexecuted with no log, no retry, and
+            # no signal is the worst failure mode. The one documented key is
+            # `prompt`; `command` is NOT supported. Warn loudly (naming the keys
+            # present) instead of a silent `continue` so the miss is diagnosable.
+            if not isinstance(entry, dict):
+                logger.warning(
+                    "Task %d deferred subtask entry is not an object (%r), skipping",
+                    task.id, type(entry).__name__,
+                )
+                continue
             prompt = entry.get("prompt", "")
             if not prompt:
+                keys = sorted(entry.keys())
+                hint = ""
+                if "command" in entry:
+                    hint = (
+                        " — 'command' is not a supported deferred-subtask key; "
+                        "subtasks take a natural-language 'prompt'"
+                    )
+                logger.warning(
+                    "Task %d deferred subtask entry has no 'prompt' (keys: %s), skipping%s",
+                    task.id, keys, hint,
+                )
                 continue
             if max_chars > 0 and len(prompt) > max_chars:
                 logger.warning(
@@ -866,12 +888,16 @@ def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
     """Log a WARN for any task-scoped file in user_temp_dir that doesn't
     match a recognized deferred-file name.
 
-    Catches two failure shapes:
+    Catches three failure shapes:
     - Hallucinated names that drop the ``task_`` prefix (e.g.
       ``{id}_skip_log.json``) — would never match the consumers' exact
       filename lookup.
     - Canonical ``task_{id}_<unknown>.json`` shapes for handlers that don't
       exist — also silently ignored by the dispatch.
+    - A descriptive name with the id as a *suffix* (e.g.
+      ``cleanup_stray_files_{id}.json``, the shape that triggered ISSUE-135) —
+      the id is delimited by ``_`` so it can't collide with another task's id
+      as a substring.
     """
     if not user_temp_dir.is_dir():
         return
@@ -886,12 +912,24 @@ def _warn_unconsumed_deferred_files(task: db.Task, user_temp_dir: Path) -> None:
     known_filenames.add(f"task_{task.id}_result.txt")
 
     suspicious: list[Path] = []
-    # Shape 1: missing the ``task_`` prefix entirely.
-    suspicious.extend(user_temp_dir.glob(f"{task.id}_*"))
+    seen: set[Path] = set()
+
+    def _flag(path: Path) -> None:
+        if path not in seen:
+            seen.add(path)
+            suspicious.append(path)
+
+    # Shape 1: missing the ``task_`` prefix entirely (id as a leading token).
+    for path in user_temp_dir.glob(f"{task.id}_*"):
+        _flag(path)
     # Shape 2: canonical prefix but unknown suffix.
     for path in user_temp_dir.glob(f"task_{task.id}_*"):
         if path.name not in known_filenames:
-            suspicious.append(path)
+            _flag(path)
+    # Shape 3: descriptive name with the id as a trailing token (ISSUE-135).
+    for path in user_temp_dir.glob(f"*_{task.id}.json"):
+        if path.name not in known_filenames:
+            _flag(path)
 
     for path in suspicious:
         logger.warning(
