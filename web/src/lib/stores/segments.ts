@@ -166,7 +166,13 @@ export function isRenderable(seg: Segment): boolean {
  * that gate, so a sub-threshold intermediate block can only arrive via the
  * history (`execution_trace`) path — and the same bar drops it there, keeping
  * the live and reloaded layouts identical. The trailing answer is exempt: it
- * always renders, however short. */
+ * always renders, however short.
+ *
+ * MUST stay equal to the backend `scheduler.stream_text_gate_chars` default
+ * (`config.py`, 200). They are independent constants; if that knob is tuned away
+ * from 200 in production, this value has to move with it, or the live stream
+ * (gated server-side) and a reloaded-from-trace turn (gated here) would classify
+ * a borderline block differently. */
 export const SUBSTANTIAL_TEXT_CHARS = 200;
 
 /** One renderable unit of an assistant turn's body, in true segment order. */
@@ -210,7 +216,12 @@ export function renderGroups(m: ChatMessage, threshold = SUBSTANTIAL_TEXT_CHARS)
 			return;
 		}
 		if (s.kind === 'thinking') return; // reasoning never renders in the body
-		const substantial = s.text.trim().length >= threshold;
+		// A whitespace-only block never renders (mirrors isRenderable's
+		// empty-settled suppression) — including an empty trailing answer, which
+		// would otherwise emit a blank `.body` div.
+		const trimmedLen = s.text.trim().length;
+		if (trimmedLen === 0) return;
+		const substantial = trimmedLen >= threshold;
 		if (i === lastTextIdx || substantial) {
 			flushTools();
 			groups.push({ kind: 'prose', id: s.id, text: s.text });

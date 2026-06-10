@@ -429,6 +429,22 @@ describe('renderGroups — body layout', () => {
 		expect(activity.steps).toHaveLength(2);
 	});
 
+	it('an empty / whitespace trailing answer produces no prose group', () => {
+		// Guard against an empty `.body` div: the trailing text is always the
+		// answer, but a whitespace-only one must not render (matches the old
+		// hasAnswerText guard / isRenderable's empty-settled suppression).
+		const m = freshAssistant();
+		feed(m, [
+			['tool_start', { tool_name: 'Bash', description: 'ls', tool_call_id: 'c1' }],
+			['tool_end', { tool_call_id: 'c1', success: true }],
+			['text_delta', { text: '   \n  ' }],
+			['done', {}],
+		]);
+		const groups = renderGroups(m);
+		expect(kinds(groups)).toEqual(['activity']);
+		expect(proseTexts(groups)).toEqual([]);
+	});
+
 	it('thinking never reaches the body', () => {
 		const m = freshAssistant();
 		feed(m, [
