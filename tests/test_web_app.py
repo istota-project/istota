@@ -2488,3 +2488,115 @@ class TestBriefingEndpoints:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 400
+
+
+@_needs_web_deps
+class TestChatUnreadRoomIndicators:
+    """Stage 2 — unread counts in the rooms-list payload + mark-read endpoint."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_db(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        self._db_path = db_path
+
+    def _cfg(self, tmp_path):
+        cfg = _make_config(tmp_path, users={"alice": UserConfig(display_name="Alice")})
+        cfg.db_path = self._db_path
+        return cfg
+
+    async def _login(self, client):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": "alice",
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    def _room(self):
+        from istota import db
+        with db.get_db(self._db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "Ideas")
+        return room
+
+    async def test_list_includes_unread_count(self, tmp_path, client, app):
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        room = self._room()
+        # first listing seeds the cursor at the (empty) max → 0, then we add
+        # two assistant messages that should count as unread on the next list.
+        import istota.web_app as mod
+        mod._chat_list_rooms("alice")  # first-surface init
+        with db.get_db(self._db_path) as conn:
+            db.add_message(conn, room.token, role="assistant", body="a1", origin_surface="web")
+            db.add_message(conn, room.token, role="assistant", body="a2", origin_surface="web")
+        cookies = await self._login(client)
+        resp = await client.get("/istota/api/chat/rooms", cookies=cookies)
+        assert resp.status_code == 200
+        rooms = {r["token"]: r for r in resp.json()["rooms"]}
+        assert rooms[room.token]["unread_count"] == 2
+
+    async def test_first_listing_initializes_to_zero(self, tmp_path, client, app):
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        room = self._room()
+        # pre-existing backlog before the room is ever listed in web
+        with db.get_db(self._db_path) as conn:
+            db.add_message(conn, room.token, role="assistant", body="old", origin_surface="web")
+            db.add_message(conn, room.token, role="system", body="old2", origin_surface="web")
+        cookies = await self._login(client)
+        resp = await client.get("/istota/api/chat/rooms", cookies=cookies)
+        rooms = {r["token"]: r for r in resp.json()["rooms"]}
+        # backlog treated as already-read → no flood
+        assert rooms[room.token]["unread_count"] == 0
+
+    async def test_mark_read_clears_count(self, tmp_path, client, app):
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        room = self._room()
+        import istota.web_app as mod
+        mod._chat_list_rooms("alice")
+        with db.get_db(self._db_path) as conn:
+            db.add_message(conn, room.token, role="assistant", body="a", origin_surface="web")
+        cookies = await self._login(client)
+        resp = await client.post(
+            f"/istota/api/chat/rooms/{room.id}/read",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        resp = await client.get("/istota/api/chat/rooms", cookies=cookies)
+        rooms = {r["token"]: r for r in resp.json()["rooms"]}
+        assert rooms[room.token]["unread_count"] == 0
+
+    async def test_mark_read_foreign_room_404(self, tmp_path, client, app):
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        # a room owned by someone else
+        with db.get_db(self._db_path) as conn:
+            other = db.create_web_chat_room(conn, "mallory", "Secret")
+        cookies = await self._login(client)
+        resp = await client.post(
+            f"/istota/api/chat/rooms/{other.id}/read",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 404
+        # no cursor written for the foreign room
+        with db.get_db(self._db_path) as conn:
+            assert db.get_room_read_state(conn, other.token, "web", "alice") == 0
+
+    async def test_count_excludes_user_role_over_endpoint(self, tmp_path, client, app):
+        from istota import db
+        _patch_app(self._cfg(tmp_path))
+        room = self._room()
+        import istota.web_app as mod
+        mod._chat_list_rooms("alice")
+        with db.get_db(self._db_path) as conn:
+            db.add_message(conn, room.token, role="user", body="my own turn", origin_surface="talk")
+            db.add_message(conn, room.token, role="assistant", body="reply", origin_surface="web")
+        cookies = await self._login(client)
+        resp = await client.get("/istota/api/chat/rooms", cookies=cookies)
+        rooms = {r["token"]: r for r in resp.json()["rooms"]}
+        assert rooms[room.token]["unread_count"] == 1

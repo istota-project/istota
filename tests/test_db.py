@@ -2254,3 +2254,98 @@ class TestUserResourceExtras:
             )
             rows = db.get_user_resources(conn, "alice")
             assert rows[0].extras == {}
+
+
+class TestUnreadMessageCounts:
+    """Stage 1 — web-chat unread room indicators: count helpers over the
+    canonical `messages` store + per-surface `room_read_state` cursor."""
+
+    def _seed_room(self, conn, token="r1", user="alice"):
+        db.register_room(conn, token, user, origin="web", name="Room")
+        return token
+
+    def test_max_id_empty_room_is_zero(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed_room(conn)
+            assert db.room_max_message_id(conn, "r1") == 0
+
+    def test_max_id_returns_highest(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed_room(conn)
+            db.add_message(conn, "r1", role="user", body="hi", origin_surface="web")
+            top = db.add_message(
+                conn, "r1", role="assistant", body="yo", origin_surface="web",
+            )
+            assert db.room_max_message_id(conn, "r1") == top
+
+    def test_count_zero_when_no_messages_no_cursor(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed_room(conn)
+            assert db.count_unread_messages(conn, "r1", "web", "alice") == 0
+
+    def test_count_excludes_user_role(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed_room(conn)
+            # cursor at 0 (no row) → everything past 0 is candidate
+            db.add_message(conn, "r1", role="user", body="q", origin_surface="web")
+            db.add_message(conn, "r1", role="assistant", body="a", origin_surface="web")
+            db.add_message(conn, "r1", role="system", body="alert", origin_surface="web")
+            # assistant + system count; user excluded
+            assert db.count_unread_messages(conn, "r1", "web", "alice") == 2
+
+    def test_count_respects_cursor(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed_room(conn)
+            db.add_message(conn, "r1", role="assistant", body="old", origin_surface="web")
+            mid = db.add_message(
+                conn, "r1", role="assistant", body="seen", origin_surface="web",
+            )
+            db.set_room_read_state(conn, "r1", "web", mid, "alice")
+            db.add_message(conn, "r1", role="assistant", body="new", origin_surface="web")
+            # only the one message with id > mid counts
+            assert db.count_unread_messages(conn, "r1", "web", "alice") == 1
+
+    def test_per_surface_isolation(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed_room(conn)
+            top = db.add_message(
+                conn, "r1", role="assistant", body="a", origin_surface="web",
+            )
+            db.set_room_read_state(conn, "r1", "web", top, "alice")
+            # web is caught up; talk cursor is independent (still 0)
+            assert db.count_unread_messages(conn, "r1", "web", "alice") == 0
+            assert db.count_unread_messages(conn, "r1", "talk", "alice") == 1
+
+    def test_per_user_isolation(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed_room(conn)
+            top = db.add_message(
+                conn, "r1", role="assistant", body="a", origin_surface="web",
+            )
+            db.set_room_read_state(conn, "r1", "web", top, "alice")
+            assert db.count_unread_messages(conn, "r1", "web", "alice") == 0
+            assert db.count_unread_messages(conn, "r1", "web", "bob") == 1
+
+    def test_initialize_seeds_cursor_to_max_when_absent(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed_room(conn)
+            db.add_message(conn, "r1", role="assistant", body="old", origin_surface="web")
+            top = db.add_message(
+                conn, "r1", role="assistant", body="old2", origin_surface="web",
+            )
+            did = db.initialize_room_read_state(conn, "r1", "web", "alice")
+            assert did is True
+            assert db.get_room_read_state(conn, "r1", "web", "alice") == top
+            # backlog now reads as caught-up
+            assert db.count_unread_messages(conn, "r1", "web", "alice") == 0
+
+    def test_initialize_noop_when_row_exists(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed_room(conn)
+            db.set_room_read_state(conn, "r1", "web", 0, "alice")
+            db.add_message(conn, "r1", role="assistant", body="x", origin_surface="web")
+            did = db.initialize_room_read_state(conn, "r1", "web", "alice")
+            assert did is False
+            # existing cursor (0) preserved → the message stays unread
+            assert db.get_room_read_state(conn, "r1", "web", "alice") == 0
+            assert db.count_unread_messages(conn, "r1", "web", "alice") == 1
