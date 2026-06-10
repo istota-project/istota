@@ -546,6 +546,12 @@ def _process_deferred_health_ops(
 
     count = 0
     failures: list[dict[str, Any]] = []
+    # Within-batch ref resolution (ISSUE-092): a deferred `insert_panel` can't
+    # return its new id to the sandboxed CLI, so a later `insert_biomarker` in
+    # the same batch can't carry a real `panel_id`. Instead the panel op may
+    # declare a symbolic `ref` and the biomarker op a `panel_ref`; here we
+    # capture each panel's real id under its ref and substitute it in.
+    refs: dict[str, int] = {}
     with health_db.connect(ctx.db_path) as conn:
         for entry in data:
             if not isinstance(entry, dict):
@@ -565,7 +571,7 @@ def _process_deferred_health_ops(
                     count += 1
                 elif op == "insert_panel":
                     enc_id = entry.get("encounter_id")
-                    health_db.insert_panel(
+                    pid = health_db.insert_panel(
                         conn,
                         drawn_at=entry["drawn_at"],
                         lab_name=entry.get("lab_name"),
@@ -575,11 +581,28 @@ def _process_deferred_health_ops(
                             int(enc_id) if enc_id is not None else None
                         ),
                     )
+                    ref = entry.get("ref")
+                    if ref:
+                        refs[str(ref)] = pid
                     count += 1
                 elif op == "insert_biomarker":
+                    panel_ref = entry.get("panel_ref")
+                    if panel_ref is not None:
+                        resolved = refs.get(str(panel_ref))
+                        if resolved is None:
+                            # The named panel wasn't created earlier in this
+                            # batch — fail loudly rather than silently mis-file
+                            # the biomarker (ISSUE-092).
+                            raise KeyError(
+                                f"unresolved panel_ref {panel_ref!r} "
+                                f"(known refs: {sorted(refs)})"
+                            )
+                        panel_id = resolved
+                    else:
+                        panel_id = int(entry["panel_id"])
                     health_db.insert_biomarker(
                         conn,
-                        panel_id=int(entry["panel_id"]),
+                        panel_id=panel_id,
                         name=entry["name"],
                         value=float(entry["value"]),
                         unit=entry["unit"],

@@ -297,6 +297,64 @@ class TestExportCsv:
             panels = health_db.list_panels(conn, include_drafts=False)
         assert len(panels) == 2
 
+    def _replay(self, ctx, user_temp, task_id, ops):
+        """Write a deferred ops file and replay it via the scheduler handler."""
+        import json
+        from unittest.mock import MagicMock
+
+        from istota import health as health_pkg
+        from istota import scheduler_deferred
+
+        (user_temp / f"task_{task_id}_health_ops.json").write_text(json.dumps(ops))
+        original = health_pkg.resolve_for_user
+        health_pkg.resolve_for_user = MagicMock(return_value=ctx)
+        try:
+            return scheduler_deferred._process_deferred_health_ops(
+                MagicMock(), MagicMock(id=task_id, user_id="alice"), user_temp,
+            )
+        finally:
+            health_pkg.resolve_for_user = original
+
+    def test_deferred_panel_ref_chaining(self, ctx, tmp_path):
+        """ISSUE-092: a deferred insert_panel declaring a `ref` and a later
+        insert_biomarker carrying `panel_ref` land the biomarker on the
+        just-created panel — the chain that the sandbox can't do at call time."""
+        user_temp = tmp_path / "user_temp"
+        user_temp.mkdir()
+        count = self._replay(ctx, user_temp, 1001, [
+            {"op": "insert_panel", "drawn_at": "2026-05-08",
+             "lab_name": "Quest", "panel_type": "CBC", "ref": "cbc"},
+            {"op": "insert_biomarker", "panel_ref": "cbc",
+             "name": "Hemoglobin", "value": 14.8, "unit": "g/dL"},
+            {"op": "insert_biomarker", "panel_ref": "cbc",
+             "name": "WBC", "value": 6.1, "unit": "10^3/uL"},
+        ])
+        assert count == 3
+        with health_db.connect(ctx.db_path) as conn:
+            panels = health_db.list_panels(conn, include_drafts=True)
+            assert len(panels) == 1
+            bios = health_db.list_biomarkers_for_panel(conn, panels[0].id)
+        assert sorted(b.name for b in bios) == ["Hemoglobin", "WBC"]
+
+    def test_deferred_unresolved_panel_ref_fails_loudly(self, ctx, tmp_path):
+        """An insert_biomarker whose panel_ref names no panel created earlier
+        in the batch is recorded as a failure (sidecar), not silently misfiled."""
+        user_temp = tmp_path / "user_temp"
+        user_temp.mkdir()
+        count = self._replay(ctx, user_temp, 1002, [
+            {"op": "insert_biomarker", "panel_ref": "ghost",
+             "name": "Hemoglobin", "value": 14.8, "unit": "g/dL"},
+        ])
+        assert count == 0
+        with health_db.connect(ctx.db_path) as conn:
+            panels = health_db.list_panels(conn, include_drafts=True)
+        assert panels == []
+        failure_file = user_temp / "task_1002_health_op_failures.json"
+        assert failure_file.exists()
+        import json
+        failures = json.loads(failure_file.read_text())
+        assert "ghost" in failures[0]["error"]
+
     def test_excludes_drafts(self, ctx):
         # One confirmed + one draft panel.
         with health_db.connect(ctx.db_path) as conn:
