@@ -487,7 +487,20 @@ def select_skills(
         for ex in meta.exclude_skills:
             if ex in selected:
                 excluded.add(ex)
-    for ex in excluded:
+    # An exclude must never strip a safety companion (e.g. untrusted_input) that a
+    # skill surviving the exclude pass pulled in — that guardrail is not the
+    # excluder's to drop. Recompute companions over the post-exclude selection and
+    # protect them. Today nothing excludes a companion, so this is dormant; it
+    # keeps a future skill's exclude_skills from silently disarming an ingest
+    # skill's companion (unlike `skills show`, the select path has no loud marker).
+    survivors = sorted(selected - excluded)
+    protected = set(expand_companions(
+        survivors, skill_index,
+        is_admin=is_admin,
+        disabled_skills=disabled,
+        enabled_experimental_features=enabled_experimental_features,
+    ))
+    for ex in excluded - protected:
         selected.discard(ex)
         reasons.pop(ex, None)
 
@@ -703,12 +716,12 @@ def eligible_skill_names(
     Excludes ``exclude`` (already-selected), ``always_include`` skills (already
     loaded eager), disabled skills, ``admin_only`` skills for non-admins,
     experimental skills whose ``skill_<name>`` flag isn't enabled, and skills
-    with unmet dependencies. The progressive-disclosure catalogue index uses
-    this so the model self-selects from the full eligible menu.
+    with unmet dependencies. The on-demand menu catalogue uses this so the model
+    self-selects from the full eligible menu.
 
-    Note: no resource gate (unlike ``select_skills``' Pass-1 keyword path). The
-    catalogue surfaces the full eligible menu so the model self-selects;
-    re-narrowing it to Pass-1's resource match would defeat that. No bundled
+    Note: no resource gate. The catalogue surfaces the full eligible menu so the
+    model self-selects; re-narrowing it to a resource match would defeat that.
+    No bundled
     skill currently declares ``resource_types`` anyway — the former holdouts
     (``notes`` / ``spec`` / ``todos``) are doc-only convention skills with
     sensible defaults (``notes`` falls back to ``{BOT_DIR}/notes/``) and dropped

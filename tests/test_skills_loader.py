@@ -354,6 +354,54 @@ class TestSelectSkills:
         assert "files" in result
         assert "email" not in result
 
+    def test_exclude_cannot_strip_companion_of_surviving_skill(self):
+        """An exclude must not remove a safety companion a still-selected skill
+        pulled in (e.g. untrusted_input riding along with an ingest skill)."""
+        index = {
+            "ingest": SkillMeta(
+                name="ingest",
+                description="Reads untrusted content",
+                source_types=["talk"],
+                companion_skills=["untrusted_input"],
+            ),
+            "excluder": SkillMeta(
+                name="excluder",
+                description="Tries to drop the companion",
+                source_types=["talk"],
+                exclude_skills=["untrusted_input"],
+            ),
+            "untrusted_input": SkillMeta(
+                name="untrusted_input",
+                description="Inbound-content guardrails",
+            ),
+        }
+        # Both ingest + excluder selected by source_type. ingest's companion
+        # untrusted_input must survive excluder's exclude_skills.
+        result = select_skills("handle this", "talk", set(), index)
+        assert "ingest" in result
+        assert "excluder" in result
+        assert "untrusted_input" in result
+
+    def test_exclude_still_removes_non_companion(self):
+        """The companion guard doesn't block a normal exclude of a skill that
+        isn't a companion of any surviving skill."""
+        index = {
+            "briefing": SkillMeta(
+                name="briefing",
+                description="Briefing",
+                source_types=["briefing"],
+                exclude_skills=["email"],
+            ),
+            "email": SkillMeta(
+                name="email",
+                description="Email",
+                source_types=["briefing"],
+            ),
+        }
+        result = select_skills("brief me", "briefing", set(), index)
+        assert "briefing" in result
+        assert "email" not in result
+
     def test_exclude_skills_only_applies_when_excluder_selected(self):
         """exclude_skills has no effect if the excluding skill isn't selected."""
         index = {

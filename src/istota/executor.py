@@ -2027,8 +2027,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # CLI skills list (generated from skill index metadata)
     cli_skills_section = cli_skills_text or ""
 
-    # Progressive-disclosure index (lazy skills the model can load on demand).
-    # Appended after the CLI-tools list; empty when no skill was deferred.
+    # Menu index (eligible skills the model can load on demand via skills show).
+    # Appended after the CLI-tools list; empty when the menu is empty.
     if skills_index:
         cli_skills_section = (
             (cli_skills_section + "\n" + skills_index)

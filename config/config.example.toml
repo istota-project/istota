@@ -383,17 +383,16 @@ sources = [
 sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 
 # ============================================================================
-# Skills (routing configuration)
+# Skills (routing)
 # ============================================================================
-# Pass 1 keyword/resource matching (always on) selects skills. Progressive
-# disclosure then renders heavy skills as a one-line index entry and widens that
-# index to the full eligible catalogue, so the model self-selects any tool on
-# demand via `istota-skill skills show <name>` while the prompt stays small.
-
-# [skills]
-# progressive_disclosure = true        # default ON: defer lazy skill bodies + widen the on-demand index to the full eligible catalogue (set false for legacy all-eager)
-# auto_lazy_threshold_chars = 0        # >0: a CLI skill over N chars defaults to lazy (0 = explicit `disclosure: lazy` frontmatter only)
-# always_eager = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory", "skills"]  # never deferred
+# Skill routing is single-axis and has no configuration. A skill is either
+# eager — selected deterministically (always_include / source_types / file_types
+# / sticky / companions), full body in the prompt — or in the on-demand menu, a
+# one-line entry the model loads in full via `istota-skill skills show <name>`.
+# The menu is the full eligible catalogue minus the eager set, so the model
+# self-selects any tool on demand while the prompt stays small. The former
+# `[skills]` block (progressive_disclosure / auto_lazy_threshold_chars /
+# always_eager) was removed; a stale block is ignored with a load-time warning.
 
 # [playbooks]                          # Learned playbooks (procedural memory) — off by default
 # enabled = false                      # master gate

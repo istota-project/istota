@@ -629,14 +629,11 @@ istota_memory_search_auto_recall: false           # BM25 search using task promp
 istota_memory_search_auto_recall_limit: 5          # max results for auto-recall
 istota_memory_search_recency_half_life_days: 180   # recency decay half-life for recall (0 = off)
 
-# Skills routing — progressive disclosure, ON by default. Heavy/lazy skill
-# bodies are deferred to a one-line index, and the index is widened to the full
-# eligible catalogue; the model loads a body on demand via `istota-skill skills
-# show <name>` and self-selects any eligible skill. always_eager skills are never
-# deferred. Set false for legacy all-eager rendering. (This replaced the removed
-# Pass-2 LLM "semantic routing" pre-router, whose per-task subprocess timed out.)
-istota_skills_progressive_disclosure: true
-istota_skills_auto_lazy_threshold_chars: 0   # >0: a CLI skill over N chars defaults to lazy (0 = explicit frontmatter only)
+# Skills routing is single-axis and has no operator knobs: a skill is either
+# eager (selected deterministically, full body in the prompt) or in the on-demand
+# menu (a one-line entry the model loads via `istota-skill skills show <name>`).
+# The former `[skills]` block (progressive_disclosure / auto_lazy_threshold_chars)
+# was removed; a stale block is ignored with a load-time warning.
 
 # Learned playbooks (procedural memory) — per-user markdown task procedures the
 # sleep cycle distills from successful multi-step tasks, recalled by relevance.

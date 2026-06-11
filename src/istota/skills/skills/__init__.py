@@ -1,7 +1,8 @@
-"""Skills loader CLI — on-demand skill-body disclosure (Part A).
+"""Skills loader CLI — on-demand skill-body loader (the menu pull-in path).
 
 ``istota-skill skills show <name>`` prints the fully rendered documentation for
-a skill (the body that progressive disclosure deferred out of the prompt).
+a menu skill (a skill not selected eager, so its body was left out of the
+prompt as a one-line "load on demand" entry).
 ``istota-skill skills list`` enumerates the skills the caller is allowed to
 load. Both re-apply the same guards the selection path enforces
 (``disabled_skills`` instance + per-user, ``admin_only`` vs the caller's admin
@@ -45,6 +46,11 @@ def _load_context():
     user_config = config.get_user(user_id)
     if user_config:
         disabled |= set(user_config.disabled_skills)
+    # Mirror the executor's devbox fold: when devbox is off, `devbox` is disabled
+    # for this surface too, so `skills list` / `skills show` agree with the menu
+    # the model was shown (executor.execute_task adds the same entry).
+    if not config.devbox.enabled:
+        disabled.add("devbox")
 
     is_admin = config.is_admin(user_id)
 

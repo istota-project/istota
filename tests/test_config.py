@@ -133,6 +133,24 @@ class TestConfigLoading:
         cfg = load_config(p)
         assert cfg.db_path == Path("mydb.sqlite")
 
+    def test_stale_skills_block_warns_not_fails(self, tmp_path, caplog):
+        # The [skills] section is obsolete (single-axis selection has no knobs).
+        # A stale block must keep loading, with a warning — never raise.
+        import logging
+
+        p = tmp_path / "config.toml"
+        p.write_text(
+            'db_path = "test.db"\n\n'
+            "[skills]\n"
+            "progressive_disclosure = false\n"
+            "auto_lazy_threshold_chars = 4000\n"
+        )
+        with caplog.at_level(logging.WARNING):
+            cfg = load_config(p)
+        assert cfg.db_path == Path("test.db")
+        assert not hasattr(cfg, "skills")
+        assert any("[skills] block" in r.message for r in caplog.records)
+
     def test_load_custom_system_prompt_true(self, tmp_path):
         p = tmp_path / "config.toml"
         p.write_text('custom_system_prompt = true\n')
