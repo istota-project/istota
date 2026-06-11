@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+# {{ istota_docker_proxy_socket_dir }} hosts the per-user Docker-API proxy
+# listen sockets ({dir}/<user>.sock). Owned by the istota user so the daemon
+# can create + chmod its own socket; mode 0750 so non-istota host users can't
+# reach it. Recreated at boot before the proxy units start.
+d {{ istota_docker_proxy_socket_dir }} 0750 {{ istota_user }} {{ istota_group }} -

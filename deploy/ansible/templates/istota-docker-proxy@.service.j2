@@ -1,0 +1,37 @@
+# {{ ansible_managed }}
+# Per-user Docker-API allowlist proxy. One systemd instance per devbox user;
+# the %i instance specifier is the user_id, used as the audit-log key and the
+# basename of the listen socket ({dir}/<user>.sock).
+#
+# The proxy sits in front of the *real* docker socket and forwards only
+# exec/cp/inspect/restart on the user's own container, refusing
+# create/run/build/privileged/host-mount. The executor binds this proxy socket
+# into the bwrap sandbox at /var/run/docker.sock instead of the raw socket, so
+# a sandboxed task can never reach the root-equivalent raw socket.
+
+[Unit]
+Description=Istota Docker-API proxy ({{ istota_namespace }}, user %i)
+After=network.target docker.service
+# Loose dependency on docker: if the upstream socket is down the proxy returns
+# 502s rather than failing to start.
+
+[Service]
+Type=simple
+User={{ istota_user }}
+Group={{ istota_group }}
+WorkingDirectory={{ istota_home }}
+Environment="ISTOTA_ADMINS_FILE=/etc/{{ istota_namespace }}/admins"
+EnvironmentFile=/etc/{{ istota_namespace }}/secrets.env
+ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.docker_proxy --user %i --config {{ istota_repo_dir }}/config/config.toml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+# The proxy needs read access to the real docker socket (forwarding upstream)
+# and write access to its own listen-socket directory.
+ReadWritePaths={{ istota_docker_proxy_socket_dir }}
+
+[Install]
+WantedBy=multi-user.target

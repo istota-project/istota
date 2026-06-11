@@ -1459,6 +1459,83 @@
     - istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only
     - istota_devbox_users | length > 0
 
+# --- Docker-API allowlist proxy. One systemd instance per devbox user; the
+# executor binds {dir}/<user>.sock into the sandbox at /var/run/docker.sock
+# instead of the root-equivalent raw socket.
+- name: Install docker-proxy socket-directory tmpfiles snippet
+  template:
+    src: istota-docker-proxy.tmpfiles.j2
+    dest: "/etc/tmpfiles.d/{{ istota_namespace }}-docker-proxy.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  notify:
+    - "reload systemd-tmpfiles for docker proxy"
+    - "restart istota-docker-proxy"
+
+- name: Ensure docker-proxy socket directory exists right now
+  file:
+    path: "{{ istota_docker_proxy_socket_dir }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0750"
+  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Deploy docker-proxy systemd instance unit
+  template:
+    src: istota-docker-proxy@.service.j2
+    dest: "/etc/systemd/system/{{ istota_namespace }}-docker-proxy@.service"
+    owner: root
+    group: root
+    mode: "0644"
+  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  notify:
+    - "reload systemd for docker proxy"
+    - "restart istota-docker-proxy"
+
+- name: Reload systemd before enabling docker-proxy instances
+  systemd:
+    daemon_reload: yes
+  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+  changed_when: false
+
+- name: Enable + start docker-proxy per devbox user
+  systemd:
+    name: "{{ istota_namespace }}-docker-proxy@{{ item }}.service"
+    enabled: yes
+    state: started
+  loop: "{{ istota_devbox_users }}"
+  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: Stop + disable docker-proxy units no longer in istota_devbox_users
+  block:
+    - name: List existing docker-proxy instance units
+      ansible.builtin.shell: |
+        systemctl list-units --type=service --all --no-legend \
+          '{{ istota_namespace }}-docker-proxy@*.service' \
+          | awk '{print $1}' \
+          || true
+      register: existing_docker_proxy_units
+      changed_when: false
+
+    - name: Stop and disable docker-proxy units no longer wanted
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop: "{{ existing_docker_proxy_units.stdout_lines | default([]) }}"
+      when:
+        - item != ""
+        - >-
+            (item | regex_replace('^.*-docker-proxy@(.+)\\.service$', '\\1'))
+            not in istota_devbox_users
+      failed_when: false
+  when:
+    - istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only
+    - istota_devbox_users | length > 0
+
 - name: Check whether devbox compose currently has containers running
   shell: docker compose -f docker-compose.devbox.yml ps -q
   args:

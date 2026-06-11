@@ -542,6 +542,19 @@ istota_devbox_proxy_audit_log: ""
 # the devbox proxy.
 istota_developer_api_timeout_seconds: 30
 
+# Docker-API allowlist proxy. One systemd unit per devbox user listens on
+# {{ istota_docker_proxy_socket_dir }}/<user>.sock and forwards only
+# exec/cp/inspect/restart on the user's own container, refusing
+# create/run/build/privileged/host-mount. The executor binds this socket into
+# the bwrap sandbox at /var/run/docker.sock instead of the root-equivalent raw
+# socket. Defaults on when devbox is on. Mapped to [devbox] api_proxy_* in
+# config.toml.
+istota_devbox_api_proxy_enabled: true
+istota_docker_proxy_socket_dir: "/var/run/{{ istota_namespace }}-docker"
+istota_devbox_api_proxy_exec_ttl_seconds: 300
+# Empty string → audit lines go to the journal only. Absolute path → also a file.
+istota_devbox_api_proxy_audit_log: ""
+
 # ntfy push notifications are configured per-user via the encrypted secrets
 # table (`istota secret ensure -s ntfy ...` or web settings). There is no
 # operator-shared ntfy config — each user supplies their own server/topic/auth.

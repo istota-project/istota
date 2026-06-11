@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from istota import db
-from istota.config import Config, DeveloperConfig, NetworkConfig, ResourceConfig, SecurityConfig, UserConfig
+from istota.config import Config, DevboxConfig, DeveloperConfig, NetworkConfig, ResourceConfig, SecurityConfig, UserConfig
 from istota.executor import (
     _build_network_allowlist,
     build_bwrap_cmd,
@@ -551,6 +551,85 @@ class TestNetworkProxyBwrapIntegration:
         # "sh" is $0, then the original cmd follows
         assert after_sep[3] == "sh"
         assert after_sep[4:] == ["claude", "-p", "-", "--allowedTools", "Read"]
+
+
+class TestDevboxDockerProxyBind:
+    """The Docker-API proxy socket is bound at the conventional docker path,
+    unconditionally (devbox enabled + proxy enabled + socket present), and the
+    raw docker socket is never bound."""
+
+    def _devbox_config(self, base: Config, sock_dir: Path, *, api_proxy_enabled=True):
+        cli = sock_dir / "docker"
+        cli.touch()
+        base.devbox = DevboxConfig(
+            enabled=True,
+            api_proxy_enabled=api_proxy_enabled,
+            api_proxy_socket_dir=str(sock_dir),
+            docker_cli=str(cli),
+            docker_socket="/var/run/docker.sock",
+        )
+        return base
+
+    def test_proxy_socket_bound_at_conventional_path(self, sandbox_config, make_sandbox_task, tmp_path):
+        sock_dir = tmp_path / "dockproxy"
+        sock_dir.mkdir()
+        (sock_dir / "alice.sock").touch()
+        config = self._devbox_config(sandbox_config, sock_dir)
+        task = make_sandbox_task(user_id="alice")
+        result = _run_bwrap(config, task, False)
+        bind_pairs = _get_bind_pairs(result, "--bind")
+        proxy_src = str((sock_dir / "alice.sock").resolve())
+        assert any(
+            src == proxy_src and dest == "/var/run/docker.sock"
+            for src, dest in bind_pairs
+        ), bind_pairs
+
+    def test_bind_not_gated_on_selection(self, sandbox_config, make_sandbox_task, tmp_path):
+        sock_dir = tmp_path / "dockproxy"
+        sock_dir.mkdir()
+        (sock_dir / "alice.sock").touch()
+        config = self._devbox_config(sandbox_config, sock_dir)
+        task = make_sandbox_task(user_id="alice")
+        # No selected_skills passed at all — bind must still happen.
+        result = _run_bwrap(config, task, False)
+        proxy_src = str((sock_dir / "alice.sock").resolve())
+        assert any(a == proxy_src for a in result)
+
+    def test_raw_docker_socket_never_bound(self, sandbox_config, make_sandbox_task, tmp_path):
+        sock_dir = tmp_path / "dockproxy"
+        sock_dir.mkdir()
+        (sock_dir / "alice.sock").touch()
+        config = self._devbox_config(sandbox_config, sock_dir)
+        task = make_sandbox_task(user_id="alice")
+        result = _run_bwrap(config, task, False)
+        # The raw /var/run/docker.sock is never a bind *source*.
+        bind_pairs = _get_bind_pairs(result, "--bind")
+        assert not any(src == "/var/run/docker.sock" for src, _ in bind_pairs)
+
+    def test_per_user_socket_path(self, sandbox_config, make_sandbox_task, tmp_path):
+        sock_dir = tmp_path / "dockproxy"
+        sock_dir.mkdir()
+        (sock_dir / "bob.sock").touch()  # only bob's socket exists
+        config = self._devbox_config(sandbox_config, sock_dir)
+        # alice has no socket -> no bind
+        alice = make_sandbox_task(user_id="alice")
+        (config.nextcloud_mount_path / "Users" / "bob").mkdir(parents=True, exist_ok=True)
+        result_alice = _run_bwrap(config, alice, False)
+        assert not any(str(sock_dir / "alice.sock") in a for a in result_alice)
+        # bob's socket exists -> bound
+        bob = make_sandbox_task(user_id="bob")
+        result_bob = _run_bwrap(config, bob, False)
+        bob_src = str((sock_dir / "bob.sock").resolve())
+        assert any(a == bob_src for a in result_bob)
+
+    def test_no_bind_when_api_proxy_disabled(self, sandbox_config, make_sandbox_task, tmp_path):
+        sock_dir = tmp_path / "dockproxy"
+        sock_dir.mkdir()
+        (sock_dir / "alice.sock").touch()
+        config = self._devbox_config(sandbox_config, sock_dir, api_proxy_enabled=False)
+        task = make_sandbox_task(user_id="alice")
+        result = _run_bwrap(config, task, False)
+        assert not any(str(sock_dir / "alice.sock") in a for a in result)
 
 
 class TestBuildNetworkAllowlist:

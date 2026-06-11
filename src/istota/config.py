@@ -80,9 +80,19 @@ class DevboxConfig:
     enabled: bool = False
     container_prefix: str = "devbox-"           # container name = f"{prefix}{user_id}"
     docker_cli: str = "/usr/bin/docker"         # host path to the Docker CLI binary
-    docker_socket: str = "/var/run/docker.sock"  # host path to the Docker socket
+    docker_socket: str = "/var/run/docker.sock"  # host path to the *real* Docker socket (proxy upstream)
     exec_timeout_seconds: int = 300             # default per-exec timeout
     max_output_bytes: int = 102_400             # stdout/stderr cap per stream
+    # Docker-API allowlist proxy. The raw docker socket is root-equivalent, so
+    # the executor never binds it into the sandbox; it binds this per-user proxy
+    # socket at the conventional in-sandbox path /var/run/docker.sock instead.
+    # The proxy forwards only exec/cp/inspect/restart on the user's own
+    # container and refuses create/run/privileged/host-mount. One daemon per
+    # devbox user (systemd @-instance); listen socket = {dir}/{user_id}.sock.
+    api_proxy_enabled: bool = True
+    api_proxy_socket_dir: str = "/var/run/istota-docker"
+    api_proxy_exec_ttl_seconds: int = 300       # sweep created-but-unstarted exec ids after this
+    api_proxy_audit_log: str = ""               # optional file sink for the audit logger
 
 
 @dataclass
@@ -1190,6 +1200,10 @@ def load_config(config_path: Path | None = None) -> Config:
             docker_socket=dx.get("docker_socket", "/var/run/docker.sock"),
             exec_timeout_seconds=dx.get("exec_timeout_seconds", 300),
             max_output_bytes=dx.get("max_output_bytes", 102_400),
+            api_proxy_enabled=dx.get("api_proxy_enabled", True),
+            api_proxy_socket_dir=dx.get("api_proxy_socket_dir", "/var/run/istota-docker"),
+            api_proxy_exec_ttl_seconds=dx.get("api_proxy_exec_ttl_seconds", 300),
+            api_proxy_audit_log=dx.get("api_proxy_audit_log", ""),
         )
 
     if "ntfy" in data:

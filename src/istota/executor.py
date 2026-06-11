@@ -971,29 +971,29 @@ def build_bwrap_cmd(
         if path.exists():
             _ro_bind(path)
 
-    # --- Devbox: Docker CLI + socket for the devbox skill ---
-    # The Docker socket is root-equivalent on the host: anything inside the
-    # sandbox that can write to it can launch a privileged container that
-    # mounts the host root. The skill CLI validates container names before
-    # every call, but that check is bypassable from any other Bash invocation
-    # in the same sandbox (curl --unix-socket, python socket.AF_UNIX, …).
-    #
-    # Mitigation in place: only bind the socket when the devbox skill is
-    # actually selected for this task. Selection in turn excludes ingest-
-    # shaped skills (email, browse, calendar, transcribe, whisper, feeds,
-    # bookmarks) so untrusted-content tasks never see the socket at all.
-    #
-    # TODO: a Docker-API allowlist proxy (à la the gitlab-api wrapper) would
-    # close the gap entirely — restrict to exec/cp/inspect/restart on the
-    # user's own container and refuse run/create/network/--privileged. Track
-    # in the devbox spec; not in this iteration.
-    if config.devbox.enabled and selected_skills and "devbox" in selected_skills:
+    # --- Devbox: Docker CLI + Docker-API allowlist proxy ---
+    # The raw Docker socket is root-equivalent on the host: anything inside the
+    # sandbox that can write to it can launch a privileged container that mounts
+    # the host root. So we never bind the raw socket. Instead we bind the
+    # per-user Docker-API allowlist proxy (src/istota/docker_proxy.py) at the
+    # conventional in-sandbox path /var/run/docker.sock — the docker client
+    # connects there by default, so the devbox CLI is unchanged. The proxy
+    # forwards only exec/cp/inspect/restart on the user's own container and
+    # refuses create/run/build/privileged/host-mount, so it is safe to bind
+    # unconditionally (no selection-time gate): even an untrusted-content task
+    # that reaches the socket directly (curl --unix-socket) can't escalate.
+    if config.devbox.enabled and config.devbox.api_proxy_enabled:
         docker_cli = Path(config.devbox.docker_cli)
         if docker_cli.exists():
             _ro_bind(docker_cli)
-        docker_sock = Path(config.devbox.docker_socket)
-        if docker_sock.exists():
-            _bind(docker_sock)
+        proxy_docker_sock = Path(config.devbox.api_proxy_socket_dir) / f"{task.user_id}.sock"
+        # Bind the proxy socket at the *literal* conventional dest path so the
+        # docker client finds it by default. dest is kept unresolved (mirrors
+        # the old raw-socket bind, where /var/run was never otherwise mapped);
+        # bwrap creates the intermediate mount point.
+        resolved_proxy = proxy_docker_sock.resolve()
+        if resolved_proxy.exists():
+            args.extend(["--bind", str(resolved_proxy), config.devbox.docker_socket])
 
     # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
     mount = config.nextcloud_mount_path
