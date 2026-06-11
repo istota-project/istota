@@ -2194,11 +2194,16 @@ def execute_task(
     _bundled_dir = config.bundled_skills_dir
     skill_index = load_skill_index(config.skills_dir, bundled_dir=_bundled_dir)
     user_resource_types = {r.resource_type for r in user_resources}
-    # Combine instance-wide and per-user disabled skills
+    # Combine instance-wide and per-user disabled skills. When devbox is off,
+    # fold `devbox` into the disabled set so the existing disabled-gate drops it
+    # from both selection and the on-demand menu (no wasted pull / confusing CLI
+    # failure) — no new exclusion logic in the loader.
     user_config = config.get_user(task.user_id)
     _disabled = set(config.disabled_skills)
     if user_config:
         _disabled |= set(user_config.disabled_skills)
+    if not config.devbox.enabled:
+        _disabled.add("devbox")
 
     # Build sticky skills from recent conversation + explicit reply parent
     sticky_skills: set[str] | None = None
@@ -2256,46 +2261,31 @@ def execute_task(
         except Exception:
             logger.warning("Failed to save selected_skills for task %d", task.id, exc_info=True)
 
-    # Progressive disclosure (Part A): selected skills are partitioned into
-    # eager (full body inline) / lazy (one-line index entry), and the on-demand
-    # index is widened to the full eligible catalogue — every skill the model
-    # could load that isn't already eager. The widened catalogue replaces Pass 2
-    # semantic routing: instead of a per-task pre-router guessing inclusion, the
-    # main model self-selects from the menu via `istota-skill skills show`.
-    # Off → every selected skill is eager, no index (legacy behaviour).
-    skills_index = None
-    if config.skills.progressive_disclosure:
-        from .skills._loader import (
-            build_disclosure_index, partition_skills_for_disclosure,
-            eligible_skill_names,
-        )
-        eager_skills, lazy_skills = partition_skills_for_disclosure(
-            selected_skills, skill_index, config.skills_dir, config.skills,
-            bundled_dir=_bundled_dir,
-        )
-        # Catalogue = eligible skills that aren't already eager-selected,
-        # pinned always_eager, or excluded by a selected skill.
-        catalogue_exclude = set(selected_skills) | set(config.skills.always_eager or [])
-        for n in selected_skills:
-            m = skill_index.get(n)
-            if m:
-                catalogue_exclude.update(m.exclude_skills)
-        catalogue = eligible_skill_names(
-            skill_index,
-            exclude=catalogue_exclude,
-            disabled_skills=_disabled if _disabled else None,
-            is_admin=is_admin,
-            enabled_experimental_features=frozenset(config.experimental.features),
-        )
-        index_names = list(lazy_skills) + [c for c in catalogue if c not in lazy_skills]
-        skills_index = build_disclosure_index(index_names, skill_index)
-        if index_names:
-            logger.info(
-                "disclosure: eager=%d lazy=%d catalogue=%d",
-                len(eager_skills), len(lazy_skills), len(index_names) - len(lazy_skills),
-            )
-    else:
-        eager_skills = selected_skills
+    # Skills (Part A — single-axis model). A skill is either *eager* (full body
+    # inline, because a deterministic rule in select_skills picked it) or in the
+    # *menu* (a one-line entry the model pulls in full via
+    # `istota-skill skills show <name>`, which also delivers that skill's
+    # companions). The menu is the full eligible catalogue — every loadable skill
+    # not already eager — so the capable main model self-selects from it (this
+    # replaced the removed Pass-2 LLM pre-router). Selection == the eager set.
+    from .skills._loader import build_disclosure_index, eligible_skill_names
+
+    eager_skills = selected_skills
+    # Menu = eligible skills not already eager-selected or excluded by one.
+    menu_exclude = set(selected_skills)
+    for n in selected_skills:
+        m = skill_index.get(n)
+        if m:
+            menu_exclude.update(m.exclude_skills)
+    menu = eligible_skill_names(
+        skill_index,
+        exclude=menu_exclude,
+        disabled_skills=_disabled if _disabled else None,
+        is_admin=is_admin,
+        enabled_experimental_features=frozenset(config.experimental.features),
+    )
+    skills_index = build_disclosure_index(menu, skill_index)
+    logger.info("skills: eager=%d menu=%d", len(eager_skills), len(menu))
 
     skills_doc = load_skills(
         config.skills_dir, eager_skills, config.bot_name, config.bot_dir_name,

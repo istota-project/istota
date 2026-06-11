@@ -8,7 +8,7 @@ import pytest
 from istota.config import Config, UserConfig
 
 
-def _write_skill(bundled, name, body, *, admin_only=False, experimental=False, cli=True, dependencies=None, resource_types=None):
+def _write_skill(bundled, name, body, *, admin_only=False, experimental=False, cli=True, dependencies=None, resource_types=None, companion_skills=None):
     d = bundled / name
     d.mkdir(parents=True, exist_ok=True)
     fm = ["---", f"name: {name}", "description: the {0} skill".format(name), f"cli: {'true' if cli else 'false'}"]
@@ -20,6 +20,8 @@ def _write_skill(bundled, name, body, *, admin_only=False, experimental=False, c
         fm.append("dependencies: [" + ", ".join(dependencies) + "]")
     if resource_types:
         fm.append("resource_types: [" + ", ".join(resource_types) + "]")
+    if companion_skills:
+        fm.append("companion_skills: [" + ", ".join(companion_skills) + "]")
     fm.append("---")
     (d / "skill.md").write_text("\n".join(fm) + "\n" + body)
     return d
@@ -149,3 +151,76 @@ class TestList:
         payload = json.loads(capsys.readouterr().out)
         names = {s["name"] for s in payload["skills"]}
         assert "secret_admin" in names
+
+
+class TestShowCompanions:
+    """`skills show <name>` delivers the skill's companions in the same
+    response — the safety-critical change (a menu-pulled ingest skill arrives
+    with its guardrails, not at the model's discretion)."""
+
+    def _ctx(self, tmp_path, monkeypatch, **skill_kwargs):
+        bundled = tmp_path / "bundled"
+        _write_skill(bundled, "browse", "# Browse\n\nFetch pages.\n",
+                     companion_skills=["untrusted_input"])
+        _write_skill(bundled, "untrusted_input", "# Untrusted Input\n\nGUARDRAILS HERE.\n", cli=False)
+        _write_skill(bundled, "health", "# Health\n\nNo companions.\n")
+        # A skill whose only companion is missing from the index.
+        _write_skill(bundled, "lonely", "# Lonely\n", companion_skills=["ghost"])
+        # A skill whose companion is admin-only (gated off for non-admin alice).
+        _write_skill(bundled, "gated", "# Gated\n", companion_skills=["adminhelper"])
+        _write_skill(bundled, "adminhelper", "# Admin Helper\n", admin_only=True, cli=False)
+
+        config = Config(
+            db_path=tmp_path / "istota.db",
+            temp_dir=tmp_path / "tmp",
+            nextcloud_mount_path=tmp_path,
+            bundled_skills_dir=bundled,
+            skills_dir=tmp_path / "ops_skills",
+            users={"alice": UserConfig()},
+            admin_users={"boss"},  # alice not admin
+        )
+        monkeypatch.setattr("istota.config.load_config", lambda *a, **kw: config)
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.delenv("ISTOTA_EXPERIMENTAL_FEATURES", raising=False)
+        return config
+
+    def test_show_appends_companion_body(self, tmp_path, monkeypatch, capsys):
+        self._ctx(tmp_path, monkeypatch)
+        from istota.skills.skills import cmd_show
+
+        cmd_show(argparse.Namespace(name="browse"))
+        out = capsys.readouterr().out
+        assert "# Browse" in out
+        assert "GUARDRAILS HERE." in out
+        assert "<!-- companion: untrusted_input -->" in out
+
+    def test_show_no_companions_is_clean(self, tmp_path, monkeypatch, capsys):
+        self._ctx(tmp_path, monkeypatch)
+        from istota.skills.skills import cmd_show
+
+        cmd_show(argparse.Namespace(name="health"))
+        out = capsys.readouterr().out
+        assert "# Health" in out
+        assert "<!-- companion" not in out
+
+    def test_show_missing_companion_marks_unavailable(self, tmp_path, monkeypatch, capsys, caplog):
+        import logging
+        self._ctx(tmp_path, monkeypatch)
+        from istota.skills.skills import cmd_show
+
+        with caplog.at_level(logging.WARNING, logger="istota.skills"):
+            cmd_show(argparse.Namespace(name="lonely"))
+        out = capsys.readouterr().out
+        assert "# Lonely" in out  # primary still rendered
+        assert "<!-- companion ghost: unavailable -->" in out
+        assert any("ghost" in r.message for r in caplog.records)
+
+    def test_show_gated_companion_marked_unavailable(self, tmp_path, monkeypatch, capsys):
+        self._ctx(tmp_path, monkeypatch)
+        from istota.skills.skills import cmd_show
+
+        cmd_show(argparse.Namespace(name="gated"))
+        out = capsys.readouterr().out
+        # admin-only companion is filtered for non-admin alice → marker, no body.
+        assert "# Admin Helper" not in out
+        assert "<!-- companion adminhelper: unavailable -->" in out

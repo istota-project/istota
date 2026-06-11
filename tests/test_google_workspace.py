@@ -10,7 +10,7 @@ from unittest import mock
 import pytest
 
 from istota import config, db
-from istota.skills._loader import load_skill_index, select_skills
+from istota.skills._loader import eligible_skill_names, load_skill_index, select_skills
 
 
 @pytest.fixture
@@ -261,35 +261,39 @@ class TestGoogleOAuthMigration:
 # ============================================================================
 
 class TestGoogleWorkspaceSkillSelection:
-    """Skill selection via keyword triggers."""
+    """google_workspace is a menu skill (single-axis model): keyword no longer
+    eager-selects it; it's surfaced in the on-demand catalogue instead."""
 
     def _index(self):
         bundled = Path(__file__).parent.parent / "src" / "istota" / "skills"
         return load_skill_index(skills_dir=Path("/dev/null"), bundled_dir=bundled)
 
-    def test_google_drive_triggers_skill(self):
+    def test_keyword_does_not_eager_select_but_in_menu(self):
         idx = self._index()
         selected = select_skills(
             "upload this file to google drive", "talk", set(),
             idx, is_admin=True,
         )
-        assert "google_workspace" in selected
+        assert "google_workspace" not in selected
+        menu = eligible_skill_names(idx, exclude=set(selected), is_admin=True)
+        assert "google_workspace" in menu
 
-    def test_spreadsheet_triggers_skill(self):
+    def test_spreadsheet_does_not_eager_select(self):
         idx = self._index()
         selected = select_skills(
             "create a spreadsheet with my expenses", "talk", set(),
             idx, is_admin=True,
         )
-        assert "google_workspace" in selected
+        assert "google_workspace" not in selected
 
-    def test_gws_triggers_skill(self):
+    def test_gws_in_menu(self):
         idx = self._index()
         selected = select_skills(
             "use gws to list my files", "talk", set(),
             idx, is_admin=True,
         )
-        assert "google_workspace" in selected
+        menu = eligible_skill_names(idx, exclude=set(selected), is_admin=True)
+        assert "google_workspace" in menu
 
     def test_bare_calendar_does_not_trigger(self):
         """'calendar' alone should not trigger google_workspace."""

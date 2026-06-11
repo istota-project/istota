@@ -1,11 +1,18 @@
-"""Tests for progressive disclosure executor wiring (Part A, Stage 3)."""
+"""Tests for the single-axis skill model wiring in the executor.
 
+A selected skill (an eager pick by a deterministic select_skills rule) gets its
+full body inline; every other eligible skill is surfaced as a one-line menu
+entry the model pulls in full via ``istota-skill skills show``. The menu is the
+full eligible catalogue minus the eager set (and minus anything they exclude).
+"""
+
+import logging
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
 from istota import db
-from istota.config import Config, SkillsConfig, UserConfig
+from istota.config import Config, UserConfig
 from istota.executor import build_prompt, execute_task
 
 
@@ -50,7 +57,7 @@ class TestBuildPromptSkillsIndex:
         assert "load on demand" not in prompt
 
 
-# ---- execute_task dry-run: real partition path -----------------------------
+# ---- execute_task dry-run: real selection + menu path ----------------------
 
 
 _HEAVY_PATCHES = [
@@ -65,19 +72,21 @@ _HEAVY_PATCHES = [
 
 
 def _write_skill(
-    bundled: Path, name: str, body: str, *, disclosure: str = "", triggers=None,
+    bundled: Path, name: str, body: str, *, source_types=None,
     cli=True, exclude_skills=None, always_include=False, admin_only=False,
-    experimental=False, dependencies=None,
+    experimental=False, dependencies=None, companion_skills=None, file_types=None,
 ):
     d = bundled / name
     d.mkdir(parents=True, exist_ok=True)
     fm = ["---", f"name: {name}", "description: the {0} skill".format(name), f"cli: {'true' if cli else 'false'}"]
-    if disclosure:
-        fm.append(f"disclosure: {disclosure}")
-    if triggers:
-        fm.append(f"triggers: [{', '.join(triggers)}]")
+    if source_types:
+        fm.append(f"source_types: [{', '.join(source_types)}]")
+    if file_types:
+        fm.append(f"file_types: [{', '.join(file_types)}]")
     if exclude_skills:
         fm.append(f"exclude_skills: [{', '.join(exclude_skills)}]")
+    if companion_skills:
+        fm.append(f"companion_skills: [{', '.join(companion_skills)}]")
     if always_include:
         fm.append("always_include: true")
     if admin_only:
@@ -90,30 +99,34 @@ def _write_skill(
     (d / "skill.md").write_text("\n".join(fm) + "\n" + body)
 
 
-def _disclosure_config(tmp_path, *, progressive: bool) -> Config:
+def _base_config(tmp_path, *, devbox_enabled=True) -> Config:
+    """Bundled set:
+
+    - calendar    — selected eager (source_types=[talk]), excludes devbox
+    - developer   — unselected, eligible → menu only
+    - bookmarks   — unselected, eligible → menu only
+    - devbox      — unselected, excluded by calendar → absent everywhere
+    """
     bundled = tmp_path / "bundled"
     _write_skill(
-        bundled, "developer", "DEVELOPER_BODY_MARKER detailed git instructions",
-        disclosure="lazy", triggers=["deploy"],
-    )
-    _write_skill(
         bundled, "calendar", "CALENDAR_BODY_MARKER scheduling instructions",
-        triggers=["deploy"],
+        source_types=["talk"], exclude_skills=["devbox"],
     )
+    _write_skill(bundled, "developer", "DEVELOPER_BODY_MARKER detailed git instructions")
+    _write_skill(bundled, "bookmarks", "BOOKMARKS_BODY_MARKER")
+    _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER")
     skills_dir = tmp_path / "ops_skills"
     skills_dir.mkdir(parents=True)
     db.init_db(tmp_path / "t.db")
-    return Config(
+    config = Config(
         db_path=tmp_path / "t.db",
         skills_dir=skills_dir,
         bundled_skills_dir=bundled,
         temp_dir=tmp_path / "temp",
         users={"alice": UserConfig()},
-        skills=SkillsConfig(
-            progressive_disclosure=progressive,
-            always_eager=[],
-        ),
     )
+    config.devbox.enabled = devbox_enabled
+    return config
 
 
 def _run_dry(config) -> str:
@@ -125,95 +138,117 @@ def _run_dry(config) -> str:
     return result
 
 
-class TestExecuteTaskDisclosure:
-    def test_lazy_skill_deferred_when_progressive_on(self, tmp_path):
-        config = _disclosure_config(tmp_path, progressive=True)
-        prompt = _run_dry(config)
-        # developer is lazy → only an index line, no body.
+class TestExecuteTaskSelectionAndMenu:
+    def test_selected_skill_body_inline(self, tmp_path):
+        prompt = _run_dry(_base_config(tmp_path))
+        # calendar is selected (source_type) → full body present, not in menu.
+        assert "CALENDAR_BODY_MARKER" in prompt
+        assert "  - calendar:" not in prompt
+
+    def test_unselected_eligible_skill_in_menu_only(self, tmp_path):
+        prompt = _run_dry(_base_config(tmp_path))
+        # developer/bookmarks were never selected → menu entry, no body.
         assert "Available skills (load on demand)" in prompt
         assert "  - developer:" in prompt
         assert "DEVELOPER_BODY_MARKER" not in prompt
-        # calendar is eager → full body present.
-        assert "CALENDAR_BODY_MARKER" in prompt
+        assert "  - bookmarks:" in prompt
+        assert "BOOKMARKS_BODY_MARKER" not in prompt
 
-    def test_all_eager_when_progressive_off(self, tmp_path):
-        config = _disclosure_config(tmp_path, progressive=False)
-        prompt = _run_dry(config)
-        # No index section; both bodies fully present.
-        assert "load on demand" not in prompt
-        assert "DEVELOPER_BODY_MARKER" in prompt
-        assert "CALENDAR_BODY_MARKER" in prompt
+    def test_excluded_skill_absent_everywhere(self, tmp_path):
+        prompt = _run_dry(_base_config(tmp_path))
+        # calendar excludes devbox → not eager, not in menu.
+        assert "  - devbox:" not in prompt
+        assert "DEVBOX_BODY_MARKER" not in prompt
+
+    def test_skills_log_line_emitted(self, tmp_path, caplog):
+        config = _base_config(tmp_path)
+        with caplog.at_level(logging.INFO, logger="istota.executor"):
+            _run_dry(config)
+        msgs = [r.message for r in caplog.records if r.message.startswith("skills: eager=")]
+        assert msgs, "expected a 'skills: eager=N menu=M' log line"
+        assert any("menu=" in m for m in msgs)
 
 
-# ---- widened catalogue index (Pass 2 replacement) --------------------------
+# ---- ingest companion: untrusted_input rides along an attachment-selected skill ----
 
 
-def _catalogue_config(tmp_path, *, always_eager=None) -> Config:
-    """Bundled set with selected (developer/calendar) + unselected eligible
-    (bookmarks), an excluded skill (devbox, excluded by calendar), a pinned
-    always_eager skill (safety), and a gated-off experimental skill (labrat)."""
+def _ingest_config(tmp_path) -> Config:
     bundled = tmp_path / "bundled"
-    _write_skill(bundled, "developer", "DEVELOPER_BODY_MARKER", disclosure="lazy", triggers=["deploy"])
     _write_skill(
-        bundled, "calendar", "CALENDAR_BODY_MARKER", triggers=["deploy"],
-        exclude_skills=["devbox"],
+        bundled, "whisper", "WHISPER_BODY_MARKER audio instructions",
+        file_types=["mp3", "wav"], companion_skills=["untrusted_input"],
     )
-    _write_skill(bundled, "bookmarks", "BOOKMARKS_BODY_MARKER")        # unselected, eligible
-    _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER")              # unselected, excluded by calendar
-    _write_skill(bundled, "safety", "SAFETY_BODY_MARKER")              # unselected, always_eager
-    _write_skill(bundled, "labrat", "LABRAT_BODY_MARKER", experimental=True)  # gated off
+    _write_skill(bundled, "untrusted_input", "UNTRUSTED_INPUT_BODY_MARKER safety rules", cli=False)
     skills_dir = tmp_path / "ops_skills"
     skills_dir.mkdir(parents=True)
     db.init_db(tmp_path / "t.db")
-    return Config(
+    config = Config(
         db_path=tmp_path / "t.db",
         skills_dir=skills_dir,
         bundled_skills_dir=bundled,
         temp_dir=tmp_path / "temp",
         users={"alice": UserConfig()},
-        skills=SkillsConfig(
-            progressive_disclosure=True,
-            always_eager=always_eager if always_eager is not None else ["safety"],
-        ),
     )
+    config.devbox.enabled = True
+    return config
 
 
-class TestWidenedCatalogueIndex:
-    def test_unselected_eligible_skill_in_index(self, tmp_path):
-        prompt = _run_dry(_catalogue_config(tmp_path))
-        # bookmarks was never selected, but appears in the on-demand catalogue.
-        assert "Available skills (load on demand)" in prompt
-        assert "  - bookmarks:" in prompt
-        assert "BOOKMARKS_BODY_MARKER" not in prompt  # index entry only, no body
+class TestIngestCompanionEager:
+    def test_attachment_selected_ingest_pulls_untrusted_input_eager(self, tmp_path):
+        config = _ingest_config(tmp_path)
+        task = _task(attachments=["/path/to/memo.mp3"])
+        with ExitStack() as stack:
+            for target, ret in _HEAVY_PATCHES:
+                stack.enter_context(patch(target, return_value=ret))
+            success, prompt, _a, _t = execute_task(task, config, [], dry_run=True)
+        assert success
+        # whisper selected by file_type → body inline; its untrusted_input
+        # companion is pulled in eager (body present, not just a menu entry).
+        assert "WHISPER_BODY_MARKER" in prompt
+        assert "UNTRUSTED_INPUT_BODY_MARKER" in prompt
+        assert "  - untrusted_input:" not in prompt
 
-    def test_selected_lazy_skill_still_indexed(self, tmp_path):
-        prompt = _run_dry(_catalogue_config(tmp_path))
-        assert "  - developer:" in prompt
-        assert "DEVELOPER_BODY_MARKER" not in prompt
 
-    def test_eager_selected_skill_full_body_not_indexed(self, tmp_path):
-        prompt = _run_dry(_catalogue_config(tmp_path))
-        assert "CALENDAR_BODY_MARKER" in prompt
-        assert "  - calendar:" not in prompt
+# ---- devbox gating: disabled → absent from eager AND menu ------------------
 
-    def test_excluded_skill_absent_from_index(self, tmp_path):
-        prompt = _run_dry(_catalogue_config(tmp_path))
-        # calendar excludes devbox → devbox is not surfaced anywhere.
+
+class TestDevboxDisabledGate:
+    def test_devbox_disabled_absent_from_eager_and_menu(self, tmp_path):
+        # A bundled set where devbox is NOT excluded by any selected skill, so
+        # the only thing keeping it out of the menu is the devbox-disabled gate.
+        bundled = tmp_path / "bundled"
+        _write_skill(bundled, "calendar", "CALENDAR_BODY_MARKER", source_types=["talk"])
+        _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER")
+        skills_dir = tmp_path / "ops_skills"
+        skills_dir.mkdir(parents=True)
+        db.init_db(tmp_path / "t.db")
+        config = Config(
+            db_path=tmp_path / "t.db",
+            skills_dir=skills_dir,
+            bundled_skills_dir=bundled,
+            temp_dir=tmp_path / "temp",
+            users={"alice": UserConfig()},
+        )
+        config.devbox.enabled = False
+        prompt = _run_dry(config)
         assert "  - devbox:" not in prompt
         assert "DEVBOX_BODY_MARKER" not in prompt
 
-    def test_always_eager_skill_absent_from_index(self, tmp_path):
-        prompt = _run_dry(_catalogue_config(tmp_path))
-        # safety is pinned always_eager → never offered for on-demand load.
-        assert "  - safety:" not in prompt
-
-    def test_experimental_gated_skill_absent_from_index(self, tmp_path):
-        prompt = _run_dry(_catalogue_config(tmp_path))
-        assert "  - labrat:" not in prompt
-
-    def test_skillsconfig_defaults(self):
-        # Progressive disclosure is the default selection model; the removed
-        # Pass-2 semantic-routing knobs are gone.
-        cfg = SkillsConfig()
-        assert cfg.progressive_disclosure is True
-        assert not hasattr(cfg, "semantic_routing")
+    def test_devbox_enabled_appears_in_menu(self, tmp_path):
+        bundled = tmp_path / "bundled"
+        _write_skill(bundled, "calendar", "CALENDAR_BODY_MARKER", source_types=["talk"])
+        _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER")
+        skills_dir = tmp_path / "ops_skills"
+        skills_dir.mkdir(parents=True)
+        db.init_db(tmp_path / "t.db")
+        config = Config(
+            db_path=tmp_path / "t.db",
+            skills_dir=skills_dir,
+            bundled_skills_dir=bundled,
+            temp_dir=tmp_path / "temp",
+            users={"alice": UserConfig()},
+        )
+        config.devbox.enabled = True
+        prompt = _run_dry(config)
+        # devbox not selected, not excluded, devbox enabled → menu entry.
+        assert "  - devbox:" in prompt

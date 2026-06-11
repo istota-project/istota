@@ -95,8 +95,27 @@ def _scripts_dir(config, user_id: str) -> str:
     return f"{config.rclone_remote}:{scripts_nc_path}"
 
 
+def _render_companion_body(config, name: str, meta) -> str | None:
+    """Render one companion skill's body (frontmatter stripped, placeholders
+    substituted) WITHOUT the ``## Skills Reference`` wrapper — it rides under a
+    delimiter beneath the primary skill. Returns None if the doc can't be read.
+    """
+    from istota.skills._loader import _resolve_skill_doc_path, _strip_frontmatter
+
+    doc_path = _resolve_skill_doc_path(name, meta, config.skills_dir, config.bundled_skills_dir)
+    if doc_path is None:
+        return None
+    try:
+        content = _strip_frontmatter(doc_path.read_text()).strip()
+    except OSError:
+        return None
+    return content.replace("{BOT_NAME}", config.bot_name).replace("{BOT_DIR}", config.bot_dir_name)
+
+
 def cmd_show(args) -> None:
-    from istota.skills._loader import load_skills
+    import logging
+
+    from istota.skills._loader import expand_companions, load_skills
 
     ctx = _load_context()
     name = args.name
@@ -105,20 +124,53 @@ def cmd_show(args) -> None:
         _output_error(err)
 
     config = ctx["config"]
+    skill_index = ctx["skill_index"]
     body = load_skills(
         config.skills_dir,
         [name],
         config.bot_name,
         config.bot_dir_name,
-        skill_index=ctx["skill_index"],
+        skill_index=skill_index,
         bundled_dir=config.bundled_skills_dir,
     )
     if not body:
         _output_error(f"no documentation found for skill {name!r}")
 
-    body = body.replace("{scripts_dir}", _scripts_dir(config, ctx["user_id"]))
-    body = body.replace("{user_id}", ctx["user_id"])
-    print(body)
+    # Append companion bodies (e.g. untrusted_input for an ingest skill) so a
+    # menu-pulled skill always arrives with its guardrails in the SAME response
+    # — companions are not optional and not at the model's discretion. Gate
+    # filtering goes through the shared expand_companions so it can't drift from
+    # selection-time companion expansion.
+    parts = [body]
+    meta = skill_index.get(name)
+    declared = list(meta.companion_skills) if meta else []
+    if declared:
+        loadable = set(expand_companions(
+            [name], skill_index,
+            is_admin=ctx["is_admin"],
+            disabled_skills=ctx["disabled"],
+            enabled_experimental_features=ctx["enabled_features"],
+        ))
+        log = logging.getLogger("istota.skills")
+        for comp in declared:
+            if comp not in loadable:
+                # Gated off (disabled/admin/experimental/deps) or missing from
+                # the index. Never silently drop — emit a visible marker; a
+                # missing safety companion is a config error.
+                log.warning("skills show %s: companion %s unavailable", name, comp)
+                parts.append(f"\n\n---\n<!-- companion {comp}: unavailable -->")
+                continue
+            cbody = _render_companion_body(config, comp, skill_index.get(comp))
+            if not cbody:
+                log.warning("skills show %s: companion %s body unreadable", name, comp)
+                parts.append(f"\n\n---\n<!-- companion {comp}: unavailable -->")
+                continue
+            parts.append(f"\n\n---\n<!-- companion: {comp} -->\n\n{cbody}")
+
+    out = "".join(parts)
+    out = out.replace("{scripts_dir}", _scripts_dir(config, ctx["user_id"]))
+    out = out.replace("{user_id}", ctx["user_id"])
+    print(out)
 
 
 def cmd_list(args) -> None:

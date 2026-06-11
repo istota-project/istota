@@ -28,8 +28,12 @@ class TestMoneySkillManifest:
         assert meta.resource_types == []
         assert "accounting" in meta.keywords
 
-    def test_selected_by_keyword(self, tmp_path):
-        from istota.skills._loader import load_skill_index, select_skills
+    def test_not_eager_selected_but_in_menu(self, tmp_path):
+        # money is a menu skill now (single-axis model): keyword no longer
+        # eager-selects it; it's surfaced in the on-demand catalogue instead.
+        from istota.skills._loader import (
+            eligible_skill_names, load_skill_index, select_skills,
+        )
 
         index = load_skill_index(skills_dir=_empty_skills_dir(tmp_path))
         selected = select_skills(
@@ -38,7 +42,9 @@ class TestMoneySkillManifest:
             user_resource_types=set(),
             skill_index=index,
         )
-        assert "money" in selected
+        assert "money" not in selected
+        menu = eligible_skill_names(index, exclude=set(selected))
+        assert "money" in menu
 
     def test_not_selected_without_keyword(self, tmp_path):
         from istota.skills._loader import load_skill_index, select_skills

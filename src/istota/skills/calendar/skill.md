@@ -3,7 +3,6 @@ name: calendar
 triggers: [calendar,  cal , event, meeting, schedule, appointment, caldav]
 description: Calendar operations with CalDAV
 cli: true
-disclosure: lazy
 source_types: [briefing]
 companion_skills: [untrusted_input]
 exclude_skills: [devbox]

@@ -1606,7 +1606,7 @@ class TestAdminEnvVarIsolation:
         skills_dir = config.skills_dir
         (skills_dir / "_index.toml").write_text(
             '[files]\ndescription = "File ops"\nalways_include = true\n\n'
-            '[schedules]\ndescription = "Scheduled jobs"\nkeywords = ["schedule"]\nadmin_only = true\n'
+            '[schedules]\ndescription = "Scheduled jobs"\nsource_types = ["talk"]\nadmin_only = true\n'
         )
         (skills_dir / "schedules.md").write_text("Admin scheduling reference.")
         (tmp_path / "temp" / "alice").mkdir(parents=True)
@@ -1628,7 +1628,7 @@ class TestAdminEnvVarIsolation:
         skills_dir = config.skills_dir
         (skills_dir / "_index.toml").write_text(
             '[files]\ndescription = "File ops"\nalways_include = true\n\n'
-            '[schedules]\ndescription = "Scheduled jobs"\nkeywords = ["schedule"]\nadmin_only = true\n'
+            '[schedules]\ndescription = "Scheduled jobs"\nsource_types = ["talk"]\nadmin_only = true\n'
         )
         (skills_dir / "schedules.md").write_text("Admin scheduling reference.")
         (tmp_path / "temp" / "alice").mkdir(parents=True)
