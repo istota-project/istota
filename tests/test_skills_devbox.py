@@ -474,9 +474,13 @@ class TestMain:
 
 
 class TestExcludeSkills:
-    """Regression: the seven ingest-shaped skills must list devbox in their
-    exclude_skills so the devbox is never co-selected with untrusted ingest.
-    Tests against the loaded skill index so a future rename catches here."""
+    """devbox is a plain menu skill — no selection-time exclusion.
+
+    The old `exclude_skills: [devbox]` gate on the seven ingest skills (which
+    kept the raw docker socket away from untrusted-content tasks) was removed
+    once the Docker-API allowlist proxy made the socket safe to bind
+    unconditionally. The boundary is now the proxy (exec/cp/inspect/restart on
+    the user's own container only), not co-selection avoidance."""
 
     def test_devbox_not_always_include(self):
         from pathlib import Path
@@ -487,10 +491,12 @@ class TestExcludeSkills:
         assert devbox_meta.always_include is False
 
     @pytest.mark.parametrize("skill", ["email", "browse", "calendar", "transcribe", "whisper", "feeds", "bookmarks"])
-    def test_ingest_skill_excludes_devbox(self, skill):
+    def test_ingest_skill_no_longer_excludes_devbox(self, skill):
         from pathlib import Path
         from istota.skills._loader import load_skill_index
         idx = load_skill_index(Path("config/skills"))
         meta = idx.get(skill)
         assert meta is not None
-        assert "devbox" in meta.exclude_skills, f"{skill} must exclude devbox"
+        assert "devbox" not in meta.exclude_skills, (
+            f"{skill} must NOT exclude devbox — the proxy is the boundary now"
+        )
