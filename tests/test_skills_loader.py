@@ -10,6 +10,7 @@ from istota.skills._loader import (
     _parse_frontmatter,
     compute_skills_fingerprint,
     eligible_skill_names,
+    expand_companions,
     get_skill_availability,
     load_skill_index,
     load_skills,
@@ -166,10 +167,10 @@ class TestSelectSkills:
         assert "files(always_include)" in msg
         # markets: matched briefing source_type
         assert "markets(source_type=briefing)" in msg
-        # email: matched keyword
-        assert "email(keyword='email')" in msg
-        # calendar: matched keyword + has resource (note: prompt includes "send" not "calendar"
-        # so calendar is NOT keyword-selected here — verify it isn't)
+        # Keyword matching no longer selects (single-axis model): no keyword=
+        # reasons appear, and the keyword-only skills (email, calendar) are absent.
+        assert "keyword=" not in msg
+        assert "email(" not in msg
         assert "calendar(" not in msg
 
     def test_source_type_match(self):
@@ -183,11 +184,11 @@ class TestSelectSkills:
         result = select_skills("what is next", "talk", {"calendar"}, index)
         assert "calendar" not in result
 
-    def test_resource_type_with_keyword_match(self):
-        """Resource type + keyword match should select skill."""
+    def test_keyword_no_longer_selects_even_with_resource(self):
+        """Single-axis model: keyword + resource match no longer selects."""
         index = self._make_index()
         result = select_skills("check my calendar", "talk", {"calendar"}, index)
-        assert "calendar" in result
+        assert "calendar" not in result
 
     def test_keyword_without_resource_type_no_match(self):
         """Keyword match but missing required resource should NOT select skill."""
@@ -195,25 +196,26 @@ class TestSelectSkills:
         result = select_skills("check my calendar", "talk", set(), index)
         assert "calendar" not in result
 
-    def test_keyword_match(self):
+    def test_keyword_no_longer_selects(self):
+        """A keyword-only skill is NOT eager-selected (single-axis model)."""
         index = self._make_index()
         result = select_skills("send an email to bob", "talk", set(), index)
-        assert "email" in result
+        assert "email" not in result
 
-    def test_keyword_case_insensitive(self):
+    def test_keyword_no_longer_selects_case_insensitive(self):
         index = self._make_index()
         result = select_skills("Send an EMAIL to bob", "talk", set(), index)
-        assert "email" in result
+        assert "email" not in result
 
-    def test_keyword_match_nextcloud_share(self):
+    def test_keyword_no_longer_selects_nextcloud_share(self):
         index = self._make_index()
         result = select_skills("share my report with bob", "talk", set(), index)
-        assert "nextcloud" in result
+        assert "nextcloud" not in result
 
-    def test_keyword_match_nextcloud_public_link(self):
+    def test_keyword_no_longer_selects_nextcloud_public_link(self):
         index = self._make_index()
         result = select_skills("create a public link for this file", "talk", set(), index)
-        assert "nextcloud" in result
+        assert "nextcloud" not in result
 
     def test_no_match(self):
         index = self._make_index()
@@ -229,13 +231,14 @@ class TestSelectSkills:
             {"calendar"},
             index,
         )
-        assert "files" in result      # always_include
-        assert "calendar" not in result  # resource_type alone (no keyword hit)
-        assert "markets" in result    # source_type
-        assert "email" in result      # keyword
-        assert "schedules" in result  # keyword
+        assert "files" in result          # always_include
+        assert "markets" in result        # source_type
+        # Keyword/resource matching no longer selects.
+        assert "calendar" not in result
+        assert "email" not in result
+        assert "schedules" not in result
 
-    def test_multiple_criteria_with_keyword(self):
+    def test_keyword_in_prompt_still_does_not_select(self):
         index = self._make_index()
         result = select_skills(
             "send email about calendar schedule",
@@ -243,11 +246,12 @@ class TestSelectSkills:
             {"calendar"},
             index,
         )
-        assert "files" in result      # always_include
-        assert "calendar" in result   # resource_type + keyword
-        assert "markets" in result    # source_type
-        assert "email" in result      # keyword
-        assert "schedules" in result  # keyword
+        assert "files" in result          # always_include
+        assert "markets" in result        # source_type
+        # Even with the keywords present in the prompt, no keyword skill selects.
+        assert "calendar" not in result
+        assert "email" not in result
+        assert "schedules" not in result
 
     def test_returns_sorted(self):
         index = self._make_index()
@@ -299,7 +303,7 @@ class TestSelectSkills:
             "whisper": SkillMeta(
                 name="whisper",
                 description="Transcription",
-                keywords=["transcribe"],
+                source_types=["talk"],
                 companion_skills=["reminders"],
             ),
             "reminders": SkillMeta(
@@ -308,6 +312,7 @@ class TestSelectSkills:
                 keywords=["remind"],
             ),
         }
+        # whisper selected by source_type; its reminders companion is disabled.
         result = select_skills(
             "transcribe this",
             "talk",
@@ -318,7 +323,7 @@ class TestSelectSkills:
         assert "whisper" in result
         assert "reminders" not in result
 
-    def test_exclude_skills_removes_keyword_matched(self):
+    def test_exclude_skills_removes_selected(self):
         """A skill with exclude_skills removes those skills from the result."""
         index = {
             "briefing": SkillMeta(
@@ -330,7 +335,7 @@ class TestSelectSkills:
             "email": SkillMeta(
                 name="email",
                 description="Email",
-                keywords=["email", "send"],
+                source_types=["briefing"],
             ),
             "files": SkillMeta(
                 name="files",
@@ -338,7 +343,7 @@ class TestSelectSkills:
                 always_include=True,
             ),
         }
-        # "email" keyword appears in prompt, but briefing excludes it
+        # email would be selected by source_type, but briefing excludes it.
         result = select_skills(
             "generate briefing with email summary",
             "briefing",
@@ -361,10 +366,11 @@ class TestSelectSkills:
             "email": SkillMeta(
                 name="email",
                 description="Email",
-                keywords=["email", "send"],
+                source_types=["talk"],
             ),
         }
-        # Not a briefing task, so briefing skill not selected, email should be included
+        # Not a briefing task, so briefing skill not selected; email (selected
+        # by its own source_type) should survive — nothing excludes it.
         result = select_skills(
             "send an email to bob",
             "talk",
@@ -640,19 +646,19 @@ class TestAdminOnlySkills:
             "schedules": SkillMeta(
                 name="schedules",
                 description="Scheduled jobs",
-                keywords=["schedule", "cron"],
+                source_types=["talk"],
                 admin_only=True,
             ),
             "tasks": SkillMeta(
                 name="tasks",
                 description="Subtask creation",
-                keywords=["subtask", "queue"],
+                source_types=["talk"],
                 admin_only=True,
             ),
             "email": SkillMeta(
                 name="email",
                 description="Email",
-                keywords=["email"],
+                source_types=["talk"],
             ),
         }
 
@@ -672,7 +678,7 @@ class TestAdminOnlySkills:
         result = select_skills("hello", "talk", set(), index, is_admin=False)
         assert "files" in result
 
-    def test_non_admin_still_gets_keyword_match(self):
+    def test_non_admin_still_gets_source_type_match(self):
         index = self._make_index()
         result = select_skills("send email", "talk", set(), index, is_admin=False)
         assert "email" in result
@@ -780,12 +786,13 @@ class TestFileTypeSelection:
         assert "whisper" not in result
         assert "transcribe" not in result
 
-    def test_keyword_still_works_without_attachment(self):
+    def test_keyword_no_longer_selects_without_attachment(self):
+        """Without a matching attachment, the keyword alone no longer selects."""
         index = self._make_index()
         result = select_skills(
             "transcribe this audio", "talk", set(), index,
         )
-        assert "whisper" in result
+        assert "whisper" not in result
 
     def test_file_type_case_insensitive(self):
         index = self._make_index()
@@ -1110,66 +1117,39 @@ class TestDirectoryBasedDiscovery:
 
 
 class TestRemindersSkillSelection:
-    """Tests for the reminders skill keyword matching."""
+    """`reminders` is a real bundled skill that used to be keyword-selected.
 
-    def _make_index(self) -> dict[str, SkillMeta]:
-        return {
-            "files": SkillMeta(
-                name="files",
-                description="File ops",
-                always_include=True,
-            ),
-            "reminders": SkillMeta(
-                name="reminders",
-                description="Set and manage time-based reminders via CRON.md",
-                keywords=[
-                    "remind", "reminder", "reminders", "remind me",
-                    "alert me", "notify me", "don't forget",
-                    "don't let me forget", "in an hour", "in 30 minutes",
-                    "at 3pm", "tomorrow morning",
-                ],
-            ),
-            "schedules": SkillMeta(
-                name="schedules",
-                description="Scheduled jobs",
-                keywords=["schedule", "recurring", "cron"],
-            ),
-        }
+    Under the single-axis model it's a menu-only skill: never eager-selected by
+    a keyword prompt, but always present in the on-demand catalogue."""
 
-    def test_remind_me_triggers_reminders(self):
-        index = self._make_index()
+    def _real_index(self) -> dict[str, SkillMeta]:
+        # skills_dir nonexistent → loader uses the real bundled directory.
+        return load_skill_index(Path("/nonexistent-ops-skills-dir"))
+
+    def test_remind_me_does_not_eager_select(self):
+        index = self._real_index()
         result = select_skills("remind me to call the dentist in 2 hours", "talk", set(), index)
-        assert "reminders" in result
+        assert "reminders" not in result
 
-    def test_reminder_keyword_triggers(self):
-        index = self._make_index()
+    def test_reminder_keyword_does_not_eager_select(self):
+        index = self._real_index()
         result = select_skills("set a reminder for 3pm", "talk", set(), index)
-        assert "reminders" in result
+        assert "reminders" not in result
 
-    def test_dont_forget_triggers(self):
-        index = self._make_index()
+    def test_dont_forget_does_not_eager_select(self):
+        index = self._real_index()
         result = select_skills("don't forget to buy milk", "talk", set(), index)
-        assert "reminders" in result
+        assert "reminders" not in result
 
-    def test_alert_me_triggers(self):
-        index = self._make_index()
-        result = select_skills("alert me when it's 5pm", "talk", set(), index)
-        assert "reminders" in result
-
-    def test_in_an_hour_triggers(self):
-        index = self._make_index()
-        result = select_skills("ping me in an hour about the meeting", "talk", set(), index)
-        assert "reminders" in result
-
-    def test_unrelated_prompt_no_match(self):
-        index = self._make_index()
+    def test_unrelated_prompt_does_not_eager_select(self):
+        index = self._real_index()
         result = select_skills("what's the weather today", "talk", set(), index)
         assert "reminders" not in result
 
-    def test_remind_case_insensitive(self):
-        index = self._make_index()
-        result = select_skills("REMIND ME to take out the trash", "talk", set(), index)
-        assert "reminders" in result
+    def test_reminders_in_menu(self):
+        index = self._real_index()
+        menu = eligible_skill_names(index, exclude=set())
+        assert "reminders" in menu
 
 
 class TestSkillEnvSpecs:
@@ -1419,16 +1399,26 @@ class TestUntrustedInputCompanion:
         assert "untrusted_input" in index["transcribe"].companion_skills
         assert "notes" in index["transcribe"].companion_skills
 
-    def test_browse_keyword_pulls_in_untrusted_input(self):
+    def test_browse_companion_resolves_untrusted_input(self):
+        # browse is no longer keyword-selected, but its companion relationship
+        # is intact: expanding its companions yields untrusted_input.
+        index = self._bundled_index()
+        companions = expand_companions(["browse"], index)
+        assert "untrusted_input" in companions
+
+    def test_ingest_skill_via_attachment_pulls_in_untrusted_input(self):
+        # whisper selects on an audio attachment (a retained file_type selector)
+        # and pulls its untrusted_input companion in eagerly.
         index = self._bundled_index()
         result = select_skills(
-            "fetch the page from this url", "talk", set(), index,
+            "", "talk", set(), index,
+            attachments=["/path/to/memo.mp3"],
         )
-        assert "browse" in result
+        assert "whisper" in result
         assert "untrusted_input" in result
 
     def test_no_ingest_skill_no_untrusted_input(self):
-        # A plain Talk task with no ingest-skill keywords should not load it.
+        # A plain Talk task with no ingest skill selected should not load it.
         index = self._bundled_index()
         result = select_skills(
             "what's 2 + 2", "talk", set(), index,
@@ -1450,13 +1440,13 @@ class TestExperimentalSkillGating:
             "wild": SkillMeta(
                 name="wild",
                 description="Experimental",
-                keywords=["wild", "thing"],
+                source_types=["talk"],
                 experimental=True,
             ),
             "normal": SkillMeta(
                 name="normal",
-                description="Normal keyword skill",
-                keywords=["wild", "thing"],
+                description="Normal source-type skill",
+                source_types=["talk"],
             ),
         }
 
@@ -1497,7 +1487,7 @@ class TestExperimentalSkillGating:
         index["normal"] = SkillMeta(
             name="normal",
             description="Pulls wild in",
-            keywords=["thing"],
+            source_types=["talk"],
             companion_skills=["wild"],
         )
         result = select_skills(
@@ -1596,9 +1586,10 @@ class TestEligibleSkillNames:
 
 
 class TestBundledDocSkillsNoResourceGate:
-    """Option A: the doc-only convention skills (notes/spec/todos) dropped
-    resource_types so they're keyword-selectable without a declared resource,
-    and spec is lazy. Guards against a regression that re-adds the gate."""
+    """The doc-only convention skills (notes/spec/todos) dropped resource_types.
+    Under the single-axis model they're menu-only: never eager-selected by a
+    keyword prompt, but always surfaced in the on-demand catalogue. Guards
+    against a regression that re-adds the resource gate."""
 
     def _real_index(self):
         # skills_dir nonexistent → loader uses the real bundled directory.
@@ -1609,19 +1600,23 @@ class TestBundledDocSkillsNoResourceGate:
         offenders = {n: m.resource_types for n, m in index.items() if m.resource_types}
         assert offenders == {}, f"unexpected resource_types holdouts: {offenders}"
 
-    def test_notes_selected_by_keyword_without_resource(self):
+    def test_notes_not_eager_selected_but_in_menu(self):
         index = self._real_index()
         result = select_skills("save this as a note in markdown", "talk", set(), index)
-        assert "notes" in result
+        assert "notes" not in result
+        assert "notes" in eligible_skill_names(index, exclude=set())
 
-    def test_todos_selected_by_keyword_without_resource(self):
+    def test_todos_not_eager_selected_but_in_menu(self):
         index = self._real_index()
         result = select_skills("add a todo to my checklist", "talk", set(), index)
-        assert "todos" in result
+        assert "todos" not in result
+        assert "todos" in eligible_skill_names(index, exclude=set())
 
-    def test_spec_is_lazy(self):
+    def test_spec_in_menu(self):
         index = self._real_index()
-        assert index["spec"].disclosure == "lazy"
+        result = select_skills("write a spec for the new feature", "talk", set(), index)
+        assert "spec" not in result
+        assert "spec" in eligible_skill_names(index, exclude=set())
 
 
 class TestFrontmatterParsing:
@@ -1747,3 +1742,89 @@ class TestFrontmatterParsing:
         # Should fall back gracefully
         assert index["email"].keywords == ["email"]
         assert index["email"].description == "Email"
+
+
+class TestExpandCompanions:
+    """Gate-filtered, one-level companion resolution shared by select_skills
+    (eager-companion expansion) and the `skills show` CLI (pull-time)."""
+
+    def _index(self) -> dict[str, SkillMeta]:
+        return {
+            "ingest": SkillMeta(
+                name="ingest",
+                description="Ingest skill",
+                companion_skills=["untrusted", "admin_helper", "labrat", "deep"],
+            ),
+            "untrusted": SkillMeta(name="untrusted", description="Safety doc"),
+            "admin_helper": SkillMeta(
+                name="admin_helper", description="Admin only", admin_only=True,
+            ),
+            "labrat": SkillMeta(
+                name="labrat", description="Experimental", experimental=True,
+            ),
+            "deep": SkillMeta(
+                name="deep", description="Needs a dep",
+                dependencies=["nonexistent_pkg_xyz"],
+            ),
+            "other": SkillMeta(
+                name="other", description="Pulls untrusted too",
+                companion_skills=["untrusted"],
+            ),
+        }
+
+    def test_one_level_resolution(self):
+        result = expand_companions(["ingest"], self._index())
+        assert "untrusted" in result
+
+    def test_excludes_names_already_in_input(self):
+        # untrusted is itself in the input set → not re-added.
+        result = expand_companions(["ingest", "untrusted"], self._index())
+        assert "untrusted" not in result
+
+    def test_dedup_across_multiple_pullers(self):
+        # Both 'ingest' and 'other' declare 'untrusted' as a companion.
+        result = expand_companions(["ingest", "other"], self._index())
+        assert result.count("untrusted") == 1
+
+    def test_drops_admin_only_for_non_admin(self):
+        result = expand_companions(["ingest"], self._index(), is_admin=False)
+        assert "admin_helper" not in result
+        result_admin = expand_companions(["ingest"], self._index(), is_admin=True)
+        assert "admin_helper" in result_admin
+
+    def test_drops_experimental_unless_flagged(self):
+        result = expand_companions(["ingest"], self._index())
+        assert "labrat" not in result
+        flagged = expand_companions(
+            ["ingest"], self._index(),
+            enabled_experimental_features=frozenset({"skill_labrat"}),
+        )
+        assert "labrat" in flagged
+
+    def test_drops_disabled(self):
+        result = expand_companions(
+            ["ingest"], self._index(), disabled_skills={"untrusted"},
+        )
+        assert "untrusted" not in result
+
+    def test_drops_missing_deps(self):
+        result = expand_companions(["ingest"], self._index())
+        assert "deep" not in result
+
+    def test_companion_not_in_index_logged_and_skipped(self, caplog):
+        import logging
+        index = {
+            "ingest": SkillMeta(
+                name="ingest", description="Ingest",
+                companion_skills=["ghost"],
+            ),
+        }
+        with caplog.at_level(logging.WARNING, logger="istota.skills_loader"):
+            result = expand_companions(["ingest"], index)
+        assert result == []
+        assert any("ghost" in r.message for r in caplog.records)
+
+    def test_name_not_in_index_ignored(self):
+        # A name with no entry in the index contributes no companions.
+        result = expand_companions(["nonexistent"], self._index())
+        assert result == []

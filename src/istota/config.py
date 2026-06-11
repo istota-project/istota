@@ -475,33 +475,6 @@ class MoneymanConfig:
 
 
 @dataclass
-class SkillsConfig:
-    """Skill routing configuration."""
-    # Progressive skill disclosure. ON by default: selected skills are
-    # partitioned eager (full body) / lazy (one-line index entry), and the
-    # on-demand index is widened to the full eligible catalogue so the model can
-    # load any skill via `istota-skill skills show <name>`. Set False for the
-    # legacy all-eager-no-index behaviour. (This superseded the removed Pass-2
-    # LLM "semantic routing" pre-router, whose per-task `claude -p` cold-start
-    # dominated and timed out in production.)
-    progressive_disclosure: bool = True
-    # When > 0, a CLI skill whose body exceeds this many chars defaults to lazy
-    # disclosure even without an explicit ``disclosure: lazy`` frontmatter key.
-    # 0 = only explicit frontmatter opts a skill into lazy.
-    auto_lazy_threshold_chars: int = 0
-    # Skills that are never deferred regardless of size or frontmatter — their
-    # rules must always be fully in context. ``skills`` is the on-demand loader
-    # itself: deferring its body would be circular (the model needs the loader's
-    # instructions to load any skill, including this one), so it is pinned eager.
-    always_eager: list[str] = field(
-        default_factory=lambda: [
-            "sensitive_actions", "untrusted_input", "files", "scripts", "memory",
-            "skills",
-        ]
-    )
-
-
-@dataclass
 class NativeBrainConfig:
     """Settings for the native harness (``brain.kind = "native"``).
 
@@ -652,7 +625,6 @@ class Config:
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefing_defaults: BriefingDefaultsConfig = field(default_factory=BriefingDefaultsConfig)
-    skills: SkillsConfig = field(default_factory=SkillsConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
@@ -1213,16 +1185,14 @@ def load_config(config_path: Path | None = None) -> Config:
         )
 
     if "skills" in data:
-        sk = data["skills"]
-        config.skills = SkillsConfig(
-            progressive_disclosure=sk.get("progressive_disclosure", True),
-            auto_lazy_threshold_chars=sk.get("auto_lazy_threshold_chars", 0),
-            always_eager=list(
-                sk.get(
-                    "always_eager",
-                    ["sensitive_actions", "untrusted_input", "files", "scripts", "memory", "skills"],
-                )
-            ),
+        # The [skills] section is obsolete: progressive disclosure collapsed
+        # into the single-axis selection model (selected ⇒ eager, else ⇒ menu),
+        # so there are no skill-routing knobs left. Warn but don't fail so an
+        # operator's stale config keeps loading.
+        logger.warning(
+            "[skills] block in config.toml is no longer used — skill disclosure "
+            "is now intrinsic (no progressive_disclosure / always_eager / "
+            "auto_lazy_threshold_chars knobs)."
         )
 
     if "brain" in data:

@@ -187,7 +187,6 @@ def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
         exclude_resources=_get_list("exclude_resources"),
         cli=_get_bool("cli"),
         experimental=_get_bool("experimental"),
-        disclosure=str(_get("disclosure", "") or "").strip().lower(),
         skill_dir=str(skill_dir),
     )
 
@@ -323,6 +322,59 @@ def get_skill_availability(meta: SkillMeta) -> tuple[str, str | None]:
     return ("available", None)
 
 
+def expand_companions(
+    names: list[str],
+    skill_index: dict[str, SkillMeta],
+    *,
+    is_admin: bool = True,
+    disabled_skills: set[str] | None = None,
+    enabled_experimental_features: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Gate-filtered companion resolution, one level, deduped.
+
+    Returns the companion skills declared by ``names`` (via
+    ``companion_skills``) that pass the standard gates — not disabled, not
+    admin-gated for a non-admin, not an unenabled experimental skill, and with
+    importable dependencies — excluding any name already in ``names``.
+
+    One level only: companions-of-companions are not expanded (so a companion
+    cycle is inert). A declared companion missing from the index is logged at
+    WARNING and skipped — it may be a safety skill, so the gap is never silent.
+
+    Shared by ``select_skills`` (eager-companion expansion) and the
+    ``skills show`` CLI (pull-time companion expansion) so the two paths apply
+    the identical gate.
+    """
+    disabled = disabled_skills or set()
+    result: list[str] = []
+    seen = set(names)
+    for name in names:
+        meta = skill_index.get(name)
+        if meta is None:
+            continue
+        for companion in meta.companion_skills:
+            if companion in seen:
+                continue
+            cmeta = skill_index.get(companion)
+            if cmeta is None:
+                logger.warning(
+                    "companion %r declared by skill %r not found in index — skipped",
+                    companion, name,
+                )
+                continue
+            if companion in disabled:
+                continue
+            if cmeta.admin_only and not is_admin:
+                continue
+            if cmeta.experimental and f"skill_{companion}" not in enabled_experimental_features:
+                continue
+            if not _check_dependencies(cmeta):
+                continue
+            seen.add(companion)
+            result.append(companion)
+    return result
+
+
 def select_skills(
     prompt: str,
     source_type: str,
@@ -334,24 +386,34 @@ def select_skills(
     sticky_skills: set[str] | None = None,
     enabled_experimental_features: frozenset[str] = frozenset(),
 ) -> list[str]:
-    """Select relevant skills based on prompt and context.
+    """Select the eager skill set for a task (the single-axis model, Part A).
 
-    Selection criteria (in order):
+    "Selected by a deterministic rule ⇒ eager." Selection criteria:
     1. Always include core skills (always_include=true)
-    2. Match by source type (e.g., briefing tasks)
-    3. Match by user resource types (e.g., user has calendar access)
-    4. Match by file types in attachments (e.g., .mp3 triggers whisper)
-    5. Match by keywords in prompt
+    2. Match by source type (e.g., briefing tasks pre-load calendar/markets)
+    3. Match by file types in attachments (e.g., .mp3 triggers whisper)
 
-    Skills with admin_only=true are skipped for non-admin users.
-    Skills with unmet dependencies are skipped with a debug log.
-    Skills in disabled_skills are skipped entirely (instance-wide + per-user).
-    Skills marked ``experimental=true`` are skipped unless their
-    ``skill_<name>`` flag appears in ``enabled_experimental_features``.
+    Keyword (``triggers``) and ``resource_types`` matching are intentionally
+    NOT eager selectors — every non-eager eligible skill is surfaced to the
+    model as a one-line menu entry (the widened on-demand catalogue), so a
+    keyword guess is redundant. ``resource_types`` survives only as a
+    menu-membership gate in ``eligible_skill_names``. (``prompt`` /
+    ``user_resource_types`` are retained in the signature for call-site
+    compatibility; they no longer drive selection.)
+
+    Sticky skills (recent-conversation follow-up) still select eager so a
+    multi-turn task keeps its skills inline. Companions of any eager skill are
+    pulled in (gate-filtered, one level) via ``expand_companions`` so e.g. the
+    ``untrusted_input`` safety skill rides along with a source/file-selected
+    ingest skill.
+
+    Skills with admin_only=true are skipped for non-admin users; unmet
+    dependencies skipped; ``disabled_skills`` skipped (instance + per-user);
+    ``experimental=true`` skipped unless ``skill_<name>`` is in
+    ``enabled_experimental_features``.
     """
     selected = set()
     reasons: dict[str, str] = {}
-    prompt_lower = prompt.lower()
     attachment_extensions = _get_attachment_extensions(attachments)
     disabled = disabled_skills or set()
 
@@ -392,16 +454,6 @@ def select_skills(
                     _add(name, f"file_type={matched_ft}")
                 continue
 
-        if meta.keywords:
-            matched_kw = next((kw for kw in meta.keywords if kw in prompt_lower), None)
-            if matched_kw is not None:
-                # If skill requires a resource type, only include if user has it
-                if meta.resource_types:
-                    if not any(rt in user_resource_types for rt in meta.resource_types):
-                        continue
-                if _check_dependencies(meta):
-                    _add(name, f"keyword={matched_kw!r}")
-
     # Inject sticky skills from recent conversation (follow-up context)
     if sticky_skills:
         for name in sticky_skills:
@@ -417,21 +469,16 @@ def select_skills(
             if _check_dependencies(meta):
                 _add(name, "sticky")
 
-    # Resolve companion skills (e.g., whisper pulls in reminders, schedules)
-    companions: dict[str, str] = {}
-    for name in selected:
-        meta = skill_index[name]
-        for companion in meta.companion_skills:
-            if companion in skill_index and companion not in selected and companion not in disabled:
-                cmeta = skill_index[companion]
-                if cmeta.admin_only and not is_admin:
-                    continue
-                if _experimental_blocked(cmeta):
-                    continue
-                if _check_dependencies(cmeta):
-                    companions[companion] = f"companion_of={name}"
-    for cname, creason in companions.items():
-        _add(cname, creason)
+    # Resolve companion skills (e.g., an ingest skill pulls in untrusted_input).
+    # Shared with the `skills show` pull-time path via expand_companions so the
+    # gate filter can't drift between the two.
+    for cname in expand_companions(
+        list(selected), skill_index,
+        is_admin=is_admin,
+        disabled_skills=disabled,
+        enabled_experimental_features=enabled_experimental_features,
+    ):
+        _add(cname, "companion")
 
     # Apply exclude_skills: selected skills can exclude others
     excluded = set()
@@ -545,111 +592,6 @@ def load_skills(
 
     fingerprint = compute_skills_fingerprint(skills_dir, bundled_dir)
     return f"## Skills Reference (v: {fingerprint})\n\n" + "\n\n".join(parts)
-
-
-# Skills whose mode was force-overridden — tracked so the always_eager override
-# WARN fires once per process per skill, not every task. Process-global by
-# design (warn-once per daemon lifetime); tests that exercise the warning call
-# reset_disclosure_warnings() to avoid cross-test cache bleed under xdist.
-_disclosure_warned: set[str] = set()
-
-
-def reset_disclosure_warnings() -> None:
-    """Clear the warn-once cache. For test isolation only."""
-    _disclosure_warned.clear()
-
-
-def resolve_disclosure_mode(
-    name: str,
-    meta: SkillMeta,
-    body_len: int,
-    config_skills,
-) -> str:
-    """Resolve whether a selected skill is rendered eager (full body) or lazy
-    (index entry + on-demand load).
-
-    Resolution order:
-    1. Explicit frontmatter ``disclosure: eager|lazy`` wins (for any skill,
-       CLI or not — a doc-only reference skill like ``developer`` can be
-       deferred and its body pulled via ``istota-skill skills show``).
-    2. Else, when ``skills.auto_lazy_threshold_chars > 0`` and the skill has a
-       CLI and its body exceeds the threshold → lazy. The auto-lazy path is
-       gated on ``cli`` because a no-CLI skill is not a capability skill that
-       should be silently deferred by size alone.
-    3. Else eager.
-
-    One hard safety carve-out overrides the above and forces **eager**: the
-    skill name is in ``skills.always_eager`` (the behavioral/safety skills whose
-    rules must always be in context). ``config_skills`` is a ``SkillsConfig``.
-    """
-    fm = (meta.disclosure or "").strip().lower()
-    if fm in ("eager", "lazy"):
-        base = fm
-        base_reason = "frontmatter"
-    elif (
-        getattr(config_skills, "auto_lazy_threshold_chars", 0) > 0
-        and meta.cli
-        and body_len > config_skills.auto_lazy_threshold_chars
-    ):
-        base = "lazy"
-        base_reason = "threshold"
-    else:
-        base = "eager"
-        base_reason = "default"
-
-    # Safety carve-out: always_eager skills are never deferred.
-    always_eager = set(getattr(config_skills, "always_eager", []) or [])
-    if name in always_eager:
-        if base == "lazy" and name not in _disclosure_warned:
-            _disclosure_warned.add(name)
-            logger.warning(
-                "disclosure: forced eager skill=%s reason=always_eager "
-                "(frontmatter requested lazy but skill is pinned eager)",
-                name,
-            )
-        return "eager"
-
-    if base == "lazy":
-        logger.info("disclosure: mode=lazy skill=%s reason=%s", name, base_reason)
-    return base
-
-
-def partition_skills_for_disclosure(
-    selected: list[str],
-    skill_index: dict[str, SkillMeta],
-    skills_dir: Path,
-    config_skills,
-    bundled_dir: Path | None = None,
-) -> tuple[list[str], list[str]]:
-    """Split selected skills into ``(eager_names, lazy_names)``.
-
-    Body length is read via the same doc-path resolution + frontmatter strip as
-    ``load_skills``. A read failure (or an unknown skill) defaults the skill to
-    **eager** — the safe choice, since the content is then present rather than
-    deferred. Selection order is preserved within each list.
-    """
-    eager: list[str] = []
-    lazy: list[str] = []
-    for name in selected:
-        meta = skill_index.get(name)
-        if meta is None:
-            eager.append(name)
-            continue
-        body_len = 0
-        try:
-            doc_path = _resolve_skill_doc_path(name, meta, skills_dir, bundled_dir)
-            if doc_path is not None:
-                body_len = len(_strip_frontmatter(doc_path.read_text()))
-        except Exception:
-            logger.debug(
-                "disclosure: body-length read failed skill=%s, defaulting eager",
-                name, exc_info=True,
-            )
-            eager.append(name)
-            continue
-        mode = resolve_disclosure_mode(name, meta, body_len, config_skills)
-        (lazy if mode == "lazy" else eager).append(name)
-    return eager, lazy
 
 
 def build_disclosure_index(
