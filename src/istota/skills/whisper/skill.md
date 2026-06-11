@@ -5,7 +5,6 @@ description: Local audio transcription using faster-whisper (CPU, int8)
 cli: true
 file_types: [mp3, wav, ogg, flac, m4a, opus, webm, mp4, aac, wma]
 companion_skills: [untrusted_input]
-exclude_skills: [devbox]
 dependencies: [faster_whisper>=1.1.0]
 ---
 # Audio Transcription with Whisper
