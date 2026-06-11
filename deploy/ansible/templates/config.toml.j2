@@ -313,6 +313,10 @@ docker_cli = "{{ istota_devbox_docker_cli }}"
 docker_socket = "{{ istota_devbox_docker_socket }}"
 exec_timeout_seconds = {{ istota_devbox_exec_timeout_seconds }}
 max_output_bytes = {{ istota_devbox_max_output_bytes }}
+api_proxy_enabled = {{ istota_devbox_api_proxy_enabled | ternary('true', 'false') }}
+api_proxy_socket_dir = "{{ istota_docker_proxy_socket_dir }}"
+api_proxy_exec_ttl_seconds = {{ istota_devbox_api_proxy_exec_ttl_seconds }}
+api_proxy_audit_log = "{{ istota_devbox_api_proxy_audit_log }}"
 {% endif %}
 {# The money skill is in-process and resolves per-user config from each
    user's [[resources]] entry — no instance-level [money] block. #}

@@ -41,6 +41,22 @@
   loop: "{{ istota_devbox_users }}"
   when: istota_devbox_enabled and istota_devbox_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
 
+- name: "reload systemd-tmpfiles for docker proxy"
+  command: systemd-tmpfiles --create /etc/tmpfiles.d/{{ istota_namespace }}-docker-proxy.conf
+  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: "reload systemd for docker proxy"
+  systemd:
+    daemon_reload: yes
+  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
+- name: "restart istota-docker-proxy"
+  systemd:
+    name: "{{ istota_namespace }}-docker-proxy@{{ item }}.service"
+    state: restarted
+  loop: "{{ istota_devbox_users }}"
+  when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
+
 - name: "restart istota-web"
   systemd:
     name: "{{ istota_namespace }}-web"
