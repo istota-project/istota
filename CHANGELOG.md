@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-06-10
+
 ### Added
 - The assistant can now learn reusable "playbooks" — step-by-step procedures for tasks it has done before. After a successful multi-step task, the nightly memory cycle distils how it was done and, when a similar request comes up later, recalls that approach so it gets it right on the first try. Playbooks are plain guidance the assistant reads, never code it runs. Off by default; an operator enables it.
 - Progressive skill loading is now the default way the assistant picks its tools. Heavy skills (like the developer or health tools) load as a one-line summary up front, and the assistant pulls the full instructions on demand only when it needs them. The summary list now covers every skill it could use, so it can reach for the right tool even when a task doesn't obviously call for it — while the prompt stays small.
@@ -731,7 +733,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.22.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.23.0...main
+[0.23.0]: https://gitlab.com/cynium/istota/-/releases/v0.23.0
 [0.22.0]: https://gitlab.com/cynium/istota/-/releases/v0.22.0
 [0.21.0]: https://gitlab.com/cynium/istota/-/releases/v0.21.0
 [0.20.0]: https://gitlab.com/cynium/istota/-/releases/v0.20.0
