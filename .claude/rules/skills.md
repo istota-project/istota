@@ -36,144 +36,109 @@ select_skills(prompt, source_type, user_resource_types, skill_index,
               enabled_experimental_features=frozenset()) -> list[str]
 eligible_skill_names(skill_index, exclude, disabled_skills=None, is_admin=True,
                      enabled_experimental_features=frozenset()) -> list[str]
-    # Shared membership gate for the disclosure catalogue: sorted names excluding
+    # Shared membership gate for the menu catalogue: sorted names excluding
     # already-selected / always_include / disabled / admin-gated / experimental-gated / missing-deps.
-    # NO resource gate (unlike select_skills' Pass-1 keyword path). No bundled skill
-    # declares resource_types now; the former holdouts (notes/spec/todos) were doc-only
-    # conventions with defaults and dropped the field. Mechanism kept for future skills.
+    # NO resource gate. No bundled skill declares resource_types now; the former
+    # holdouts (notes/spec/todos) were doc-only conventions with defaults and dropped
+    # the field. Mechanism kept for future skills. Unchanged by the single-axis switch.
+expand_companions(names, skill_index, *, is_admin=True, disabled_skills=None,
+                  enabled_experimental_features=frozenset()) -> list[str]
+    # Shared, gate-filtered, one-level companion resolver. Returns the companions
+    # declared by `names` that pass the standard gates (not disabled / admin-gated /
+    # experimental-gated / deps present), excluding any name already in `names`.
+    # Companions-of-companions are NOT expanded (a cycle is inert). A declared
+    # companion missing from the index is logged at WARNING and skipped. Used by BOTH
+    # select_skills (eager companion expansion) and the `skills show` CLI (pull-time
+    # companion expansion) so the gate filter can't drift between the two paths.
 compute_skills_fingerprint(skills_dir: Path) -> str               # SHA-256, first 12 hex chars
 load_skills_changelog(skills_dir: Path) -> str | None             # CHANGELOG.md
 load_skills(skills_dir: Path, skill_names: list[str], bot_name, bot_dir, skill_index=None, bundled_dir=None) -> str
     # Concatenate skill docs (strips frontmatter)
-resolve_disclosure_mode(name, meta, body_len, config_skills) -> "eager" | "lazy"
-partition_skills_for_disclosure(selected, skill_index, skills_dir, config_skills, bundled_dir=None) -> (eager, lazy)
-build_disclosure_index(lazy_names, skill_index) -> str            # "" when no lazy skills
+build_disclosure_index(menu_names, skill_index) -> str            # "" when menu empty
 ```
 
-### Two axes: selection vs. disclosure
+### Single axis: eager body vs. menu entry
 
-Skill handling splits into two **orthogonal** questions. Conflating them is the
-usual source of confusion (why does a skill carry `always_include` *and*
-`disclosure`? why do some carry neither?).
+There is one axis, not two. A skill is either **eager** (full body in the
+prompt, because a deterministic rule in `select_skills` picked it) or in the
+**menu** (a one-line "load on demand" entry the model pulls in full via
+`istota-skill skills show <name>`). The old eager/lazy "progressive disclosure"
+machinery — `SkillMeta.disclosure`, `resolve_disclosure_mode`,
+`partition_skills_for_disclosure`, the `SkillsConfig`
+`progressive_disclosure` / `auto_lazy_threshold_chars` / `always_eager` knobs —
+is **gone**. The `disclosure: lazy` frontmatter was stripped from every skill.
+There is no "off" switch and no per-skill body-deferral flag; the menu is
+intrinsic.
 
-- **Axis 1 — selection** (`select_skills`, Pass 1): *is this skill in the
-  per-task set at all?* Driven by `always_include`, keyword / `source_types` /
-  `file_types` / `resource_types` matches, and sticky / companion pull-in.
-- **Axis 2 — disclosure** (`resolve_disclosure_mode`): *for a skill that IS
-  selected, do we inline its full body (**eager**) or emit a one-line menu entry
-  (**lazy**)?* Driven by frontmatter `disclosure`, the size threshold, and the
-  `always_eager` override.
+"Selected ⇒ eager; everything else eligible ⇒ menu." `select_skills` produces
+the eager set; `eligible_skill_names` produces the menu (the full eligible
+catalogue minus the eager set and its `exclude_skills`). The two are
+complementary partitions of the loadable catalogue.
 
-A skill carries a frontmatter field only to **deviate from the defaults**; both
-axes default sensibly, so most small task-specific skills (`todos`, `notes`,
-`markets`, …) carry **neither** field — "selected only on a keyword/source
-match, inlined when selected." You add `always_include` to force Axis 1
-(always select), or `disclosure: lazy` to force Axis 2 (defer the body).
+`always_include` (per-skill frontmatter) = `files`, `sensitive_actions`,
+`memory`, `scripts`, `memory_search`, `kv`, `skills` — "always **select** me"
+(so these are always eager). `skills` is in this set because deferring the
+loader's own body would be circular: the model needs the loader instructions to
+pull any skill, itself included.
 
-`always_include` and `always_eager` are **not** the same field and name
-*different* skill sets — they live on different axes:
+### The menu catalogue (replaced Pass 2)
 
-- `always_include` (Axis 1, per-skill frontmatter) = `files`,
-  `sensitive_actions`, `memory`, `scripts`, `memory_search`, `kv`, `skills` —
-  "always **select** me."
-- `always_eager` (Axis 2, a `SkillsConfig` name list) = `sensitive_actions`,
-  `untrusted_input`, `files`, `scripts`, `memory`, `skills` — "if selected,
-  **force eager** (safety/behavioral rules — and the on-demand loader's own
-  instructions — must be in context)."
-
-The sets differ deliberately: `untrusted_input` is `always_eager` but **not**
-`always_include` (it loads only when a companion pulls it in for untrusted
-content, but must be eager when it does); `memory_search` / `kv` are
-`always_include` but **not** `always_eager` (always loaded, fine at
-default-eager without pinning). `skills` is in **both**: it's always selected
-*and* pinned eager — deferring the loader's own body would be circular (the
-model needs the loader instructions to load any skill, itself included). It was
-eager anyway via the `always_include` default-eager path; the pin makes that
-immune to a stray `disclosure: lazy`.
-
-**Consequence of the widened catalogue (below): selecting a lazy skill is a
-prompt-level no-op.** Because the on-demand index is widened to the *full
-eligible catalogue*, a lazy skill that keyword-matched renders the **identical**
-one-line menu entry as a skill that was never selected (`build_disclosure_index`
-treats `lazy_selected` and the rest of the catalogue the same). So for a lazy
-skill, Axis-1 keyword selection does **not** change what the model sees in the
-prompt. The `triggers` lists on the companionless lazy skills (`developer`,
-`health`, `money`, `location`) are therefore inert for prompt assembly — they're
-kept for documentation/observability, not routing. Selecting a lazy skill still
-has two live effects: it fires that skill's `companion_skills` (notably the
-`untrusted_input` safety skill on the seven ingest skills — the reason
-keyword-selecting a lazy *ingest* skill matters), and it seeds
-sticky-skill persistence for follow-up tasks. The only Axis-1 selection that
-changes the *body* set is selection of an **eager** skill.
-
-### Progressive disclosure (Part A)
-
-When `skills.progressive_disclosure` is on (**default**), a *selected* skill is
-rendered **eager** (full body in `skills_doc`) or **lazy** (a one-line entry in
-the "Available skills (load on demand)" prompt section; the model pulls the body
-via `istota-skill skills show <name>`). `SkillMeta.disclosure`
-(`"" | "eager" | "lazy"`) is parsed from frontmatter.
-
-`resolve_disclosure_mode` order: frontmatter `disclosure` wins → else the size
-threshold (`auto_lazy_threshold_chars`, CLI skills only) → else eager. One safety
-carve-out forces eager: the name is in `skills.always_eager` (default
-`sensitive_actions`, `untrusted_input`, `files`, `scripts`, `memory`, `skills`). The no-CLI
-carve-out was **dropped** (so the doc-only `developer` skill can be lazy), but the
-size threshold still requires `cli: true`, so a no-CLI skill is deferred only via
-explicit frontmatter. `partition_skills_for_disclosure` reads each skill's body
-length (defaults to **eager** on a read failure — safe, content present) and
-splits the selection; the executor calls `load_skills(eager)` +
-`build_disclosure_index(...)` and passes the index to `build_prompt` as
-`skills_index`. `developer`, `health`, `money`, `location`, `browse`, `calendar`,
-`spec` ship marked `disclosure: lazy` (`spec` because its body is ~7KB and the
-workflow is used rarely — kept a one-line menu entry, pulled on demand).
-
-**Widened catalogue index (replaces Pass 2).** The on-demand index is not just
-the selected-lazy skills — the executor widens it to the *full eligible
-catalogue*: `index_names = lazy_selected ∪ eligible_skill_names(exclude =
-selected ∪ always_eager ∪ ⋃ exclude_skills_of_selected)`. So every loadable
-skill the model isn't already given eager appears in the menu, and the capable
-main model self-selects what to load — instead of a per-task `claude -p` Pass-2
-pre-router guessing inclusion (its cold-start cost dominated and timed out in
-production). `eligible_skill_names` (`_loader.py`) is the shared membership gate
-(excludes already-selected / `always_include` / disabled / admin-gated /
-experimental-gated / missing-deps). The executor logs `disclosure: eager=N
-lazy=M catalogue=K` per task. With disclosure off, no index is emitted (legacy
-all-eager prompt).
+The "Available skills (load on demand)" prompt section is the **full eligible
+catalogue**, not a narrowed guess. The executor computes
+`menu = eligible_skill_names(skill_index, exclude = selected ∪ ⋃
+exclude_skills_of_selected)` — every loadable skill the model isn't already
+given eager — and renders it via `build_disclosure_index(menu, skill_index)`.
+The capable main model self-selects what to load from the menu. This replaced
+the removed per-task `claude -p` Pass-2 pre-router (its cold-start cost
+dominated and timed out in production). `eligible_skill_names` (`_loader.py`) is
+the shared membership gate (excludes already-selected / `always_include` /
+disabled / admin-gated / experimental-gated / missing-deps). The executor logs
+`skills: eager=N menu=M` per task.
 
 The on-demand loader is the `skills` core skill (`always_include`, `cli: true`):
 `istota-skill skills show <name>` renders a skill's full body (same frontmatter
 strip + `{BOT_NAME}`/`{BOT_DIR}`/`{scripts_dir}`/`{user_id}` substitution as
 `load_skills`), re-applying the disabled / `admin_only` / experimental /
-missing-deps guards from the loaded config + `ISTOTA_USER_ID` so a deferred body
+missing-deps guards from the loaded config + `ISTOTA_USER_ID` so a pulled body
 can't bypass them; unknown / disallowed → `{"status":"error",...}` + exit 1.
 `istota-skill skills list` enumerates the loadable (guard-filtered) skills. (No
 resource gate — the `resource_types` skills are doc-only conventions with
-defaults, matching the catalogue. The task-local `exclude_skills` set isn't
-knowable in the subprocess either, but devbox's real boundary is the
-docker-socket bwrap gate, not catalogue visibility.) It runs server-side via the
-skill proxy (unsandboxed), so `load_config()` and the admins file are reachable.
+defaults, matching the catalogue.) It runs server-side via the skill proxy
+(unsandboxed), so `load_config()` and the admins file are reachable.
+
+**`skills show` appends companion bodies.** After rendering `<name>`'s body,
+`show` resolves its companions via `expand_companions` and appends each
+companion's rendered body under a delimiter `\n\n---\n<!-- companion: <comp>
+-->\n\n<body>`. A gated-off / missing / unreadable companion instead appends
+`<!-- companion <comp>: unavailable -->` and logs a WARNING — a missing safety
+companion is a config error, never silently dropped. This is the safety-critical
+guarantee: pulling an ingest skill from the menu (e.g. `browse`) also delivers
+`untrusted_input` in the **same response**, so its inbound-handling guardrails
+are never optional or at the model's discretion. `expand_companions` is the
+shared resolver, so the menu-pull path applies the identical gate filter as
+selection-time companion expansion.
 
 ### Skill Selection
 
-**Pass 1: Deterministic matching** (`select_skills`) — fast, zero-cost. The only selection pass (the former LLM Pass 2 was removed — see below).
+**Deterministic matching** (`select_skills`) — fast, zero-cost. The only selection pass; the eager set falls out of it (the former LLM Pass 2 was removed — see below).
 
 Filters applied to every candidate before any rule fires:
 - `admin_only=True` skipped when `is_admin=False`
-- `experimental=True` skipped unless `skill_<name>` is in `enabled_experimental_features` — the gate fires on the main loop, the sticky path, the companion pull-in, and the disclosure-catalogue filter (`eligible_skill_names`) so an unenabled experimental skill cannot leak into selection or the on-demand index via any path
+- `experimental=True` skipped unless `skill_<name>` is in `enabled_experimental_features` — the gate fires on the main loop, the sticky path, the companion pull-in (`expand_companions`), and the menu filter (`eligible_skill_names`) so an unenabled experimental skill cannot leak into selection or the menu via any path
 - Unmet `dependencies` (missing Python packages) skipped via `_check_dependencies()`
 - Names in `disabled_skills` (instance-level + per-user, merged) skipped
 
-Selection rules (priority order, with `continue` short-circuits in `_loader.py:344-374`):
+Eager selectors (priority order, with `continue` short-circuits):
 1. `meta.always_include == True`
 2. `source_type in meta.source_types`
 3. Any `meta.file_types` match attachment extensions
-4. Any `meta.keywords` found in `prompt.lower()` — additionally requires `user_resource_types ∩ meta.resource_types` if `meta.resource_types` is set
+
+Keyword (`triggers`/`keywords`) and `resource_types` matching are **no longer selectors** — every non-eager eligible skill is in the menu, so a keyword guess is redundant. The `triggers`/`keywords` frontmatter is **kept deliberately** (not removed): it's surfaced by the `!skills` command as documentation, but it does not drive selection. `resource_types` survives only as a menu-membership gate inside `eligible_skill_names`. (`prompt` / `user_resource_types` stay in the `select_skills` signature for call-site compatibility; they no longer drive selection.)
 
 After the main loop:
-5. **Sticky skills** (`_loader.py:376-387`) — names supplied via `sticky_skills` are added (filtered by disabled/admin_only/deps). Always-include skills are not re-added.
-6. **Companion skills** — `meta.companion_skills` of already-selected skills are pulled in (respects disabled/admin_only/deps).
-7. **Exclude pass** — `meta.exclude_skills` of selected skills are removed from the final set (e.g., briefing excludes email).
+4. **Sticky skills** — names supplied via `sticky_skills` are added eager (filtered by disabled/admin_only/deps). Always-include skills are not re-added.
+5. **Companion skills** — companions of already-selected skills are pulled in eager via `expand_companions` (gate-filtered, one level), so e.g. `untrusted_input` rides along with a source/file/sticky-selected ingest skill.
+6. **Exclude pass** — `meta.exclude_skills` of selected skills are removed from the final set (e.g., briefing excludes email).
 
 **Sticky skills source** (`executor.py:1761-1789`): for `talk` and `email` tasks with a `conversation_token`, the executor populates `sticky_skills` from:
 - `db.get_recent_conversation_skills(conversation_token, max_age_minutes=30, limit=2)` — skills from the last two tasks in the same conversation within the last 30 minutes
@@ -181,23 +146,22 @@ After the main loop:
 
 After execution, the resolved skill set is persisted via `db.save_task_selected_skills()` so future tasks in the conversation can carry it forward.
 
-**Pre-transcription**: before skill selection, `_pre_transcribe_attachments()` (`executor.py:225`) transcribes audio attachments and enriches `task.prompt` with the spoken text so keyword rules match voice memos.
+**Pre-transcription**: before skill selection, `_pre_transcribe_attachments()` transcribes audio attachments and enriches `task.prompt` with the spoken text. Selection no longer keyword-matches the prompt, but the enriched prompt still flows into the menu-driven flow and is available to the model.
 
 **Pass 2 (LLM semantic routing) was removed.** It ran a per-task `claude -p`
 subprocess to pre-guess extra skills; the cold-start cost dominated and timed out
-on every production task. The widened progressive-disclosure catalogue (above)
-replaces it — every eligible skill is in the on-demand index and the main model
-self-loads, no pre-router. `classify_skills` / `build_skill_manifest` / the
-`semantic_routing*` config knobs are gone; `eligible_skill_names` is the surviving
-shared gate.
+on every production task. The full-catalogue menu (above) replaces it — every
+eligible skill is in the menu and the main model self-loads, no pre-router.
+`classify_skills` / `build_skill_manifest` / the `semantic_routing*` config knobs
+are gone; `eligible_skill_names` is the surviving shared gate.
 
-Returns sorted list of skill names.
+Returns sorted list of skill names (the eager set).
 
-**Selection observability**: `select_skills` emits a single INFO log per task with each selected skill annotated by the rule that fired (`pass1_selection count=N: foo(always_include), bar(keyword='kw'), …`); the executor emits `disclosure: eager=N lazy=M catalogue=K`. Use these to reconcile selection misses against runtime proxy rejections (see executor.md).
+**Selection observability**: `select_skills` emits a single INFO log per task with each eager skill annotated by the rule that fired (`pass1_selection count=N: foo(always_include), bar(source_type=briefing), …`); the executor emits `skills: eager=N menu=M`. Use these to reconcile selection misses against runtime proxy rejections (see executor.md).
 
 ### Skill Metadata (YAML frontmatter)
 All metadata lives in YAML frontmatter at the top of each `skill.md` file:
-- `name`, `triggers` (keyword list), `description` (for LLM routing manifest)
+- `name`, `triggers` (keyword list — `!skills` documentation only, not a selector), `description` (shown in the menu catalogue and `!skills`)
 - `always_include`, `admin_only`, `cli` (booleans)
 - `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_resources` (lists)
 - `exclude_memory`, `exclude_persona` (booleans)
@@ -249,18 +213,20 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 
 Note: `money` is the sole accounting skill. It runs in-process via the vendored `money` package (no subprocess, no HTTP).
 
-**Module-shaped skills (`feeds`, `money`, `bookmarks`, `location`)** dropped their `resource_types` fields with Phase 1 of the modules / connected services refactor. Selection is keyword-only — the credential / module gate enforced by the proxy + the in-process loader (`feeds.resolve_for_user`, `money.resolve_for_user`) decides whether the skill can actually do anything. The bookmarks `env` block reads both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` from the encrypted `secrets` table via the new `from: "secret"` env-spec source.
+**Module-shaped skills (`feeds`, `money`, `bookmarks`, `location`)** dropped their `resource_types` fields with Phase 1 of the modules / connected services refactor. They have no eager selector and live in the menu (pulled on demand); the credential / module gate enforced by the proxy + the in-process loader (`feeds.resolve_for_user`, `money.resolve_for_user`) decides whether the skill can actually do anything. The bookmarks `env` block reads both `KARAKEEP_BASE_URL` and `KARAKEEP_API_KEY` from the encrypted `secrets` table via the new `from: "secret"` env-spec source.
 
-**No bundled skill declares `resource_types` anymore.** The last holdouts — the doc-only convention skills `notes`, `spec`, `todos` — dropped the field too: they're pure instruction docs with sensible defaults (`notes` writes to `{BOT_DIR}/notes/` when no `notes_folder` is declared; `spec`/`todos` similar), so gating their *selection* on a declared resource wrongly hid useful conventions from users on the default folder. They're now plain keyword skills. `spec` is `disclosure: lazy` (its ~7KB body is a catalogue entry, pulled on demand) while `notes`/`todos` are small enough to inline eager on a keyword hit. The `resource_types` selection gate in `select_skills` (Pass-1 keyword path) remains as a mechanism for any future resource-backed skill, but is currently exercised by none.
+**No bundled skill declares `resource_types` anymore.** The last holdouts — the doc-only convention skills `notes`, `spec`, `todos` — dropped the field too: they're pure instruction docs with sensible defaults (`notes` writes to `{BOT_DIR}/notes/` when no `notes_folder` is declared; `spec`/`todos` similar). With keyword selection gone, none of them is eager unless source/file/sticky-selected — they live in the menu and the model pulls them on demand (`spec`'s ~7KB body in particular is a menu entry, never inlined eagerly). The `resource_types` gate survives only inside `eligible_skill_names` (menu membership) for any future resource-backed skill; no bundled skill exercises it.
 
-`untrusted_input` is a doc-only companion skill — no triggers, no source_types, never selected directly. It loads via `companion_skills` declarations on the seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`) so its rules ride along whenever a task is processing content from outside the trust boundary. Paired with `sensitive_actions`: outbound rules in that one, inbound-reading rules here, per-action authorization principle stated in both.
+`untrusted_input` is a doc-only companion skill — no triggers, no source_types, never selected directly. It loads via `companion_skills` declarations on the seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`) so its rules ride along whenever a task is processing content from outside the trust boundary — both when an ingest skill is selected eager (`select_skills` → `expand_companions`) and when one is pulled from the menu (`skills show` appends companion bodies via the same `expand_companions`). Paired with `sensitive_actions`: outbound rules in that one, inbound-reading rules here, per-action authorization principle stated in both.
 
 ## Skill CLI Modules (`src/istota/skills/`)
 
 ### `devbox/` - Persistent dev container
 **Subcommands**: `exec <command> [--timeout N]`, `exec-file <path> [--interpreter X] [--timeout N]`, `cp-in <src> <dest>`, `cp-out <src> <dest>`, `status`, `reset --yes`
 **Env vars**: `ISTOTA_USER_ID`, `ISTOTA_DEVBOX_CONTAINER` (default `devbox-<user_id>`), `ISTOTA_DEVBOX_DOCKER_CLI`, `ISTOTA_DEVBOX_DOCKER_SOCKET`, `ISTOTA_DEVBOX_EXEC_TIMEOUT`, `ISTOTA_DEVBOX_MAX_OUTPUT_BYTES`
-**Note**: Keyword-triggered; **not** `always_include`. The seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`) list `exclude_skills: [devbox]` so the devbox is never co-selected with untrusted-content tasks. `build_bwrap_cmd` further gates the docker CLI / socket bind on `"devbox" in selected_skills` — when the skill isn't in the per-task selection, the socket isn't reachable from inside the sandbox at all. Container name is validated against `^[a-zA-Z0-9_.-]+$` before every `docker exec/cp/inspect/restart`. Each container carries a `com.istota.user_id=<user_id>` label and `_running()` verifies the label matches `ISTOTA_USER_ID` before any operation — defence-in-depth against stale containers from a prior tenant. `cp-in` / `cp-out` host paths are validated to stay under `ISTOTA_DEFERRED_DIR` or the user's `NEXTCLOUD_MOUNT_PATH` subtree (and rejects host-side symlinks). `args.command` is capped at 32 KB and refuses NUL bytes. Stdout/stderr capped at `max_output_bytes` per stream with a `[truncated: N more bytes]` marker. Image (`istota-devbox:latest`) built from `docker/devbox/Dockerfile`; production deploys via Ansible (one container per `istota_devbox_users` entry, isolated on `devbox-net` with `DOCKER-USER` iptables drops for `169.254.169.254/32` + RFC1918). The residual trade-off — anything inside the sandbox that *does* have the socket bound can in principle launch a privileged container — is documented in `executor.py:build_bwrap_cmd`; the proper fix (a Docker-API allowlist proxy) is filed for a later iteration.
+**Note**: Plain menu skill; **not** `always_include`. The `exclude_skills: [devbox]` exclusions on the seven ingest-shaped skills (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`) are **gone** — co-selection with ingest tasks is safe now because the boundary moved off the socket. The Docker-API allowlist proxy (`src/istota/docker_proxy.py`) is bound into the sandbox at `/var/run/docker.sock` **unconditionally** (whenever `config.devbox.enabled and config.devbox.api_proxy_enabled` and the per-user proxy socket exists), with no `"devbox" in selected_skills` gate; the raw root-equivalent socket is never bound. So even an untrusted-content task that reaches the socket directly (`curl --unix-socket`) sees only the allowlist — exec/cp/inspect/restart on its own `devbox-<user_id>` container, and 403 on create/run/build/privileged/host-mount. The executor folds `devbox` into the effective `disabled_skills` when `config.devbox.enabled = False`, so it appears in neither eager nor menu. Container name is validated against `^[a-zA-Z0-9_.-]+$` before every `docker exec/cp/inspect/restart`. Each container carries a `com.istota.user_id=<user_id>` label and `_running()` verifies the label matches `ISTOTA_USER_ID` before any operation — defence-in-depth against stale containers from a prior tenant. `cp-in` / `cp-out` host paths are validated to stay under `ISTOTA_DEFERRED_DIR` or the user's `NEXTCLOUD_MOUNT_PATH` subtree (and rejects host-side symlinks). `args.command` is capped at 32 KB and refuses NUL bytes. Stdout/stderr capped at `max_output_bytes` per stream with a `[truncated: N more bytes]` marker. Image (`istota-devbox:latest`) built from `docker/devbox/Dockerfile`; production deploys via Ansible (one container per `istota_devbox_users` entry, isolated on `devbox-net` with `DOCKER-USER` iptables drops for `169.254.169.254/32` + RFC1918). The former residual trade-off (anything with the raw socket bound could launch a privileged host-mounting container) is **resolved** by the proxy: the socket inside the sandbox is the allowlist, and container creation is refused outright, so root-in-an-unprivileged-no-host-mount container is not host root.
+
+**Docker-API allowlist proxy** (`src/istota/docker_proxy.py`): per-user asyncio reverse proxy in front of the host Docker socket, safe to bind into the sandbox unconditionally. `DockerApiProxy` listens on `{config.devbox.api_proxy_socket_dir}/{user_id}.sock` and forwards a tightly-scoped allowlist against the user's own `devbox-<user_id>` container; the pure `classify_request(method, path, body, *, container_name, tracked_exec_ids) -> (allowed, reason)` is the decision core. Allowed: `GET /_ping|/version`, `GET /containers/json`, `GET /containers/{name}/json`, exec-create `POST /containers/{name}/exec` (owned; body must not set `Privileged`/`HostConfig`), exec-start `POST /exec/{id}/start` + exec-inspect `GET /exec/{id}/json` (tracked id only), cp `HEAD|GET|PUT /containers/{name}/archive`, `POST /containers/{name}/restart` — all scoped to the owned container. Everything else → 403. exec-create is the one fully-mediated op (parse request body for the privilege check, parse the response body for the issued exec `Id`); all other allowed ops splice the client socket full-duplex to the real socket without interpreting the stream. exec-ids are tracked (evicted on start, TTL-swept by `api_proxy_exec_ttl_seconds`). Audit logger `istota.docker_proxy.audit` emits one `docker_proxy user=… method=… path=… result=… reason=… dur_ms=…` line per request; optional file fan-out via `config.devbox.api_proxy_audit_log`. Daemon entry point `python -m istota.docker_proxy --user <id>`. Ansible: `istota-docker-proxy@.service.j2` systemd instance unit + `istota-docker-proxy.tmpfiles.j2` + `istota_devbox_api_proxy_enabled` / `istota_docker_proxy_socket_dir` defaults; `config.toml.j2` maps `[devbox] api_proxy_*`.
 
 **Credential proxy** (`src/istota/devbox_proxy.py` + `docker/devbox/scripts/*` + `docker/devbox/lib/istota_devbox_client.py`): per-user asyncio daemon on the host, listens on `/var/run/{namespace}/<user>/sock` (mode 0o660, owned by `istota:istota`). The compose template bind-mounts the per-user directory `/var/run/{namespace}/<user>/` into the container at `/run/istota-cred/` so daemon restarts can unlink + recreate the socket inode without stranding the container against a dead bind-mount target. The container's `dev` user gains access via the compose `group_add:` entry that grants the host's `istota` gid as a supplementary group; the per-user directory also enforces cross-tenant isolation (container alice's bind mount contains only alice's socket). Container-side shims (`git-credential-istota`, `gitlab-api`, `github-api`, `gh`, `glab`) frame JSON requests over the socket; the daemon injects GitHub/GitLab tokens server-side. Tokens never enter the container's env or filesystem. Protocol in `devbox_proxy_protocol.py` — single-line JSON, 16 MiB cap, structured error envelope with stable `ERR_*` codes (`no_token`, `not_allowed`, `upstream_error`, `bad_request`, `unknown_action`, `internal`). Allowlist enforcement reuses `developer.{gitlab,github}_api_allowlist`. Audit logger `istota.devbox_proxy.audit` emits one key-value line per action (`user=, action=, result=, dur_ms=, method=, endpoint=, status=`) to the journal, plus an optional file fan-out via `developer.devbox_proxy_audit_log`. Cross-host `git_credential get` attempts (e.g. `bitbucket.org`) emit a `result=no_token` audit line — the only signal we have that the agent reached for a third-party host. The daemon starts cleanly with no tokens; per-action `no_token` errors are the normal mode for partial-provider configurations. Systemd instance template at `deploy/ansible/templates/istota-devbox-proxy@.service.j2`; deployed as `{namespace}-devbox-proxy@<user>.service`, one instance per `istota_devbox_users` entry. Tmpfiles snippet creates the socket directory at boot. Compose template's per-user `volumes:` entry pins the socket into each container, gated on `istota_devbox_proxy_enabled` (default true when devbox is on). The Dockerfile-checksum task in `tasks/main.yml` was generalized to hash the whole `docker/devbox/{Dockerfile,lib,scripts,etc}` tree so any shim edit triggers an image rebuild via the existing `restart istota-devbox` handler.
 

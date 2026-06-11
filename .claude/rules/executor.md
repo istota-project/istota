@@ -15,7 +15,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 ### Flow
 1. **Setup temp dir**: `config.temp_dir / task.user_id`
 2. **Merge resources**: DB resources + config resources → `db.UserResource` list
-3. **Load skills**: `load_skill_index()` → `select_skills()` (Pass 1 deterministic matching, the only selection pass) → (when `skills.progressive_disclosure`, default on) `partition_skills_for_disclosure()` splits selected into eager/lazy → `load_skills(eager)` for the body + `build_disclosure_index(lazy ∪ eligible_skill_names(...))` for the **widened** on-demand catalogue index (`skills_index`, which replaced the removed LLM Pass 2); off → `load_skills(all_selected)`, no index (legacy)
+3. **Load skills**: `load_skill_index()` → `select_skills()` (deterministic matching, the only selection pass) produces the **eager** set → `load_skills(eager)` for the body + `eligible_skill_names(exclude = selected ∪ ⋃ exclude_skills_of_selected)` for the **menu** (the full eligible catalogue) → `build_disclosure_index(menu)` → `skills_index`. Always on, single-axis (selected ⇒ eager, else eligible ⇒ menu); no `progressive_disclosure` flag, no eager/lazy partition. The menu replaced the removed LLM Pass 2; the executor logs `skills: eager=N menu=M`.
 4. **Skills changelog**: fingerprint compare, interactive only
 5. **Context loading**: skip for scheduled/briefing
 6. **User memory**: `read_user_memory_v2()`, skip for briefings
@@ -69,13 +69,13 @@ def build_prompt(
 7b. Recalled memories: BM25 search results (when `auto_recall` enabled)
 7c. Learned Playbooks: `_recall_playbooks` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated/`skip_memory` tasks)
 8. Confirmation context: previous bot output for confirmed actions
-9. Tools: file access, browser, CalDAV, sqlite3, email, then `skills_index` ("Available skills (load on demand)") when progressive disclosure deferred any skill
+9. Tools: file access, browser, CalDAV, sqlite3, email, then `skills_index` ("Available skills (load on demand)" — the menu catalogue) when the menu is non-empty
 10. Rules: resource restrictions, confirmation, subtasks, output
 11. Context: previous messages
 12. Request: prompt + attachments
 13. Guidelines: `config/guidelines/{source_type}.md`
 14. Skills changelog
-15. Skills doc (eager skills only when progressive disclosure is on)
+15. Skills doc (eager skills only — the menu skills are surfaced by the index in step 9, not inlined)
 
 ## Environment Variable Mapping
 
@@ -92,7 +92,7 @@ def build_prompt(
 | Nextcloud | `NEXTCLOUD_MOUNT_PATH` | `str(config.nextcloud_mount_path)` |
 | CalDAV | `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD` | `config.caldav_*` |
 | Browser | `BROWSER_API_URL`, `BROWSER_VNC_URL` | `config.browser.*` (if enabled) |
-| Devbox | `ISTOTA_DEVBOX_CONTAINER`, `ISTOTA_DEVBOX_DOCKER_CLI`, `ISTOTA_DEVBOX_DOCKER_SOCKET`, `ISTOTA_DEVBOX_EXEC_TIMEOUT`, `ISTOTA_DEVBOX_MAX_OUTPUT_BYTES` | `config.devbox.*` (if enabled). Container name defaults to `f"{container_prefix}{task.user_id}"`. `build_bwrap_cmd` additionally `--ro-bind`s `docker_cli` and `--bind`s `docker_socket` so the `devbox` skill CLI can reach the host docker daemon from inside the sandbox. |
+| Devbox | `ISTOTA_DEVBOX_CONTAINER`, `ISTOTA_DEVBOX_DOCKER_CLI`, `ISTOTA_DEVBOX_DOCKER_SOCKET`, `ISTOTA_DEVBOX_EXEC_TIMEOUT`, `ISTOTA_DEVBOX_MAX_OUTPUT_BYTES` | `config.devbox.*` (set unconditionally when `config.devbox.enabled`, no selection gate). Container name defaults to `f"{container_prefix}{task.user_id}"`. `build_bwrap_cmd` `--ro-bind`s `docker_cli` and binds the per-user **Docker-API allowlist proxy** socket (`{api_proxy_socket_dir}/{user_id}.sock`) at the conventional in-sandbox path `/var/run/docker.sock` whenever `config.devbox.enabled and config.devbox.api_proxy_enabled` and the proxy socket exists — **no `"devbox" in selected_skills` gate, and the raw root-equivalent socket is never bound**. The devbox CLI is unchanged (connects to the default path); the proxy (`src/istota/docker_proxy.py`) forwards only the allowlisted ops on the user's own container, so binding it unconditionally is safe even for untrusted-content tasks. |
 | Email | `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM` | `config.email.*` (`SMTP_FROM` is plus-addressed: `bot+user_id@domain`) |
 | Email | `IMAP_HOST/PORT/USER/PASSWORD` | `config.email.*` |
 | Karakeep | `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY` | From resource config `extra` |
@@ -201,7 +201,7 @@ The proxy (`skill_proxy.py`) takes two distinct skill sets:
 - `allowed_skills` (frozenset): all CLI skills (`cli: true`) — global whitelist used to reject typos / non-existent skill names.
 - `authorized_skills` (frozenset): per-task subset returned by `_authorized_skills_from_credentials()`. Used purely for the informative-rejection error message returned to the client, and logged at proxy startup as `proxy_authorization task_id=… selected=… authorized=… …`.
 
-The `skill_credential_map` (built from `authorized_skills` via `_build_skill_credential_map`) controls which credential env vars actually get injected for a given skill CLI invocation — that is the real enforcement boundary. Selection (Pass 1) controls only which skill *docs* go in the prompt; it no longer gates credential access.
+The `skill_credential_map` (built from `authorized_skills` via `_build_skill_credential_map`) controls which credential env vars actually get injected for a given skill CLI invocation — that is the real enforcement boundary. Skill selection controls only which skill *docs* (eager bodies) go in the prompt; it no longer gates credential access.
 
 Every proxy rejection emits a structured WARNING — `proxy_rejected task_id=… type=skill|credential … reason=unknown_skill|not_authorized|not_authorized_credential|credential_not_present`. Use these to count selection misses vs. real abuse attempts.
 
@@ -225,7 +225,7 @@ Every proxy rejection emits a structured WARNING — `proxy_rejected task_id=…
 | `load_channel_guidelines()` | Load guidelines/{source_type}.md |
 | `_split_credential_env()` | Split env dict into credential vars and clean vars (for proxy) |
 | `_build_network_allowlist()` | Build host:port allowlist for CONNECT proxy |
-| `build_bwrap_cmd()` | Build bubblewrap sandbox command wrapper |
+| `build_bwrap_cmd()` | Build bubblewrap sandbox command wrapper. Binds the per-user Docker-API allowlist proxy socket at `/var/run/docker.sock` (unconditionally when `config.devbox.enabled and config.devbox.api_proxy_enabled` and the socket exists; no selection gate, raw socket never bound) + ro-binds `docker_cli`. |
 | `_execute_simple()` | subprocess.run mode |
 | `_execute_streaming()` | Retry wrapper for streaming |
 | `execute_task_interactive()` | CLI interactive mode |
