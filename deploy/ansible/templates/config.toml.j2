@@ -332,17 +332,6 @@ auto_recall_limit = {{ istota_memory_search_auto_recall_limit }}
 recency_half_life_days = {{ istota_memory_search_recency_half_life_days }}
 {% endif %}
 
-{% if not istota_skills_progressive_disclosure or istota_skills_auto_lazy_threshold_chars > 0 %}
-
-[skills]
-{% if not istota_skills_progressive_disclosure %}
-progressive_disclosure = false
-{% endif %}
-{% if istota_skills_auto_lazy_threshold_chars > 0 %}
-auto_lazy_threshold_chars = {{ istota_skills_auto_lazy_threshold_chars }}
-{% endif %}
-{% endif %}
-
 {% if istota_playbooks_enabled %}
 
 [playbooks]

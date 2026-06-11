@@ -153,6 +153,41 @@ class TestList:
         assert "secret_admin" in names
 
 
+class TestDevboxFold:
+    """devbox must be hidden from this CLI when devbox is disabled, mirroring the
+    executor's disabled-fold so `skills list`/`show` agree with the menu."""
+
+    def _add_devbox(self, ctx, tmp_path):
+        _write_skill(ctx.bundled_skills_dir, "devbox", "# Devbox\n\nRun things.\n")
+
+    def test_devbox_hidden_when_disabled(self, ctx, tmp_path, capsys):
+        self._add_devbox(ctx, tmp_path)
+        assert ctx.devbox.enabled is False  # default
+        from istota.skills.skills import cmd_list, cmd_show
+
+        cmd_list(argparse.Namespace())
+        names = {s["name"] for s in json.loads(capsys.readouterr().out)["skills"]}
+        assert "devbox" not in names
+
+        with pytest.raises(SystemExit):
+            cmd_show(argparse.Namespace(name="devbox"))
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+
+    def test_devbox_visible_when_enabled(self, ctx, tmp_path, capsys):
+        self._add_devbox(ctx, tmp_path)
+        ctx.devbox.enabled = True
+        from istota.skills.skills import cmd_list, cmd_show
+
+        cmd_list(argparse.Namespace())
+        names = {s["name"] for s in json.loads(capsys.readouterr().out)["skills"]}
+        assert "devbox" in names
+
+        cmd_show(argparse.Namespace(name="devbox"))
+        out = capsys.readouterr().out
+        assert "Run things." in out
+
+
 class TestShowCompanions:
     """`skills show <name>` delivers the skill's companions in the same
     response — the safety-critical change (a menu-pulled ingest skill arrives
