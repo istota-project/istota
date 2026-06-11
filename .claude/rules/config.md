@@ -41,10 +41,12 @@ enabled: bool = False        api_url: str = "http://localhost:9223"    vnc_url: 
 ### `DevboxConfig`
 ```
 enabled: bool = False                container_prefix: str = "devbox-"
-docker_cli: str = "/usr/bin/docker"  docker_socket: str = "/var/run/docker.sock"
+docker_cli: str = "/usr/bin/docker"  docker_socket: str = "/var/run/docker.sock"  # the *real* host socket (proxy upstream)
 exec_timeout_seconds: int = 300      max_output_bytes: int = 102_400
+api_proxy_enabled: bool = True       api_proxy_socket_dir: str = "/var/run/istota-docker"
+api_proxy_exec_ttl_seconds: int = 300  api_proxy_audit_log: str = ""
 ```
-Per-user persistent Docker container — the agent's escape hatch for tasks the bwrap sandbox can't handle (installing packages, network diagnostics, raw sockets). When `enabled`, the executor exports `ISTOTA_DEVBOX_*` env vars (container name = `f"{container_prefix}{task.user_id}"`) and `build_bwrap_cmd` `--ro-bind`s `docker_cli` + `--bind`s `docker_socket` into the sandbox so the `devbox` skill CLI can issue `docker exec/cp/inspect/restart` against the user's own container. Image is built from `docker/devbox/Dockerfile`; compose runs it under the `devbox` profile (`docker compose --profile devbox up`).
+Per-user persistent Docker container — the agent's escape hatch for tasks the bwrap sandbox can't handle (installing packages, network diagnostics, raw sockets). When `enabled`, the executor exports `ISTOTA_DEVBOX_*` env vars (container name = `f"{container_prefix}{task.user_id}"`) and `build_bwrap_cmd` `--ro-bind`s `docker_cli` into the sandbox so the `devbox` skill CLI can issue `docker exec/cp/inspect/restart` against the user's own container. The **raw root-equivalent socket is no longer bound into the sandbox** — instead, when `api_proxy_enabled`, `build_bwrap_cmd` binds the per-user Docker-API allowlist proxy socket (`{api_proxy_socket_dir}/{user_id}.sock`, served by `src/istota/docker_proxy.py`) at the conventional in-sandbox path `/var/run/docker.sock` (the devbox CLI connects there by default, so it's unchanged). The proxy forwards only the allowlisted ops on the user's own container and refuses container create/run/build/privileged/host-mount, so it's safe to bind unconditionally (no selection gate). `api_proxy_exec_ttl_seconds` sweeps created-but-unstarted exec ids; `api_proxy_audit_log` is an optional file sink for the `istota.docker_proxy.audit` logger. Image is built from `docker/devbox/Dockerfile`; compose runs it under the `devbox` profile (`docker compose --profile devbox up`).
 
 ### `ConversationConfig`
 ```
@@ -106,30 +108,19 @@ passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 network: NetworkConfig = NetworkConfig()
 ```
 
-### `SkillsConfig`
-```
-progressive_disclosure: bool = True    # Part A master gate — ON by default; defer lazy bodies + widen index to full catalogue
-auto_lazy_threshold_chars: int = 0     # >0: a CLI skill over N chars defaults to lazy (0 = explicit frontmatter only)
-always_eager: list[str] = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]
-```
-Progressive skill disclosure (Part A): when `progressive_disclosure` is on
-(**default**), a *selected* skill is rendered either **eager** (full body in
-`skills_doc`) or **lazy** (a one-line entry in the "Available skills (load on
-demand)" prompt section; the model pulls the body via `istota-skill skills show
-<name>`). Per-skill mode comes from `resolve_disclosure_mode`: frontmatter
-`disclosure: eager|lazy` wins, else the size threshold (CLI skills only), else
-eager; `always_eager` names are always eager. The no-CLI carve-out was dropped
-so a doc-only reference skill (`developer`) can be deferred — but the size
-threshold still requires a CLI, so a no-CLI skill is only deferred via explicit
-frontmatter. `developer`/`health`/`money`/`location`/`browse`/`calendar` ship
-marked `disclosure: lazy`. **The on-demand index is widened** beyond the
-selected-lazy skills to the *full eligible catalogue* — every loadable skill
-(`eligible_skill_names`) that isn't already eager-selected, pinned
-`always_eager`, or excluded by a selected skill. This replaced the **removed**
-Pass-2 LLM semantic router: the capable main model self-selects from the menu
-instead of a per-task `claude -p` pre-router (whose cold-start cost dominated and
-timed out in production). The `semantic_routing*` knobs, `classify_skills`, and
-`build_skill_manifest` are gone.
+### `SkillsConfig` — removed
+
+`SkillsConfig` and the `[skills]` config section are **gone** (no
+`progressive_disclosure`, `auto_lazy_threshold_chars`, or `always_eager` knobs).
+The two-axis eager/lazy "progressive disclosure" model collapsed into one axis:
+a skill is either **eager** (full body in the prompt, because `select_skills`
+picked it deterministically) or in the **menu** (a one-line "load on demand"
+entry the model pulls in full via `istota-skill skills show <name>`). The menu —
+the full eligible catalogue (`eligible_skill_names`) minus the eager set and its
+`exclude_skills` — is intrinsic, with no master gate and no per-skill
+body-deferral flag, so there are no routing knobs left to configure. A stale
+`[skills]` block in `config.toml` logs a warning at load time but doesn't fail.
+See `.claude/rules/skills.md` for the single-axis model.
 
 ### `PlaybooksConfig`
 ```
@@ -267,7 +258,7 @@ email: EmailConfig                  conversation: ConversationConfig
 scheduler: SchedulerConfig          browser: BrowserConfig
 devbox: DevboxConfig
 logging: LoggingConfig
-briefing_defaults: BriefingDefaultsConfig   skills: SkillsConfig
+briefing_defaults: BriefingDefaultsConfig
 brain: BrainConfig                          # selects model-invocation backend
 security: SecurityConfig
 memory_search: MemorySearchConfig   playbooks: PlaybooksConfig
