@@ -1405,11 +1405,16 @@ def _chat_update_room(
                 if reg is not None and reg.origin == "talk":
                     # Shared Talk room: hide per-user via membership, never via
                     # the global archived flag (ISSUE-134) — that would hide it
-                    # from the other participants too.
+                    # from the other participants too. Mirror _chat_delete_room:
+                    # the dismissal tombstone is what makes the hide durable
+                    # against the poll's membership re-seed, so write/clear it
+                    # alongside the membership change.
                     if archived:
                         db.remove_room_member(conn, updated.token, username)
+                        db.dismiss_room(conn, updated.token, username)
                     else:
                         db.add_room_member(conn, updated.token, username)
+                        db.undismiss_room(conn, updated.token, username)
                 else:
                     db.set_room_archived(conn, updated.token, bool(archived))
     return _room_to_dict(updated) if updated else None
@@ -1436,6 +1441,12 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         reg = db.get_room(conn, room.token)
         if reg is not None and reg.origin == "talk":
             db.remove_room_member(conn, room.token, username)
+            # Durable hide tombstone: the poll-time Talk-room registration
+            # backfill re-adds membership for every participant, so dropping the
+            # membership row alone wouldn't keep the room hidden. The tombstone
+            # excludes it from the web list until the user re-engages (posts in
+            # the room), which clears it via `record_inbound`.
+            db.dismiss_room(conn, room.token, username)
             db.update_web_chat_room(conn, room_id, archived=True)
             return "ok"
         db.delete_web_chat_room(conn, room_id, username)

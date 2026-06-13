@@ -17,6 +17,11 @@
 	// A room is on Talk when it originated there or has been promoted.
 	const onTalk = $derived(room.origin === 'talk' || !!room.talk_token);
 	const canPromote = $derived(room.origin !== 'talk' && !room.talk_token);
+	// An imported (Talk-origin) room is hidden per-user, not destroyed — this
+	// must match the backend's hide condition (`reg.origin == 'talk'`), NOT
+	// `onTalk`: a promoted web room (origin='web' + talk_token) is still hard-
+	// deleted, so it must read as a delete, not a hide.
+	const isImported = $derived(room.origin === 'talk');
 	let promoting = $state(false);
 	async function handlePromote() {
 		if (!onPromote || promoting) return;
@@ -118,15 +123,16 @@
 		{/if}
 	</div>
 
-	{#if showDanger}
+	{#if isImported}
+		<p class="hint hide-hint">
+			Hiding only removes this room from your web chat list. The Nextcloud Talk
+			conversation and its messages aren't deleted, and it reappears here if you post
+			in it again.
+		</p>
+	{:else if showDanger}
 		<div class="danger-zone">
 			<p class="danger-warn">
-				{#if onTalk}
-					This hides the room from web chat. The Nextcloud Talk conversation and its
-					history are not deleted.
-				{:else}
-					This permanently deletes this room and all its messages. This cannot be undone.
-				{/if}
+				This permanently deletes this room and all its messages. This cannot be undone.
 			</p>
 			<p class="danger-prompt">Type <code>{room.name}</code> to confirm.</p>
 			<input type="text" bind:value={confirmText} placeholder={room.name} />
@@ -137,7 +143,13 @@
 	{/if}
 
 	{#snippet footer()}
-		{#if !showDanger}
+		{#if isImported}
+			<!-- A hide is reversible (re-engagement un-hides), so it's a one-click
+			     action with no type-the-name confirm — unlike a real delete. -->
+			<button class="delete-link" type="button" onclick={onDelete}>
+				Hide
+			</button>
+		{:else if !showDanger}
 			<button class="delete-link" type="button" onclick={() => (showDanger = true)}>
 				Delete
 			</button>
@@ -211,6 +223,8 @@
 	}
 
 	.talk-on { color: var(--text-muted); }
+
+	.hide-hint { margin: 0 0 0.6rem; }
 
 	.talk-btn {
 		background: var(--surface-card);

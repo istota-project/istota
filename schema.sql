@@ -629,6 +629,17 @@ CREATE TABLE IF NOT EXISTS room_members (
 );
 CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members (user_id);
 
+-- Per-user "hide this room" tombstone. The Talk poll re-adds membership when a
+-- room is first registered (and the message loop re-adds active senders), so a
+-- dropped room_members row alone isn't a durable hide; list_member_rooms also
+-- excludes a tombstoned room. Cleared by the user's own next inbound.
+CREATE TABLE IF NOT EXISTS room_dismissals (
+    room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL,
+    dismissed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (room_token, user_id)
+);
+
 -- One row per (room, surface) the room is exposed on.
 CREATE TABLE IF NOT EXISTS room_bindings (
     room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,

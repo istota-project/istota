@@ -142,6 +142,67 @@ class TestPerUserHideDoesNotAffectOthers:
             assert db.get_room(conn, "r77") is not None
             assert db.get_room(conn, "r77").archived is False
 
+    def test_web_hide_writes_tombstone_surviving_poll_re_add(
+        self, web_config, db_path
+    ):
+        """Hiding an imported room writes a dismissal tombstone, so the poll's
+        membership re-seed can't resurface it (only re-engagement does)."""
+        from istota import web_app
+
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "r77", "stefan", origin="talk", name="#warsaw")
+            db.add_room_binding(conn, "r77", "talk", "r77")
+        rooms = web_app._chat_list_rooms("stefan")
+        rid = next(r["id"] for r in rooms if r["token"] == "r77")
+        assert web_app._chat_delete_room("stefan", rid) == "ok"
+        with db.get_db(db_path) as conn:
+            assert db.is_room_dismissed(conn, "r77", "stefan")
+            db.add_room_member(conn, "r77", "stefan")  # poll re-seed
+        assert "r77" not in {r["token"] for r in web_app._chat_list_rooms("stefan")}
+
+
+class TestHideTombstone:
+    """The per-user dismissal tombstone. The poll-time Talk-room registration
+    backfill re-adds membership for every participant, so a hide can't rely on
+    the dropped `room_members` row alone — `list_member_rooms` must also honor a
+    tombstone, cleared only by the user's own re-engagement."""
+
+    def test_dismiss_excludes_from_member_rooms_even_while_member(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "alice", origin="talk", name="#x")
+            assert {r.token for r in db.list_member_rooms(conn, "alice")} == {"tok"}
+            db.dismiss_room(conn, "tok", "alice")
+            # Still a member, but hidden by the tombstone.
+            assert db.is_room_member(conn, "tok", "alice")
+            assert db.is_room_dismissed(conn, "tok", "alice")
+            assert db.list_member_rooms(conn, "alice") == []
+
+    def test_undismiss_restores(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "alice", origin="talk", name="#x")
+            db.dismiss_room(conn, "tok", "alice")
+            db.undismiss_room(conn, "tok", "alice")
+            assert not db.is_room_dismissed(conn, "tok", "alice")
+            assert {r.token for r in db.list_member_rooms(conn, "alice")} == {"tok"}
+
+    def test_dismiss_is_per_user(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "alice", origin="talk", name="#x")
+            db.add_room_member(conn, "tok", "bob")
+            db.dismiss_room(conn, "tok", "alice")
+            # alice hidden, bob unaffected.
+            assert db.list_member_rooms(conn, "alice") == []
+            assert {r.token for r in db.list_member_rooms(conn, "bob")} == {"tok"}
+
+    def test_tombstone_survives_membership_re_add(self, db_path):
+        """The core guarantee: re-adding membership (what the poll backfill does
+        every cycle) does NOT resurrect a hidden room — only undismiss does."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "alice", origin="talk", name="#x")
+            db.dismiss_room(conn, "tok", "alice")
+            db.add_room_member(conn, "tok", "alice")  # poll re-seed
+            assert db.list_member_rooms(conn, "alice") == []
+
 
 class TestReviewFixes:
     """Edge cases surfaced by the Mulder/Scully review of the membership change."""

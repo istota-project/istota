@@ -2,6 +2,35 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-13: Surface lurked-in Talk rooms in web chat + durable per-user hide
+
+A Talk room the bot merely *participates in* but has never been addressed in didn't appear in web chat. Diagnosed on the deployment DB: room registration keyed exclusively on `tasks` rows (the `unified_rooms_v1` migration's `_fold_talk_rooms` and the live `record_inbound` path), but a quiet channel the bot lurks in has its message history rebuilt from Nextcloud while its tasks never carry over — so zero task rows, no `rooms` registry row, invisible in the membership-driven web list. The poll only *renamed* known rooms; it never registered new ones.
+
+**Key changes:**
+- **Poll-time registration.** The Talk poll now registers any conversation the bot participates in (`origin='talk'`) on first sight, seeding membership from the human participants mapped to istota users (`actor_id in config.users` + `actorType == "users"`, bot excluded). Resolves the canonical token first so a *promoted* web room (whose canonical token is its web token) isn't duplicated into a phantom `origin='talk'` row. Skips type-4 changelog rooms. First-sight-only (no per-cycle re-seed); membership for active users is kept current by the message loop + `record_inbound`.
+- **Durable per-user hide.** New `room_dismissals` tombstone (`(room_token, user_id)`). `list_member_rooms` excludes a tombstoned room even while the user is a member, so a hide survives any later membership re-add. Written by both web hide paths (`_chat_delete_room` + the `PATCH archived` branch).
+- **Re-engagement un-hides.** The tombstone is cleared by the user's own next message — `record_inbound` for an addressed message, and the poll message loop (before the @mention gate) for a non-mention post in a multi-user room, which never reaches `record_inbound`.
+- **UI.** Deleting an imported (Talk-origin) room is now a one-click **Hide** with honest copy and no type-the-name confirm; web-origin rooms keep the confirmed destructive **Delete**. Fixed the branch condition to `origin === 'talk'` so a promoted web room (hard-deleted by the backend) correctly reads as a delete.
+- **Review round (Mulder/Scully).** Caught + fixed: the promoted-web phantom (canonical-token resolution), multi-user re-engagement never firing (message-loop un-hide), the `PATCH archived` path missing the tombstone, write-txn-across-HTTP (now first-sight-only), `actorType` filter, `schema.sql` + `delete_web_chat_room` tombstone cleanup. All re-verified.
+
+**Files added/modified:**
+- `src/istota/transport/talk/inbound.py` - poll-time room registration + member seeding (`_istota_members_for_conversation`); message-loop re-engagement un-hide
+- `src/istota/db.py` - `room_dismissals` table + `dismiss_room`/`undismiss_room`/`is_room_dismissed`; `list_member_rooms` tombstone exclusion; `delete_web_chat_room` cleanup
+- `src/istota/transport/ingest.py` - `record_inbound` clears the sender's tombstone
+- `src/istota/web_app.py` - both hide paths write/clear the tombstone
+- `web/src/lib/components/chat/RoomSettings.svelte` - one-click Hide vs confirmed Delete
+- `schema.sql` - `room_dismissals` for fresh installs
+- `tests/test_room_membership.py`, `tests/test_transport_ingest.py`, `tests/test_transport_talk_inbound.py` - tombstone, re-engagement, poll registration, phantom-room + changelog-room regressions
+- `AGENTS.md` - unified room-sync section updated
+
+## 2026-06-13: Allow WebSearch/WebFetch in the bot toolset, steer page reads to browse
+
+The bot's headless `claude -p` invocation enumerates `--allowedTools` (it does *not* run with bypass permissions — that's the tmux brain only), and the six-tool list excluded web tools, so the bot couldn't search the web. Added `WebSearch` + `WebFetch` to `build_allowed_tools`. WebSearch runs server-side (returns titles/URLs only); page reading is steered to the `browse` skill via an eager line in the prompt's Tools section (there's no tool-search-level steering hook — prompt + allow/deny lists are the only levers).
+
+**Files added/modified:**
+- `src/istota/executor.py` - `build_allowed_tools` adds `WebSearch`/`WebFetch`; `build_prompt` Tools section steers page reads to `browse`
+- `tests/test_security.py` - asserts web tools allowed
+
 ## 2026-06-10: Remove the Pass-2 semantic-routing wiring entirely
 
 Immediate follow-up to the default-flip below. With Pass 2 already off by default and superseded by the widened disclosure catalogue, keeping the dead pre-router around (reachable via `semantic_routing = true`) bought nothing, so it's deleted outright.

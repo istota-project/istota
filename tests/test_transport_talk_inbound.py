@@ -688,9 +688,9 @@ class TestRoomTitleBackfill:
         assert room.name == "New Name"
 
     @pytest.mark.asyncio
-    async def test_no_room_is_not_created(self, make_config):
-        """Backfill only touches rooms already in the registry — it must not
-        surface every Talk conversation the bot happens to be in."""
+    async def test_room_with_no_istota_participants_not_registered(self, make_config):
+        """A polled room whose participants don't map to any istota user (bot-
+        only or all-guest) is not registered — there's no one to show it to."""
         config = make_config()
         config.users = {"alice": UserConfig()}
         with db.get_db(config.db_path) as conn:
@@ -703,10 +703,178 @@ class TestRoomTitleBackfill:
             mock_instance = MockClient.return_value
             mock_instance.list_conversations = AsyncMock(return_value=conversations)
             mock_instance.poll_messages = AsyncMock(return_value=[])
+            mock_instance.get_participants = AsyncMock(return_value=[
+                {"actorId": "istota", "actorType": "users"},   # the bot
+                {"actorId": "guest123", "actorType": "guests"},  # not an istota user
+            ])
             await poll_talk_conversations(config)
 
         with db.get_db(config.db_path) as conn:
             assert db.get_room(conn, "unseen") is None
+
+
+class TestPollRoomRegistration:
+    """A Talk room the bot is in surfaces in web chat on the next poll, even
+    when no one has messaged the bot in it (the #sysadmin case) — registration
+    is seeded from the human participants, not from task history."""
+
+    @pytest.mark.asyncio
+    async def test_group_room_registered_and_members_seeded(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "grp", 50)
+
+        conversations = [{"token": "grp", "type": 2, "displayName": "#sysadmin"}]
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            mock_instance.get_participants = AsyncMock(return_value=[
+                {"actorId": "istota", "actorType": "users"},
+                {"actorId": "alice", "actorType": "users"},
+                {"actorId": "bob", "actorType": "users"},
+            ])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            room = db.get_room(conn, "grp")
+            assert room is not None and room.origin == "talk"
+            assert room.name == "#sysadmin"
+            assert sorted(db.list_room_members(conn, "grp")) == ["alice", "bob"]
+            assert {r.token for r in db.list_member_rooms(conn, "alice")} == {"grp"}
+            assert {r.token for r in db.list_member_rooms(conn, "bob")} == {"grp"}
+
+    @pytest.mark.asyncio
+    async def test_changelog_room_not_registered(self, make_config):
+        """A type-4 'Talk updates' changelog room is a system room and must not
+        surface in web chat."""
+        config = make_config()
+        config.users = {"alice": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "changelog", 50)
+
+        conversations = [{"token": "changelog", "type": 4, "displayName": "Talk updates"}]
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            mock_instance.get_participants = AsyncMock(return_value=[
+                {"actorId": "alice", "actorType": "users"},
+            ])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, "changelog") is None
+
+    @pytest.mark.asyncio
+    async def test_dm_registered_with_other_party(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "dmtok", 50)
+
+        conversations = [{"token": "dmtok", "type": 1, "name": "alice"}]
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            room = db.get_room(conn, "dmtok")
+            assert room is not None and room.origin == "talk"
+            assert db.list_room_members(conn, "dmtok") == ["alice"]
+
+    @pytest.mark.asyncio
+    async def test_hidden_existing_room_not_resurfaced_by_poll(self, make_config):
+        """A polled room that already exists isn't re-seeded, so a hide (member
+        dropped + tombstone) stays hidden across polls with no message."""
+        config = make_config()
+        config.users = {"alice": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "grp", "alice", origin="talk", name="#sysadmin")
+            db.add_room_binding(conn, "grp", "talk", "grp")
+            db.remove_room_member(conn, "grp", "alice")
+            db.dismiss_room(conn, "grp", "alice")
+            db.set_talk_poll_state(conn, "grp", 50)
+
+        conversations = [{"token": "grp", "type": 2, "displayName": "#sysadmin"}]
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            mock_instance.get_participants = AsyncMock(return_value=[
+                {"actorId": "alice", "actorType": "users"},
+            ])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert not db.is_room_member(conn, "grp", "alice")
+            assert db.is_room_dismissed(conn, "grp", "alice")
+            assert db.list_member_rooms(conn, "alice") == []
+
+    @pytest.mark.asyncio
+    async def test_promoted_web_room_not_duplicated(self, make_config):
+        """A promoted web room's canonical token is its web token (Talk token
+        lives only in a binding). Polling the Talk token must NOT create a
+        phantom duplicate origin='talk' room."""
+        config = make_config()
+        config.users = {"alice": UserConfig()}
+        web_token, talk_token = "web-alice-uuid", "nc_talk_xyz"
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, web_token, "alice", origin="web", name="My Room")
+            db.add_room_binding(conn, web_token, "talk", talk_token)
+            db.set_talk_poll_state(conn, talk_token, 50)
+
+        conversations = [{"token": talk_token, "type": 2, "displayName": "My Room"}]
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=conversations)
+            mock_instance.poll_messages = AsyncMock(return_value=[])
+            mock_instance.get_participants = AsyncMock(return_value=[
+                {"actorId": "alice", "actorType": "users"},
+            ])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_room(conn, talk_token) is None  # no phantom
+            assert {r.token for r in db.list_member_rooms(conn, "alice")} == {web_token}
+
+    @pytest.mark.asyncio
+    async def test_non_mention_post_unhides_in_multiuser_room(self, make_config):
+        """Re-engagement un-hides even when the post doesn't @mention the bot
+        (so record_inbound is never reached): the poll message loop clears the
+        sender's tombstone and re-adds their membership."""
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "grp", "alice", origin="talk", name="#sysadmin")
+            db.add_room_binding(conn, "grp", "talk", "grp")
+            db.add_room_member(conn, "grp", "bob")
+            db.remove_room_member(conn, "grp", "alice")
+            db.dismiss_room(conn, "grp", "alice")
+            db.set_talk_poll_state(conn, "grp", 50)
+
+        # A plain (no-@mention) message from alice in a 3-participant room.
+        msg = _msg(actor_id="alice", message="status update, no mention")
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "grp", "type": 2, "displayName": "#sysadmin"},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+            mock_instance.get_participants = AsyncMock(return_value=[
+                {"actorId": "istota", "actorType": "users"},
+                {"actorId": "alice", "actorType": "users"},
+                {"actorId": "bob", "actorType": "users"},
+            ])
+            await poll_talk_conversations(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert not db.is_room_dismissed(conn, "grp", "alice")  # un-hidden
+            assert db.is_room_member(conn, "grp", "alice")
+            assert {r.token for r in db.list_member_rooms(conn, "alice")} == {"grp"}
 
     @pytest.mark.asyncio
     async def test_web_origin_room_name_not_overwritten(self, make_config):

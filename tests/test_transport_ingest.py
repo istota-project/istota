@@ -59,6 +59,27 @@ class TestIngestMessage:
         assert task.model == "claude-opus-4-8"
         assert task.effort == "high"
 
+    def test_sender_inbound_clears_their_hide_tombstone(self, config, db_path):
+        """Re-engagement un-hides: a user posting in a room they'd hidden clears
+        their dismissal tombstone, so it resurfaces in their web list. Only the
+        sender's tombstone — a co-member's hide is untouched."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room42", "alice", origin="talk", name="#x")
+            db.add_room_member(conn, "room42", "bob")
+            db.dismiss_room(conn, "room42", "alice")
+            db.dismiss_room(conn, "room42", "bob")
+
+        msg = IncomingMessage(
+            user_id="alice", text="back again", source_type="talk",
+            surface="talk", channel_token="room42",
+        )
+        with db.get_db(db_path) as conn:
+            ingest_message(conn, config, msg)
+
+        with db.get_db(db_path) as conn:
+            assert not db.is_room_dismissed(conn, "room42", "alice")
+            assert db.is_room_dismissed(conn, "room42", "bob")  # untouched
+
     def test_minimal_message(self, config, db_path):
         msg = IncomingMessage(
             user_id="bob",
