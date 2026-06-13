@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nextcloud Talk rooms the bot sits in but hasn't been messaged in now show up in web chat. Previously a room only appeared once someone had addressed the bot there; a quiet room the bot had merely joined stayed invisible. The bot now registers each room it participates in as it polls, so they surface on their own.
 
 ### Changed
+- The assistant now runs with its full built-in toolset instead of a fixed allow-list of a handful of tools. Because it runs non-interactively, any tool outside that list used to be silently unavailable; the sandbox, network proxy, and credential stripping are the real security boundary, so the allow-list added little. Its own multi-agent fan-out tool stays disabled, so work keeps flowing through Istota's own skills.
 - Deleting an imported Talk room from web chat is now clearly a per-person hide, not a delete: it's a single click with no type-the-name confirmation, the wording says so, and the room comes back if you post in it again. The Talk conversation and its history are never touched, and hiding it for yourself doesn't hide it for anyone else. Deleting a web-only room is still a real, confirmed delete.
 
 ## [0.23.0] - 2026-06-10

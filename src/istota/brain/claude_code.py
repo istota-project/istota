@@ -14,6 +14,7 @@ and need the same downstream cleanup.
 
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -76,6 +77,14 @@ def is_transient_api_error(text: str) -> bool:
     return parsed["status_code"] in TRANSIENT_STATUS_CODES or parsed["status_code"] == 429
 
 
+def _is_root() -> bool:
+    """True when the process runs as uid 0 (Unix). `claude` refuses
+    --dangerously-skip-permissions as root unless IS_SANDBOX=1 is set. Shared by
+    both the headless and tmux launch paths."""
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
+
+
 # Flags already warned-about as unsupported, so the "dropped a flag" WARNING
 # fires once per flag per process rather than every task. Module-global on
 # purpose (the warning is operator-facing, not per-request).
@@ -90,8 +99,9 @@ def build_claude_cli_flags(
 
     Covers the model / effort / tool / system-prompt flags both brains need; it
     deliberately does NOT add ``-p -`` or the ``--output-format stream-json``
-    flags (headless-only) nor ``--dangerously-skip-permissions`` (tmux-only) —
-    each brain appends its own path-specific flags around this common core.
+    flags (headless-only) nor ``--dangerously-skip-permissions`` (which both
+    brains append themselves) — each brain appends its own path-specific flags
+    around this common core.
 
     ``unsupported`` names flags the *target* CLI surface rejects (the interactive
     TUI may not accept every ``-p`` flag; Stage 1 of the tmux production spec
@@ -103,19 +113,31 @@ def build_claude_cli_flags(
     flags: list[str] = []
     # Empty allowed_tools means text-only invocation (e.g. sleep cycle): skip the
     # tool flags entirely so claude's defaults stay out of the equation. The
-    # prompt itself is what keeps the call text-only.
+    # prompt itself, plus the absence of --dangerously-skip-permissions, is what
+    # keeps the call text-only.
     if req.allowed_tools:
-        # Disallow the harness's built-in multi-agent fan-out tool. Istota
-        # orchestrates work through its own skills, not Claude Code's Agent
-        # orchestrator.
+        # Both brains run non-interactively with --dangerously-skip-permissions
+        # (added per-brain), so the model gets its full default toolset and an
+        # --allowedTools allowlist would only restrict it below that, blocking
+        # tools we didn't think to enumerate. The bwrap sandbox + network proxy
+        # are the security boundary, not an interactive permission prompt; Bash
+        # is permitted anyway, which is effectively unrestricted inside the
+        # sandbox. So we drop --allowedTools and rely on skip-permissions.
         #
-        # The Workflow tool used to be disallowed here too (ISSUE-110): the
-        # harness auto-injected a "use the Workflow tool" reminder whenever the
-        # word "workflow" appeared anywhere in the prompt blob, firing on
-        # essentially every task. As of Claude Code 2.1.162 the auto-inject no
-        # longer fires, so the suppression is retired; if it returns, re-add
-        # "Workflow" to the disallow list below.
-        flags += ["--allowedTools"] + req.allowed_tools + ["--disallowedTools", "Agent"]
+        # We DO still explicitly deny the harness's built-in multi-agent
+        # orchestration tools (Agent + Workflow): deny rules win even under
+        # --dangerously-skip-permissions, so this keeps Istota orchestrating
+        # through its own skills / subtasks rather than Claude Code's fan-out,
+        # whose dozens-of-subagents cost profile we don't want a task reaching
+        # for unprompted.
+        #
+        # Workflow had briefly been dropped from this list (ISSUE-110 follow-up)
+        # because the old --allowedTools allowlist already excluded it — the only
+        # reason to name it then was to suppress a harness auto-inject reminder
+        # that stopped firing in 2.1.162. Now that the allowlist is gone (we run
+        # with --dangerously-skip-permissions), the allowlist no longer
+        # implicitly blocks Workflow, so it must be denied explicitly again.
+        flags += ["--disallowedTools", "Agent", "Workflow"]
 
     def _add(flag: str, *values: str) -> None:
         if flag in unsupported:
@@ -293,6 +315,15 @@ class ClaudeCodeBrain:
 
     def execute(self, req: BrainRequest) -> BrainResult:
         try:
+            # --dangerously-skip-permissions (added by _build_command for
+            # tool-bearing tasks) is refused under root/sudo unless IS_SANDBOX=1
+            # signals an external isolation boundary. That's the Docker
+            # container-as-sandbox case (bwrap off, runs as root); on the
+            # non-root prod VM service user the flag is allowed without it, so we
+            # leave it unset. Mirrors the tmux brain's root handling.
+            if req.allowed_tools and _is_root() and "IS_SANDBOX" not in req.env:
+                req.env["IS_SANDBOX"] = "1"
+
             cmd = self._build_command(req)
             if req.sandbox_wrap is not None:
                 cmd = req.sandbox_wrap(cmd)
@@ -317,6 +348,13 @@ class ClaudeCodeBrain:
     @staticmethod
     def _build_command(req: BrainRequest) -> list[str]:
         cmd = ["claude", "-p", "-"] + build_claude_cli_flags(req)
+        if req.allowed_tools:
+            # Run non-interactively without per-tool permission prompts (which
+            # can't be answered in -p mode and would otherwise auto-deny tools).
+            # The sandbox + network proxy are the boundary; an allowlist buys
+            # nothing here. Skipped for text-only invocations (no tools), so
+            # those stay tool-less. Mirrors the tmux brain.
+            cmd += ["--dangerously-skip-permissions"]
         if req.streaming:
             # --include-partial-messages emits content deltas as they arrive so
             # the final answer streams token-by-token on stream surfaces instead

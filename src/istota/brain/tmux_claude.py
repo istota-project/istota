@@ -52,6 +52,7 @@ from .claude_code import (
     API_RETRY_DELAY_SECONDS,
     API_RETRY_MAX_ATTEMPTS,
     ClaudeCodeBrain,
+    _is_root,
     build_claude_cli_flags,
     is_transient_api_error,
 )
@@ -128,13 +129,6 @@ _SESSION_COUNTER = itertools.count(1)
 
 # Max pane text length captured into a log line on error/timeout.
 _PANE_LOG_CHARS = 2000
-
-
-def _is_root() -> bool:
-    """True when the process runs as uid 0 (Unix). The interactive `claude` TUI
-    refuses --dangerously-skip-permissions as root unless IS_SANDBOX=1 is set."""
-    geteuid = getattr(os, "geteuid", None)
-    return geteuid is not None and geteuid() == 0
 
 
 def parse_transcript(path: Path) -> list[StreamEvent]:

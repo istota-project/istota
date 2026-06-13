@@ -134,15 +134,82 @@ class TestBuildCommandDisallowedTools:
             timeout_seconds=60,
         )
 
-    def test_agent_disallowed_when_tools_allowed(self, tmp_path):
+    def test_orchestration_tools_disallowed_when_tools_allowed(self, tmp_path):
         cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, ["Bash"]))
         assert "--disallowedTools" in cmd
         flag_idx = cmd.index("--disallowedTools")
-        disallowed = cmd[flag_idx + 1 : flag_idx + 2]
-        assert disallowed == ["Agent"]
+        disallowed = cmd[flag_idx + 1 : flag_idx + 3]
+        assert disallowed == ["Agent", "Workflow"]
 
-    def test_no_disallowed_tools_when_text_only(self, tmp_path):
-        # Empty allowed_tools => text-only invocation, no tool flags at all.
+    def test_no_allowlist_skip_permissions_when_tools_allowed(self, tmp_path):
+        # We run non-interactively with --dangerously-skip-permissions instead
+        # of an --allowedTools allowlist; the sandbox + network proxy are the
+        # boundary. Agent stays denied (deny wins even under skip-permissions).
+        cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, ["Bash"]))
+        assert "--allowedTools" not in cmd
+        assert "--dangerously-skip-permissions" in cmd
+
+    def test_no_tool_flags_when_text_only(self, tmp_path):
+        # Empty allowed_tools => text-only invocation: no tool flags and no
+        # skip-permissions, so the call can't reach a tool.
         cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, []))
         assert "--allowedTools" not in cmd
         assert "--disallowedTools" not in cmd
+        assert "--dangerously-skip-permissions" not in cmd
+
+
+class TestRootSkipPermissionsEnv:
+    """`claude --dangerously-skip-permissions` is refused under root/sudo unless
+    IS_SANDBOX=1 signals an external isolation boundary (the Docker
+    container-as-sandbox case). The headless brain sets it for tool-bearing
+    tasks, mirroring the tmux brain."""
+
+    def _execute_capturing_env(self, tmp_path, *, root, allowed_tools, env=None):
+        from unittest.mock import patch
+
+        req = BrainRequest(
+            prompt="hi",
+            allowed_tools=allowed_tools,
+            cwd=tmp_path,
+            env=dict(env or {}),
+            timeout_seconds=60,
+            streaming=False,
+        )
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs.get("env") or {})
+            return typing.cast(
+                typing.Any,
+                type("R", (), {"stdout": "ok", "stderr": "", "returncode": 0})(),
+            )
+
+        with patch("istota.brain.claude_code._is_root", lambda: root), patch(
+            "istota.brain.claude_code.subprocess.run", side_effect=fake_run
+        ):
+            ClaudeCodeBrain().execute(req)
+        return req.env, captured
+
+    def test_root_with_tools_sets_is_sandbox(self, tmp_path):
+        env, captured = self._execute_capturing_env(
+            tmp_path, root=True, allowed_tools=["Bash"]
+        )
+        assert env.get("IS_SANDBOX") == "1"
+        assert captured.get("IS_SANDBOX") == "1"
+
+    def test_non_root_leaves_is_sandbox_unset(self, tmp_path):
+        env, _ = self._execute_capturing_env(
+            tmp_path, root=False, allowed_tools=["Bash"]
+        )
+        assert "IS_SANDBOX" not in env
+
+    def test_root_text_only_leaves_is_sandbox_unset(self, tmp_path):
+        # No tools => no skip-permissions => no need for IS_SANDBOX.
+        env, _ = self._execute_capturing_env(tmp_path, root=True, allowed_tools=[])
+        assert "IS_SANDBOX" not in env
+
+    def test_existing_is_sandbox_preserved(self, tmp_path):
+        env, _ = self._execute_capturing_env(
+            tmp_path, root=True, allowed_tools=["Bash"], env={"IS_SANDBOX": "custom"}
+        )
+        assert env.get("IS_SANDBOX") == "custom"

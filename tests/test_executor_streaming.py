@@ -246,7 +246,8 @@ class TestSimpleExecution:
             execute_task(task, config, [])
 
         assert "--output-format" not in captured_cmd
-        assert "--allowedTools" in captured_cmd
+        assert "--allowedTools" not in captured_cmd
+        assert "--dangerously-skip-permissions" in captured_cmd
 
     def test_custom_system_prompt_in_command(self, tmp_path):
         """--system-prompt-file is added when custom_system_prompt is True."""
@@ -592,7 +593,8 @@ class TestStreamingExecution:
         idx = captured_cmd.index("--output-format")
         assert captured_cmd[idx + 1] == "stream-json"
         assert "--verbose" in captured_cmd
-        assert "--allowedTools" in captured_cmd
+        assert "--allowedTools" not in captured_cmd
+        assert "--dangerously-skip-permissions" in captured_cmd
 
     def test_timeout_kills_process(self, tmp_path):
         """Timeout fires and returns proper error message."""

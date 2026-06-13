@@ -83,7 +83,7 @@ overrides plug in for free via `_roles.py`.
 | Field | Notes |
 |---|---|
 | `prompt: str` | Fully composed prompt (emissaries+persona+memory+skills+context+request) |
-| `allowed_tools: list[str]` | From `executor.build_allowed_tools()` — ["Read","Write","Edit","Grep","Glob","Bash"]. Empty list = text-only invocation; ClaudeCodeBrain skips `--allowedTools`/`--disallowedTools` entirely (sleep-cycle path). |
+| `allowed_tools: list[str]` | From `executor.build_allowed_tools()`. For ClaudeCodeBrain / TmuxClaudeBrain this is now effectively a **non-empty = give the model tools** signal (they run with `--dangerously-skip-permissions`, not an allowlist); the specific names only matter to NativeBrain, which filters its in-process tool set by them. Empty list = text-only invocation: ClaudeCodeBrain emits no tool flags and no skip-permissions (sleep-cycle path). |
 | `cwd: Path` | Subprocess working dir (`config.temp_dir`) |
 | `env: dict[str,str]` | Per-task env (already credential-stripped if proxy enabled) |
 | `timeout_seconds: int` | `config.scheduler.task_timeout_minutes * 60` |
@@ -109,13 +109,28 @@ overrides plug in for free via `_roles.py`.
 ## ClaudeCodeBrain
 Wraps the `claude` CLI subprocess. Owns:
 
-1. **Command construction** — `claude -p - --allowedTools ... --disallowedTools Agent Workflow`,
-   plus optional `--model`, `--effort`, `--system-prompt-file`, and
-   (in streaming mode) `--output-format stream-json --verbose
-   --include-partial-messages`. The last flag makes the CLI emit answer /
-   reasoning text token-by-token as `stream_event` frames *before* the whole
-   `assistant` block lands — without it the final response would arrive as one
-   block and dump all at once on stream surfaces.
+1. **Command construction** — `claude -p - --disallowedTools Agent Workflow
+   --dangerously-skip-permissions`, plus optional `--model`, `--effort`,
+   `--system-prompt-file`, and (in streaming mode) `--output-format stream-json
+   --verbose --include-partial-messages`. The last flag makes the CLI emit
+   answer / reasoning text token-by-token as `stream_event` frames *before* the
+   whole `assistant` block lands — without it the final response would arrive as
+   one block and dump all at once on stream surfaces. There is **no
+   `--allowedTools` allowlist**: the run is non-interactive (a per-tool
+   permission prompt can't be answered in `-p` mode and would auto-deny), so it
+   relies on `--dangerously-skip-permissions` for the model's full default
+   toolset, with the bwrap sandbox + network proxy as the security boundary (the
+   same posture the tmux brain uses; `build_claude_cli_flags` is shared). `Agent`
+   and `Workflow` stay explicitly denied — deny rules win even under
+   skip-permissions — so Istota keeps orchestrating through its own skills, not
+   Claude Code's multi-agent fan-out (whose dozens-of-subagents cost we don't
+   want a task reaching for unprompted; the old allowlist implicitly excluded
+   `Workflow`, so dropping it required denying `Workflow` explicitly again).
+   Text-only invocations (empty `allowed_tools`, e.g. the sleep cycle)
+   get neither tool flags nor skip-permissions, so they can't reach a tool. As
+   root (the Docker container-as-sandbox case) `execute()` sets `IS_SANDBOX=1`
+   for tool-bearing tasks, since `claude` refuses skip-permissions as root
+   otherwise (`_is_root`, shared with the tmux brain).
 2. **Sandbox wrap** — calls `req.sandbox_wrap(cmd)` if provided so the
    executor's bwrap configuration applies without the brain knowing about
    bubblewrap.

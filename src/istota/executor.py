@@ -759,16 +759,25 @@ def _split_credential_env(
 
 
 def build_allowed_tools(is_admin: bool, skill_names: list[str]) -> list[str]:
-    """Build --allowedTools list for restricted security mode.
+    """Build the per-task tool list.
 
-    Permits all Bash commands — the security boundary is the clean env
-    (credential stripping), not command restriction. The tool surface is
-    effectively unbounded: skill CLIs, user scripts, cron commands, curl
-    for CalDAV/Nextcloud, rclone, etc.
+    The CLI brains (ClaudeCodeBrain / TmuxClaudeBrain) no longer pass this as an
+    ``--allowedTools`` allowlist — they run with ``--dangerously-skip-permissions``
+    and the model gets its full default toolset. The security boundary is the
+    bwrap sandbox + network proxy + clean env (credential stripping), not an
+    interactive permission prompt; Bash is permitted anyway, which is effectively
+    unrestricted inside the sandbox. ``Agent`` + ``Workflow`` (the harness's
+    multi-agent fan-out) are denied separately via ``--disallowedTools`` so
+    Istota orchestrates through its own skills.
 
-    WebSearch / WebFetch are allowed too. WebSearch runs server-side
-    (Anthropic's backend) and only returns result titles + URLs, so page
-    reading is steered to the `browse` skill in the prompt's Tools section.
+    The returned list still matters in two places: NativeBrain filters its
+    in-process tool set by these names, and a non-empty list is the signal that
+    distinguishes a tool-bearing task from a text-only one (empty => sleep cycle
+    / OCR / explainer, which get no tools and no skip-permissions).
+
+    WebSearch / WebFetch are included; WebSearch runs server-side (Anthropic's
+    backend) and only returns result titles + URLs, so page reading is steered to
+    the `browse` skill in the prompt's Tools section.
     """
     return ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"]
 
