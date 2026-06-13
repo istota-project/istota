@@ -2,6 +2,17 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-13: Fix init_db migration crash on upgrade DBs (row_factory)
+
+`docker compose up --build` restart-looped on a volume that already held data: `init_db` → `_run_migrations` → `_migrate_unified_rooms` → `_backfill_turns` → `_backfill_turns_for` raised `TypeError: tuple indices must be integers or slices, not str` at `r["conversation_token"]`. Root cause: `init_db` opened a raw `sqlite3.connect()` with no `row_factory`, so the cursor yielded plain tuples, but the unified-rooms backfill (added 2026-06-09) reads task rows by column name. The runtime `get_db` path sets `row_factory = sqlite3.Row`, which is why this only ever bit the init/migration path — and only when completed tasks already existed at migration time (a fresh install has nothing to backfill, so the loop body never runs, which is why every existing test missed it). The `TypeError` also escaped `_step`'s `OperationalError`-only guard, so the completion marker was never written and the container retried forever.
+
+Fix: set `conn.row_factory = sqlite3.Row` in `init_db` before `_run_migrations`. `Row` supports both name and positional access, so it's a safe superset for every migration step (full suite stays green — 6439 passed). Pre-existing bug, unrelated to the skip-permissions change in the same session; it surfaced now because the user's Docker volume had completed tasks and hadn't yet run the unified-rooms fold.
+
+**Files added/modified:**
+- `src/istota/db.py` - `init_db` sets `row_factory = sqlite3.Row`
+- `tests/test_unified_rooms.py` - regression test re-running `init_db` with a completed task present and the migration marker cleared (the upgrade path)
+- `CHANGELOG.md` - Fixed entry
+
 ## 2026-06-13: Drop the CLI tool allowlist for --dangerously-skip-permissions
 
 The headless `claude -p` brain ran with an explicit `--allowedTools Read Write Edit Grep Glob Bash WebSearch WebFetch --disallowedTools Agent` allowlist. In non-interactive `-p` mode any tool outside that list auto-denies (no prompt to answer), so the model was silently capped below its full toolset for no real safety gain — the bwrap sandbox + network proxy + credential-stripped clean env are the actual boundary, and Bash was already permitted (effectively unrestricted inside the sandbox). The tmux brain already ran with `--dangerously-skip-permissions`; this aligns the headless path with it and lets the shared `build_claude_cli_flags` produce one consistent posture.

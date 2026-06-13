@@ -280,6 +280,34 @@ class TestMigration:
         # exactly one system message, not duplicated
         assert len(db.get_messages(conn, "web-u-abc")) == 1
 
+    def test_init_db_backfills_with_existing_tasks(self, tmp_path):
+        """Regression: re-running init_db when completed tasks already exist must
+        not crash. init_db opens a raw sqlite3 connection; the unified-rooms
+        backfill reads task rows by column name, which needs a Row factory.
+        Without it `_backfill_turns_for` hit "tuple indices must be integers",
+        crashing init and producing the docker container restart-loop."""
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        # Seed a completed Talk turn + register its room, then clear the
+        # migration marker so the next init_db re-runs the fold over real data
+        # (the upgrade path the empty-fresh-install tests never exercise).
+        with db.get_db(db_path) as c:
+            c.execute(
+                "INSERT INTO tasks (source_type, user_id, conversation_token, "
+                "prompt, result, status) VALUES "
+                "('talk', 'u', 'room1', 'hello', 'hi there', 'completed')"
+            )
+            db.register_room(c, "room1", "u", origin="talk")
+            c.execute("DELETE FROM _migration_state WHERE name = 'unified_rooms_v1'")
+            c.commit()
+
+        # The raw-connection migration path — must not raise.
+        db.init_db(db_path)
+
+        with db.get_db(db_path) as c:
+            bodies = {m.body for m in db.get_messages(c, "room1")}
+        assert "hello" in bodies and "hi there" in bodies
+
 
 # ---------------------------------------------------------------------------
 # Delete cascade
