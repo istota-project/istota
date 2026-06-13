@@ -534,6 +534,13 @@ def init_db(db_path: Path) -> None:
     """Initialize database with schema."""
     schema_path = Path(__file__).parent.parent.parent / "schema.sql"
     with sqlite3.connect(db_path) as conn:
+        # Migrations read rows by column name (e.g. the unified-rooms backfill),
+        # so this connection needs the same Row factory the runtime get_db path
+        # uses — a raw connection yields tuples and name-indexing raises
+        # TypeError mid-migration (crashed init on upgrade DBs that already held
+        # completed tasks). Row supports both name and positional access, so it's
+        # a safe superset for every migration step.
+        conn.row_factory = sqlite3.Row
         # Run migrations first so new columns exist before schema creates indexes on them
         _run_migrations(conn)
         conn.executescript(schema_path.read_text())

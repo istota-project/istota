@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The assistant can now search the web. Web search is available to every task; reading a specific page is routed to the built-in browser so it can handle JavaScript-heavy sites.
 
 ### Fixed
+- Fixed a startup crash that could leave the app in a restart loop on upgrade. When the database already held completed conversations, the one-time chat-history migration failed to read its own rows and aborted initialization. It now reads them correctly and finishes.
 - Nextcloud Talk rooms the bot sits in but hasn't been messaged in now show up in web chat. Previously a room only appeared once someone had addressed the bot there; a quiet room the bot had merely joined stayed invisible. The bot now registers each room it participates in as it polls, so they surface on their own.
 
 ### Changed
