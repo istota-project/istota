@@ -765,8 +765,12 @@ def build_allowed_tools(is_admin: bool, skill_names: list[str]) -> list[str]:
     (credential stripping), not command restriction. The tool surface is
     effectively unbounded: skill CLIs, user scripts, cron commands, curl
     for CalDAV/Nextcloud, rclone, etc.
+
+    WebSearch / WebFetch are allowed too. WebSearch runs server-side
+    (Anthropic's backend) and only returns result titles + URLs, so page
+    reading is steered to the `browse` skill in the prompt's Tools section.
     """
-    return ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+    return ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"]
 
 
 def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
@@ -2024,6 +2028,21 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     if config.browser.enabled:
         browser_tool = "\n- Web browser for JS-rendered pages: istota-skill browse (see browse skill for details)"
 
+    # Web tools line. WebSearch + WebFetch are always allowed. WebSearch only
+    # returns result titles + URLs, so reading a page needs a fetch tool — steer
+    # that to the browse skill when the browser service is up (it renders JS and
+    # reaches arbitrary sites); WebFetch is the lightweight fallback.
+    if config.browser.enabled:
+        web_tools = (
+            "\n- Web search: WebSearch — finds result titles and URLs; it does not fetch page content."
+            "\n- Reading web pages: prefer the browse skill (istota-skill browse) — it renders JavaScript and follows links. Use WebFetch only as a lightweight fallback for simple static pages."
+        )
+    else:
+        web_tools = (
+            "\n- Web search: WebSearch — finds result titles and URLs; it does not fetch page content."
+            "\n- Reading web pages: WebFetch fetches a URL and extracts content against your prompt."
+        )
+
     # CLI skills list (generated from skill index metadata)
     cli_skills_section = cli_skills_text or ""
 
@@ -2109,7 +2128,7 @@ Output target: {output_target or 'text'}{per_user_email_line}
 {memory_section}{knowledge_facts_section}{channel_memory_section}{dated_memories_section}{recalled_section}{playbooks_section}## Available tools
 
 You have access to:
-{file_tools}{browser_tool}
+{file_tools}{browser_tool}{web_tools}
 {cli_skills_section}{db_tool_line}
 - Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
 
