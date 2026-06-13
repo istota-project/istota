@@ -72,7 +72,9 @@ def _write_transcript(tmp_path, records, name="t.jsonl"):
 class TestFlagHelper:
     def test_empty_unsupported_matches_headless_argv(self, tmp_path):
         # Golden: the headless argv ClaudeCodeBrain builds is exactly
-        # ["claude","-p","-"] + build_claude_cli_flags(req) + stream flags.
+        # ["claude","-p","-"] + build_claude_cli_flags(req) +
+        # --dangerously-skip-permissions + stream flags. No --allowedTools
+        # allowlist — Agent stays denied and the run skips per-tool prompts.
         sp = tmp_path / "sp.md"
         sp.write_text("system")
         req = _req(tmp_path, allowed_tools=["Bash", "Read"],
@@ -80,13 +82,14 @@ class TestFlagHelper:
                    custom_system_prompt_path=sp, streaming=False)
         flags = build_claude_cli_flags(req)
         assert flags == [
-            "--allowedTools", "Bash", "Read", "--disallowedTools", "Agent",
+            "--disallowedTools", "Agent", "Workflow",
             "--model", "claude-opus-4-8", "--effort", "high",
             "--system-prompt-file", str(sp),
         ]
-        # And the brain's _build_command wraps it identically.
+        # And the brain's _build_command wraps it identically (plus the
+        # non-interactive skip-permissions flag).
         cmd = claude_code.ClaudeCodeBrain._build_command(req)
-        assert cmd == ["claude", "-p", "-"] + flags
+        assert cmd == ["claude", "-p", "-"] + flags + ["--dangerously-skip-permissions"]
 
     def test_unsupported_flag_dropped(self, tmp_path, caplog):
         claude_code._WARNED_UNSUPPORTED_FLAGS.clear()
@@ -95,7 +98,7 @@ class TestFlagHelper:
         with caplog.at_level(logging.WARNING):
             flags = build_claude_cli_flags(req, unsupported=frozenset({"--effort"}))
         assert "--effort" not in flags
-        assert "--model" in flags and "--allowedTools" in flags
+        assert "--model" in flags and "--disallowedTools" in flags
         assert any("unsupported_flag" in r.message for r in caplog.records)
 
     def test_unsupported_warning_is_once_per_process(self, tmp_path, caplog):
@@ -110,6 +113,7 @@ class TestFlagHelper:
     def test_empty_allowed_tools_skips_tool_flags(self, tmp_path):
         flags = build_claude_cli_flags(_req(tmp_path, allowed_tools=[]))
         assert "--allowedTools" not in flags
+        assert "--disallowedTools" not in flags
 
 
 # --------------------------------------------------------------------------

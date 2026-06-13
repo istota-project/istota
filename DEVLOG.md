@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-13: Drop the CLI tool allowlist for --dangerously-skip-permissions
+
+The headless `claude -p` brain ran with an explicit `--allowedTools Read Write Edit Grep Glob Bash WebSearch WebFetch --disallowedTools Agent` allowlist. In non-interactive `-p` mode any tool outside that list auto-denies (no prompt to answer), so the model was silently capped below its full toolset for no real safety gain — the bwrap sandbox + network proxy + credential-stripped clean env are the actual boundary, and Bash was already permitted (effectively unrestricted inside the sandbox). The tmux brain already ran with `--dangerously-skip-permissions`; this aligns the headless path with it and lets the shared `build_claude_cli_flags` produce one consistent posture.
+
+Verified both load-bearing CLI behaviors empirically against the local CLI (2.1.177) before committing: (1) `--dangerously-skip-permissions` in `-p` mode does execute tools with no allowlist (wrote a file); (2) `--disallowedTools` still wins under skip-permissions (a denied `Write` stayed blocked). So deny rules are the right mechanism for the orchestration tools.
+
+**Key changes:**
+- **`build_claude_cli_flags`** (shared by both CLI brains): for a tool-bearing task, emit only `--disallowedTools Agent Workflow` instead of the `--allowedTools …` allowlist. Empty `allowed_tools` (text-only: sleep cycle / OCR / explainer) still emits no tool flags at all.
+- **`ClaudeCodeBrain._build_command`**: append `--dangerously-skip-permissions` for tool-bearing tasks (skipped for text-only, so those stay tool-less and can't reach a tool).
+- **Re-deny `Workflow`.** ISSUE-110's follow-up had dropped `Workflow` from the disallow list, but only because the *allowlist* was implicitly excluding it. With the allowlist gone, `Workflow` (multi-agent fan-out, dozens of subagents) becomes reachable, so it's denied explicitly again alongside `Agent`. Behavior-preserving — the model still can't fan out and keeps orchestrating through Istota's own skills/subtasks.
+- **Root handling.** `claude` refuses skip-permissions as root unless `IS_SANDBOX=1`. `ClaudeCodeBrain.execute` now sets it for tool-bearing tasks when running as root (the Docker container-as-sandbox case; bwrap off, runs as root), mirroring the tmux brain. On the non-root prod VM service user the flag is allowed without it, so it's left unset. `_is_root` moved into `claude_code.py` (single definition; the tmux brain imports it, keeping the test monkeypatch on `tmux_claude._is_root` working).
+- **`build_allowed_tools` kept, repurposed.** Its return list no longer reaches the CLI for the two CLI brains, but it still drives NativeBrain's in-process tool filter and is the non-empty/empty signal that distinguishes a tool task from a text-only one. Docstring updated to say so.
+- **Healthchecks left alone.** The `--allowedTools Bash` calls in `commands.py` / `heartbeat.py` only run `echo healthcheck-ok`, work fine, and aren't on the brain path.
+
+**Files added/modified:**
+- `src/istota/brain/claude_code.py` - drop allowlist, add `_is_root` + skip-permissions + root `IS_SANDBOX`, re-deny `Workflow`
+- `src/istota/brain/tmux_claude.py` - import `_is_root` from `claude_code` instead of defining it
+- `src/istota/executor.py` - `build_allowed_tools` docstring rewrite
+- `tests/test_brain.py` - rework `TestBuildCommandDisallowedTools`, add `TestRootSkipPermissionsEnv`
+- `tests/test_tmux_production.py`, `tests/test_executor_streaming.py` - update flag assertions
+- `.claude/rules/brain.md`, `.claude/rules/executor.md`, `CHANGELOG.md` - docs
+
 ## 2026-06-13: Surface lurked-in Talk rooms in web chat + durable per-user hide
 
 A Talk room the bot merely *participates in* but has never been addressed in didn't appear in web chat. Diagnosed on the deployment DB: room registration keyed exclusively on `tasks` rows (the `unified_rooms_v1` migration's `_fold_talk_rooms` and the live `record_inbound` path), but a quiet channel the bot lurks in has its message history rebuilt from Nextcloud while its tasks never carry over — so zero task rows, no `rooms` registry row, invisible in the membership-driven web list. The poll only *renamed* known rooms; it never registered new ones.
