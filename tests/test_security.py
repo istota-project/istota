@@ -244,6 +244,13 @@ class TestBuildAllowedTools:
         with_dev = build_allowed_tools(is_admin=False, skill_names=["developer"])
         assert base == with_dev
 
+    def test_includes_web_tools(self):
+        """WebSearch + WebFetch are allowed; page reading is steered to browse
+        in the prompt, not by withholding the tools."""
+        tools = build_allowed_tools(is_admin=False, skill_names=[])
+        assert "WebSearch" in tools
+        assert "WebFetch" in tools
+
 
 class TestConfigEnvVarOverrides:
     def _write_minimal_config(self, tmp_path):
