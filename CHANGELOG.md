@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The assistant can now search the web. Web search is available to every task; reading a specific page is routed to the built-in browser so it can handle JavaScript-heavy sites.
+
+### Fixed
+- Nextcloud Talk rooms the bot sits in but hasn't been messaged in now show up in web chat. Previously a room only appeared once someone had addressed the bot there; a quiet room the bot had merely joined stayed invisible. The bot now registers each room it participates in as it polls, so they surface on their own.
+
+### Changed
+- Deleting an imported Talk room from web chat is now clearly a per-person hide, not a delete: it's a single click with no type-the-name confirmation, the wording says so, and the room comes back if you post in it again. The Talk conversation and its history are never touched, and hiding it for yourself doesn't hide it for anyone else. Deleting a web-only room is still a real, confirmed delete.
+
 ## [0.23.0] - 2026-06-10
 
 ### Added

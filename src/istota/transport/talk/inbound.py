@@ -149,6 +149,36 @@ def _participant_names(participants: list[dict], exclude: str | None = None) -> 
     return names
 
 
+def _istota_members_for_conversation(
+    conv: dict, participants: list[dict], config: Config,
+) -> list[str]:
+    """The istota user_ids who are human participants of a Talk conversation,
+    for seeding `room_members` when the room is first registered from a poll.
+
+    Uses the same actor→user gate as message processing (`actor_id in
+    config.users`, bot excluded), so membership matches who could actually
+    drive a task in the room. For a DM (type 1) the participant list is empty,
+    so the other party comes from `conv['name']`. Returned sorted for a
+    deterministic room owner. Empty when no istota human participates (a
+    bot-only or all-guest room) — the caller then skips registration."""
+    bot = config.talk.bot_username
+    members: set[str] = set()
+    if conv.get("type") == 1:
+        other = conv.get("name", "")
+        if other and other != bot and other in config.users:
+            members.add(other)
+    else:
+        for p in participants:
+            # Mirror the message-processing gate: only real users (not guests /
+            # federated / bots), and only those mapped to an istota user.
+            if p.get("actorType", "users") != "users":
+                continue
+            actor_id = p.get("actorId", "")
+            if actor_id and actor_id != bot and actor_id in config.users:
+                members.add(actor_id)
+    return sorted(members)
+
+
 async def _poll_single_conversation(
     client: TalkClient,
     conversation_token: str,
@@ -248,21 +278,54 @@ async def poll_talk_conversations(config: Config) -> list[int]:
             display_name = conv.get("displayName") or conv.get("name")
             if display_name:
                 conv_names[conversation_token] = display_name
-                # Proactively backfill the registry room title from Talk's
-                # displayName every poll, not only when a new inbound message
-                # arrives (record_inbound). Migrated Talk rooms were folded in
-                # with NULL names; without this they'd show the generic "Talk
-                # room" in web chat until their next message. Only touch rooms
-                # that already exist in the registry (don't surface rooms the
-                # user never interacted with) and only Talk-origin rooms (a
-                # web-origin room's user-set name wins).
-                existing_room = db.get_room(conn, conversation_token)
+
+            # Register the Talk room in the unified registry on first sight so
+            # it surfaces in web chat even when no one has messaged the bot in
+            # it yet — the task-keyed unified-rooms migration and the live
+            # record_inbound path both miss a room the bot merely lurks in
+            # (polled + history-cached, but never addressed): the #sysadmin
+            # case. Resolve the canonical token FIRST: a *promoted* web room's
+            # canonical token is its web token (the Talk token lives only in a
+            # binding), so registering by the raw Talk token would create a
+            # phantom duplicate origin='talk' row. Seed membership from the human
+            # participants mapped to istota users (bot excluded). Only a
+            # genuinely new room needs the participant fetch, so it's rare, not
+            # per-poll — membership for active users is maintained below (the
+            # message loop) and by record_inbound. A user who later hides the
+            # room is kept out by their dismissal tombstone.
+            canonical = (
+                db.resolve_room_token(conn, "talk", conversation_token)
+                or conversation_token
+            )
+            existing_room = db.get_room(conn, canonical)
+            if existing_room is not None:
+                # Backfill the registry title from Talk's displayName (migrated
+                # rooms were folded in with NULL names; without this they'd show
+                # the generic "Talk room" until their next message). Talk-origin
+                # only — a web-origin (incl. promoted) room's user-set name wins.
                 if (
-                    existing_room is not None
-                    and existing_room.origin == "talk"
+                    existing_room.origin == "talk"
+                    and display_name
                     and existing_room.name != display_name
                 ):
-                    db.rename_room(conn, conversation_token, display_name)
+                    db.rename_room(conn, canonical, display_name)
+            elif conv_type != 4:
+                # New room (skip type 4 = the "Talk updates" changelog room — a
+                # system room that shouldn't surface in web chat).
+                participants = await _get_participants(
+                    client, conversation_token, conv_type,
+                )
+                member_ids = _istota_members_for_conversation(
+                    conv, participants, config,
+                )
+                if member_ids:
+                    db.register_room(
+                        conn, canonical, member_ids[0],
+                        origin="talk", name=display_name,
+                    )
+                    db.add_room_binding(conn, canonical, "talk", conversation_token)
+                    for uid in member_ids[1:]:
+                        db.add_room_member(conn, canonical, uid)
 
             # Cache 1:1 DM tokens by user ID (for notification fallback)
             if conv_type == 1:
@@ -402,6 +465,20 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                 if actor_id not in config.users:
                     # Unknown user - skip silently
                     continue
+
+                # Re-engagement un-hides: any message the user posts in a room
+                # they'd hidden clears their dismissal tombstone (and re-adds
+                # their membership), so it resurfaces in their web list — even
+                # in a multi-user room where the message is dropped just below
+                # for lacking an @mention (so record_inbound is never reached).
+                # Resolve to the canonical token so a promoted web room works.
+                reengaged_token = (
+                    db.resolve_room_token(conn, "talk", conversation_token)
+                    or conversation_token
+                )
+                if db.get_room(conn, reengaged_token) is not None:
+                    db.add_room_member(conn, reengaged_token, actor_id)
+                    db.undismiss_room(conn, reengaged_token, actor_id)
 
                 # In multi-user rooms, only respond when @mentioned
                 conv_type = conv_types.get(conversation_token, 1)

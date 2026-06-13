@@ -94,6 +94,11 @@ def record_inbound(
         # registered it (ISSUE-134). Idempotent; covers the already-registered
         # path where register_room above didn't run.
         db.add_room_member(conn, room_token, user_id)
+        # Re-engagement un-hides: the sender posting in a room they'd previously
+        # hidden clears their hide tombstone so it resurfaces in their web list.
+        # Only the sender's own tombstone — another participant's hide is left
+        # intact.
+        db.undismiss_room(conn, room_token, user_id)
 
         # 2. Echo check (loop-prevention ledger). Dormant for v1 Talk+web.
         if external_id is not None and db.message_has_external_id(

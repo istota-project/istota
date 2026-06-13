@@ -437,6 +437,21 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_room_members_user "
             "ON room_members (user_id)"
         )
+        # Per-user "hide this room" tombstone. The web hide-an-imported-room
+        # action drops the `room_members` row, but the poll-time Talk-room
+        # registration backfill re-adds membership for every participant — so
+        # the dropped row alone is no longer a durable hide. This tombstone is:
+        # written on hide, consulted by `list_member_rooms` (excluded from the
+        # web list even while a member), and cleared on the user's own next
+        # inbound (`record_inbound`) — "re-engagement un-hides".
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS room_dismissals (
+                room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+                user_id      TEXT NOT NULL,
+                dismissed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (room_token, user_id)
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS room_bindings (
                 room_token   TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
@@ -2249,6 +2264,7 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM room_bindings WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_read_state WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_members WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_dismissals WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
     # Drop every participant's handle for the token, not just the requester's
     # (room_id): a promoted web room can accrue handles for other members, and
@@ -2388,6 +2404,34 @@ def is_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> b
     return row is not None
 
 
+def dismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
+    """Tombstone a room as hidden for `user_id` (the web hide action). Durable
+    against the poll-time membership backfill — `list_member_rooms` excludes a
+    dismissed room even while the user is still a member. Cleared by
+    `undismiss_room` (the user's own next inbound)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO room_dismissals (room_token, user_id) VALUES (?, ?)",
+        (room_token, user_id),
+    )
+
+
+def undismiss_room(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
+    """Clear a hide tombstone — re-engagement un-hides (called from
+    `record_inbound` on the sender's own message)."""
+    conn.execute(
+        "DELETE FROM room_dismissals WHERE room_token = ? AND user_id = ?",
+        (room_token, user_id),
+    )
+
+
+def is_room_dismissed(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM room_dismissals WHERE room_token = ? AND user_id = ? LIMIT 1",
+        (room_token, user_id),
+    ).fetchone()
+    return row is not None
+
+
 def list_room_members(conn: sqlite3.Connection, room_token: str) -> list[str]:
     rows = conn.execute(
         "SELECT user_id FROM room_members WHERE room_token = ? ORDER BY user_id",
@@ -2401,11 +2445,19 @@ def list_member_rooms(
 ) -> list[Room]:
     """Rooms `user_id` is a member of, oldest-first. This is the visibility query
     for the web room list (ISSUE-134) — it replaces the single-owner
-    `list_rooms`, so a shared Talk room surfaces for every participant."""
+    `list_rooms`, so a shared Talk room surfaces for every participant.
+
+    A room the user has hidden (`room_dismissals` tombstone) is excluded even
+    while they remain a member — the poll-time backfill re-adds membership, so
+    membership alone can't keep a hidden room hidden."""
     sql = (
         "SELECT r.* FROM rooms r "
         "JOIN room_members m ON m.room_token = r.token "
-        "WHERE m.user_id = ?"
+        "WHERE m.user_id = ? "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM room_dismissals d "
+        "  WHERE d.room_token = r.token AND d.user_id = m.user_id"
+        ")"
     )
     params: list = [user_id]
     if not include_archived:
