@@ -52,6 +52,9 @@ disabled_modules = ["money"]
 # Default delivery surface for results/notifications when nothing else applies
 default_destination = "talk"   # talk | email | ntfy | web | surface:channel | comma list
 
+# Where replies to inbound email threads are delivered
+email_reply_routing = "origin+thread"   # origin+thread (default) | origin | thread
+
 # Purpose-keyed routing table — overrides default_destination per purpose.
 # Purposes: reply, alert, log, briefing, notification
 [users.alice.routing]

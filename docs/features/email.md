@@ -46,7 +46,13 @@ Email output uses a deferred file pattern: Claude writes a JSON file to the temp
 
 ## Emissary threads
 
-When the bot sends an email on behalf of a user, the outbound message is tracked in the `sent_emails` table (Message-ID, recipient, user, conversation_token). When external contacts reply, the email poller matches `References` headers against sent emails and creates tasks with `output_target="talk"` routed to the originating Talk conversation.
+When the bot sends an email on behalf of a user, the outbound message is tracked in the `sent_emails` table (Message-ID, recipient, user, conversation_token, plus an origin descriptor recording the surface+channel the thread started on). When external contacts reply, the email poller matches `References` headers against sent emails and creates a task routed by the user's `email_reply_routing` policy:
+
+- `origin+thread` (default) — deliver the reply to the conversation's origin surface (`web` / `talk` / etc.) **and** mirror it back over email to the thread.
+- `origin` — origin surface only.
+- `thread` — email thread only.
+
+The origin descriptor self-addresses the surface and channel, so a reply to a web-started thread lands back in the right web room rather than defaulting to Talk. Replies whose origin can't be recovered (plus-address / sender-match paths with no descriptor) fall back to the user's resolved Talk room.
 
 The bot drafts a response and asks for confirmation. On approval, the task re-executes with `confirmation_context` injected, instructing it to send the draft rather than re-draft. Pending confirmations are auto-cancelled when the user sends a new message in the same conversation.
 

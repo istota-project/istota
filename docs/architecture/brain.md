@@ -2,7 +2,7 @@
 
 The Brain layer (`src/istota/brain/`) is the single seam between executor orchestration and model invocation. The executor builds a fully composed prompt + env + sandbox configuration and hands a `BrainRequest` to a `Brain` implementation. Brains own the call to the model, stream parsing, and transient-API retry. Everything else — memory, skills, context, sandboxing, deferred DB writes, malformed-output detection, and result composition — stays in the executor.
 
-Two brains ship behind the same protocol: `ClaudeCodeBrain` (the default, a subprocess wrapper) and `NativeBrain` (Istota's own in-process agent loop against any OpenAI-compatible model). The executor doesn't change when you swap between them.
+Three brains ship behind the same protocol: `ClaudeCodeBrain` (the default, a headless `claude -p` subprocess wrapper), `NativeBrain` (Istota's own in-process agent loop against any OpenAI-compatible model), and `TmuxClaudeBrain` (drives the interactive `claude` TUI in a detached tmux session, keeping traffic on subscription billing). The executor doesn't change when you swap between them. `make_brain` selects on `config.brain.kind` (`KNOWN_BRAIN_KINDS = {"claude_code", "native", "tmux_claude"}`); an unknown kind raises `ValueError` at startup.
 
 ## Layout
 
@@ -15,7 +15,10 @@ brain/
 ├── claude_code.py  # ClaudeCodeBrain — wraps the `claude` CLI subprocess +
 │                   # owns the Anthropic model namespace (canonical IDs,
 │                   # MODEL_ALIASES, DEFAULT_ROLE_TARGETS, resolver methods)
-└── native.py       # NativeBrain — drives Istota's in-process agent loop
+├── native.py       # NativeBrain — drives Istota's in-process agent loop
+└── tmux_claude.py  # TmuxClaudeBrain — drives the interactive `claude` TUI in a
+                    # detached tmux session; delegates model resolution to a
+                    # composed ClaudeCodeBrain, only implements execute()
 ```
 
 The native loop's machinery lives in sibling packages: `llm/` (the provider abstraction — `openai_compat` is the only provider), `agent/` (the loop and tool dispatch), and `session/` (turn state, compaction, retry).
@@ -51,7 +54,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | Field | Notes |
 |---|---|
 | `prompt` | Fully composed prompt (emissaries + persona + memory + skills + context + request) |
-| `allowed_tools` | From `executor.build_allowed_tools()` — `["Read","Write","Edit","Grep","Glob","Bash"]` |
+| `allowed_tools` | From `executor.build_allowed_tools()` — `["Read","Write","Edit","Grep","Glob","Bash","WebSearch","WebFetch"]`. For ClaudeCodeBrain / TmuxClaudeBrain the list contents no longer reach the CLI (both run with `--dangerously-skip-permissions`, not an `--allowedTools` allowlist); the names only matter to NativeBrain, which filters its in-process tool set by them. A non-empty list is also the signal that distinguishes a tool-bearing task from a text-only one (empty = no tools, no skip-permissions, e.g. the sleep cycle). |
 | `cwd` | Subprocess working directory (`config.temp_dir`) |
 | `env` | Per-task env (already credential-stripped if the skill proxy is enabled) |
 | `timeout_seconds` | `config.scheduler.task_timeout_minutes * 60` |
@@ -79,7 +82,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 
 Wraps the `claude` CLI subprocess. Owns:
 
-1. **Command construction** — `claude -p - --allowedTools ... --disallowedTools Agent Workflow`, plus optional `--model`, `--effort`, `--system-prompt-file`, and (in streaming mode) `--output-format stream-json --verbose --include-partial-messages`. The last flag makes the CLI emit answer / reasoning text token-by-token as `stream_event` frames *before* the whole `assistant` block lands — without it the final response would arrive as one block and dump all at once on stream surfaces (web / REPL).
+1. **Command construction** — `claude -p - --dangerously-skip-permissions --disallowedTools Agent Workflow`, plus optional `--model`, `--effort`, `--system-prompt-file`, and (in streaming mode) `--output-format stream-json --verbose --include-partial-messages`. Tool-bearing tasks no longer pass an `--allowedTools` allowlist — the model gets its full default toolset and the security boundary is the bwrap sandbox + network proxy + clean env, not an interactive permission prompt. `Agent` + `Workflow` (the harness's multi-agent fan-out) stay denied so Istota orchestrates through its own skills. Text-only invocations (empty `allowed_tools`, e.g. the sleep cycle) emit no tool flags and no skip-permissions. The `--include-partial-messages` flag makes the CLI emit answer / reasoning text token-by-token as `stream_event` frames *before* the whole `assistant` block lands — without it the final response would arrive as one block and dump all at once on stream surfaces (web / REPL).
 2. **Sandbox wrap** — calls `req.sandbox_wrap(cmd)` if provided so the executor's bwrap configuration applies.
 3. **Subprocess** — `Popen` (streaming) or `subprocess.run` (simple), prompt via stdin to avoid `E2BIG` on large prompts; stderr drained on a background thread to prevent deadlock.
 4. **Stream parsing** — line-by-line via `make_stream_parser()` from `_events.py`, dispatching `ResultEvent` → final result, `ToolUseEvent` / `TextEvent` → trace + on_progress, `ContextManagementEvent` → `cm_boundary` marker in trace. The `stream_event` partial frames parse into `TextDeltaEvent` / `ThinkingDeltaEvent` and go to `on_progress` only (never the trace); the trailing whole-block `TextEvent` / `ThinkingEvent` still records the trace and is deduped against the deltas executor-side (text via `_delta_seen`, thinking via `_thinking_seen`). On push surfaces (Talk) the deltas are dropped and `TextEvent` → `progress_text` stands.
@@ -104,7 +107,7 @@ Both are re-exported from `executor` for `scheduler.py` and tests; canonical hom
 
 ```toml
 [brain]
-kind = "claude_code"  # "claude_code" | "native"
+kind = "claude_code"  # "claude_code" | "native" | "tmux_claude"
 
 [brain.native]         # only when kind = "native" (or routed-to)
 provider = "openai_compat"
@@ -112,12 +115,17 @@ model = "claude-sonnet-4-6"
 base_url = "https://api.anthropic.com/v1"
 # api_key via ISTOTA_BRAIN_NATIVE_API_KEY (kept out of TOML)
 
+[brain.tmux]           # only when kind = "tmux_claude" (or routed-to)
+# All fields default in code to the prototype's pinned values, so an
+# absent block is behavioral parity. See config.example.toml for the
+# full set (marker heuristics, circuit-breaker thresholds, CLI pin).
+
 [brain.source_type_overrides]   # per-source-type routing (gradual rollout)
 scheduled = "native"
 heartbeat = "native"
 ```
 
-Defaults to `"claude_code"`, so existing deployments need no changes. `source_type_overrides` maps a task's `source_type` to a brain kind, overriding `kind` for matching tasks — the gradual-rollout knob (`brain.resolve_brain_kind` resolves it per task; unknown kinds are logged and ignored). The second brain kind is `"native"` — istota's own in-process agent loop. See the [native brain operator runbook](../configuration/native-brain.md) for enabling it, the dev tiers, and shadow compare.
+Defaults to `"claude_code"`, so existing deployments need no changes. `source_type_overrides` maps a task's `source_type` to a brain kind, overriding `kind` for matching tasks — the gradual-rollout knob (`brain.resolve_brain_kind` resolves it per task; unknown kinds are logged and ignored). `"native"` is istota's own in-process agent loop — see the [native brain operator runbook](../configuration/native-brain.md) for enabling it, the dev tiers, and shadow compare. `"tmux_claude"` drives the interactive `claude` TUI in a detached tmux session to keep traffic on subscription billing; a launch-level failure returns `stop_reason="fallback"` so the executor reruns the task headless, and a process-global circuit breaker short-circuits to `claude_code` for a cooldown after repeated launch failures.
 
 ## Adding a new brain
 

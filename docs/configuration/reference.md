@@ -97,6 +97,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `shared_file_check_interval` | `120` | Seconds between shared file checks |
 | `heartbeat_check_interval` | `60` | Seconds between heartbeat checks |
 | `db_health_check_interval` | `86400` | Seconds between SQLite `quick_check` + self-heal `REINDEX` sweeps over framework + per-user DBs (24h) |
+| `scheduler_stats_interval` | `60` | Seconds between `scheduler_stats` health-line emits (threads / fds / rss / running-tasks / active-workers) — one `key=value` INFO line per interval on the `istota.scheduler.stats` logger, for catching resource leaks early. 0 disables |
 
 ### Progress & event streaming
 
@@ -193,10 +194,12 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 
 | Setting | Default | Description |
 |---|---|---|
-| `kind` | `"claude_code"` | Brain implementation. `"claude_code"` (default) wraps the `claude` CLI subprocess; `"native"` runs Istota's own in-process agent loop against any OpenAI-compatible model (configured under `[brain.native]`). |
+| `kind` | `"claude_code"` | Brain implementation. `"claude_code"` (default) wraps the headless `claude -p` CLI subprocess; `"native"` runs Istota's own in-process agent loop against any OpenAI-compatible model (configured under `[brain.native]`); `"tmux_claude"` drives the interactive `claude` TUI in a detached tmux session to keep traffic on subscription billing (configured under `[brain.tmux]`, with automatic fallback to `claude_code`). |
 | `source_type_overrides` | `{}` | Per-`source_type` brain override (e.g. route `scheduled` to `native` while interactive tasks stay on `claude_code`). |
 
 `[brain.native]` (used when `kind = "native"` or a `source_type_overrides` entry routes to it): `provider` (only `"openai_compat"`), `model` (explicit id), `base_url`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`. The API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file.
+
+`[brain.tmux]` (used when `kind = "tmux_claude"` or routed-to): every field defaults in code to the prototype's pinned values, so an absent block is behavioral parity. Knobs include `fallback_trip_threshold`, `fallback_cooldown_seconds`, `ready_timeout_seconds`, `tmux_command_timeout`, `cli_version_pin`, and the pane-text marker lists (`ready_markers`, `trust_markers`, `theme_markers`, `bypass_warning_marker`, `bypass_accept_marker`, `error_markers`) — heuristics pinned to a `claude` CLI version, so a CLI reword that breaks readiness detection is a config hotfix, not a code release. See `config.example.toml` for the full annotated block.
 
 ## `[sleep_cycle]`
 
