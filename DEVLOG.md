@@ -2,6 +2,49 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-15: Integrate money fully into istota; drop standalone CLI
+
+Money still carried a standalone identity (its own `money` console script, `MONEY_CONFIG` env / `config.toml` discovery / `load_context`, a `[users.*]` TOML format, and TOML config-read fallbacks throughout `money/cli.py`) even though in-Istota every path already resolved config from the per-user DB via `resolve_for_user` → `config_store`. The directive: money no longer exists outside istota, so it should integrate fully into istota patterns and stay entirely usable from the CLI following those patterns.
+
+Chose option (A) from the design discussion: keep the money Click command-tree as the internal engine and drive it from istota, rather than rewriting ~40 tested commands as argparse. Operational accounting commands are now reachable as `istota money <op> …` (e.g. `istota money invoice generate -u USER`): `cli_money.py` resolves the user the istota way and forwards to the Click tree in-process with a `Context` injected — the same bridge the money skill already used. The config-management commands (`config|client|company|service|tax|monarch`) stay native argparse and were left untouched per the request.
+
+Removed the standalone surface entirely: the Click `cli` group is now injection-only (`_require_injected_context`), and config is read solely from the per-user money DB (legacy workspace TOML is still imported once by `_migrate` on first touch; `parse_*_config` survive only as pure parsers + for tests). One argparse quirk drove a design choice: `nargs=REMAINDER` can't capture a leading option, so `istota money list -u U` (options-first, no positional) bubbled up to the top parser. Fix: `cli.main()` peels `money <operational-cmd>` off with a `parse_known_args` pre-pass before the strict `parse_args()` and routes it through `cli_money.dispatch_operational`. Per-command `--help` then requires `-u` (accepted wart); top-level `istota money --help` still lists everything natively.
+
+`test_cli.py` was built almost entirely on the removed `-c config.toml` flow, so it needed a near-total rewrite to the injected-Context pattern (delegated the mechanical migration to a subagent with guardrails, then reviewed the diff). Four standalone-only test classes were deleted; all operational tests were converted with assertions preserved. Fixed the remaining fallout in `test_invoicing.py`, `test_cli_experimental.py` (inject a minimal Context — the group callback now runs before the experimental gate), and `test_monarch_client.py` (seed monarch config in the DB + pass cookie creds via the secrets overlay) by hand. Full suite green: 6436 passed.
+
+Deliberate residual: `money/routes.py` keeps a DB-first→TOML fallback for the web surface — inert in-Istota (DB always seeded), left as-is to bound scope.
+
+**Key changes:**
+- New `istota money <op> …` operational CLI forwarding to the money Click tree in-process; config commands stay native argparse.
+- Removed the `money` console script, `MONEY_CONFIG`/`MONEY_SECRETS_FILE`, `load_context`/`_parse_user_context`/`DEFAULT_SECRETS_FILE`, the `--config/-c` option, and the TOML config-read fallbacks; Click group is injection-only.
+- `cli.main()` peels operational money commands before `parse_args` to work around argparse REMAINDER's leading-option limitation.
+- Migrated the money CLI test suites off the removed standalone loader to injected Context.
+
+**Files added/modified:**
+- `src/istota/cli_money.py` - operational passthrough (`_OPERATIONAL_COMMANDS`, `_add_operational`, `_pop_user`, `_invoke_money_cli`, `dispatch_operational`, `is_operational`)
+- `src/istota/cli.py` - pre-parse peel routing `money <op>` to `cli_money.dispatch_operational`
+- `src/istota/money/cli.py` - removed `load_context`/`_parse_user_context`/`DEFAULT_SECRETS_FILE`; injection-only `cli()` group; DB-only config in `_load_invoicing_config`/`_run_monarch_sync`/`debug_monarch`
+- `pyproject.toml` - dropped the `money` console script
+- `tests/money/test_cli.py`, `tests/money/test_cli_money.py`, `tests/money/test_cli_experimental.py`, `tests/money/test_invoicing.py`, `tests/money/test_monarch_client.py`, `tests/test_money_jobs.py` - migrated to injected Context
+- `.claude/rules/{skills,executor}.md`, `docs/reference/environment-variables.md`, `CHANGELOG.md` - doc updates
+
+## 2026-06-15: Fix invoice counter drift after TOML→DB migration
+
+Generating outstanding invoices was about to reissue invoice numbers that already existed and were paid (the counter thought the highest issued was 235 while the work log and generated PDFs went through 238). Root cause was a split-brain introduced when accounting config moved into the per-user DB: `generate_invoices_for_period` / `invoice create` read `next_invoice_number` from the DB but persisted it only via `update_invoice_number`, which regex-rewrites the old `invoicing.toml` that nothing reads post-migration. So the DB counter never advanced and a later run restarted from the stale value.
+
+Fix derives the starting number from ground truth instead of trusting a separate counter: `max(stored_counter, highest_existing_invoice_number(data_dir) + 1)`, where the helper parses the `INV-` numbers already stamped on work entries. This self-heals the drift and also kills a latent collision where `run-scheduled` reused one in-memory counter across multiple clients in a single run. Persistence now routes to the same backend the config came from via `persist_next_invoice_number` (DB when `has_invoicing_data`, else TOML), with `config_store.set_next_invoice_number` as the targeted DB scalar setter. No manual data fix needed on the deployment — the next real run reconciles the counter.
+
+**Key changes:**
+- Start invoice numbering from one past the highest invoice already issued (work log is ground truth).
+- Persist the advanced counter to whichever backend the config came from (DB in-Istota).
+- Added `highest_existing_invoice_number`, `parse_invoice_number`, `persist_next_invoice_number`, `config_store.set_next_invoice_number`.
+
+**Files added/modified:**
+- `src/istota/money/core/invoicing.py` - defensive start + `persist_next_invoice_number` + helpers
+- `src/istota/money/config_store.py` - `set_next_invoice_number`
+- `src/istota/money/cli.py` - pass `db_path` through generate/create; route persistence
+- `tests/money/test_invoicing.py` - derivation + persistence-backend tests
+
 ## 2026-06-13: Fix init_db migration crash on upgrade DBs (row_factory)
 
 `docker compose up --build` restart-looped on a volume that already held data: `init_db` → `_run_migrations` → `_migrate_unified_rooms` → `_backfill_turns` → `_backfill_turns_for` raised `TypeError: tuple indices must be integers or slices, not str` at `r["conversation_token"]`. Root cause: `init_db` opened a raw `sqlite3.connect()` with no `row_factory`, so the cursor yielded plain tuples, but the unified-rooms backfill (added 2026-06-09) reads task rows by column name. The runtime `get_db` path sets `row_factory = sqlite3.Row`, which is why this only ever bit the init/migration path — and only when completed tasks already existed at migration time (a fresh install has nothing to backfill, so the loop body never runs, which is why every existing test missed it). The `TypeError` also escaped `_step`'s `OperationalError`-only guard, so the completion marker was never written and the container retried forever.
