@@ -961,3 +961,154 @@ class TestCheckScheduledInvoices:
         assert "acme" in result
         assert "beta" in result  # past day 1, catch-up
         assert "gamma" not in result  # on-demand
+
+
+class TestNextInvoiceNumberDerivation:
+    """The starting invoice number must never collide with an already-issued one.
+
+    Regression for the DB-migration counter drift: the counter is loaded from
+    the DB but historically persisted only to a (now-unread) TOML file, so it
+    froze while real invoices marched ahead. Deriving the start defensively
+    from the highest existing invoice self-heals that drift and also prevents
+    collisions when several clients are generated in one run.
+    """
+
+    def test_highest_existing_invoice_number_empty(self, tmp_path):
+        from istota.money.core.invoicing import highest_existing_invoice_number
+
+        assert highest_existing_invoice_number(tmp_path) == 0
+
+    def test_highest_existing_invoice_number_reads_work_entries(self, tmp_path):
+        from istota.money.core.invoicing import highest_existing_invoice_number
+        from istota.money.work import add_work_entry
+
+        add_work_entry(tmp_path, "2026-05-01", "acme", "dev", qty=1, invoice="INV-000236")
+        add_work_entry(tmp_path, "2026-05-01", "acme", "dev", qty=1, invoice="INV-000238")
+        add_work_entry(tmp_path, "2026-05-01", "acme", "dev", qty=1)  # uninvoiced
+
+        assert highest_existing_invoice_number(tmp_path) == 238
+
+    def test_generate_starts_above_highest_existing_when_counter_lags(self, tmp_path):
+        """Counter says 236 but invoices 236-238 already exist: start at 239."""
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
+
+        config_file = tmp_path / "invoicing.toml"
+        config_file.write_text(
+            f'accounting_path = "{tmp_path}"\n'
+            'invoice_output = "invoices"\n'
+            'next_invoice_number = 236\n\n'
+            '[company]\nname = "My Co"\n\n'
+            '[clients.sosf]\nname = "SOSF Inc"\nterms = 30\n\n'
+            '[services.dev]\ndisplay_name = "Dev"\nrate = 150\ntype = "hours"\n'
+            'income_account = "Income:Dev"\n'
+        )
+        config = parse_invoicing_config(config_file)
+
+        # Already-issued invoices, counter never advanced past 236
+        add_work_entry(tmp_path, "2026-05-01", "sosf", "dev", qty=1, invoice="INV-000236")
+        add_work_entry(tmp_path, "2026-05-01", "sosf", "dev", qty=1, invoice="INV-000237")
+        add_work_entry(tmp_path, "2026-05-01", "sosf", "dev", qty=1, invoice="INV-000238")
+        # New uninvoiced work
+        add_work_entry(tmp_path, "2026-06-15", "sosf", "dev", qty=8)
+
+        results = generate_invoices_for_period(
+            config=config, config_path=config_file,
+            accounting_path=tmp_path, data_dir=tmp_path,
+            dry_run=True,
+        )
+        assert len(results) == 1
+        assert results[0]["invoice_number"] == "INV-000239"
+
+    def test_generate_uses_counter_when_ahead_of_existing(self, tmp_path):
+        """When the counter leads the ledger, honor the counter."""
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
+
+        config_file = tmp_path / "invoicing.toml"
+        config_file.write_text(
+            f'accounting_path = "{tmp_path}"\n'
+            'invoice_output = "invoices"\n'
+            'next_invoice_number = 500\n\n'
+            '[company]\nname = "My Co"\n\n'
+            '[clients.sosf]\nname = "SOSF Inc"\nterms = 30\n\n'
+            '[services.dev]\ndisplay_name = "Dev"\nrate = 150\ntype = "hours"\n'
+            'income_account = "Income:Dev"\n'
+        )
+        config = parse_invoicing_config(config_file)
+        add_work_entry(tmp_path, "2026-05-01", "sosf", "dev", qty=1, invoice="INV-000238")
+        add_work_entry(tmp_path, "2026-06-15", "sosf", "dev", qty=8)
+
+        results = generate_invoices_for_period(
+            config=config, config_path=config_file,
+            accounting_path=tmp_path, data_dir=tmp_path,
+            dry_run=True,
+        )
+        assert results[0]["invoice_number"] == "INV-000500"
+
+
+class TestCounterPersistenceBackend:
+    """The advanced counter must land in whichever backend the config came from."""
+
+    def _seed_db(self, tmp_path, next_number):
+        from istota.money import config_store
+
+        db_path = tmp_path / "money.db"
+        config_store.init_db(db_path)
+        # has_invoicing_data() gates DB routing on collection tables, so seed a
+        # company (matching the in-istota state) plus the counter scalar.
+        cfg = InvoicingConfig(
+            accounting_path="", invoice_output="invoices/generated",
+            next_invoice_number=next_number,
+            company=CompanyConfig(name="My Co", key="myco"),
+            clients={}, services={},
+            companies={"myco": CompanyConfig(name="My Co", key="myco")},
+            default_entity="myco",
+        )
+        config_store.save_invoicing(db_path, cfg)
+        return db_path
+
+    def test_persist_writes_db_when_db_backed(self, tmp_path):
+        from istota.money import config_store
+        from istota.money.core.invoicing import persist_next_invoice_number
+
+        db_path = self._seed_db(tmp_path, 236)
+
+        persist_next_invoice_number(240, db_path=db_path, config_path=None)
+
+        assert config_store.load_invoicing(db_path).next_invoice_number == 240
+
+    def test_persist_falls_back_to_toml_without_db(self, tmp_path):
+        from istota.money.core.invoicing import persist_next_invoice_number
+
+        config_file = tmp_path / "invoicing.toml"
+        config_file.write_text('next_invoice_number = 1\n')
+
+        persist_next_invoice_number(7, db_path=None, config_path=config_file)
+
+        assert "next_invoice_number = 7" in config_file.read_text()
+
+    def test_persist_prefers_db_over_toml_when_both_present(self, tmp_path):
+        from istota.money import config_store
+        from istota.money.core.invoicing import persist_next_invoice_number
+
+        db_path = self._seed_db(tmp_path, 1)
+        config_file = tmp_path / "invoicing.toml"
+        config_file.write_text('next_invoice_number = 1\n')
+
+        persist_next_invoice_number(9, db_path=db_path, config_path=config_file)
+
+        assert config_store.load_invoicing(db_path).next_invoice_number == 9
+        # Stale TOML left untouched — the DB is the source of truth
+        assert "next_invoice_number = 1" in config_file.read_text()
+
+
+class TestSetNextInvoiceNumber:
+    def test_round_trip(self, tmp_path):
+        from istota.money import config_store
+
+        db_path = tmp_path / "money.db"
+        config_store.init_db(db_path)
+        config_store.set_next_invoice_number(db_path, 239)
+
+        assert config_store.load_invoicing(db_path).next_invoice_number == 239

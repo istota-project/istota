@@ -570,6 +570,18 @@ def save_invoicing(
             _upsert_service_row(conn, key, svc)
 
 
+def set_next_invoice_number(db_path: Path | str, new_number: int) -> None:
+    """Persist just the ``next_invoice_number`` scalar to the DB.
+
+    A targeted update so the invoice generator can advance the counter without
+    rewriting the whole invoicing config (which would also truncate/replace the
+    companies/clients/services tables).
+    """
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        _kv_set(conn, "invoicing_settings", "next_invoice_number", new_number)
+
+
 def _invoicing_scalar(cfg: InvoicingConfig, key: str) -> Any:
     if key == "accounting_path":
         return cfg.accounting_path or None
