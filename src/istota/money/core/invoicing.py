@@ -244,6 +244,51 @@ def format_invoice_number(number: int) -> str:
     return f"INV-{number:06d}"
 
 
+def parse_invoice_number(number_str: str) -> int | None:
+    """Parse the integer out of an ``INV-000238`` style string (None if it doesn't match)."""
+    match = re.match(r"INV-0*(\d+)", number_str.strip())
+    return int(match.group(1)) if match else None
+
+
+def highest_existing_invoice_number(data_dir: Path) -> int:
+    """Return the highest invoice number already stamped on work entries (0 if none).
+
+    The work log is the ground truth for what's been issued. Deriving the next
+    number from this (rather than trusting a separate counter) self-heals counter
+    drift and prevents duplicate numbers.
+    """
+    from istota.money.work import get_invoice_numbers
+
+    highest = 0
+    for inv in get_invoice_numbers(data_dir):
+        n = parse_invoice_number(inv)
+        if n is not None and n > highest:
+            highest = n
+    return highest
+
+
+def persist_next_invoice_number(
+    new_number: int,
+    *,
+    db_path: Path | None,
+    config_path: Path | None,
+) -> None:
+    """Persist the advanced counter to whichever backend the config came from.
+
+    DB wins when present (the in-istota path): the config is loaded from the DB,
+    so the counter must be written back there — not to a stale TOML file that
+    nobody reads. Falls back to the TOML file for the standalone-CLI escape hatch.
+    """
+    if db_path is not None:
+        from istota.money import config_store
+
+        if config_store.has_invoicing_data(db_path):
+            config_store.set_next_invoice_number(db_path, new_number)
+            return
+    if config_path is not None:
+        update_invoice_number(config_path, new_number)
+
+
 def generate_invoice(
     entries: list[WorkEntry],
     group_name: str,
@@ -279,6 +324,7 @@ def generate_invoices_for_period(
     entity_filter: str | None = None,
     dry_run: bool = False,
     invoice_output_dir: Path | None = None,
+    db_path: Path | None = None,
 ) -> list[dict]:
     """Generate invoices for uninvoiced work entries.
 
@@ -322,7 +368,14 @@ def generate_invoices_for_period(
     base_dir = invoice_output_dir if invoice_output_dir is not None else accounting_path / config.invoice_output
     output_dir = base_dir / year
 
-    invoice_number = config.next_invoice_number
+    # Start at the higher of the stored counter and one past the highest invoice
+    # already issued. The work log is ground truth, so this self-heals counter
+    # drift (e.g. a counter left behind by the DB migration) and prevents
+    # collisions across both runs and multiple clients within one run.
+    invoice_number = max(
+        config.next_invoice_number,
+        highest_existing_invoice_number(data_dir) + 1,
+    )
     results = []
 
     for (client_key, entity_key), client_entity_entries in sorted(grouped.items()):
@@ -389,7 +442,9 @@ def generate_invoices_for_period(
             invoice_number += 1
 
     if not dry_run and results:
-        update_invoice_number(config_path, invoice_number)
+        persist_next_invoice_number(
+            invoice_number, db_path=db_path, config_path=config_path,
+        )
 
     return results
 

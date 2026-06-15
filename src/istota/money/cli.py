@@ -885,6 +885,7 @@ def invoice_generate(ctx, period, client, entity, dry_run):
             period=period, client_filter=client,
             entity_filter=entity, dry_run=dry_run,
             invoice_output_dir=invoice_output_dir,
+            db_path=ctx.db_path,
         )
     except Exception as e:
         _output({"status": "error", "error": str(e)})
@@ -1079,7 +1080,8 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
     """
     from istota.money.core.invoicing import (
         generate_invoice_html, generate_invoice_pdf,
-        format_invoice_number, update_invoice_number,
+        format_invoice_number, highest_existing_invoice_number,
+        persist_next_invoice_number,
         resolve_entity as resolve_entity_fn, build_line_items,
     )
     from istota.money.core.models import InvoiceLineItem, Invoice
@@ -1134,7 +1136,10 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
         return
 
     data_dir = _require_data_dir(ctx)
-    invoice_number = config.next_invoice_number
+    invoice_number = max(
+        config.next_invoice_number,
+        highest_existing_invoice_number(data_dir) + 1,
+    )
     invoice_date = date.today()
     number_str = format_invoice_number(invoice_number)
 
@@ -1191,7 +1196,10 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
     pdf_path = output_dir / pdf_filename
     generate_invoice_pdf(html, pdf_path)
 
-    update_invoice_number(ctx.invoicing_config_path, invoice_number + 1)
+    persist_next_invoice_number(
+        invoice_number + 1, db_path=ctx.db_path,
+        config_path=ctx.invoicing_config_path,
+    )
 
     _output({
         "status": "ok",
@@ -1348,6 +1356,7 @@ def run_scheduled(ctx, dry_run, skip_monarch):
                 accounting_path=accounting_path, data_dir=data_dir,
                 client_filter=client_key, dry_run=dry_run,
                 invoice_output_dir=invoice_output_dir,
+                db_path=ctx.db_path,
             )
             if results and not dry_run:
                 set_invoice_schedule_generation(db_conn, client_key)
