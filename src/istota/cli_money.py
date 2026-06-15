@@ -44,7 +44,9 @@ def _print_error(msg: str) -> int:
 
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     """Register the ``money`` subcommand group on the istota CLI."""
-    p = subparsers.add_parser("money", help="Manage money module config")
+    p = subparsers.add_parser(
+        "money", help="Money module: config management + accounting operations",
+    )
     sub = p.add_subparsers(dest="money_action", required=True)
 
     _add_config(sub)
@@ -53,6 +55,7 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     _add_service(sub)
     _add_tax(sub)
     _add_monarch(sub)
+    _add_operational(sub)
 
 
 def dispatch(args, istota_config) -> int:
@@ -65,6 +68,142 @@ def dispatch(args, istota_config) -> int:
         return handler(args, istota_config)
     except ValueError as exc:
         return _print_error(str(exc))
+
+
+# =============================================================================
+# Operational commands — `istota money list|invoice|work|sync-monarch|…`
+#
+# The accounting operations live in the money Click command-tree
+# (``istota.money.cli``). Rather than reimplement them, we resolve the user the
+# istota way (``resolve_for_user`` → DB) and forward to that tree in-process
+# with the resolved :class:`Context` injected, exactly as the money skill does.
+# Click is an internal engine; the user-facing entry follows istota patterns
+# (``-u USER``, DB-backed, no env-var config, no standalone binary).
+# =============================================================================
+
+# Maps each forwarded subcommand name to its help text. Names mirror the
+# top-level command/group names in ``istota.money.cli``. (The config-management
+# names — config/client/company/service/tax/monarch — are handled natively
+# above and deliberately excluded here.)
+_OPERATIONAL_COMMANDS = {
+    "list": "List transactions in a ledger",
+    "check": "Validate a ledger with bean-check",
+    "balances": "Show account balances",
+    "query": "Run a BQL query against a ledger",
+    "report": "Generate a financial report",
+    "lots": "Show tax lots (experimental: money_tax)",
+    "wash-sales": "Detect wash sales (experimental: money_wash_sales)",
+    "backfill-ids": "Backfill stable transaction ids",
+    "add-transaction": "Append a transaction to a ledger",
+    "edit-transaction": "Edit a transaction in place by id",
+    "import-csv": "Import transactions from a CSV file",
+    "sync-monarch": "Sync transactions from Monarch Money",
+    "debug-monarch": "Health-check Monarch credentials",
+    "run-scheduled": "Run the periodic sync + invoice scheduler",
+    "users": "List users visible to the money CLI",
+    "invoice": "Invoice management (generate/list/paid/create/void)",
+    "work": "Work-entry tracking (list/add/update/remove)",
+}
+
+
+def _add_operational(sub) -> None:
+    """Register one passthrough subparser per operational command.
+
+    ``add_help=False`` + ``REMAINDER`` hand the command's own arguments
+    (including ``--help``) verbatim to the money Click tree.
+    """
+    for name, help_text in _OPERATIONAL_COMMANDS.items():
+        op = sub.add_parser(name, help=help_text, add_help=False)
+        op.add_argument(
+            "rest", nargs=argparse.REMAINDER,
+            help="Arguments forwarded to the money command (use -u/--user)",
+        )
+
+
+def _pop_user(rest: list[str]) -> tuple[str | None, list[str]]:
+    """Pull a ``-u`` / ``--user`` value out of a verbatim arg list.
+
+    Money's Click subcommands never define their own ``-u``, so any ``-u`` /
+    ``--user`` in the forwarded args is the group-level user selector. Returns
+    ``(user_id, remaining_args)``.
+    """
+    out: list[str] = []
+    user: str | None = None
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in ("-u", "--user"):
+            if i + 1 < len(rest):
+                user = rest[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("--user="):
+            user = tok[len("--user="):]
+            i += 1
+            continue
+        if tok.startswith("-u") and len(tok) > 2:
+            user = tok[2:]
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return user, out
+
+
+def _invoke_money_cli(istota_config, user_id: str, click_args: list[str]) -> int:
+    """Forward to the money Click tree with a DB-resolved Context injected."""
+    from click.testing import CliRunner
+
+    from istota.money import load_user_secrets
+    from istota.money.cli import Context, cli
+
+    user_ctx = _load_user_ctx(istota_config, user_id)  # exits(2) on UserNotFound
+    obj = Context()
+    obj.users[user_id] = user_ctx
+    obj.activate_user(user_id)
+    try:
+        obj.secrets = load_user_secrets(user_id, istota_config) or None
+    except Exception:  # secrets are optional; never block a read-only command
+        obj.secrets = None
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["-u", user_id, *click_args],
+        obj=obj, standalone_mode=False, catch_exceptions=True,
+    )
+    if result.output:
+        sys.stdout.write(result.output)
+    if result.exception is not None and not isinstance(result.exception, SystemExit):
+        return _print_error(
+            f"{type(result.exception).__name__}: {result.exception}"
+        )
+    return result.exit_code or 0
+
+
+def _operational_dispatch(args, istota_config) -> int:
+    return dispatch_operational(
+        args.money_action, list(getattr(args, "rest", None) or []), istota_config,
+    )
+
+
+def is_operational(name: str) -> bool:
+    """True if ``name`` is a money operational command (forwarded to Click)."""
+    return name in _OPERATIONAL_COMMANDS
+
+
+def dispatch_operational(name: str, raw_args: list[str], istota_config) -> int:
+    """Forward an operational command + its verbatim args to the money Click tree.
+
+    The single entry both the argparse subparser path and the ``main()`` argv
+    peel funnel through (argparse ``REMAINDER`` can't capture a leading option
+    such as ``-u``, so the peel handles those before ``parse_args``).
+    """
+    user_id, click_args = _pop_user(list(raw_args))
+    if not user_id:
+        return _print_error(f"money {name}: --user/-u is required")
+    return _invoke_money_cli(istota_config, user_id, [name, *click_args])
 
 
 # =============================================================================
@@ -1282,4 +1421,6 @@ _DISPATCH = {
     "service": _service_dispatch,
     "tax": _tax_dispatch,
     "monarch": _monarch_dispatch,
+    # Operational commands all forward to the money Click tree.
+    **{name: _operational_dispatch for name in _OPERATIONAL_COMMANDS},
 }

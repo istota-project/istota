@@ -457,3 +457,82 @@ class TestCombinedImport:
         ])
         assert rc == 2
         assert "wrapper" in err.lower() or "bare" in err.lower()
+
+
+class TestOperationalPassthrough:
+    """`istota money <op>` forwards accounting operations to the money Click tree."""
+
+    def test_pop_user_space_separated(self):
+        user, rest = cli_money._pop_user(["generate", "-u", "alice", "--dry-run"])
+        assert user == "alice"
+        assert rest == ["generate", "--dry-run"]
+
+    def test_pop_user_long_and_equals(self):
+        assert cli_money._pop_user(["list", "--user", "bob"]) == ("bob", ["list"])
+        assert cli_money._pop_user(["list", "--user=bob"]) == ("bob", ["list"])
+
+    def test_pop_user_attached_short(self):
+        assert cli_money._pop_user(["list", "-ubob"]) == ("bob", ["list"])
+
+    def test_pop_user_absent(self):
+        assert cli_money._pop_user(["list", "--ledger", "main"]) == (
+            None, ["list", "--ledger", "main"],
+        )
+
+    def test_operational_requires_user(self):
+        rc, _, err = _run(["money", "list"])
+        assert rc == 2
+        assert "--user/-u is required" in err
+
+    def test_forwards_command_and_strips_user(self, patched_loader):
+        """The subcommand name + remaining args reach the Click tree; -u is pulled out."""
+        captured = {}
+
+        def fake_invoke(istota_config, user_id, click_args):
+            captured["user"] = user_id
+            captured["args"] = click_args
+            return 0
+
+        with patch.object(cli_money, "_invoke_money_cli", side_effect=fake_invoke):
+            rc, _, _ = _run([
+                "money", "invoice", "generate", "-u", "alice", "--dry-run",
+            ])
+        assert rc == 0
+        assert captured["user"] == "alice"
+        assert captured["args"] == ["invoice", "generate", "--dry-run"]
+
+    def test_end_to_end_work_list_empty(self, patched_loader):
+        """A real forward through the Click tree returns JSON for an empty workspace."""
+        import json
+
+        rc, out, err = _run(["money", "work", "list", "-u", "u1"], istota_config=object())
+        assert rc == 0, err
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+
+    def test_dispatch_operational_options_first(self, patched_loader):
+        """The main() peel path: command + options-first args, -u extracted."""
+        captured = {}
+
+        def fake_invoke(istota_config, user_id, click_args):
+            captured["user"] = user_id
+            captured["args"] = click_args
+            return 0
+
+        with patch.object(cli_money, "_invoke_money_cli", side_effect=fake_invoke):
+            rc = cli_money.dispatch_operational(
+                "list", ["-u", "alice", "--account", "Foo"], object(),
+            )
+        assert rc == 0
+        assert captured["user"] == "alice"
+        assert captured["args"] == ["list", "--account", "Foo"]
+
+    def test_dispatch_operational_requires_user(self):
+        rc = cli_money.dispatch_operational("balances", ["--account", "Foo"], object())
+        assert rc == 2
+
+    def test_is_operational(self):
+        assert cli_money.is_operational("invoice")
+        assert cli_money.is_operational("list")
+        assert not cli_money.is_operational("client")
+        assert not cli_money.is_operational("config")

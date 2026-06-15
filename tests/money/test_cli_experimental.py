@@ -2,24 +2,33 @@
 
 These tests invoke the Click ``cli`` group directly via ``CliRunner`` so
 the full decorator stack runs (Click parsing + ``@requires_feature`` +
-``@pass_ctx``). The decorator should short-circuit before any ledger
-machinery loads, so we don't need a real money workspace.
+``@pass_ctx``). A minimal Context is injected (the group callback now
+requires one); the decorator short-circuits before any ledger machinery
+loads, so we don't need a real money workspace.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from click.testing import CliRunner
 
-from istota.money.cli import cli
+from istota.money.cli import Context, UserContext, cli
+
+
+def _injected():
+    obj = Context()
+    obj.users["u"] = UserContext(data_dir=Path("/tmp"), ledgers=[])
+    obj.activate_user("u")
+    return obj
 
 
 class TestLotsGating:
     def test_lots_blocked_without_flag(self, monkeypatch):
         monkeypatch.delenv("ISTOTA_EXPERIMENTAL_FEATURES", raising=False)
         runner = CliRunner()
-        result = runner.invoke(cli, ["lots", "AAPL"])
+        result = runner.invoke(cli, ["-u", "u", "lots", "AAPL"], obj=_injected())
         assert result.exit_code == 1
         payload = json.loads(result.output.strip())
         assert payload["status"] == "error"
@@ -35,7 +44,7 @@ class TestWashSalesGating:
     def test_wash_sales_blocked_without_flag(self, monkeypatch):
         monkeypatch.delenv("ISTOTA_EXPERIMENTAL_FEATURES", raising=False)
         runner = CliRunner()
-        result = runner.invoke(cli, ["wash-sales"])
+        result = runner.invoke(cli, ["-u", "u", "wash-sales"], obj=_injected())
         assert result.exit_code == 1
         payload = json.loads(result.output.strip())
         assert payload["status"] == "error"
@@ -45,7 +54,7 @@ class TestWashSalesGating:
         # money_tax alone doesn't unlock wash-sales — flags are per-command.
         monkeypatch.setenv("ISTOTA_EXPERIMENTAL_FEATURES", "money_tax")
         runner = CliRunner()
-        result = runner.invoke(cli, ["wash-sales"])
+        result = runner.invoke(cli, ["-u", "u", "wash-sales"], obj=_injected())
         assert result.exit_code == 1
         payload = json.loads(result.output.strip())
         assert payload["status"] == "error"

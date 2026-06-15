@@ -100,7 +100,6 @@ all = [
 istota = "istota.cli:main"
 istota-scheduler = "istota.scheduler:main"
 istota-skill = "istota.skill_client:main"
-money = "istota.money.cli:cli"
 
 [build-system]
 requires = ["hatchling"]

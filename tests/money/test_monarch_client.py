@@ -442,49 +442,47 @@ class TestDebugMonarchCommand:
     resolution → vendored client → JSON envelope shape (which heartbeat
     checks will parse).
 
-    We feed the CLI a real config.toml + monarch.toml + secrets file (the
-    standard standalone-CLI flow used by tests/money/test_cli.py), so the
-    same code path that runs in production gets exercised.
+    Monarch config lives in the per-user money DB; we seed it and inject the
+    resolved Context the istota way (the standalone config path is gone).
     """
 
-    def _setup(
+    def _run(
         self, tmp_path, *, session_id="SID-x", csrftoken="CSRF-y",
         with_creds=True,
     ):
-        secrets = tmp_path / "secrets.toml"
+        import tomllib
+
+        from click.testing import CliRunner
+        from istota.money import config_store
+        from istota.money.cli import Context, UserContext, cli
+
+        db_path = tmp_path / "money.db"
+        config_store.init_db(db_path)
+        toml_text = (
+            "[monarch]\n\n"
+            "[monarch.sync]\nlookback_days = 7\n\n"
+            '[monarch.profiles.default]\nledger = "default"\n'
+        )
+        config_store.save_monarch(
+            db_path,
+            config_store.monarch_config_from_toml_dict(tomllib.loads(toml_text)),
+            replace_collections=True,
+        )
+        obj = Context()
+        obj.users["u"] = UserContext(data_dir=tmp_path, ledgers=[], db_path=db_path)
+        obj.activate_user("u")
+        # Monarch cookies live in the encrypted secrets table (cookie-pair auth),
+        # not in the DB config — supplied here via the resolved secrets overlay.
         if with_creds:
-            secrets.write_text(
-                f'[monarch]\nsession_id = "{session_id}"\n'
-                f'csrftoken = "{csrftoken}"\n'
-            )
-        else:
-            secrets.write_text('[monarch]\n')
-
-        monarch_config = tmp_path / "monarch.toml"
-        monarch_config.write_text(
-            '[monarch]\n\n[monarch.sync]\nlookback_days = 7\n'
-        )
-
-        (tmp_path / "main.beancount").write_text("")
-        config = tmp_path / "config.toml"
-        config.write_text(
-            f'data_dir = "{tmp_path}"\n'
-            f'secrets_file = "{secrets}"\n'
-            f'monarch_config = "monarch.toml"\n\n'
-            f'[[ledgers]]\nname = "default"\npath = "{tmp_path}/main.beancount"\n'
-        )
-        return config
+            obj.secrets = {"monarch": {"session_id": session_id, "csrftoken": csrftoken}}
+        return CliRunner().invoke(cli, ["-u", "u", "debug-monarch"], obj=obj)
 
     def test_returns_ok_envelope_on_success(self, monkeypatch, tmp_path):
-        from click.testing import CliRunner
-        from istota.money.cli import cli
-
-        config = self._setup(tmp_path)
         _install_fake_session(monkeypatch, body=json.dumps({
             "data": {"me": {"id": "u-1", "email": "stefan@example.com"}},
         }))
 
-        result = CliRunner().invoke(cli, ["-c", str(config), "debug-monarch"])
+        result = self._run(tmp_path)
         assert result.exit_code == 0, result.output
         envelope = json.loads(result.output)
         assert envelope == {
@@ -493,27 +491,19 @@ class TestDebugMonarchCommand:
         }
 
     def test_returns_error_envelope_on_403(self, monkeypatch, tmp_path):
-        from click.testing import CliRunner
-        from istota.money.cli import cli
-
-        config = self._setup(tmp_path)
         _install_fake_session(
             monkeypatch, status=403,
             body='{"detail":"CSRF Failed: Referer checking failed - no Referer."}',
         )
 
-        result = CliRunner().invoke(cli, ["-c", str(config), "debug-monarch"])
+        result = self._run(tmp_path)
         envelope = json.loads(result.output)
         assert envelope["status"] == "error"
         assert envelope["auth_ok"] is False
         assert "CSRF" in envelope["error"]
 
     def test_returns_error_envelope_when_creds_missing(self, tmp_path):
-        from click.testing import CliRunner
-        from istota.money.cli import cli
-
-        config = self._setup(tmp_path, with_creds=False)
-        result = CliRunner().invoke(cli, ["-c", str(config), "debug-monarch"])
+        result = self._run(tmp_path, with_creds=False)
         envelope = json.loads(result.output)
         assert envelope["status"] == "error"
         assert envelope["auth_ok"] is False

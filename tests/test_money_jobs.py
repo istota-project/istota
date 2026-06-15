@@ -28,39 +28,27 @@ def _conn(tmp_path: Path):
     return conn
 
 
-def _money_toml(data_dir: Path, *, with_invoicing: bool, with_monarch: bool) -> Path:
-    """Write a legacy money config TOML for ``TestJobsForUser`` (pure-logic tests).
+def _make_user_context(
+    data_dir: Path, *, with_invoicing: bool, with_monarch: bool,
+):
+    """Build a ``money.cli.UserContext`` for the ``TestJobsForUser`` matrix.
 
-    The standalone ``money.cli.load_context`` still accepts this form;
-    workspace-mode integration tests should use :func:`_make_workspace`.
+    ``jobs_for_user`` only inspects ``monarch_config_path`` /
+    ``invoicing_config_path`` / ``db_path``. The standalone TOML loader is
+    gone, so we set those fields directly: a dummy path makes the feature
+    "configured" for the path-based fast check.
     """
-    cfg_path = data_dir / "money.toml"
+    from istota.money.cli import UserContext
+
     ledger = data_dir / "main.beancount"
     ledger.write_text("")
-    parts = [
-        f'data_dir = "{data_dir}"',
-        f'db_path = "{data_dir / "money.db"}"',
-        "",
-        "[users.alice]",
-        f'data_dir = "{data_dir}"',
-        f'ledgers = [{{name = "main", path = "{ledger}"}}]',
-    ]
-    if with_invoicing:
-        inv = data_dir / "invoicing.toml"
-        inv.write_text(
-            '[default_entity]\n'
-            'name = "Acme"\n'
-            'address = "1 Way"\n'
-            'email = "x@y.z"\n'
-            'tax_id = "0"\n'
-        )
-        parts.append(f'invoicing_config = "{inv}"')
-    if with_monarch:
-        mon = data_dir / "monarch.toml"
-        mon.write_text('[monarch]\nemail = "x@y.z"\n')
-        parts.append(f'monarch_config = "{mon}"')
-    cfg_path.write_text("\n".join(parts) + "\n")
-    return cfg_path
+    return UserContext(
+        data_dir=data_dir,
+        ledgers=[{"name": "main", "path": ledger}],
+        db_path=data_dir / "money.db",
+        invoicing_config_path=(data_dir / "invoicing.toml") if with_invoicing else None,
+        monarch_config_path=(data_dir / "monarch.toml") if with_monarch else None,
+    )
 
 
 def _make_workspace(
@@ -114,43 +102,33 @@ def _make_app_config(
 
 class TestJobsForUser:
     def test_seeds_run_scheduled_when_only_invoicing_configured(self, tmp_path):
-        from istota.money.cli import load_context
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=False)
-        ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], "alice")
+        uctx = _make_user_context(tmp_path, with_invoicing=True, with_monarch=False)
+        jobs = jobs_for_user(uctx, "alice")
         names = [j["name"] for j in jobs]
         assert names == [f"{MODULE_PREFIX}run_scheduled"]
 
     def test_seeds_run_scheduled_when_only_monarch_configured(self, tmp_path):
-        from istota.money.cli import load_context
-        cfg = _money_toml(tmp_path, with_invoicing=False, with_monarch=True)
-        ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], "alice")
+        uctx = _make_user_context(tmp_path, with_invoicing=False, with_monarch=True)
+        jobs = jobs_for_user(uctx, "alice")
         names = [j["name"] for j in jobs]
         assert names == [f"{MODULE_PREFIX}run_scheduled"]
 
     def test_seeds_run_scheduled_when_fully_configured(self, tmp_path):
-        from istota.money.cli import load_context
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], "alice")
+        uctx = _make_user_context(tmp_path, with_invoicing=True, with_monarch=True)
+        jobs = jobs_for_user(uctx, "alice")
         assert len(jobs) == 1
         assert jobs[0]["name"] == f"{MODULE_PREFIX}run_scheduled"
 
     def test_no_jobs_when_neither_feature_configured(self, tmp_path):
-        from istota.money.cli import load_context
-        cfg = _money_toml(tmp_path, with_invoicing=False, with_monarch=False)
-        ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], "alice")
+        uctx = _make_user_context(tmp_path, with_invoicing=False, with_monarch=False)
+        jobs = jobs_for_user(uctx, "alice")
         assert jobs == []
 
     def test_dispatch_shape_is_skill_task(self, tmp_path):
         """Phase 1.3: jobs are skill-tasks, not shell command-tasks."""
         import json
-        from istota.money.cli import load_context
-        cfg = _money_toml(tmp_path, with_invoicing=True, with_monarch=True)
-        ctx = load_context(str(cfg))
-        jobs = jobs_for_user(ctx.users["alice"], "alice")
+        uctx = _make_user_context(tmp_path, with_invoicing=True, with_monarch=True)
+        jobs = jobs_for_user(uctx, "alice")
         for j in jobs:
             assert "command" not in j
             assert j["skill"] == "money"

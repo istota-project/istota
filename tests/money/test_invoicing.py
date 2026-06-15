@@ -679,20 +679,23 @@ class TestLoadInvoicingConfigReturnsResolvedPaths:
     """_load_invoicing_config must return absolute paths so PDFs land in data_dir."""
 
     def _make_config(self, tmp_path, accounting_path=".", invoice_output="invoices/generated"):
+        from istota.money import config_store
         from istota.money.cli import Context
-        invoicing_toml = tmp_path / "invoicing.toml"
-        invoicing_toml.write_text(
-            f'accounting_path = "{accounting_path}"\n'
-            f'invoice_output = "{invoice_output}"\n'
-            'next_invoice_number = 1\n\n'
-            '[company]\nname = "Co"\n\n'
-            '[clients.acme]\nname = "Acme"\nterms = 30\n\n'
-            '[services.dev]\ndisplay_name = "Dev"\nrate = 100\n'
-        )
+        from istota.money.core.models import CompanyConfig, InvoicingConfig
+        db_path = tmp_path / "money.db"
+        config_store.init_db(db_path)
+        config_store.save_invoicing(db_path, InvoicingConfig(
+            accounting_path=accounting_path, invoice_output=invoice_output,
+            next_invoice_number=1,
+            company=CompanyConfig(name="Co", key="co"),
+            clients={}, services={},
+            companies={"co": CompanyConfig(name="Co", key="co")},
+            default_entity="co",
+        ))
         ctx = Context()
         ctx.data_dir = tmp_path / "data"
         ctx.data_dir.mkdir()
-        ctx.invoicing_config_path = invoicing_toml
+        ctx.db_path = db_path
         return ctx
 
     def test_invoice_output_dir_resolved_relative_to_data_dir(self, tmp_path):
@@ -722,18 +725,21 @@ class TestLoadInvoicingConfigReturnsResolvedPaths:
     def test_fallback_without_data_dir_uses_resolve(self, tmp_path):
         """When data_dir is None, paths should still be absolute via resolve()."""
         from istota.money.cli import _load_invoicing_config, Context
-        invoicing_toml = tmp_path / "invoicing.toml"
-        invoicing_toml.write_text(
-            'accounting_path = "."\n'
-            'invoice_output = "invoices/out"\n'
-            'next_invoice_number = 1\n\n'
-            '[company]\nname = "Co"\n\n'
-            '[clients.a]\nname = "A"\n\n'
-            '[services.s]\ndisplay_name = "S"\nrate = 1\n'
-        )
+        from istota.money import config_store
+        from istota.money.core.models import CompanyConfig, InvoicingConfig
+        db_path = tmp_path / "money.db"
+        config_store.init_db(db_path)
+        config_store.save_invoicing(db_path, InvoicingConfig(
+            accounting_path=".", invoice_output="invoices/out",
+            next_invoice_number=1,
+            company=CompanyConfig(name="Co", key="co"),
+            clients={}, services={},
+            companies={"co": CompanyConfig(name="Co", key="co")},
+            default_entity="co",
+        ))
         ctx = Context()
         ctx.data_dir = None
-        ctx.invoicing_config_path = invoicing_toml
+        ctx.db_path = db_path
         _, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
         assert accounting_path.is_absolute()
         assert invoice_output_dir.is_absolute()

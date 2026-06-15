@@ -20,9 +20,6 @@ def _output(result: dict) -> None:
         sys.exit(1)
 
 
-DEFAULT_SECRETS_FILE = Path("/etc/money/secrets.toml")
-
-
 @dataclass
 class UserContext:
     """Per-user configuration resolved from a [users.*] section."""
@@ -159,18 +156,12 @@ def _load_invoicing_config(ctx: Context):
     ``accounting_path`` points to.
     """
     from istota.money import config_store
-    from istota.money.core.invoicing import parse_invoicing_config
-    if ctx.db_path is not None and config_store.has_invoicing_data(ctx.db_path):
-        config = config_store.load_invoicing(ctx.db_path)
-    elif ctx.invoicing_config_path and ctx.invoicing_config_path.exists():
-        # Standalone CLI escape hatch: read TOML directly when the DB hasn't
-        # been seeded. In-istota always hits the DB branch above.
-        config = parse_invoicing_config(ctx.invoicing_config_path)
-    else:
+    if ctx.db_path is None or not config_store.has_invoicing_data(ctx.db_path):
         raise click.ClickException(
-            "No invoicing config available — DB is empty and no "
-            "invoicing.toml found",
+            "No invoicing config in the DB for this user. Seed it via "
+            "`istota money config import` or `istota money client|company|service add`.",
         )
+    config = config_store.load_invoicing(ctx.db_path)
     if ctx.data_dir:
         accounting_path = _resolve(ctx.data_dir, config.accounting_path)
         invoice_output_dir = _resolve(ctx.data_dir, config.invoice_output)
@@ -180,180 +171,35 @@ def _load_invoicing_config(ctx: Context):
     return config, accounting_path, invoice_output_dir
 
 
-def _parse_user_context(user_data: dict, config_dir: Path) -> UserContext:
-    """Parse a [users.*] section into a UserContext."""
-    raw_data_dir = user_data.get("data_dir", "")
-    if not raw_data_dir:
-        raise click.ClickException("Each user must have a data_dir")
-    data_dir = Path(raw_data_dir).resolve()
+def _require_injected_context(ctx) -> "Context":
+    """The money CLI runs only with an istota-resolved Context injected.
 
-    ledgers = []
-    for entry in user_data.get("ledgers", []):
-        if isinstance(entry, str):
-            # Short form: just a ledger name (path = data_dir/ledgers/{name}.beancount)
-            ledgers.append({
-                "name": entry,
-                "path": data_dir / "ledgers" / f"{entry}.beancount",
-            })
-        else:
-            ledgers.append({
-                "name": entry.get("name", "default"),
-                "path": _resolve(data_dir, entry["path"]),
-            })
-
-    invoicing_config_path = None
-    if user_data.get("invoicing_config"):
-        invoicing_config_path = _resolve(data_dir, user_data["invoicing_config"])
-
-    monarch_config_path = None
-    if user_data.get("monarch_config"):
-        monarch_config_path = _resolve(data_dir, user_data["monarch_config"])
-
-    tax_config_path = None
-    if user_data.get("tax_config"):
-        tax_config_path = _resolve(data_dir, user_data["tax_config"])
-
-    db_path = None
-    if user_data.get("db_path"):
-        db_path = _resolve(data_dir, user_data["db_path"])
-    else:
-        db_path = data_dir / "data" / "money.db"
-
-    return UserContext(
-        data_dir=data_dir,
-        ledgers=ledgers,
-        invoicing_config_path=invoicing_config_path,
-        monarch_config_path=monarch_config_path,
-        tax_config_path=tax_config_path,
-        db_path=db_path,
-    )
-
-
-def load_context(config_path: str | None = None) -> Context:
-    """Load configuration from a money config TOML file and return a Context.
-
-    Config is found via: explicit path, ``MONEY_CONFIG`` env var, or
-    ``./config.toml``. Returns an empty :class:`Context` when no file is
-    configured. Supports multi-user configs with a ``[users]`` section;
-    a top-level ``data_dir`` creates a single implicit ``default`` user.
-
-    Workspace-mode resolution lives in :mod:`istota.money._loader`. The
-    in-process skill resolves a UserContext there and injects it into
-    Click via ``runner.invoke(cli, args, obj=...)``, so this loader only
-    handles the standalone-CLI case.
+    There is no standalone config loader anymore — money is part of istota.
+    Both entry points (the ``istota money …`` operator CLI and the money skill)
+    resolve the user via ``istota.money.resolve_for_user`` (DB-backed) and inject
+    the :class:`Context` through ``CliRunner.invoke(obj=...)``.
     """
-    import os
-
-    import tomli
-
-    mctx = Context()
-
-    if not config_path:
-        config_path = os.environ.get("MONEY_CONFIG", "")
-    if not config_path:
-        cwd_config = Path("config.toml")
-        if cwd_config.exists():
-            config_path = str(cwd_config)
-    if not config_path:
-        return mctx
-
-    config_file = Path(config_path)
-    data = tomli.loads(config_file.read_text())
-    config_dir = config_file.parent.resolve()
-
-    # Load secrets file (credentials kept outside of data_dir / nextcloud mount)
-    secrets_path = None
-    env_secrets = os.environ.get("MONEY_SECRETS_FILE", "")
-    if env_secrets:
-        secrets_path = Path(env_secrets)
-    elif data.get("secrets_file"):
-        # Resolve relative to config dir for secrets_file at top level
-        raw_sf = data["secrets_file"]
-        p = Path(raw_sf)
-        secrets_path = p if p.is_absolute() else config_dir / raw_sf
-    else:
-        secrets_path = DEFAULT_SECRETS_FILE
-
-    if secrets_path and secrets_path.exists():
-        mctx.secrets = tomli.loads(secrets_path.read_text())
-
-    # API key: env var > secrets > config
-    env_api_key = os.environ.get("MONEY_API_KEY", "")
-    secrets_api_key = (mctx.secrets or {}).get("api", {}).get("api_key", "")
-    config_api_key = data.get("api_key", "")
-    mctx.api_key = env_api_key or secrets_api_key or config_api_key or None
-
-    # Multi-user config
-    users_section = data.get("users", {})
-    if users_section:
-        for user_key, user_data in users_section.items():
-            mctx.users[user_key] = _parse_user_context(user_data, config_dir)
-        # Auto-activate if single user
-        if len(mctx.users) == 1:
-            mctx.activate_user(next(iter(mctx.users)))
-        return mctx
-
-    # Legacy single-user config (backward compat)
-    raw_data_dir = data.get("data_dir", "")
-    mctx.data_dir = Path(raw_data_dir).resolve() if raw_data_dir else config_dir
-
-    for entry in data.get("ledgers", []):
-        mctx.ledgers.append({
-            "name": entry.get("name", "default"),
-            "path": _resolve(mctx.data_dir, entry["path"]),
-        })
-
-    if data.get("invoicing_config"):
-        mctx.invoicing_config_path = _resolve(mctx.data_dir, data["invoicing_config"])
-    if data.get("monarch_config"):
-        mctx.monarch_config_path = _resolve(mctx.data_dir, data["monarch_config"])
-    if data.get("tax_config"):
-        mctx.tax_config_path = _resolve(mctx.data_dir, data["tax_config"])
-    if data.get("db_path"):
-        mctx.db_path = _resolve(mctx.data_dir, data["db_path"])
-    else:
-        mctx.db_path = mctx.data_dir / "data" / "money.db"
-
-    # Create implicit "default" user for for_user()/for_default_user() compat
-    mctx.users["default"] = UserContext(
-        data_dir=mctx.data_dir,
-        ledgers=list(mctx.ledgers),
-        invoicing_config_path=mctx.invoicing_config_path,
-        monarch_config_path=mctx.monarch_config_path,
-        tax_config_path=mctx.tax_config_path,
-        db_path=mctx.db_path,
+    if isinstance(ctx.obj, Context) and ctx.obj.users:
+        return ctx.obj
+    raise click.ClickException(
+        "money CLI must be invoked through istota (e.g. `istota money …`); "
+        "there is no standalone config.",
     )
-    mctx.active_user = "default"
-
-    return mctx
 
 
 @click.group()
-@click.option("--config", "-c", "config_path", type=click.Path(exists=True), help="Config file path")
-@click.option("--user", "-u", "user_key", help="User key from config (required when multiple users configured)")
+@click.option("--user", "-u", "user_key", help="Active user key (resolved by istota)")
 @click.pass_context
-def cli(ctx, config_path, user_key):
-    """Money — accounting operations CLI."""
-    # Callers running the CLI in-process (the istota money skill) build a
-    # Context with the resolved UserContext and inject it via
-    # CliRunner.invoke(obj=...). Skip file-based loading in that case.
-    if isinstance(ctx.obj, Context) and ctx.obj.users:
-        if user_key and user_key in ctx.obj.users:
-            ctx.obj.activate_user(user_key)
-        return
+def cli(ctx, user_key):
+    """Money — accounting operations CLI (driven by istota).
 
-    ctx.ensure_object(Context)
-    mctx = load_context(config_path)
-    if user_key:
-        if user_key not in mctx.users:
-            raise click.ClickException(
-                f"Unknown user: {user_key}. Available: {', '.join(mctx.available_users)}"
-            )
+    The caller (the ``istota money …`` CLI or the money skill) resolves the
+    user's :class:`Context` via ``istota.money.resolve_for_user`` and injects it
+    through ``CliRunner.invoke(obj=...)``. There is no file-based config loader.
+    """
+    mctx = _require_injected_context(ctx)
+    if user_key and user_key in mctx.users:
         mctx.activate_user(user_key)
-    elif not mctx.has_single_user and mctx.active_user is None:
-        # Multi-user config with no --user: defer error to commands that need it.
-        pass
-    ctx.obj = mctx
 
 
 @cli.command("users")
@@ -716,22 +562,16 @@ def _run_monarch_sync(ctx, dry_run: bool, ledger: str | None) -> dict:
     """
     from istota.money import config_store
     from istota.money.core.transactions import (
-        parse_monarch_config,
         sync_all_profiles,
         sync_monarch as core_sync,
     )
-    if ctx.db_path is not None and config_store.has_monarch_data(ctx.db_path):
-        config = config_store.load_monarch(ctx.db_path, secrets=ctx.secrets)
-    elif ctx.monarch_config_path and ctx.monarch_config_path.exists():
-        config = parse_monarch_config(
-            ctx.monarch_config_path, secrets=ctx.secrets,
-        )
-    else:
+    if ctx.db_path is None or not config_store.has_monarch_data(ctx.db_path):
         return {
             "status": "error",
-            "error": "No monarch config available — DB is empty and no "
-                     "monarch.toml found",
+            "error": "No monarch config in the DB for this user. Seed it via "
+                     "`istota money monarch …` or `istota money config import`.",
         }
+    config = config_store.load_monarch(ctx.db_path, secrets=ctx.secrets)
     db_conn = _get_db_conn(ctx)
     try:
         if ledger:
@@ -809,20 +649,14 @@ def debug_monarch(ctx):
     from istota.money._vendor.monarch_client import (
         MonarchAuthError, MonarchClient, MonarchCookieAuth,
     )
-    from istota.money.core.transactions import parse_monarch_config
 
-    if ctx.db_path is not None and config_store.has_monarch_data(ctx.db_path):
-        config = config_store.load_monarch(ctx.db_path, secrets=ctx.secrets)
-    elif ctx.monarch_config_path and ctx.monarch_config_path.exists():
-        config = parse_monarch_config(
-            ctx.monarch_config_path, secrets=ctx.secrets,
-        )
-    else:
+    if ctx.db_path is None or not config_store.has_monarch_data(ctx.db_path):
         _output({
             "status": "error", "auth_ok": False,
-            "error": "No monarch config available",
+            "error": "No monarch config in the DB for this user",
         })
         return
+    config = config_store.load_monarch(ctx.db_path, secrets=ctx.secrets)
 
     creds = config.credentials
     if not (creds.session_id and creds.csrftoken):
