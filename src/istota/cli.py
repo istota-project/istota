@@ -1232,6 +1232,20 @@ def cmd_experimental_list(args):
 
 
 def main():
+    # `istota money <op> …` forwards operational commands verbatim to the money
+    # Click tree. argparse REMAINDER can't capture a leading option (e.g.
+    # `money list -u U`), so peel those off before the strict parse_args().
+    from istota import cli_money
+    _pre = argparse.ArgumentParser(add_help=False)
+    _pre.add_argument("-c", "--config")
+    _pre.add_argument("-v", "--verbose", action="store_true")
+    _known, _rest = _pre.parse_known_args()
+    if len(_rest) >= 2 and _rest[0] == "money" and cli_money.is_operational(_rest[1]):
+        config = load_config(Path(_known.config) if _known.config else None)
+        setup_logging(config, verbose=_known.verbose)
+        rc = cli_money.dispatch_operational(_rest[1], _rest[2:], config)
+        sys.exit(rc or 0)
+
     parser = argparse.ArgumentParser(description="Istota CLI")
     parser.add_argument("-c", "--config", help="Path to config file")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose (DEBUG) logging")

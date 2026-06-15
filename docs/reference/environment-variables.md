@@ -71,9 +71,7 @@ Every service-integration env var is declared in the consuming skill's `skill.md
 | `TUMBLR_API_KEY` | `secrets` (`feeds.tumblr_api_key`) | per-user, sensitive |
 | `NTFY_TOPIC` / `NTFY_SERVER_URL` / `NTFY_USERNAME` | `secrets` (`ntfy.*`) | per-user (non-credential) |
 | `NTFY_TOKEN` / `NTFY_PASSWORD` | `secrets` (`ntfy.token` / `ntfy.password`) | per-user, sensitive |
-| `MONEY_CONFIG` | legacy resource `extras.config_path` | per-user; current deployments resolve money in-process |
-| `MONEY_USER` | task `user_id` | override via `user_key` on the resource |
-| `MONEY_SECRETS_FILE` | escape hatch | optional, for direct `money` CLI use; the skill reads creds in-process |
+| `MONEY_USER` | task `user_id` | the only money env var; config is resolved from the per-user money DB via `resolve_for_user`. `MONEY_CONFIG` / `MONEY_SECRETS_FILE` and the standalone `money` binary are gone — money is fully istota-native (reachable as `istota money …`). |
 
 ## Module setup_env hooks
 
