@@ -236,6 +236,7 @@ class QuarterlyTaxEstimate:
     method: str  # "annualized" | "safe_harbor"
     filing_status: str
     w2_months: int
+    annualization_months: int
     # Income
     se_income_ytd: float
     se_income_annualized: float

@@ -351,6 +351,7 @@ export interface TaxEstimateResponse {
 	method: string;
 	filing_status: string;
 	w2_months: number;
+	annualization_months: number;
 	se_income_ytd: number;
 	se_income_annualized: number;
 	w2_income: number;

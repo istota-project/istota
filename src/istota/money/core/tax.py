@@ -168,6 +168,14 @@ FED_CUMULATIVE_PCT: dict[int, float] = {1: 0.25, 2: 0.50, 3: 0.75, 4: 1.00}
 CA_INSTALLMENT_PCT: dict[int, float] = {1: 0.30, 2: 0.40, 3: 0.00, 4: 0.30}
 CA_CUMULATIVE_PCT: dict[int, float] = {1: 0.30, 2: 0.70, 3: 0.70, 4: 1.00}
 
+# IRS annualized-income installment method (Form 2210 Schedule AI / 1040-ES).
+# Each payment quarter annualizes income earned through the end of its period.
+# Period end months: Q1=Mar(3), Q2=May(5), Q3=Aug(8), Q4=Dec(12). The
+# annualization factor is 12 / period_months: Q1 x4, Q2 x2.4, Q3 x1.5, Q4 x1.
+# (NOT even calendar quarters of 3/6/9/12 months — those over-state the Q2/Q3
+# periods and under-project mid-year income.)
+ANNUALIZATION_PERIOD_END_MONTH: dict[int, int] = {1: 3, 2: 5, 3: 8, 4: 12}
+
 
 # =============================================================================
 # Pure calculation functions
@@ -307,6 +315,45 @@ def compute_ca_tax(
     return taxable, std_ded, tax
 
 
+def annualization_months(
+    quarter: int, tax_year: int, today: date | None = None
+) -> int:
+    """Number of months of income to annualize from for a payment quarter.
+
+    Defaults to the full IRS annualized-income installment period
+    (``ANNUALIZATION_PERIOD_END_MONTH``: Q1=3, Q2=5, Q3=8, Q4=12). When
+    ``today`` is given and falls before that period has fully elapsed, only the
+    completed months are available, so we annualize from those instead. Scaling
+    partial-year data as if a full period of income existed under- or
+    over-projects the annual figure (the mid-year Q3 bug). Floors at 1.
+    """
+    period_end = ANNUALIZATION_PERIOD_END_MONTH.get(quarter, 12)
+    if today is None:
+        return period_end
+    if today.year > tax_year:
+        elapsed = 12
+    elif today.year < tax_year:
+        elapsed = 0
+    else:
+        elapsed = today.month - 1  # the current month is still in progress
+    return max(1, min(period_end, elapsed))
+
+
+def _project_full_year(ytd: float, months_elapsed: int, target_months: int) -> float:
+    """Project a year-to-date amount to a full- or partial-year total.
+
+    Scales ``ytd`` from the months actually elapsed up to ``target_months``
+    (capped at 12). Never returns less than ``ytd`` — an annualized total can't
+    be below what's already been earned while the income source is ongoing
+    (the "annualized < YTD" bug). Used for W-2 wages and withholding.
+    """
+    if ytd <= 0 or months_elapsed <= 0:
+        return max(ytd, 0.0)
+    monthly = ytd / months_elapsed
+    projected = monthly * min(target_months, 12)
+    return max(projected, ytd)
+
+
 def estimate_quarterly_tax(
     se_income_ytd: float,
     w2_income: float,
@@ -322,27 +369,38 @@ def estimate_quarterly_tax(
     enable_qbi: bool = False,
     current_quarter: int = 1,
     w2_months: int = 12,
+    income_months: int | None = None,
     config: TaxConfig | None = None,
 ) -> QuarterlyTaxEstimate:
     """Compute estimated quarterly tax payment.
 
     current_quarter is the payment quarter (1-4), not the calendar quarter.
-    SE income covers completed quarters through the payment quarter.
+
+    income_months is the number of months of income the YTD figures actually
+    span. When None it defaults to the full IRS annualization period for the
+    quarter (3/5/8/12). Callers that know the real date should pass the
+    date-capped value from ``annualization_months(quarter, year, today)`` so a
+    payment quarter whose period hasn't elapsed yet doesn't annualize partial
+    data as if a full period existed.
 
     w2_months is the expected number of months the W-2 job will last this year
-    (default 12). W-2 income/withholding YTD is projected to w2_months, not
-    to a full 12 months. This handles partial-year employment.
+    (default 12). W-2 income/withholding is projected from income_months to
+    w2_months, and never falls below the YTD amount already earned.
 
     For safe_harbor method, uses prior_year tax / 4 as the quarterly target.
     """
-    se_annualize = 4 / current_quarter
-    months_elapsed = current_quarter * 3
-    w2_annualize = w2_months / months_elapsed
+    months = income_months if income_months is not None else annualization_months(
+        current_quarter, tax_year
+    )
+    months = max(1, months)
 
-    se_annualized = se_income_ytd * se_annualize
-    w2_annualized = w2_income * w2_annualize
-    fed_withholding_annual = w2_federal_withholding * w2_annualize
-    state_withholding_annual = w2_state_withholding * w2_annualize
+    # SE income annualizes by 12 / months (x4, x2.4, x1.5, x1 for full periods).
+    se_annualized = max(se_income_ytd, se_income_ytd * (12 / months))
+    # W-2 wages + withholding project from the same elapsed months to the
+    # expected employment months, never below YTD.
+    w2_annualized = _project_full_year(w2_income, months, w2_months)
+    fed_withholding_annual = _project_full_year(w2_federal_withholding, months, w2_months)
+    state_withholding_annual = _project_full_year(w2_state_withholding, months, w2_months)
 
     # SE tax on annualized SE income.
     # W-2 wages are NOT passed here: SE tax SS cap is per-person, and the W-2
@@ -429,6 +487,7 @@ def estimate_quarterly_tax(
         method=method,
         filing_status=filing_status,
         w2_months=w2_months,
+        annualization_months=months,
         se_income_ytd=se_income_ytd,
         se_income_annualized=se_annualized,
         w2_income=w2_income,
@@ -562,14 +621,32 @@ def _parse_amount(value: str) -> float:
     return float(parts[0])
 
 
-def payment_quarter_from_date(today: date) -> int:
+def payment_quarter_from_date(today: date, tax_year: int | None = None) -> int:
     """Determine which estimated tax payment you're making based on today's date.
 
-    Q1 payment due Apr 15 (covers Jan-Mar income)
-    Q2 payment due Jun 15 (covers Jan-Jun income)
-    Q3 payment due Sep 15 (covers Jan-Sep income)
-    Q4 payment due Jan 15 next year (covers full year)
+    Payment quarters map to the IRS annualization periods (see
+    ``ANNUALIZATION_PERIOD_END_MONTH``):
+
+    Q1 payment due Apr 15 (annualizes Jan-Mar income)
+    Q2 payment due Jun 15 (annualizes Jan-May income)
+    Q3 payment due Sep 15 (annualizes Jan-Aug income)
+    Q4 payment due Jan 15 next year (full year)
+
+    The Q4 payment for tax year Y is due in *January of Y+1*, so a bare January
+    date would otherwise read as Q1. Pass ``tax_year`` to disambiguate: a date
+    in any calendar year after the tax year is the (possibly late) Q4 payment,
+    and a date before the tax year floors at Q1. Without ``tax_year`` the date
+    is interpreted within its own calendar year (legacy behavior).
+
+    Resolve ``today`` in the user's timezone, not server UTC — on the Jun 15
+    boundary a UTC clock can read Jun 16 and skip the Q2 payment due that day.
     """
+    if tax_year is not None:
+        if today.year > tax_year:
+            return 4  # the only estimated payment falling in a later year is Q4
+        if today.year < tax_year:
+            return 1  # pre-paying before the tax year begins
+
     month, day = today.month, today.day
     if month < 4 or (month == 4 and day <= 15):
         return 1
@@ -580,23 +657,21 @@ def payment_quarter_from_date(today: date) -> int:
     return 4
 
 
-def _quarter_end_month(quarter: int) -> int:
-    """Return the last month of the given calendar quarter."""
-    return quarter * 3
-
-
 def query_se_income(
-    ledger_path: Path, config: TaxConfig, quarter: int,
+    ledger_path: Path, config: TaxConfig, through_month: int,
 ) -> float:
-    """Query beancount ledger for SE income through end of the given quarter.
+    """Query beancount ledger for net SE income through the given month.
 
-    Quarter here is the payment quarter: Q1 = through month 3, Q2 = through month 6, etc.
-    Returns net SE income as a positive number.
+    ``through_month`` is the last month of the tax year to include (1-12) — e.g.
+    5 includes Jan–May. Callers pass the annualization span
+    (``annualization_months(...)``) so the queried income period matches the
+    period the estimate annualizes from. Returns net SE income as a positive
+    number.
     """
     from istota.money.core.ledger import run_bean_query
 
     year = config.tax_year
-    end_month = _quarter_end_month(quarter)
+    end_month = max(1, min(12, through_month))
 
     # Query SE revenue (Income accounts are negative in beancount)
     # Anchor with ^ to avoid matching e.g. Assets:SK-Income-Fidelity
