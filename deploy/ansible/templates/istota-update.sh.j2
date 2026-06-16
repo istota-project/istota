@@ -97,8 +97,19 @@ sqlite3 "$DB_PATH" "ALTER TABLE scheduled_jobs ADD COLUMN output_target TEXT;" 2
 # Fix DB ownership
 chown "${USER}:${GROUP}" "$DB_PATH"
 
-# Restart scheduler
+# Restart services. All long-running Python services hold the old code in
+# memory until restarted — restarting only the scheduler left the web UI and
+# webhook receiver serving stale code after every auto-update. Gated on the
+# same flags as the Ansible restart handlers.
 log "Restarting ${NAMESPACE}-scheduler"
 systemctl restart "${NAMESPACE}-scheduler"
+{% if istota_web_enabled | default(false) %}
+log "Restarting ${NAMESPACE}-web"
+systemctl restart "${NAMESPACE}-web"
+{% endif %}
+{% if istota_location_enabled | default(false) %}
+log "Restarting ${NAMESPACE}-webhooks"
+systemctl restart "${NAMESPACE}-webhooks"
+{% endif %}
 
 log "Update complete"
