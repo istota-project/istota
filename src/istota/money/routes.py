@@ -62,6 +62,33 @@ def get_user_config(
         raise HTTPException(404, "user not configured")
 
 
+def _resolve_today(request: Request, username: str):
+    """Return today's date in the user's configured timezone.
+
+    Estimated-tax payment quarters hinge on the date (e.g. the Q2 payment is due
+    June 15). Resolving the quarter from the server's UTC clock pushed a
+    Pacific-time user past the boundary a day early — on June 15 evening Pacific
+    the server already saw June 16 and jumped to Q3. Use the user's own tz.
+    """
+    from datetime import date, datetime
+
+    istota_config = getattr(request.app.state, "istota_config", None)
+    tz_name = "UTC"
+    if istota_config is not None:
+        try:
+            uc = istota_config.get_user(username)
+            if uc is not None and getattr(uc, "timezone", None):
+                tz_name = uc.timezone
+        except Exception:
+            pass
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo(tz_name)).date()
+    except Exception:
+        return date.today()
+
+
 def _load_invoicing_config(user_ctx: UserContext):
     """Load invoicing config, preferring DB over the legacy TOML path."""
     from istota.money import config_store
@@ -643,16 +670,17 @@ async def api_invoice_pdf(
 
 @router.get("/tax/estimate")
 async def api_tax_estimate(
+    request: Request,
     ledger: str | None = None,
     method: str = "annualized",
     quarter: int | None = None,
     year: int | None = None,
+    user: dict = Depends(require_auth),
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from datetime import date
-
     from istota.money.core.models import TaxConfig
     from istota.money.core.tax import (
+        annualization_months,
         estimate_quarterly_tax,
         load_tax_inputs,
         payment_quarter_from_date,
@@ -669,8 +697,9 @@ async def api_tax_estimate(
     saved = load_tax_inputs(user_ctx.db_path)
 
     tax_year = year or config.tax_year
-    today = date.today()
-    current_quarter = quarter or payment_quarter_from_date(today)
+    today = _resolve_today(request, user["username"])
+    current_quarter = quarter or payment_quarter_from_date(today, tax_year)
+    months = annualization_months(current_quarter, tax_year, today)
     use_method = method if method != "annualized" else saved.get("method", method)
 
     se_income_ytd = 0.0
@@ -680,7 +709,7 @@ async def api_tax_estimate(
             config_for_query = TaxConfig(
                 **{**config.__dict__, "tax_year": tax_year}
             ) if tax_year != config.tax_year else config
-            se_income_ytd = query_se_income(ledger_path, config_for_query, current_quarter)
+            se_income_ytd = query_se_income(ledger_path, config_for_query, months)
         except Exception:
             pass
 
@@ -703,6 +732,7 @@ async def api_tax_estimate(
         enable_qbi=config.enable_qbi_deduction,
         current_quarter=current_quarter,
         w2_months=saved.get("w2_months", 12),
+        income_months=months,
         config=config,
     )
     return {"status": "ok", **result.__dict__}
@@ -712,13 +742,13 @@ async def api_tax_estimate(
 async def api_tax_estimate_recalculate(
     request: Request,
     ledger: str | None = None,
+    user: dict = Depends(require_auth),
     user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
-    from datetime import date
-
     from istota.money.core.models import TaxConfig
     from istota.money.core.tax import (
+        annualization_months,
         estimate_quarterly_tax,
         payment_quarter_from_date,
         query_se_income,
@@ -735,8 +765,9 @@ async def api_tax_estimate_recalculate(
     body = await request.json()
     tax_year = body.get("year", config.tax_year)
     method = body.get("method", "annualized")
-    today = date.today()
-    current_quarter = body.get("quarter") or payment_quarter_from_date(today)
+    today = _resolve_today(request, user["username"])
+    current_quarter = body.get("quarter") or payment_quarter_from_date(today, tax_year)
+    months = annualization_months(current_quarter, tax_year, today)
 
     def _bval(key, fallback):
         v = body.get(key)
@@ -766,7 +797,7 @@ async def api_tax_estimate_recalculate(
             config_for_query = TaxConfig(
                 **{**config.__dict__, "tax_year": tax_year}
             ) if tax_year != config.tax_year else config
-            se_income_ytd = query_se_income(ledger_path, config_for_query, current_quarter)
+            se_income_ytd = query_se_income(ledger_path, config_for_query, months)
         except Exception:
             pass
 
@@ -785,6 +816,7 @@ async def api_tax_estimate_recalculate(
         enable_qbi=config.enable_qbi_deduction,
         current_quarter=current_quarter,
         w2_months=w2_months,
+        income_months=months,
         config=config,
     )
     return {"status": "ok", **result.__dict__}

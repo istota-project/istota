@@ -263,17 +263,20 @@
 					<details class="info-panel">
 						<summary>How income is annualized</summary>
 						<p>
-							SE income is pulled from the ledger through the end of Q{data.quarter}
-							and multiplied by {4 / data.quarter} to project a full-year figure.
+							This uses the IRS annualized-income method (Form 2210). For the Q{data.quarter}
+							payment, SE income is pulled from the ledger through the first
+							{data.annualization_months} months of the year and annualized
+							&times;{(12 / data.annualization_months).toFixed(2)} to project a full year.
 							{#if data.w2_months < 12}
-								W-2 income is projected to {data.w2_months} months of employment
-								(YTD through {data.quarter * 3} months, scaled by {data.w2_months}/{data.quarter * 3}).
-								This models the W-2 job ending after {data.w2_months} months instead of running all year.
+								W-2 income is projected from those {data.annualization_months} months to
+								{data.w2_months} months of employment (the job ending early), and never
+								falls below the amount already earned.
 							{:else}
-								W-2 income is the YTD amount you entered, annualized the same way as SE income.
+								W-2 income is projected from the same {data.annualization_months} months to a full year.
 							{/if}
 							{#if method === 'annualized'}
-								This self-corrects each quarter as actual income data replaces projections.
+								The period grows each quarter (3, 5, 8, then 12 months), so the projection
+								tightens toward your actual annual income.
 							{/if}
 						</p>
 					</details>

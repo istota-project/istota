@@ -1,16 +1,20 @@
 """Tests for money.core.tax module."""
 
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from istota.money.core.tax import (
+    annualization_months,
     apply_brackets,
     compute_ca_tax,
     compute_federal_tax,
     compute_se_tax,
     estimate_quarterly_tax,
     parse_tax_config,
+    payment_quarter_from_date,
+    ANNUALIZATION_PERIOD_END_MONTH,
     ADDITIONAL_MEDICARE_RATE,
     ADDITIONAL_MEDICARE_THRESHOLD,
 )
@@ -339,10 +343,10 @@ class TestEstimateQuarterlyTax:
             current_quarter=3,
         )
         assert result.quarter == 3
-        # SE annualized: 75000 * (4/3) = 100,000
-        assert result.se_income_annualized == 100_000
-        # W-2 annualized: 90000 * (4/3) = 120,000
-        assert result.w2_income_annualized == 120_000
+        # SE annualized: 75000 * (12/8) = 112,500 (IRS Q3 period = 8 months, x1.5)
+        assert result.se_income_annualized == 112_500
+        # W-2 annualized: 90000 projected from 8 months to a full year = 135,000
+        assert result.w2_income_annualized == 135_000
         # Federal estimated paid reduces net due
         assert result.federal_estimated_paid == 10_000
         assert result.state_estimated_paid == 3_000
@@ -543,6 +547,251 @@ class TestEstimateQuarterlyTax:
         state_total_q4 = q4.state_total_liability
         expected_q4 = round(max(0, state_total_q4 * 1.00 - 8000), 2)
         assert q4.state_quarterly_amount == expected_q4
+
+
+class TestPaymentQuarterFromDate:
+    """The payment quarter for a date. June 15 is the Q2 due date, not Q3 —
+    the boundary that produced wrong numbers when resolved in server time."""
+
+    @pytest.mark.parametrize("d,expected", [
+        (date(2026, 1, 1), 1),
+        (date(2026, 3, 31), 1),
+        (date(2026, 4, 15), 1),    # Q1 due date
+        (date(2026, 4, 16), 2),
+        (date(2026, 6, 15), 2),    # Q2 due date
+        (date(2026, 6, 16), 3),
+        (date(2026, 9, 15), 3),    # Q3 due date
+        (date(2026, 9, 16), 4),
+        (date(2026, 12, 31), 4),
+    ])
+    def test_boundaries(self, d, expected):
+        assert payment_quarter_from_date(d) == expected
+
+    def test_next_year_without_tax_year_is_legacy_q1(self):
+        # Backward compatible: with no tax_year, a January date reads as Q1.
+        assert payment_quarter_from_date(date(2027, 1, 15)) == 1
+
+
+class TestPaymentQuarterCrossYear:
+    """The Q4 payment for tax year Y is due Jan 15 of Y+1. A bare date in
+    January would read as Q1; passing the tax year resolves it to Q4."""
+
+    @pytest.mark.parametrize("d,expected", [
+        (date(2027, 1, 1), 4),     # Q4 window opens in the new year
+        (date(2027, 1, 15), 4),    # Q4 due date
+        (date(2027, 2, 1), 4),     # filed late — still the Q4 payment
+        (date(2027, 6, 30), 4),    # very late
+    ])
+    def test_year_after_tax_year_is_q4(self, d, expected):
+        assert payment_quarter_from_date(d, tax_year=2026) == expected
+
+    @pytest.mark.parametrize("d,expected", [
+        (date(2026, 4, 15), 1),
+        (date(2026, 6, 15), 2),
+        (date(2026, 9, 15), 3),
+        (date(2026, 11, 1), 4),    # within the tax year, post-Sep -> Q4
+    ])
+    def test_same_year_unchanged(self, d, expected):
+        assert payment_quarter_from_date(d, tax_year=2026) == expected
+
+    def test_before_tax_year_is_q1(self):
+        # Pre-paying before the tax year even starts: floor at Q1.
+        assert payment_quarter_from_date(date(2025, 12, 1), tax_year=2026) == 1
+
+
+class TestAnnualizationMonths:
+    """IRS annualized-income installment periods: Q1=3, Q2=5, Q3=8, Q4=12 months."""
+
+    def test_irs_periods_match_form_2210(self):
+        assert ANNUALIZATION_PERIOD_END_MONTH == {1: 3, 2: 5, 3: 8, 4: 12}
+
+    @pytest.mark.parametrize("quarter,expected", [(1, 3), (2, 5), (3, 8), (4, 12)])
+    def test_full_period_without_today(self, quarter, expected):
+        assert annualization_months(quarter, 2026) == expected
+
+    @pytest.mark.parametrize("quarter,today,expected", [
+        (1, date(2026, 4, 15), 3),    # on each due date the period is complete
+        (2, date(2026, 6, 15), 5),
+        (3, date(2026, 9, 15), 8),
+        (4, date(2027, 1, 15), 12),   # Q4 settles in the next calendar year
+    ])
+    def test_on_time_periods_complete(self, quarter, today, expected):
+        assert annualization_months(quarter, 2026, today) == expected
+
+    @pytest.mark.parametrize("quarter,today,expected", [
+        (3, date(2026, 6, 16), 5),    # Q3 mis-selected mid-June: only 5 months real
+        (2, date(2026, 5, 20), 4),    # Q2 computed early in May: 4 complete months
+        (4, date(2026, 6, 15), 5),    # Q4 mid-June: capped hard
+        (1, date(2026, 2, 10), 1),    # Q1 in February: 1 complete month
+    ])
+    def test_caps_to_elapsed_when_period_incomplete(self, quarter, today, expected):
+        assert annualization_months(quarter, 2026, today) == expected
+
+    def test_before_tax_year_floors_at_one(self):
+        assert annualization_months(1, 2026, date(2025, 12, 1)) == 1
+
+
+class TestIrsAnnualizationFactors:
+    """SE income annualizes by 12/period: Q1 x4, Q2 x2.4, Q3 x1.5, Q4 x1."""
+
+    @pytest.mark.parametrize("quarter,factor", [(1, 4.0), (2, 2.4), (3, 1.5), (4, 1.0)])
+    def test_se_factor_per_quarter(self, quarter, factor):
+        result = estimate_quarterly_tax(
+            se_income_ytd=10_000, w2_income=0,
+            w2_federal_withholding=0, w2_state_withholding=0,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026, current_quarter=quarter,
+        )
+        assert result.annualization_months == ANNUALIZATION_PERIOD_END_MONTH[quarter]
+        assert round(result.se_income_annualized, 2) == round(10_000 * factor, 2)
+
+
+class TestW2ProjectionNeverBelowYtd:
+    """An annualized figure can never be below year-to-date while employed."""
+
+    def test_reported_bug_scenario(self):
+        # w2 YTD 80,000 with an 8-month job, computed at Q3. The old code scaled
+        # by 8/9 -> 71,111 (below YTD). It must be >= YTD.
+        result = estimate_quarterly_tax(
+            se_income_ytd=0, w2_income=80_000,
+            w2_federal_withholding=10_000, w2_state_withholding=6_000,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026, current_quarter=3, w2_months=8,
+        )
+        # Q3 full period = 8 months; project 8 -> 8 months = YTD exactly.
+        assert result.w2_income_annualized == 80_000
+        assert result.w2_income_annualized >= 80_000
+
+    def test_contradictory_employment_months_clamps_to_ytd(self):
+        # 8 months of data but a claimed 6-month job: raw projection dips below
+        # YTD; the clamp holds it at YTD.
+        result = estimate_quarterly_tax(
+            se_income_ytd=0, w2_income=80_000,
+            w2_federal_withholding=0, w2_state_withholding=0,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026, current_quarter=3,
+            income_months=8, w2_months=6,
+        )
+        assert result.w2_income_annualized == 80_000
+
+    def test_partial_year_projection_and_withholding(self):
+        # 50,000 over 5 months, a 10-month job -> 50000/5*10 = 100,000.
+        result = estimate_quarterly_tax(
+            se_income_ytd=0, w2_income=50_000,
+            w2_federal_withholding=5_000, w2_state_withholding=0,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026, current_quarter=2,
+            income_months=5, w2_months=10,
+        )
+        assert result.w2_income_annualized == 100_000
+        # Withholding scales by the same ratio: 5000/5*10 = 10,000.
+        assert result.federal_withholding == 10_000
+
+
+class TestIncomeMonthsOverride:
+    def test_income_months_overrides_quarter_period(self):
+        # Q3 normally annualizes from 8 months (x1.5). With only 5 months of
+        # real data, income_months=5 annualizes x2.4 instead.
+        result = estimate_quarterly_tax(
+            se_income_ytd=10_000, w2_income=0,
+            w2_federal_withholding=0, w2_state_withholding=0,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026, current_quarter=3, income_months=5,
+        )
+        assert result.annualization_months == 5
+        assert round(result.se_income_annualized, 2) == 24_000.00
+
+    def test_q3_selected_midyear_does_not_underproject(self):
+        # The exact reported bug: Q3 on June 16 with ~5 months of data. The cap
+        # annualizes x2.4 (5 mo), not the buggy x1.333 (treating it as 9 mo).
+        today = date(2026, 6, 16)
+        months = annualization_months(3, 2026, today)
+        assert months == 5
+        result = estimate_quarterly_tax(
+            se_income_ytd=33_391.01, w2_income=80_000,
+            w2_federal_withholding=0, w2_state_withholding=0,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026,
+            current_quarter=3, income_months=months, w2_months=8,
+        )
+        # 33,391.01 x 12/5 = 80,138.42 (not the buggy 44,521.35).
+        assert round(result.se_income_annualized, 2) == 80_138.42
+        # 80,000 / 5 * 8 = 128,000, and never below the 80,000 YTD.
+        assert result.w2_income_annualized == 128_000
+        assert result.w2_income_annualized >= 80_000
+
+
+class TestYearLongConvergence:
+    """A steady income rate must yield the same full-year projection at every
+    payment date — Q1 through Q4 converge when each period's data is complete."""
+
+    @pytest.mark.parametrize("quarter", [1, 2, 3, 4])
+    def test_se_income_converges(self, quarter):
+        monthly = 5_000.0          # true annual SE = 60,000
+        months = ANNUALIZATION_PERIOD_END_MONTH[quarter]
+        result = estimate_quarterly_tax(
+            se_income_ytd=monthly * months, w2_income=0,
+            w2_federal_withholding=0, w2_state_withholding=0,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026, current_quarter=quarter,
+        )
+        assert round(result.se_income_annualized, 2) == 60_000.00
+
+    @pytest.mark.parametrize("quarter", [1, 2, 3, 4])
+    def test_w2_full_year_converges(self, quarter):
+        monthly = 6_000.0          # true annual W-2 = 72,000
+        months = ANNUALIZATION_PERIOD_END_MONTH[quarter]
+        result = estimate_quarterly_tax(
+            se_income_ytd=0, w2_income=monthly * months,
+            w2_federal_withholding=900.0 * months, w2_state_withholding=0,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026, current_quarter=quarter, w2_months=12,
+        )
+        assert round(result.w2_income_annualized, 2) == 72_000.00
+        # Withholding annualizes consistently: 900 * 12 = 10,800.
+        assert round(result.federal_withholding, 2) == 10_800.00
+
+    @pytest.mark.parametrize("quarter", [1, 2, 3, 4])
+    def test_w2_partial_year_converges(self, quarter):
+        # 8-month job at 6,000/mo -> true annual W-2 = 48,000. At Q4 the YTD
+        # spans 12 calendar months but income only in 8; the clamp keeps it right.
+        monthly, employment_months = 6_000.0, 8
+        period = ANNUALIZATION_PERIOD_END_MONTH[quarter]
+        ytd = monthly * min(period, employment_months)
+        result = estimate_quarterly_tax(
+            se_income_ytd=0, w2_income=ytd,
+            w2_federal_withholding=0, w2_state_withholding=0,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026, current_quarter=quarter,
+            w2_months=employment_months,
+        )
+        assert round(result.w2_income_annualized, 2) == 48_000.00
+
+
+class TestDateDrivenEndToEnd:
+    """Mirror the route flow: today -> payment quarter -> annualization months
+    -> estimate, at each due date with a steady income rate. Same annual result."""
+
+    @pytest.mark.parametrize("today", [
+        date(2026, 4, 15), date(2026, 6, 15),
+        date(2026, 9, 15), date(2027, 1, 15),
+    ])
+    def test_steady_income_same_annual_on_each_due_date(self, today):
+        monthly_se, monthly_w2 = 4_000.0, 7_000.0  # annual SE 48k, W-2 84k
+        quarter = payment_quarter_from_date(today, tax_year=2026)
+        months = annualization_months(quarter, 2026, today)
+        if today == date(2027, 1, 15):
+            assert quarter == 4  # cross-year Q4 resolves correctly
+        result = estimate_quarterly_tax(
+            se_income_ytd=monthly_se * months,
+            w2_income=monthly_w2 * months,
+            w2_federal_withholding=0, w2_state_withholding=0,
+            federal_estimated_paid=0, state_estimated_paid=0,
+            filing_status="mfj", tax_year=2026,
+            current_quarter=quarter, income_months=months, w2_months=12,
+        )
+        assert round(result.se_income_annualized, 2) == 48_000.00
+        assert round(result.w2_income_annualized, 2) == 84_000.00
 
 
 class TestParseTaxConfig:
