@@ -33,11 +33,11 @@ The brain returns a `BrainResult` carrying `(success, result_text, actions_taken
 `ClaudeCodeBrain`, the default brain, builds and invokes:
 
 ```
-claude -p - --allowedTools Read Write Edit Grep Glob Bash --disallowedTools Agent Workflow \
+claude -p - --dangerously-skip-permissions --disallowedTools Agent Workflow \
   --output-format stream-json --verbose
 ```
 
-with optional `--model`, `--effort`, and `--system-prompt-file` flags. See [brain](brain.md) for the full implementation.
+with optional `--model`, `--effort`, and `--system-prompt-file` flags. Tool-bearing tasks run with `--dangerously-skip-permissions` and no `--allowedTools` allowlist — the security boundary is the bwrap sandbox + network proxy + clean env, not an interactive permission prompt. See [brain](brain.md) for the full implementation.
 
 ## Environment variables
 
@@ -108,7 +108,7 @@ Malformed results are reclassified as failures and retried.
 |---|---|
 | `build_clean_env()` | Minimal env for Claude subprocess |
 | `build_stripped_env()` | `os.environ` minus anything containing `PASSWORD`, `SECRET`, `TOKEN`, `API_KEY`, `APP_PASSWORD`, `NC_PASS`, or `PRIVATE_KEY` in its name. Substring match — no preserve list (`ISTOTA_SECRET_KEY` is stripped). For heartbeat/cron commands. |
-| `build_allowed_tools()` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash"]` |
+| `build_allowed_tools()` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"]`. The CLI brains no longer pass this as an `--allowedTools` allowlist (they run `--dangerously-skip-permissions`); the list survives as NativeBrain's in-process tool filter and the non-empty/empty signal for tool-bearing vs text-only tasks. `WebSearch` runs server-side (titles + URLs only), so page reads are steered to the `browse` skill. |
 | `_split_credential_env()` | Separates credential vars for proxy routing using a manifest-derived `credential_set` |
 | `derive_credential_set()` | Sensitive env-var names across all skill manifests (replaces `_PROXY_CREDENTIAL_VARS`) |
 | `derive_authorized_skills()` | Selected skills ∪ skills whose sensitive `EnvSpec`s resolve under this task's context (replaces `_authorized_skills_from_credentials`) |

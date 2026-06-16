@@ -1,11 +1,14 @@
 # Native brain — operator runbook
 
-Istota has two model-invocation backends behind one protocol:
+Istota has three model-invocation backends behind one protocol:
 
-- **`claude_code`** (default) — wraps the `claude` CLI subprocess. Battle-tested; delegates the agentic loop, tool use, and context management to Claude Code.
+- **`claude_code`** (default) — wraps the headless `claude -p` CLI subprocess. Battle-tested; delegates the agentic loop, tool use, and context management to Claude Code.
 - **`native`** — istota's own in-process agent loop against an OpenAI-compatible provider. Gives istota direct control over the loop, tool execution, context compaction, and model selection.
+- **`tmux_claude`** — drives the interactive `claude` TUI in a detached tmux session (keeps traffic on subscription billing), with automatic fallback to `claude_code` and a circuit breaker. Configured under `[brain.tmux]`; see `config.example.toml` for the full block.
 
-Both coexist permanently and are switchable per instance or per task. Switching does not touch executor orchestration (memory, skills, sandbox, deferred writes) — only which `Brain` implementation runs.
+All coexist permanently and are switchable per instance or per task. Switching does not touch executor orchestration (memory, skills, sandbox, deferred writes) — only which `Brain` implementation runs.
+
+This runbook covers the `native` backend.
 
 ## Enabling the native brain
 
