@@ -1411,6 +1411,71 @@ class TestCheckScheduledJobs:
         assert len(result) == 1
 
     @patch("istota.scheduler._sync_cron_files")
+    def test_overlap_guard_skips_when_prior_run_in_flight(self, mock_sync, db_path):
+        """A `* * * * *` job whose previous run is still pending/running must not
+        stack another task — otherwise a wedged worker lets the backlog grow one
+        row/minute (the location-alert incident)."""
+        config = Config(
+            db_path=db_path, users={"alice": UserConfig(timezone="UTC")},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
+        yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
+        with db.get_db(db_path) as conn:
+            cur = conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, conversation_token,
+                    enabled, last_run_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "every-min", "* * * * *", "do it", "room1", 1,
+                 yesterday, yesterday),
+            )
+            job_id = cur.lastrowid
+            # A prior run is still pending — simulates the wedged-queue backlog.
+            db.create_task(
+                conn, prompt="do it", user_id="alice", source_type="scheduled",
+                scheduled_job_id=job_id, queue="background",
+            )
+
+        with db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+        assert result == [], "should not enqueue a second run while one is in flight"
+        # last_run_at must NOT be advanced on skip, so the job fires immediately
+        # once the in-flight run clears (correct for sparse jobs too).
+        with db.get_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT last_run_at FROM scheduled_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        assert row["last_run_at"] == yesterday
+
+    @patch("istota.scheduler._sync_cron_files")
+    def test_overlap_guard_allows_when_prior_run_completed(self, mock_sync, db_path):
+        """Once the previous run reaches a terminal state, the next fire proceeds."""
+        config = Config(
+            db_path=db_path, users={"alice": UserConfig(timezone="UTC")},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
+        yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
+        with db.get_db(db_path) as conn:
+            cur = conn.execute(
+                """INSERT INTO scheduled_jobs
+                   (user_id, name, cron_expression, prompt, conversation_token,
+                    enabled, last_run_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("alice", "every-min", "* * * * *", "do it", "room1", 1,
+                 yesterday, yesterday),
+            )
+            job_id = cur.lastrowid
+            prev = db.create_task(
+                conn, prompt="do it", user_id="alice", source_type="scheduled",
+                scheduled_job_id=job_id, queue="background",
+            )
+            db.update_task_status(conn, prev, "completed", result="ok")
+
+        with db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+        assert len(result) == 1
+
+    @patch("istota.scheduler._sync_cron_files")
     def test_skip_log_channel_flows_to_task(self, mock_sync, db_path):
         """skip_log_channel on a scheduled job should propagate to the created task."""
         user = UserConfig(timezone="UTC")
@@ -3232,6 +3297,55 @@ class TestWorkerPoolIsolation:
 # ---------------------------------------------------------------------------
 
 
+class TestFailAncientNotification:
+    """Aging out a pending task must only notify the user when *they* submitted
+    it. Automated tasks (scheduled jobs, briefings, …) pile up on their own when
+    the queue wedges; notifying their output channel turns one stuck worker into
+    a per-minute 'task cancelled' flood (the location-alert incident)."""
+
+    def _config(self, db_path, tmp_path):
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(url="https://nc.example"),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(),
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=tmp_path / "mount",
+            users={"alice": UserConfig()},
+        )
+
+    def _insert_aged_pending(self, db_path, source_type, scheduled_job_id=None):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="x", user_id="alice", source_type=source_type,
+                conversation_token="room1", scheduled_job_id=scheduled_job_id,
+            )
+            conn.execute(
+                "UPDATE tasks SET created_at = datetime('now', '-5 hours') WHERE id = ?",
+                (task_id,),
+            )
+        return task_id
+
+    @patch("istota.scheduler.send_notification")
+    def test_automated_task_does_not_notify(self, mock_notify, db_path, tmp_path):
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(db_path, tmp_path)
+        self._insert_aged_pending(db_path, "scheduled", scheduled_job_id=49)
+        run_cleanup_checks(config)
+        assert mock_notify.call_count == 0
+
+    @patch("istota.scheduler.send_notification")
+    def test_user_submitted_task_still_notifies(self, mock_notify, db_path, tmp_path):
+        from istota.scheduler import run_cleanup_checks
+
+        config = self._config(db_path, tmp_path)
+        self._insert_aged_pending(db_path, "talk")
+        run_cleanup_checks(config)
+        assert mock_notify.call_count == 1
+
+
 class TestExecuteCommandTask:
     def _make_config(self, db_path, tmp_path):
         mount = tmp_path / "mount"
@@ -3263,6 +3377,29 @@ class TestExecuteCommandTask:
         success, result = _execute_command_task(task, config)
         assert success is True
         assert result == "hello world"
+
+    def test_timeout_kills_backgrounded_grandchild(self, db_path, tmp_path):
+        """A command that backgrounds a child inheriting stdout must still hit
+        the timeout promptly. With plain subprocess.run, the post-timeout
+        communicate() blocks on the grandchild holding the pipe — the wedge that
+        let a hung CRON command heartbeat-hold its worker for hours. The process
+        -group kill releases the pipe so the deadline is honored."""
+        import time as _time
+
+        config = Config(
+            db_path=db_path,
+            nextcloud_mount_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+            scheduler=SchedulerConfig(task_timeout_minutes=0),  # 0s deadline
+        )
+        # Shell exits, but the backgrounded `sleep 30` inherits the stdout pipe.
+        task = self._make_task(command="sleep 30 & echo started")
+        start = _time.monotonic()
+        success, result = _execute_command_task(task, config)
+        elapsed = _time.monotonic() - start
+        assert success is False
+        assert "timed out" in result.lower()
+        assert elapsed < 15, f"timeout wedged on grandchild pipe ({elapsed:.1f}s)"
 
     def test_failure_returns_stderr(self, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
@@ -3708,7 +3845,7 @@ class TestExecuteSkillTask:
             captured["env"] = kwargs.get("env", {})
             return MagicMock(returncode=0, stdout="ok", stderr="")
 
-        with patch("istota.scheduler.subprocess.run", side_effect=_fake_run):
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
             with patch(
                 "istota.scheduler.discover_calendars_for_task",
                 return_value=[],
@@ -3734,7 +3871,7 @@ class TestExecuteSkillTask:
             captured["env"] = kwargs.get("env", {})
             return MagicMock(returncode=0, stdout="ok", stderr="")
 
-        with patch("istota.scheduler.subprocess.run", side_effect=_fake_run):
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
             with patch(
                 "istota.scheduler.discover_calendars_for_task",
                 return_value=[],
@@ -3771,7 +3908,7 @@ class TestExecuteSkillTask:
             captured["env"] = kwargs.get("env", {})
             return MagicMock(returncode=0, stdout="ok", stderr="")
 
-        with patch("istota.scheduler.subprocess.run", side_effect=_fake_run):
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
             with patch(
                 "istota.scheduler.discover_calendars_for_task",
                 return_value=[("primary", "https://cal.example.com/p", True)],
@@ -3809,7 +3946,7 @@ class TestExecuteSkillTask:
             captured["env"] = kwargs.get("env", {})
             return MagicMock(returncode=0, stdout="ok", stderr="")
 
-        with patch("istota.scheduler.subprocess.run", side_effect=_fake_run):
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
             with patch(
                 "istota.scheduler.discover_calendars_for_task",
                 return_value=[],
@@ -3867,7 +4004,7 @@ class TestGarminSyncInProcess:
 
         fake_ctx = MagicMock(user_id="alice")
         with patch(
-            "istota.scheduler.subprocess.run",
+            "istota.scheduler._run_capture",
             side_effect=AssertionError("must not subprocess"),
         ), patch(
             "istota.health.resolve_for_user", return_value=fake_ctx,
@@ -3951,7 +4088,7 @@ class TestGarminSyncInProcess:
             return MagicMock(returncode=0, stdout='{"status":"ok"}', stderr="")
 
         with patch(
-            "istota.scheduler.subprocess.run", side_effect=_fake_run,
+            "istota.scheduler._run_capture", side_effect=_fake_run,
         ) as mock_run, patch(
             "istota.scheduler.discover_calendars_for_task", return_value=[],
         ), patch(

@@ -29,6 +29,12 @@ _SCHEDULER_STATS_LOGGER = logging.getLogger("istota.scheduler.stats")
 # Warn at most once when psutil is unavailable rather than on every emit.
 _psutil_unavailable_warned = False
 
+# Source types the system generates on its own (not user-submitted). Used to
+# suppress the "A task you submitted was cancelled" notice when these age out —
+# notifying their output channel turns one wedged worker into a notification
+# flood (a `* * * * *` cron aging out 130+ backed-up runs).
+_AUTOMATED_SOURCE_TYPES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"})
+
 from . import db
 from .brain import make_brain
 from .consumers import (
@@ -1076,6 +1082,56 @@ def _run_garmin_sync_inprocess(
     return (not res.auth_error), result_text
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL a subprocess and every descendant in its process group."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        # Group already gone, or no getpgid (e.g. not a session leader) —
+        # fall back to killing the direct child.
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _run_capture(
+    cmd, *, timeout: float, cwd: str, env: dict, shell: bool = False,
+) -> subprocess.CompletedProcess:
+    """Run a subprocess capturing stdout/stderr, killing the whole process
+    *group* on timeout.
+
+    ``subprocess.run(timeout=…)`` only SIGKILLs the direct child, then calls
+    ``communicate()`` again to reap it — which blocks indefinitely when an
+    orphaned grandchild inherited the stdout/stderr pipe. A CRON ``command:``
+    that backgrounds a child (or a skill CLI that shells out) therefore wedges
+    its worker past the timeout, and because the per-task heartbeat thread keeps
+    pinging, the stuck-running reaper never reclaims it — the location-alert task
+    held its only background slot for 6+ hours that way. ``start_new_session``
+    puts the child in its own process group so the timeout can ``os.killpg`` the
+    whole tree, releasing the pipe. Re-raises ``TimeoutExpired`` so callers
+    handle the deadline exactly as before; otherwise returns a CompletedProcess
+    so call sites keep using ``.returncode`` / ``.stdout`` / ``.stderr``.
+    """
+    proc = subprocess.Popen(
+        cmd, shell=shell, cwd=cwd, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        # The group is dead now, so this drains the pipes and reaps without
+        # blocking; bound it anyway so a pathological case can't hang the worker.
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
 def _execute_skill_task(
     task: db.Task, config: Config,
 ) -> tuple[bool, str]:
@@ -1173,10 +1229,8 @@ def _execute_skill_task(
 
     cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
     try:
-        proc = subprocess.run(
+        proc = _run_capture(
             cmd,
-            capture_output=True,
-            text=True,
             timeout=timeout,
             cwd=str(config.temp_dir),
             env=env,
@@ -1278,14 +1332,12 @@ def _execute_command_task(
     # point at the wrong user's DB.
     env.update(dispatch_setup_env_hooks(list(skill_index), skill_index, ctx))
     try:
-        proc = subprocess.run(
+        proc = _run_capture(
             task.command,
-            shell=True,
-            capture_output=True,
-            text=True,
             timeout=timeout,
             cwd=str(config.temp_dir),
             env=env,
+            shell=True,
         )
     except subprocess.TimeoutExpired:
         return False, f"Command timed out after {config.scheduler.task_timeout_minutes} minutes"
@@ -2689,6 +2741,13 @@ def run_cleanup_checks(config: Config) -> None:
                 f"Auto-failed ancient pending task: task {task_info['id']} "
                 f"(user: {task_info['user_id']}, source: {task_info['source_type']})"
             )
+            # Notify only for tasks the user actually submitted. Automated tasks
+            # (scheduled jobs, briefings, heartbeats, subtasks) pile up on their
+            # own when the queue wedges; notifying their output channel turns one
+            # stuck worker into a per-minute "task cancelled" flood — the message
+            # ("A task you submitted…") isn't even true for them.
+            if task_info["source_type"] in _AUTOMATED_SOURCE_TYPES:
+                continue
             # Notify user via Talk if conversation_token is set
             if task_info["conversation_token"] and config.nextcloud.url:
                 try:
@@ -3301,6 +3360,21 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                 continue
 
             if should_run:
+                # Overlap guard: don't stack a new run while a prior run of the
+                # same job is still in flight. A `* * * * *` job behind a wedged
+                # single background worker would otherwise grow the queue one
+                # row/minute (the location-alert incident). last_run_at is left
+                # untouched so the job fires the next tick once the in-flight run
+                # clears — correct for sparse jobs too (advancing it would push
+                # the next fire out by a full interval).
+                inflight = db.count_inflight_tasks_for_scheduled_job(conn, job.id)
+                if inflight:
+                    logger.warning(
+                        "Scheduled job '%s' (user: %s) skipped: %d prior run(s) "
+                        "still in flight",
+                        job.name, job.user_id, inflight,
+                    )
+                    continue
                 task_id = db.create_task(
                     conn,
                     prompt=job.prompt,
