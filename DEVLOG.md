@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-17: Stop one hung scheduled task wedging the background queue
+
+A per-minute CRON `command:` job (a `* * * * *` location script) shelled out to `istota-skill` subprocesses and hung. Its task heartbeated for 6.5h while stuck, holding the user's single background worker slot the whole time, so nothing else in the background queue could run. Three compounding gaps turned one hung script into a self-sustaining incident: (1) `check_scheduled_jobs` enqueued a fresh run every fire regardless of whether the prior run was still in flight, so the backlog grew one row/minute behind the wedged slot (130+ pending); (2) `subprocess.run(timeout=…)` only SIGKILLs the *direct* child, then blocks forever in the post-kill `communicate()` when an orphaned grandchild still holds the stdout pipe — so the framework timeout never actually fired, and because the per-task heartbeat thread keeps pinging from a separate thread, the liveness-based stuck-running reaper never reclaimed it either; (3) `fail_ancient_pending_tasks` posted "A task you submitted was cancelled…" to every aged-out task's channel — including the automated backlog — turning the pile-up into a once-a-minute chat flood (and the message wasn't even true for a scheduled job).
+
+Fixes, scoped to all three (verified the live state on the deploy host first: task heartbeated 6.5h, 130+ pending scheduled-bg backlog, the per-minute job confirmed as the source):
+
+- **Overlap guard.** `check_scheduled_jobs` now skips enqueuing a run when `db.count_inflight_tasks_for_scheduled_job(job_id) > 0`. `last_run_at` is deliberately *not* advanced on skip, so the job fires the next tick once the in-flight run clears — correct for sparse jobs too (advancing would push the next fire out a full interval). Composes with the existing `cron_max_staleness` guard: after a long-running run finally clears, a far-past `next_run` then trips the staleness suppression so missed fires don't all replay.
+- **Process-group kill.** New `_run_capture` / `_kill_process_group` helpers run the child under `Popen(start_new_session=True)` and `os.killpg(SIGKILL)` the whole group on timeout, then drain pipes with a bounded second `communicate`. Both `_execute_command_task` and `_execute_skill_task` route through it (re-raising `TimeoutExpired` so their existing except branches are unchanged). The framework now hard-kills the tree at `task_timeout_minutes` even when a child backgrounds grandchildren that inherited the pipe.
+- **Notification suppression.** The `fail_ancient_pending_tasks` loop skips the user-facing notice for `_AUTOMATED_SOURCE_TYPES` (`scheduled`/`briefing`/`heartbeat`/`subtask`); user-submitted source types (talk/email/web/cli/…) still notify as before.
+
+Note the script's own internal timeouts / cadence remain the user's cleanup — fix #2 caps the wedge at `task_timeout_minutes`, it doesn't make a 30-min-per-run cron sensible. Full suite green (6519 passed, 7 skipped).
+
+**Key changes:**
+- `db.count_inflight_tasks_for_scheduled_job(conn, scheduled_job_id)` — non-terminal task count per job, backs the overlap guard.
+- Overlap guard in `check_scheduled_jobs` (skip without advancing `last_run_at`).
+- `_run_capture` + `_kill_process_group`; both subprocess task runners use them.
+- `_AUTOMATED_SOURCE_TYPES` + the suppressed `fail_ancient_pending_tasks` notification branch.
+
+**Files added/modified:**
+- `src/istota/db.py` - `count_inflight_tasks_for_scheduled_job`
+- `src/istota/scheduler.py` - overlap guard; `_run_capture`/`_kill_process_group` + both runners rewired; `_AUTOMATED_SOURCE_TYPES` + notification gate
+- `tests/test_db.py` - `TestCountInflightTasksForScheduledJob`
+- `tests/test_scheduler.py` - overlap-guard cases, `TestFailAncientNotification`, grandchild-pipe timeout test; migrated 6 skill-task tests from patching `subprocess.run` to `_run_capture`
+- `.claude/rules/scheduler.md` - documented the overlap guard, group-kill, and automated-task notification gate
+
 ## 2026-06-17: Get briefing prefetch off the scheduler dispatch thread (ISSUE-143)
 
 A transient upstream blip caused a full task-processing outage: chat in every room went unanswered for ~5.5 minutes with no wait notice. Root cause — the single-threaded scheduler loop built each due briefing's prompt inline (`build_briefing_prompt`: news/yfinance/FinViz/IMAP, per-source ~60s timeouts, no overall deadline). When a source hung, `pool.dispatch()` never ran, so no worker was spawned for any user; nothing was ever claimed, so the per-room "another task is processing" gate never fired and the missing answers were silent.

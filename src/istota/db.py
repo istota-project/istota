@@ -2226,6 +2226,22 @@ def count_recent_web_tasks(
     return int(row[0]) if row else 0
 
 
+def count_inflight_tasks_for_scheduled_job(
+    conn: sqlite3.Connection, scheduled_job_id: int,
+) -> int:
+    """Count non-terminal tasks already queued for a scheduled job — backs the
+    overlap guard in check_scheduled_jobs. A cron that can't keep up (e.g. a
+    ``* * * * *`` job behind a wedged single background worker) must not stack a
+    new run each tick; that grew a 130+ deep backlog one row/minute in the
+    location-alert incident."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE scheduled_job_id = ? "
+        "AND status IN ('pending', 'locked', 'running', 'pending_confirmation')",
+        (scheduled_job_id,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def count_active_web_tasks(
     conn: sqlite3.Connection, token: str, user_id: str,
 ) -> int:

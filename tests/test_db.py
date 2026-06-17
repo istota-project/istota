@@ -14,6 +14,47 @@ def db_path(tmp_path):
     return path
 
 
+class TestCountInflightTasksForScheduledJob:
+    def test_zero_when_none(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.count_inflight_tasks_for_scheduled_job(conn, 49) == 0
+
+    def test_counts_pending_and_running(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="cron", user_id="alice",
+                source_type="scheduled", scheduled_job_id=49, queue="background",
+            )
+            running = db.create_task(
+                conn, prompt="cron", user_id="alice",
+                source_type="scheduled", scheduled_job_id=49, queue="background",
+            )
+            db.update_task_status(conn, running, "running")
+            assert db.count_inflight_tasks_for_scheduled_job(conn, 49) == 2
+
+    def test_ignores_terminal_states(self, db_path):
+        with db.get_db(db_path) as conn:
+            done = db.create_task(
+                conn, prompt="cron", user_id="alice",
+                source_type="scheduled", scheduled_job_id=49, queue="background",
+            )
+            db.update_task_status(conn, done, "completed", result="ok")
+            failed = db.create_task(
+                conn, prompt="cron", user_id="alice",
+                source_type="scheduled", scheduled_job_id=49, queue="background",
+            )
+            db.update_task_status(conn, failed, "failed", error="x")
+            assert db.count_inflight_tasks_for_scheduled_job(conn, 49) == 0
+
+    def test_scoped_to_job_id(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="cron", user_id="alice",
+                source_type="scheduled", scheduled_job_id=49, queue="background",
+            )
+            assert db.count_inflight_tasks_for_scheduled_job(conn, 72) == 0
+
+
 class TestHasActiveForegroundTaskForChannel:
     def test_true_when_pending_fg_task_exists(self, db_path):
         with db.get_db(db_path) as conn:
