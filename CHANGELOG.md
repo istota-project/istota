@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-06-17
+
 ### Added
 - The assistant can now search the web. Web search is available to every task; reading a specific page is routed to the built-in browser so it can handle JavaScript-heavy sites.
 
@@ -749,7 +751,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.23.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.24.0...main
+[0.24.0]: https://gitlab.com/cynium/istota/-/releases/v0.24.0
 [0.23.0]: https://gitlab.com/cynium/istota/-/releases/v0.23.0
 [0.22.0]: https://gitlab.com/cynium/istota/-/releases/v0.22.0
 [0.21.0]: https://gitlab.com/cynium/istota/-/releases/v0.21.0
