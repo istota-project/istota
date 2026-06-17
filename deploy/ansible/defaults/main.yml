@@ -493,7 +493,20 @@ istota_browser_max_sessions: 3
 istota_browser_shm_size: "2gb"
 istota_browser_cpu_limit: "{{ ansible_facts['processor_vcpus'] }}"
 istota_browser_memory_limit: "3G"
-istota_browser_restart_cron: "0 5 * * *"  # Daily restart (5 AM)
+
+# Browser auto-heal watchdog (ISSUE-143). A systemd timer runs the watchdog
+# every interval; it restarts the container only after `debounce` consecutive
+# unhealthy reads, and stops flapping (paging once) after `crashloop_max`
+# restarts within `crashloop_window` seconds. A separate daily-restart timer
+# keeps the scheduled cycle and clears crash-loop state.
+istota_browser_watchdog_interval: 30          # seconds between health checks
+istota_browser_watchdog_debounce: 2           # consecutive unhealthy reads before restart
+istota_browser_watchdog_crashloop_max: 5      # restarts allowed within the window
+istota_browser_watchdog_crashloop_window: 1800  # crash-loop window, seconds (30 min)
+istota_browser_watchdog_state_dir: "/var/lib/{{ istota_namespace }}/browser-watchdog"
+istota_browser_watchdog_ntfy_url: ""          # optional: full ntfy topic URL for restart/crash-loop alerts
+istota_browser_watchdog_alert_email: ""       # optional: email address (requires `mail`) for alerts
+istota_browser_restart_oncalendar: "*-*-* 05:00:00"  # systemd OnCalendar for the daily restart (was 0 5 * * *)
 
 # Devbox container (per-user persistent dev / network-diagnostics environment).
 # When enabled, one container per entry in istota_devbox_users is brought up

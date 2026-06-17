@@ -714,6 +714,56 @@ def _resource_monitor():
 
 
 # ---------------------------------------------------------------------------
+# Liveness server (separate thread + port)
+# ---------------------------------------------------------------------------
+#
+# The Flask API runs single-threaded (Playwright's sync API uses greenlets that
+# can't switch OS threads), so a long in-flight browse blocks every other Flask
+# request — including `/health`. The Docker HEALTHCHECK then times out and marks
+# a *busy-but-healthy* container `unhealthy`, and the watchdog restarts it
+# mid-operation, killing a legitimate session (ISSUE-143, finding 2).
+#
+# This standalone HTTP server answers `/live` on its own thread and port. A
+# Playwright call releases the GIL while it waits on browser I/O, so this thread
+# still runs and responds even while Flask is busy — "busy" no longer reads as
+# "dead". It only reports unhealthy when the Chrome *process* is actually gone
+# (a cheap, non-blocking `poll()`), so a restart means the container is really
+# wedged, not merely working. The HEALTHCHECK targets this endpoint instead of
+# `/health`.
+
+LIVENESS_PORT = int(os.environ.get("BROWSER_LIVENESS_PORT", "9224"))
+
+
+def _start_liveness_server():
+    """Run a tiny liveness HTTP server on its own thread (never blocks)."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _LivenessHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 (stdlib naming)
+            if self.path.split("?", 1)[0] != "/live":
+                self.send_response(404)
+                self.end_headers()
+                return
+            # Non-blocking: a subprocess poll(), no Playwright/Flask round-trip.
+            try:
+                alive = chrome.is_chrome_running()
+            except Exception:
+                alive = False
+            self.send_response(200 if alive else 503)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok\n" if alive else b"chrome-down\n")
+
+        def log_message(self, *args):  # silence per-request stderr spam
+            pass
+
+    server = ThreadingHTTPServer(("0.0.0.0", LIVENESS_PORT), _LivenessHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True, name="liveness")
+    t.start()
+    log.info("Liveness server listening on :%d/live", LIVENESS_PORT)
+
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 
@@ -724,6 +774,7 @@ if __name__ == "__main__":
     log.info("Chrome launched (pid=%d)", chrome._chrome_proc.pid)
     mon = threading.Thread(target=_resource_monitor, daemon=True)
     mon.start()
+    _start_liveness_server()
     # threaded=False: Playwright sync API uses greenlets that can't
     # switch threads. All requests run on the main thread.
     app.run(host="0.0.0.0", port=9223, threaded=False)

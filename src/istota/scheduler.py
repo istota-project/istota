@@ -39,7 +39,6 @@ from .consumers import (
 from .db_health import CheckReport, check_and_repair
 from .events import EventWriter, PROGRESS_MESSAGES
 from .skills.briefing import (
-    build_briefing_prompt,
     get_briefings_for_user,
     parse_briefing_json,
     strip_briefing_preamble,
@@ -2139,14 +2138,28 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
     return await deliver_email_result(config, task, message)
 
 
+def _deferred_briefing_placeholder(briefing_name: str) -> str:
+    """Stand-in prompt stored on a deferred briefing task (ISSUE-143).
+
+    The real prompt is built in the executor at worker-pickup time. This
+    placeholder is only what an inspector (`istota show <id>`) sees on the
+    stored row, and the fallback the executor keeps if the briefing config
+    can't be resolved or its prompt build fails.
+    """
+    return f"Generate the '{briefing_name}' briefing."
+
+
 def check_briefings(db_path, app_config: Config) -> list[int]:
     """
     Check for briefings that should run and queue them as tasks.
 
-    Uses three phases to avoid holding DB locks during slow network I/O:
-    1. Short DB read to check which briefings are due
-    2. Network pre-fetch (market data, newsletters) with NO DB connection
-    3. Short DB write to create tasks
+    The slow network pre-fetch that builds the briefing prompt (news, yfinance,
+    FinViz, IMAP) is NOT done here — it is deferred to the executor when a
+    background worker picks the task up (ISSUE-143). This keeps the scheduler
+    dispatch thread free: a slow or unreachable briefing upstream can no longer
+    stall `pool.dispatch()` and starve task processing for every room. The task
+    carries only the briefing identity (`briefing_name`); the worker resolves
+    the live config and builds the prompt.
 
     Args:
         db_path: Path to the database file
@@ -2235,30 +2248,21 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
     if not due_briefings:
         return []
 
-    # Phase 2: Network pre-fetch — NO DB connection held
-    # build_briefing_prompt does yfinance, FinViz, IMAP fetches which can
-    # take minutes if endpoints are slow/down. Doing this outside the DB
-    # transaction prevents "database is locked" errors for other threads.
-    prepared: list[tuple[str, "BriefingConfig", str]] = []
-    for user_id, user_tz_str, briefing in due_briefings:
-        prompt = build_briefing_prompt(
-            briefing, user_id, app_config, user_tz_str,
-        )
-        prepared.append((user_id, briefing, prompt))
-
-    # Phase 3: Short DB write — create tasks and update last_run
+    # Phase 2: Short DB write — create tasks and update last_run. The prompt
+    # is built later, in the executor, off the dispatch thread (ISSUE-143).
     created_tasks = []
     with db.get_db(db_path) as conn:
-        for user_id, briefing, prompt in prepared:
+        for user_id, _user_tz_str, briefing in due_briefings:
             task_id = db.create_task(
                 conn,
-                prompt=prompt,
+                prompt=_deferred_briefing_placeholder(briefing.name),
                 user_id=user_id,
                 source_type="briefing",
                 conversation_token=briefing.conversation_token,
                 output_target=briefing.output,
                 priority=8,
                 queue="background",
+                briefing_name=briefing.name,
             )
             db.set_briefing_last_run(conn, user_id, briefing.name)
             created_tasks.append(task_id)
@@ -2308,22 +2312,19 @@ def check_briefing_triggers(db_path, config: Config) -> list[int]:
                 trigger_file.unlink()
                 continue
 
-            # Live DB timezone so a web-UI change is honored without restart
-            # (ISSUE-099); the briefing-trigger path holds no conn here.
-            user_tz_str = config.resolve_user_timezone(user_id)
-
-            # Build and queue the briefing task
-            prompt = build_briefing_prompt(briefing, user_id, config, user_tz_str)
+            # Queue the briefing task; the prompt is built in the executor off
+            # the dispatch thread (ISSUE-143), same as the cron path.
             with db.get_db(db_path) as conn:
                 task_id = db.create_task(
                     conn,
-                    prompt=prompt,
+                    prompt=_deferred_briefing_placeholder(briefing.name),
                     user_id=user_id,
                     source_type="briefing",
                     conversation_token=briefing.conversation_token,
                     output_target=briefing.output,
                     priority=8,
                     queue="background",
+                    briefing_name=briefing.name,
                 )
             created_tasks.append(task_id)
             logger.info("Triggered briefing %s for %s (task %d)", briefing_name, user_id, task_id)
@@ -2428,6 +2429,127 @@ def check_db_health(config: Config) -> list[CheckReport]:
             )
 
     return reports
+
+
+def _operator_alert_user(config: Config) -> str | None:
+    """Pick a user to receive operator-level scheduler alerts.
+
+    Prefers the first admin user (sorted for determinism); falls back to the
+    first configured user. ``None`` when no users are configured.
+    """
+    if config.admin_users:
+        return sorted(config.admin_users)[0]
+    if config.users:
+        return sorted(config.users)[0]
+    return None
+
+
+class LoopWatchdog:
+    """Defense-in-depth monitor for a stalled scheduler main loop (ISSUE-143).
+
+    The dispatch loop is single-threaded: if `pool.dispatch()` or an
+    unanticipated per-cycle check blocks (a slow network call that slipped onto
+    the loop thread, a wedged DB sweep), task dispatch stops for every room with
+    no other signal — the failure mode ISSUE-143 describes. This watchdog runs on
+    its own daemon thread, watches a last-tick timestamp the loop bumps each
+    iteration, and logs an ERROR plus fires one operator alert when the loop has
+    gone silent for longer than ``stall_seconds``. It re-arms once the loop
+    recovers, so a transient stall pages once rather than on every check.
+
+    Some loop checks are *known* to block for minutes by design (the nightly
+    sleep cycle runs synchronous LLM extraction per user; the DB-health sweep
+    walks every per-user DB). Those would otherwise trip the watchdog every
+    night. The loop wraps them in ``with watchdog.suspended():`` so the watchdog
+    only fires on *unexpected* stalls — the regressions this is meant to catch.
+    (Those checks do still pause dispatch while they run; moving them off the
+    loop thread is tracked separately.)
+    """
+
+    def __init__(self, config: Config, stall_seconds: int):
+        self._config = config
+        self._stall_seconds = stall_seconds
+        self._last_tick = time.time()
+        self._stop = threading.Event()
+        self._thread: "threading.Thread | None" = None
+        self._alerted = False
+        self._suspended = False
+
+    def tick(self) -> None:
+        """Record a live loop iteration; re-arm after a recovery."""
+        self._last_tick = time.time()
+        if self._alerted:
+            self._alerted = False
+            logger.info("scheduler main loop recovered from stall")
+
+    @contextlib.contextmanager
+    def suspended(self):
+        """Pause stall detection around a known-long synchronous check.
+
+        Resets the tick on both entry and exit so the long operation is not
+        counted as a stall and the first post-resume iteration starts clean.
+        """
+        self._suspended = True
+        self._last_tick = time.time()
+        try:
+            yield
+        finally:
+            self._suspended = False
+            self._last_tick = time.time()
+
+    def start(self) -> None:
+        if self._stall_seconds <= 0:
+            return
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="loop-watchdog",
+        )
+        self._thread.start()
+        logger.info(
+            "STARTUP Started loop-stall watchdog (threshold %ds)",
+            self._stall_seconds,
+        )
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        # Poll at ~1/4 the stall window, clamped to a sane [5, 30]s band.
+        interval = max(5.0, min(30.0, self._stall_seconds / 4))
+        while not self._stop.wait(interval):
+            if self._suspended:
+                continue
+            stalled_for = time.time() - self._last_tick
+            if stalled_for >= self._stall_seconds and not self._alerted:
+                self._alerted = True
+                logger.error(
+                    "scheduler main loop stalled: no dispatch tick for %.0fs "
+                    "(threshold %ds) — task processing is blocked for all rooms",
+                    stalled_for, self._stall_seconds,
+                )
+                self._fire_alert(stalled_for)
+
+    def _fire_alert(self, stalled_for: float) -> None:
+        user_id = _operator_alert_user(self._config)
+        if not user_id:
+            return
+
+        # Deliver off the watchdog thread: the alert path itself goes through the
+        # persistent asyncio loop (run_coro, timeout=None), and if *that* is what
+        # is wedged a synchronous send would block the watchdog forever. A daemon
+        # thread bounds the watchdog's exposure.
+        def _deliver():
+            try:
+                send_notification(
+                    self._config, user_id,
+                    f"⚠️ Scheduler main loop stalled — no dispatch tick for "
+                    f"{stalled_for:.0f}s. Task processing is blocked for all rooms.",
+                    purpose="alert",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("loop-stall alert delivery failed", exc_info=True)
+
+        threading.Thread(target=_deliver, daemon=True, name="loop-watchdog-alert").start()
 
 
 def _emit_scheduler_stats(config: Config, pool: "WorkerPool | None") -> None:
@@ -3556,6 +3678,12 @@ def run_daemon(config: Config) -> None:
     # Create worker pool for per-user concurrent task processing
     pool = WorkerPool(config)
 
+    # Defense-in-depth: a separate thread alerts if the single-threaded main
+    # loop stops ticking (ISSUE-143). The loop bumps watchdog.tick() each
+    # iteration below.
+    watchdog = LoopWatchdog(config, config.scheduler.loop_stall_alert_seconds)
+    watchdog.start()
+
     # Initialize status writer
     from .status_writer import init_status_writer, write_status
     init_status_writer()
@@ -3577,6 +3705,9 @@ def run_daemon(config: Config) -> None:
     last_stats_check = time.time()
 
     while not _shutdown_requested:
+        # Mark the loop alive for the stall watchdog before doing any work.
+        watchdog.tick()
+
         # Dispatch worker threads first — minimizes latency for pending tasks
         try:
             pool.dispatch()
@@ -3617,11 +3748,13 @@ def run_daemon(config: Config) -> None:
                 logger.error("Error checking scheduled jobs: %s", e)
             last_scheduled_job_check = now
 
-        # Check sleep cycles periodically (same interval as briefings)
+        # Check sleep cycles periodically (same interval as briefings). The
+        # extraction runs synchronous per-user LLM calls and can take minutes;
+        # suspend the stall watchdog so a healthy nightly run doesn't page.
         if now - last_sleep_cycle_check >= config.scheduler.briefing_check_interval:
             try:
                 from .memory.sleep_cycle import check_sleep_cycles
-                with db.get_db(config.db_path) as conn:
+                with watchdog.suspended(), db.get_db(config.db_path) as conn:
                     sleep_users = check_sleep_cycles(conn, config)
                     if sleep_users:
                         logger.info("Ran sleep cycle for %d user(s): %s", len(sleep_users), ", ".join(sleep_users))
@@ -3633,7 +3766,7 @@ def run_daemon(config: Config) -> None:
         if now - last_channel_sleep_cycle_check >= config.scheduler.briefing_check_interval:
             try:
                 from .memory.sleep_cycle import check_channel_sleep_cycles
-                with db.get_db(config.db_path) as conn:
+                with watchdog.suspended(), db.get_db(config.db_path) as conn:
                     channel_tokens = check_channel_sleep_cycles(conn, config)
                     if channel_tokens:
                         logger.info("Ran channel sleep cycle for %d channel(s): %s", len(channel_tokens), ", ".join(channel_tokens))
@@ -3706,7 +3839,10 @@ def run_daemon(config: Config) -> None:
         # latent corruption after a deploy.
         if now - last_db_health_check >= config.scheduler.db_health_check_interval:
             try:
-                check_db_health(config)
+                # A full quick_check + REINDEX sweep over every per-user DB can
+                # take a while; suspend the stall watchdog around it.
+                with watchdog.suspended():
+                    check_db_health(config)
             except Exception as e:  # noqa: BLE001
                 logger.error("Error running DB health checks: %s", e)
             last_db_health_check = now
@@ -3737,6 +3873,9 @@ def run_daemon(config: Config) -> None:
         # of waiting a full poll_interval (the gated checks above stay on
         # poll_interval granularity — see _dispatch_sleep).
         _dispatch_sleep(pool, config, lambda: _shutdown_requested)
+
+    # Stop the stall watchdog before tearing the rest down.
+    watchdog.stop()
 
     # Shutdown workers before releasing lock
     pool.shutdown()

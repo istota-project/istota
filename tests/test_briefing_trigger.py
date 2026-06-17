@@ -27,9 +27,8 @@ class TestCheckBriefingTriggers:
         )
         return cfg
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="test prompt")
     @patch("istota.scheduler.db")
-    def test_processes_valid_trigger(self, mock_db, mock_build, tmp_path):
+    def test_processes_valid_trigger(self, mock_db, tmp_path):
         cfg = self._make_config(tmp_path)
         triggers_dir = tmp_path / "triggers"
         triggers_dir.mkdir()
@@ -46,8 +45,10 @@ class TestCheckBriefingTriggers:
         result = check_briefing_triggers(cfg.db_path, cfg)
 
         assert result == [42]
-        mock_build.assert_called_once()
+        # No prompt prefetch on the dispatch thread (ISSUE-143): the task is
+        # created with the briefing identity; the executor builds the prompt.
         mock_db.create_task.assert_called_once()
+        assert mock_db.create_task.call_args.kwargs.get("briefing_name") == "morning"
         # Trigger file should be deleted
         assert not (triggers_dir / "briefing_alice_morning.json").exists()
 

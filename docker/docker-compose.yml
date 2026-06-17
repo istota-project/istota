@@ -423,8 +423,13 @@ services:
       resources:
         limits:
           memory: ${BROWSER_MEMORY_LIMIT:-3G}
+    # Probe the lightweight liveness endpoint on its own thread/port (9224),
+    # not the single-threaded Flask /health (9223): a long in-flight browse
+    # blocks Flask, which would make a busy-but-healthy container read as
+    # unhealthy and get restarted mid-operation (ISSUE-143). A compose
+    # healthcheck overrides the image HEALTHCHECK, so this must match it.
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9223/health | python -c \"import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('browser_connected',False) else 1)\""]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9224/live || exit 1"]
       interval: 30s
       timeout: 10s
       start_period: 15s

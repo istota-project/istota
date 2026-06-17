@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# {{ istota_namespace | capitalize }} browser container watchdog — managed by Ansible.
+#
+# Robust auto-heal for the {{ istota_namespace }}-browser container (ISSUE-143).
+# Replaces the old grep-based cron with:
+#   - debounced restart (only after N consecutive unhealthy reads)
+#   - crash-loop protection (stop flapping + page once when a restart loop forms)
+#   - alerts on every restart, louder on crash-loop
+# The container's Docker HEALTHCHECK targets the lightweight liveness endpoint
+# (:9224/live) so "unhealthy" means actually wedged, not merely busy — a long
+# legitimate browse no longer trips a restart.
+set -euo pipefail
+
+CONTAINER="{{ istota_namespace }}-browser"
+COMPOSE_FILE="{{ istota_home }}/docker-compose.browser.yml"
+STATE_DIR="{{ istota_browser_watchdog_state_dir }}"
+LOG_FILE="/var/log/{{ istota_namespace }}/browser-health.log"
+UNHEALTHY_FILE="$STATE_DIR/consecutive_unhealthy"
+RESTARTS_FILE="$STATE_DIR/restart_timestamps"
+TRIPPED_FILE="$STATE_DIR/crashloop_tripped"
+
+DEBOUNCE={{ istota_browser_watchdog_debounce }}                  # consecutive unhealthy reads before a restart
+CRASHLOOP_MAX={{ istota_browser_watchdog_crashloop_max }}        # max restarts allowed within the window
+CRASHLOOP_WINDOW={{ istota_browser_watchdog_crashloop_window }}  # crash-loop window, seconds
+NTFY_URL="{{ istota_browser_watchdog_ntfy_url }}"
+ALERT_EMAIL="{{ istota_browser_watchdog_alert_email }}"
+
+mkdir -p "$STATE_DIR"
+
+log() { echo "$(date -Is) $*" >> "$LOG_FILE"; }
+
+alert() {
+    # $1 = ntfy priority (default|high|urgent); rest = message
+    local prio="$1"; shift
+    local msg="$*"
+    log "ALERT[$prio] $msg"
+    if [ -n "$NTFY_URL" ]; then
+        curl -fsS -H "Title: {{ istota_namespace }} browser watchdog" \
+            -H "Priority: $prio" -d "$msg" "$NTFY_URL" >/dev/null 2>&1 \
+            || log "ntfy alert delivery failed"
+    fi
+    if [ -n "$ALERT_EMAIL" ] && command -v mail >/dev/null 2>&1; then
+        echo "$msg" | mail -s "{{ istota_namespace }} browser watchdog" "$ALERT_EMAIL" 2>/dev/null || true
+    fi
+}
+
+restart_container() {
+    log "Restarting $CONTAINER"
+    docker compose -f "$COMPOSE_FILE" restart >> "$LOG_FILE" 2>&1 \
+        || docker compose -f "$COMPOSE_FILE" up -d >> "$LOG_FILE" 2>&1 \
+        || log "restart command failed"
+}
+
+# Append the current restart, prune entries older than the window, echo the
+# remaining count.
+record_restart_and_count() {
+    local now cutoff kept count
+    now=$(date +%s)
+    echo "$now" >> "$RESTARTS_FILE"
+    cutoff=$(( now - CRASHLOOP_WINDOW ))
+    kept=$(awk -v c="$cutoff" '$1 >= c' "$RESTARTS_FILE" 2>/dev/null || true)
+    printf '%s\n' "$kept" | sed '/^$/d' > "$RESTARTS_FILE"
+    # Count non-empty lines robustly. `grep -c` exits 1 on no match, which under
+    # `set -e` + `|| echo 0` would double-print; awk always exits 0.
+    count=$(awk 'END {print NR}' "$RESTARTS_FILE" 2>/dev/null || echo 0)
+    echo "$count"
+}
+
+cmd_check() {
+    # Once a crash-loop has tripped, stop touching the container until an
+    # operator clears the flag (or the daily restart clears it). Paged once
+    # at trip time; staying quiet here avoids alert spam every tick.
+    if [ -f "$TRIPPED_FILE" ]; then
+        log "crash-loop tripped; skipping auto-restart (clear $TRIPPED_FILE to resume)"
+        return 0
+    fi
+
+    local status
+    status=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' "$CONTAINER" 2>/dev/null || echo "missing")
+
+    if [ "$status" = "healthy" ]; then
+        : > "$UNHEALTHY_FILE"   # reset the debounce counter
+        return 0
+    fi
+
+    if [ "$status" = "starting" ]; then
+        # Inside the HEALTHCHECK start-period — not yet a failure.
+        return 0
+    fi
+
+    # Anything other than healthy/starting → advance the debounce counter. This
+    # covers "unhealthy", "missing" (container gone, inspect failed → the ||
+    # fallback above), and the literal "<no value>" docker prints for a present
+    # container with no healthcheck defined.
+    local n
+    n=$(cat "$UNHEALTHY_FILE" 2>/dev/null || echo 0); n=$((n + 1))
+    echo "$n" > "$UNHEALTHY_FILE"
+    log "status=$status consecutive_unhealthy=$n/$DEBOUNCE"
+
+    if [ "$n" -lt "$DEBOUNCE" ]; then
+        return 0
+    fi
+
+    : > "$UNHEALTHY_FILE"   # reset after deciding to act
+
+    local restarts
+    restarts=$(record_restart_and_count)
+    if [ "$restarts" -gt "$CRASHLOOP_MAX" ]; then
+        touch "$TRIPPED_FILE"
+        alert urgent "$CONTAINER crash-looping: $restarts restarts in ${CRASHLOOP_WINDOW}s. Auto-restart DISABLED pending investigation. Clear $TRIPPED_FILE to resume."
+        return 0
+    fi
+
+    alert high "$CONTAINER unhealthy (status=$status) — restarting (restart #$restarts in last ${CRASHLOOP_WINDOW}s)."
+    restart_container
+}
+
+cmd_daily_restart() {
+    log "Scheduled daily restart"
+    restart_container
+    # A clean scheduled restart clears crash-loop state so the watchdog
+    # resumes auto-healing the next day.
+    rm -f "$TRIPPED_FILE" "$UNHEALTHY_FILE" "$RESTARTS_FILE"
+}
+
+case "${1:-check}" in
+    check) cmd_check ;;
+    daily-restart) cmd_daily_restart ;;
+    *) echo "usage: $0 {check|daily-restart}" >&2; exit 2 ;;
+esac

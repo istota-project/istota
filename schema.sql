@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Scheduled job tracking
     scheduled_job_id INTEGER,       -- Links task back to originating scheduled job
 
+    -- Briefing identity for deferred-prompt briefing tasks (ISSUE-143). When
+    -- set, the executor builds the full briefing prompt (slow network I/O) at
+    -- worker-pickup time instead of on the scheduler dispatch thread.
+    briefing_name TEXT,
+
     -- Worker queue (foreground = interactive, background = scheduled/briefing/subtask)
     queue TEXT NOT NULL DEFAULT 'foreground',
 

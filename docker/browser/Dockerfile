@@ -68,8 +68,12 @@ RUN mkdir -p /data/browser-profile /tmp/.X11-unix && \
 # API port and noVNC port
 EXPOSE 9223 6080
 
-# Restart container if browser API or Chrome is unresponsive
+# Health is the lightweight liveness endpoint on a separate thread/port (9224),
+# not the single-threaded Flask /health (9223): a long in-flight browse blocks
+# Flask, which would make a busy-but-healthy container read as unhealthy and get
+# restarted mid-operation (ISSUE-143). The liveness thread answers even while
+# Flask is busy and reports unhealthy only when the Chrome process is gone.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:9223/health | python -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('browser_connected',False) else 1)" || exit 1
+    CMD curl -sf http://localhost:9224/live || exit 1
 
 ENTRYPOINT ["./entrypoint.sh"]

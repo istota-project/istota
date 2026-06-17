@@ -218,6 +218,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `heartbeat_check_interval` | 60s | Heartbeat checks |
 | `db_health_check_interval` | 86400s (24h) | SQLite `quick_check` + `REINDEX` self-heal across framework + per-user feeds/health/location/money DBs (covers Nextcloud-mount FUSE/network induced index corruption) |
 | `scheduler_stats_interval` | 60s | One `scheduler_stats threads=… fds=… rss_mb=… tasks_running=… workers_active=…` INFO line per interval on logger `istota.scheduler.stats`, daemon-only. Surfaces resource leaks (ISSUE-101 class) in minutes via `journalctl … \| grep scheduler_stats`. psutil-derived fields (`fds`/`rss_mb`) omitted with a one-time WARN when psutil is unavailable; DB hiccup → `tasks_running=?`. First emit after one full interval. `0` disables. |
+| `loop_stall_alert_seconds` | 180s | Defense-in-depth (ISSUE-143). `LoopWatchdog` runs on its own daemon thread, watches a last-tick timestamp the main loop bumps each iteration (`watchdog.tick()`), and logs an ERROR + fires one operator alert (`send_notification(purpose="alert")` to the first admin/user via `_operator_alert_user`) when the loop hasn't ticked in this long. Re-arms on recovery so a transient stall pages once. `0` disables. |
 | `worker_idle_timeout` | 10s | Cumulative-idle linger before a worker exits. The worker re-checks for work on a fine cadence for up to this long (continuous emptiness) before exiting; resets whenever a task is claimed. (Pre-phase-2 this was effectively capped to ~one `poll_interval` with a single recheck — the knob is now honoured.) |
 | `worker_idle_poll_interval` | 0.5s | Idle re-check cadence inside `_worker_idle_wait`. A follow-up task is claimed within ~one interval instead of waiting a `poll_interval`. A cheap `count_claimable_tasks_for_user_queue` pre-check gates the `claim_task`. 0 or ≥ `worker_idle_timeout` = legacy single coarse-wait + single-recheck. |
 | `max_foreground_workers` | 5 | Instance-level fg worker cap |
@@ -253,7 +254,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `_load_deferred_email_output()` | Load structured email output from deferred file |
 | `_process_deferred_sent_emails()` | Record outbound emails for emissary thread matching |
 | `post_result_to_email()` | Send email reply with threading |
-| `check_briefings()` | Cron-based briefing scheduling |
+| `check_briefings()` | Cron-based briefing scheduling. Creates each due briefing as a `source_type="briefing"` background task carrying only the briefing identity (`briefing_name`) + a placeholder prompt — it does **no** network prefetch on the dispatch thread (ISSUE-143). The slow prompt build (`build_briefing_prompt`: news/yfinance/FinViz/IMAP) is deferred to `executor.build_deferred_briefing_prompt`, run by the background worker that picks the task up, so a slow upstream can't stall `pool.dispatch()` for every room. `check_briefing_triggers` (NC-app trigger files) does the same. |
 | `check_scheduled_jobs()` | Cron-based job scheduling |
 | `cleanup_old_temp_files()` | Remove old temp files |
 
@@ -265,7 +266,7 @@ After task completion, if enabled + `auto_index_conversations`:
 
 | Table | Dataclass | Key Columns |
 |---|---|---|
-| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, last_heartbeat, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, actions_taken, execution_trace, model, effort |
+| `tasks` | `Task` | id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempt_count, max_attempts, cancel_requested, worker_pid, last_heartbeat, locked_at/by, scheduled_for, output_target, talk_message_id, reply_to_talk_id, heartbeat_silent, scheduled_job_id, briefing_name, actions_taken, execution_trace, model, effort |
 | `user_resources` | `UserResource` | id, user_id, resource_type, resource_path, display_name, permissions |
 | `briefing_configs` | `BriefingConfig` | id, user_id, name, cron_expression, conversation_token, components (JSON), enabled |
 | `briefing_state` | — | user_id, briefing_name, last_run_at |
