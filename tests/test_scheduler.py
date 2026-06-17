@@ -913,8 +913,7 @@ class TestCheckBriefings:
         result = check_briefings(db_path, config)
         assert result == []
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="Test briefing prompt")
-    def test_cron_triggers_briefing(self, mock_build, db_path):
+    def test_cron_triggers_briefing(self, db_path):
         # Briefing at 6 AM UTC, we pretend it is 6:05 AM UTC
         briefing = BriefingConfig(
             name="morning",
@@ -943,10 +942,15 @@ class TestCheckBriefings:
         result = check_briefings(db_path, config)
 
         assert len(result) == 1
-        mock_build.assert_called_once()
+        # No prompt prefetch on the dispatch thread (ISSUE-143): the task
+        # carries the briefing identity and the executor builds the prompt.
+        with db.get_db(db_path) as conn:
+            created = db.get_task(conn, result[0])
+        assert created.source_type == "briefing"
+        assert created.briefing_name == "morning"
+        assert created.queue == "background"
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="Test prompt")
-    def test_cron_not_yet_due(self, mock_build, db_path):
+    def test_cron_not_yet_due(self, db_path):
         briefing = BriefingConfig(
             name="morning",
             cron="0 6 * * *",
@@ -972,9 +976,8 @@ class TestCheckBriefings:
 
         assert result == []
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="Test prompt")
     @patch("istota.scheduler._now")
-    def test_first_run_past_scheduled(self, mock_now, mock_build, db_path):
+    def test_first_run_past_scheduled(self, mock_now, db_path):
         """First run: no last_run_at, and we are past the cron time today."""
         # Cron at 6am, mock current time to 14:00 so it's reliably in the past
         mock_now.return_value = datetime(2026, 6, 15, 14, 0, 0, tzinfo=ZoneInfo("UTC"))
@@ -994,8 +997,7 @@ class TestCheckBriefings:
         result = check_briefings(db_path, config)
         assert len(result) == 1
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="Test prompt")
-    def test_first_run_before_scheduled(self, mock_build, db_path):
+    def test_first_run_before_scheduled(self, db_path):
         """First run: no last_run_at, but cron time is in the future today."""
         # Use a cron at 23:59 so we haven't reached it yet (unless it is 23:59)
         briefing = BriefingConfig(
@@ -1025,8 +1027,7 @@ class TestCheckBriefings:
         result = check_briefings(db_path, config)
         assert result == []
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="Test briefing prompt")
-    def test_email_briefing_without_conversation_token(self, mock_build, db_path):
+    def test_email_briefing_without_conversation_token(self, db_path):
         briefing = BriefingConfig(
             name="morning",
             cron="0 6 * * *",
@@ -1052,12 +1053,167 @@ class TestCheckBriefings:
         assert len(result) == 1
 
 
+class TestBriefingDeferredPrompt:
+    """ISSUE-143: the briefing prefetch must not run on the dispatch thread."""
+
+    def test_check_briefings_does_no_network_prefetch(self, db_path):
+        """check_briefings must not build the briefing prompt (network I/O).
+
+        A slow/unreachable upstream during the build would otherwise stall the
+        single-threaded dispatch loop and starve task processing for every room.
+        """
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *", conversation_token="room1",
+            components={"calendar": True, "markets": True, "news": True},
+            output="both",
+        )
+        user = UserConfig(timezone="UTC", briefings=[briefing])
+        config = Config(
+            db_path=db_path, users={"alice": user},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
+        with db.get_db(db_path) as conn:
+            yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
+            conn.execute(
+                "INSERT INTO briefing_state (user_id, briefing_name, last_run_at) VALUES (?, ?, ?)",
+                ("alice", "morning", yesterday),
+            )
+
+        # Patch the build at its source. If check_briefings calls it, fail.
+        with patch(
+            "istota.skills.briefing.build_briefing_prompt",
+            side_effect=AssertionError("prefetch ran on the dispatch thread"),
+        ):
+            result = check_briefings(db_path, config)
+
+        assert len(result) == 1
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, result[0])
+        assert task.source_type == "briefing"
+        assert task.briefing_name == "morning"
+        assert task.queue == "background"
+        assert task.output_target == "both"
+        # The stored prompt is the lightweight placeholder, not prefetched data.
+        assert "morning" in task.prompt
+
+    def test_executor_builds_briefing_prompt_at_execution_time(self, db_path):
+        from istota.executor import build_deferred_briefing_prompt
+
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *", conversation_token="room1",
+            components={"calendar": True},
+        )
+        user = UserConfig(timezone="America/New_York", briefings=[briefing])
+        config = Config(db_path=db_path, users={"alice": user})
+        task = db.Task(
+            id=7, status="running", source_type="briefing", user_id="alice",
+            prompt="Generate the 'morning' briefing.", briefing_name="morning",
+        )
+
+        with patch(
+            "istota.skills.briefing.build_briefing_prompt",
+            return_value="FULL BRIEFING PROMPT",
+        ) as mock_build:
+            built = build_deferred_briefing_prompt(task, config)
+
+        assert built == "FULL BRIEFING PROMPT"
+        mock_build.assert_called_once()
+        # Resolved the live briefing config + timezone for the build.
+        called_briefing, called_user, _cfg, called_tz = mock_build.call_args.args
+        assert called_briefing.name == "morning"
+        assert called_user == "alice"
+        assert called_tz == "America/New_York"
+
+    def test_executor_keeps_placeholder_when_briefing_missing(self, db_path):
+        from istota.executor import build_deferred_briefing_prompt
+
+        config = Config(
+            db_path=db_path,
+            users={"alice": UserConfig(timezone="UTC", briefings=[])},
+        )
+        task = db.Task(
+            id=8, status="running", source_type="briefing", user_id="alice",
+            prompt="Generate the 'gone' briefing.", briefing_name="gone",
+        )
+        # Unresolvable briefing → None so the caller keeps the placeholder.
+        assert build_deferred_briefing_prompt(task, config) is None
+
+    def test_executor_returns_none_when_no_briefing_name(self, db_path):
+        from istota.executor import build_deferred_briefing_prompt
+
+        config = Config(db_path=db_path, users={})
+        task = db.Task(
+            id=9, status="running", source_type="briefing", user_id="alice",
+            prompt="x", briefing_name=None,
+        )
+        assert build_deferred_briefing_prompt(task, config) is None
+
+    def test_execute_task_swaps_in_built_briefing_prompt(self, tmp_path):
+        """End-to-end: a deferred briefing task's prompt is built in execute_task."""
+        from istota.executor import execute_task
+
+        db_path = tmp_path / "exec.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *", conversation_token="room1",
+            components={"calendar": True},
+        )
+        config = Config(
+            db_path=db_path, users={"alice": UserConfig(timezone="UTC", briefings=[briefing])},
+            skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+        )
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Generate the 'morning' briefing.", user_id="alice",
+                source_type="briefing", conversation_token="room1",
+                queue="background", briefing_name="morning",
+            )
+            task = db.get_task(conn, task_id)
+
+        with patch(
+            "istota.skills.briefing.build_briefing_prompt",
+            return_value="SENTINEL_BRIEFING_BODY",
+        ):
+            _ok, rendered, _a, _t = execute_task(
+                task, config, [], dry_run=True,
+            )
+
+        assert "SENTINEL_BRIEFING_BODY" in rendered
+
+    def test_execute_task_fails_when_briefing_build_yields_nothing(self, tmp_path):
+        """An unbuildable deferred briefing fails (→ retry), not run on placeholder."""
+        from istota.executor import execute_task
+
+        db_path = tmp_path / "exec2.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        # No matching briefing configured for "gone" → build resolves to None.
+        config = Config(
+            db_path=db_path, users={"alice": UserConfig(timezone="UTC", briefings=[])},
+            skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+        )
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Generate the 'gone' briefing.", user_id="alice",
+                source_type="briefing", queue="background", briefing_name="gone",
+            )
+            task = db.get_task(conn, task_id)
+
+        success, result, _a, _t = execute_task(task, config, [], dry_run=True)
+        assert success is False
+        assert "gone" in result
+
+
 class TestCheckBriefingsStaleGate:
     """Insertion-time staleness gate: long-outage catch-ups are skipped."""
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="x")
     @patch("istota.scheduler._now")
-    def test_stale_briefing_skipped_and_last_run_bumped(self, mock_now, mock_build, db_path):
+    def test_stale_briefing_skipped_and_last_run_bumped(self, mock_now, db_path):
         # 6 AM daily briefing. last_run yesterday; "now" is 11 AM (5h stale).
         mock_now.return_value = datetime(2026, 6, 15, 11, 0, 0, tzinfo=ZoneInfo("UTC"))
 
@@ -1080,7 +1236,6 @@ class TestCheckBriefingsStaleGate:
         result = check_briefings(db_path, config)
 
         assert result == []
-        mock_build.assert_not_called()
         with db.get_db(db_path) as conn:
             bumped = conn.execute(
                 "SELECT last_run_at FROM briefing_state WHERE user_id=? AND briefing_name=?",
@@ -1090,9 +1245,8 @@ class TestCheckBriefingsStaleGate:
         # last_run was overwritten so the same next_run won't fire again.
         assert bumped != last_run
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="x")
     @patch("istota.scheduler._now")
-    def test_within_threshold_fires(self, mock_now, mock_build, db_path):
+    def test_within_threshold_fires(self, mock_now, db_path):
         # 6 AM daily briefing. "now" is 6:05 AM — 5 min stale, under 60.
         mock_now.return_value = datetime(2026, 6, 15, 6, 5, 0, tzinfo=ZoneInfo("UTC"))
         briefing = BriefingConfig(
@@ -1113,9 +1267,8 @@ class TestCheckBriefingsStaleGate:
         result = check_briefings(db_path, config)
         assert len(result) == 1
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="x")
     @patch("istota.scheduler._now")
-    def test_threshold_zero_preserves_legacy_catchup(self, mock_now, mock_build, db_path):
+    def test_threshold_zero_preserves_legacy_catchup(self, mock_now, db_path):
         # Same 5h-stale scenario as the first test, but with the gate disabled.
         mock_now.return_value = datetime(2026, 6, 15, 11, 0, 0, tzinfo=ZoneInfo("UTC"))
         briefing = BriefingConfig(
@@ -1482,9 +1635,8 @@ class TestCheckScheduledJobs:
 class TestCheckBriefingsDST:
     """DST-related tests for check_briefings."""
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="Test prompt")
     @patch("istota.scheduler._now")
-    def test_dst_spring_forward_no_double_fire(self, mock_now, mock_build, db_path):
+    def test_dst_spring_forward_no_double_fire(self, mock_now, db_path):
         """Briefing should not fire early when last_run_at crosses DST boundary.
 
         Scenario: 6 AM weekday briefing. Last ran Friday March 7, 06:00 PST.
@@ -1516,9 +1668,8 @@ class TestCheckBriefingsDST:
         result = check_briefings(db_path, config)
         assert result == [], "Briefing fired early due to DST transition — double-fire bug"
 
-    @patch("istota.scheduler.build_briefing_prompt", return_value="Test prompt")
     @patch("istota.scheduler._now")
-    def test_dst_spring_forward_fires_at_correct_time(self, mock_now, mock_build, db_path):
+    def test_dst_spring_forward_fires_at_correct_time(self, mock_now, db_path):
         """Briefing should fire at the correct wall-clock time after DST spring-forward."""
         la_tz = ZoneInfo("America/Los_Angeles")
         # Now = March 9, 06:05 PDT

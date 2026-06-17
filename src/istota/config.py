@@ -122,6 +122,7 @@ class SchedulerConfig:
     heartbeat_check_interval: int = 60  # seconds between heartbeat checks
     db_health_check_interval: int = 86400  # seconds between SQLite quick_check sweeps over per-user DBs
     scheduler_stats_interval: int = 60  # seconds between scheduler_stats health-line emits (0 = disabled)
+    loop_stall_alert_seconds: int = 180  # alert if the main dispatch loop hasn't ticked in this long (0 = disabled)
     talk_poll_interval: int = 10  # seconds between Talk polls
     talk_poll_timeout: int = 30  # long-poll timeout for Talk API
     talk_poll_wait: float = 2.0  # max seconds to wait for all rooms before processing available results
@@ -1125,6 +1126,7 @@ def load_config(config_path: Path | None = None) -> Config:
             heartbeat_check_interval=sched.get("heartbeat_check_interval", 60),
             db_health_check_interval=sched.get("db_health_check_interval", 86400),
             scheduler_stats_interval=sched.get("scheduler_stats_interval", 60),
+            loop_stall_alert_seconds=sched.get("loop_stall_alert_seconds", 180),
             talk_poll_interval=sched.get("talk_poll_interval", 10),
             talk_poll_timeout=sched.get("talk_poll_timeout", 30),
             talk_poll_wait=sched.get("talk_poll_wait", 2.0),

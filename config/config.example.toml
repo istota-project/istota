@@ -270,6 +270,12 @@ tasks_file_poll_interval = 30
 # early. 0 disables the emit.
 scheduler_stats_interval = 60
 
+# Defense-in-depth: alert an operator if the single-threaded main dispatch loop
+# stops ticking for this many seconds (a slow call that slipped onto the loop
+# thread, a wedged check). A separate watchdog thread logs an ERROR and fires
+# one alert, then re-arms when the loop recovers. 0 disables it.
+loop_stall_alert_seconds = 180
+
 # Progress / event streaming.
 # Every task produces a typed, persisted event stream (the task_events table)
 # consumed by all output surfaces: web chat SSE, Talk, push, log channel, admin.

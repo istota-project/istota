@@ -1275,20 +1275,82 @@
     - "{{ istota_home }}/browser.env"
   when: not istota_browser_enabled and not istota_web_only
 
-- name: Deploy browser health check cron
-  template:
-    src: istota-browser-health.cron.j2
-    dest: "/etc/cron.d/{{ istota_namespace }}-browser-health"
-    owner: root
-    group: root
-    mode: "0644"
-  when: istota_browser_enabled and not istota_web_only
-
-- name: Remove browser health check cron when disabled
+# Browser auto-heal watchdog (ISSUE-143): a systemd timer replaces the old
+# grep-based cron with debounced restarts, crash-loop protection, and alerts.
+# The legacy cron is removed unconditionally so existing hosts migrate cleanly.
+- name: Remove legacy browser health check cron
   file:
     path: "/etc/cron.d/{{ istota_namespace }}-browser-health"
     state: absent
+  when: not istota_web_only
+
+- name: Create browser watchdog state directory
+  file:
+    path: "{{ istota_browser_watchdog_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: istota_browser_enabled and not istota_web_only
+
+- name: Deploy browser watchdog script
+  template:
+    src: istota-browser-watchdog.sh.j2
+    dest: "/usr/local/bin/{{ istota_namespace }}-browser-watchdog"
+    owner: root
+    group: root
+    mode: "0755"
+  when: istota_browser_enabled and not istota_web_only
+
+- name: Deploy browser watchdog systemd units
+  template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - "{{ istota_namespace }}-browser-watchdog.service"
+    - "{{ istota_namespace }}-browser-watchdog.timer"
+    - "{{ istota_namespace }}-browser-daily-restart.service"
+    - "{{ istota_namespace }}-browser-daily-restart.timer"
+  when: istota_browser_enabled and not istota_web_only
+  notify: "reload systemd"
+
+- name: Enable browser watchdog timers
+  systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - "{{ istota_namespace }}-browser-watchdog.timer"
+    - "{{ istota_namespace }}-browser-daily-restart.timer"
+  when: istota_browser_enabled and not istota_web_only
+
+- name: Stop and disable browser watchdog timers when disabled
+  systemd:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - "{{ istota_namespace }}-browser-watchdog.timer"
+    - "{{ istota_namespace }}-browser-daily-restart.timer"
   when: not istota_browser_enabled and not istota_web_only
+  failed_when: false
+
+- name: Remove browser watchdog files when disabled
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/usr/local/bin/{{ istota_namespace }}-browser-watchdog"
+    - "/etc/systemd/system/{{ istota_namespace }}-browser-watchdog.service"
+    - "/etc/systemd/system/{{ istota_namespace }}-browser-watchdog.timer"
+    - "/etc/systemd/system/{{ istota_namespace }}-browser-daily-restart.service"
+    - "/etc/systemd/system/{{ istota_namespace }}-browser-daily-restart.timer"
+  when: not istota_browser_enabled and not istota_web_only
+  notify: "reload systemd"
 
 # ============================================================
 # DEVBOX (per-user persistent dev / network-diagnostics container)

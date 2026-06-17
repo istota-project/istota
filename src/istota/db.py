@@ -43,6 +43,10 @@ class Task:
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
+    # Briefing identity for deferred-prompt briefing tasks (ISSUE-143). When
+    # set, the executor builds the full briefing prompt (slow network I/O) at
+    # worker-pickup time instead of on the scheduler dispatch thread.
+    briefing_name: str | None = None
     queue: str = "foreground"
     confirmed_at: str | None = None
     selected_skills: str | None = None  # JSON array of skill names
@@ -165,6 +169,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         ("heartbeat_silent", "INTEGER DEFAULT 0"),
         ("skip_log_channel", "INTEGER DEFAULT 0"),
         ("scheduled_job_id", "INTEGER"),
+        ("briefing_name", "TEXT"),
         ("command", "TEXT"),
         ("queue", "TEXT DEFAULT 'foreground'"),
         ("actions_taken", "TEXT"),
@@ -578,6 +583,7 @@ def create_task(
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
+    briefing_name: str | None = None,
     command: str | None = None,
     queue: str = "foreground",
     model: str | None = None,
@@ -607,9 +613,10 @@ def create_task(
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
-            heartbeat_silent, skip_log_channel, scheduled_job_id, queue, model, effort,
+            heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
+            queue, model, effort,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -630,6 +637,7 @@ def create_task(
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
+            briefing_name,
             queue,
             model or None,
             effort or None,
@@ -656,7 +664,7 @@ _TASK_COLUMNS = (
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
     "reply_to_content, heartbeat_silent, skip_log_channel, scheduled_job_id, "
-    "queue, confirmed_at, selected_skills, model, effort, model_used, "
+    "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "talk_delivery_token, skill, skill_args"
 )
 
@@ -698,6 +706,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],
+        briefing_name=row["briefing_name"],
         queue=row["queue"],
         confirmed_at=row["confirmed_at"],
         selected_skills=row["selected_skills"],

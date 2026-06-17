@@ -2157,6 +2157,46 @@ You have access to:
     return prompt
 
 
+def build_deferred_briefing_prompt(task: db.Task, config: Config) -> str | None:
+    """Build a briefing task's full prompt at execution time (ISSUE-143).
+
+    The scheduler creates briefing tasks carrying only the briefing identity
+    (``task.briefing_name``) and a placeholder prompt, deferring the slow
+    network pre-fetch (news, yfinance, FinViz, IMAP) off the dispatch thread.
+    This resolves the live briefing config and timezone and builds the real
+    prompt.
+
+    Returns the built prompt, or ``None`` if the briefing can't be resolved or
+    the build raises. The caller (``execute_task``) treats ``None`` as a task
+    failure so the normal retry/backoff applies, rather than running the model on
+    the bare placeholder.
+    """
+    if not task.briefing_name:
+        return None
+    try:
+        from .skills.briefing import build_briefing_prompt, get_briefings_for_user
+
+        briefings = get_briefings_for_user(config, task.user_id)
+        briefing = next(
+            (b for b in briefings if b.name == task.briefing_name), None
+        )
+        if briefing is None:
+            logger.warning(
+                "Deferred briefing %r not found for user %s (task %s); "
+                "keeping placeholder prompt",
+                task.briefing_name, task.user_id, task.id,
+            )
+            return None
+        user_tz = config.resolve_user_timezone(task.user_id)
+        return build_briefing_prompt(briefing, task.user_id, config, user_tz)
+    except Exception as e:
+        logger.error(
+            "Deferred briefing prompt build failed for task %s (%s): %s",
+            task.id, task.briefing_name, e,
+        )
+        return None
+
+
 def execute_task(
     task: db.Task,
     config: Config,
@@ -2195,6 +2235,24 @@ def execute_task(
                 display_name=rc.name or None, permissions=rc.permissions,
             ))
     user_resources = all_resources
+
+    # Briefing tasks defer their prompt build to here (ISSUE-143): building a
+    # briefing prompt does slow network I/O (news, yfinance, FinViz, IMAP).
+    # Running it in the worker instead of the scheduler dispatch loop keeps a
+    # slow or unreachable upstream from stalling task dispatch for every room.
+    if task.source_type == "briefing" and task.briefing_name:
+        built = build_deferred_briefing_prompt(task, config)
+        if built:
+            task.prompt = built
+        else:
+            # The prompt couldn't be built (briefing config gone, or the build
+            # raised). Fail the task so the normal retry/backoff applies instead
+            # of running the model on the bare placeholder and delivering a
+            # contentless briefing with no re-run. Briefing failures don't notify
+            # the user, so this is a quiet retry.
+            msg = f"briefing prompt build failed for {task.briefing_name!r}"
+            logger.error("Task %s: %s", task.id, msg)
+            return False, msg, None, None
 
     # Pre-transcribe audio attachments so skill selection sees real text
     enriched_prompt = _pre_transcribe_attachments(task.attachments, task.prompt)

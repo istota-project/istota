@@ -14,6 +14,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 
 ### Flow
 1. **Setup temp dir**: `config.temp_dir / task.user_id`
+1b. **Deferred briefing prompt** (ISSUE-143): when `task.source_type == "briefing"` and `task.briefing_name` is set, `build_deferred_briefing_prompt(task, config)` resolves the live briefing config + timezone and builds the full prompt (`build_briefing_prompt`'s slow news/yfinance/FinViz/IMAP fetch) here, in the worker — `task.prompt` is replaced. This keeps the slow network I/O off the scheduler dispatch thread (the scheduler creates briefing tasks with only the identity + a placeholder). Build failure / unresolvable briefing → keeps the placeholder, never fails the task.
 2. **Merge resources**: DB resources + config resources → `db.UserResource` list
 3. **Load skills**: `load_skill_index()` → `select_skills()` (deterministic matching, the only selection pass) produces the **eager** set → `load_skills(eager)` for the body + `eligible_skill_names(exclude = selected ∪ ⋃ exclude_skills_of_selected)` for the **menu** (the full eligible catalogue) → `build_disclosure_index(menu)` → `skills_index`. Always on, single-axis (selected ⇒ eager, else eligible ⇒ menu); no `progressive_disclosure` flag, no eager/lazy partition. The menu replaced the removed LLM Pass 2; the executor logs `skills: eager=N menu=M`.
 4. **Skills changelog**: fingerprint compare, interactive only
