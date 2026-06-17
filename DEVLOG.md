@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-17: Get briefing prefetch off the scheduler dispatch thread (ISSUE-143)
+
+A transient upstream blip caused a full task-processing outage: chat in every room went unanswered for ~5.5 minutes with no wait notice. Root cause — the single-threaded scheduler loop built each due briefing's prompt inline (`build_briefing_prompt`: news/yfinance/FinViz/IMAP, per-source ~60s timeouts, no overall deadline). When a source hung, `pool.dispatch()` never ran, so no worker was spawned for any user; nothing was ever claimed, so the per-room "another task is processing" gate never fired and the missing answers were silent.
+
+Fix is the issue's preferred design: stop prefetching in the loop. `check_briefings` / `check_briefing_triggers` now create the background briefing task immediately, carrying only the briefing identity (new `tasks.briefing_name` column) plus a lightweight placeholder prompt — no network on the loop thread. The real prompt is built in the executor (`build_deferred_briefing_prompt`, a guard at the top of `execute_task`) when a background worker picks the task up, so a slow upstream only ties up that one worker. The build resolves the live briefing config + timezone each run (preserves the ISSUE-099 live-tz behavior); retries re-fetch fresh data. An unbuildable briefing (config gone, or build raised) fails the task → quiet retry/backoff (briefing failures don't notify) rather than running the model on the bare placeholder.
+
+Also did the two secondary asks. Browser auto-heal: the Flask API is single-threaded (Playwright sync greenlets), so a long in-flight browse blocked `/health` and the Docker healthcheck marked a busy-but-healthy container unhealthy → restarted mid-session. Added a lightweight liveness server on its own thread/port (9224) that answers even while Flask is busy and reports unhealthy only when the Chrome *process* is gone; retargeted the healthcheck (image + full-stack compose). Replaced the grep-based 2-min cron with a systemd watchdog (30s, debounced restart, crash-loop protection that stops flapping and pages once, ntfy/email alerts) plus a separate daily-restart timer. Defense-in-depth: `LoopWatchdog` alerts an operator if the main loop ever stops ticking (`loop_stall_alert_seconds`, default 180), suspended around the known multi-minute in-loop checks (sleep cycles, DB-health sweep) so a healthy nightly run doesn't false-page, with alert delivery off-thread so a wedged delivery can't freeze the watchdog.
+
+Browser code lives in the `stealth-browser` source-of-truth repo (vendored into `docker/browser/`); edited there and synced. Mulder + Scully reviewed: caught a must-fix (the full-stack compose `healthcheck:` overrode the image `HEALTHCHECK`, still probing the blocking `/health`), the watchdog false-page on the sleep cycle, the watchdog-blocking-on-alert hazard, and the briefing-degrade-vs-retry call — all fixed. Full suite green (6510 passed).
+
+**Key changes:**
+- Deferred briefing prompt build: new `tasks.briefing_name` column; `check_briefings`/`check_briefing_triggers` create identity-only tasks; `executor.build_deferred_briefing_prompt` builds at worker-pickup time.
+- `LoopWatchdog` + `loop_stall_alert_seconds` (default 180); `suspended()` context manager wraps the sleep-cycle and DB-health checks; off-thread alert delivery.
+- Browser liveness server on port 9224; healthcheck retargeted in the Dockerfile and the full-stack compose.
+- systemd browser watchdog (debounce / crash-loop / alerts) + daily-restart timer replacing the grep cron.
+
+**Files added/modified:**
+- `src/istota/scheduler.py` - deferred briefing task creation; `LoopWatchdog` + `_operator_alert_user`; wired into `run_daemon` with `suspended()` around slow checks
+- `src/istota/executor.py` - `build_deferred_briefing_prompt` + the briefing guard at the top of `execute_task` (fail-on-unbuildable)
+- `src/istota/db.py`, `schema.sql` - `tasks.briefing_name` column (dataclass, migration, create_task, `_TASK_COLUMNS`, `_row_to_task`)
+- `src/istota/config.py`, `config/config.example.toml` - `loop_stall_alert_seconds`
+- `docker/browser/browse_api.py`, `docker/browser/Dockerfile` - liveness server + healthcheck (synced from `stealth-browser`)
+- `docker/docker-compose.yml` - full-stack compose healthcheck retargeted to `:9224/live`
+- `deploy/ansible/templates/istota-browser-{watchdog,daily-restart}.{sh,service,timer}.j2`, `defaults/main.yml`, `tasks/main.yml` - systemd watchdog (cron removed)
+- `tests/test_loop_watchdog.py`, `tests/test_scheduler.py`, `tests/test_briefing_trigger.py` - new + migrated tests
+- `.claude/rules/scheduler.md`, `.claude/rules/executor.md` - doc updates
+
 ## 2026-06-15: Integrate money fully into istota; drop standalone CLI
 
 Money still carried a standalone identity (its own `money` console script, `MONEY_CONFIG` env / `config.toml` discovery / `load_context`, a `[users.*]` TOML format, and TOML config-read fallbacks throughout `money/cli.py`) even though in-Istota every path already resolved config from the per-user DB via `resolve_for_user` → `config_store`. The directive: money no longer exists outside istota, so it should integrate fully into istota patterns and stay entirely usable from the CLI following those patterns.
