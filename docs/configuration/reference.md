@@ -98,6 +98,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `heartbeat_check_interval` | `60` | Seconds between heartbeat checks |
 | `db_health_check_interval` | `86400` | Seconds between SQLite `quick_check` + self-heal `REINDEX` sweeps over framework + per-user DBs (24h) |
 | `scheduler_stats_interval` | `60` | Seconds between `scheduler_stats` health-line emits (threads / fds / rss / running-tasks / active-workers) — one `key=value` INFO line per interval on the `istota.scheduler.stats` logger, for catching resource leaks early. 0 disables |
+| `loop_stall_alert_seconds` | `180` | Defense-in-depth: a watchdog thread logs an ERROR and fires one operator alert if the single-threaded main dispatch loop hasn't ticked in this long (a slow call that slipped onto the loop thread, a wedged check), then re-arms when the loop recovers. Suspended around known multi-minute in-loop work (sleep cycles, DB-health sweep) to avoid false pages. 0 disables |
 
 ### Progress & event streaming
 

@@ -59,7 +59,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 
 | Skill | Keywords | CLI | Notes |
 |---|---|---|---|
-| `money` | accounting, ledger, beancount, invoice, expense, money | yes -- in-process accounting (ledger, invoicing, transactions, work log) | Requires `money` resource |
+| `money` | accounting, ledger, beancount, invoice, expense, money | yes -- in-process accounting (ledger, invoicing, transactions, work log) | Default-on module — no resource needed; opt out via the user's `disabled_modules`. Operations are also operator-reachable as `istota money <op>` |
 
 ## Google Workspace
 
