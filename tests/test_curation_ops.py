@@ -333,18 +333,20 @@ class TestRemove:
         assert "foo as paragraph text" in section.lines
         assert "- the foo bullet" not in section.lines
 
-    def test_remove_does_not_descend_into_subsections(self):
-        # A bullet under a subsection isn't editable; surface it as a
-        # reject (match_in_subsection) so the model knows the attempt was
-        # noticed instead of silently treating it like a clean miss.
+    def test_remove_descends_into_subsections(self):
+        # Removing stale bullets is the whole point — a bullet under a
+        # `### subheading` must be removable, not rejected.
         doc = _doc("## Pref\n- top bullet\n### Sub\n- sub foo bullet\n")
         new_doc, applied, rejected = apply_ops(
             doc, [{"op": "remove", "heading": "Pref", "match": "foo"}]
         )
-        assert applied == []
-        assert rejected and rejected[0]["reason"] == "match_in_subsection"
-        # Subsection content untouched
-        assert "- sub foo bullet" in new_doc.find("Pref").lines
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "applied"
+        section = new_doc.find("Pref")
+        assert "- sub foo bullet" not in section.lines
+        # The subheading line and the other bullet survive.
+        assert "### Sub" in section.lines
+        assert "- top bullet" in section.lines
 
     def test_remove_true_miss_still_noop_when_subsections_present(self):
         # If the match is absent from BOTH top region and subsections, the
@@ -356,16 +358,223 @@ class TestRemove:
         assert rejected == []
         assert applied and applied[0]["outcome"] == "noop_no_match"
 
-    def test_remove_in_section_with_no_top_region_is_match_in_subsection(self):
+    def test_remove_in_section_with_no_top_region_descends(self):
         # Section starts immediately with a `### subheading` — top region
-        # is empty. A bullet under that subheading must still produce
-        # `match_in_subsection`, not a silent noop_no_match.
+        # is empty. A bullet under that subheading is still removable.
         doc = _doc("## Pref\n### Sub\n- sub foo bullet\n")
+        new_doc, applied, rejected = apply_ops(
+            doc, [{"op": "remove", "heading": "Pref", "match": "foo"}]
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "applied"
+        assert "- sub foo bullet" not in new_doc.find("Pref").lines
+
+    def test_remove_uniqueness_spans_whole_section(self):
+        # A needle that matches one top-region bullet AND one subsection
+        # bullet is ambiguous now that remove spans the whole section.
+        doc = _doc("## Pref\n- foo top\n### Sub\n- foo sub\n")
         _, applied, rejected = apply_ops(
             doc, [{"op": "remove", "heading": "Pref", "match": "foo"}]
         )
         assert applied == []
-        assert rejected and rejected[0]["reason"] == "match_in_subsection"
+        assert rejected and rejected[0]["reason"] == "multiple_matches"
+
+    def test_remove_never_removes_a_subheading_line(self):
+        # `### …` lines are subheadings, not bullets — remove must ignore them
+        # even when the match substring appears in the heading text.
+        doc = _doc("## Pref\n### Editor settings\n- vs code\n")
+        _, applied, rejected = apply_ops(
+            doc, [{"op": "remove", "heading": "Pref", "match": "Editor"}]
+        )
+        assert applied and applied[0]["outcome"] == "noop_no_match"
+        assert rejected == []
+
+
+class TestReplace:
+    def test_replace_unique_top_region_bullet(self):
+        doc = _doc("## Pref\n- old wording\n- keep me\n")
+        new_doc, applied, rejected = apply_ops(
+            doc,
+            [{"op": "replace", "heading": "Pref", "match": "old wording",
+              "line": "new wording"}],
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "applied"
+        section = new_doc.find("Pref")
+        assert "- new wording" in section.lines
+        assert "- old wording" not in section.lines
+        assert "- keep me" in section.lines
+
+    def test_replace_descends_into_subsection_and_preserves_indent(self):
+        doc = _doc("## Pref\n- top\n### Sub\n  - nested old\n")
+        new_doc, applied, rejected = apply_ops(
+            doc,
+            [{"op": "replace", "heading": "Pref", "match": "nested old",
+              "line": "nested new"}],
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "applied"
+        # Indentation of the original nested bullet is preserved.
+        assert "  - nested new" in new_doc.find("Pref").lines
+
+    def test_replace_normalizes_marker(self):
+        doc = _doc("## Pref\n- old\n")
+        new_doc, _, _ = apply_ops(
+            doc, [{"op": "replace", "heading": "Pref", "match": "old", "line": "* starred"}]
+        )
+        assert "- starred" in new_doc.find("Pref").lines
+
+    def test_replace_no_match_is_noop(self):
+        doc = _doc("## Pref\n- foo\n")
+        _, applied, rejected = apply_ops(
+            doc, [{"op": "replace", "heading": "Pref", "match": "missing", "line": "x"}]
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "noop_no_match"
+
+    def test_replace_multiple_matches_rejected(self):
+        doc = _doc("## Pref\n- foo apple\n- foo banana\n")
+        _, applied, rejected = apply_ops(
+            doc, [{"op": "replace", "heading": "Pref", "match": "foo", "line": "x"}]
+        )
+        assert applied == []
+        assert rejected[0]["reason"] == "multiple_matches"
+
+    def test_replace_identical_text_is_noop_dup(self):
+        doc = _doc("## Pref\n- same\n")
+        new_doc, applied, rejected = apply_ops(
+            doc, [{"op": "replace", "heading": "Pref", "match": "same", "line": "same"}]
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "noop_dup"
+
+    def test_replace_into_existing_other_bullet_is_noop_dup(self):
+        # Rewriting one bullet to text another bullet already has must not
+        # manufacture a duplicate — leave the doc unchanged.
+        doc = _doc("## Pref\n- apple\n- banana\n")
+        new_doc, applied, rejected = apply_ops(
+            doc,
+            [{"op": "replace", "heading": "Pref", "match": "apple", "line": "banana"}],
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "noop_dup"
+        bullets = [l for l in new_doc.find("Pref").lines if l.startswith("- ")]
+        assert bullets == ["- apple", "- banana"]
+
+    def test_replace_missing_heading_rejected(self):
+        doc = _doc("## Pref\n- foo\n")
+        _, applied, rejected = apply_ops(
+            doc, [{"op": "replace", "heading": "Nope", "match": "foo", "line": "x"}]
+        )
+        assert applied == []
+        assert rejected[0]["reason"] == "heading_missing"
+
+    def test_replace_empty_match_rejected(self):
+        doc = _doc("## Pref\n- foo\n")
+        _, applied, rejected = apply_ops(
+            doc, [{"op": "replace", "heading": "Pref", "match": "  ", "line": "x"}]
+        )
+        assert applied == []
+        assert rejected[0]["reason"] == "empty_match"
+
+    def test_replace_hash_prefixed_new_line_rejected(self):
+        doc = _doc("## Pref\n- foo\n")
+        _, applied, rejected = apply_ops(
+            doc, [{"op": "replace", "heading": "Pref", "match": "foo", "line": "## h"}]
+        )
+        assert applied == []
+        assert rejected[0]["reason"] == "line_starts_with_hash"
+
+
+class TestRemoveHeading:
+    def test_remove_heading_drops_whole_section(self):
+        doc = _doc("## A\n- a\n\n## B\n- b\n")
+        new_doc, applied, rejected = apply_ops(
+            doc, [{"op": "remove_heading", "heading": "A"}]
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "applied"
+        assert [s.heading for s in new_doc.sections] == ["B"]
+
+    def test_remove_heading_missing_rejected(self):
+        doc = _doc("## A\n- a\n")
+        _, applied, rejected = apply_ops(
+            doc, [{"op": "remove_heading", "heading": "Nope"}]
+        )
+        assert applied == []
+        assert rejected[0]["reason"] == "heading_missing"
+
+    def test_remove_heading_with_subsections(self):
+        doc = _doc("## A\n- a\n### Sub\n- s\n\n## B\n- b\n")
+        new_doc, applied, _ = apply_ops(
+            doc, [{"op": "remove_heading", "heading": "A"}]
+        )
+        assert applied[0]["outcome"] == "applied"
+        assert new_doc.find("A") is None
+        assert new_doc.find("B") is not None
+
+
+class TestAppendSubheading:
+    def test_append_under_existing_subheading(self):
+        doc = _doc("## Pref\n- top\n### Editor\n- vs code\n")
+        new_doc, applied, rejected = apply_ops(
+            doc,
+            [{"op": "append", "heading": "Pref", "subheading": "Editor",
+              "line": "vim too"}],
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "applied"
+        section = new_doc.find("Pref")
+        idx_sub = section.lines.index("### Editor")
+        idx_new = section.lines.index("- vim too")
+        idx_existing = section.lines.index("- vs code")
+        # New bullet lands after the subheading and after the existing one.
+        assert idx_new > idx_existing > idx_sub
+        # Top region untouched.
+        assert "- top" in section.lines
+
+    def test_append_under_subheading_stops_at_next_subheading(self):
+        doc = _doc("## Pref\n### A\n- a1\n### B\n- b1\n")
+        new_doc, applied, rejected = apply_ops(
+            doc,
+            [{"op": "append", "heading": "Pref", "subheading": "A", "line": "a2"}],
+        )
+        assert rejected == []
+        section = new_doc.find("Pref")
+        idx_a2 = section.lines.index("- a2")
+        idx_b = section.lines.index("### B")
+        # The new bullet belongs to subsection A, before subheading B.
+        assert idx_a2 < idx_b
+
+    def test_append_under_subheading_dedups(self):
+        doc = _doc("## Pref\n### Editor\n- vs code\n")
+        new_doc, applied, rejected = apply_ops(
+            doc,
+            [{"op": "append", "heading": "Pref", "subheading": "Editor",
+              "line": "vs code"}],
+        )
+        assert rejected == []
+        assert applied and applied[0]["outcome"] == "noop_dup"
+
+    def test_append_missing_subheading_rejected(self):
+        doc = _doc("## Pref\n- top\n### Editor\n- vs code\n")
+        _, applied, rejected = apply_ops(
+            doc,
+            [{"op": "append", "heading": "Pref", "subheading": "Nope", "line": "x"}],
+        )
+        assert applied == []
+        assert rejected[0]["reason"] == "subheading_missing"
+
+    def test_append_without_subheading_unchanged_top_region_behavior(self):
+        # Omitting subheading keeps the established top-region append.
+        doc = _doc("## Pref\n- top\n### Editor\n- vs code\n")
+        new_doc, applied, _ = apply_ops(
+            doc, [{"op": "append", "heading": "Pref", "line": "another top"}]
+        )
+        section = new_doc.find("Pref")
+        idx_new = section.lines.index("- another top")
+        idx_sub = section.lines.index("### Editor")
+        assert idx_new < idx_sub
 
 
 class TestBatch:

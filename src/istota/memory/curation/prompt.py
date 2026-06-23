@@ -35,9 +35,12 @@ def build_op_curation_prompt(
     parts.append(
         "## Operations available\n"
         "\n"
-        "- append: add a bullet under an EXISTING heading\n"
+        "- append: add a bullet under an EXISTING heading (optionally under one of its\n"
+        '  `### subheadings` via "subheading")\n'
         "- add_heading: create a NEW heading with one or more bullets\n"
-        "- remove: remove a bullet (heading + substring match; must be unique)"
+        "- remove: remove a bullet (heading + substring match; must be unique)\n"
+        "- replace: rewrite the single matching bullet in place (heading + match + new line)\n"
+        "- remove_heading: drop a whole `## ` section (heading)"
     )
 
     parts.append(
@@ -45,14 +48,16 @@ def build_op_curation_prompt(
         "\n"
         "- Headings are matched **case-sensitive exact** against the structure shown above.\n"
         "  Copy the heading text verbatim.\n"
-        '- "Bullet" means a line starting with `-`, `*`, or `1.` (etc). Paragraphs and `### subheadings`\n'
-        "  are NOT bullets and are NEVER touched by these ops.\n"
-        "- Ops only operate on the **top region** of a section — the lines before the first `### subheading`.\n"
-        "  Subsections are opaque; do not try to edit content inside them.\n"
-        "- `append` inserts the new bullet at the end of the top region (before any `###` subsection).\n"
-        "- `remove` matches `match` as a case-insensitive substring against the bullet text. If zero lines\n"
-        "  match, the op is a quiet no-op. If multiple match, the op is rejected — be more specific.\n"
-        "- `append` deduplicates: identical bullet text in the section's top region produces no change.\n"
+        '- "Bullet" means a line starting with `-`, `*`, or `1.` (etc). Paragraphs and `### subheading`\n'
+        "  lines themselves are NOT bullets and are NEVER matched or removed by these ops.\n"
+        "- `remove` and `replace` match `match` as a case-insensitive substring against bullet text\n"
+        "  across the WHOLE section (top region AND `### subsections`). If zero bullets match, the op\n"
+        "  is a quiet no-op. If multiple match, the op is rejected — be more specific.\n"
+        "- `append` without a subheading inserts at the end of the top region (before any `###`).\n"
+        '  With "subheading" set, it appends under that subsection instead.\n'
+        "- `append` deduplicates: identical bullet text in the target region produces no change.\n"
+        "- `replace` preserves the matched bullet's indentation; an identical rewrite is a no-op.\n"
+        "- `remove_heading` deletes the entire section — use it only for sections that are wholly stale.\n"
         "- `add_heading` rejects existing names; use `append` to add a bullet under an existing heading."
     )
 

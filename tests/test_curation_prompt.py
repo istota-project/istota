@@ -50,6 +50,22 @@ class TestBuildPrompt:
         assert "add_heading" in prompt
         assert "remove" in prompt
 
+    def test_documents_widened_op_set(self):
+        doc = parse_sectioned_doc("## A\n- a\n")
+        prompt = build_op_curation_prompt("alice", doc, "dated", None)
+        # The newer ops must be advertised so the model can use them.
+        assert "replace" in prompt
+        assert "remove_heading" in prompt
+        assert "subheading" in prompt
+
+    def test_does_not_claim_subsections_are_opaque(self):
+        # remove/replace now reach into subsections; a stale "opaque" /
+        # "top region only" instruction would mislead the model.
+        doc = parse_sectioned_doc("## A\n- a\n### Sub\n- s\n")
+        prompt = build_op_curation_prompt("alice", doc, "dated", None).lower()
+        assert "opaque" not in prompt
+        assert "only operate on the" not in prompt
+
 
 class TestStripJsonFences:
     def test_unwraps_json_block_with_lang(self):

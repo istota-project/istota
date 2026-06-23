@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-23: USER.md memory — off-mount lock anchor + wider edit vocabulary
+
+Two related fixes to the op-based USER.md / CHANNEL.md memory subsystem, prompted by a report that the `USER.md.lock` file persisted in the user's config dir and that the assistant struggled to prune stale bullets under the strict append-only feel.
+
+The lock was never actually stuck — `memory_md_lock` is a context-managed flock; the `.lock` *file* just persisted on disk as an inert anchor while the lock itself released on context exit. The real problems were (1) the anchor lived as a sibling of USER.md on the rclone/FUSE Nextcloud mount, where `fcntl.flock` is unreliable (silent no-op or `ENOLCK`/`ENOTSUP`) and the leftover file cluttered the config dir, and (2) the ops vocabulary couldn't touch `### subsection` content at all, had no in-place edit, and no whole-section removal — so the model frequently couldn't land an edit even though a `remove` command existed.
+
+Mulder/Scully reviewed the first pass. Scully verified all functional behavior; Mulder caught a silent regression in the initial off-mount design (anchor under `/tmp/istota-md-locks` is invisible inside the bwrap sandbox, which mounts a private tmpfs over `/tmp` — so a sandboxed CLI and the host curator would flock different inodes and both acquire instantly, reintroducing the exact race the lock prevents, only when the skill proxy is off). The fix moved the anchor under the per-user deferred dir (`ISTOTA_DEFERRED_DIR` = `config.temp_dir/<user_id>`), which the executor already bind-mounts into the sandbox at the same path — so curator (host), proxy CLI (host), and sandboxed CLI all resolve the same inode, per-user, with no cross-tenant reach. Trade-off: cross-*user* CHANNEL.md serialization is now best-effort (it was already FUSE-unreliable; channel writes are rare and uncurated, and protecting the audited USER.md in every config is the priority).
+
+Also from the review: `replace` now refuses to manufacture a duplicate (scans the whole section, returns `noop_dup`), `remove`/`replace` uniqueness spans the whole section, and the stale "subsections are opaque" instruction was scrubbed from the curation prompt and the `types.py` docstring.
+
+**Key changes:**
+- `file_lock.py`: anchor moved off the mount. `lock_path_for(target, *, lock_dir=None)` keys the anchor name on `sha256(abspath(target))[:16]`; `deferred_lock_dir(deferred_dir)` builds the per-user `.md-locks/` anchor dir the daemon writers pass. System-temp default kept as an ad-hoc/test fallback.
+- Curator (`sleep_cycle.py`) and the runtime CLI (`skills/memory`) both pass the per-user deferred anchor dir, so they coordinate on one inode across the sandbox boundary.
+- New ops in `curation/ops.py`: `replace` (in-place rewrite of the unique matching bullet, indentation-preserving, dup-safe) and `remove_heading` (drop a whole `## ` section). `remove` now spans the whole section (top region + subsections); the old `match_in_subsection` reject is gone. `append` gained an optional `subheading` to target a `### subsection` (new `subsection_region_indices` helper in `types.py`).
+- CLI subcommands `replace`, `remove-heading`, and `append --subheading`; curation prompt + skill.md + AGENTS.md updated to advertise the wider vocabulary and drop the "opaque subsections" guidance.
+
+**Files added/modified:**
+- `src/istota/memory/curation/file_lock.py` - off-mount anchor, `lock_path_for`, `deferred_lock_dir`
+- `src/istota/memory/curation/ops.py` - `replace`, `remove_heading`, whole-section `remove`, subheading-append, `_find_unique_bullet`/`_insert_bullet_in_region` helpers
+- `src/istota/memory/curation/types.py` - `subsection_region_indices`, corrected docstrings
+- `src/istota/memory/curation/prompt.py` - widened op set, dropped "opaque" wording
+- `src/istota/memory/sleep_cycle.py` - curator passes the per-user anchor dir
+- `src/istota/skills/memory/__init__.py` - new subcommands + `_lock_dir()` from `ISTOTA_DEFERRED_DIR`
+- `src/istota/skills/memory/skill.md`, `AGENTS.md` - docs
+- `tests/test_curation_{concurrency,ops,prompt}.py`, `tests/test_skill_memory_cli.py` - new/updated coverage (6553 passed, 7 skipped)
+
 ## 2026-06-17: Stop one hung scheduled task wedging the background queue
 
 A per-minute CRON `command:` job (a `* * * * *` location script) shelled out to `istota-skill` subprocesses and hung. Its task heartbeated for 6.5h while stuck, holding the user's single background worker slot the whole time, so nothing else in the background queue could run. Three compounding gaps turned one hung script into a self-sustaining incident: (1) `check_scheduled_jobs` enqueued a fresh run every fire regardless of whether the prior run was still in flight, so the backlog grew one row/minute behind the wedged slot (130+ pending); (2) `subprocess.run(timeout=…)` only SIGKILLs the *direct* child, then blocks forever in the post-kill `communicate()` when an orphaned grandchild still holds the stdout pipe — so the framework timeout never actually fired, and because the per-task heartbeat thread keeps pinging from a separate thread, the liveness-based stuck-running reaper never reclaimed it either; (3) `fail_ancient_pending_tasks` posted "A task you submitted was cancelled…" to every aged-out task's channel — including the automated backlog — turning the pile-up into a once-a-minute chat flood (and the message wasn't even true for a scheduled job).
