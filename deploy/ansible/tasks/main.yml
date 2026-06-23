@@ -414,7 +414,13 @@
       Wants=network-online.target
 
       [Service]
-      Type=simple
+      # Type=notify: rclone signals sd_notify READY=1 only once the FUSE mount
+      # is actually live, so dependent units (scheduler/web/webhooks, which
+      # Require + After this) start only after the mount exists — not merely
+      # after rclone is spawned. With Type=simple a reboot raced: apps started
+      # against the bare mountpoint, seeded empty per-user DBs into it, and the
+      # non-empty dir then permanently wedged rclone ("mountpoint is not empty").
+      Type=notify
       User={{ istota_user }}
       Group={{ istota_group }}
       ExecStartPre=/bin/mkdir -p {{ istota_nextcloud_mount_path }}

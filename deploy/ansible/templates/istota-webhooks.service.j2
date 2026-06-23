@@ -1,6 +1,13 @@
 [Unit]
 Description={{ istota_namespace | capitalize }} Webhook Receiver
 After=network.target
+{% if istota_use_nextcloud_mount %}
+After=mount-nextcloud.service
+# Requires (not Wants): the webhook receiver writes GPS pings straight into the
+# per-user location.db on the rclone mount. Don't start until the FUSE mount is
+# live, and stay down if it fails, so pings never land in the bare mountpoint.
+Requires=mount-nextcloud.service
+{% endif %}
 
 [Service]
 Type=simple
