@@ -63,16 +63,20 @@ istota-skill memory_search add-fact stefan grew_up_in Warsaw
 istota-skill memory headings                          # see what's already there
 istota-skill memory show --heading "Communication style"   # inspect a section's current content
 istota-skill memory append --heading "Communication style" --line "Keep replies under 3 sentences with stefan's family"
+istota-skill memory append --heading "Communication style" --subheading "Email" --line "Plain text, no HTML"
 istota-skill memory add-heading --heading "Travel" --line "Default vehicle is the BMW /5 motorcycle — say 'rode' not 'drove'"
 istota-skill memory remove --heading "Preferences" --match "morning meetings"
+istota-skill memory replace --heading "Preferences" --match "prefers tea" --line "Prefers black coffee"
+istota-skill memory remove-heading --heading "Old Project"
 ```
 
 Rules:
 
 - The heading must already exist for `append`; on `heading_missing` the CLI returns the list of available headings — pick the closest match or use `add-heading`.
 - `add-heading` is for genuinely new topic areas only. Don't proliferate near-duplicates ("Notes", "Memory", "Stuff").
-- `remove` requires a substring unique to one bullet under the top region of the heading. If the substring matches multiple bullets, the CLI returns `multiple_matches`; narrow the substring.
-- Subsections (`### …`) are opaque to the CLI. To edit content under a subsection, restructure the surrounding section first via `add-heading`/`remove` at the `## ` level.
+- `remove` requires a substring unique to one bullet under the heading. The match spans the whole section — top region **and** any `### subsections`. If the substring matches multiple bullets, the CLI returns `multiple_matches`; narrow the substring. `### subheading` lines themselves are never matched.
+- To **reword** a stale bullet, use `replace --match <substr> --line <new text>` — one in-place op instead of `remove` then `append`. To drop an entire stale section, use `remove-heading`.
+- To append under a `### subsection`, pass `--subheading "Name"` to `append`. Without it, `append` targets the section's top region (above the first `###`).
 
 ### Don't bypass the CLI
 

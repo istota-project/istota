@@ -1091,7 +1091,11 @@ def curate_user_memory(
         get_user_md_lint_seen_path,
         write_last_seen,
     )
-    from .curation.file_lock import MemoryMdLocked, memory_md_lock
+    from .curation.file_lock import (
+        MemoryMdLocked,
+        deferred_lock_dir,
+        memory_md_lock,
+    )
     from .curation.lint import (
         filter_unseen_candidates,
         find_temporal_bullets,
@@ -1193,8 +1197,11 @@ def curate_user_memory(
     memory_path.parent.mkdir(parents=True, exist_ok=True)
 
     header_added = False
+    # Anchor under the user's deferred dir so the lock is the same inode the
+    # runtime memory CLI uses (host or sandboxed) — see file_lock docstring.
+    lock_dir = deferred_lock_dir(config.temp_dir / user_id)
     try:
-        with memory_md_lock(memory_path, timeout_seconds=5.0):
+        with memory_md_lock(memory_path, timeout_seconds=5.0, lock_dir=lock_dir):
             # Re-read USER.md from disk after the LLM call. If it changed
             # during the brain's wall time (a runtime CLI write landed
             # between read and write), abort tonight's curation rather

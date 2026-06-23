@@ -127,17 +127,80 @@ class TestRemove:
         assert "Existing note 1" not in user_md.read_text()
         assert "Existing note 2" in user_md.read_text()
 
-    def test_match_in_subsection_rejected(self, tmp_path, monkeypatch, capsys):
+    def test_removes_bullet_under_subsection(self, tmp_path, monkeypatch, capsys):
+        # Removal now reaches into `### subsections` so stale bullets there
+        # can be pruned (previously rejected as match_in_subsection).
         user_md = _setup_user(tmp_path, monkeypatch)
-        before = user_md.read_text()
-        with pytest.raises(SystemExit):
-            memory_main([
-                "remove", "--heading", "Communication style",
-                "--match", "sign off",
-            ])
+        memory_main([
+            "remove", "--heading", "Communication style",
+            "--match", "sign off",
+        ])
         out = json.loads(capsys.readouterr().out)
-        assert out["error"] == "match_in_subsection"
-        assert user_md.read_text() == before
+        assert out["outcome"] == "applied"
+        body = user_md.read_text()
+        assert "Always sign off with name" not in body
+        # The subheading and the other section content survive.
+        assert "### Email" in body
+        assert "Prefers short replies" in body
+
+
+class TestReplaceCli:
+    def test_replace_unique_bullet(self, tmp_path, monkeypatch, capsys):
+        user_md = _setup_user(tmp_path, monkeypatch)
+        memory_main([
+            "replace", "--heading", "Notes",
+            "--match", "note 1", "--line", "Reworded note one",
+        ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        body = user_md.read_text()
+        assert "- Reworded note one" in body
+        assert "Existing note 1" not in body
+
+    def test_replace_in_subsection(self, tmp_path, monkeypatch, capsys):
+        user_md = _setup_user(tmp_path, monkeypatch)
+        memory_main([
+            "replace", "--heading", "Communication style",
+            "--match", "sign off", "--line", "Sign off with first name only",
+        ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        body = user_md.read_text()
+        assert "Sign off with first name only" in body
+        assert "Always sign off with name" not in body
+
+
+class TestRemoveHeadingCli:
+    def test_remove_heading_drops_section(self, tmp_path, monkeypatch, capsys):
+        user_md = _setup_user(tmp_path, monkeypatch)
+        memory_main(["remove-heading", "--heading", "Notes"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        body = user_md.read_text()
+        assert "## Notes" not in body
+        assert "## Communication style" in body
+
+    def test_remove_heading_missing(self, tmp_path, monkeypatch, capsys):
+        _setup_user(tmp_path, monkeypatch)
+        with pytest.raises(SystemExit):
+            memory_main(["remove-heading", "--heading", "Nope"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "heading_missing"
+
+
+class TestAppendSubheadingCli:
+    def test_append_under_subheading(self, tmp_path, monkeypatch, capsys):
+        user_md = _setup_user(tmp_path, monkeypatch)
+        memory_main([
+            "append", "--heading", "Communication style",
+            "--subheading", "Email", "--line", "Use plain text, no HTML",
+        ])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        body = user_md.read_text()
+        assert "Use plain text, no HTML" in body
+        # Lands under the Email subsection, after its existing bullet.
+        assert body.index("Always sign off") < body.index("Use plain text")
 
 
 class TestShowHeadings:
@@ -161,6 +224,27 @@ class TestShowHeadings:
         out = json.loads(capsys.readouterr().out)
         assert out["error"] == "heading_missing"
         assert "Notes" in out["available_headings"]
+
+
+class TestLockAnchorPlacement:
+    def test_anchor_goes_under_deferred_dir_not_tmp(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # With ISTOTA_DEFERRED_DIR set (the daemon path), the flock anchor must
+        # live under that per-user dir — it's bind-mounted into the sandbox, so
+        # a sandboxed CLI and the host curator share the same inode.
+        user_md = _setup_user(tmp_path, monkeypatch)
+        deferred = tmp_path / "deferred" / "alice"
+        deferred.mkdir(parents=True)
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred))
+        memory_main(["append", "--heading", "Notes", "--line", "Anchored"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["outcome"] == "applied"
+        assert "- Anchored" in user_md.read_text()
+        # Anchor created under the deferred dir, not as a mount sibling.
+        anchors = list((deferred / ".md-locks").glob("USER.md.*.lock"))
+        assert anchors, "expected a flock anchor under ISTOTA_DEFERRED_DIR/.md-locks"
+        assert not (user_md.parent / "USER.md.lock").exists()
 
 
 class TestChannel:

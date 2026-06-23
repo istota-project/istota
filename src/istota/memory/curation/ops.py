@@ -11,24 +11,33 @@ that only need file ops.
 
 Op shapes
 ---------
-- append:      {"op": "append", "heading": str, "line": str}
+- append:      {"op": "append", "heading": str, "line": str,
+                "subheading": str | None}
+                (omit subheading → top region; set it → under that `### …`)
 - add_heading: {"op": "add_heading", "heading": str, "lines": list[str]}
 - remove:      {"op": "remove", "heading": str, "match": str}
+                (matches any bullet in the section, subsections included)
+- replace:     {"op": "replace", "heading": str, "match": str, "line": str}
+                (rewrites the single matching bullet in place)
+- remove_heading: {"op": "remove_heading", "heading": str}
+                (drops the whole `## ` section)
 - add_fact:    {"op": "add_fact", "subject": str, "predicate": str,
                 "object": str, "valid_from": str | None}
                 (apply_ops_with_db only)
 
 Outcomes (kept on each entry of `applied`):
 - "applied"        — the doc/DB changed
-- "noop_dup"       — append: bullet already exists in top region (case-insensitive);
+- "noop_dup"       — append: bullet already exists (case-insensitive);
+                     replace: the new text already exists as a section bullet
+                     (the matched one or another) — left unchanged;
                      add_fact: an exact or fuzzy duplicate already exists
-- "noop_no_match"  — remove: zero lines matched
+- "noop_no_match"  — remove / replace: zero bullets matched
 
 Reject reasons (kept on each entry of `rejected`):
 - "unknown_op", "missing_field", "heading_missing", "heading_exists",
   "empty_line", "empty_lines", "empty_heading", "empty_match",
   "line_starts_with_hash", "heading_starts_with_hash", "multiple_matches",
-  "match_in_subsection",
+  "subheading_missing",
   "empty_subject", "empty_predicate", "empty_object", "invalid_predicate",
   "invalid_valid_from", "object_too_long", "no_db_connection"
 """
@@ -39,7 +48,14 @@ import copy
 import re
 from typing import Any
 
-from .types import Section, SectionedDoc, classify_line, normalize_bullet_text, top_region_indices
+from .types import (
+    Section,
+    SectionedDoc,
+    classify_line,
+    normalize_bullet_text,
+    subsection_region_indices,
+    top_region_indices,
+)
 
 # Matches actual heading-shaped tokens (`# `, `## `, ..., up to `###### `).
 # Not a bare `#` followed by non-space (which is plausible content like a
@@ -59,6 +75,8 @@ _REQUIRED_FIELDS = {
     "append": ("heading", "line"),
     "add_heading": ("heading", "lines"),
     "remove": ("heading", "match"),
+    "replace": ("heading", "match", "line"),
+    "remove_heading": ("heading",),
     "add_fact": ("subject", "predicate", "object"),
 }
 
@@ -131,6 +149,10 @@ def _apply_ops_inner(
             result = _apply_add_heading(new_doc, op)
         elif kind == "remove":
             result = _apply_remove(new_doc, op)
+        elif kind == "replace":
+            result = _apply_replace(new_doc, op)
+        elif kind == "remove_heading":
+            result = _apply_remove_heading(new_doc, op)
         else:  # "add_fact"
             result = _apply_add_fact(op, db_ctx)
 
@@ -187,6 +209,13 @@ def _apply_append(doc: SectionedDoc, op: dict) -> str:
 
     new_bullet = _normalize_to_bullet(line)
     new_text_lower = normalize_bullet_text(new_bullet).lower()
+
+    sub = op.get("subheading")
+    if sub is not None and str(sub).strip():
+        region = subsection_region_indices(section, str(sub))
+        if region is None:
+            return "subheading_missing"
+        return _insert_bullet_in_region(section, region, new_bullet, new_text_lower)
 
     start, end = top_region_indices(section)
     # Dedup: any bullet line in top region whose normalized text matches?
@@ -263,6 +292,57 @@ def _apply_add_heading(doc: SectionedDoc, op: dict) -> str:
     return "applied"
 
 
+def _insert_bullet_in_region(
+    section: Section, region: tuple[int, int], new_bullet: str, new_text_lower: str
+) -> str:
+    """Append `new_bullet` at the end of the `(start, end)` line region.
+
+    Used for subheading-targeted appends. The region is a subsection's bullet
+    range (no nested `### subheadings` inside it). Dedups against existing
+    bullets in the region; inserts a blank gap when the preceding line is a
+    paragraph so the bullet doesn't fuse onto it.
+    """
+    start, end = region
+    for i in range(start, end):
+        if classify_line(section.lines[i]) == "bullet":
+            if normalize_bullet_text(section.lines[i]).lower() == new_text_lower:
+                return "noop_dup"
+
+    insert_at = start
+    for i in range(start, end):
+        if classify_line(section.lines[i]) != "blank":
+            insert_at = i + 1
+
+    if insert_at > 0 and classify_line(section.lines[insert_at - 1]) == "paragraph":
+        section.lines.insert(insert_at, "")
+        insert_at += 1
+
+    section.lines.insert(insert_at, new_bullet)
+    return "applied"
+
+
+def _find_unique_bullet(section: Section, needle: str) -> int | str:
+    """Return the index of the single bullet whose text contains `needle`.
+
+    Searches every bullet line in the section — top region AND subsections —
+    so stale bullets anywhere are reachable. `### subheading` lines are never
+    candidates (they classify as 'subheading', not 'bullet'). Returns the
+    reason string `"noop_no_match"` (zero) or `"multiple_matches"` (>1) when
+    there isn't exactly one hit.
+    """
+    matches: list[int] = []
+    for i in range(len(section.lines)):
+        if classify_line(section.lines[i]) != "bullet":
+            continue
+        if needle in normalize_bullet_text(section.lines[i]).lower():
+            matches.append(i)
+    if len(matches) == 0:
+        return "noop_no_match"
+    if len(matches) > 1:
+        return "multiple_matches"
+    return matches[0]
+
+
 def _apply_remove(doc: SectionedDoc, op: dict) -> str:
     section = doc.find(op["heading"])
     if section is None:
@@ -270,34 +350,54 @@ def _apply_remove(doc: SectionedDoc, op: dict) -> str:
     match = op["match"]
     if not match or not match.strip():
         return "empty_match"
-    needle = match.strip().lower()
 
-    start, end = top_region_indices(section)
-    matches: list[int] = []
-    for i in range(start, end):
+    found = _find_unique_bullet(section, match.strip().lower())
+    if isinstance(found, str):
+        return found  # noop_no_match | multiple_matches
+
+    section.lines.pop(found)
+    return "applied"
+
+
+def _apply_replace(doc: SectionedDoc, op: dict) -> str:
+    section = doc.find(op["heading"])
+    if section is None:
+        return "heading_missing"
+    match = op["match"]
+    if not match or not match.strip():
+        return "empty_match"
+    line = op["line"]
+    reason = _validate_appendable_line(line)
+    if reason:
+        return reason
+
+    found = _find_unique_bullet(section, match.strip().lower())
+    if isinstance(found, str):
+        return found  # noop_no_match | multiple_matches
+
+    original = section.lines[found]
+    # Preserve the matched bullet's indentation so a nested (subsection)
+    # bullet keeps its depth after the rewrite.
+    indent = original[: len(original) - len(original.lstrip())]
+    new_line = indent + _normalize_to_bullet(line)
+    new_text_lower = normalize_bullet_text(new_line).lower()
+    # Don't manufacture a duplicate: if the new text already exists as a bullet
+    # anywhere in the section (the matched bullet itself, or another one), leave
+    # the doc unchanged. This also covers the "no actual change" case.
+    for i in range(len(section.lines)):
         if classify_line(section.lines[i]) != "bullet":
             continue
-        bullet_text = normalize_bullet_text(section.lines[i]).lower()
-        if needle in bullet_text:
-            matches.append(i)
+        if normalize_bullet_text(section.lines[i]).lower() == new_text_lower:
+            return "noop_dup"
+    section.lines[found] = new_line
+    return "applied"
 
-    if len(matches) == 0:
-        # Distinguish a true miss from "match exists but lives under a
-        # `### subheading`". Subsections are opaque to ops, so we must not
-        # touch them — but a silent no-op trains the model that its remove
-        # was accepted. Surface it as a reject so the audit log captures
-        # the attempt and the model can stop trying.
-        for i in range(end, len(section.lines)):
-            if classify_line(section.lines[i]) != "bullet":
-                continue
-            bullet_text = normalize_bullet_text(section.lines[i]).lower()
-            if needle in bullet_text:
-                return "match_in_subsection"
-        return "noop_no_match"
-    if len(matches) > 1:
-        return "multiple_matches"
 
-    section.lines.pop(matches[0])
+def _apply_remove_heading(doc: SectionedDoc, op: dict) -> str:
+    section = doc.find(op["heading"])
+    if section is None:
+        return "heading_missing"
+    doc.sections = [s for s in doc.sections if s is not section]
     return "applied"
 
 

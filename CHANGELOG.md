@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The assistant can now properly tidy its own long-term memory. It can edit a saved note in place, remove an outdated note, and drop a whole stale section — including notes filed under a sub-heading, which it previously couldn't touch at all. Before this it could mostly only add new notes, so old or wrong entries tended to pile up.
+
+### Fixed
+- Stopped the assistant's memory file from leaving a stray `.lock` file in each user's cloud folder. The short-lived lock that guards memory writes now lives in local scratch space instead of next to the memory file on the network drive, where it cluttered the folder and where the lock itself could be unreliable.
+
 ## [0.24.0] - 2026-06-17
 
 ### Added

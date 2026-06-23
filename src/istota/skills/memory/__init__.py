@@ -5,11 +5,15 @@ the always-included memory skill so durable memory writes don't bypass
 heading routing, dedup, or the audit log.
 
 Subcommands:
-  append      Append a bullet under an existing `## heading`.
-  add-heading Add a new `## heading` with one or more bullets.
-  remove      Remove a bullet (substring match, must be unique).
-  show        Print the current contents of USER.md (or one section).
-  headings    List the `## ` heading names in order.
+  append        Append a bullet under an existing `## heading` (optionally
+                under one of its `### subheadings` via --subheading).
+  add-heading   Add a new `## heading` with one or more bullets.
+  remove        Remove a bullet (substring match, must be unique). Reaches
+                into subsections.
+  replace       Rewrite the single matching bullet in place.
+  remove-heading Drop a whole `## ` section.
+  show          Print the current contents of USER.md (or one section).
+  headings      List the `## ` heading names in order.
 
 Each write subcommand can target the channel memory file by passing
 `--channel TOKEN`. The TOKEN is validated against `ISTOTA_CONVERSATION_TOKEN`
@@ -37,7 +41,11 @@ from istota.memory.curation.audit import (
     write_audit_log,
     write_last_seen,
 )
-from istota.memory.curation.file_lock import MemoryMdLocked, memory_md_lock
+from istota.memory.curation.file_lock import (
+    MemoryMdLocked,
+    deferred_lock_dir,
+    memory_md_lock,
+)
 from istota.memory.curation.ops import apply_ops
 from istota.memory.curation.parser import (
     parse_sectioned_doc,
@@ -207,10 +215,23 @@ def _update_last_seen(path: Path, text: str, is_channel: bool) -> None:
     )
 
 
+def _lock_dir() -> Path | None:
+    """Shared anchor dir for the runtime CLI.
+
+    Use the per-user deferred dir (`ISTOTA_DEFERRED_DIR`) so the anchor is the
+    same inode whether this CLI runs host-side under the skill proxy or inside
+    the bwrap sandbox (the deferred dir is bind-mounted in), matching the
+    nightly curator's anchor. Falls back to the system-temp default for ad-hoc
+    CLI runs with no task env (no concurrent curator to coordinate with then).
+    """
+    deferred = os.environ.get("ISTOTA_DEFERRED_DIR", "")
+    return deferred_lock_dir(Path(deferred)) if deferred else None
+
+
 def _do_op(args, op_dict: dict) -> int:
     path, is_channel = _resolve_target(args)
     try:
-        with memory_md_lock(path, timeout_seconds=5.0):
+        with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir()):
             current = _read_text(path)
             doc = parse_sectioned_doc(current)
             new_doc, applied, rejected = apply_ops(doc, [op_dict])
@@ -246,7 +267,11 @@ def _do_op(args, op_dict: dict) -> int:
 
 
 def cmd_append(args) -> int:
-    return _do_op(args, {"op": "append", "heading": args.heading, "line": args.line})
+    op = {"op": "append", "heading": args.heading, "line": args.line}
+    subheading = getattr(args, "subheading", None)
+    if subheading:
+        op["subheading"] = subheading
+    return _do_op(args, op)
 
 
 def cmd_add_heading(args) -> int:
@@ -257,6 +282,17 @@ def cmd_add_heading(args) -> int:
 
 def cmd_remove(args) -> int:
     return _do_op(args, {"op": "remove", "heading": args.heading, "match": args.match})
+
+
+def cmd_replace(args) -> int:
+    return _do_op(
+        args,
+        {"op": "replace", "heading": args.heading, "match": args.match, "line": args.line},
+    )
+
+
+def cmd_remove_heading(args) -> int:
+    return _do_op(args, {"op": "remove_heading", "heading": args.heading})
 
 
 def cmd_show(args) -> int:
@@ -309,6 +345,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_app = sub.add_parser("append", help="Append a bullet under an existing heading.")
     p_app.add_argument("--heading", required=True)
     p_app.add_argument("--line", required=True)
+    p_app.add_argument(
+        "--subheading",
+        help="Append under this `### subheading` of the heading instead of the top region.",
+    )
     _add_channel_flag(p_app)
 
     p_add = sub.add_parser("add-heading", help="Add a new heading with one or more bullets.")
@@ -321,6 +361,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_rm.add_argument("--heading", required=True)
     p_rm.add_argument("--match", required=True)
     _add_channel_flag(p_rm)
+
+    p_rep = sub.add_parser("replace", help="Rewrite the single matching bullet in place.")
+    p_rep.add_argument("--heading", required=True)
+    p_rep.add_argument("--match", required=True)
+    p_rep.add_argument("--line", required=True)
+    _add_channel_flag(p_rep)
+
+    p_rmh = sub.add_parser("remove-heading", help="Drop a whole `## ` section.")
+    p_rmh.add_argument("--heading", required=True)
+    _add_channel_flag(p_rmh)
 
     p_show = sub.add_parser("show", help="Print USER.md (optionally filtered to one heading).")
     p_show.add_argument("--heading")
@@ -339,6 +389,8 @@ def main(argv=None) -> int:
         "append": cmd_append,
         "add-heading": cmd_add_heading,
         "remove": cmd_remove,
+        "replace": cmd_replace,
+        "remove-heading": cmd_remove_heading,
         "show": cmd_show,
         "headings": cmd_headings,
     }
