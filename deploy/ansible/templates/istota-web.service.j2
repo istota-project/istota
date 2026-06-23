@@ -1,6 +1,13 @@
 [Unit]
 Description={{ istota_namespace | capitalize }} Web Interface
 After=network.target
+{% if istota_use_nextcloud_mount %}
+After=mount-nextcloud.service
+# Requires (not Wants): the web app reads/writes per-user DBs on the rclone
+# mount. Don't start until the FUSE mount is actually live, and stay down if it
+# fails, so we never read empty re-inits or seed the bare mountpoint.
+Requires=mount-nextcloud.service
+{% endif %}
 
 [Service]
 Type=simple

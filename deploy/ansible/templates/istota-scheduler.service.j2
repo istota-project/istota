@@ -3,7 +3,12 @@ Description={{ istota_namespace | capitalize }} Task Scheduler Daemon
 After=network.target
 {% if istota_use_nextcloud_mount %}
 After=mount-nextcloud.service
-Wants=mount-nextcloud.service
+# Requires (not Wants): if the rclone mount is down, the scheduler must NOT
+# start. A weak Wants let it boot while the mount was failing and seed per-user
+# workspace data into the bare mountpoint, which then permanently wedged rclone
+# ("mountpoint is not empty"). With the mount unit as Type=notify, After= also
+# guarantees we start only once the FUSE mount is actually live, not just spawned.
+Requires=mount-nextcloud.service
 {% endif %}
 
 [Service]
