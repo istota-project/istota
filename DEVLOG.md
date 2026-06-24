@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-24: Browser autoheal sees a wedged-but-alive Chrome (deep liveness tier)
+
+ISSUE-149. ISSUE-143 moved the container `HEALTHCHECK` off the blocking Flask `/health` onto a lightweight liveness server (`:9224/live`) so a long legitimate browse stops reading as "dead" — but `/live` answers from `chrome.is_chrome_running()`, which is just `_chrome_proc.poll() is None`. That sees a *dead* process, not a Chrome whose process is alive but internally frozen (hung CDP, deadlocked browser, wedged renderer tree). In that state browse and VNC hang while every health signal stays green, so the whole heal chain (debounce → restart → crash-loop guard → alert) never fires.
+
+Reproduced live before coding: the browser container was `healthy`, `/live` returned `ok`, browse + VNC were frozen, and Chrome's own DevTools endpoint (`127.0.0.1:9222/json/version`) *accepted the TCP connection but never sent an HTTP response* (recv timed out). Restarting the container restored it — `/json/version` answered again — confirming a browser-process-level freeze (in scope), not a single hung renderer (out of scope). That endpoint is the discriminator: it's served by the Chrome process itself, independent of the single-threaded Flask app and of page-level browse work, so it keeps answering fast during a long browse but stops when the browser is genuinely wedged.
+
+Fix is the issue's minimal variant: a `deep` liveness tier (`/live?deep=1`) that, when the process is alive, also probes `/json/version` with a short timeout and returns 503 `chrome-wedged` if it doesn't answer. The launch window is exempt via an `is_launching()` flag spanning `launch_chrome()` (process up, DevTools not serving yet — must not read as a wedge). Both HEALTHCHECKs (image `Dockerfile` and the overriding service-level one in `docker-compose.yml`) point at the deep tier; the Ansible production compose declares no service-level healthcheck so it inherits the image one, and the watchdog reads `.State.Health.Status` so it gets the better signal with no change. Skipped the optional in-process `restart_chrome()` self-heal to avoid racing the watchdog. Browser code edited in the stealth-browser source-of-truth repo and synced. Decision table verified with a self-contained replica (the container code can't import in the pytest env — Flask/patchright). Deploy needs an Ansible run to rebuild the browser image; the auto-update cron pulls app code but won't rebuild the image.
+
+**Files modified:**
+- `docker/browser/chrome.py` - `devtools_responding(timeout)` + `is_launching()` flag; `_wait_for_chrome_ready` refactored onto the shared probe
+- `docker/browser/browse_api.py` - liveness handler gained a `deep` tier (`_probe` decision table)
+- `docker/browser/Dockerfile` - image HEALTHCHECK → `/live?deep=1`
+- `docker/docker-compose.yml` - service-level healthcheck → `/live?deep=1`
+
 ## 2026-06-23: Fix non-admin doubled mount path (silent memory loss)
 
 Follow-up from the Mulder/Scully review of the memory-lock change (FINDING 2). For non-admin users the executor set `NEXTCLOUD_MOUNT_PATH` to a *scoped* value (`real/Users/<uid>`), but every consumer — the `memory` and `memory_search` skill CLIs, and the `schedules`/`reminders` skill docs — builds paths as `$NEXTCLOUD_MOUNT_PATH/Users/<uid>/…`. So a non-admin's USER.md write resolved to `real/Users/<uid>/Users/<uid>/<bot>/config/USER.md` — a phantom doubled path that the auto-loader (which uses the unscoped `config.nextcloud_mount_path`) never reads back. Result: non-admin durable-memory writes silently vanished. Latent in the default deployment because an empty admins file means everyone is admin.
