@@ -2652,15 +2652,22 @@ def execute_task(
             "ISTOTA_EXPERIMENTAL_FEATURES": ",".join(config.experimental.features),
         })
 
-        # Admin users get full DB and mount access; non-admin users get scoped paths
+        # NEXTCLOUD_MOUNT_PATH is the real mount root for everyone. Every
+        # consumer (the memory / memory_search skill CLIs, the schedules /
+        # reminders skill docs) builds paths as `$NEXTCLOUD_MOUNT_PATH/Users/
+        # <uid>/…`, so a "scoped" non-admin value (real/Users/<uid>) doubled the
+        # Users/<uid> segment — a non-admin's USER.md write then landed at
+        # real/Users/<uid>/Users/<uid>/… , a phantom path the auto-loader never
+        # reads back (silent memory loss). Per-user filesystem isolation is
+        # enforced by the bwrap bind (build_bwrap_cmd binds only the user's own
+        # Users/<uid> dir, for admin and non-admin alike) and the CLIs self-scope
+        # by ISTOTA_USER_ID, so the real root is safe here. DB access stays
+        # admin-only; the prompt still shows non-admins their scoped path.
+        env["NEXTCLOUD_MOUNT_PATH"] = (
+            str(config.nextcloud_mount_path) if config.nextcloud_mount_path else ""
+        )
         if is_admin:
             env["ISTOTA_DB_PATH"] = str(config.db_path)
-            env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path) if config.nextcloud_mount_path else ""
-        else:
-            if config.nextcloud_mount_path:
-                env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path / "Users" / task.user_id)
-            else:
-                env["NEXTCLOUD_MOUNT_PATH"] = ""
 
         # Browser container credentials
         if config.browser.enabled:

@@ -1585,7 +1585,14 @@ class TestAdminEnvVarIsolation:
         assert env["NEXTCLOUD_MOUNT_PATH"] == str(config.nextcloud_mount_path)
 
     @patch("istota.executor.subprocess.run")
-    def test_non_admin_gets_scoped_mount_path_env(self, mock_run, tmp_path):
+    def test_non_admin_gets_real_root_mount_path_env(self, mock_run, tmp_path):
+        # The mount env var is the REAL root for non-admins too. Every consumer
+        # (memory / memory_search CLIs, the schedules/reminders skill docs)
+        # prepends `Users/<uid>` to it; a previously "scoped" mount
+        # (real/Users/<uid>) doubled that segment, so a non-admin's USER.md write
+        # landed at real/Users/<uid>/Users/<uid>/… — a phantom path never read
+        # back. Filesystem isolation is enforced by the bwrap bind (only the
+        # user's own Users/<uid> dir is bound), not by this env var.
         config = self._make_config(tmp_path, admin_users={"bob"})
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -1596,8 +1603,11 @@ class TestAdminEnvVarIsolation:
             execute_task(task, config, [], conn=conn)
 
         env = mock_run.call_args[1]["env"]
-        expected = str(config.nextcloud_mount_path / "Users" / "alice")
-        assert env["NEXTCLOUD_MOUNT_PATH"] == expected
+        assert env["NEXTCLOUD_MOUNT_PATH"] == str(config.nextcloud_mount_path)
+        # Specifically NOT the doubled/scoped form.
+        assert env["NEXTCLOUD_MOUNT_PATH"] != str(
+            config.nextcloud_mount_path / "Users" / "alice"
+        )
 
     @patch("istota.executor.subprocess.run")
     def test_admin_skills_include_admin_only(self, mock_run, tmp_path):
