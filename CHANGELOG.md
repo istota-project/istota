@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Stopped the assistant's memory file from leaving a stray `.lock` file in each user's cloud folder. The short-lived lock that guards memory writes now lives in local scratch space instead of next to the memory file on the network drive, where it cluttered the folder and where the lock itself could be unreliable.
+- Fixed silent memory loss for non-admin users. Long-term memory writes by a non-admin resolved to a wrong, doubled folder path that nothing ever read back, so the saved note effectively disappeared. Non-admin file paths are now resolved correctly; per-user isolation is unchanged (still enforced by the sandbox).
 
 ## [0.24.0] - 2026-06-17
 

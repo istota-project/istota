@@ -2,6 +2,16 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-23: Fix non-admin doubled mount path (silent memory loss)
+
+Follow-up from the Mulder/Scully review of the memory-lock change (FINDING 2). For non-admin users the executor set `NEXTCLOUD_MOUNT_PATH` to a *scoped* value (`real/Users/<uid>`), but every consumer — the `memory` and `memory_search` skill CLIs, and the `schedules`/`reminders` skill docs — builds paths as `$NEXTCLOUD_MOUNT_PATH/Users/<uid>/…`. So a non-admin's USER.md write resolved to `real/Users/<uid>/Users/<uid>/<bot>/config/USER.md` — a phantom doubled path that the auto-loader (which uses the unscoped `config.nextcloud_mount_path`) never reads back. Result: non-admin durable-memory writes silently vanished. Latent in the default deployment because an empty admins file means everyone is admin.
+
+Root cause was the env scoping itself, not the CLIs: per-user filesystem isolation is already enforced by the bwrap bind (`build_bwrap_cmd` binds only the task user's own `Users/<uid>` dir, for admin and non-admin alike), and the skill CLIs self-scope by `ISTOTA_USER_ID` (executor-set, not model-controllable). The scoped env added no isolation while breaking the path convention. Fix: `NEXTCLOUD_MOUNT_PATH` is now the real root for everyone; `ISTOTA_DB_PATH` stays admin-only; the prompt still shows non-admins their scoped path and the "you can ONLY access …" framing (display only, backed by bwrap). As a corollary this also realigns the per-user memory lock anchor between the curator and a non-admin CLI (the anchor name is keyed on the target's abspath).
+
+**Files modified:**
+- `src/istota/executor.py` - non-admin `NEXTCLOUD_MOUNT_PATH` now the real root (DB stays admin-only)
+- `tests/test_executor.py` - `test_non_admin_gets_real_root_mount_path_env` replaces the test that pinned the doubled value
+
 ## 2026-06-23: USER.md memory — off-mount lock anchor + wider edit vocabulary
 
 Two related fixes to the op-based USER.md / CHANNEL.md memory subsystem, prompted by a report that the `USER.md.lock` file persisted in the user's config dir and that the assistant struggled to prune stale bullets under the strict append-only feel.
