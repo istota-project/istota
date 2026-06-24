@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- The headless browser now heals itself from a wider class of freeze. Its health check used to ask only "is the browser process alive?", so a browser that was running but internally frozen — pages and the remote view both hung — still looked healthy and never got restarted. The check now also confirms the browser is actually responding, so a genuine freeze is caught and the existing restart-and-alert machinery kicks in, while a long legitimate page load still isn't mistaken for a hang.
 - The assistant can now properly tidy its own long-term memory. It can edit a saved note in place, remove an outdated note, and drop a whole stale section — including notes filed under a sub-heading, which it previously couldn't touch at all. Before this it could mostly only add new notes, so old or wrong entries tended to pile up.
 
 ### Fixed
