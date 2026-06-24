@@ -22,6 +22,11 @@ CHROME_PORT = 9222
 # Chrome process
 _chrome_proc = None
 
+# True while launch_chrome() is bringing Chrome up: the process exists but its
+# DevTools endpoint isn't serving yet, so a deep liveness probe must not read
+# that window as a wedge (ISSUE-149).
+_launching = False
+
 # Patchright CDP connection (lazy)
 _pw = None
 _pw_browser = None
@@ -30,7 +35,9 @@ _pw_context = None
 
 def launch_chrome():
     """Launch Chrome directly with debugging port and stealth extension."""
-    global _chrome_proc
+    global _chrome_proc, _launching
+
+    _launching = True
 
     chrome_path = os.environ.get(
         "CHROME_EXECUTABLE", "/usr/bin/google-chrome-stable",
@@ -66,31 +73,54 @@ def launch_chrome():
     ]
 
     env = {**os.environ, "DISPLAY": ":99"}
-    _chrome_proc = subprocess.Popen(
-        args, env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        _chrome_proc = subprocess.Popen(
+            args, env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        _wait_for_chrome_ready()
+        log.info(
+            "Chrome launched (pid=%d, debug_port=%d)",
+            _chrome_proc.pid, CHROME_PORT,
+        )
+    finally:
+        _launching = False
 
-    _wait_for_chrome_ready()
-    log.info(
-        "Chrome launched (pid=%d, debug_port=%d)",
-        _chrome_proc.pid, CHROME_PORT,
-    )
+
+def devtools_responding(timeout=2):
+    """Whether Chrome's DevTools HTTP endpoint answers within ``timeout`` seconds.
+
+    The endpoint is served by the Chrome browser process itself, independent of
+    the single-threaded Flask app and of page-level browse work: a long browse
+    holds the Flask thread, not Chrome's DevTools server, so this keeps answering
+    fast while a browse is in flight but stops answering when the browser process
+    is genuinely wedged. That is the discriminator a process-only ``poll()`` can't
+    see (ISSUE-149) — a wedged-but-alive Chrome accepts the TCP connection but
+    never sends an HTTP response, so the short timeout is what catches it.
+    """
+    try:
+        resp = urllib.request.urlopen(
+            f"http://localhost:{CHROME_PORT}/json/version", timeout=timeout,
+        )
+        resp.close()
+        return True
+    except Exception:
+        return False
+
+
+def is_launching():
+    """Whether a launch is in progress (DevTools not yet expected to answer)."""
+    return _launching
 
 
 def _wait_for_chrome_ready(timeout=15):
     """Wait for Chrome's debugging port to accept connections."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            resp = urllib.request.urlopen(
-                f"http://localhost:{CHROME_PORT}/json/version", timeout=2,
-            )
-            resp.close()
+        if devtools_responding(timeout=2):
             return
-        except Exception:
-            time.sleep(0.5)
+        time.sleep(0.5)
     raise RuntimeError(
         f"Chrome not ready on port {CHROME_PORT} after {timeout}s",
     )

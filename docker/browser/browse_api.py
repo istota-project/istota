@@ -726,10 +726,17 @@ def _resource_monitor():
 # This standalone HTTP server answers `/live` on its own thread and port. A
 # Playwright call releases the GIL while it waits on browser I/O, so this thread
 # still runs and responds even while Flask is busy — "busy" no longer reads as
-# "dead". It only reports unhealthy when the Chrome *process* is actually gone
-# (a cheap, non-blocking `poll()`), so a restart means the container is really
-# wedged, not merely working. The HEALTHCHECK targets this endpoint instead of
-# `/health`.
+# "dead". The cheap `/live` reports unhealthy only when the Chrome *process* is
+# actually gone (a non-blocking `poll()`).
+#
+# `/live?deep=1` adds a second tier: it also probes Chrome's own DevTools
+# endpoint, which catches a Chrome whose process is alive but internally wedged
+# (hung CDP, deadlocked browser, frozen renderer tree) — the common real-world
+# outage `poll()` reports as green (ISSUE-149). A merely-busy browse still passes
+# (DevTools answers independently of Flask); a wedged browser does not. The
+# launch window is exempt (`is_launching()`): the process exists but DevTools
+# isn't up yet, so a relaunch must not read as a wedge. The HEALTHCHECK targets
+# the deep tier.
 
 LIVENESS_PORT = int(os.environ.get("BROWSER_LIVENESS_PORT", "9224"))
 
@@ -740,19 +747,39 @@ def _start_liveness_server():
 
     class _LivenessHandler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 (stdlib naming)
-            if self.path.split("?", 1)[0] != "/live":
+            from urllib.parse import parse_qs, urlparse
+
+            parsed = urlparse(self.path)
+            if parsed.path != "/live":
                 self.send_response(404)
                 self.end_headers()
                 return
-            # Non-blocking: a subprocess poll(), no Playwright/Flask round-trip.
+            deep = parse_qs(parsed.query).get("deep", ["0"])[0] not in (
+                "0", "", "false",
+            )
+            status, body = self._probe(deep)
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(body)
+
+        @staticmethod
+        def _probe(deep):
+            # Cheap tier: a subprocess poll(), no Playwright/Flask round-trip.
             try:
                 alive = chrome.is_chrome_running()
             except Exception:
                 alive = False
-            self.send_response(200 if alive else 503)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"ok\n" if alive else b"chrome-down\n")
+            if not alive:
+                return 503, b"chrome-down\n"
+            # Deep tier: is the live process actually responsive? Exempt the
+            # launch window (DevTools not up yet) so a relaunch doesn't read as
+            # a wedge.
+            if deep and not chrome.is_launching() and not chrome.devtools_responding(
+                timeout=2,
+            ):
+                return 503, b"chrome-wedged\n"
+            return 200, b"ok\n"
 
         def log_message(self, *args):  # silence per-request stderr spam
             pass
