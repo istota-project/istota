@@ -37,7 +37,6 @@ import sys
 from pathlib import Path
 
 from istota.memory.curation.audit import (
-    get_user_md_last_seen_path,
     write_audit_log,
     write_last_seen,
 )
