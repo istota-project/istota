@@ -72,8 +72,10 @@ EXPOSE 9223 6080
 # not the single-threaded Flask /health (9223): a long in-flight browse blocks
 # Flask, which would make a busy-but-healthy container read as unhealthy and get
 # restarted mid-operation (ISSUE-143). The liveness thread answers even while
-# Flask is busy and reports unhealthy only when the Chrome process is gone.
+# Flask is busy. The deep tier (`?deep=1`) also probes Chrome's DevTools endpoint
+# so a wedged-but-alive Chrome (frozen process, hung CDP) reads as unhealthy too,
+# not just a dead process — a busy browse still passes (ISSUE-149).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:9224/live || exit 1
+    CMD curl -sf "http://localhost:9224/live?deep=1" || exit 1
 
 ENTRYPOINT ["./entrypoint.sh"]

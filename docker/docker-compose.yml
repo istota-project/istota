@@ -426,10 +426,12 @@ services:
     # Probe the lightweight liveness endpoint on its own thread/port (9224),
     # not the single-threaded Flask /health (9223): a long in-flight browse
     # blocks Flask, which would make a busy-but-healthy container read as
-    # unhealthy and get restarted mid-operation (ISSUE-143). A compose
-    # healthcheck overrides the image HEALTHCHECK, so this must match it.
+    # unhealthy and get restarted mid-operation (ISSUE-143). The deep tier
+    # (?deep=1) also probes Chrome's DevTools endpoint so a wedged-but-alive
+    # Chrome reads as unhealthy too (ISSUE-149); a busy browse still passes.
+    # A compose healthcheck overrides the image HEALTHCHECK, so this must match it.
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9224/live || exit 1"]
+      test: ["CMD-SHELL", "curl -sf 'http://localhost:9224/live?deep=1' || exit 1"]
       interval: 30s
       timeout: 10s
       start_period: 15s
