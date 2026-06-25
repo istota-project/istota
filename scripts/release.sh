@@ -111,6 +111,9 @@ if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
 fi
 
 git add CHANGELOG.md pyproject.toml
+# vite-mock-api.ts is bumped above only when present; stage it the same way so
+# the version bump lands in this commit instead of leaving the tree dirty.
+[ -f web/vite-mock-api.ts ] && git add web/vite-mock-api.ts || true
 git commit -m "Bump version to $NEW"
 git tag -a "$TAG" --cleanup=verbatim -m "Release $TAG" -m "$NOTES"
 git push --follow-tags
