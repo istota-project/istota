@@ -1,0 +1,8 @@
+# {{ istota_namespace | capitalize }} browser watchdog - managed by Ansible
+# Health check (debounced auto-heal of a wedged container) + daily proactive
+# restart. The debounce, crash-loop protection, and alerting live in the script;
+# cron only sets the cadence. Output is appended to browser-health.log by the
+# script itself; the redirect here catches any script-level (pre-log) failure.
+MAILTO=""
+{{ istota_browser_watchdog_cron }} root /usr/local/bin/{{ istota_namespace }}-browser-watchdog check >> /var/log/{{ istota_namespace }}/browser-health.log 2>&1
+{{ istota_browser_daily_restart_cron }} root /usr/local/bin/{{ istota_namespace }}-browser-watchdog daily-restart >> /var/log/{{ istota_namespace }}/browser-health.log 2>&1
