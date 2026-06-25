@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-06-25: Browser watchdog runs from cron.d, not a systemd timer
+
+Follow-up to the deep-liveness change (ISSUE-149). A browser outage on the deployment host surfaced a gap one layer below the healthcheck: the container correctly read `unhealthy` for ~15 hours (deep probe working — Chrome's process alive but DevTools hanging) and nothing restarted it. The container `HEALTHCHECK` only *marks* status; the piece that reads `.State.Health.Status` and restarts is the watchdog, and the watchdog was **not running on the host at all**. The script and state dir had been deployed, but the systemd timer/service that fire the script were never installed — so the whole debounce → restart → crash-loop → alert chain sat idle behind a correct unhealthy signal. (Manual container restart restored service as a stopgap.)
+
+Rather than re-debug why the systemd units didn't install, reframed the watchdog as a **cron.d job** to match how the other scheduled jobs already run (auto-update, backup are both `/etc/cron.d/` entries). The watchdog script is fully self-contained — it logs to its own file, its debounce counts *reads* not seconds, and it drives `docker compose` directly — so systemd contributed only the firing cadence and unit management, both of which cron.d provides. The conversion loses nothing functional. One tradeoff: cron's 1-minute floor replaces the timer's 30s interval, so with debounce=2 the worst-case detect-and-restart goes from ~1 min to ~2 min — immaterial for a rare wedge, and not worth a `sleep 30` double-fire hack.
+
+The `check` line runs every minute and the daily proactive restart at 05:00 (which also clears crash-loop state). Dropped the four systemd unit templates and the `interval`/`oncalendar` vars (replaced by `watchdog_cron`/`daily_restart_cron`). No migration cleanup task — this host never got the timers and there are no others. New deploy installs `/etc/cron.d/<ns>-browser-watchdog`; needs a playbook run to take effect (the auto-update cron pulls app code but doesn't run the role).
+
+**Files modified:**
+- `deploy/ansible/tasks/main.yml` - replaced the systemd unit deploy/enable/disable tasks with a single cron.d deploy + disabled-state cleanup
+- `deploy/ansible/defaults/main.yml` - `watchdog_interval`/`restart_oncalendar` → `watchdog_cron`/`daily_restart_cron`
+- `deploy/ansible/templates/istota-browser-watchdog.cron.j2` - new (check + daily-restart cron lines)
+- removed `istota-browser-{watchdog,daily-restart}.{service,timer}.j2`
+
 ## 2026-06-24: Browser autoheal sees a wedged-but-alive Chrome (deep liveness tier)
 
 ISSUE-149. ISSUE-143 moved the container `HEALTHCHECK` off the blocking Flask `/health` onto a lightweight liveness server (`:9224/live`) so a long legitimate browse stops reading as "dead" — but `/live` answers from `chrome.is_chrome_running()`, which is just `_chrome_proc.poll() is None`. That sees a *dead* process, not a Chrome whose process is alive but internally frozen (hung CDP, deadlocked browser, wedged renderer tree). In that state browse and VNC hang while every health signal stays green, so the whole heal chain (debounce → restart → crash-loop guard → alert) never fires.
