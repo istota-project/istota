@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-06-25
+
 ### Changed
 - The headless browser now heals itself from a wider class of freeze. Its health check used to ask only "is the browser process alive?", so a browser that was running but internally frozen — pages and the remote view both hung — still looked healthy and never got restarted. The check now also confirms the browser is actually responding, so a genuine freeze is caught and the existing restart-and-alert machinery kicks in, while a long legitimate page load still isn't mistaken for a hang.
 - The assistant can now properly tidy its own long-term memory. It can edit a saved note in place, remove an outdated note, and drop a whole stale section — including notes filed under a sub-heading, which it previously couldn't touch at all. Before this it could mostly only add new notes, so old or wrong entries tended to pile up.
@@ -759,7 +761,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.24.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.25.0...main
+[0.25.0]: https://gitlab.com/cynium/istota/-/releases/v0.25.0
 [0.24.0]: https://gitlab.com/cynium/istota/-/releases/v0.24.0
 [0.23.0]: https://gitlab.com/cynium/istota/-/releases/v0.23.0
 [0.22.0]: https://gitlab.com/cynium/istota/-/releases/v0.22.0
