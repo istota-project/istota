@@ -229,7 +229,7 @@
     name: www-data
     groups: nextcloud-mount
     append: yes
-  notify: Restart nginx
+  notify: restart nginx
   when: not istota_update_only and not istota_web_only and istota_site_enabled and istota_use_nextcloud_mount
 
 - name: Allow Docker containers to access host ports
