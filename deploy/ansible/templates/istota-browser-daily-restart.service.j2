@@ -1,9 +1,0 @@
-[Unit]
-Description={{ istota_namespace | capitalize }} browser container scheduled daily restart
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/{{ istota_namespace }}-browser-watchdog daily-restart
-SyslogIdentifier={{ istota_namespace }}-browser-daily-restart

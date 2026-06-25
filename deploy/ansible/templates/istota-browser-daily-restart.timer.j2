@@ -1,9 +1,0 @@
-[Unit]
-Description={{ istota_namespace | capitalize }} browser daily-restart timer
-
-[Timer]
-OnCalendar={{ istota_browser_restart_oncalendar }}
-Persistent=true
-
-[Install]
-WantedBy=timers.target
