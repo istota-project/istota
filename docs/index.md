@@ -5,9 +5,9 @@
 [![Last commit](https://img.shields.io/github/last-commit/istota-project/istota?logo=github)](https://github.com/istota-project/istota/commits/main)
 [![License](https://img.shields.io/github/license/istota-project/istota)](https://github.com/istota-project/istota/blob/main/LICENSE)
 
-**Istota** (*ee-stoh-tah* — Polish for *being* or *entity*) is a secure personal AI operating system that integrates with your private cloud (Nextcloud). It runs on its own VM and connects as a regular Nextcloud user — run it on the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or on its own agentic loop against any OpenAI-compatible model.
+**Istota** is a self-hosted personal AI agent with its own web UI. It runs on its own VM and connects to your Nextcloud instance as a regular user, so you can talk to it over Nextcloud Talk, email, or the built-in web chat. You run it on the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or on its own agentic loop against any OpenAI-compatible model.
 
-Self-hosted, server-native, and multi-user out of the box, it pairs multi-layered memory and a curated set of skills with an integrated web UI and a growing set of native modules: multi-room AI agent chat, an RSS reader, location tracking with travel history and saved places, and personal health and accounting dashboards.
+It ships with a set of skills the agent loads on demand — calendar, email, web browsing, git, accounting, transcription, and more — plus native web modules: multi-room chat, an RSS reader, location tracking with travel history and saved places, and health and accounting dashboards. It is multi-user out of the box, with per-user memory, filesystem sandboxing, and resource permissions.
 
 ```
 Talk message ──>┐
@@ -59,3 +59,7 @@ Most AI assistant projects treat infrastructure as someone else's problem, conne
 ## License
 
 [MIT](https://github.com/istota-project/istota/blob/main/LICENSE).
+
+---
+
+*This documentation is written and updated by Istota, and reviewed regularly by contributors for accuracy.*

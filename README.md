@@ -1,214 +1,91 @@
 # Istota
 
-A secure, self-hosted personal AI operating system that integrates with your private cloud (Nextcloud). ([istota.xyz](https://istota.xyz))
+[![License](https://img.shields.io/github/license/istota-project/istota)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/istota-project/istota?logo=github)](https://github.com/istota-project/istota/commits/main)
+[![Docs](https://img.shields.io/badge/docs-istota.cynium.com-blue)](https://istota.cynium.com/docs)
 
-## Quick start
+**Istota is a self-hosted personal AI agent with its own web UI.** It runs on its own VM and connects to your Nextcloud instance as a regular user, so you can talk to it over Nextcloud Talk, email, or the built-in web chat. Run it on the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or on its own agentic loop against any OpenAI-compatible model.
 
-Bare metal/VM is the canonical deployment and requires an existing Nextcloud installation on the network/internet.
+It ships with a set of skills the agent loads on demand — calendar, email, web browsing, git, accounting, transcription, and more — plus native web modules: multi-room chat, an RSS reader, location tracking, and health and accounting dashboards. It is multi-user out of the box, with per-user memory, filesystem sandboxing, and resource permissions.
+
+## How it works
+
+```
+Talk message ──>┐
+Web chat ──────>│
+Email ─────────>├──> SQLite queue -> Scheduler -> Brain -> Response
+TASKS.md ──────>│
+CLI / REPL ────>┘
+```
+
+Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file watching, the REPL, or the CLI. The scheduler claims tasks from a SQLite queue, builds a prompt with the user's resources, skills, memory, and conversation context, then hands it to a **Brain** in a sandbox. Per-user worker threads keep foreground chat and background jobs on separate pools, so a long-running job never blocks a conversation.
+
+## Features
+
+| Area | What you get |
+|------|--------------|
+| **Messaging** | Nextcloud Talk (DMs + group rooms with @mentions), always-on web chat with live streaming, email (IMAP/SMTP threading), TASKS.md polling, REPL, CLI. Talk and web chat share one room model — continue a conversation on either surface with shared history, and promote a web room to a real Talk conversation. |
+| **Skills** | ~30 skills the agent loads on demand: calendar, email, web browsing (Dockerized Playwright), git/GitLab/GitHub, beancount accounting, GPS tracking, Karakeep bookmarks, voice transcription, OCR, RSS feeds, health, Google Workspace, and more. A curated standard library, not a plugin marketplace. |
+| **Memory** | Per-user (USER.md) and per-channel memory, nightly-extracted dated memories, hybrid BM25 + vector recall, and a temporal knowledge graph. Optional learned playbooks distilled from successful multi-step tasks. |
+| **Web UI** | Authenticated SvelteKit dashboard (Nextcloud OAuth2): multi-room chat, RSS reader, location/places map, money and health dashboards, and per-user settings. |
+| **Scheduling** | Cron jobs via CRON.md (prompts, prompt files, or shell commands), natural-language reminders, and scheduled briefings with calendar / markets / headlines / news / todos, delivered to Talk or email. |
+| **Health** | Body-stat time series, bloodwork OCR + CSV import, biomarker trends with LLM explainers, Garmin Connect sync, immunization registry, and medical history. Metric storage with unit-aware display. |
+| **Monitoring** | Heartbeat checks — file age, shell commands, URL health, calendar conflicts, task deadlines, self-checks — with cooldowns, quiet hours, and per-check intervals. |
+| **Multi-user** | Per-user config, resource permissions, worker pools, and admin/non-admin isolation. Multiple bot instances can share one Nextcloud and interact with each other through Talk rooms. |
+| **Security** | Bubblewrap sandbox per task, credential stripping from subprocess environments, network isolation via a CONNECT proxy, and deferred DB writes for sandboxed operations. |
+| **Pluggable brain** | Swap the model backend behind one protocol: the Claude Code CLI, Istota's own in-process agentic loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, Ollama, LM Studio, vLLM), or the Claude TUI over tmux. Route whole instances or specific task types to either. |
+| **Constitution** | An [Emissaries](https://github.com/istota-project/emissaries) layer defines how the agent handles data, the boundary between private and public action, and what it owes to people beyond its operator. |
+
+## Install
+
+Bare metal is the canonical deployment and connects to an existing Nextcloud. Docker bundles its own Nextcloud (Postgres, Redis, the web UI, and an nginx reverse proxy) for evaluation or standalone use.
 
 ```bash
-# Bare metal (Debian/Ubuntu VM, connects to your existing Nextcloud) — recommended
+# Bare metal (Debian/Ubuntu VM, connects to your Nextcloud) — recommended
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash
 
 # Docker (bundles its own Nextcloud)
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
 ```
 
-Both run the same interactive wizard. `--help` lists flags; the dispatcher forwards everything except `--docker` to the chosen path. At least glance at [`install.sh`](install.sh) (or [`docker/init.sh`](docker/init.sh)) before you pipe it into a shell.
+Both run the same interactive wizard (Nextcloud connection, users, optional features). Glance at [`install.sh`](install.sh) before you pipe it into a shell.
 
-## Bare metal/VM install
-
-Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a Claude Code OAuth token.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash
-```
-
-The installer walks you through connecting to Nextcloud, setting up users, and choosing optional features. After installation:
+After a bare-metal install, log Claude in once:
 
 ```bash
 sudo -u istota HOME=/srv/app/istota claude login
 ```
 
-To update: `sudo bash install.sh --update`. An Ansible role is also available at `deploy/ansible/`.
+To update: `sudo bash install.sh --update` (bare metal) or `cd ~/istota && git pull && docker compose -f docker/docker-compose.yml up -d --build` (Docker). An Ansible role is available at `deploy/ansible/`.
 
-## Docker install
-
-The Docker setup spins up a complete stack from scratch: Postgres, Redis, a fresh Nextcloud instance, the Istota scheduler, the SvelteKit web UI, an nginx reverse proxy on a single host port (Nextcloud at `/`, the Istota dashboard at `/istota/`), and — on x86-64 Linux hosts and Apple Silicon under Rosetta — a Playwright browser container with bot-detection countermeasures that the `browse` skill drives. The GPS webhook receiver is opt-in. If you already have a Nextcloud instance, use the bare-metal path instead — Compose creates its own Nextcloud and is meant for evaluation or standalone deployments, not for connecting to an existing one.
-
-### 1. Configure
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
-# or, from a clone: bash docker/init.sh
-```
-
-The curl path clones the repo to `~/istota` (override with `ISTOTA_CLONE_DIR=...`) and runs the wizard from there. When invoked via `sudo`, `~` resolves to the invoking user's home (via `SUDO_USER`), not `/root` — so `sudo curl … | bash -s -- --docker` still lands in your own home directory. Keep this directory around — it holds your `.env` and is where you'll run `docker compose` commands from later. To update: `cd ~/istota && git pull && docker compose -f docker/docker-compose.yml up -d --build`. Volumes (`istota_data`, `nextcloud_data`, postgres, etc.) survive rebuilds.
-
-`init.sh` is a guided wizard that mirrors the bare-metal install flow. It auto-generates passwords for the Nextcloud admin, Postgres, the bot account, and your user; auto-detects your timezone; and walks through the same optional-feature prompts you'd see on a real install:
-
-- **Identity** — bot name, public hostname (`DOMAIN` — leave empty for localhost-only).
-- **Claude auth** — paste a token from `claude setup-token` (instructions printed inline), or skip and set `ANTHROPIC_API_KEY` later.
-- **Primary user** — login id, display name, timezone, optional email address.
-- **Email integration** — IMAP/SMTP host, user, password (skipped if you say no).
-- **GPS location tracking** — toggles the `location` compose profile so the Overland webhook receiver starts.
-- **Developer credentials** — optional GitLab / GitHub personal access tokens.
-- **Browser container** — auto-enabled on x86-64 Linux hosts and Apple Silicon under Rosetta (slow, preview-grade); disabled on Linux ARM, where Chrome has no native packages and qemu emulation is unreliable.
-
-The script writes `docker/.env` (mode 600) and prints the generated passwords once — copy them somewhere safe. Flags: `--minimal` skips the optional-feature sections (passwords + Claude + user only), `--force` overwrites an existing `.env` without asking.
-
-If you'd rather configure by hand, copy `.env.example` to `.env` and edit it directly. At minimum set `CLAUDE_CODE_OAUTH_TOKEN`, `ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `BOT_PASSWORD`, `USER_PASSWORD`, and `USER_NAME`.
-
-### 2. Start
-
-```bash
-docker compose up -d
-```
-
-First start takes a few minutes: Nextcloud initializes the database, creates user accounts, installs apps (Talk, Calendar, External Storage), sets up shared folders, registers an OAuth2 client for the web dashboard, and creates a Talk room between you and the bot. The Istota container waits for all of this before starting the scheduler. On first boot it also generates a `LOCATION_INGEST_TOKEN` and an `ISTOTA_SECRET_KEY` (the master key for the encrypted `secrets` table) and persists them under `/data/`.
-
-### 3. Chat
-
-Open `http://localhost:8080`, log in with your `USER_NAME` / `USER_PASSWORD`, go to Talk, and start chatting. The bot responds through the same Talk interface. The web dashboard lives at `http://localhost:8080/istota/` (Nextcloud OAuth2 — same login).
-
-### Optional services
-
-The browser container (Playwright with bot-detection countermeasures) and the GPS webhook receiver run as Docker Compose profiles. `init.sh` sets `COMPOSE_PROFILES=browser` by default on x86-64 Linux and Apple Silicon (with a 5G memory bump for Rosetta-emulated Chromium); on Linux ARM Chrome has no native packages so it stays off. GPS is off by default. Edit `COMPOSE_PROFILES` in `.env` — comma-separated list — or pass `--profile` flags ad-hoc:
-
-```bash
-docker compose --profile browser up -d              # Browser only
-docker compose --profile location up -d             # GPS webhook receiver only
-docker compose --profile browser --profile location up -d  # Both
-```
-
-### Configuration
-
-The `.env` file exposes most of the same settings available in the Ansible role: scheduler intervals, conversation context tuning, progress updates, sleep cycle, memory search, email (IMAP/SMTP), developer skill (git/gitlab/github), and per-user overrides. See `.env.example` for the full list with defaults. Per-user features like ntfy push notifications, Karakeep bookmarks, Google Workspace, and Monarch are configured per-user in the web settings (`/istota/settings`) — there are no operator-shared blocks for those.
-
-The config file at `/data/config/config.toml` inside the container is generated on first start and not overwritten on subsequent starts. To change settings after initial setup, either delete the config and restart (it regenerates from env vars), or edit it directly:
-
-```bash
-docker compose exec istota vi /data/config/config.toml
-docker compose restart istota
-```
-
-### Differences from bare metal
-
-The Docker deployment differs from a bare metal / Ansible installation in a few ways:
-
-- **No network proxy.** The CONNECT-based network proxy (domain allowlist) is disabled — Docker's own network isolation serves the same purpose. Bubblewrap filesystem sandboxing and the skill credential proxy are enabled and work inside the container. Bubblewrap requires kernel support for user namespaces; in containers without `CAP_SYS_ADMIN` it cannot create namespaces and the sandbox is unavailable. Add `--cap-add SYS_ADMIN` to the istota service if you see `SECURITY UNSUPPORTED CONFIGURATION` at startup — Linux + bubblewrap is the only supported configuration (see [docs/deployment/security.md](docs/deployment/security.md#supported-deployment)).
-- **Single user.** The Docker setup provisions one human user. Additional users can be added by editing `config.toml` directly and creating them in Nextcloud.
-- **Bundled Nextcloud.** The Compose file creates a new Nextcloud instance. If you already run Nextcloud, use the bare metal installer or Ansible role instead — they connect to your existing instance without creating a second one.
-- **No backups or auto-update.** The Ansible role sets up cron-based DB backups and optional auto-update. In Docker, volume backups are your responsibility.
-- **All Python extras installed.** The Docker image includes every optional dependency (whisper, memory-search, etc.) so all skills are available without rebuilding.
-
-## How it works
-
-```
-Talk message ──>┐
-Email ─────────>├──> SQLite queue -> Scheduler -> Brain -> Response
-TASKS.md ──────>│
-CLI ───────────>┘
-```
-
-Messages arrive through Talk polling, IMAP, TASKS.md file watching, or the CLI. The scheduler claims tasks from a SQLite queue, builds a prompt with the user's resources, skills, memory, and conversation context, then hands it to a **Brain** in a sandbox. Three brains ship: one wraps the headless Claude Code CLI; one is Istota's own in-process agentic loop, which can drive any OpenAI-compatible model; and one drives the interactive Claude CLI in a tmux session to keep traffic on a Claude subscription (with the headless brain as an automatic fallback). Responses go back through the same channel.
-
-Per-user worker threads handle concurrency. Foreground tasks (chat) and background tasks (scheduled jobs, briefings) run on separate pools so a long-running job never blocks a conversation.
-
-## Features
-
-**Messaging** — Nextcloud Talk (DMs and multi-user rooms with @mention support), an in-app web chat, email (IMAP/SMTP with threading), TASKS.md file polling, CLI. Talk and web chat share one surface-independent room model: any conversation can be continued on either surface with full cross-surface context and one shared history, a web room can be promoted to a real Talk conversation ("Also open in Talk"), and an answer to a Talk message streams live in an open web room.
-
-**Skills** — Deterministic keyword/resource matching (Pass 1) selects skills; sticky skills carry the previous turn's set into follow-ups in the same conversation. By default, **progressive disclosure** then renders heavy skills as a one-line index entry the model expands on demand, and widens that index to the full eligible catalogue so the model self-selects any tool while the prompt stays small. (An optional Haiku-based semantic-routing pre-pass exists but is off by default — the widened catalogue replaces it.) Ships with: Nextcloud file management, CalDAV calendar, email, web browsing (Dockerized Playwright with bot-detection countermeasures), git/gitlab/github workflows, money (in-process beancount ledger, invoicing, transactions, work log), Google Workspace (Drive, Gmail, Calendar, Sheets, Docs), GPS location tracking (Overland), Karakeep bookmarks, voice transcription (faster-whisper), OCR (Tesseract), native RSS/Atom/Tumblr/Are.na feed manager (in-process — `feedparser` + vendored API providers, per-user SQLite, OPML import/export), and more. Skills are a curated standard library, not a plugin marketplace.
-
-**Memory** — Per-user persistent memory (USER.md, auto-loaded into prompts), per-channel memory (CHANNEL.md), dated memory files from nightly extraction, and BM25 auto-recall. Temporal knowledge graph stores structured facts as entity-relationship triples with validity windows — freeform predicates, automatic supersession for single-valued relations, fuzzy dedup. Configurable memory cap to limit total prompt size. Hybrid BM25 + vector search (sqlite-vec, MiniLM) across conversations and memory files. Optional learned playbooks (off by default) distil reusable task procedures from successful multi-step runs during the nightly cycle and recall them by relevance — markdown guidance only, never executed.
-
-**Scheduling** — Cron jobs via CRON.md (AI prompts, prompt files, or shell commands), per-job model and effort overrides for cheap retrieve-and-render runs, natural-language reminders as one-shot cron entries, scheduled briefings with calendar/markets/headlines/news/todos components.
-
-**Briefings** — Configurable morning/evening summaries. Components include calendar events, market data (futures, indices via yfinance + FinViz), headlines (pre-fetched frontpages from AP, Reuters, Guardian, FT, Al Jazeera, Le Monde, Der Spiegel), email newsletter digests, todos, and reminders. Output to Talk, email, or both.
-
-**Health tracking** — Body stats time series, bloodwork panel ingestion (OCR + CSV import), biomarker trends with out-of-range LLM explainers, Garmin Connect daily sync (sleep, stress, steps, HRV, VO2 max), immunization registry with coverage tracking, and medical history (encounters + diagnoses). Per-user SQLite with metric storage and unit-aware display. Web UI with sparkline grid, spreadsheet view, trend charts, and drag-and-drop upload.
-
-**Heartbeat monitoring** — User-defined health checks: file age, shell commands, URL health, calendar conflicts, task deadlines, and system self-checks. Cooldowns, quiet hours, and per-check intervals.
-
-**Multi-user** — Per-user config files, resource permissions, worker pools, and filesystem sandboxing. Admin/non-admin isolation. Each user gets their own Nextcloud workspace with config files, exports, and memory. Multiple bot instances can coexist on the same Nextcloud, each running as its own Nextcloud user with a separate namespace, and they can interact with each other through Talk rooms like any other participant.
-
-**Security** — Bubblewrap sandbox per invocation (PID namespace, restricted mounts, credential isolation). Non-admin users can't see the database, other users' files, or system config. Deferred DB writes via JSON files for sandboxed operations. Credential stripping from subprocess environments.
-
-**Email routing** — Plus-addressed inbound (`bot+user_id@domain`) so external contacts can email a specific user's agent directly. Outbound emails are tracked so external replies route back to the surface the request came from — the web chat room, Nextcloud Talk room, or email thread it started in — and, by default, also continue the email thread (per-user policy: origin+thread, origin-only, or thread-only). Untrusted senders to plus-addresses go through a deterministic confirmation gate before any task runs.
-
-**Web interface** — Authenticated SvelteKit dashboard at `/istota` (Nextcloud OIDC). Includes a feed reader (viewport-based read tracking, infinite scroll, lightbox, per-entry starring with a "Starred" sidebar view, scope-aware bulk mark-as-read with `Shift-A` / toolbar button, `f` to toggle star) backed by the in-tree `istota.feeds` module, with a sprocket-icon settings page for subscriptions, categories, and OPML import/export; a GPS location/places page with map, cluster discovery, dismiss-zones, and per-place visit stats; money pages backed by the same in-process accounting code the skill uses; and health pages (stats sparklines, bloodwork matrix, OCR upload, Garmin settings, immunization registry). The user's `/settings` page exposes Profile, Resources, Briefings, and a "Disabled modules" multiselect; per-module credentials live on a cog-icon page for each module (Tumblr API key on `/feeds/settings`, Monarch credentials on `/money/settings`, Garmin Connect on `/health/settings`, Overland ingest token on `/location/settings`); cross-cutting Connected services (Karakeep, Google Workspace) live on `/settings`.
-
-**Pluggable model backend** — A `Brain` protocol sits between the executor and model invocation, with two implementations. `claude_code` (the default) wraps the `claude` CLI with stream-json parsing and transient-API retries. `native` is Istota's own in-process agentic loop — tool dispatch, context compaction, retries, usage accounting — running against any OpenAI-compatible endpoint: Anthropic, OpenRouter, or a local model served by Ollama, LM Studio, or vLLM. The native brain means Istota is a standalone agent, not tied to Claude Code; switch the whole instance or route specific task types to either brain.
-
-**Constitution** — An [Emissaries](https://github.com/istota-project/emissaries) layer defines how the agent reasons about data, handles the boundary between private and public action, and what it owes to people beyond its operator. Per-user persona customization sits on top.
+Full walkthroughs, optional services, and configuration: **[Docker quickstart](https://istota.cynium.com/docs/getting-started/quickstart-docker/)** · **[Bare metal quickstart](https://istota.cynium.com/docs/getting-started/quickstart-bare-metal/)**.
 
 ## Why Nextcloud?
 
-Most AI assistant projects treat infrastructure as someone else's problem. They connect to third-party APIs for storage, calendars, contacts, and messaging, accumulating credentials and vendor dependencies. Istota takes a different approach: it runs on its own VM and integrates with your Nextcloud instance as a regular user.
+Most AI assistant projects connect to third-party APIs for storage, calendars, and messaging, accumulating credentials and vendor dependencies. Istota instead runs on its own VM and integrates with your Nextcloud instance as a regular user — files, calendars, contacts, Talk messaging, and sharing all work through standard Nextcloud protocols. No webhooks, no OAuth apps, no server plugins.
 
-The bot gets files, calendars, contacts, Talk messaging, and sharing through the same protocols every other Nextcloud user uses. File sharing works by sharing a folder with the bot's user account. Calendar access works through standard CalDAV. Talk conversations work through the regular user API. No webhooks, no OAuth apps, no server plugins.
+- **Zero Nextcloud configuration.** Create a user account, invite it to a chat.
+- **File sharing is native.** Users share files with the bot like they share with colleagues.
+- **Multi-user comes free.** Nextcloud handles user isolation, file ownership, and access control.
+- **Self-hosted end to end.** Your data stays on your server; the only external dependency is a model provider.
 
-In practice this means:
-
-- **Zero Nextcloud configuration.** Create a user account, invite it to a chat. No admin panel changes, no app installation, no API tokens on the Nextcloud side.
-- **File sharing is native.** Users share files with the bot the same way they share with colleagues. The bot shares files back the same way. Permissions, links, and access control are handled by Nextcloud.
-- **Multi-user comes free.** Nextcloud already handles user isolation, file ownership, and access control. Istota inherits all of it rather than reimplementing it.
-- **Self-hosted end to end.** Your data stays on your Nextcloud server and the VM running Istota. The only external dependency is a model provider — Claude, any OpenAI-compatible API, or a model you host yourself.
-- **User self-service.** Config files (persona, briefings, cron jobs, heartbeat checks) live in the user's shared Nextcloud folder. Users edit them with any text editor or the Nextcloud web UI, no CLI access needed.
-
-Istota is built around Nextcloud — it uses your files, calendars, contacts, and chat directly rather than wrapping them in API adapters. This tight integration is by design: your assistant lives where your data already is. That said, like any agent, it integrates with outside services where useful — a Google Workspace skill (Drive, Gmail, Calendar, Sheets, Docs) ships in the box, and skills for Microsoft 365 or other services can be added the same way.
-
-## User workspace
-
-Each user gets a Nextcloud workspace:
-
-```
-/Users/alice/
-├── istota/              # Shared with the user
-│   ├── config/
-│   │   ├── USER.md          # Persistent memory
-│   │   ├── PERSONA.md       # Personality customization
-│   │   ├── TASKS.md         # File-based task queue
-│   │   ├── BRIEFINGS.md     # Briefing schedule
-│   │   ├── CRON.md          # Scheduled jobs
-│   │   └── HEARTBEAT.md     # Health monitoring config
-│   ├── exports/         # Bot-generated files
-│   ├── scripts/         # User-authored reusable scripts
-│   └── examples/        # Reference documentation
-├── inbox/               # Drop files here for the bot to process
-├── memories/            # Nightly-extracted dated memories (YYYY-MM-DD.md)
-└── shared/              # Auto-organized files shared with the bot
-```
-
-Channels (Talk rooms) get their own `/Channels/{token}/` namespace with `CHANNEL.md` and dated channel memories.
+Config files (persona, briefings, cron jobs, heartbeat checks) live in each user's Nextcloud folder, editable with any text editor. See [Why Nextcloud](https://istota.cynium.com/docs) for the full rationale.
 
 ## Development
 
 ```bash
 uv sync --extra all                        # Install all dependencies
-uv run pytest tests/ -v                    # Run tests (~3450 unit tests)
+uv run pytest tests/ -v                    # Run tests (~4100 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```
 
-Most skill dependencies are optional. Install everything with `--extra all`, or pick individual groups:
-
-```bash
-uv sync --extra calendar         # caldav + icalendar
-uv sync --extra email            # imap-tools
-uv sync --extra markets          # yfinance
-uv sync --extra transcribe       # pytesseract + Pillow (OCR)
-uv sync --extra memory-search    # sqlite-vec + sentence-transformers for semantic search
-uv sync --extra whisper          # faster-whisper for audio transcription
-uv sync --extra location         # fastapi + uvicorn + geopy for GPS location receiver
-```
-
-Skills with missing dependencies are automatically excluded from prompt selection. Use `!skills` in Talk to see which are available.
+Most skill dependencies are optional — install everything with `--extra all`, or pick groups (`calendar`, `email`, `markets`, `transcribe`, `memory-search`, `whisper`, `location`). Skills with missing dependencies are excluded from selection automatically; run `!skills` in Talk to see what's available.
 
 ## Further reading
 
-- [Documentation](https://istota.xyz/docs) — full docs (also buildable locally with `mkdocs serve`)
+- [Documentation](https://istota.cynium.com/docs) — full docs (also buildable locally with `mkdocs serve`)
+- [Architecture overview](https://istota.cynium.com/docs/architecture/overview/) — how the system fits together
 - [CHANGELOG.md](CHANGELOG.md) — release notes
 - [DEVLOG.md](DEVLOG.md) — development journal
 
