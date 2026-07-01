@@ -5,7 +5,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/istota-project/istota?logo=github)](https://github.com/istota-project/istota/commits/main)
 [![License](https://img.shields.io/github/license/istota-project/istota)](https://github.com/istota-project/istota/blob/main/LICENSE)
 
-**Istota** is a self-hosted personal AI agent with its own web UI. It runs on its own VM and connects to your Nextcloud instance as a regular user, so you can talk to it over Nextcloud Talk, email, or the built-in web chat. You run it on the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or on its own agentic loop against any OpenAI-compatible model.
+**Istota** is a self-hosted personal AI assistant with its own web UI. It runs on your own server and works with any model — use Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or point it at any OpenAI-compatible endpoint like OpenRouter or a local model. Talk to it over the built-in web chat, email, or Nextcloud Talk. It integrates with Nextcloud for files, calendars, and messaging — a deep integration, though not a hard requirement.
 
 It ships with a set of skills the agent loads on demand — calendar, email, web browsing, git, accounting, transcription, and more — plus native web modules: multi-room chat, an RSS reader, location tracking with travel history and saved places, and health and accounting dashboards. It is multi-user out of the box, with per-user memory, filesystem sandboxing, and resource permissions.
 
@@ -21,11 +21,11 @@ Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file w
 
 ## What is it?
 
-Istota runs on its own VM, connecting to your Nextcloud instance as a regular user, and handles the plumbing around a language model: input channels, task queuing, context assembly, prompt construction, skill loading, memory, scheduling, multi-user isolation, and response delivery. The reasoning comes from whichever model you point it at.
+Istota runs on your own server and handles the plumbing around a language model: input channels, task queuing, context assembly, prompt construction, skill loading, memory, scheduling, multi-user isolation, and response delivery. The reasoning comes from whichever model you point it at.
 
 It is not tied to a single vendor. A pluggable **Brain** sits at the model seam: the default brain delegates to the Claude Code CLI, while the native brain runs Istota's own in-process agentic loop — tool dispatch, context compaction, retries — against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model). So Istota can run fully standalone on open models.
 
-It integrates as a regular Nextcloud user. File sharing, calendars, contacts, and Talk messaging all work through standard Nextcloud protocols. No webhooks, no OAuth apps, no server plugins.
+When you connect it to Nextcloud, it integrates as a regular Nextcloud user: file sharing, calendars, contacts, and Talk messaging all work through standard Nextcloud protocols. No webhooks, no OAuth apps, no server plugins.
 
 ## Features at a glance
 
@@ -48,7 +48,7 @@ It integrates as a regular Nextcloud user. File sharing, calendars, contacts, an
 
 ## Why Nextcloud?
 
-Most AI assistant projects treat infrastructure as someone else's problem, connecting to third-party APIs for storage, calendars, and messaging. Istota takes a different approach: it runs on its own VM and integrates with your Nextcloud instance as a regular user.
+Most AI assistant projects treat infrastructure as someone else's problem, connecting to third-party APIs for storage, calendars, and messaging. Istota takes a different approach: it runs on its own server and, when you connect it to Nextcloud, integrates as a regular user.
 
 - **Zero Nextcloud configuration.** Create a user account, invite it to a chat.
 - **File sharing is native.** Users share files with the bot like they share with colleagues.

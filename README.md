@@ -4,7 +4,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/istota-project/istota?logo=github)](https://github.com/istota-project/istota/commits/main)
 [![Docs](https://img.shields.io/badge/docs-istota.cynium.com-blue)](https://istota.cynium.com/docs)
 
-**Istota is a self-hosted personal AI agent with its own web UI.** It runs on its own VM and connects to your Nextcloud instance as a regular user, so you can talk to it over Nextcloud Talk, email, or the built-in web chat. Run it on the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or on its own agentic loop against any OpenAI-compatible model.
+**Istota is a self-hosted personal AI assistant with its own web UI.** It runs on your own server and works with any model — use Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or point it at any OpenAI-compatible endpoint like OpenRouter or a local model. Talk to it over the built-in web chat, email, or Nextcloud Talk. It integrates with Nextcloud for files, calendars, and messaging — a deep integration, though not a hard requirement.
 
 It ships with a set of skills the agent loads on demand — calendar, email, web browsing, git, accounting, transcription, and more — plus native web modules: multi-room chat, an RSS reader, location tracking, and health and accounting dashboards. It is multi-user out of the box, with per-user memory, filesystem sandboxing, and resource permissions.
 
@@ -62,7 +62,7 @@ Full walkthroughs, optional services, and configuration: **[Docker quickstart](h
 
 ## Why Nextcloud?
 
-Most AI assistant projects connect to third-party APIs for storage, calendars, and messaging, accumulating credentials and vendor dependencies. Istota instead runs on its own VM and integrates with your Nextcloud instance as a regular user — files, calendars, contacts, Talk messaging, and sharing all work through standard Nextcloud protocols. No webhooks, no OAuth apps, no server plugins.
+Most AI assistant projects connect to third-party APIs for storage, calendars, and messaging, accumulating credentials and vendor dependencies. Istota instead runs on its own server and, when you connect it to Nextcloud, integrates as a regular user — files, calendars, contacts, Talk messaging, and sharing all work through standard Nextcloud protocols. No webhooks, no OAuth apps, no server plugins.
 
 - **Zero Nextcloud configuration.** Create a user account, invite it to a chat.
 - **File sharing is native.** Users share files with the bot like they share with colleagues.

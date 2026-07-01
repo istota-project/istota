@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Repositioned how the project describes itself. Istota is now presented as a self-hosted personal AI assistant that works with any model — Claude, or any OpenAI-compatible endpoint like OpenRouter — and integrates with Nextcloud as a deep but not required integration, rather than something that runs inside Nextcloud. The README was also streamlined.
+
 ## [0.25.0] - 2026-06-25
 
 ### Changed
