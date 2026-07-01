@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-01: README + docs repositioning; recover from a stale docs-sync force-push
+
+Two things this session: a docs-copy pass, and an unplanned git recovery.
+
+**Docs pass.** Streamlined the README and repositioned the top-level framing across every prominent surface. The README had grown to ~220 lines with a 69-line Docker walkthrough and a dozen long feature paragraphs that duplicated the docs site; rewrote it in the compact style of a few reference agent READMEs (Hermes, nanoclaw, pi): a bold one-line tagline, a scannable feature *table* instead of prose, and minimal install steps that link out to the docs site rather than reproducing them. Fixed stale content while there — the removed skill-routing model (progressive disclosure / Pass 1 keyword / Haiku semantic-routing pre-pass), "OIDC" (web auth is Nextcloud OAuth2), and an outdated test count.
+
+Then a repositioning pass on the identity copy itself. Prominent taglines described Istota as something that "runs as a regular Nextcloud user" or "lives in your Nextcloud instance," and led the model story with "run it on the Claude Code CLI." Both read wrong for where the project is heading: Nextcloud is an integration, not where the assistant lives, and we're slowly decoupling toward Nextcloud-optional. Reframed the lead identity to "a self-hosted personal AI assistant with its own web UI" that "runs on your own server" and "works with any model — Claude through the Claude Code CLI, or any OpenAI-compatible endpoint like OpenRouter." Nextcloud is now framed as a deep integration you connect, "though not a hard requirement." The technical "integrates as a regular Nextcloud user" mechanism survives only in the Why-Nextcloud deep-dives, not the headline. Dropped "operating system" everywhere in favor of "assistant."
+
+**Git recovery.** Mid-session a `git pull --rebase` against the primary remote silently dropped our local work. A weekly docs-sync automation had force-pushed `main` from a pre-retheme base (before the move-to-GitHub / retheme commit), so its merge carried neither the retheme nor the just-made README streamline; the rebase took that stale merge as its base and reset the working tree to it — reverting the mkdocs theme from teal/green back to deep-purple/amber along the way. Nothing was lost (our streamline commit survived on the public GitHub mirror and in the reflog). Recovered by resetting local back to our commit, restoring the stashed `mkdocs.yml` WIP, and force-pushing to drop the stale merge and reconverge both remotes. Verified the teal/green palette is back. Open follow-up: the docs-sync job pushes from a stale base and will keep re-diverging until it's pointed at current `main`.
+
+**Files modified:**
+- `README.md` - streamlined to a feature table + minimal install; repositioned intro and "Why Nextcloud?"
+- `docs/index.md` - repositioned intro, "What is it?", and "Why Nextcloud?"; added a "docs authored by Istota" footer note
+- `docs/architecture/overview.md` - lead sentence: "operating system … runs as a regular Nextcloud user" → "assistant … runs on your own server and integrates with Nextcloud"
+- `mkdocs.yml` - reworded `site_description` to the assistant / any-model framing
+
 ## 2026-06-25: Browser watchdog runs from cron.d, not a systemd timer
 
 Follow-up to the deep-liveness change (ISSUE-149). A browser outage on the deployment host surfaced a gap one layer below the healthcheck: the container correctly read `unhealthy` for ~15 hours (deep probe working — Chrome's process alive but DevTools hanging) and nothing restarted it. The container `HEALTHCHECK` only *marks* status; the piece that reads `.State.Health.Status` and restarts is the watchdog, and the watchdog was **not running on the host at all**. The script and state dir had been deployed, but the systemd timer/service that fire the script were never installed — so the whole debounce → restart → crash-loop → alert chain sat idle behind a correct unhealthy signal. (Manual container restart restored service as a stopgap.)
