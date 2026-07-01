@@ -16,7 +16,7 @@ Emissaries define how the agent reasons about:
 - Data access and privacy
 - Cognitive limitations and engagement
 
-Based on the [Emissaries](https://commontask.org/emissaries/) framework.
+Based on the [Emissaries](https://github.com/istota-project/emissaries) framework.
 
 Controlled by `emissaries_enabled` (default `true`). Skipped for briefings.
 

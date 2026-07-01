@@ -9,7 +9,7 @@
 ## Install
 
 ```bash
-git clone https://forge.cynium.com/cynium/istota.git
+git clone https://github.com/istota-project/istota.git
 cd istota
 uv sync --extra all
 ```
