@@ -101,7 +101,7 @@ The user sleep cycle (`process_user_sleep_cycle()` in `memory/sleep_cycle.py`) r
 1. **Load state.** `sleep_cycle_state` records the last processed task ID per user.
 2. **Gather day data.** Tasks completed since the last run, partitioned into INTERACTIVE (`talk`, `email`, `cli`) and AUTOMATED (`cron`, `briefing`, `subtask`). Interactive sources get 80% of a 50,000-char budget; tasks within a conversation are grouped; per-task allocation is proportional to content length with tail-biased truncation (40% head + 60% tail) so conclusions survive.
 3. **Build extraction prompt.** Includes the gathered data, the current USER.md (so Sonnet skips already-known facts), and a list of suggested predicates with usage hints. The prompt asks for three sections — `MEMORIES:` (bullets), `FACTS:` (JSON triples), `TOPICS:` (JSON map of `ref:N → category`).
-4. **Invoke** `claude -p - --model sonnet` directly (not via the task queue or brain abstraction).
+4. **Invoke** the configured brain (`make_brain(config.brain).execute`) text-only — no tools, no streaming, no sandbox; not via the task queue. The model defaults to the `extraction_model` role (`"general"`).
 5. **Parse the structured output.** A regex-based parser extracts the three sections; missing or malformed sections degrade gracefully (treat the whole response as memories, empty facts, empty topics). Personal attributes and relationships are routed to FACTS only — they're not duplicated as MEMORY bullets.
 6. **Write the dated memory file** to `memories/YYYY-MM-DD.md`. The sentinel `NO_NEW_MEMORIES` skips the write but still advances state.
 7. **Insert facts** into `knowledge_facts` via `add_fact()` (with fuzzy dedup).
@@ -120,7 +120,7 @@ When `[sleep_cycle] curate_user_memory = true` (opt-in, off by default), the use
 
 1. **Parse** the current USER.md into a `SectionedDoc` (preamble + level-2 sections; `### subheadings` and below stay as opaque content inside each section).
 2. **Build the curation prompt** with the current section structure, the last 3 days of dated memories (capped at 8000 chars), and the current knowledge-graph facts (so Sonnet doesn't duplicate them in USER.md).
-3. **Invoke** `claude -p - --model sonnet` and strip any ` ```json ` fences from the output.
+3. **Invoke** the configured brain (`make_brain(config.brain).execute`) with the `curation_model` role (`"general"`) and strip any ` ```json ` fences from the output.
 4. **Parse** the response as `{"ops": [...]}`. The applier accepts three op shapes:
    - `{"op": "append", "heading": "...", "line": "..."}` — add a bullet under an existing heading.
    - `{"op": "add_heading", "heading": "...", "lines": [...]}` — create a new heading with one or more bullets.

@@ -21,7 +21,7 @@ uv sync                          # Core only (httpx, croniter, tomli)
 uv sync --extra calendar         # caldav + icalendar
 uv sync --extra email            # imap-tools
 uv sync --extra markets          # yfinance
-uv sync --extra transcribe       # pytesseract + Pillow (OCR)
+uv sync --extra transcribe       # pytesseract (OCR; Pillow is a core dep)
 uv sync --extra memory-search    # sqlite-vec + sentence-transformers
 uv sync --extra whisper          # faster-whisper for audio transcription
 uv sync --extra feeds            # feedparser + bleach (native RSS/Atom feeds)

@@ -35,7 +35,7 @@ All sources call `db.create_task()`, which inserts a row with `status='pending'`
 
 1. Fail tasks locked > 30 min that are too old to retry
 2. Release recent stale locks back to `pending`
-3. Same for stuck `running` tasks — "stuck" is decided by worker liveness, not a flat runtime (ISSUE-112): a `running` task is reclaimable once its `last_heartbeat` has been silent longer than `worker_stuck_minutes` (default 5), or, if it never heartbeated, once `started_at` exceeds `task_timeout_minutes` + grace. The running worker pings `last_heartbeat` every `worker_heartbeat_seconds`, so a slow-but-alive worker (e.g. the in-process native brain) is never reclaimed
+3. Same for stuck `running` tasks — "stuck" is decided by worker liveness, not a flat runtime (ISSUE-112): a `running` task is reclaimable once its `last_heartbeat` has been silent longer than `worker_stuck_minutes` (default 10), or, if it never heartbeated, once `started_at` exceeds `task_timeout_minutes` + grace. The running worker pings `last_heartbeat` every `worker_heartbeat_seconds`, so a slow-but-alive worker (e.g. the in-process native brain) is never reclaimed
 
 Tasks are ordered by `priority DESC, created_at ASC`. Workers filter by `user_id` and `queue` type.
 
@@ -45,31 +45,32 @@ After claiming, the worker immediately updates status to `running` and closes th
 
 ### Command tasks
 
-If the task has a `command` field (shell scheduled jobs), it runs via `_execute_command_task()` — a simple `subprocess.run` with `build_stripped_env()`. No skill selection, no Claude, no prompt assembly.
+If the task has a `command` field (shell scheduled jobs), it runs via `_execute_command_task()` — through `_run_capture` (a `Popen` with `start_new_session=True`, so a timeout SIGKILLs the whole process group rather than blocking on an orphaned grandchild). Its env is `build_stripped_env()` plus propagated `ISTOTA_*` vars, `ISTOTA_EXPERIMENTAL_FEATURES`, and manifest-derived credential / connection vars resolved by `build_skill_env` + `dispatch_setup_env_hooks`. No skill selection, no Claude, no prompt assembly.
 
 ### Prompt tasks
 
 For all other tasks, `execute_task()` handles the full pipeline:
 
-1. **Skill selection** (deterministic keyword/resource matching) + progressive-disclosure partition
+1. **Skill selection** — single axis: `select_skills()` runs deterministic matching (`always_include` / `source_types` / `file_types` / sticky / companions, minus `exclude_skills`) to produce the **eager** set (full body in the prompt). Keyword and resource matching are no longer selectors, and there is no progressive-disclosure partition. Every other eligible skill (`eligible_skill_names`) becomes a one-line **menu** entry the model pulls in on demand
 2. **Persist selected skills** to DB via `save_task_selected_skills()`
 3. **Load skill docs** and resolve env vars
 4. **Context loading** (Talk message cache or email thread)
 5. **Memory loading** (USER.md, CHANNEL.md, dated memories, recalled memories)
 6. **Prompt assembly** (see [executor docs](executor.md) for section order)
-7. **Brain execution** — the executor builds a `BrainRequest` and calls `brain.execute(req)`. The default `ClaudeCodeBrain` spawns `claude -p - --output-format stream-json` and parses the stream. Other brains (Phase 2+) speak HTTP. See [brain](brain.md).
+7. **Brain execution** — the executor builds a `BrainRequest` and calls `brain.execute(req)`. The default `ClaudeCodeBrain` spawns `claude -p - --output-format stream-json` and parses the stream. `NativeBrain` runs an in-process agent loop over HTTP against any OpenAI-compatible model; `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (not HTTP). See [brain](brain.md).
 8. **Result composition** (still in executor) — `_compose_full_result(text, trace)` handles context-management boundaries and terse-result recovery; both brains produce the same `(result_text, execution_trace)` shape.
 
 The executor returns `(success, result_text, actions_taken_json, execution_trace_json)`.
 
 ### Progress updates
 
-Two independent callback chains run during streaming:
+Progress flows through task-event streaming, not per-consumer callbacks. The executor adapts the brain's `StreamEvent`s into typed `TaskEvent`s and writes them to the `task_events` log via an `EventWriter`. `process_one_task` subscribes three in-process consumers to that log:
 
-- **Talk progress**: rate-limited updates to the user's conversation (ack message editing)
-- **Log channel**: every tool call posted to the operator's log channel (no rate limiting)
+- **`TalkEventSubscriber`**: edits the ack message in place with rate-limited progress
+- **`LogChannelSubscriber`**: accumulating edit of the operator's log-channel message
+- **`PushNotificationSubscriber`**: ntfy on long-running tasks
 
-When both are active, they're composed into a single callback. Each maintains its own state (message IDs, description lists).
+The web SSE endpoint reads the same `task_events` table directly (the table is the bus, no IPC). The old `_make_talk_progress_callback` / `_make_log_channel_callback` / `_composite_callback` chain is gone.
 
 ## Result processing
 
@@ -95,7 +96,7 @@ Back in the scheduler, `process_one_task()` handles the result inside a DB trans
 
 After the DB transaction closes:
 
-1. **Deferred operations**: process JSON files from the sandbox temp dir (subtasks, transaction tracking, sent emails, KV ops, user alerts, email output)
+1. **Deferred operations**: process JSON files from the sandbox temp dir (subtasks, transaction tracking, sent emails, KV ops, KG ops, health ops, user alerts, email output)
 2. **Briefing digest**: save for next-run deduplication
 3. **Talk progress finalize**: edit ack message with final summary
 4. **Log channel finalize**: edit/post completion message with skills and tool summary

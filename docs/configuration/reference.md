@@ -18,7 +18,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `disabled_skills` | `[]` | Instance-wide skills to exclude |
 | `temp_dir` | `"/tmp/istota"` | Temporary directory for task execution |
 | `max_memory_chars` | `0` | Cap total memory in prompts (0 = unlimited) |
-| `max_knowledge_facts` | `0` | Cap knowledge graph facts per prompt (0 = unlimited) |
+| `max_knowledge_facts` | `50` | Cap knowledge graph facts per prompt (0 = unlimited) |
 
 ## `[nextcloud]`
 
@@ -110,7 +110,7 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `progress_show_tool_use` | `true` | Emit `tool_start` / `tool_end` events |
 | `progress_show_text` | `false` | Emit `progress_text` events (intermediate text; noisy) |
 | `event_log_enabled` | `true` | Write events to the `task_events` table (kill-switch for task-event-streaming) |
-| `stream_text_gate_chars` | `200` | Narration gate for streamed answer text on stream surfaces (web/REPL). A text run emits no `text_delta` until it crosses this many chars without an intervening tool call, so short lead-in narration ("Let me check…") is discarded at the tool boundary instead of leaking into the answer area. Never loses text — only animation. 0 disables |
+| `stream_text_gate_chars` | `280` | Narration gate for streamed answer text on stream surfaces (web/REPL). A text run emits no `text_delta` until it crosses this many chars without an intervening tool call, so short lead-in narration ("Let me check…") is discarded at the tool boundary instead of leaking into the answer area. Never loses text — only animation. 0 disables |
 | `push_notification_threshold_seconds` | `30` | Min task duration before an ntfy completion push fires |
 | `push_notification_sources` | `[]` | Source types that trigger a completion push; empty = ntfy opt-in only (never a default surface) |
 
@@ -122,7 +122,7 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `max_background_workers` | `3` | Instance-level bg worker cap |
 | `user_max_foreground_workers` | `2` | Global per-user fg default |
 | `user_max_background_workers` | `1` | Global per-user bg default |
-| `worker_idle_timeout` | `30` | Seconds before idle worker exits |
+| `worker_idle_timeout` | `10` | Seconds before idle worker exits |
 
 ### Robustness
 
@@ -133,7 +133,7 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `stale_pending_warn_minutes` | `30` | Warn for long-pending tasks |
 | `stale_pending_fail_hours` | `2` | Auto-fail ancient tasks |
 | `worker_heartbeat_seconds` | `60` | How often a running worker pings liveness (0 disables). Stuck-task reclaim uses the heartbeat to tell a slow-but-alive worker from a dead one. |
-| `worker_stuck_minutes` | `5` | Reclaim a heartbeating worker's task after this much heartbeat silence. Independent of `task_timeout_minutes`. |
+| `worker_stuck_minutes` | `10` | Reclaim a heartbeating worker's task after this much heartbeat silence. Independent of `task_timeout_minutes`. |
 | `task_retention_days` | `7` | Delete old completed tasks |
 | `email_retention_days` | `7` | Delete old IMAP emails (0 = disable) |
 | `talk_cache_max_per_conversation` | `200` | Max cached Talk messages |
@@ -161,11 +161,7 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 
 ## `[skills]`
 
-| Setting | Default | Description |
-|---|---|---|
-| `progressive_disclosure` | `true` | Defer lazy skill bodies to a one-line index and widen that index to the full eligible catalogue (model loads bodies on demand via `istota-skill skills show`). Set `false` for legacy all-eager rendering. |
-| `auto_lazy_threshold_chars` | `0` | `>0`: a CLI skill whose body exceeds N chars defaults to lazy (`0` = explicit `disclosure: lazy` frontmatter only) |
-| `always_eager` | `["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]` | Skills never deferred (their rules must stay fully in context) |
+There is no `[skills]` config section. Skill disclosure is single-axis (a skill is either eager or a menu entry the model loads on demand) with no config knobs. A stale `[skills]` block only logs a warning at load time.
 
 ## `[models.roles]`
 
@@ -283,7 +279,12 @@ What it IS: a one-way push channel (bot → device) used by heartbeat alerts and
 
 ## Money
 
-There is no instance-level `[money]` config section. Money is a **module** (on by default; opt out per user via `disabled_modules = ["money"]`). The bot auto-discovers `*.beancount` files at the top level of `{user_workspace}/ledgers/` — no per-resource path is required. Monarch credentials live in the encrypted `secrets` table (provision via `istota secret ensure --user alice --service monarch --key session_token --value …` or the web settings UI).
+There is no instance-level `[money]` config section. Money is a **module** (on by default; opt out per user via `disabled_modules = ["money"]`). The bot auto-discovers `*.beancount` files at the top level of `{user_workspace}/ledgers/` — no per-resource path is required. Monarch credentials are a cookie pair in the encrypted `secrets` table — provision both keys (`session_id` and `csrftoken`) via the CLI or the web settings UI:
+
+```bash
+istota secret ensure --user alice --service monarch --key session_id --value …
+istota secret ensure --user alice --service monarch --key csrftoken --value …
+```
 
 ## `[google_workspace]`
 

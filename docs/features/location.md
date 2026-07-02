@@ -7,7 +7,7 @@ Overland GPS webhook receiver for location tracking with place detection and vis
 The webhook receiver (`webhook_receiver.py`) runs as a separate FastAPI service ingesting location pings from the [Overland](https://overland.p3k.app/) iOS/Android app. It detects transitions between named places and logs visits.
 
 ```
-Overland app -> POST /overland/{token} -> webhook_receiver.py -> SQLite
+Overland app -> POST /webhooks/location?token=... -> webhook_receiver.py -> SQLite
 ```
 
 ## Setup

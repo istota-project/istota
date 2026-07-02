@@ -34,6 +34,20 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `web_chat_rooms` | One row per web chat room: `id, user_id, token (channel id), name, archived, created_at, updated_at`. One room = one `conversation_token`, each with its own `CHANNEL.md` |
 | `web_chat_messages` | Bot-delivered (unsolicited) room messages — alerts / logs / notifications routed to the `web` surface via `WebTransport.deliver`: `id, user_id, token, role, title, text, created_at`. Distinct from task-backed turns; merged into room history by time |
 
+### Rooms (unified Talk/web)
+
+The unified Talk/web room-sync model (defined in `schema.sql`) supersedes the de-facto tasks-as-history store with a surface-neutral room + message model.
+
+| Table | Purpose |
+|---|---|
+| `rooms` | Canonical room registry keyed on `conversation_token`; `origin` (talk\|web), display name, `archived` flag |
+| `room_bindings` | One row per (room, surface) exposing a room; maps canonical token to each surface's ref |
+| `messages` | Canonical transcript (role user\|assistant\|system, `task_id`, `origin_surface`, `external_ids` mirror ledger) |
+| `room_members` | Per-user membership of a shared room; web visibility resolves through this, not the single-owner `rooms.user_id` |
+| `room_dismissals` | Per-user "hide this room" tombstone, cleared by the user's own next inbound |
+| `room_read_state` | Per-surface, per-user read cursors driving unread badges |
+| `trusted_email_senders` | Per-user fnmatch allowlist for the email trust gate |
+
 ### Scheduling
 
 | Table | Purpose |
@@ -68,15 +82,17 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 |---|---|
 | `monarch_synced_transactions` | Monarch Money sync dedup |
 | `csv_imported_transactions` | CSV import dedup |
-| `invoice_schedule_state` | Automated invoice generation timing |
-| `invoice_overdue_notified` | Prevents duplicate overdue alerts |
+
+Invoice timing tables (`invoice_schedule_state`, `invoice_overdue_notified`) live in the per-user money DB (`money/db.py`), not the framework `istota.db`.
 
 ### Feeds (per-user feeds.db)
 
 | Table | Purpose |
 |---|---|
-| `feed_state` | RSS/Tumblr/Are.na polling state |
-| `feed_items` | Aggregated feed content |
+| `feed_categories` | User-defined feed categories |
+| `feeds` | Subscribed RSS/Atom/Tumblr/Are.na sources + per-feed poll state |
+| `feed_entries` | Aggregated feed content + read/star state |
+| `schema_meta` | Schema version + global default poll interval |
 
 ### Location (per-user location.db)
 

@@ -1,6 +1,6 @@
 # Architecture overview
 
-Istota is a self-hosted personal AI assistant that runs on your own server and integrates with Nextcloud — files, calendars, and Talk messaging — when you connect it. It dispatches each task to a pluggable **Brain**. Two brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, and `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model). Swapping brains doesn't touch executor orchestration. Messages arrive from Nextcloud Talk, the in-app web chat, email, file-based task queues, scheduled jobs, the interactive REPL, or the CLI — each surface sits behind a uniform [Transport](#input-channels) seam. They flow through a SQLite task queue, get claimed by per-user worker threads, and produce responses delivered back to the originating channel.
+Istota is a self-hosted personal AI assistant that runs on your own server and integrates with Nextcloud — files, calendars, and Talk messaging — when you connect it. It dispatches each task to a pluggable **Brain**. Three brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model), and `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (subscription billing; it composes `ClaudeCodeBrain` for model resolution). Swapping brains doesn't touch executor orchestration. Messages arrive from Nextcloud Talk, the in-app web chat, email, file-based task queues, scheduled jobs, the interactive REPL, or the CLI — each surface sits behind a uniform [Transport](#input-channels) seam. They flow through a SQLite task queue, get claimed by per-user worker threads, and produce responses delivered back to the originating channel.
 
 ```
 Talk (polling) ──────►┐
@@ -103,15 +103,12 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 | `nextcloud_api.py` | Enriches user configs from Nextcloud OCS API at startup |
 | `web_app.py` | Authenticated web interface (FastAPI + Nextcloud OAuth2) |
 | `webhook_receiver.py` | FastAPI webhook receiver (Overland GPS) |
-| `briefing.py` | Builds briefing prompts from pre-fetched components |
-| `briefing_loader.py` | Loads and merges briefing configs from user workspace, per-user TOML, and main config |
-| `invoice_scheduler.py` | Automated invoice generation, reminders, and overdue detection |
 | `devbox_proxy.py` | Per-user host-side credential proxy for the devbox container |
 | `logging_setup.py` | Centralized logging configuration (console, file, rotation) |
 
 ## Browser container
 
-The headless browser runs in a Docker container (`docker/browser/`) exposing a Flask API for Playwright operations:
+The headless browser runs in a Docker container (`docker/browser/`) — Google Chrome driven over a Flask API (with VNC for observation):
 
 | Module | Purpose |
 |---|---|
@@ -125,7 +122,7 @@ Anti-detection strategy: Chrome launches with the stealth extension natively. Pa
 
 ## Design decisions
 
-**Pluggable execution — delegate, or run the loop in-house.** The default brain invokes the existing Claude Code CLI as the execution engine. The native brain instead runs Istota's own in-process agent loop (tool dispatch, context compaction, retries) against any OpenAI-compatible model. Same executor, same skills — the brain is the swappable seam, so Istota isn't bound to one vendor.
+**Pluggable execution — delegate, or run the loop in-house.** The default brain invokes the existing Claude Code CLI as the execution engine. The native brain instead runs Istota's own in-process agent loop (tool dispatch, context compaction, retries) against any OpenAI-compatible model. A third brain drives the interactive Claude TUI over tmux to keep traffic on subscription billing. Same executor, same skills — the brain is the swappable seam, so Istota isn't bound to one vendor.
 
 **Regular Nextcloud user, not bot API.** The bot runs as an ordinary user. File sharing, CalDAV, and Talk messaging work through standard protocols. No special server configuration.
 

@@ -1,19 +1,30 @@
-# Bare metal install
+# Bare metal quickstart
 
-Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a Claude Code OAuth token.
+Bare metal is the canonical deployment. It runs Istota natively on a Debian/Ubuntu VM and connects to an existing Nextcloud instance. If you don't have a Nextcloud, use the [Docker quickstart](quickstart-docker.md) instead — it bundles its own.
 
-## Quick install
+Requirements: a Nextcloud instance, a Debian/Ubuntu VM, and a model backend (a Claude Code subscription/OAuth token, or any OpenAI-compatible endpoint — see the [native brain runbook](../configuration/native-brain.md)).
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash
+```
+
+That's the whole install. The one-liner clones the repo, installs prerequisites, and runs an interactive wizard that walks you through connecting to Nextcloud, setting up users, and choosing optional features.
+
+Prefer to read before you pipe? Download and inspect it first:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh -o install.sh
+less install.sh
 sudo bash install.sh
 ```
 
-The installer walks you through connecting to Nextcloud, setting up users, and choosing optional features.
+When you're done, see [post-install](post-install.md) to authenticate Claude and send your first message.
 
-### What install.sh does
+## What install.sh does
 
-The script is a ~250-line bootstrap that:
+The dispatcher clones the repo (when curl-piped) and hands off to `deploy/install.sh`, a bootstrap that:
 
 1. Ensures Python 3.11+, pipx, and ansible-core are installed
 2. Installs required Ansible collections (`community.general`, `ansible.posix`)
@@ -22,7 +33,7 @@ The script is a ~250-line bootstrap that:
 5. Converts `settings.toml` to Ansible vars via `settings_to_vars.py`
 6. Runs `ansible-playbook` in local connection mode
 
-### Common commands
+## Common commands
 
 ```bash
 # Default: runs the interactive setup wizard
@@ -82,7 +93,7 @@ Point your `roles_path` at `deploy/ansible/`, or symlink it into your roles dire
 
 - Debian 12+ or Ubuntu server
 - Nextcloud instance with an app password for the bot user
-- Claude Code CLI subscription
+- A model backend: a Claude Code subscription/OAuth token (default), or any OpenAI-compatible endpoint via the [native brain](../configuration/native-brain.md)
 
 ## Optional features
 

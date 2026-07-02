@@ -34,7 +34,7 @@ client_id = "123456789-abc.apps.googleusercontent.com"
 client_secret = ""    # or ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET env var
 ```
 
-The default scopes request access to Drive, Gmail, Calendar, Sheets, and Docs. To restrict access, override the `scopes` list:
+The default scopes request read-only access to Drive, Gmail, and Calendar; add Sheets/Docs or write scopes explicitly via the `scopes` list:
 
 ```toml
 [google_workspace]
@@ -48,11 +48,7 @@ scopes = [
 
 ### 3. Install the gws CLI
 
-The Ansible role installs `gws` via npm when `istota_google_workspace_enabled` is set. For manual installs:
-
-```bash
-npm install -g @googleworkspace/cli
-```
+The Ansible role downloads a prebuilt `gws` release binary from the `googleworkspace/cli` GitHub releases (the `x86_64-unknown-linux-gnu.tar.gz` asset) to `~/.local/bin/gws` when `istota_google_workspace_enabled` is set. For manual installs, download the matching release binary from the [googleworkspace/cli releases page](https://github.com/googleworkspace/cli/releases) and place it on your `PATH`.
 
 ### 4. Connect a user's Google account
 
@@ -70,7 +66,7 @@ OAuth tokens are stored per-user in the database and auto-refreshed on each task
 
 Once connected, the bot can use `gws` commands for any task that matches the skill triggers (e.g., "upload this to google drive", "create a spreadsheet", "check my google calendar").
 
-The bot receives the user's OAuth token via `GOOGLE_WORKSPACE_CLI_TOKEN` and uses the `gws` CLI directly through Bash.
+The bot invokes `istota-skill google_workspace <args>` (the skill wrapper); the OAuth token is injected proxy-side rather than exposed to the model.
 
 ### Example interactions
 
@@ -92,7 +88,7 @@ The bot receives the user's OAuth token via `GOOGLE_WORKSPACE_CLI_TOKEN` and use
 
 - OAuth tokens are stored in the database, scoped per-user
 - The access token is routed through the credential proxy (`GOOGLE_WORKSPACE_CLI_TOKEN` is stripped from the subprocess env and injected server-side)
-- Network isolation allowlists specific Google API hosts (googleapis.com subdomains) only when the skill is selected
+- Network isolation allowlists specific Google API hosts (googleapis.com subdomains) when the user's Google credentials are present (authorized via the credential set, decoupled from prompt-time skill selection)
 - Users can only access their own Google account data
 - Disconnect removes all stored tokens immediately
 

@@ -39,7 +39,7 @@ CRON.md is the source of truth. `cron_loader.py` reads it and syncs job definiti
 
 **Prompt file jobs**: Like prompt jobs, but the prompt is loaded from an external file. Paths are relative to the Nextcloud mount root.
 
-**Command jobs**: Run shell commands directly via `subprocess.run()`. No Claude invocation. Output captured and optionally posted to Talk.
+**Command jobs**: Run shell commands in a subprocess (via `_run_capture`, which kills the whole process group on timeout). No Claude invocation. Output captured and optionally posted to Talk.
 
 All job types go through the same task queue with retry logic, `!stop` support, failure tracking, and auto-disable.
 
@@ -54,7 +54,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `command` | for command jobs | Shell command to execute |
 | `type` | no | `"prompt"` (default), `"prompt_file"`, or `"command"` |
 | `conversation_token` | no | Talk room for output |
-| `output_target` | no | `"talk"` or `"email"` |
+| `output_target` | no | `talk`, `email`, `ntfy`, `both`, `all`, or a `surface:channel` / comma-list descriptor |
 | `once` | no | Auto-delete after successful execution |
 | `silent_unless_action` | no | Suppress output unless response has `ACTION:` prefix |
 | `skip_log_channel` | no | Suppress log channel output for frequent jobs |

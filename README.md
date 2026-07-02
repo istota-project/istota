@@ -25,7 +25,7 @@ Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file w
 | Area | What you get |
 |------|--------------|
 | **Messaging** | Nextcloud Talk (DMs + group rooms with @mentions), always-on web chat with live streaming, email (IMAP/SMTP threading), TASKS.md polling, REPL, CLI. Talk and web chat share one room model — continue a conversation on either surface with shared history, and promote a web room to a real Talk conversation. |
-| **Skills** | ~30 skills the agent loads on demand: calendar, email, web browsing (Dockerized Playwright), git/GitLab/GitHub, beancount accounting, GPS tracking, Karakeep bookmarks, voice transcription, OCR, RSS feeds, health, Google Workspace, and more. A curated standard library, not a plugin marketplace. |
+| **Skills** | ~35 skills the agent loads on demand: calendar, email, web browsing (Dockerized Chrome), git/GitLab/GitHub, beancount accounting, GPS tracking, Karakeep bookmarks, voice transcription, OCR, RSS feeds, health, Google Workspace, and more. A curated standard library, not a plugin marketplace. |
 | **Memory** | Per-user (USER.md) and per-channel memory, nightly-extracted dated memories, hybrid BM25 + vector recall, and a temporal knowledge graph. Optional learned playbooks distilled from successful multi-step tasks. |
 | **Web UI** | Authenticated SvelteKit dashboard (Nextcloud OAuth2): multi-room chat, RSS reader, location/places map, money and health dashboards, and per-user settings. |
 | **Scheduling** | Cron jobs via CRON.md (prompts, prompt files, or shell commands), natural-language reminders, and scheduled briefings with calendar / markets / headlines / news / todos, delivered to Talk or email. |
@@ -50,12 +50,6 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
 
 Both run the same interactive wizard (Nextcloud connection, users, optional features). Glance at [`install.sh`](install.sh) before you pipe it into a shell.
 
-After a bare-metal install, log Claude in once:
-
-```bash
-sudo -u istota HOME=/srv/app/istota claude login
-```
-
 To update: `sudo bash install.sh --update` (bare metal) or `cd ~/istota && git pull && docker compose -f docker/docker-compose.yml up -d --build` (Docker). An Ansible role is available at `deploy/ansible/`.
 
 Full walkthroughs, optional services, and configuration: **[Docker quickstart](https://istota.cynium.com/docs/getting-started/quickstart-docker/)** · **[Bare metal quickstart](https://istota.cynium.com/docs/getting-started/quickstart-bare-metal/)**.
@@ -75,7 +69,7 @@ Config files (persona, briefings, cron jobs, heartbeat checks) live in each user
 
 ```bash
 uv sync --extra all                        # Install all dependencies
-uv run pytest tests/ -v                    # Run tests (~4100 unit tests)
+uv run pytest tests/ -v                    # Run tests (~6500 unit tests)
 uv run pytest -m integration -v            # Integration tests (needs live config)
 uv run istota task "hello" -u alice -x     # Test execution
 ```

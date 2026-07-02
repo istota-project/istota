@@ -15,14 +15,15 @@ The prompt is built in a specific order, each section adding context for Claude:
 7. **Channel memory**: `CHANNEL.md` content (when `conversation_token` is set)
 8. **Dated memories**: last N days of extracted memories (via `auto_load_dated_days`)
 9. **Recalled memories**: BM25 search results (when `auto_recall` is enabled)
-10. **Confirmation context**: previous bot output for confirmed actions
-11. **Tools**: available tools documentation (file access, browser, CalDAV, sqlite3, email)
-12. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
-13. **Conversation context**: previous messages (selected by the context module)
-14. **Request**: the actual prompt text + file attachments
-15. **Guidelines**: channel-specific formatting from `config/guidelines/{source_type}.md`
-16. **Skills changelog**: "what's new" if skills updated since last interaction
-17. **Skills documentation**: concatenated skill `.md` files, selectively loaded
+10. **Learned playbooks**: `_recall_playbooks()` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated / `skip_memory` tasks)
+11. **Confirmation context**: previous bot output for confirmed actions
+12. **Tools**: available tools documentation (file access, browser, CalDAV, sqlite3, email)
+13. **Rules**: resource restrictions, confirmation flow, subtask creation, output format
+14. **Conversation context**: previous messages (selected by the context module)
+15. **Request**: the actual prompt text + file attachments
+16. **Guidelines**: channel-specific formatting from `config/guidelines/{source_type}.md`
+17. **Skills changelog**: "what's new" if skills updated since last interaction
+18. **Skills documentation**: concatenated skill `.md` files, selectively loaded
 
 ## Brain invocation
 
@@ -41,7 +42,7 @@ with optional `--model`, `--effort`, and `--system-prompt-file` flags. Tool-bear
 
 ## Environment variables
 
-The executor builds a minimal, clean environment for the subprocess. `build_clean_env()` starts with only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). The only env vars the executor injects directly are the core identity ones (`ISTOTA_TASK_ID`, `ISTOTA_USER_ID`, `ISTOTA_DB_PATH`, `ISTOTA_CONVERSATION_TOKEN`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_SKILL_PROXY_SOCK`) plus a few path/runtime vars (`NEXTCLOUD_MOUNT_PATH`, `BROWSER_API_URL`, `BROWSER_VNC_URL`, `WEBSITE_PATH`, `WEBSITE_URL`).
+The executor builds a minimal, clean environment for the subprocess. `build_clean_env()` starts with only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). The main env vars the executor injects directly are the core identity ones (`ISTOTA_TASK_ID`, `ISTOTA_USER_ID`, `ISTOTA_DB_PATH`, `ISTOTA_CONVERSATION_TOKEN`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_SKILL_PROXY_SOCK`, `ISTOTA_BOT_DIR_NAME`, `ISTOTA_EXPERIMENTAL_FEATURES`) plus a few path/runtime vars (`NEXTCLOUD_MOUNT_PATH`, `BROWSER_API_URL`, `BROWSER_VNC_URL`, `WEBSITE_PATH`, `WEBSITE_URL`) and, when devbox is enabled, the `ISTOTA_DEVBOX_*` set.
 
 Everything else — Nextcloud / CalDAV / IMAP / SMTP credentials, service tokens, per-user secrets — is **manifest-derived**. Each skill's `skill.md` frontmatter declares its env vars in the `env:` block; `build_skill_env()` walks the loaded skill index and resolves each `EnvSpec` against the task's `EnvContext`. This replaces the hardcoded credential-injection block in `execute_task` that used to duplicate the same wiring across the executor, the proxy strip-set, and the auth map.
 
@@ -68,12 +69,17 @@ See [security](../deployment/security.md#authorization-model) for the full model
 
 ## Streaming events
 
-The brain emits `StreamEvent`s (defined in `src/istota/brain/_events.py`) which the executor's `on_progress` closure filters and forwards to the scheduler's progress callback:
+The brain emits `StreamEvent`s (defined in `src/istota/brain/_events.py`) which the executor's `_on_brain_event` adapter maps to typed `TaskEvent`s and writes to the `task_events` log via `EventWriter.emit()` (`src/istota/events.py`). There is no scheduler-side progress callback and no `italicize` flag — the log is the bus. In-process consumers (`TalkEventSubscriber`, `LogChannelSubscriber`, `PushNotificationSubscriber`) and the web SSE endpoint read from it.
 
-- **ToolUseEvent** — forwarded as progress updates to Talk (gated by `progress_show_tool_use`)
-- **TextEvent** — forwarded as progress with `italicize=False` (gated by `progress_show_text`)
-- **ResultEvent** — final result (handled internally by the brain, surfaces as `BrainResult.result_text`)
-- **ContextManagementEvent** — marks a context management boundary in the trace (the brain records it as a `cm_boundary` entry)
+The `_on_brain_event` mapping:
+
+- **ToolUseEvent** -> `tool_start` (gated by `progress_show_tool_use`); NativeBrain also emits `ToolEndEvent` -> `tool_end` and `ToolProgressEvent` -> `tool_progress`
+- **TextEvent** -> `progress_text` (gated by `progress_show_text`); per-token `TextDeltaEvent` -> coalesced `text_delta` on stream surfaces only
+- **ThinkingEvent / ThinkingDeltaEvent** -> coalesced `thinking` (stream surfaces only)
+- **ResultEvent** — final result (surfaces as `BrainResult.result_text`)
+- **ContextManagementEvent** -> `context_management`, and a `cm_boundary` marker in the trace
+
+The full `TaskEvent` kind set: `task_started`, `tool_start`, `tool_end`, `tool_progress`, `progress_text`, `text_delta`, `thinking`, `context_management`, `confirmation`, `result`, `error`, `cancelled`, `done`. The scheduler emits the terminal frames (`confirmation` / `result` / `cancelled` / `error` + `done`) and calls `writer.finish()`.
 
 Cancellation is polled between events via the `cancel_check` callback, which calls `db.is_task_cancelled()`. The brain kills its subprocess and returns `stop_reason="cancelled"` when the check returns True.
 

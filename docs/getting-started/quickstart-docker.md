@@ -1,18 +1,39 @@
 # Docker quickstart
 
-!!! info "Beta"
-    The Docker deployment is now feature-complete (Phase 6 — May 2026): default Talk channels, OAuth2 web UI, nginx reverse proxy, optional modules (feeds, money, location), encrypted secrets store, and DB-backed user profiles all auto-provision. The bare-metal Ansible path remains the longest-running deployment model — pick whichever fits your operations style.
-
 The Docker setup spins up a complete stack: Postgres, Redis, a fresh Nextcloud instance, and the Istota scheduler. If you already have a Nextcloud instance, use [bare metal](quickstart-bare-metal.md) instead -- Docker Compose creates its own Nextcloud.
 
-## 1. Configure
+## Install
 
 ```bash
-cd docker
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
+```
+
+The one-liner clones the repo to `~/istota` and runs an interactive wizard that auto-generates the passwords, prompts for your Claude token and optional features, writes `docker/.env`, and brings the stack up. Requires Docker with the `docker compose` plugin.
+
+First start takes a few minutes: Nextcloud initializes the database, creates user accounts, installs apps (Talk, Calendar, External Storage), sets up shared folders, and creates a Talk room between you and the bot.
+
+When it's up, open `http://localhost:8080`, log in with the username and password the wizard set, go to Talk, and start chatting.
+
+### Wizard flags
+
+The `--docker` flag and everything after it forwards to `docker/init.sh`:
+
+```bash
+bash docker/init.sh --minimal    # passwords + Claude token + user only, skip optional sections
+bash docker/init.sh --force      # overwrite an existing .env without asking
+bash docker/init.sh --no-start   # write .env but don't run `docker compose up`
+```
+
+### Manual configuration (from a clone)
+
+To skip the wizard and edit the environment by hand, copy the example and fill it in:
+
+```bash
+cd ~/istota/docker
 cp .env.example .env
 ```
 
-Edit `.env` and set at minimum:
+Set at minimum:
 
 - `CLAUDE_CODE_OAUTH_TOKEN` -- generate with `claude setup-token` (or set `ANTHROPIC_API_KEY` for direct API access)
 - `ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `BOT_PASSWORD`, `USER_PASSWORD`
@@ -24,21 +45,15 @@ Optional but recommended:
 - `USER_TIMEZONE` -- e.g. `America/New_York` (defaults to UTC)
 - `USER_EMAIL` -- enables email features
 
-## 2. Start
+Then bring the stack up:
 
 ```bash
 docker compose up -d
 ```
 
-First start takes a few minutes: Nextcloud initializes the database, creates user accounts, installs apps (Talk, Calendar, External Storage), sets up shared folders, and creates a Talk room between you and the bot.
-
-## 3. Chat
-
-Open `http://localhost:8080`, log in with your `USER_NAME` / `USER_PASSWORD`, go to Talk, and start chatting.
-
 ## Optional services
 
-The browser container (Playwright with bot-detection countermeasures) and GPS webhook receiver run as Docker Compose profiles:
+The browser container (Google Chrome with bot-detection countermeasures) and GPS webhook receiver run as Docker Compose profiles:
 
 ```bash
 docker compose --profile browser up -d              # Web browsing
