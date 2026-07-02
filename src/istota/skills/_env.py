@@ -247,6 +247,33 @@ def build_skill_env(
     return env
 
 
+def build_identity_env(
+    skill_index: dict[str, SkillMeta],
+    ctx: EnvContext,
+) -> dict[str, str]:
+    """Resolve only ``source="user_id"`` (pure-identity, non-sensitive) env
+    specs across the *whole* index.
+
+    These vars (e.g. ``MONEY_USER`` / ``FEEDS_USER``) are just the task's user
+    id — always safe and required for a skill to run at all. Unlike config- or
+    secret-derived vars (which stay gated on ``authorized_skills`` for env
+    minimisation), identity vars must be resolved for every skill, because a
+    *menu-loaded* skill (the model self-selects it at runtime) is neither
+    eagerly selected nor credential-authorized and would otherwise be missing
+    its id ("MONEY_USER not set"). Mirrors how ``dispatch_setup_env_hooks``
+    iterates the full index. ``None`` results are skipped.
+    """
+    env: dict[str, str] = {}
+    for meta in skill_index.values():
+        for spec in meta.env_specs:
+            if not spec.var or spec.source != "user_id" or spec.sensitive:
+                continue
+            val = _resolve_env_spec(spec, ctx)
+            if val is not None:
+                env.setdefault(spec.var, val)
+    return env
+
+
 def dispatch_setup_env_hooks(
     selected_skills: list[str],
     skill_index: dict[str, SkillMeta],

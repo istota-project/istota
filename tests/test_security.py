@@ -2,10 +2,11 @@
 
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from istota import db
 from istota.config import (
     Config,
     DeveloperConfig,
@@ -25,8 +26,9 @@ from istota.executor import (
     derive_credential_set,
     derive_lookup_allowlist,
     derive_skill_credential_map,
+    execute_task,
 )
-from istota.skills._env import EnvContext
+from istota.skills._env import EnvContext, build_identity_env, build_skill_env
 from istota.skills._types import EnvSpec, SkillMeta
 
 
@@ -400,6 +402,85 @@ class TestDeriveSkillCredentialMap:
         assert derive_skill_credential_map(["feeds"], idx) == {
             "feeds": {"TUMBLR_API_KEY"},
         }
+
+
+class TestMenuSkillDeclarativeEnv:
+    """Regression: a menu-loaded skill's non-sensitive declarative env vars
+    must be resolved over the FULL skill index, not just ``authorized_skills``.
+
+    A skill the model self-selects from the menu at runtime (via ``skills
+    show``) is neither eagerly selected nor — absent its secret — credential-
+    authorized. The executor previously resolved ``build_skill_env`` over only
+    ``authorized_skills`` (selected ∪ credential-authorized), so such a skill's
+    ``from:user_id`` vars (``MONEY_USER`` / ``FEEDS_USER``) were never set and
+    the proxied CLI failed with "MONEY_USER not set". ``setup_env`` hooks
+    escaped this by iterating the full index; ``build_skill_env`` now does too
+    (matching ``scheduler._execute_skill_task``). Sensitive vars stay gated via
+    ``_split_credential_env`` + the proxy's ``skill_credential_map``.
+    """
+
+    def test_unauthorized_menu_skill_dropped_when_scoped(self):
+        """The old, buggy scoping: money is not authorized, so scoping env to
+        ``authorized_skills`` omits MONEY_USER."""
+        idx = _bundled_skill_index()
+        ctx = _ctx_with_config(Config())
+        authorized = derive_authorized_skills([], idx, ctx)
+        assert "money" not in authorized  # no Monarch secret, not selected
+        scoped = build_skill_env(authorized, idx, ctx)
+        assert "MONEY_USER" not in scoped
+
+    def test_identity_env_resolves_menu_skill_user_vars(self):
+        """The fix: ``build_identity_env`` resolves ``source="user_id"`` vars
+        (MONEY_USER / FEEDS_USER) for menu-loaded skills over the full index,
+        even without a credential or eager selection."""
+        idx = _bundled_skill_index()
+        ctx = _ctx_with_config(Config())
+        identity = build_identity_env(idx, ctx)
+        assert identity.get("MONEY_USER") == "alice"
+        assert identity.get("FEEDS_USER") == "alice"
+
+    def test_identity_env_excludes_config_derived_vars(self):
+        """Env minimisation: identity resolution is *only* ``user_id`` specs —
+        config/secret-derived vars (e.g. KARAKEEP_BASE_URL) are NOT pulled in
+        for unselected skills; those stay gated on ``authorized_skills``."""
+        idx = _bundled_skill_index()
+        ctx = _ctx_with_config(Config())
+        identity = build_identity_env(idx, ctx)
+        assert "KARAKEEP_BASE_URL" not in identity
+        assert "GITHUB_URL" not in identity
+
+    @patch("istota.executor.subprocess.run")
+    def test_menu_skill_env_reaches_brain(self, mock_run, tmp_path):
+        """End-to-end guard on the executor call site: for a plain task where
+        money/feeds are only menu skills (not eagerly selected, no secret),
+        their ``from:user_id`` vars must still be in the env handed to the
+        brain subprocess. Fails if the executor reverts to resolving
+        ``build_skill_env`` over ``authorized_skills`` instead of the full
+        index (the "MONEY_USER not set" regression).
+        """
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        config = Config(
+            db_path=tmp_path / "test.db",
+            skills_dir=skills_dir,          # empty operator overrides
+            bundled_skills_dir=None,        # real bundled skills → money/feeds present
+            temp_dir=tmp_path / "temp",
+            security=SecurityConfig(skill_proxy_enabled=False),
+        )
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="how much did I invoice?",
+                user_id="alice", source_type="cli",
+            )
+            task = db.get_task(conn, tid)
+            execute_task(task, config, [], conn=conn)
+
+        env = mock_run.call_args.kwargs["env"]
+        assert env.get("MONEY_USER") == "alice"
+        assert env.get("FEEDS_USER") == "alice"
 
 
 class TestDeriveLookupAllowlist:
