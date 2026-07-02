@@ -6,17 +6,17 @@ Skills are self-contained directories under `src/istota/skills/`, each with a `s
 
 Skills are not plugins or extensions. They are curated documentation and tooling that gets selectively loaded into Claude's prompt based on what's relevant to the current task. When a user asks about their calendar, the calendar skill docs are included so Claude knows how to use the CalDAV CLI. When they ask about email, the email skill docs are loaded instead.
 
-## Selection: keyword matching
+## Selection: deterministic matching
 
-A single deterministic pass selects skills (the former LLM "Pass 2 semantic routing" was removed — see [Progressive disclosure](#progressive-disclosure) for what replaced it). A skill is selected if any of these match:
+A single deterministic pass produces the **eager** skill set (the former LLM "Pass 2 semantic routing" was removed — see [On-demand menu](#on-demand-menu) for what replaced it). A skill is selected eager if any of these match:
 
-- `always_include = true` (files, sensitive_actions, memory, scripts, memory_search, kv)
+- `always_include = true` (files, sensitive_actions, memory, scripts, memory_search, kv, skills)
 - `source_types` matches the task's source type (e.g., `briefing` -> calendar, markets)
-- Any `keywords` found in the prompt text (e.g., "email" -> email skill)
 - Attachment file extensions match `file_types` (e.g., `.wav` -> whisper)
+- Sticky skills carried from recent conversation turns (see below)
 - `companion_skills` of already-selected skills are pulled in
 
-If a skill declares both `keywords` and `resource_types`, the user must have at least one matching resource in addition to the keyword match.
+Keyword (`triggers`) matching is **not** a selector — every non-eager eligible skill is in the on-demand menu, so a keyword guess is redundant. `triggers` survives only as `!skills` documentation. `resource_types` survives only as a menu-membership gate.
 
 Admin-only skills are filtered out for non-admin users. Skills with unmet `dependencies` are skipped. Skills listed in `disabled_skills` (instance or per-user) are excluded.
 
@@ -25,30 +25,30 @@ Admin-only skills are filtered out for non-admin users. Skills with unmet `depen
 Selection emits an INFO log per task with each selected skill annotated by the rule that fired:
 
 ```
-pass1_selection count=5: files(always_include), markets(source_type=briefing), email(keyword='email'), …
+pass1_selection count=5: files(always_include), markets(source_type=briefing), calendar(source_type=briefing), …
 ```
 
-The executor also logs `disclosure: eager=N lazy=M catalogue=K` (see [Progressive disclosure](#progressive-disclosure)). These logs make it easy to count selection misses against runtime credential-proxy rejections (see [security](../deployment/security.md#credential-proxy)).
+The executor also logs `skills: eager=N menu=M` (see [On-demand menu](#on-demand-menu)). These logs make it easy to count selection misses against runtime credential-proxy rejections (see [security](../deployment/security.md#credential-proxy)).
 
 ### Pre-transcription
 
-Audio attachments are transcribed before skill selection so keyword matching works on voice memos.
+Audio attachments are transcribed before skill selection so the spoken text enriches the prompt the model sees when self-selecting from the menu.
 
 ### Skill stickiness
 
-Skills from recent conversation turns are automatically re-selected for follow-up messages in the same conversation. This applies to the interactive surfaces (`talk`, `email`, `repl`, `web`) with a `conversation_token`, and covers up to 2 prior tasks within a 30-minute window. Skills from a direct reply parent are also carried forward. Sticky skills bypass keyword matching but still respect `disabled_skills` and dependency checks.
+Skills from recent conversation turns are automatically re-selected for follow-up messages in the same conversation. This applies to the interactive surfaces (`talk`, `email`, `repl`, `web`) with a `conversation_token`, and covers up to 2 prior tasks within a 30-minute window. Skills from a direct reply parent are also carried forward. Sticky skills are added eager subject to the standard gates (`disabled_skills`, `admin_only`, experimental, dependency checks).
 
-This means if you ask about your calendar and then say "also add that to my todos," the calendar skill stays loaded even though the follow-up message only triggers the todos skill.
+This means if you ask about your calendar and then say "also add that to my todos," the calendar skill stays loaded across the follow-up message.
 
 ### Exclude rules
 
 Skills can exclude other skills via `exclude_skills` (e.g., the briefing skill excludes email to prevent delivery interference).
 
-## Progressive disclosure
+## On-demand menu
 
-On by default (`skills.progressive_disclosure`). A selected skill is rendered either **eager** (full instructions inline) or **lazy** (a one-line entry in an "Available skills (load on demand)" section). For a lazy skill the model loads the full body on demand with `istota-skill skills show <name>`. Per-skill mode: frontmatter `disclosure: eager|lazy` wins, else a size threshold (`auto_lazy_threshold_chars`, CLI skills only), else eager; `always_eager` skills (the behavioral/safety set) are never deferred.
+Skill loading is single-axis with no config knobs. The deterministic pass produces the **eager** set (full instructions inline in the prompt). Everything else eligible goes in the **menu** — one-line entries in an "Available skills (load on demand)" section. For a menu skill the model loads the full body on demand with `istota-skill skills show <name>` (which also delivers that skill's companions).
 
-The on-demand index is **widened to the full eligible catalogue** — every loadable skill that isn't already eager (excluding always-included, disabled, admin-gated, experimental-gated, missing-dependency, and excluded skills). So the model can reach for any relevant tool even when keyword matching didn't surface it, while the prompt stays small. This replaced an earlier LLM "semantic routing" pre-pass that ran a separate model call per task; the cold-start cost dominated and timed out in production, and the widened catalogue gives the main model the full menu for free. Set `progressive_disclosure = false` for legacy all-eager rendering with no index.
+The menu is the **full eligible catalogue** — every loadable skill that isn't already eager (excluding always-included, disabled, admin-gated, experimental-gated, missing-dependency, and excluded skills). So the model can reach for any relevant tool while the prompt stays small. This replaced an earlier LLM "semantic routing" pre-pass that ran a separate model call per task; the cold-start cost dominated and timed out in production, and the full-catalogue menu gives the main model the complete list for free.
 
 ## Skill anatomy
 
@@ -113,14 +113,7 @@ See [adding skills](../development/adding-skills.md) for a step-by-step guide.
 
 ## Configuration
 
-```toml
-[skills]
-progressive_disclosure = true     # default; defer lazy bodies + widen the on-demand catalogue index
-auto_lazy_threshold_chars = 0     # >0: a CLI skill over N chars defaults to lazy (0 = explicit frontmatter only)
-# always_eager = ["sensitive_actions", "untrusted_input", "files", "scripts", "memory"]  # never deferred
-```
-
-Instance-wide and per-user skill exclusion:
+Skill disclosure has no config knobs (the former `[skills]` section was removed). Instance-wide and per-user skill exclusion:
 
 ```toml
 # config.toml (instance-wide)

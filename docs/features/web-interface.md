@@ -132,9 +132,9 @@ A light/dark theme toggle in the shell header switches the whole UI between them
 
 **Dashboard**: shows available features for the authenticated user. When [Google Workspace](google-workspace.md) is enabled, the dashboard also shows a connect/disconnect card for linking a Google account.
 
-**Feeds**: RSS feed reader with masonry card grid, image/text filter, sort-by dropdown (published/added), grid/list view, navigable image lightbox, per-entry starring (`f` keyboard shortcut), and scope-aware bulk mark-as-read (`Shift-A` / toolbar button). Viewport-based read tracking marks entries as read after 1.5s visible. Sprocket-icon settings page for managing subscriptions, categories, and OPML import/export. Served by the in-tree `istota.feeds` module against per-user SQLite. Requires a `feeds` resource.
+**Feeds**: RSS feed reader with masonry card grid, image/text filter, sort-by dropdown (published/added), grid/list view, navigable image lightbox, per-entry starring (`f` keyboard shortcut), and scope-aware bulk mark-as-read (`Shift-A` / toolbar button). Viewport-based read tracking marks entries as read after 1.5s visible. Sprocket-icon settings page for managing subscriptions, categories, and OPML import/export. Served by the in-tree `istota.feeds` module against per-user SQLite. Requires the `feeds` module to be enabled (on by default).
 
-**Money**: accounting dashboard with ledger queries, transaction management, invoicing, and work log tracking. Backed by the in-process `money` module (no external service). Requires a `money` resource.
+**Money**: accounting dashboard with ledger queries, transaction management, invoicing, and work log tracking. Backed by the in-process `money` module (no external service). Requires the `money` module to be enabled (on by default).
 
 **Health**: body stats grid with sparklines, bloodwork matrix (dates × markers with flag-colored cells, CSV import/export), panel detail with inline edit and source preview, per-marker trend charts with out-of-range zones and LLM explainer, medical history timeline with encounters and diagnoses, immunization tracking with coverage status strip, vaccine drill-down pages with clinical explainers, Garmin Connect integration on the settings page. Requires the `health` module to be enabled (on by default).
 

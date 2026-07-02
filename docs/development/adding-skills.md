@@ -19,7 +19,7 @@ All metadata lives in the YAML frontmatter block. The markdown body is the docum
 ---
 name: my_skill
 triggers: [my_keyword, another_keyword]
-description: One-line description for the LLM classification manifest
+description: One-line description shown in the menu catalogue and `!skills`
 resource_types: [my_resource]
 cli: true
 dependencies: [some-package]
@@ -38,12 +38,12 @@ Use `{BOT_NAME}`, `{BOT_DIR}`, and `{user_id}` placeholders -- they're substitut
 | Field | Type | Purpose |
 |---|---|---|
 | `name` | string | Skill identifier, matches directory name |
-| `triggers` | list | Prompt keywords that trigger this skill (Pass 1) |
-| `description` | string | Shown in `!skills` and LLM classification manifest |
+| `triggers` | list | Documentation-only keywords surfaced by `!skills`; not a selector |
+| `description` | string | Shown in the menu catalogue and `!skills` |
 | `always_include` | bool | Load for every task |
 | `admin_only` | bool | Hidden from non-admin users |
 | `cli` | bool | Whether this skill has a CLI module |
-| `resource_types` | list | Required user resources (combined with keywords) |
+| `resource_types` | list | Menu-membership gate (a menu entry only when the user has a matching resource) |
 | `source_types` | list | Auto-include for these task source types |
 | `file_types` | list | Auto-include for these attachment extensions |
 | `companion_skills` | list | Pull in these skills when this one is selected |

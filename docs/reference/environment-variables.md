@@ -67,7 +67,7 @@ Every service-integration env var is declared in the consuming skill's `skill.md
 | `KARAKEEP_API_KEY` | `secrets` (`karakeep.api_key`) | per-user, sensitive |
 | `MONARCH_SESSION_ID` | `secrets` (`monarch.session_id`) | per-user, sensitive |
 | `MONARCH_CSRFTOKEN` | `secrets` (`monarch.csrftoken`) | per-user, sensitive |
-| `FEEDS_USER` | task `user_id` | set by `_execute_skill_task` for the native feeds skill |
+| `FEEDS_USER` | task `user_id` | declared in the feeds `skill.md` env spec (`from: user_id`) and resolved by `build_skill_env` in every subprocess path (LLM `execute_task`, skill-task, command-task) |
 | `TUMBLR_API_KEY` | `secrets` (`feeds.tumblr_api_key`) | per-user, sensitive |
 | `NTFY_TOPIC` / `NTFY_SERVER_URL` / `NTFY_USERNAME` | `secrets` (`ntfy.*`) | per-user (non-credential) |
 | `NTFY_TOKEN` / `NTFY_PASSWORD` | `secrets` (`ntfy.token` / `ntfy.password`) | per-user, sensitive |

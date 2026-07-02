@@ -27,8 +27,12 @@ istota user list                             # List configured users
 istota user lookup EMAIL                     # Find user by email
 istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
-istota user ensure -u USER --name NAME [--timezone TZ] [--log-channel TOKEN] [--alerts-channel TOKEN] [--email k=v ...] [--max-fg N] [--max-bg N] [--site-enabled] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...]
+istota user show --name USER_ID              # Dump the stored profile row as JSON
+istota user remove --name USER_ID            # Delete a user_profiles row (no other tables touched)
+istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--site-enabled|--no-site] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--email-reply-routing origin+thread|origin|thread]
 ```
+
+`istota user ensure` has no `-u`/`--user` flag — the user id comes from `--name` (required). `--tz` and `--timezone` are aliases. `--email` takes a bare address and is repeatable (each pass replaces the stored list). Worker caps are `--max-foreground-workers` / `--max-background-workers`.
 
 `--default-destination` sets the fallback delivery surface (`talk` | `email` | `ntfy` | `web` | `surface:channel` | comma list). `--route` is repeatable and sets a purpose-keyed override; `PURPOSE` is one of `reply`, `alert`, `log`, `briefing`, `notification`. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).
 
@@ -45,17 +49,22 @@ Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `reminders_fi
 ### Briefings
 
 ```bash
-istota briefing ensure -u USER -n NAME -c CRON [--conversation-token TOKEN] [--output talk|email|ntfy|both] [--component k=v] [--components-json '{…}'] [--disabled]
+istota briefing ensure -u USER --name NAME --cron CRON [--conversation-token TOKEN] [--output talk|email|ntfy|both] [--component k=v] [--components-json '{…}'] [--disabled]
 istota briefing list   -u USER
+istota briefing delete -u USER --name NAME
 ```
+
+`ensure` / `list` / `delete` are positional actions. There are no `-n`/`-c` short flags — use `--name` and `--cron` (`-c` is the global `--config`).
 
 ### Secrets (encrypted store)
 
 ```bash
-istota secret ensure -u USER -s SERVICE -k KEY -v VALUE   # value via flag, env, or stdin
-istota secret list   -u USER                               # service/key/last_accessed; values never printed
-istota secret remove -u USER -s SERVICE -k KEY
+istota secret ensure -u USER --service SERVICE --key KEY --value VALUE   # value via flag, env, or stdin
+istota secret list   -u USER                                             # service/key/last_accessed; values never printed
+istota secret remove -u USER --service SERVICE --key KEY
 ```
+
+Only `-u`/`--user` has a short form. `--service`, `--key`, and `--value` are long-only (`-v` is the global verbose flag).
 
 ### Ensure-CLI state contract
 
@@ -87,12 +96,14 @@ istota tasks-file status [-u USER]           # Show file task status
 
 ### Key-value store
 
+Every `kv` subcommand takes a required `NAMESPACE` positional and a required `-u`/`--user`:
+
 ```bash
-istota kv get KEY                            # Get value
-istota kv set KEY VALUE                      # Set value
-istota kv list [--namespace NS]              # List keys
-istota kv delete KEY                         # Delete key
-istota kv namespaces                         # List namespaces
+istota kv get NAMESPACE KEY -u USER          # Get value
+istota kv set NAMESPACE KEY VALUE -u USER    # Set value (JSON)
+istota kv list NAMESPACE -u USER             # List entries in a namespace
+istota kv delete NAMESPACE KEY -u USER       # Delete key
+istota kv namespaces -u USER                 # List namespaces
 ```
 
 The skill proxy client also exposes set operations for membership-tracking patterns (seen IDs, processed hashes). These operate on a JSON-array value and avoid round-tripping large blobs:
@@ -103,6 +114,40 @@ istota-skill kv set-size     <ns> <key>                       # Count members
 istota-skill kv set-members  <ns> <key> [--limit N] [--offset N]  # Paginated slice
 istota-skill kv set-add      <ns> <key> <member> [<member>...]    # Add members (deferred)
 istota-skill kv set-remove   <ns> <key> <member> [<member>...]    # Remove members (deferred)
+```
+
+### Experimental features
+
+```bash
+istota experimental list                     # List known feature flags with on/off status
+```
+
+### Money
+
+Accounting operations are reachable as `istota money <op> …`. Operational commands are forwarded verbatim to the money engine (resolve the user with `-u USER`):
+
+```bash
+istota money list -u USER                     # list transactions in a ledger
+istota money check -u USER                    # bean-check a ledger
+istota money balances -u USER                 # account balances
+istota money query -u USER "<bql>"            # run a BQL query
+istota money report -u USER                   # financial report
+istota money add-transaction -u USER ...      # append a transaction
+istota money import-csv -u USER ...           # import transactions from CSV
+istota money sync-monarch -u USER             # sync from Monarch Money
+istota money invoice -u USER <generate|list|paid|create|void> ...
+istota money work -u USER <list|add|update|remove> ...
+```
+
+Config-management subcommands manage the per-user money DB config:
+
+```bash
+istota money config  <show|import|export|diff> ...
+istota money client  <add|update|remove|list> ...
+istota money company <add|update|remove|list> ...
+istota money service <add|update|remove|list> ...
+istota money tax     <set|rates|pattern> ...
+istota money monarch <profile|account-map> ...
 ```
 
 ### Interactive REPL

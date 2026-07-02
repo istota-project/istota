@@ -51,15 +51,15 @@ ln -s /path/to/istota/deploy/ansible /path/to/roles/istota
 | Email | `istota_email_enabled` | `false` |
 | Browser container | `istota_browser_enabled` | `false` |
 | Memory search | `istota_memory_search_enabled` | `true` |
-| Sleep cycle | `istota_sleep_cycle_enabled` | `false` |
-| Channel sleep cycle | `istota_channel_sleep_cycle_enabled` | `false` |
+| Sleep cycle | `istota_sleep_cycle_enabled` | `true` |
+| Channel sleep cycle | `istota_channel_sleep_cycle_enabled` | `true` |
 | Whisper transcription | `istota_whisper_enabled` | `false` |
 | Nginx site hosting | `istota_site_enabled` | `false` |
 | Node.js | `istota_nodejs_enabled` | `false` |
 | Developer/GitLab | `istota_developer_enabled` | `false` |
 | Database backups | `istota_backup_enabled` | `true` |
 | Bubblewrap sandbox | `istota_security_sandbox_enabled` | `true` |
-| Web interface | `istota_web_enabled` | `false` |
+| Web interface | `istota_web_enabled` | `true` |
 | GPS location | `istota_location_enabled` | `false` |
 
 ## Variables

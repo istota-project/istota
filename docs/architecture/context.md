@@ -33,7 +33,7 @@ All context settings live in the `[conversation]` section:
 | `enabled` | `true` | Enable conversation context |
 | `lookback_count` | 25 | Messages to consider |
 | `skip_selection_threshold` | 3 | Include all if history is this small |
-| `selection_model` | `"haiku"` | Model alias for relevance matching (resolved through the active brain; under `native` the brain's own fast completer is used) |
+| `selection_model` | `"fast"` | Role alias for relevance matching, resolves to Haiku by default (resolved through the active brain; under `native` the brain's own fast completer is used) |
 | `selection_timeout` | 30.0 | Timeout for LLM selection |
 | `use_selection` | `true` | Use LLM selection (false = include all) |
 | `always_include_recent` | 5 | Always include this many recent messages |

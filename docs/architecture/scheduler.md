@@ -30,8 +30,8 @@ while not shutdown_requested:
     organize_shared_files()     # every shared_file_check_interval (120s)
     poll_tasks_files()          # every tasks_file_poll_interval (30s)
     run_cleanup_checks()        # every briefing_check_interval
+    check_briefing_triggers()   # every briefing_check_interval (NC-app trigger files)
     check_heartbeats()          # every heartbeat_check_interval (60s)
-    check_invoice_schedules()   # every briefing_check_interval
     pool.dispatch()             # spawn workers for users with pending tasks
     sleep(poll_interval)        # 2s
 ```
@@ -48,7 +48,7 @@ Talk polling runs in a separate daemon thread, started at scheduler launch.
 
 **Per-channel gate**: Before creating a task, the Talk poller checks if an active foreground task exists for the conversation. If so, it queues the message but sends "Still working on a previous request" as an immediate response.
 
-Workers are keyed by `(user_id, queue_type, slot)`. Each `UserWorker` is a thread that processes tasks serially, exiting after `worker_idle_timeout` (30s) of no tasks. Thread safety: fresh DB connections per call, new `asyncio.run()` event loop per worker, `threading.Lock` on the workers dict.
+Workers are keyed by `(user_id, queue_type, slot)`. Each `UserWorker` is a thread that processes tasks serially, exiting after `worker_idle_timeout` (10s) of no tasks. Thread safety: fresh DB connections per call, new `asyncio.run()` event loop per worker, `threading.Lock` on the workers dict.
 
 ## Task claiming
 
@@ -64,7 +64,7 @@ The claim sets `status='locked', locked_at=now, locked_by=worker_id` atomically.
 
 ### Stuck-running detection by worker liveness (ISSUE-112)
 
-Steps 3–5 (and the standalone `fail_stuck_locked_running_tasks()` maintenance pass) share `_STUCK_RUNNING_PREDICATE`, which decides "stuck" by **worker liveness**, not raw runtime. A `running` task is stuck when its `last_heartbeat` has been silent longer than `worker_stuck_minutes` (default 5); when no heartbeat was ever recorded it falls back to `started_at` older than `task_timeout_minutes` + grace. The running worker pings `last_heartbeat` every `worker_heartbeat_seconds` (default 60) via the `_task_heartbeat` context manager (`db.touch_task_heartbeat`), so a slow-but-alive worker — notably the in-process native brain, which has no killable PID — is never reclaimed, while a crashed worker is recovered in minutes. (This is distinct from the health-check heartbeat system in `heartbeat.py`.)
+Steps 3–5 (and the standalone `fail_stuck_locked_running_tasks()` maintenance pass) share `_STUCK_RUNNING_PREDICATE`, which decides "stuck" by **worker liveness**, not raw runtime. A `running` task is stuck when its `last_heartbeat` has been silent longer than `worker_stuck_minutes` (default 10); when no heartbeat was ever recorded it falls back to `started_at` older than `task_timeout_minutes` + grace. The running worker pings `last_heartbeat` every `worker_heartbeat_seconds` (default 60) via the `_task_heartbeat` context manager (`db.touch_task_heartbeat`), so a slow-but-alive worker — notably the in-process native brain, which has no killable PID — is never reclaimed, while a crashed worker is recovered in minutes. (This is distinct from the health-check heartbeat system in `heartbeat.py`.)
 
 `claim_task` and every other `Task`-returning helper (`get_task`, `get_pending_confirmation*`, `get_reply_parent_task`, `get_stale_pending_tasks`, `get_completed_*_since`) route their SELECT/RETURNING through a single `_TASK_COLUMNS` constant in `db.py`. Adding a column means editing one place; missing columns now raise `IndexError` rather than silently returning `None` (the failure mode that masked the brief 027eb1a regression where `task.skill` came back unset and module-poller rows fell through to the LLM path with an empty prompt).
 
@@ -127,7 +127,8 @@ With the bubblewrap sandbox, the DB is read-only inside the subprocess. Claude a
 | `task_{id}_kv_ops.json` | `_process_deferred_kv_ops` | KV store set/delete operations |
 | `task_{id}_kg_ops.json` | `_process_deferred_kg_ops` | Knowledge-graph fact add/invalidate/delete (per-op commit) |
 | `task_{id}_user_alerts.json` | `_process_deferred_user_alerts` | Alerts/notifications for the user's alerts channel |
-| `task_{id}_email_output.json` | `_load_deferred_email_output` | Structured email reply (preferred over the legacy stdout-JSON parser) |
+| `task_{id}_health_ops.json` | `_process_deferred_health_ops` | Health module inserts/updates replayed against the per-user `health.db` |
+| `task_{id}_email_output.json` | `_deliver_deferred_email_output` | Structured email reply (preferred over the legacy stdout-JSON parser) |
 
 `_load_deferred_json(user_temp_dir, task_id, suffix, expected_type=...)` is the shared envelope helper: builds the path, exists-checks, parses JSON, validates the top-level shape (`list` or `dict`), and warns + unlinks on a malformed file. Each handler then runs its own business logic and unlinks at the call site so per-handler invariants (admin gate, depth gate, KG per-op commit) read cleanly.
 

@@ -47,9 +47,10 @@ The set of stripped variables is **manifest-derived**: `derive_credential_set(sk
 
 - `CALDAV_PASSWORD`, `NC_PASS`, `SMTP_PASSWORD`, `IMAP_PASSWORD`
 - `KARAKEEP_API_KEY`
-- `GITLAB_TOKEN`, `GITHUB_TOKEN`, `MONARCH_SESSION_TOKEN`, `GOOGLE_WORKSPACE_CLI_TOKEN`
+- `GITLAB_TOKEN`, `GITHUB_TOKEN`, `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN`, `GOOGLE_WORKSPACE_CLI_TOKEN`
 - `NTFY_TOKEN`, `NTFY_PASSWORD`, `TUMBLR_API_KEY`
-- `ISTOTA_SECRET_KEY` (master Fernet key — routed to module-skill subprocesses that need to decrypt per-user secrets, blocked at the proxy lookup endpoint)
+
+`ISTOTA_SECRET_KEY` (the master Fernet key) is **not** in the manifest-derived set. It is the proxy's hard-reject lookup var (`_PROXY_LOOKUP_BLOCKED`) and never enters any subprocess env.
 
 Adding a sensitive credential to a skill's `env:` block is the only step needed to route it through the proxy; there is no longer a hand-maintained `_PROXY_CREDENTIAL_VARS` list to keep in sync.
 
@@ -59,7 +60,7 @@ The proxy's Unix socket path includes the host process PID — `istota-proxy-{pi
 
 ### Authorization model
 
-Credential authorization is **decoupled from skill selection**. A skill is authorized for credential access if any of its sensitive `EnvSpec`s actually resolves under the task's context — that is, if the user has the corresponding resource configured (Karakeep, etc.) or the relevant instance config is set (SMTP, GitLab/GitHub tokens). Selection (keyword matching) controls only which skill *docs* go into the prompt, not which credentials can be requested at runtime.
+Credential authorization is **decoupled from skill selection**. A skill is authorized for credential access if any of its sensitive `EnvSpec`s actually resolves under the task's context — that is, if the user has the corresponding resource configured (Karakeep, etc.) or the relevant instance config is set (SMTP, GitLab/GitHub tokens). Skill selection controls only which skill *docs* go into the prompt, not which credentials can be requested at runtime.
 
 This avoids the failure mode where a keyword miss locks a skill out: e.g. a user has a Karakeep resource configured, the prompt didn't say "bookmark", `bookmarks` wasn't selected — under the old model the proxy would refuse to inject `KARAKEEP_API_KEY` and the CLI invocation would fail mysteriously. Under the new model the credential is injectable as soon as Claude decides it needs the bookmarks skill, regardless of selection.
 

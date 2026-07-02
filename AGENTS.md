@@ -63,7 +63,7 @@ config/                   # config.toml, persona.md, emissaries.md, system-promp
 deploy/ansible/           # Role + install.sh + wizard.sh + validate_config.py
 docker/                   # Full-stack compose (nginx + nextcloud + postgres + redis + istota scheduler/web/webhooks)
 web/                      # SvelteKit (adapter-static, base /istota)
-tests/                    # pytest + pytest-asyncio (~4100 tests, 99 files)
+tests/                    # pytest + pytest-asyncio (~6500 tests, 207 files)
 schema.sql
 pyproject.toml
 ```

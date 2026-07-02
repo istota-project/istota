@@ -13,7 +13,9 @@
 | `redis` | Nextcloud session cache |
 | `nextcloud` | Fresh Nextcloud instance with auto-provisioning |
 | `istota` | Scheduler + Claude Code |
-| `browser` (profile) | Playwright container for web browsing |
+| `web` | SvelteKit + FastAPI web UI |
+| `nginx` | Reverse proxy (single entry port) |
+| `browser` (profile) | Chrome + VNC container for web browsing |
 | `webhooks` (profile) | GPS webhook receiver |
 
 ## Configuration

@@ -13,7 +13,9 @@ src/istota/memory/
     ├── parser.py         # parse / serialize markdown sections
     ├── ops.py            # apply_ops with validation
     ├── prompt.py         # curation prompt + JSON-fence stripper
-    └── audit.py          # USER.md.audit.jsonl writer
+    ├── audit.py          # USER.md.audit.jsonl writer
+    ├── file_lock.py      # per-file flock for runtime memory writes
+    └── lint.py           # Phase-A lint pass over USER.md bullets
 ```
 
 `memory/__init__.py` re-exports the public surface for back-compat. In-repo callers import explicitly (`from istota.memory.search import ...`). The `search()` function is intentionally not re-exported because it would shadow the `search` submodule.
@@ -28,7 +30,7 @@ The executor is the only consumer of memory data at task time. During prompt ass
 4. **Dated memories** — `read_dated_memories()` reads the last `auto_load_dated_days` files from `memories/YYYY-MM-DD.md`. Skipped for briefings.
 5. **Recalled memories** — `_recall_memories()` runs a hybrid search using the task prompt as the query, keyed on the user's namespace plus `channel:{token}` when applicable. Off by default (`auto_recall = false`). Two ISSUE-109 scope levers shape the results: **recency decay** down-weights each hit by age with a half-life of `recency_half_life_days` (default 180; 0 disables) so dense old clusters don't outrank current context on sheer mass, and **episode windows** suppress any chunk whose `valid_until` has passed so time-boxed memories age out cleanly.
 
-If the resulting memory section exceeds `max_memory_chars`, `_apply_memory_cap()` truncates in this order: recalled → knowledge facts → dated. User and channel memory are always preserved.
+If the resulting memory section exceeds `max_memory_chars`, `_apply_memory_cap()` truncates in this order: recalled → knowledge facts → dated → playbooks. Playbooks are truncated last (most protected — an actionable procedure outranks recalled snippets and dated context). User and channel memory are always preserved.
 
 The read path is pure I/O and FTS5 lookups — there is no LLM call in the executor's memory layer.
 
@@ -60,7 +62,7 @@ Two filters apply before indexing:
 `process_user_sleep_cycle()`:
 
 1. Reads `sleep_cycle_state` (last task id processed for this user).
-2. `gather_day_data()` partitions completed tasks since the last run into INTERACTIVE (`talk`, `email`, `cli`) and AUTOMATED (`cron`, `briefing`, `subtask`) sections. Interactive tasks get 80% of a 50,000-char budget; per-task allocation is proportional to content length with tail-biased truncation (40% head + 60% tail).
+2. `gather_day_data()` partitions completed tasks since the last run into INTERACTIVE (`talk`, `email`, `cli`) and AUTOMATED (`cron`, `briefing`, `subtask`) sections. Interactive tasks get 80% of a 50,000-char budget; each task gets an equal share of the section budget (`interactive_budget // len(interactive)`, min-floored) with tail-biased truncation (40% head + 60% tail).
 3. `build_memory_extraction_prompt()` includes the day data, the current USER.md (so Sonnet skips already-known facts), and a list of suggested predicates with usage hints.
 4. Runs a privileged text-only model call through the **configured brain** (`make_brain(config.brain).execute(BrainRequest(...))`) — no streaming, no sandbox, no task queue. The sleep cycle is privileged orchestration: it goes through the brain abstraction (so a `native` deployment extracts with its own provider) but skips the isolation pipeline user-initiated tasks run through. Per-feature model overrides come from `[sleep_cycle]` (`extraction_model`, `curation_model`).
 5. `_parse_structured_extraction()` extracts `MEMORIES:` (bullets), `FACTS:` (JSON triples), and `TOPICS:` (JSON map). Missing or malformed sections degrade gracefully.
@@ -95,7 +97,7 @@ curate_user_memory(config, user_id, conn)
   └── _post_curation_summary()           # one-line message to log_channel
 ```
 
-`apply_ops()` accepts three op shapes (`append`, `add_heading`, `remove`), validates each independently, and never raises. Bad ops accumulate in `rejected` while good ones still apply. Ops only operate on the **top region** of a section — lines before the first `### subheading` — so deeper hand-curated structure is safe from automated edits.
+`apply_ops()` accepts five op shapes (`append`, `add_heading`, `remove`, `replace`, `remove_heading`), validates each independently, and never raises. Bad ops accumulate in `rejected` while good ones still apply. `remove` and `replace` reach bullets anywhere in a section, including inside `### subsections`; `replace` rewrites in place, `remove_heading` drops a whole section, and `append --subheading` targets a subsection.
 
 The skip-write decision is outcome-based, not text-based: if every applied op was a no-op (`noop_dup` or `noop_no_match`), the file is left alone. Comparing serialized output against the file's current text would trigger a spurious rewrite whenever USER.md had harmless drift (CRLF, trailing whitespace on headings, missing trailing newline) that the round-trip normalized away.
 
@@ -155,7 +157,7 @@ SQLite tables (`schema.sql`):
    - **Auto-expiring** (`interested_in`, `completed`, `acquired`, `disposed_of`, `traveled_to`) — when the caller supplies no `valid_until`, a default `DEFAULT_EPHEMERAL_TTL_DAYS` (90) window is stamped so the event ages out of the always-current view (ISSUE-109 lever 1). `decided` is deliberately excluded — durable decisions persist.
    - Everything else is multi-valued and coexists.
 
-   Word-level Jaccard similarity (threshold 0.7) on the `predicate object` signature catches near-duplicates.
+   Word-level Jaccard similarity on the object string (threshold 0.6, `FUZZY_DEDUP_THRESHOLD`), compared only after a predicate-equality gate, catches near-duplicates.
 2. **Executor read path.** `select_relevant_facts()` filters by relevance to the prompt and `format_facts_for_prompt()` renders them into the prompt's "Known facts" section.
 3. **Curation prompt.** `_load_kg_facts_text()` includes current facts in the USER.md curation prompt so Sonnet doesn't duplicate structured knowledge as bullets in USER.md.
 

@@ -1,6 +1,6 @@
 # Testing
 
-Istota uses TDD with pytest and pytest-asyncio. The test suite has ~2,760 tests across 56 files.
+Istota uses TDD with pytest and pytest-asyncio. The test suite has ~6,500 tests across ~200 files.
 
 ## Running tests
 
@@ -35,11 +35,11 @@ Integration tests are deselected by default (configured in `pyproject.toml`). Th
 Skill loader tests require isolation from bundled skills:
 
 ```python
-# Always pass both params to isolate from bundled skills
-index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path), skip_entrypoints=True)
+# Pass bundled_dir to isolate from bundled skills
+index = load_skill_index(skills_dir, bundled_dir=_empty_bundled(tmp_path))
 ```
 
-Executor tests set `bundled_skills_dir` on the Config object to an empty directory, which automatically triggers `skip_entrypoints`.
+Executor tests set `bundled_skills_dir` on the Config object to an empty directory to isolate from bundled skills.
 
 ## TDD workflow
 
