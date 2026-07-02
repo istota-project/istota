@@ -78,3 +78,6 @@ Thumbs.db
 # Test fixtures containing production session logs (sensitive)
 tests/fixtures/cm_traces/*.jsonl
 .claude/scheduled_tasks.lock
+
+# Local demo environment (seed scripts + traces, not part of the product)
+scripts/demo/
