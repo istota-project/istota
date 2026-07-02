@@ -2698,7 +2698,12 @@ def execute_task(
                 env["WEBSITE_URL"] = f"https://{config.site.hostname}/~{task.user_id}"
 
         # Declarative env vars from skill manifests
-        from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
+        from .skills._env import (
+            EnvContext,
+            build_identity_env,
+            build_skill_env,
+            dispatch_setup_env_hooks,
+        )
         env_ctx = EnvContext(
             config=config,
             task=task,
@@ -2719,6 +2724,16 @@ def execute_task(
             selected_skills, skill_index, env_ctx,
         )
         skill_env = build_skill_env(authorized_skills, skill_index, env_ctx)
+        # A menu-loaded skill (the model self-selects it at runtime via
+        # ``skills show``) is neither eagerly selected nor credential-
+        # authorized, so the call above skips it. Its pure-identity vars
+        # (``source="user_id"``, e.g. ``MONEY_USER`` / ``FEEDS_USER``) are
+        # non-sensitive and required for the skill to run at all — resolve
+        # those over the full index so the proxied CLI isn't missing them
+        # ("MONEY_USER not set"). Config/secret-derived vars stay gated on
+        # ``authorized_skills`` (env minimisation for the untrusted model).
+        for k, v in build_identity_env(skill_index, env_ctx).items():
+            skill_env.setdefault(k, v)
         # Declarative env vars don't override hardcoded ones
         for k, v in skill_env.items():
             if k not in env:
