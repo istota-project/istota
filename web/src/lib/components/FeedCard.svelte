@@ -5,12 +5,30 @@
 
 	import { markReadDelay } from '$lib/stores/feeds';
 
-	let { entry, onImageClick, onViewed, onStarToggle }: {
+	let { entry, onImageClick, onViewed, onStarToggle, onOpen }: {
 		entry: FeedEntry;
 		onImageClick: (images: string[], index: number) => void;
 		onViewed?: (id: number) => void;
 		onStarToggle?: (id: number, starred: boolean) => void;
+		onOpen?: () => void;
 	} = $props();
+
+	// Open the reader on a plain card click, but let the existing interactive
+	// targets (image → lightbox, title/permalink → original, star) keep their
+	// own behaviour.
+	function handleCardClick(e: MouseEvent) {
+		if (!onOpen) return;
+		if ((e.target as HTMLElement).closest('a, button')) return;
+		onOpen();
+	}
+
+	function handleCardKey(e: KeyboardEvent) {
+		if (!onOpen || e.target !== e.currentTarget) return;
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			onOpen();
+		}
+	}
 
 	async function toggleStar(e: MouseEvent) {
 		e.stopPropagation();
@@ -78,11 +96,17 @@
 	}
 </script>
 
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <article
 	class="card {isImage ? 'image' : 'text'} feed-{feedSlug}"
+	class:openable={!!onOpen}
 	data-published={entry.published_at}
 	data-added={entry.created_at}
 	use:trackView
+	onclick={handleCardClick}
+	onkeydown={handleCardKey}
+	role={onOpen ? 'button' : undefined}
+	tabindex={onOpen ? 0 : undefined}
 >
 	{#if entry.status === 'read'}
 		<span class="seen-pill">SEEN</span>

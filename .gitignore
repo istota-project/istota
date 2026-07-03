@@ -78,3 +78,6 @@ Thumbs.db
 # Test fixtures containing production session logs (sensitive)
 tests/fixtures/cm_traces/*.jsonl
 .claude/scheduled_tasks.lock
+
+# Local dev feed preview data (seeded by scripts/dev/seed_feed_preview.py)
+web/dev-feed-data.json

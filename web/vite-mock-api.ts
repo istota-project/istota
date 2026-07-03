@@ -662,13 +662,33 @@ interface MockEntry {
 	created_at: string;
 }
 
-const mockReaderFeeds: MockFeedSource[] = [
+const DEFAULT_READER_FEEDS: MockFeedSource[] = [
 	{ id: 1, title: 'Hacker News', site_url: 'https://news.ycombinator.com', category: { id: 1, title: 'Blogs' } },
 	{ id: 2, title: 'The Verge', site_url: 'https://www.theverge.com', category: { id: 1, title: 'Blogs' } },
 	{ id: 3, title: 'Daring Fireball', site_url: 'https://daringfireball.net', category: { id: 1, title: 'Blogs' } },
 	{ id: 4, title: 'Nemfrog', site_url: 'https://nemfrog.tumblr.com', category: { id: 2, title: 'Tumblr' } },
 	{ id: 5, title: 'Cats in a channel', site_url: 'https://are.na/cats', category: { id: 3, title: 'Are.na' } },
 ];
+
+// When ``scripts/dev/seed_feed_preview.py`` has run, it drops real, freshly
+// polled feed data next to this file. Prefer it so the dev UI renders actual
+// entries (exercising the poller's image-dedup / hero-strip) instead of the
+// synthetic filler below. Absent/invalid → fall back to the generator.
+function loadSeededReaderData(): { feeds: MockFeedSource[]; entries: MockEntry[] } | null {
+	try {
+		const raw = readFileSync(resolve(__mockDir, 'dev-feed-data.json'), 'utf8');
+		const data = JSON.parse(raw);
+		if (Array.isArray(data?.feeds) && Array.isArray(data?.entries) && data.entries.length) {
+			return data;
+		}
+	} catch {
+		// not seeded — fine, use the synthetic dataset
+	}
+	return null;
+}
+
+const _seededReaderData = loadSeededReaderData();
+const mockReaderFeeds: MockFeedSource[] = _seededReaderData?.feeds ?? DEFAULT_READER_FEEDS;
 
 const sampleTitles = [
 	'A small note on cache invalidation',
@@ -753,7 +773,7 @@ function generateMockEntries(): MockEntry[] {
 	return entries;
 }
 
-const mockReaderEntries: MockEntry[] = generateMockEntries();
+const mockReaderEntries: MockEntry[] = _seededReaderData?.entries ?? generateMockEntries();
 
 function feedsListResponse(params: URLSearchParams): { feeds: MockFeedSource[]; entries: MockEntry[]; total: number } {
 	const limit = Math.max(1, Math.min(500, Number(params.get('limit')) || 50));
@@ -761,11 +781,13 @@ function feedsListResponse(params: URLSearchParams): { feeds: MockFeedSource[]; 
 	const before = params.get('before');
 	const order = params.get('order') === 'created_at' ? 'created_at' : 'published_at';
 	const feedId = params.get('feed_id') ? Number(params.get('feed_id')) : 0;
+	const categoryId = params.get('category_id') ? Number(params.get('category_id')) : 0;
 	const statusFilter = params.get('status'); // 'unread' | null
 	const starredOnly = params.get('starred') === '1';
 
 	let pool = mockReaderEntries;
 	if (feedId) pool = pool.filter((e) => e.feed.id === feedId);
+	if (categoryId) pool = pool.filter((e) => e.feed.category.id === categoryId);
 	if (statusFilter === 'unread') pool = pool.filter((e) => e.status !== 'read');
 	if (starredOnly) pool = pool.filter((e) => e.starred);
 
