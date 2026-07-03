@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Removed the gradient fade over the bottom of feed grid cards. It was meant to signal clipped content but overlapped the card's meta row (star, feed name, date); cards now clip with a clean edge.
+
 ### Fixed
 - Health dates (vaccinations, lab draw dates, encounters) no longer show a day early for viewers in timezones west of UTC. Date-only values were read as UTC midnight and then shifted into the local timezone; they now render on their own calendar day.
 - Importing medical conditions or immunizations from more than one source no longer creates duplicate entries. The same condition named across two documents reconciles to a single record — matched by diagnosis code, or by name when no code is present — and a repeated vaccination merges unless it's a genuine booster on a different date.

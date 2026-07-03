@@ -452,19 +452,6 @@
 		box-shadow: 0 0 0 1px var(--border-default);
 	}
 
-	/* Fade the clipped bottom of grid cards so "there's more" reads clearly.
-	   Suppressed in list view, where cards are already un-clipped. */
-	.feed-grid:not(.list-view) :global(.card.openable)::after {
-		content: '';
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		height: 3rem;
-		background: linear-gradient(to bottom, transparent, var(--surface-card));
-		pointer-events: none;
-	}
-
 	.feed-grid :global(.seen-pill) {
 		position: absolute;
 		top: 0.4rem;
