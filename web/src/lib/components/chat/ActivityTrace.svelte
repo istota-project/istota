@@ -18,8 +18,13 @@
 	const activeTool = $derived(
 		[...tools].reverse().find((t) => t.tool.running)?.tool ?? tools[tools.length - 1]?.tool ?? null,
 	);
-	const anyRunning = $derived(tools.some((t) => t.tool.running));
-	const busy = $derived(streaming || anyRunning);
+	// The shimmer follows the `streaming` prop alone — the parent (Message.svelte)
+	// already scopes it to just the trailing activity group of a live message
+	// (`gi === lastActivityIdx`), which is the only in-progress work phase. We
+	// deliberately do NOT key off per-tool `running` flags: the default
+	// ClaudeCodeBrain never emits `tool_end`, so every tool stays `running` until
+	// the terminal event — keying on that would make every earlier chip animate.
+	const busy = $derived(streaming);
 </script>
 
 <div class="activity" class:open={expanded} class:active={busy}>
