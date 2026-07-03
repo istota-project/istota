@@ -30,7 +30,13 @@ from istota.feeds.models import (
 )
 from istota.feeds.providers import arena as arena_provider
 from istota.feeds.providers import tumblr as tumblr_provider
-from istota.feeds.sanitize import extract_images, html_to_text, sanitize_html
+from istota.feeds.sanitize import (
+    dedupe_image_variants,
+    extract_images,
+    html_to_text,
+    remove_images,
+    sanitize_html,
+)
 
 
 logger = logging.getLogger("istota.feeds.poller")
@@ -152,17 +158,31 @@ def _rss_entry_to_item(entry) -> FetchedItem:
         content_html = entry.get("summary") or entry.get("description")
 
     cleaned_html = sanitize_html(content_html)
-    content_text = html_to_text(cleaned_html)
 
-    image_urls = extract_images(cleaned_html)
+    # Hero/gallery images = the article's lead image (the first one embedded in
+    # the body) plus any enclosure / media:content images. We deliberately take
+    # only the *lead* body image, not every inline image, so images the author
+    # placed mid-article stay in the body. Resolution variants of one image
+    # (e.g. the Guardian's ?width=140/460/700) collapse to the widest.
+    body_images = extract_images(cleaned_html)
+    media_images: list[str] = []
     for enc in entry.get("enclosures", []) or []:
         mime = (enc.get("type") or "").lower()
         if mime.startswith("image/") and enc.get("href"):
-            image_urls.append(enc["href"])
+            media_images.append(enc["href"])
     if entry.get("media_content"):
         for m in entry["media_content"]:
             if m.get("url"):
-                image_urls.append(m["url"])
+                media_images.append(m["url"])
+
+    lead_body_image = body_images[:1]  # 0 or 1 element
+    image_urls = dedupe_image_variants(lead_body_image + media_images)
+
+    # Drop the hero image(s) from the body so the reader doesn't paint it twice
+    # (once as the hero, once at the top of the excerpt). Only images promoted
+    # to image_urls are removed; every other inline image is preserved.
+    cleaned_html = remove_images(cleaned_html, image_urls)
+    content_text = html_to_text(cleaned_html)
 
     published_at = _published_iso(entry)
 
@@ -173,7 +193,7 @@ def _rss_entry_to_item(entry) -> FetchedItem:
         author=author,
         content_html=cleaned_html,
         content_text=content_text,
-        image_urls=_dedupe_preserving_order(image_urls),
+        image_urls=image_urls,
         published_at=published_at,
     )
 
@@ -190,17 +210,6 @@ def _published_iso(entry) -> str | None:
             except (TypeError, ValueError):
                 continue
     return entry.get("published") or entry.get("updated")
-
-
-def _dedupe_preserving_order(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for x in items:
-        if x in seen:
-            continue
-        seen.add(x)
-        out.append(x)
-    return out
 
 
 # -- batch polling ------------------------------------------------------------

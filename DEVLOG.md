@@ -2,6 +2,35 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-03: Feed reader — image de-duplication, expand-to-read overlay, category filtering
+
+A run of feed-reader work, all in the `feeds` module and its web UI, plus a local dev-preview harness so the UI could be iterated on without a deploy.
+
+**RSS image duplication.** Entries were painting the same image two or three times. Two distinct mechanisms, confirmed against live feeds: the Guardian ships one photo as several `<media:content>` variants differing only in resize/signature query params (`?width=140/460/700`), and `_dedupe_preserving_order` couldn't collapse them because the strings differ — the card then rendered a 3-tile gallery of one photo. Separately, WordPress-style feeds embed the lead image in the `<description>` body *and* surface it as a thumbnail, so the card drew it as the hero and again at the top of the excerpt (2×). Constraint from the user: don't strip genuine inline images from the body, only kill the duplication. Fix lives entirely in `sanitize.py` helpers + `_rss_entry_to_item` (RSS/Atom only — Tumblr/Are.na have their own providers and keep their galleries): a new `image_identity()` (path-based key that ignores resize query params for image-extension URLs, keeps the full URL otherwise so `image.php?id=1|2` don't wrongly merge), `dedupe_image_variants()` (collapse variants, keep the widest), and `remove_images()` (drop only the hero-matching `<img>` from the body, plus clean up emptied `<a>`/`<p>`/`<figure>` wrappers). The poller now promotes only the *lead* body image (not every inline image) plus media/enclosure images to `image_urls`, then strips exactly those from `content_html` — so the hero shows once and mid-article images stay in place. Existing rows aren't rewritten (`INSERT OR IGNORE` on guid); these feeds churn so the visible top self-heals within a poll cycle.
+
+**Local preview harness.** To iterate on the card rendering without deploying, added `scripts/dev/seed_feed_preview.py` — polls a handful of real feeds through the actual (fixed) `poll_feed` and dumps `web/dev-feed-data.json` in the Vite mock's shape. The mock (`vite-mock-api.ts`) now loads that file when present, else falls back to its synthetic generator, so `VITE_MOCK_API=1 npm run dev` renders real post-fix entries with no backend/auth. The JSON is gitignored.
+
+**Expand-to-read overlay.** Grid cards are clipped at 420px; the only way to read a full post was to toggle to list view and scroll to find it. Added `FeedReader.svelte`, a reader overlay modeled on the existing `Lightbox`: click a card body (guarded so image→lightbox, title/star keep their behaviour) opens a centered panel with the full un-clipped content + inline images, star, and a prominent "Open original" (the payoff for summary feeds whose stored content is just an excerpt). Esc/backdrop close; ← / → step between posts. Colors were pulled to the real `app.css` design tokens so grid/list/reader match (biggest fix: body copy was `--text-dim`, should be `--text-secondary`), and the panel centers vertically for short posts (caps at 94vh with internal scroll for long ones).
+
+**Category filtering.** The sidebar only offered all / unread / individual feeds. Rather than the user's floated eye-icon, made the category *name* itself the filter (caret still collapses) with the same active highlight a selected feed gets — consistent with clicking a feed, standard in readers, no new iconography. `CategoryGroup` gained an opt-in selectable header (only when an `onSelect` prop is passed, so the location sidebar that reuses it is untouched). New `selectedCategoryId` store, mutually exclusive with `selectedFeedId`; the page sends `category_id` and the feed/category reload effects were merged so switching straight from a feed to a category reloads once. No backend change needed — `list_entries` already filtered `f.category_id` and the route was already plumbed; only the UI was missing. Mark-all-read gained the `category` scope (backend already supported it).
+
+**Reader nav respects the active view.** The overlay already navigated the current scope (entries are server-loaded with the active filter params), but stopped at the loaded page boundary because the modal can't trip the grid's scroll-to-load. `next` now pages in more via the page's `loadMore` (same filter params) when it hits the loaded end, and the arrows are always rendered but disabled/dimmed at the true first/last of the view (with a loading state while paging) instead of disappearing.
+
+**Files added/modified:**
+- `src/istota/feeds/sanitize.py` - added `image_identity`, `dedupe_image_variants`, `remove_images` + helpers
+- `src/istota/feeds/poller.py` - `_rss_entry_to_item` now dedups variants + strips the hero from the body; dropped dead `_dedupe_preserving_order`
+- `tests/test_feeds_sanitize.py` - new: helper unit tests
+- `tests/test_feeds_poller.py` - added `TestRssImageDedup` (Guardian / PetaPixel / multi-inline fixtures)
+- `scripts/dev/seed_feed_preview.py` - new: real-feed dev-preview seeder
+- `web/vite-mock-api.ts` - load seeded `dev-feed-data.json` when present; `category_id` filter parity
+- `web/src/lib/components/FeedReader.svelte` - new: reader overlay
+- `web/src/lib/components/FeedCard.svelte` - guarded card-click → open reader
+- `web/src/lib/components/ui/CategoryGroup.svelte` - opt-in selectable header
+- `web/src/lib/stores/feeds.ts` - `selectedCategoryId`
+- `web/src/routes/feeds/+layout.svelte` - category select handler + active state + mark-all-read category scope
+- `web/src/routes/feeds/+page.svelte` - `category_id` param, merged reload effect, reader wiring + load-more
+- `.gitignore` - `web/dev-feed-data.json`
+
 ## 2026-07-01: README + docs repositioning; recover from a stale docs-sync force-push
 
 Two things this session: a docs-copy pass, and an unplanned git recovery.

@@ -5,10 +5,11 @@
 		type FeedEntry,
 	} from '$lib/api';
 	import {
-		feedsRefreshNonce, selectedFeedId, showImages, showStarred,
+		feedsRefreshNonce, selectedFeedId, selectedCategoryId, showImages, showStarred,
 		showText, showUnseen, sortBy, viewMode,
 	} from '$lib/stores/feeds';
 	import FeedCard from '$lib/components/FeedCard.svelte';
+	import FeedReader from '$lib/components/FeedReader.svelte';
 	import Lightbox from '$lib/components/Lightbox.svelte';
 	import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
 
@@ -102,6 +103,9 @@
 	let lightboxImages = $state<string[]>([]);
 	let lightboxIndex = $state<number | null>(null);
 
+	// Reader overlay — index into filteredEntries of the open post (null = closed).
+	let readerIndex = $state<number | null>(null);
+
 	// Batch read queue
 	const pendingReadIds = new Set<number>();
 	let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -138,6 +142,7 @@
 			direction: 'desc',
 		};
 		if (opts.feedId) params.feed_id = String(opts.feedId);
+		if ($selectedCategoryId) params.category_id = String($selectedCategoryId);
 		if ($showUnseen) params.status = 'unread';
 		if ($showStarred) params.starred = '1';
 		if (opts.before != null) {
@@ -223,13 +228,17 @@
 	let sentinel: HTMLDivElement | undefined = $state();
 	let scrollObserver: IntersectionObserver | null = null;
 
-	// Reload when selected feed changes
-	let prevSelFeed: number | null = null;
+	// Reload when the selected scope (feed or category) changes. Tracked
+	// together so switching straight from a feed to a category — which clears
+	// one store and sets the other in the same tick — reloads once, not twice.
+	let prevScope: { feed: number; cat: number } | null = null;
 	$effect(() => {
-		if (prevSelFeed !== null && $selectedFeedId !== prevSelFeed) {
-			loadEntries($selectedFeedId);
+		const feed = $selectedFeedId;
+		const cat = $selectedCategoryId;
+		if (prevScope !== null && (feed !== prevScope.feed || cat !== prevScope.cat)) {
+			loadEntries(feed);
 		}
-		prevSelFeed = $selectedFeedId;
+		prevScope = { feed, cat };
 	});
 
 	onMount(() => loadEntries($selectedFeedId));
@@ -335,7 +344,7 @@
 		<div class="center-msg error">{error}</div>
 	{:else}
 		<div class="feed-grid" class:list-view={$viewMode === 'list'}>
-			{#each filteredEntries as entry (entry.id)}
+			{#each filteredEntries as entry, i (entry.id)}
 				<div
 					class="card-slot"
 					data-entry-id={entry.id}
@@ -351,6 +360,7 @@
 					}}
 						onViewed={handleViewed}
 						onStarToggle={handleStarToggle}
+						onOpen={() => (readerIndex = i)}
 					/>
 				</div>
 			{/each}
@@ -367,6 +377,20 @@
 {#if !loading && !error}
 	<div class="status-badge">{entries.length} / {total}</div>
 {/if}
+
+<FeedReader
+	entries={filteredEntries}
+	index={readerIndex}
+	{hasMore}
+	onClose={() => (readerIndex = null)}
+	onView={handleViewed}
+	onStarToggle={handleStarToggle}
+	onNeedMore={loadMore}
+	onImageClick={(imgs, idx) => {
+		lightboxImages = imgs;
+		lightboxIndex = idx;
+	}}
+/>
 
 <Lightbox
 	images={lightboxImages}
@@ -417,6 +441,28 @@
 		max-height: 420px;
 		display: flex;
 		flex-direction: column;
+	}
+
+	.feed-grid :global(.card.openable) {
+		cursor: pointer;
+		transition: box-shadow var(--transition-fast), transform var(--transition-fast);
+	}
+
+	.feed-grid :global(.card.openable:hover) {
+		box-shadow: 0 0 0 1px var(--border-default);
+	}
+
+	/* Fade the clipped bottom of grid cards so "there's more" reads clearly.
+	   Suppressed in list view, where cards are already un-clipped. */
+	.feed-grid:not(.list-view) :global(.card.openable)::after {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 3rem;
+		background: linear-gradient(to bottom, transparent, var(--surface-card));
+		pointer-events: none;
 	}
 
 	.feed-grid :global(.seen-pill) {

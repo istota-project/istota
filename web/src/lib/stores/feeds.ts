@@ -8,6 +8,10 @@ export const feedsList = writable<Feed[]>([]);
 /** Currently selected feed ID for sidebar filtering (0 = all). */
 export const selectedFeedId = writable<number>(0);
 
+/** Currently selected category ID for sidebar filtering (0 = none).
+ *  Mutually exclusive with selectedFeedId — selecting one clears the other. */
+export const selectedCategoryId = writable<number>(0);
+
 /** When true, the reader is filtered to only starred entries. */
 export const showStarred = writable(false);
 

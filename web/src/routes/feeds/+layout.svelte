@@ -7,6 +7,7 @@
 	import {
 		feedsList,
 		selectedFeedId,
+		selectedCategoryId,
 		showImages,
 		showStarred,
 		showText,
@@ -52,6 +53,17 @@
 
 	function handleFeedClick(feedId: number) {
 		selectedFeedId.set($selectedFeedId === feedId ? 0 : feedId);
+		selectedCategoryId.set(0);
+		showStarred.set(false);
+		showUnseen.set(false);
+		sidebarOpen = false;
+		if (onSettings) goto(`${base}/feeds`);
+	}
+
+	function handleCategoryClick(categoryId: number) {
+		// Toggle: clicking the active category again returns to All.
+		selectedCategoryId.set($selectedCategoryId === categoryId ? 0 : categoryId);
+		selectedFeedId.set(0);
 		showStarred.set(false);
 		showUnseen.set(false);
 		sidebarOpen = false;
@@ -60,6 +72,7 @@
 
 	function handleAllClick() {
 		selectedFeedId.set(0);
+		selectedCategoryId.set(0);
 		showStarred.set(false);
 		showUnseen.set(false);
 		sidebarOpen = false;
@@ -70,6 +83,7 @@
 		showUnseen.set(true);
 		showStarred.set(false);
 		selectedFeedId.set(0);
+		selectedCategoryId.set(0);
 		sidebarOpen = false;
 		if (onSettings) goto(`${base}/feeds`);
 	}
@@ -78,21 +92,25 @@
 		showStarred.set(true);
 		showUnseen.set(false);
 		selectedFeedId.set(0);
+		selectedCategoryId.set(0);
 		sidebarOpen = false;
 		if (onSettings) goto(`${base}/feeds`);
 	}
 
 	async function handleMarkAllRead() {
-		const scope = $selectedFeedId ? 'feed' : 'all';
+		const scope = $selectedFeedId ? 'feed' : $selectedCategoryId ? 'category' : 'all';
+		const scopeId = $selectedFeedId || $selectedCategoryId || 0;
 		const targetTitle = $selectedFeedId
 			? feeds.find((f) => f.id === $selectedFeedId)?.title || 'this feed'
-			: 'every feed';
+			: $selectedCategoryId
+				? feeds.find((f) => f.category.id === $selectedCategoryId)?.category.title || 'this category'
+				: 'every feed';
 		const confirmed = window.confirm(
 			`Mark all unread entries in ${targetTitle} as read? This can't be undone.`,
 		);
 		if (!confirmed) return;
 		try {
-			await markAsRead(scope, $selectedFeedId ? { id: $selectedFeedId } : undefined);
+			await markAsRead(scope, scopeId ? { id: scopeId } : undefined);
 			feedsRefreshNonce.update((n) => n + 1);
 		} catch (e) {
 			console.error('mark-all-read failed', e);
@@ -165,7 +183,7 @@
 			>
 			<button
 				class="feed-btn special"
-				class:active={!$selectedFeedId && !$showStarred && !$showUnseen}
+				class:active={!$selectedFeedId && !$selectedCategoryId && !$showStarred && !$showUnseen}
 				onclick={handleAllClick}
 				type="button"
 			>
@@ -190,7 +208,14 @@
 				<span class="feed-name">Starred</span>
 			</button>
 			{#each groupedFeeds as [category, catFeeds] (category)}
-				<CategoryGroup label={category} count={catFeeds.length} collapsible>
+				{@const catId = catFeeds[0]?.category.id ?? 0}
+				<CategoryGroup
+					label={category}
+					count={catFeeds.length}
+					collapsible
+					active={catId !== 0 && $selectedCategoryId === catId}
+					onSelect={catId !== 0 ? () => handleCategoryClick(catId) : undefined}
+				>
 					{#each catFeeds as feed (feed.id)}
 						<button
 							class="feed-btn"

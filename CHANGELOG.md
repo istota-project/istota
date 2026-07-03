@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The feed reader can now show every entry in a whole category, not just an individual feed or all/unread — click a category name in the sidebar to filter to it.
+- You can now open and read a full post straight from the feed grid, without switching to list view. Clicking a card opens a reader overlay with the full content; the arrows step through the current view (paging in more as needed) and disable at the ends.
+
 ### Changed
 - Repositioned how the project describes itself. Istota is now presented as a self-hosted personal AI assistant that works with any model — Claude, or any OpenAI-compatible endpoint like OpenRouter — and integrates with Nextcloud as a deep but not required integration, rather than something that runs inside Nextcloud. The README was also streamlined.
+
+### Fixed
+- Feed entries no longer show the same image two or three times. Some feeds list one photo at several sizes, and others embed the article's lead image in the body as well as using it as the thumbnail; the reader now shows each image once while keeping genuine inline images further down an article.
 
 ## [0.25.0] - 2026-06-25
 

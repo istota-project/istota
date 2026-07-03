@@ -220,3 +220,88 @@ class TestPollDueFeeds:
                            now=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc))
             entries = feeds_db.list_entries(conn)
         assert len(entries) == 1  # second poll didn't double-insert
+
+
+# ---------------------------------------------------------------------------
+# RSS image dedup + hero-strip (Guardian 3×, PetaPixel 2×)
+# ---------------------------------------------------------------------------
+
+
+def _first_item(rss_bytes):
+    """Poll a stubbed RSS body and return the single FetchedItem."""
+    resp = _StubResponse(status_code=200, content=rss_bytes)
+    result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+    assert result.error is None
+    assert len(result.items) == 1
+    return result.items[0]
+
+
+GUARDIAN_RSS = b"""<?xml version="1.0" encoding="utf-8"?>
+<rss xmlns:media="http://search.yahoo.com/mrss/" version="2.0">
+<channel><title>G</title><link>https://g.com</link>
+<item>
+  <title>Match</title>
+  <link>https://g.com/a</link>
+  <guid>g-1</guid>
+  <pubDate>Thu, 01 May 2026 12:00:00 GMT</pubDate>
+  <description>&lt;p&gt;Kick off soon.&lt;/p&gt;</description>
+  <media:content width="140" url="https://i.guim.co.uk/img/media/abc/master/3049.jpg?width=140&amp;s=aaa"/>
+  <media:content width="460" url="https://i.guim.co.uk/img/media/abc/master/3049.jpg?width=460&amp;s=bbb"/>
+  <media:content width="700" url="https://i.guim.co.uk/img/media/abc/master/3049.jpg?width=700&amp;s=ccc"/>
+</item>
+</channel></rss>
+"""
+
+
+PETAPIXEL_RSS = b"""<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+<channel><title>P</title><link>https://p.com</link>
+<item>
+  <title>Deals</title>
+  <link>https://p.com/a</link>
+  <guid>p-1</guid>
+  <pubDate>Thu, 01 May 2026 12:00:00 GMT</pubDate>
+  <description><![CDATA[<p class="feature-image"><a href="https://p.com/a"><img width="1600" src="https://p.com/uploads/cover.jpg" class="wp-post-image" /></a></p><p>Looking to save on new photography gear this Fourth of July?</p>]]></description>
+  <enclosure url="https://p.com/uploads/clip.mp4" length="1234" type="video/mp4" />
+</item>
+</channel></rss>
+"""
+
+
+MULTI_INLINE_RSS = b"""<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+<channel><title>X</title><link>https://x.com</link>
+<item>
+  <title>Gallery piece</title>
+  <link>https://x.com/a</link>
+  <guid>x-1</guid>
+  <pubDate>Thu, 01 May 2026 12:00:00 GMT</pubDate>
+  <description><![CDATA[<p><img src="https://x.com/lead.jpg" /></p><p>intro text</p><figure><img src="https://x.com/mid.jpg" /></figure><p>more text</p>]]></description>
+</item>
+</channel></rss>
+"""
+
+
+class TestRssImageDedup:
+    def test_guardian_resolution_variants_collapse_to_one_hero(self):
+        item = _first_item(GUARDIAN_RSS)
+        assert item.image_urls == [
+            "https://i.guim.co.uk/img/media/abc/master/3049.jpg?width=700&s=ccc"
+        ]
+
+    def test_petapixel_lead_image_becomes_hero_and_leaves_body(self):
+        item = _first_item(PETAPIXEL_RSS)
+        # Hero is the in-body lead image; the video enclosure is not an image.
+        assert item.image_urls == ["https://p.com/uploads/cover.jpg"]
+        # The lead image no longer sits in the body (no hero+body dup)...
+        assert "cover.jpg" not in (item.content_html or "")
+        # ...but the article text survives untouched.
+        assert "Looking to save" in (item.content_html or "")
+
+    def test_inline_images_past_the_lead_are_preserved(self):
+        item = _first_item(MULTI_INLINE_RSS)
+        # Only the lead is promoted to the hero.
+        assert item.image_urls == ["https://x.com/lead.jpg"]
+        # The lead is stripped from the body, the mid-article image stays.
+        assert "lead.jpg" not in (item.content_html or "")
+        assert "mid.jpg" in (item.content_html or "")
