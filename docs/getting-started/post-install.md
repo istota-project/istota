@@ -10,7 +10,11 @@ After deploying via [Docker](quickstart-docker.md) or [bare metal](quickstart-ba
     ```
     The web UI at `/istota/settings` lets each user edit their own profile and add per-user resources (calendars, folders, modules) without touching `config.toml`. Operator-supplied resources from `config.toml` show up alongside as read-only.
 
-## Authenticate Claude CLI
+## Claude authentication
+
+Both installers collect a long-lived Claude Code OAuth token during setup (the bare-metal wizard's "Claude Authentication" prompt; the Docker `init.sh` `CLAUDE_CODE_OAUTH_TOKEN` prompt), and provision the credentials file for you. Generate the token with `claude setup-token`. If you supplied it during install, Claude auth is already done — skip this section.
+
+Only if you skipped the token at install time (and aren't using `ANTHROPIC_API_KEY` or a native-brain provider key), authenticate manually:
 
 === "Bare metal"
 

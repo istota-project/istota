@@ -90,11 +90,11 @@ Point your Ansible `roles_path` at the `deploy/ansible/` directory, or symlink i
 
 - Debian 12+ or Ubuntu server
 - Nextcloud instance with an app password for the bot user
-- Claude Code CLI subscription (authenticate after install with `sudo -u istota claude login`)
+- Claude Code CLI subscription (the wizard collects a long-lived OAuth token up front — generate one with `claude setup-token`)
 
 ## Post-install
 
-1. Authenticate Claude CLI: `sudo -u istota HOME=/srv/app/istota claude login`
+1. Claude auth: the wizard's "Claude Authentication" prompt collects an OAuth token and provisions the credentials file, so no separate login is needed. Only if you skipped it (and aren't using `ANTHROPIC_API_KEY`), run `sudo -u istota HOME=/srv/app/istota claude login`.
 2. Invite the bot user to Nextcloud Talk conversations
 3. Test: `sudo -u istota HOME=/srv/app/istota /srv/app/istota/.venv/bin/istota task "Hello" -u USER -x`
 
