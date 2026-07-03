@@ -2,7 +2,7 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import {
 		getLocationPings,
 		getDaySummary,
@@ -165,6 +165,11 @@
 		} finally {
 			loading = false;
 		}
+		// Re-frame the map for the new range (the map's own fit is one-shot, so
+		// a range change from the Manhattan routine to the Tokyo trip wouldn't
+		// otherwise refit). tick() lets the new pings reach the map first.
+		await tick();
+		mapComponent?.refit();
 	}
 
 	function selectRange(start: string, end: string) {
