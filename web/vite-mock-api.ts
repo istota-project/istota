@@ -487,7 +487,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 
 const mockAdminStats = {
 	system: {
-		version: '0.25.0',
+		version: '0.26.0',
 		uptime_seconds: 345600,
 		db_size_bytes: 119447552,
 		python_version: '3.12.3',

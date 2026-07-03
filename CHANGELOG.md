@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-03
+
 ### Added
 - The feed reader can now show every entry in a whole category, not just an individual feed or all/unread — click a category name in the sidebar to filter to it.
 - You can now open and read a full post straight from the feed grid, without switching to list view. Clicking a card opens a reader overlay with the full content; the arrows step through the current view (paging in more as needed) and disable at the ends.
@@ -771,7 +773,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.25.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.26.0...main
+[0.26.0]: https://gitlab.com/cynium/istota/-/releases/v0.26.0
 [0.25.0]: https://gitlab.com/cynium/istota/-/releases/v0.25.0
 [0.24.0]: https://gitlab.com/cynium/istota/-/releases/v0.24.0
 [0.23.0]: https://gitlab.com/cynium/istota/-/releases/v0.23.0
