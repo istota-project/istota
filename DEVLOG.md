@@ -2,6 +2,21 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-03: Health — date-only render off-by-one + cross-source import de-dup
+
+Two independent health fixes in one session.
+
+**Date-only off-by-one.** Vaccinations (and other date-only health values) rendered a day early for any viewer west of UTC. `formatDate` appended `T00:00:00Z` to bare `YYYY-MM-DD` strings, pinning them to UTC midnight, then `toLocaleDateString(undefined, …)` shifted them into the browser's local zone — so a July 3 record showed as "Jul 2" in a UTC-4 zone. The stored value and the write path were both correct; purely a render bug. The fix is one character per site — drop the `Z` so bare dates parse as *local* midnight; real timestamps (with a `T…` component) are untouched. Grepping the pattern turned up 10 sites (9 health pages + the location layout); the money pages already did it right (`T00:00:00`, no `Z`).
+
+**Cross-source import de-dup (ISSUE-154).** Importing conditions from more than one source — or adding them over chat while processing several documents — inserted a duplicate `diagnoses` row per source. There *was* a dedup mechanism, but its `dedup_key` is a per-import random-prefixed positional key: it only collapses a *replay of the identical batch*, never two independent sources naming the same condition. Added a second, content-based reconciliation layer alongside it (the positional key stays, for replay idempotency). `insert_diagnosis` / `insert_immunization` gained a `reconcile` flag that the import routes and the deferred agent-write replay set; manual UI single-adds stay plain inserts. Diagnoses match ICD10-first — authoritative when both rows carry a code, so a differing code is a distinct condition even if the names agree — with a normalized-name fallback when either side lacks a code. Immunizations match on normalized name + `date_given`, so a re-import merges but a genuine booster on another date stays distinct. On a match the existing row is kept and only its null fields are backfilled (a value already set is never overwritten), and duplicates converge to one row keeping the earliest encounter link. No schema change — the multi-encounter-provenance link table was considered and deferred.
+
+**Files added/modified:**
+- `web/src/routes/health/**` (bloodwork, bloodwork/panel, bloodwork/marker, history, history/diagnoses, history/encounter, immunizations, immunizations/vaccine) + `web/src/routes/location/+layout.svelte` — drop the `Z` from date-only parsing
+- `src/istota/health/db.py` - normalization helpers, `_find_matching_diagnosis` / `_find_matching_immunization`, shared `_backfill_null_columns`; `reconcile` flag on both insert functions
+- `src/istota/health/routes.py` - encounter-bulk + immunization-bulk pass `reconcile=True`
+- `src/istota/scheduler_deferred.py` - `insert_diagnosis` + `bulk_insert_immunizations` replay pass `reconcile=True`
+- `tests/test_health_db.py`, `tests/test_health_encounter_import.py` - reconcile coverage (10 new tests)
+
 ## 2026-07-03: Feed image dedup — backfill over pre-existing entries
 
 Follow-up to the image de-duplication work below. That change fixed the duplication at ingest, but the prior entry's assumption that stale rows "self-heal within a poll cycle" was wrong for the body-duplication case. xkcd was the reported symptom: the comic still rendered twice.

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Health dates (vaccinations, lab draw dates, encounters) no longer show a day early for viewers in timezones west of UTC. Date-only values were read as UTC midnight and then shifted into the local timezone; they now render on their own calendar day.
+- Importing medical conditions or immunizations from more than one source no longer creates duplicate entries. The same condition named across two documents reconciles to a single record — matched by diagnosis code, or by name when no code is present — and a repeated vaccination merges unless it's a genuine booster on a different date.
 - Feed entries that were saved before the image de-duplication fix now get corrected too. The earlier fix only cleaned up newly-fetched entries, so already-stored posts — most visibly xkcd, whose whole body is a single comic image — kept showing the image twice. A one-time cleanup pass now rewrites existing entries so each image shows once, while leaving genuine inline images in place.
 
 ## [0.26.0] - 2026-07-03
