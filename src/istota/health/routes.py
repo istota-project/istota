@@ -1491,6 +1491,7 @@ async def api_encounter_bulk(
                         encounter_id=eid,
                         severity=severity,
                         dedup_key=f"{prefix}:{i}:dx:{j}",
+                        reconcile=True,
                     )
                     diagnosis_ids.append(did)
             conn.commit()
@@ -2191,6 +2192,7 @@ async def api_immunization_bulk(
                     notes=r.get("notes") or None,
                     source=r.get("source") or "import",
                     dedup_key=f"{prefix}:{i}",
+                    reconcile=True,
                 )
                 ids.append(iid)
             conn.commit()

@@ -718,6 +718,7 @@ def _process_deferred_health_ops(
                         severity=entry.get("severity"),
                         notes=entry.get("notes"),
                         dedup_key=entry.get("dedup_key"),
+                        reconcile=True,
                     )
                     count += 1
                 elif op == "update_diagnosis":
@@ -809,6 +810,7 @@ def _process_deferred_health_ops(
                             notes=r.get("notes"),
                             source=r.get("source", "import"),
                             dedup_key=dk,
+                            reconcile=True,
                         )
                         count += 1
                 elif op == "set_setting":

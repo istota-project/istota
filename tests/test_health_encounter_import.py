@@ -325,6 +325,32 @@ class TestBulkRoute:
         )
         assert resp.status_code == 400
 
+    def test_bulk_reconciles_same_condition_across_sources(self, client):
+        """Two separate imports naming the same condition converge to one row."""
+        row_a = self._row(
+            encounter_date="2020-01-15",
+            diagnoses=[{"name": "Hypertension", "icd10": "I10",
+                        "status": "chronic"}],
+        )
+        row_b = self._row(
+            encounter_date="2022-06-01",
+            diagnoses=[{"name": "hypertension", "status": "active"}],
+        )
+        first = client.post(
+            "/istota/api/health/encounters/bulk", json={"rows": [row_a]},
+        )
+        second = client.post(
+            "/istota/api/health/encounters/bulk", json={"rows": [row_b]},
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        # Two distinct encounters, but a single reconciled condition.
+        diagnoses = client.get(
+            "/istota/api/health/diagnoses?status=all",
+        ).json()["diagnoses"]
+        assert len(diagnoses) == 1
+        assert diagnoses[0]["icd10"] == "I10"
+
     def test_bulk_always_writes_dedup_key(self, client, ctx):
         client.post(
             "/istota/api/health/encounters/bulk",
