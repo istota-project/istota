@@ -146,7 +146,11 @@ def _rss_entry_to_item(entry) -> FetchedItem:
         or entry.get("link")
         or entry.get("title", "")
     )
-    title = entry.get("title")
+    # Store titles as plain text. Atom feeds (e.g. The Atlantic) ship
+    # ``<title type="html">`` with inline markup like ``<em>``; feedparser
+    # decodes it to real tags, but the reader renders titles with escaping
+    # interpolation, so any tags would show literally. Strip them here.
+    title = html_to_text(entry.get("title"))
     url = entry.get("link")
     author = entry.get("author")
 
