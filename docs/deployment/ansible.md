@@ -92,6 +92,10 @@ ansible-playbook playbook.yml -e "istota_update_only=true"
 
 ## Post-install
 
+Claude auth is provisioned during install from the `istota_claude_code_oauth_token` variable (generate the token with `claude setup-token`; the wizard prompts for it and the role writes the credentials file). No separate login is needed.
+
+Only if you deployed without the token (and aren't using `ANTHROPIC_API_KEY`), authenticate manually:
+
 ```bash
 sudo -u istota HOME=/srv/app/istota claude login
 ```

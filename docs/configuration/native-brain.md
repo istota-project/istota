@@ -41,6 +41,30 @@ ISTOTA_BRAIN_NATIVE_API_KEY=sk-...
 - `openai_compat` needs an **explicit** model id (e.g. `claude-sonnet-4-6`). It does not understand role aliases (`smart`) or Claude-CLI short names (`opus`).
 - The `claude_code` brain (default) keeps Claude Code's aliasing — `opus` resolves to the latest Opus. The native brain does not; map role names with `[models.roles]` if you want them.
 
+### OpenRouter
+
+`openai_compat` targets any OpenAI chat-completions endpoint (`src/istota/llm/openai_compat.py`), so OpenRouter is just a `base_url` + `model` + key:
+
+```toml
+[brain]
+kind = "native"
+
+[brain.native]
+provider = "openai_compat"
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-sonnet-4"   # OpenRouter ids are slash-namespaced: <vendor>/<model>
+prompt_caching = true                 # REQUIRED for OpenRouter — see below
+```
+
+```
+ISTOTA_BRAIN_NATIVE_API_KEY=sk-or-v1-...
+```
+
+Two things to get right:
+
+- **Model id.** OpenRouter uses slash-namespaced ids (`anthropic/claude-sonnet-4`, `openai/gpt-4o`, `google/gemini-2.5-pro`). Because `openai_compat` does no aliasing (above), paste the id exactly as OpenRouter lists it on its models page — a bare `claude-sonnet-4-6` will not resolve there.
+- **Prompt caching must be explicit.** The auto-default only turns caching on when the base_url contains `api.anthropic.com` (`make_provider` in `src/istota/llm/__init__.py`). For an `openrouter.ai` base_url it defaults **off**, so set `prompt_caching = true` (Ansible: `istota_brain_native_prompt_caching: true`) to get `cache_control` breakpoints on caching-capable models routed through OpenRouter.
+
 ## Ansible deployment
 
 The role renders the `[brain]` block from inventory variables. The `[brain.native]` and `[brain.source_type_overrides]` tables are only written when `istota_brain_kind` is `native` or `istota_brain_source_type_overrides` is non-empty, so existing deployments stay byte-identical until you opt in. After templating, `files/validate_config.py` parses the rendered config and gates the scheduler restart, so a malformed brain block fails the play instead of the running daemon.
