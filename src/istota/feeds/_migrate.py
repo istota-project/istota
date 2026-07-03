@@ -27,6 +27,12 @@ from istota.feeds.models import (
     FeedsContext,
     default_poll_interval_for,
     detect_source_type,
+    parse_image_urls,
+)
+from istota.feeds.sanitize import (
+    dedupe_image_variants,
+    html_to_text,
+    remove_images,
 )
 
 
@@ -35,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 _SENTINEL_KEY = "feeds_legacy_toml_imported_at"
 _DEFAULTS_SENTINEL_KEY = "feeds_default_opml_seeded_at"
+_BACKFILL_SENTINEL_KEY = "feeds_image_dedup_backfilled_at"
 # Re-exported for tests; canonical home is db.py.
 _DEFAULT_INTERVAL_SETTING_KEY = feeds_db._DEFAULT_INTERVAL_KEY
 
@@ -433,15 +440,94 @@ def seed_default_opml(ctx: FeedsContext) -> dict | None:
     }
 
 
+def backfill_image_dedup(ctx: FeedsContext) -> dict | None:
+    """Strip already-promoted hero images out of stored ``content_html``.
+
+    The RSS poller collapses resolution variants and drops the hero copy
+    from an entry's body at ingest time (see :func:`poller._rss_entry_to_item`).
+    But it writes rows with ``INSERT OR IGNORE`` keyed on ``(feed_id, guid)``,
+    so an entry stored *before* that dedup landed is never rewritten: its
+    ``content_html`` still embeds the comic/photo that's also in
+    ``image_urls``, and the reader paints it twice (hero + body). xkcd is
+    the clearest case — the whole entry body is that one ``<img>``.
+
+    This one-shot backfill re-runs the body-side dedup over every stored
+    entry: for each row it re-collapses ``image_urls`` variants and removes
+    those images from ``content_html`` (by :func:`sanitize.image_identity`,
+    so a differently-sized body copy still matches). Genuine mid-article
+    inline images — anything not promoted to the hero set — are left alone.
+    ``content_text`` is recomputed from the rewritten HTML so search stays
+    consistent.
+
+    Idempotent and race-safe, mirroring :func:`migrate_legacy_toml`: a
+    ``schema_meta`` sentinel (``feeds_image_dedup_backfilled_at``) is claimed
+    via a plain ``INSERT`` (PK conflict → one winner), then the rewrites run
+    in the same transaction. Returns ``None`` when the sentinel already
+    exists; otherwise a summary dict with the updated-row count (which may be
+    zero — the sentinel is still burned so we don't re-scan every boot).
+
+    Reset incantation for an operator who wants to re-run:
+    ``DELETE FROM schema_meta WHERE key='feeds_image_dedup_backfilled_at'``.
+    """
+    feeds_db.init_db(ctx.db_path)
+
+    with feeds_db.connect(ctx.db_path) as conn:
+        already = conn.execute(
+            "SELECT 1 FROM schema_meta WHERE key = ?",
+            (_BACKFILL_SENTINEL_KEY,),
+        ).fetchone()
+        if already:
+            return None
+
+        # Atomic claim — only one concurrent process gets past this insert.
+        try:
+            conn.execute(
+                "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
+                (_BACKFILL_SENTINEL_KEY, _iso_now()),
+            )
+        except sqlite3.IntegrityError:
+            return None
+
+        updated = 0
+        rows = conn.execute(
+            "SELECT id, content_html, image_urls FROM feed_entries "
+            "WHERE content_html IS NOT NULL AND content_html != ''"
+        ).fetchall()
+        for row in rows:
+            images = parse_image_urls(row["image_urls"])
+            if not images:
+                continue
+            # Re-collapse resolution variants first so a body copy stored at a
+            # different width than the hero still matches by identity.
+            images = dedupe_image_variants(images)
+            new_html = remove_images(row["content_html"], images)
+            if new_html == row["content_html"]:
+                continue
+            new_text = html_to_text(new_html)
+            conn.execute(
+                "UPDATE feed_entries SET content_html = ?, content_text = ? "
+                "WHERE id = ?",
+                (new_html, new_text, row["id"]),
+            )
+            updated += 1
+
+        conn.commit()
+
+    logger.info("feeds_image_dedup_backfilled entries_updated=%d", updated)
+    return {"entries_updated": updated}
+
+
 def ensure_initialised(ctx: FeedsContext) -> None:
     """Wire up a feeds workspace for use.
 
     Creates the dirs, runs schema migrations on the SQLite, imports any
-    legacy ``feeds.toml`` (once), then seeds default subscriptions from
-    OPML (once). Safe to call from every entry point — web routes, CLI
+    legacy ``feeds.toml`` (once), seeds default subscriptions from OPML
+    (once), then backfills the image dedup over any pre-existing entries
+    (once). Safe to call from every entry point — web routes, CLI
     subcommands, skill facade.
     """
     ctx.ensure_dirs()
     feeds_db.init_db(ctx.db_path)
     migrate_legacy_toml(ctx)
     seed_default_opml(ctx)
+    backfill_image_dedup(ctx)

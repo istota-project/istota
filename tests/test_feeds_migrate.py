@@ -464,3 +464,129 @@ class TestEnsureInitialisedSeedsDefaults:
         with feeds_db.connect(ctx.db_path) as conn:
             count = conn.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"]
         assert count == 2  # only the TOML rows
+
+
+class TestBackfillImageDedup:
+    """Heal entries stored before the image-dedup poller change.
+
+    Old rows keep the hero image embedded in ``content_html`` (the poller
+    used ``INSERT OR IGNORE`` and never rewrote them), so the reader paints
+    it twice — once as the hero, once inside the body. The backfill drops
+    every ``image_urls`` member from ``content_html``.
+    """
+
+    def _seed_entry(self, ctx, *, guid, content_html, image_urls):
+        feeds_db.init_db(ctx.db_path)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="https://xkcd.com/rss.xml", title="xkcd",
+                site_url=None, source_type="rss", category_id=None,
+                poll_interval_minutes=180,
+            )
+            conn.execute(
+                """
+                INSERT INTO feed_entries(
+                    feed_id, guid, title, url, author, content_html,
+                    content_text, image_urls, published_at, fetched_at, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    feed_id, guid, "Holes", "https://xkcd.com/3266/", None,
+                    content_html, "body text",
+                    __import__("json").dumps(image_urls),
+                    "2026-07-01T04:00:00+00:00", "2026-07-01T05:00:00+00:00",
+                    "unread",
+                ),
+            )
+            conn.commit()
+        return feed_id
+
+    def test_strips_hero_image_from_stale_body(self, ctx):
+        from istota.feeds._migrate import backfill_image_dedup
+
+        img = "https://imgs.xkcd.com/comics/holes.png"
+        self._seed_entry(
+            ctx,
+            guid="https://xkcd.com/3266/",
+            content_html=f'<img src="{img}" alt="Holes" />',
+            image_urls=[img],
+        )
+        result = backfill_image_dedup(ctx)
+        assert result is not None
+        assert result["entries_updated"] == 1
+        with feeds_db.connect(ctx.db_path) as conn:
+            entries = feeds_db.list_entries(conn)
+        assert img not in (entries[0].content_html or "")
+        # Hero image is untouched — still available for the reader hero.
+        assert entries[0].image_urls == [img]
+
+    def test_collapses_resolution_variant_in_body(self, ctx):
+        from istota.feeds._migrate import backfill_image_dedup
+
+        hero = "https://cdn.example.com/photo.jpg?width=700"
+        body_variant = "https://cdn.example.com/photo.jpg?width=140"
+        self._seed_entry(
+            ctx,
+            guid="g1",
+            content_html=f'<p>Text</p><img src="{body_variant}" />',
+            image_urls=[hero],
+        )
+        result = backfill_image_dedup(ctx)
+        assert result["entries_updated"] == 1
+        with feeds_db.connect(ctx.db_path) as conn:
+            html = feeds_db.list_entries(conn)[0].content_html
+        assert "photo.jpg" not in (html or "")
+        assert "Text" in html
+
+    def test_leaves_genuine_inline_image_alone(self, ctx):
+        from istota.feeds._migrate import backfill_image_dedup
+
+        hero = "https://img/hero.jpg"
+        inline = "https://img/midarticle.jpg"
+        self._seed_entry(
+            ctx,
+            guid="g2",
+            content_html=f'<img src="{hero}" /><p>body</p><img src="{inline}" />',
+            image_urls=[hero],
+        )
+        backfill_image_dedup(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            html = feeds_db.list_entries(conn)[0].content_html
+        assert hero not in html
+        assert inline in html
+
+    def test_is_idempotent_via_sentinel(self, ctx):
+        from istota.feeds._migrate import backfill_image_dedup
+
+        img = "https://img/x.jpg"
+        self._seed_entry(
+            ctx, guid="g3",
+            content_html=f'<img src="{img}" />', image_urls=[img],
+        )
+        first = backfill_image_dedup(ctx)
+        assert first["entries_updated"] == 1
+        second = backfill_image_dedup(ctx)
+        assert second is None  # sentinel set → no-op
+
+    def test_no_op_when_nothing_to_strip(self, ctx):
+        from istota.feeds._migrate import backfill_image_dedup
+
+        self._seed_entry(
+            ctx, guid="g4",
+            content_html="<p>just text, no images</p>", image_urls=[],
+        )
+        result = backfill_image_dedup(ctx)
+        # Runs (writes sentinel), but touches zero rows.
+        assert result is not None
+        assert result["entries_updated"] == 0
+
+    def test_ensure_initialised_runs_backfill(self, ctx):
+        from istota.feeds._migrate import _BACKFILL_SENTINEL_KEY
+
+        ensure_initialised(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            sentinel = conn.execute(
+                "SELECT 1 FROM schema_meta WHERE key = ?",
+                (_BACKFILL_SENTINEL_KEY,),
+            ).fetchone()
+        assert sentinel is not None
