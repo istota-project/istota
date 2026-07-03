@@ -131,6 +131,30 @@ class TestPollFeedRss:
         assert captured["headers"].get("If-None-Match") == '"prev"'
         assert captured["headers"].get("If-Modified-Since") == feed.last_modified
 
+    def test_html_tags_stripped_from_titles(self):
+        # The Atlantic's Atom feed ships ``<title type="html">`` with inline
+        # markup (``<em>`` around emphasised words). feedparser decodes it to
+        # real tags; we store titles as plain text, so the reader shows the
+        # words, not literal ``<em>…</em>``.
+        atom = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example</title>
+  <link href="https://example.com"/>
+  <entry>
+    <id>atom-1</id>
+    <title type="html">The &lt;em&gt;Other&lt;/em&gt; Case for X</title>
+    <link href="https://example.com/x"/>
+    <summary type="html">&lt;p&gt;Body&lt;/p&gt;</summary>
+  </entry>
+</feed>
+"""
+        resp = _StubResponse(status_code=200, content=atom)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert len(result.items) == 1
+        assert result.items[0].title == "The Other Case for X"
+        # Plain-text titles never render the body path's HTML.
+        assert result.items[0].content_html is not None
+
 
 # ---------------------------------------------------------------------------
 # poll_due_feeds — persists state, applies backoff, dedupes entries
