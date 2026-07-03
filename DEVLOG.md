@@ -2,6 +2,13 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-03: Feeds — remove grid card bottom fade
+
+Removed the `::after` gradient fade on feed grid cards. It was added as a truncation cue (feather the clipped bottom `3rem` of a fixed-height grid card so "there's more" reads clearly), gated to grid view and `.card.openable`. In practice it overlapped the card's `.meta` row — star button, feed name, published date — dimming the footer under a gradient. Since the cards are already clickable-to-open, the cue wasn't worth the readability cost. Deleted the rule outright; cards now clip with a clean edge. No markup change — the fade lived entirely in the page's scoped CSS, not `FeedCard.svelte`.
+
+**Files added/modified:**
+- `web/src/routes/feeds/+page.svelte` - dropped the `.feed-grid:not(.list-view) :global(.card.openable)::after` gradient rule
+
 ## 2026-07-03: Health — date-only render off-by-one + cross-source import de-dup
 
 Two independent health fixes in one session.
