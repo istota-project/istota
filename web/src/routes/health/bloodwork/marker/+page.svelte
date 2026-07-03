@@ -101,7 +101,7 @@
 			chart = undefined;
 		}
 		const labels = trend.points.map((p) =>
-			new Date(p.drawn_at + (p.drawn_at.includes('T') ? '' : 'T00:00:00Z'))
+			new Date(p.drawn_at + (p.drawn_at.includes('T') ? '' : 'T00:00:00'))
 				.toLocaleDateString(undefined, { year: 'numeric', month: 'short' }),
 		);
 		const values = trend.points.map((p) => p.value);
@@ -233,7 +233,7 @@
 
 	function formatDate(iso: string): string {
 		try {
-			const d = new Date(iso + (iso.includes('T') ? '' : 'T00:00:00Z'));
+			const d = new Date(iso + (iso.includes('T') ? '' : 'T00:00:00'));
 			return d.toLocaleDateString(undefined, {
 				year: 'numeric', month: 'short', day: 'numeric',
 			});

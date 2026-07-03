@@ -200,7 +200,7 @@
 	function formatDate(iso: string | null): string {
 		if (!iso) return '—';
 		try {
-			const d = new Date(iso + (iso.includes('T') ? '' : 'T00:00:00Z'));
+			const d = new Date(iso + (iso.includes('T') ? '' : 'T00:00:00'));
 			return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 		} catch {
 			return iso;
