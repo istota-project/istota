@@ -29,8 +29,13 @@
 	}
 
 	let {
-		center = [-118.3, 34.1],
-		zoom = 12,
+		// Neutral world view as the pre-data default. fitBounds() snaps to the
+		// actual pings the moment they load, so this only shows during the
+		// sub-second init — a zoomed-out globe reads as "loading" rather than a
+		// specific wrong city (this used to default to LA, which looked like the
+		// map had geolocated the user).
+		center = [0, 20],
+		zoom = 1.5,
 		pings = [],
 		places = [],
 		clusters = [],
@@ -621,9 +626,33 @@
 			return;
 		}
 
-		const bounds = new maplibregl.LngLatBounds(allCoords[0], allCoords[0]);
-		for (const c of allCoords) bounds.extend(c);
-		map.fitBounds(bounds, { padding: 60, maxZoom: 16, duration: 0 });
+		// Unwrap longitudes into a continuous frame relative to the first coord,
+		// so a trans-Pacific span (e.g. NY -74 .. Tokyo +139) is measured the
+		// short way over the Pacific (-74 .. -221) rather than the long way
+		// around the globe. Without this the fitted viewport centres over Asia
+		// and a great-circle flight arc (which greatCircleArc unwraps the same
+		// way) is split at the anti-meridian. Bounds are passed as a raw
+		// [[w,s],[e,n]] array so MapLibre doesn't re-normalise the longitudes.
+		const ref = allCoords[0][0];
+		let west = Infinity, east = -Infinity, south = Infinity, north = -Infinity;
+		for (const [lon, lat] of allCoords) {
+			let l = lon;
+			while (l - ref > 180) l -= 360;
+			while (l - ref < -180) l += 360;
+			if (l < west) west = l;
+			if (l > east) east = l;
+			if (lat < south) south = lat;
+			if (lat > north) north = lat;
+		}
+		map.fitBounds([[west, south], [east, north]], { padding: 60, maxZoom: 16, duration: 0 });
+	}
+
+	// Imperative refit, bypassing the one-shot hasFittedBounds guard. The
+	// history range switcher calls this after loading a new range so the map
+	// re-frames (e.g. Manhattan routine -> a trans-Pacific trip) instead of
+	// staying on the first-loaded view.
+	export function refit() {
+		fitBounds();
 	}
 
 	onMount(() => {
