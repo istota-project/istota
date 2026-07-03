@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-03: Feed image dedup — backfill over pre-existing entries
+
+Follow-up to the image de-duplication work below. That change fixed the duplication at ingest, but the prior entry's assumption that stale rows "self-heal within a poll cycle" was wrong for the body-duplication case. xkcd was the reported symptom: the comic still rendered twice.
+
+**Why the self-heal never happened.** The poller writes entries with `INSERT OR IGNORE INTO feed_entries` keyed on `(feed_id, guid)`. Re-polling an already-stored guid is a no-op — the row is never rewritten regardless of how often the feed churns. So any entry stored *before* the dedup landed keeps its pre-dedup `content_html` (the hero `<img>` still embedded in the body) alongside `image_urls`, and `FeedReader.svelte` paints it twice: once as `.reader-hero`, once inside `{@html entry.content}`. xkcd is the clearest case because the whole entry body is that single comic `<img>`. I confirmed the ingest path is correct by running the live xkcd feed through `_rss_entry_to_item` — new entries come out with `content_html` empty and the comic promoted to `image_urls`. The bug is purely stale stored data.
+
+**Fix — one-shot backfill migration.** Added `backfill_image_dedup(ctx)` to `_migrate.py`, mirroring `migrate_legacy_toml`'s idempotent/race-safe shape: a `schema_meta` sentinel (`feeds_image_dedup_backfilled_at`) is claimed via a plain `INSERT` (PK conflict → one winner), then the rewrites run in the same transaction. For every stored entry with non-empty `content_html` it re-collapses the row's `image_urls` variants (`dedupe_image_variants`) and strips those images from the body (`remove_images`, matched by `image_identity` so a differently-sized body copy still matches), recomputing `content_text`. Genuine mid-article inline images — anything not promoted to the hero set — are left untouched. Zero-row runs still burn the sentinel so it doesn't re-scan every boot. Wired into `ensure_initialised` after `seed_default_opml`, so it runs once per user on the next feeds touch (web/CLI/skill). Operator reset: `DELETE FROM schema_meta WHERE key='feeds_image_dedup_backfilled_at'`.
+
+Considered but deferred: switching the poller's `INSERT OR IGNORE` to `ON CONFLICT DO UPDATE` scoped to content columns, so re-served items refresh. That would only heal feeds that keep serving the same item (xkcd does, but a rotated-out item wouldn't), and the backfill fixes all stale rows regardless — so the migration is the complete fix and the upsert is optional hardening for another day.
+
+**Files added/modified:**
+- `src/istota/feeds/_migrate.py` - added `backfill_image_dedup` + `_BACKFILL_SENTINEL_KEY`; wired into `ensure_initialised`; imports the sanitize dedup helpers
+- `tests/test_feeds_migrate.py` - new `TestBackfillImageDedup` (strip stale hero, collapse variant in body, leave inline images, sentinel idempotency, zero-row no-op, `ensure_initialised` wiring)
+
 ## 2026-07-03: Feed reader — image de-duplication, expand-to-read overlay, category filtering
 
 A run of feed-reader work, all in the `feeds` module and its web UI, plus a local dev-preview harness so the UI could be iterated on without a deploy.
