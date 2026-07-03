@@ -571,6 +571,171 @@ class TestDiagnoses:
         assert d.encounter_id is None
 
 
+class TestDiagnosisReconcile:
+    """Content-based reconciliation for import/agent diagnosis writes.
+
+    ``reconcile=True`` merges a clinically-equivalent condition into the
+    existing row instead of inserting a duplicate. Identity is ICD10-first
+    (authoritative when both rows carry a code), normalized-name fallback.
+    """
+
+    def test_same_name_from_two_sources_merges(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            first = health_db.insert_diagnosis(
+                conn, name="Hypertension", status="chronic",
+                date_diagnosed="2020-01-15", reconcile=True,
+            )
+            # A second source names it slightly differently (case/space/punct).
+            second = health_db.insert_diagnosis(
+                conn, name="  hypertension. ", status="active",
+                date_diagnosed="2022-06-01", reconcile=True,
+            )
+            conn.commit()
+            all_d = health_db.list_diagnoses(conn, status="all")
+        assert first == second
+        assert len(all_d) == 1
+
+    def test_matching_icd10_merges_despite_name_difference(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = health_db.insert_diagnosis(
+                conn, name="Essential hypertension", icd10="I10",
+                reconcile=True,
+            )
+            b = health_db.insert_diagnosis(
+                conn, name="HTN", icd10="i10", reconcile=True,
+            )
+            conn.commit()
+            all_d = health_db.list_diagnoses(conn, status="all")
+        assert a == b
+        assert len(all_d) == 1
+
+    def test_different_icd10_stays_distinct_even_if_name_matches(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = health_db.insert_diagnosis(
+                conn, name="Diabetes", icd10="E11.9", reconcile=True,
+            )
+            b = health_db.insert_diagnosis(
+                conn, name="Diabetes", icd10="E10.9", reconcile=True,
+            )
+            conn.commit()
+            all_d = health_db.list_diagnoses(conn, status="all")
+        assert a != b
+        assert len(all_d) == 2
+
+    def test_merge_backfills_null_fields_only(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            first = health_db.insert_diagnosis(
+                conn, name="Hypertension", status="chronic",
+                severity=None, reconcile=True,
+            )
+            # Second source supplies icd10 + severity the first lacked, but a
+            # different (non-null) status must not overwrite the existing one.
+            health_db.insert_diagnosis(
+                conn, name="Hypertension", status="active",
+                icd10="I10", severity="moderate", reconcile=True,
+            )
+            conn.commit()
+            d = health_db.get_diagnosis(conn, first)
+        assert d.icd10 == "I10"          # backfilled (was null)
+        assert d.severity == "moderate"  # backfilled (was null)
+        assert d.status == "chronic"     # preserved (was already set)
+
+    def test_reconcile_off_by_default_still_duplicates(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            health_db.insert_diagnosis(conn, name="Hypertension")
+            health_db.insert_diagnosis(conn, name="Hypertension")
+            conn.commit()
+            all_d = health_db.list_diagnoses(conn, status="all")
+        assert len(all_d) == 2
+
+    def test_dedup_key_replay_still_returns_same_row(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = health_db.insert_diagnosis(
+                conn, name="Asthma", dedup_key="imp:0:dx:0", reconcile=True,
+            )
+            b = health_db.insert_diagnosis(
+                conn, name="Asthma", dedup_key="imp:0:dx:0", reconcile=True,
+            )
+            conn.commit()
+            all_d = health_db.list_diagnoses(conn, status="all")
+        assert a == b
+        assert len(all_d) == 1
+
+
+class TestImmunizationReconcile:
+    """Content-based reconciliation for immunization import writes.
+
+    Keyed on normalized name + date_given: a re-import of the same shot on
+    the same day merges, but a genuine booster on another date stays a
+    distinct row.
+    """
+
+    def test_same_vaccine_same_date_merges(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = health_db.insert_immunization(
+                conn, name="Influenza", date_given="2025-10-01",
+                source="import", reconcile=True,
+            )
+            b = health_db.insert_immunization(
+                conn, name="  influenza ", date_given="2025-10-01",
+                source="import", reconcile=True,
+            )
+            conn.commit()
+            rows = health_db.list_immunizations(conn)
+        assert a == b
+        assert len(rows) == 1
+
+    def test_same_vaccine_different_date_stays_distinct(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = health_db.insert_immunization(
+                conn, name="Influenza", date_given="2024-10-01",
+                source="import", reconcile=True,
+            )
+            b = health_db.insert_immunization(
+                conn, name="Influenza", date_given="2025-10-01",
+                source="import", reconcile=True,
+            )
+            conn.commit()
+            rows = health_db.list_immunizations(conn)
+        assert a != b
+        assert len(rows) == 2
+
+    def test_merge_backfills_null_fields_only(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            first = health_db.insert_immunization(
+                conn, name="Influenza", date_given="2025-10-01",
+                lot_number=None, manufacturer="Sanofi",
+                source="import", reconcile=True,
+            )
+            health_db.insert_immunization(
+                conn, name="Influenza", date_given="2025-10-01",
+                lot_number="ABC123", manufacturer="Pfizer",
+                source="import", reconcile=True,
+            )
+            conn.commit()
+            imm = health_db.get_immunization(conn, first)
+        assert imm.lot_number == "ABC123"      # backfilled (was null)
+        assert imm.manufacturer == "Sanofi"    # preserved (was already set)
+
+
 class TestDeferredEncounterReplay:
     def test_replay_inserts(self, tmp_path):
         """The scheduler replays deferred encounter/diagnosis ops."""

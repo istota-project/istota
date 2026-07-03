@@ -1212,6 +1212,67 @@ def _row_to_diagnosis(row: sqlite3.Row) -> Diagnosis:
     )
 
 
+def _normalize_condition_name(name: str) -> str:
+    """Lowercase, collapse whitespace, drop trailing punctuation."""
+    return " ".join(name.strip().lower().split()).rstrip(".,;:")
+
+
+def _normalize_icd10(code: str | None) -> str | None:
+    """Uppercase and strip an ICD10 code for identity comparison."""
+    if not code:
+        return None
+    c = code.strip().upper().replace(" ", "")
+    return c or None
+
+
+def _find_matching_diagnosis(
+    conn: sqlite3.Connection, *, name: str, icd10: str | None,
+) -> sqlite3.Row | None:
+    """Locate a clinically-equivalent existing diagnosis, if any.
+
+    Identity is ICD10-first: when both the incoming row and a candidate
+    carry a code, they match only when the normalized codes are equal (and
+    a differing code means *not* the same condition, even if the names
+    agree). When either side lacks a code, fall back to normalized-name
+    equality.
+    """
+    inc_name = _normalize_condition_name(name)
+    inc_icd = _normalize_icd10(icd10)
+    rows = conn.execute(
+        "SELECT id, name, icd10, severity, date_resolved FROM diagnoses",
+    ).fetchall()
+    for r in rows:
+        ex_icd = _normalize_icd10(r["icd10"])
+        if inc_icd and ex_icd:
+            if inc_icd == ex_icd:
+                return r
+        elif inc_name == _normalize_condition_name(r["name"]):
+            return r
+    return None
+
+
+def _backfill_null_columns(
+    conn: sqlite3.Connection, table: str, row: sqlite3.Row,
+    candidates: dict[str, Any],
+) -> None:
+    """Set each candidate column on ``row`` only where it is currently null.
+
+    Enrich-on-merge: a second source can fill a gap the first left blank,
+    but never overwrites a value already recorded.
+    """
+    updates = {
+        col: val for col, val in candidates.items()
+        if val is not None and row[col] is None
+    }
+    if not updates:
+        return
+    set_clause = ", ".join(f"{col} = ?" for col in updates)
+    conn.execute(
+        f"UPDATE {table} SET {set_clause} WHERE id = ?",  # noqa: S608 (fixed cols)
+        (*updates.values(), row["id"]),
+    )
+
+
 def insert_diagnosis(
     conn: sqlite3.Connection,
     *,
@@ -1224,6 +1285,7 @@ def insert_diagnosis(
     severity: str | None = None,
     notes: str | None = None,
     dedup_key: str | None = None,
+    reconcile: bool = False,
 ) -> int:
     if status not in _DIAGNOSIS_STATUSES:
         raise ValueError(f"unknown diagnosis status: {status!r}")
@@ -1233,6 +1295,18 @@ def insert_diagnosis(
         ).fetchone()
         if row is not None:
             return int(row[0])
+    if reconcile:
+        existing = _find_matching_diagnosis(conn, name=name, icd10=icd10)
+        if existing is not None:
+            _backfill_null_columns(
+                conn, "diagnoses", existing,
+                {
+                    "icd10": icd10.strip() if icd10 else None,
+                    "severity": severity,
+                    "date_resolved": date_resolved,
+                },
+            )
+            return int(existing["id"])
     cur = conn.execute(
         """
         INSERT INTO diagnoses(
@@ -1380,6 +1454,26 @@ def _row_to_immunization(row: sqlite3.Row) -> Immunization:
     )
 
 
+def _find_matching_immunization(
+    conn: sqlite3.Connection, *, name: str, date_given: str,
+) -> sqlite3.Row | None:
+    """Locate an existing immunization for the same vaccine on the same day.
+
+    Keyed on normalized name + ``date_given``: a re-import of the same shot
+    merges, but a genuine booster on another date is a distinct row.
+    """
+    inc_name = _normalize_condition_name(name)
+    inc_date = (date_given or "").strip()
+    rows = conn.execute("SELECT * FROM immunizations").fetchall()
+    for r in rows:
+        if (
+            _normalize_condition_name(r["name"]) == inc_name
+            and (r["date_given"] or "").strip() == inc_date
+        ):
+            return r
+    return None
+
+
 def insert_immunization(
     conn: sqlite3.Connection,
     *,
@@ -1398,6 +1492,7 @@ def insert_immunization(
     notes: str | None = None,
     source: str = "manual",
     dedup_key: str | None = None,
+    reconcile: bool = False,
 ) -> int:
     if dedup_key is not None:
         row = conn.execute(
@@ -1405,6 +1500,27 @@ def insert_immunization(
         ).fetchone()
         if row is not None:
             return int(row[0])
+    if reconcile:
+        existing = _find_matching_immunization(
+            conn, name=name, date_given=date_given,
+        )
+        if existing is not None:
+            _backfill_null_columns(
+                conn, "immunizations", existing,
+                {
+                    "product_name": product_name,
+                    "manufacturer": manufacturer,
+                    "dose_label": dose_label,
+                    "lot_number": lot_number,
+                    "route": route,
+                    "site": site,
+                    "administered_by": administered_by,
+                    "facility": facility,
+                    "cvx_code": cvx_code,
+                    "notes": notes,
+                },
+            )
+            return int(existing["id"])
     cur = conn.execute(
         """
         INSERT INTO immunizations(
