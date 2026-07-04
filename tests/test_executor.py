@@ -1518,6 +1518,18 @@ class TestAdminPromptIsolation:
                 "Elapsed-time arithmetic rule missing from rules section"
             )
 
+    def test_prompt_includes_fetched_content_date_rule(self, tmp_path):
+        """ISSUE-155 — dates in fetched content must not override the prompt date."""
+        config = self._make_config(tmp_path)
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+        for is_admin in (True, False):
+            prompt = build_prompt(task, [], config, is_admin=is_admin)
+            assert "publication or authorship dates" in prompt, (
+                "Fetched-content date rule missing from rules section"
+            )
+
 
 class TestAdminEnvVarIsolation:
     def _make_config(self, tmp_path, admin_users=None):
