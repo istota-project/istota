@@ -173,7 +173,7 @@
 # Docker — inlined (replace with a dedicated role if you prefer)
 - name: Check if Docker CE apt repo is configured
   stat:
-    path: /etc/apt/sources.list.d/download_docker_com_linux_{{ ansible_facts['distribution'] | lower }}.list
+    path: /etc/apt/sources.list.d/docker.sources
   register: docker_repo_file
   when: not istota_update_only and not istota_web_only and (istota_browser_enabled or istota_devbox_enabled)
 
@@ -194,9 +194,21 @@
         dest: /etc/apt/trusted.gpg.d/docker.asc
         mode: '0644'
 
+    - name: Remove legacy .list Docker repository (superseded by deb822)
+      ansible.builtin.file:
+        path: "/etc/apt/sources.list.d/download_docker_com_linux_{{ ansible_facts['distribution'] | lower }}.list"
+        state: absent
+
     - name: Add Docker apt repository
-      ansible.builtin.apt_repository:
-        repo: "deb [arch={{ ansible_facts['dpkg_architecture'] }} signed-by=/etc/apt/trusted.gpg.d/docker.asc] https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }} {{ ansible_facts['distribution_release'] }} stable"
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: deb
+        uris: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}"
+        suites: "{{ ansible_facts['distribution_release'] }}"
+        components: stable
+        architectures: "{{ ansible_facts['dpkg_architecture'] }}"
+        signed_by: /etc/apt/trusted.gpg.d/docker.asc
+        enabled: true
         state: present
 
 - name: Install Docker for browser container
