@@ -28,6 +28,17 @@ mount_available() {
     mountpoint -q "$MOUNT_PATH" 2>/dev/null
 }
 
+# Optional failure-alert hook. Operator wires a command via
+# istota_backup_alert_command; empty (the default) = no-op. The command runs
+# with the alert text in $ISTOTA_BACKUP_ALERT_MESSAGE (avoids shell-quoting
+# the message). Never affects the backup's own exit status.
+ALERT_COMMAND="{{ istota_backup_alert_command | default('') }}"
+_alert() {
+    [ -n "$ALERT_COMMAND" ] || return 0
+    ISTOTA_BACKUP_ALERT_MESSAGE="$1" bash -c "$ALERT_COMMAND" \
+        || log "WARNING: backup alert command failed"
+}
+
 # Backup a single SQLite DB with WAL-aware .backup, integrity check, gzip,
 # remote copy, and per-prefix retention rotation.
 #   $1 — source DB path
@@ -44,13 +55,26 @@ _backup_one_db() {
     log "Backing up ${prefix} (${src_db})"
 
     local tmp_file
-    tmp_file=$(mktemp "${LOCAL_DIR}/${prefix}-backup-XXXXXX.db")
+    if ! tmp_file=$(mktemp "${LOCAL_DIR}/${prefix}-backup-XXXXXX.db"); then
+        log "ERROR: mktemp failed for ${prefix}"
+        return 1
+    fi
+    # Remove the temp on every exit from this function. Because each risky
+    # step below is handled explicitly (never left to abort the shell under
+    # set -e), every path out is a normal `return`, so this RETURN trap always
+    # fires — a failing DB can neither orphan its temp nor abort the run.
     trap 'rm -f "$tmp_file"' RETURN
 
-    sqlite3 "$src_db" ".backup '$tmp_file'"
+    if ! sqlite3 "$src_db" ".backup '$tmp_file'"; then
+        log "ERROR: sqlite3 .backup failed for ${prefix} (source ${src_db})"
+        return 1
+    fi
 
     local check
-    check=$(sqlite3 "$tmp_file" "PRAGMA integrity_check;")
+    if ! check=$(sqlite3 "$tmp_file" "PRAGMA integrity_check;" 2>&1); then
+        log "ERROR: integrity check errored for ${prefix}: ${check}"
+        return 1
+    fi
     if [ "$check" != "ok" ]; then
         log "ERROR: Backup integrity check failed for ${prefix}: $check"
         return 1
@@ -58,21 +82,30 @@ _backup_one_db() {
 
     local backup_name="${prefix}-${TIMESTAMP}.db.gz"
 
-    gzip -c "$tmp_file" > "${LOCAL_DIR}/daily/${backup_name}"
+    if ! gzip -c "$tmp_file" > "${LOCAL_DIR}/daily/${backup_name}"; then
+        log "ERROR: gzip failed for ${prefix}"
+        rm -f "${LOCAL_DIR}/daily/${backup_name}"
+        return 1
+    fi
     log "Local daily backup saved: ${LOCAL_DIR}/daily/${backup_name}"
 
+    # Weekly + remote copies are best-effort: a failure here is logged but does
+    # not fail the DB (the authoritative local daily artifact already exists).
     if [ "$DAY_OF_WEEK" -eq 7 ]; then
-        cp "${LOCAL_DIR}/daily/${backup_name}" "${LOCAL_DIR}/weekly/${backup_name}"
-        log "Local weekly backup saved: ${LOCAL_DIR}/weekly/${backup_name}"
+        cp "${LOCAL_DIR}/daily/${backup_name}" "${LOCAL_DIR}/weekly/${backup_name}" \
+            && log "Local weekly backup saved: ${LOCAL_DIR}/weekly/${backup_name}" \
+            || log "WARNING: local weekly copy failed for ${prefix}"
     fi
 
     if mount_available; then
-        cp "${LOCAL_DIR}/daily/${backup_name}" "${REMOTE_DIR}/db/daily/${backup_name}"
-        log "Remote daily backup copied: ${backup_name}"
+        cp "${LOCAL_DIR}/daily/${backup_name}" "${REMOTE_DIR}/db/daily/${backup_name}" \
+            && log "Remote daily backup copied: ${backup_name}" \
+            || log "WARNING: remote daily copy failed for ${prefix}"
 
         if [ "$DAY_OF_WEEK" -eq 7 ]; then
-            cp "${LOCAL_DIR}/weekly/${backup_name}" "${REMOTE_DIR}/db/weekly/${backup_name}"
-            log "Remote weekly backup copied: ${backup_name}"
+            cp "${LOCAL_DIR}/weekly/${backup_name}" "${REMOTE_DIR}/db/weekly/${backup_name}" \
+                && log "Remote weekly backup copied: ${backup_name}" \
+                || log "WARNING: remote weekly copy failed for ${prefix}"
         fi
     else
         log "WARNING: Nextcloud mount not available, skipping remote copy for ${prefix}"
@@ -111,8 +144,14 @@ _discover_module_dbs() {
 
 backup_db() {
     log "Starting database backup"
+    local failed=0
 
-    _backup_one_db "$DB" "{{ istota_namespace }}"
+    # Each DB is backed up independently: a single failure is counted and
+    # logged, never fatal, so one bad DB can't skip the remaining users'
+    # backups (the pre-fix set -e behaviour silently torpedoed a whole run).
+    if ! _backup_one_db "$DB" "{{ istota_namespace }}"; then
+        failed=$((failed + 1))
+    fi
 
     # Per-user module DBs (feeds, money, location, ...)
     local module_db user_id module
@@ -122,18 +161,30 @@ backup_db() {
         # Walk up from the file: dirname=data, parent=module, grandparent=bot_dir, then user.
         module=$(basename "$(dirname "$(dirname "$module_db")")")
         user_id=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$module_db")")")")")
-        _backup_one_db "$module_db" "${user_id}-${module}"
+        if ! _backup_one_db "$module_db" "${user_id}-${module}"; then
+            failed=$((failed + 1))
+        fi
     done < <(_discover_module_dbs)
 
+    if [ "$failed" -gt 0 ]; then
+        log "ERROR: Database backup completed with ${failed} failure(s)"
+        _alert "$(hostname): database backup had ${failed} DB failure(s) — see zorg-backup.log"
+        return 1
+    fi
+
     log "Database backup complete"
+    return 0
 }
 
 backup_files() {
     log "Starting files backup (rclone sync)"
+    local failed=0
 
 {% for source in istota_backup_files_sources %}
     log "Syncing ${RCLONE_REMOTE}:{{ source.src }} -> ${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}/{{ source.dest }}"
-    rclone sync \
+    # Each source is independent: a failed sync is counted, not fatal, so one
+    # bad source can't skip the rest.
+    if rclone sync \
         --config "$RCLONE_CONFIG" \
         "${RCLONE_REMOTE}:{{ source.src }}" \
         "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}/{{ source.dest }}" \
@@ -141,29 +192,41 @@ backup_files() {
         --exclude '{{ exclude }}' \
 {% endfor %}
         --verbose \
-        2>&1 | while IFS= read -r line; do log "  $line"; done || {
+        2>&1 | while IFS= read -r line; do log "  $line"; done; then
+        log "Finished syncing {{ source.src }}"
+    else
         log "ERROR: rclone sync failed for {{ source.src }}"
-        return 1
-    }
-    log "Finished syncing {{ source.src }}"
+        failed=$((failed + 1))
+    fi
 
 {% endfor %}
+    if [ "$failed" -gt 0 ]; then
+        log "ERROR: Files backup completed with ${failed} sync failure(s)"
+        _alert "$(hostname): files backup had ${failed} rclone sync failure(s) — see zorg-backup.log"
+        return 1
+    fi
+
     log "Files backup complete"
+    return 0
 }
 
+# Aggregate exit status so a partial failure surfaces as a non-zero exit
+# (visible in cron/journald) instead of a silent success.
+rc=0
 case "${1:-}" in
     db)
-        backup_db
+        backup_db || rc=1
         ;;
     files)
-        backup_files
+        backup_files || rc=1
         ;;
     all)
-        backup_db
-        backup_files
+        backup_db || rc=1
+        backup_files || rc=1
         ;;
     *)
         echo "Usage: $0 {db|files|all}" >&2
         exit 1
         ;;
 esac
+exit "$rc"
