@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Migrated the Docker apt repository setup in the Ansible deploy to the deb822 source format. The old `apt_repository` module is deprecated and due for removal in a future ansible-core release; the stale auto-named `.list` file is cleaned up on the next run. Deployment-only change.
+
+### Fixed
+- Hardened the Nextcloud rclone mount on the production deploy. A dead mount endpoint now self-heals on service restart instead of needing a manual unmount, and a slow or wedged backend fails fast (about 30 seconds) rather than blocking a file operation for minutes.
+
 ## [0.26.1] - 2026-07-03
 
 ### Changed
