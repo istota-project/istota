@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-07: WAL-mode SQLite on the FUSE mount → SIGBUS crash loop (ISSUE-157)
+
+The web service was crash-looping on **SIGBUS** whenever a feeds endpoint was hit — user-visible as feeds failing to load plus intermittent 502s. Root cause: the per-user **module** DBs (feeds, money, location, health) live on the rclone FUSE-backed Nextcloud mount, and they were opened in **WAL** journal mode. WAL relies on an mmap'd `-shm` shared-memory file; the FUSE VFS can't reliably back those mmap pages, so a failed page fault raises SIGBUS and kills the whole process. `feeds.init_db` re-runs the WAL pragma on every request (`ensure_initialised` in the request dependency), which maximized exposure. The framework DB is on local disk, so it was never affected.
+
+**Trigger.** The previous day's mount-hardening (fail-fast rclone `--timeout`/`--low-level-retries`) turned a slow-but-eventually-successful backend op into a hard EIO in ~30s — which for the mmap'd `-shm` surfaces as SIGBUS rather than a transient stall. The hardening is correct on its own terms; it just unmasked a latent WAL-on-network-FS bug.
+
+**Fix.** Switch the four on-mount module DBs from `journal_mode = WAL` to `DELETE` (rollback journal — no `-shm`, no mmap; the standard SQLite-on-network-filesystem posture). Set unconditionally in each `init_db` (not gated on fresh-file creation) so pre-existing WAL DBs convert on first touch; it's a no-op once already DELETE. `feeds` and `money` also got a 30s `busy_timeout` to absorb the reader/writer serialization DELETE implies (`health`/`location` already had one). A `SQLITE_BUSY` is a caught, recoverable error; the point is that nothing on the mount can mmap, so nothing can SIGBUS. Framework DBs on local disk keep WAL. Existing on-mount DBs were converted operationally (checkpoint + `journal_mode=DELETE`; one DB whose `-shm` was mid-glitch was copied off-mount, converted on local disk, and copied back).
+
+**Durable follow-up (open):** move the four module DBs off the mount to local disk (like the framework DB) and keep WAL — eliminates both the SIGBUS and the concurrency penalty. Needs a `db_path` change in each module's `resolve_for_user` plus a one-time data move and a separate backup path. Tracked in ISSUE-157.
+
+**Backup script (same SIGBUS, second blast radius).** The Ansible-managed backup script ran under `set -euo pipefail`, so when `sqlite3 .backup` SIGBUS'd on a WAL-mode on-mount DB, the whole run aborted — every DB after the failing one was silently skipped, and the `mktemp` temp file was orphaned (a `RETURN` cleanup trap does not fire on a `set -e` abort). Observed as a backup run that saved the framework DB and two users' modules, then died on a third user's first module, leaving that user with no backups for the run plus a stray 0-byte temp file. Reworked so each DB (and each rclone source) is backed up independently: explicit error checks so the per-DB helper always returns cleanly, explicit **scope-safe** temp cleanup on every path (the first cut used a `RETURN` trap, but that trap is not scope-local — it re-fired on the caller's return and tripped `set -u` on the out-of-scope temp var, turning a fully-successful run into exit 1; caught in live testing and replaced with explicit `rm`), a failure counter instead of a fatal abort, a non-zero aggregate exit on any failure, and an optional operator alert hook. Added a `backup` Ansible tag for surgical deploys.
+
+**Key changes:**
+- `journal_mode = DELETE` (unconditional) for feeds/health/location/money module DBs; framework DBs keep WAL.
+- `busy_timeout = 30000` + `timeout=30.0` added to the feeds and money connection helpers.
+- Backup script: per-DB and per-source failure isolation, scope-safe temp cleanup, non-zero exit on failure, optional `istota_backup_alert_command` hook, `backup` deploy tag.
+
+**Files added/modified:**
+- `src/istota/feeds/db.py`, `src/istota/health/db.py`, `src/istota/location/db.py`, `src/istota/money/db.py` — WAL→DELETE (+ busy_timeout on feeds/money; dropped a now-unused `fresh` var in health)
+- `tests/test_location_module.py` — `test_init_db_sets_delete_mode` (was `_sets_wal_mode`)
+- `deploy/ansible/templates/istota-backup.sh.j2` — per-DB/per-source failure isolation, scope-safe cleanup, aggregate non-zero exit, alert hook
+- `deploy/ansible/defaults/main.yml` — `istota_backup_alert_command` default (empty)
+- `deploy/ansible/tasks/main.yml` — `backup` tag on the backup script + cron tasks
+
 ## 2026-07-03: Feeds — remove grid card bottom fade
 
 Removed the `::after` gradient fade on feed grid cards. It was added as a truncation cue (feather the clipped bottom `3rem` of a fixed-height grid card so "there's more" reads clearly), gated to grid view and `.card.openable`. In practice it overlapped the card's `.meta` row — star button, feed name, published date — dimming the footer under a gradient. Since the cards are already clickable-to-open, the cue wasn't worth the readability cost. Deleted the rule outright; cards now clip with a clean edge. No markup change — the fade lived entirely in the page's scoped CSS, not `FeedCard.svelte`.
