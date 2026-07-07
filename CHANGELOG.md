@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.2] - 2026-07-07
+
 ### Changed
 - Migrated the Docker apt repository setup in the Ansible deploy to the deb822 source format. The old `apt_repository` module is deprecated and due for removal in a future ansible-core release; the stale auto-named `.list` file is cleaned up on the next run. Deployment-only change.
 
@@ -790,7 +792,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.26.1...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.26.2...main
+[0.26.2]: https://gitlab.com/cynium/istota/-/releases/v0.26.2
 [0.26.1]: https://gitlab.com/cynium/istota/-/releases/v0.26.1
 [0.26.0]: https://gitlab.com/cynium/istota/-/releases/v0.26.0
 [0.25.0]: https://gitlab.com/cynium/istota/-/releases/v0.25.0
