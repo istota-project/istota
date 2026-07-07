@@ -59,24 +59,28 @@ _backup_one_db() {
         log "ERROR: mktemp failed for ${prefix}"
         return 1
     fi
-    # Remove the temp on every exit from this function. Because each risky
-    # step below is handled explicitly (never left to abort the shell under
-    # set -e), every path out is a normal `return`, so this RETURN trap always
-    # fires — a failing DB can neither orphan its temp nor abort the run.
-    trap 'rm -f "$tmp_file"' RETURN
+    # Explicit cleanup on every path out. Each risky step below is handled
+    # explicitly (never left to abort the shell under set -e), so the temp is
+    # always removed and a failing DB can neither orphan its temp nor abort the
+    # run. (A RETURN trap is avoided on purpose: it is not scope-local, so it
+    # would re-fire on the caller's return and trip set -u on the out-of-scope
+    # $tmp_file.)
 
     if ! sqlite3 "$src_db" ".backup '$tmp_file'"; then
         log "ERROR: sqlite3 .backup failed for ${prefix} (source ${src_db})"
+        rm -f "$tmp_file"
         return 1
     fi
 
     local check
     if ! check=$(sqlite3 "$tmp_file" "PRAGMA integrity_check;" 2>&1); then
         log "ERROR: integrity check errored for ${prefix}: ${check}"
+        rm -f "$tmp_file"
         return 1
     fi
     if [ "$check" != "ok" ]; then
         log "ERROR: Backup integrity check failed for ${prefix}: $check"
+        rm -f "$tmp_file"
         return 1
     fi
 
@@ -84,9 +88,11 @@ _backup_one_db() {
 
     if ! gzip -c "$tmp_file" > "${LOCAL_DIR}/daily/${backup_name}"; then
         log "ERROR: gzip failed for ${prefix}"
-        rm -f "${LOCAL_DIR}/daily/${backup_name}"
+        rm -f "${LOCAL_DIR}/daily/${backup_name}" "$tmp_file"
         return 1
     fi
+    # The gzip'd daily file is now the source of truth; the raw temp is done.
+    rm -f "$tmp_file"
     log "Local daily backup saved: ${LOCAL_DIR}/daily/${backup_name}"
 
     # Weekly + remote copies are best-effort: a failure here is logged but does
@@ -119,6 +125,8 @@ _backup_one_db() {
         find "${REMOTE_DIR}/db/daily" -name "${prefix}-*.db.gz" -mtime +${DAILY_RETENTION} -delete 2>/dev/null || true
         find "${REMOTE_DIR}/db/weekly" -name "${prefix}-*.db.gz" -mtime +$((WEEKLY_RETENTION * 7)) -delete 2>/dev/null || true
     fi
+
+    return 0
 }
 
 # Discover per-user module DBs by scanning {mount}/Users/<user>/*/<module>/data/<module>.db.
