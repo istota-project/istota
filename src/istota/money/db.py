@@ -62,12 +62,13 @@ CREATE TABLE IF NOT EXISTS kv_store (
 def get_db(db_path: Path | str):
     """Context manager for database connections with row factory.
 
-    WAL is set once by ``init_db`` and persists in the SQLite file
-    header — re-issuing the pragma per connection costs a write-lock
-    acquisition and races with sibling readers.
+    journal_mode is set once by ``init_db`` and persists in the SQLite file
+    header. 30s busy handler absorbs the reader/writer serialization that
+    DELETE journal mode implies (no WAL concurrency).
     """
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
     try:
         yield conn
         conn.commit()
@@ -81,7 +82,11 @@ def get_db(db_path: Path | str):
 def init_db(db_path: Path | str) -> None:
     """Create tables if they don't exist."""
     with get_db(db_path) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
+        # DELETE (rollback journal), NOT WAL: this DB lives on the rclone
+        # FUSE-backed Nextcloud mount where WAL's mmap'd -shm file can SIGBUS
+        # the process (ISSUE-157). Issued unconditionally so a pre-existing WAL
+        # DB converts on first touch; no-op once already DELETE.
+        conn.execute("PRAGMA journal_mode=DELETE")
         conn.executescript(SCHEMA)
         _migrate_monarch_synced_columns(conn)
 
