@@ -381,6 +381,22 @@ def backup_ledger(ledger_path: Path, max_backups: int = 10) -> Path | None:
     return backup_path
 
 
+def _append_entries_unlocked(ledger_path: Path, entries: list[str]) -> None:
+    """Backup + append entries to the main ledger. Caller must hold the lock.
+
+    Split out so a caller that already holds ``_ledger_lock`` (add_transaction,
+    which keeps the lock through a post-write bean-check) can append without
+    re-acquiring it — the flock is not reentrant across separate open file
+    descriptions, so a nested ``_ledger_lock`` would deadlock.
+    """
+    if not entries:
+        return
+    backup_ledger(ledger_path)
+    with open(ledger_path, "a") as f:
+        for entry in entries:
+            f.write(f"\n{entry}\n")
+
+
 def append_to_ledger(ledger_path: Path, entries: list[str]) -> None:
     """Append beancount entries to the main ledger file with backup.
 
@@ -393,10 +409,7 @@ def append_to_ledger(ledger_path: Path, entries: list[str]) -> None:
     from .edit import _ledger_lock
 
     with _ledger_lock(ledger_path):
-        backup_ledger(ledger_path)
-        with open(ledger_path, "a") as f:
-            for entry in entries:
-                f.write(f"\n{entry}\n")
+        _append_entries_unlocked(ledger_path, entries)
 
 
 # =============================================================================
@@ -1033,18 +1046,18 @@ def add_transaction(
     txn += f'  {debit}  {amount:.2f} {currency}\n'
     txn += f'  {credit}\n'
 
-    txn_dir = ledger_path.parent / "transactions"
-    txn_dir.mkdir(exist_ok=True)
-    txn_file = txn_dir / f"{txn_date.year}.beancount"
-
     from .edit import _ledger_lock
     from .ledger import run_bean_check
 
+    # Append to the main ledger — the same file sync_monarch / import_csv write
+    # to and the same file bean-check validates. Writing to a transactions/
+    # subdir that no ledger include()s let bean-check pass vacuously while the
+    # entry stayed invisible to every query and balance (ISSUE-158).
     # Held under the lock through the post-write bean-check so the validation
-    # sees a tree no concurrent writer is mutating (ISSUE-104).
+    # sees a tree no concurrent writer is mutating (ISSUE-104). Uses the
+    # unlocked append helper because the flock is not reentrant.
     with _ledger_lock(ledger_path):
-        with open(txn_file, "a") as f:
-            f.write(f"\n{txn}")
+        _append_entries_unlocked(ledger_path, [txn])
         success, errors = run_bean_check(ledger_path)
     if not success:
         return {

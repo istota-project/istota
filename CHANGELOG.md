@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Manually adding a transaction to a ledger now actually records it. The `add-transaction` command reported success but wrote the entry to a location no ledger read from, so it never appeared in any query, balance, invoice, or report. Entries now land in the main ledger alongside every other write path. (The bulk sync and CSV import paths were never affected.)
 - The web interface no longer crashes when opening feeds. The per-user feeds, money, location, and health databases sit on the network-backed Nextcloud storage, where the previous database journaling mode could crash the whole web process — showing up as feeds failing to load and intermittent errors. They now use a journaling mode that's safe on network storage.
 - Database backups are now resilient to a single failing database. Previously one database that failed to back up would silently abort the entire run, skipping every remaining user's backup and leaving a stray temporary file. Each database and file sync is now backed up independently, the run reports a clear failure (and can trigger an optional alert) instead of stopping early, and temporary files are always cleaned up.
 

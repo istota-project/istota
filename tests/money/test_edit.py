@@ -230,8 +230,8 @@ class TestWritersStampIds:
             "Expenses:Food", "Assets:Bank:Checking", 5.0,
         )
         assert result["status"] == "ok"
-        txn_file = (tmp_path / "transactions" / "2024.beancount").read_text()
-        assert 'id: "' in txn_file
+        # The entry lands in the main ledger, not an orphan subdir (ISSUE-158).
+        assert 'id: "' in ledger.read_text()
 
     def test_recategorization_expense_has_id(self):
         from istota.money.core.transactions import format_recategorization_entry

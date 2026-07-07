@@ -2,6 +2,25 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-07: money `add-transaction` wrote to an orphan file no ledger read (ISSUE-158)
+
+`istota-skill money add-transaction` returned `status: ok`, its post-write `bean-check` passed, and the transaction was **not in the ledger** — invisible to every query, balance, invoice, and report. Low blast radius only because it isn't the primary write path (`sync-monarch` / `import-csv` are, and both worked); the defect sat unnoticed for months, leaving a fossil trail of orphaned entries under `ledgers/transactions/`.
+
+**Root cause.** `add_transaction` wrote the entry to `{ledger_dir}/transactions/{year}.beancount` — a subdir that no ledger `include`s and that the workspace loader's non-recursive `*.beancount` glob never picks up — then ran `run_bean_check` against the *main* ledger, which never saw the new file and passed vacuously. So the CLI reported success against a file that didn't contain the transaction. The two working write paths both go through `append_to_ledger`, which appends straight to the main ledger.
+
+**Fix.** Make `add_transaction` land in the main ledger, the same file the other writers append to and the same file bean-check validates; drop the `transactions/` subdir write entirely. The one wrinkle: `add_transaction` already holds `_ledger_lock` across its post-write bean-check (ISSUE-104), and the flock is **not** reentrant across separate open file descriptions in the same process — calling `append_to_ledger` (which re-takes the lock) from inside would deadlock until the 10s timeout. So the append body was factored into `_append_entries_unlocked(ledger_path, entries)`: `append_to_ledger` wraps it in the lock as before, `add_transaction` calls it directly under its existing lock. The `monarch-id` dedup gap noted in the issue is moot under this fix — not pursuing the per-year-partition alternative, which carried an ownership-ambiguity problem when multiple ledgers share a dir.
+
+Verified end-to-end against a real beancount ledger (not a mocked bean-check): an added entry lands in the main ledger, creates no subdir, loads cleanly, and is visible to the beancount loader that every query/balance/report reads from.
+
+**Key changes:**
+- `add_transaction` appends to the main ledger via a new unlocked helper instead of writing a per-year file under `transactions/`.
+- `_append_entries_unlocked` extracted so a lock-holding caller can append without a reentrant-flock deadlock; `append_to_ledger` now wraps it.
+
+**Files added/modified:**
+- `src/istota/money/core/transactions.py` — `add_transaction` write path → main ledger; `_append_entries_unlocked` split out of `append_to_ledger`
+- `tests/money/test_transactions.py` — `test_success` asserts main-ledger landing + no subdir; new `test_lands_in_validated_ledger` asserts bean-check sees the entry
+- `tests/money/test_edit.py` — `test_add_transaction_stamps_id` reads the main ledger
+
 ## 2026-07-07: WAL-mode SQLite on the FUSE mount → SIGBUS crash loop (ISSUE-157)
 
 The web service was crash-looping on **SIGBUS** whenever a feeds endpoint was hit — user-visible as feeds failing to load plus intermittent 502s. Root cause: the per-user **module** DBs (feeds, money, location, health) live on the rclone FUSE-backed Nextcloud mount, and they were opened in **WAL** journal mode. WAL relies on an mmap'd `-shm` shared-memory file; the FUSE VFS can't reliably back those mmap pages, so a failed page fault raises SIGBUS and kills the whole process. `feeds.init_db` re-runs the WAL pragma on every request (`ensure_initialised` in the request dependency), which maximized exposure. The framework DB is on local disk, so it was never affected.

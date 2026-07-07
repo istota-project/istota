@@ -615,7 +615,7 @@ class TestAddTransaction:
         ledger_dir = tmp_path / "ledger"
         ledger_dir.mkdir()
         ledger_file = ledger_dir / "main.beancount"
-        ledger_file.write_text('include "transactions/*.beancount"\n')
+        ledger_file.write_text("; main ledger\n")
 
         with patch("istota.money.core.ledger.run_bean_check") as mock_check:
             mock_check.return_value = (True, [])
@@ -628,9 +628,40 @@ class TestAddTransaction:
         assert result["payee"] == "Test Store"
         assert result["amount"] == 25.00
 
-        txn_file = ledger_dir / "transactions" / "2026.beancount"
-        assert txn_file.exists()
-        assert "Test Store" in txn_file.read_text()
+        # The transaction must land in the main ledger — the same file every
+        # other write path appends to and the same file bean-check validates.
+        assert "Test Store" in ledger_file.read_text()
+        # It must NOT be misfiled into an orphan transactions/ subdir that no
+        # ledger includes (ISSUE-158).
+        assert not (ledger_dir / "transactions").exists()
+
+    def test_lands_in_validated_ledger(self, tmp_path):
+        """An added transaction must be visible to bean-check on the main ledger.
+
+        Regression test for ISSUE-158: add_transaction previously wrote to an
+        un-included transactions/ subdir, so the post-write bean-check passed
+        vacuously against a ledger that never saw the entry.
+        """
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        ledger_file = ledger_dir / "main.beancount"
+        ledger_file.write_text("; main ledger\n")
+
+        checked_files = []
+
+        def fake_check(path):
+            checked_files.append(Path(path))
+            assert "Groceries" in Path(path).read_text()
+            return (True, [])
+
+        with patch("istota.money.core.ledger.run_bean_check", side_effect=fake_check):
+            result = add_transaction(
+                ledger_file, date(2026, 2, 4), "Groceries", "Weekly shop",
+                "Expenses:Food:Groceries", "Assets:Bank:Checking", 25.00,
+            )
+
+        assert result["status"] == "ok"
+        assert checked_files == [ledger_file]
 
     def test_negative_amount(self, tmp_path):
         ledger_file = tmp_path / "main.beancount"
