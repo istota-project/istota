@@ -132,11 +132,12 @@ def init_db(path: Path) -> None:
         conn = sqlite3.connect(path, timeout=30.0)
         try:
             conn.execute("PRAGMA busy_timeout = 30000")
-            if fresh:
-                # WAL is persistent in the SQLite file header — set it
-                # only on fresh creation. Re-issuing per-connect races
-                # with sibling readers and raises "database is locked".
-                conn.execute("PRAGMA journal_mode = WAL")
+            # DELETE (rollback journal), NOT WAL: this DB lives on the rclone
+            # FUSE-backed Nextcloud mount where WAL's mmap'd -shm file can
+            # SIGBUS the process (ISSUE-157). Set unconditionally (not just
+            # when fresh) so pre-existing WAL DBs convert on first touch;
+            # no-op once already DELETE.
+            conn.execute("PRAGMA journal_mode = DELETE")
             conn.executescript(SCHEMA_SQL)
             conn.execute(
                 "INSERT OR IGNORE INTO schema_meta(key, value) "

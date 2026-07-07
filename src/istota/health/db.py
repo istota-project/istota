@@ -211,12 +211,14 @@ def init_db(db_path: Path) -> None:
     """Create / migrate the SQLite schema. Idempotent."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    fresh = not db_path.exists()
     conn = sqlite3.connect(db_path, timeout=30.0)
     try:
         conn.execute("PRAGMA busy_timeout = 30000")
-        if fresh:
-            conn.execute("PRAGMA journal_mode = WAL")
+        # DELETE (rollback journal), NOT WAL: this DB lives on the rclone
+        # FUSE-backed Nextcloud mount where WAL's mmap'd -shm file can SIGBUS
+        # the process (ISSUE-157). Set unconditionally (not just when fresh)
+        # so pre-existing WAL DBs convert on first touch; no-op once DELETE.
+        conn.execute("PRAGMA journal_mode = DELETE")
         conn.executescript(SCHEMA_SQL)
         _migrate_add_content_hash(conn)
         _migrate_add_panel_encounter_fk(conn)
