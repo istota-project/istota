@@ -398,6 +398,7 @@
     group: "{{ istota_group }}"
     mode: "0755"
   when: not istota_update_only and not istota_web_only and istota_use_nextcloud_mount
+  tags: [mount]
 
 - name: Create nextcloud-mount group
   group:
@@ -405,6 +406,7 @@
     system: yes
     state: present
   when: not istota_update_only and not istota_web_only and istota_use_nextcloud_mount
+  tags: [mount]
 
 - name: Add istota user to nextcloud-mount group
   user:
@@ -412,6 +414,7 @@
     groups: nextcloud-mount
     append: yes
   when: not istota_update_only and not istota_web_only and istota_use_nextcloud_mount
+  tags: [mount]
 
 - name: Deploy rclone mount systemd service
   copy:
@@ -435,14 +438,20 @@
       Type=notify
       User={{ istota_user }}
       Group={{ istota_group }}
+      # Self-heal a dead endpoint ("Transport endpoint is not connected") before
+      # (re)mounting. Non-fatal ('-') so it's a no-op when nothing is mounted.
+      ExecStartPre=-/bin/fusermount3 -uz {{ istota_nextcloud_mount_path }}
       ExecStartPre=/bin/mkdir -p {{ istota_nextcloud_mount_path }}
       ExecStart=/usr/bin/rclone mount \
         --config {{ istota_home }}/.config/rclone/rclone.conf \
         --allow-other \
         --vfs-cache-mode full \
         --vfs-cache-max-age 1h \
-        --dir-cache-time 5s \
+        --dir-cache-time 30s \
         --poll-interval 10s \
+        --timeout 30s \
+        --contimeout 15s \
+        --low-level-retries 3 \
         {{ istota_rclone_remote }}: {{ istota_nextcloud_mount_path }}
       ExecStop=/bin/fusermount3 -u {{ istota_nextcloud_mount_path }}
       Restart=on-failure
@@ -453,6 +462,7 @@
   when: not istota_update_only and not istota_web_only and istota_use_nextcloud_mount
   notify:
     - reload systemd
+  tags: [mount]
 
 - name: Enable allow_other in FUSE config
   lineinfile:
@@ -460,6 +470,7 @@
     regexp: '^#?user_allow_other'
     line: 'user_allow_other'
   when: not istota_update_only and not istota_web_only and istota_use_nextcloud_mount
+  tags: [mount]
 
 - name: Enable and start rclone mount
   systemd:
@@ -468,6 +479,7 @@
     state: started
     daemon_reload: yes
   when: not istota_update_only and not istota_web_only and istota_use_nextcloud_mount
+  tags: [mount]
 
 - name: Set ownership of .config directory
   file:
