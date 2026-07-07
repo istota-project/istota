@@ -1948,6 +1948,7 @@
     group: root
     mode: "0755"
   when: istota_backup_enabled and not istota_web_only
+  tags: [backup]
 
 - name: Deploy istota backup cron
   template:
@@ -1957,6 +1958,7 @@
     group: root
     mode: "0644"
   when: istota_backup_enabled and not istota_web_only
+  tags: [backup]
 
 - name: Remove backup script when backups disabled
   file:

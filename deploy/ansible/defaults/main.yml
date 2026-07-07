@@ -747,6 +747,11 @@ istota_backup_rclone_config: "{{ istota_home }}/.config/rclone/rclone.conf"
 istota_backup_rclone_remote: "{{ istota_rclone_remote }}"
 istota_backup_rclone_remote_path: "Backups"
 istota_backup_log: "/var/log/{{ istota_namespace }}/{{ istota_namespace }}-backup.log"
+# Optional command run when a backup run has one or more failures. Empty = no
+# alert (backup still exits non-zero + logs the failure). The command receives
+# the alert text in the ISTOTA_BACKUP_ALERT_MESSAGE env var, e.g.:
+#   'curl -s -H "Title: zorg backup failed" -d "$ISTOTA_BACKUP_ALERT_MESSAGE" https://ntfy.example.com/zorg'
+istota_backup_alert_command: ""
 
 # Auto-update settings (poor man's CI)
 istota_auto_update_enabled: false
