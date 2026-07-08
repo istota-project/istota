@@ -2,6 +2,7 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { selectedYear } from '$lib/money/stores/transactions';
+	import { Select } from '$lib/components/ui';
 
 	let { children } = $props();
 
@@ -12,10 +13,11 @@
 		return page.url.pathname.startsWith(`${base}${path}`);
 	}
 
-	function handleYearChange(e: Event) {
-		const val = (e.target as HTMLSelectElement).value;
-		selectedYear.set(val === '' ? 0 : Number(val));
-	}
+	const yearOptions = $derived([
+		{ value: '', label: 'All' },
+		...years.map((y) => ({ value: String(y), label: String(y) })),
+	]);
+	const selectedYearValue = $derived($selectedYear ? String($selectedYear) : '');
 </script>
 
 <div class="money-section-header">
@@ -25,12 +27,12 @@
 		<a href="{base}/money/reports/balance-sheet" class:active={isActive('/money/reports/balance-sheet')}>Balance sheet</a>
 	</div>
 	<div class="money-section-tools">
-		<select class="money-control-select" value={$selectedYear || ''} onchange={handleYearChange}>
-			<option value="">All</option>
-			{#each years as y}
-				<option value={y}>{y}</option>
-			{/each}
-		</select>
+		<Select
+			value={selectedYearValue}
+			options={yearOptions}
+			onValueChange={(v) => selectedYear.set(v === '' ? 0 : Number(v))}
+			ariaLabel="Year"
+		/>
 	</div>
 </div>
 

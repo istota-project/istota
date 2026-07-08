@@ -14,6 +14,7 @@
 		type Encounter,
 		type HealthPanel,
 	} from '$lib/api';
+	import { Select, type SelectOption } from '$lib/components/ui';
 
 	// Read the panel id from ?id=… so the page is statically prerenderable
 	// under adapter-static; the actual lookup happens client-side.
@@ -70,6 +71,11 @@
 		else if (e.facility) parts.push(e.facility);
 		return parts.join(' · ');
 	}
+
+	const encounterOptions: SelectOption[] = $derived([
+		{ value: '', label: '— Not linked —' },
+		...encounters.map((e) => ({ value: String(e.id), label: encounterLabel(e) })),
+	]);
 
 	const linkedEncounter: Encounter | null = $derived.by(() => {
 		const p = panel;
@@ -220,12 +226,13 @@
 						</label>
 						<label class="full-row">
 							<span>Linked encounter</span>
-							<select bind:value={editEncounterId}>
-								<option value="">— Not linked —</option>
-								{#each encounters as e (e.id)}
-									<option value={String(e.id)}>{encounterLabel(e)}</option>
-								{/each}
-							</select>
+							<Select
+								value={editEncounterId}
+								options={encounterOptions}
+								onValueChange={(v) => (editEncounterId = v)}
+								ariaLabel="Linked encounter"
+								fullWidth
+							/>
 						</label>
 					</div>
 				{:else}
@@ -404,9 +411,8 @@
 		color: var(--text-muted);
 		font-size: var(--text-xs);
 	}
-	.header-edit input,
-	.header-edit select {
-		background: var(--surface-raised);
+	.header-edit input {
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);

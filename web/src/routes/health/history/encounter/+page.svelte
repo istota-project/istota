@@ -11,6 +11,7 @@
 		type Encounter,
 		type HealthPanel,
 	} from '$lib/api';
+	import { Select, type SelectOption } from '$lib/components/ui';
 
 	let loading = $state(true);
 	let error = $state('');
@@ -59,6 +60,10 @@
 		if (current && !opts.includes(current)) opts.unshift(current);
 		return opts;
 	});
+
+	const editTypeSelectOptions: SelectOption[] = $derived(
+		editTypeOptions.map((t) => ({ value: t, label: typeLabel(t) })),
+	);
 
 	const encounterId = $derived.by(() => {
 		const raw = page.url.searchParams.get('id');
@@ -166,11 +171,13 @@
 				</label>
 				<label>
 					<span>Type</span>
-					<select bind:value={form.encounter_type}>
-						{#each editTypeOptions as t (t)}
-							<option value={t}>{typeLabel(t)}</option>
-						{/each}
-					</select>
+					<Select
+						value={form.encounter_type ?? ''}
+						options={editTypeSelectOptions}
+						onValueChange={(v) => (form.encounter_type = v)}
+						ariaLabel="Type"
+						fullWidth
+					/>
 				</label>
 				<label>
 					<span>Provider</span>
@@ -330,7 +337,7 @@
 	}
 	.meta dl {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
 		gap: 0.6rem 1.5rem;
 		margin: 0;
 	}
@@ -414,7 +421,7 @@
 	}
 	.form .row {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
 		gap: 0.65rem;
 	}
 	.form label {
@@ -430,10 +437,9 @@
 	}
 	.form label.full { grid-column: 1 / -1; }
 	.form input,
-	.form select,
 	.form textarea {
 		padding: 0.3rem 0.5rem;
-		background: var(--surface-raised);
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);

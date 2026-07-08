@@ -1,26 +1,28 @@
 <script lang="ts">
 	import { selectedYear } from '$lib/money/stores/transactions';
 	import { accountFilter } from '$lib/money/stores/accounts';
+	import { Select } from '$lib/components/ui';
 
 	let { children } = $props();
 
 	const currentYear = new Date().getFullYear();
 	const years = Array.from({ length: 11 }, (_, i) => currentYear - i);
 
-	function handleYearChange(e: Event) {
-		const val = (e.target as HTMLSelectElement).value;
-		selectedYear.set(val === '' ? 0 : Number(val));
-	}
+	const yearOptions = $derived([
+		{ value: '', label: 'All' },
+		...years.map((y) => ({ value: String(y), label: String(y) })),
+	]);
+	const selectedYearValue = $derived($selectedYear ? String($selectedYear) : '');
 </script>
 
 <div class="money-section-header">
 	<div class="money-section-tools">
-		<select class="money-control-select" value={$selectedYear || ''} onchange={handleYearChange}>
-			<option value="">All</option>
-			{#each years as y}
-				<option value={y}>{y}</option>
-			{/each}
-		</select>
+		<Select
+			value={selectedYearValue}
+			options={yearOptions}
+			onValueChange={(v) => selectedYear.set(v === '' ? 0 : Number(v))}
+			ariaLabel="Year"
+		/>
 		<input
 			type="text"
 			class="money-control-input"

@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Section navigation in the web app (Health, Money, Location) collapses into a dropdown on phone-width screens instead of wrapping, keeping the header on one line.
+
+### Changed
+- Dropdowns across the web interface now use a single consistent, theme-matching control instead of a mix of the app's styled dropdown and native browser ones. This covers form dropdowns (settings, health, feeds) and filter controls (money year, feeds sort, location activity, medical-history type), with dropdown heights now matching the text fields beside them.
+- Card and tile grids across every module (dashboard, health, feeds, money, admin, settings) share one responsive layout.
+
 ### Fixed
+- The Health stats page no longer scrolls sideways on phones; its cards reflow to fit narrow screens.
+- On the Health "log measurement" form, the value field is no longer squeezed to near-zero width by the unit picker next to it.
 - Manually adding a transaction to a ledger now actually records it. The `add-transaction` command reported success but wrote the entry to a location no ledger read from, so it never appeared in any query, balance, invoice, or report. Entries now land in the main ledger alongside every other write path. (The bulk sync and CSV import paths were never affected.)
 - The web interface no longer crashes when opening feeds. The per-user feeds, money, location, and health databases sit on the network-backed Nextcloud storage, where the previous database journaling mode could crash the whole web process — showing up as feeds failing to load and intermittent errors. They now use a journaling mode that's safe on network storage.
 - Database backups are now resilient to a single failing database. Previously one database that failed to back up would silently abort the entire run, skipping every remaining user's backup and leaving a stray temporary file. Each database and file sync is now backed up independently, the run reports a clear failure (and can trigger an optional alert) instead of stopping early, and temporary files are always cleaned up.

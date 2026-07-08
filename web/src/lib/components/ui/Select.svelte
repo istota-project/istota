@@ -86,6 +86,10 @@
 		border-radius: 0.3rem;
 		padding: 0.3rem 0.5rem;
 		font-size: var(--text-sm);
+		/* Match native text-input height: inputs inherit line-height 1.5, but the
+		   base trigger pins 1.2, which left the full-width trigger ~4px shorter
+		   than the inputs it sits beside in forms. */
+		line-height: 1.5;
 	}
 	:global(.ui-select-trigger--full .ui-select-label) {
 		max-width: none;

@@ -12,6 +12,7 @@
 		type ImmunizationRef,
 		type ImmunizationStatus,
 	} from '$lib/api';
+	import { Select, type SelectOption } from '$lib/components/ui';
 
 	let loading = $state(true);
 	let error = $state('');
@@ -32,6 +33,17 @@
 	let formNotes = $state('');
 	let saving = $state(false);
 	let formError = $state('');
+
+	const vaccineOptions: SelectOption[] = $derived(
+		refs.map((r) => ({ value: r.name, label: r.display_name })),
+	);
+	const routeOptions: SelectOption[] = [
+		{ value: '', label: '' },
+		{ value: 'IM', label: 'IM' },
+		{ value: 'SC', label: 'SC' },
+		{ value: 'oral', label: 'Oral' },
+		{ value: 'nasal', label: 'Nasal' },
+	];
 
 	async function load() {
 		loading = true;
@@ -166,11 +178,13 @@
 		<div class="row">
 			<label>
 				<span>Vaccine</span>
-				<select bind:value={formName}>
-					{#each refs as r (r.name)}
-						<option value={r.name}>{r.display_name}</option>
-					{/each}
-				</select>
+				<Select
+					value={formName}
+					options={vaccineOptions}
+					onValueChange={(v) => (formName = v)}
+					ariaLabel="Vaccine"
+					fullWidth
+				/>
 			</label>
 			<label>
 				<span>Date</span>
@@ -194,13 +208,13 @@
 				</label>
 				<label>
 					<span>Route</span>
-					<select bind:value={formRoute}>
-						<option value=""></option>
-						<option value="IM">IM</option>
-						<option value="SC">SC</option>
-						<option value="oral">Oral</option>
-						<option value="nasal">Nasal</option>
-					</select>
+					<Select
+						value={formRoute}
+						options={routeOptions}
+						onValueChange={(v) => (formRoute = v)}
+						ariaLabel="Route"
+						fullWidth
+					/>
 				</label>
 				<label>
 					<span>Site</span>
@@ -230,11 +244,11 @@
 {:else}
 	<section class="coverage">
 		<h2>Coverage</h2>
-		<ul class="cards">
+		<ul class="cards card-grid">
 			{#each visibleCoverage as c (c.name)}
 				<li>
 					<a
-						class="card"
+						class="card interactive"
 						href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
 					>
 						<span class="name">{c.display_name}</span>
@@ -268,11 +282,11 @@
 		{#if riskBased.length > 0}
 			<details class="risk-based" bind:open={riskOpen}>
 				<summary>Risk-based vaccines ({riskBased.length})</summary>
-				<ul class="cards">
+				<ul class="cards card-grid">
 					{#each riskBased as c (c.name)}
 						<li>
 							<a
-								class="card"
+								class="card interactive"
 								href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
 							>
 								<span class="name">{c.display_name}</span>
@@ -295,7 +309,7 @@
 
 		{#if other.length > 0}
 			<h3>Other recorded</h3>
-			<ul class="cards">
+			<ul class="cards card-grid">
 				{#each other as c (c.name)}
 					<li>
 						<div class="card">
@@ -447,10 +461,9 @@
 		font-size: var(--text-xs);
 	}
 	.quick-form input,
-	.quick-form select,
 	.quick-form textarea {
 		padding: 0.3rem 0.5rem;
-		background: var(--surface-raised);
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);
@@ -498,9 +511,8 @@
 		list-style: none;
 		margin: 0;
 		padding: 0;
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-		gap: 0.5rem;
+		--card-min: 240px;
+		--card-gap: 0.5rem;
 		grid-auto-rows: 1fr;
 	}
 	.cards > li {
@@ -512,14 +524,9 @@
 		align-items: flex-start;
 		gap: 0.4rem;
 		width: 100%;
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
 		padding: 0.7rem 0.9rem;
-		text-decoration: none;
 		color: var(--text-primary);
 	}
-	.card:hover { border-color: #555; }
 	.card .name {
 		font-weight: 500;
 		font-size: var(--text-sm);

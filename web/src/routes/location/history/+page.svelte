@@ -30,6 +30,7 @@
 	import DayStats from '$lib/components/location/DayStats.svelte';
 	import TripList from '$lib/components/location/TripList.svelte';
 	import Chip from '$lib/components/ui/Chip.svelte';
+	import { Select } from '$lib/components/ui';
 	import { loadSetting, saveSetting } from '$lib/stores/persisted';
 	import { ACTIVITY_LABELS, ALL_ACTIVITY_TYPES } from '$lib/location-constants';
 
@@ -44,6 +45,10 @@
 	let showHeat = $state(loadSetting('location.showHeat', false));
 	let panelOpen = $state(false);
 	let activityFilter: string = $state('all');
+	const activityOptions = [
+		{ value: 'all', label: 'All' },
+		...ALL_ACTIVITY_TYPES.map((t) => ({ value: t, label: ACTIVITY_LABELS[t] })),
+	];
 	let showDiscover = $state(loadSetting('location.showDiscover', false));
 	let clusters: DiscoveredCluster[] = $state([]);
 	let dismissed: DismissedCluster[] = $state([]);
@@ -233,12 +238,12 @@
 			<Chip checked={showHeat} onclick={() => showHeat = !showHeat}>Heat map</Chip>
 		{/if}
 		{#if pings.length > 0}
-			<select class="mode-select" bind:value={activityFilter}>
-				<option value="all">All</option>
-				{#each ALL_ACTIVITY_TYPES as type}
-					<option value={type}>{ACTIVITY_LABELS[type]}</option>
-				{/each}
-			</select>
+			<Select
+				value={activityFilter}
+				options={activityOptions}
+				onValueChange={(v) => (activityFilter = v)}
+				ariaLabel="Activity filter"
+			/>
 		{/if}
 		<Chip checked={showDiscover} onclick={() => showDiscover = !showDiscover}>
 			Discover
@@ -477,17 +482,6 @@
 		border-radius: var(--radius-pill);
 		pointer-events: none;
 		z-index: 10;
-	}
-
-	.mode-select {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		color: var(--text-primary);
-		font: inherit;
-		font-size: var(--text-xs);
-		padding: 0.2rem 0.4rem;
-		border-radius: 0.25rem;
-		cursor: pointer;
 	}
 
 	@media (max-width: 768px) {

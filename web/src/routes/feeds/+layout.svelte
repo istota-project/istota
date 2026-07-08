@@ -23,10 +23,16 @@
 		SidebarToggle,
 		CategoryGroup,
 		Chip,
+		Select,
 	} from '$lib/components/ui';
 	import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from 'lucide-svelte';
 
 	let { children } = $props();
+
+	const sortOptions = [
+		{ value: 'published', label: 'Published' },
+		{ value: 'added', label: 'Added' },
+	];
 
 	let feeds: Feed[] = $state([]);
 	let sidebarOpen = $state(false);
@@ -133,10 +139,12 @@
 		<ShellHeader title="Feeds">
 			{#snippet nav()}
 				{#if !onSettings}
-					<select class="mode-select" bind:value={$sortBy}>
-						<option value="published">Published</option>
-						<option value="added">Added</option>
-					</select>
+					<Select
+						value={$sortBy}
+						options={sortOptions}
+						onValueChange={(v) => sortBy.set(v as 'published' | 'added')}
+						ariaLabel="Sort order"
+					/>
 					<div class="filter-group">
 						<Chip checked={$showImages} onclick={() => showImages.update((v) => !v)}>Images</Chip>
 						<Chip checked={$showText} onclick={() => showText.update((v) => !v)}>Text</Chip>
@@ -239,18 +247,8 @@
 	.filter-group {
 		display: flex;
 		gap: var(--chip-gap);
-	}
-
-	.mode-select {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		color: var(--text-primary);
-		font: inherit;
-		font-size: var(--text-xs);
-		padding: 0.2rem 0.4rem;
-		border-radius: 0.25rem;
-		cursor: pointer;
-		margin-right: 0.5rem;
+		/* Preserve the separation the sort dropdown's old margin-right gave. */
+		margin-left: 0.4rem;
 	}
 
 	.feed-btn {

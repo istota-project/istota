@@ -7,6 +7,7 @@
 		type ParsedDiagnosis,
 		type ParsedEncounter,
 	} from '$lib/api';
+	import { Select, type SelectOption } from '$lib/components/ui';
 
 	const ENCOUNTER_TYPES = [
 		'visit',
@@ -21,6 +22,21 @@
 	];
 
 	const DIAGNOSIS_STATUSES = ['active', 'chronic', 'resolved'] as const;
+
+	const encounterTypeOptions: SelectOption[] = ENCOUNTER_TYPES.map((t) => ({
+		value: t,
+		label: t,
+	}));
+	const statusOptions: SelectOption[] = DIAGNOSIS_STATUSES.map((s) => ({
+		value: s,
+		label: s,
+	}));
+	const severityOptions: SelectOption[] = [
+		{ value: '', label: '—' },
+		{ value: 'mild', label: 'mild' },
+		{ value: 'moderate', label: 'moderate' },
+		{ value: 'severe', label: 'severe' },
+	];
 
 	let file: File | null = $state(null);
 	let fileInput: HTMLInputElement | undefined = $state();
@@ -224,11 +240,13 @@
 				</label>
 				<label>
 					<span>Type</span>
-					<select bind:value={row.encounter_type}>
-						{#each ENCOUNTER_TYPES as t (t)}
-							<option value={t}>{t}</option>
-						{/each}
-					</select>
+					<Select
+						value={row.encounter_type}
+						options={encounterTypeOptions}
+						onValueChange={(v) => (row.encounter_type = v)}
+						ariaLabel="Type"
+						fullWidth
+					/>
 				</label>
 				<label>
 					<span>Provider</span>
@@ -328,39 +346,29 @@
 										/>
 									</td>
 									<td>
-										<select
+										<Select
 											value={d.status}
-											onchange={(e) =>
-												setDiagnosisField(
-													row,
-													j,
-													'status',
-													(e.currentTarget as HTMLSelectElement).value as ParsedDiagnosis['status'],
-												)}
-										>
-											{#each DIAGNOSIS_STATUSES as s (s)}
-												<option value={s}>{s}</option>
-											{/each}
-										</select>
+											options={statusOptions}
+											onValueChange={(v) =>
+												setDiagnosisField(row, j, 'status', v as ParsedDiagnosis['status'])}
+											ariaLabel="Status"
+											fullWidth
+										/>
 									</td>
 									<td>
-										<select
+										<Select
 											value={d.severity || ''}
-											onchange={(e) => {
-												const v = (e.currentTarget as HTMLSelectElement).value;
+											options={severityOptions}
+											onValueChange={(v) =>
 												setDiagnosisField(
 													row,
 													j,
 													'severity',
 													(v || null) as ParsedDiagnosis['severity'],
-												);
-											}}
-										>
-											<option value="">—</option>
-											<option value="mild">mild</option>
-											<option value="moderate">moderate</option>
-											<option value="severe">severe</option>
-										</select>
+												)}
+											ariaLabel="Severity"
+											fullWidth
+										/>
 									</td>
 									<td class="row-actions">
 										<button
@@ -439,9 +447,6 @@
 	}
 
 	.card {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
 		padding: 0.85rem 1rem;
 		margin-bottom: 0.75rem;
 		display: flex;
@@ -550,7 +555,7 @@
 	}
 	.grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
 		gap: 0.65rem;
 	}
 	label {
@@ -564,9 +569,9 @@
 		color: var(--text-muted);
 		font-size: var(--text-xs);
 	}
-	input, select, textarea {
+	input, textarea {
 		padding: 0.3rem 0.5rem;
-		background: var(--surface-raised);
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);
@@ -614,8 +619,7 @@
 	}
 	/* Compact inputs inside the diagnoses table — mirrors the immunization
 	   review-table sizing so the nested grid doesn't overpower the card. */
-	table.grid-tbl input,
-	table.grid-tbl select {
+	table.grid-tbl input {
 		padding: 0.25rem 0.4rem;
 	}
 	td.row-actions,

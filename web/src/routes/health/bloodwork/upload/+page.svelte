@@ -9,6 +9,14 @@
 		healthPanelSourceUrl,
 		type Biomarker,
 	} from '$lib/api';
+	import { Select } from '$lib/components/ui';
+
+	const flagOptions = [
+		{ value: '', label: '—' },
+		{ value: 'H', label: 'H' },
+		{ value: 'L', label: 'L' },
+		{ value: 'C', label: 'C' },
+	];
 
 	let file: File | null = $state(null);
 	let fileInput: HTMLInputElement | undefined = $state(undefined);
@@ -275,12 +283,12 @@
 											<input type="number" step="any" bind:value={b.ref_range_high} placeholder="high" />
 										</td>
 										<td>
-											<select bind:value={b.flag}>
-												<option value={null}>—</option>
-												<option value="H">H</option>
-												<option value="L">L</option>
-												<option value="C">C</option>
-											</select>
+											<Select
+												value={b.flag ?? ''}
+												options={flagOptions}
+												onValueChange={(v) => (b.flag = v === '' ? null : v)}
+												ariaLabel="Flag"
+											/>
 										</td>
 										<td><button class="del" type="button" onclick={() => removeRow(i)}>×</button></td>
 									</tr>
@@ -336,9 +344,6 @@
 		margin: 0 0 0.5rem;
 	}
 	.card {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
 		padding: 1rem;
 		display: flex;
 		flex-direction: column;
@@ -389,8 +394,8 @@
 		font-size: var(--text-sm);
 	}
 	label > span { color: var(--text-muted); font-size: var(--text-xs); }
-	input, select {
-		background: var(--surface-raised);
+	input {
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);

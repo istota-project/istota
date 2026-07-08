@@ -27,10 +27,12 @@
 		metricLabel,
 		toCanonical,
 	} from '$lib/health/units';
+	import { Select } from '$lib/components/ui';
 
 	Chart.register(LineController, LineElement, PointElement, CategoryScale, LinearScale, Tooltip, Filler);
 
 	const METRIC_KEYS = Object.keys(METRIC_LABELS);
+	const metricOptions = METRIC_KEYS.map((m) => ({ value: m, label: METRIC_LABELS[m] }));
 
 	type Range = '30d' | '90d' | '1y' | 'all';
 
@@ -354,10 +356,10 @@
 		<button class="link" onclick={() => openEntry()} type="button">Log your first measurement</button>.
 	</div>
 {:else}
-	<div class="grid">
+	<div class="grid card-grid" style="--card-min: 380px;">
 		{#each metricsToShow() as metric (metric)}
 			{@const v = formatLatestValue(metric)}
-			<button class="card" onclick={() => openEntry(metric)} type="button">
+			<button class="card interactive" onclick={() => openEntry(metric)} type="button">
 				<header>
 					<span class="label">{metricLabel(metric)}</span>
 					<span class="count">{(seriesByMetric[metric] || []).length} pts</span>
@@ -382,7 +384,7 @@
 			</button>
 		{/each}
 		{#if hasBp()}
-			<button class="card" onclick={() => openEntry('blood_pressure_systolic')} type="button">
+			<button class="card interactive" onclick={() => openEntry('blood_pressure_systolic')} type="button">
 				<header>
 					<span class="label">Blood Pressure</span>
 					<span class="count">
@@ -411,9 +413,13 @@
 			<form onsubmit={submitEntry}>
 				<label>
 					<span>Metric</span>
-					<select bind:value={formMetric}>
-						{#each METRIC_KEYS as m}<option value={m}>{METRIC_LABELS[m]}</option>{/each}
-					</select>
+					<Select
+						value={formMetric}
+						options={metricOptions}
+						onValueChange={(v) => (formMetric = v)}
+						ariaLabel="Metric"
+						fullWidth
+					/>
 				</label>
 				<label>
 					<span>Value</span>
@@ -503,26 +509,12 @@
 		text-decoration: underline;
 		padding: 0;
 	}
-	.grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-		gap: 0.75rem;
-	}
 	.card {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
-		padding: 0.75rem 0.9rem;
-		text-align: left;
 		font: inherit;
-		color: var(--text-primary);
-		cursor: pointer;
+		text-align: left;
 		display: flex;
 		flex-direction: column;
 		min-height: 170px;
-	}
-	.card:hover {
-		border-color: #555;
 	}
 	header {
 		display: flex;
@@ -614,10 +606,16 @@
 	.value-row input {
 		flex: 1;
 	}
-	.unit-select {
+	/* Specificity must beat `.modal select { width: 100% }` below, or this
+	   fixed-width unit picker would take the whole row and collapse the value
+	   input to near-zero. */
+	.value-row .unit-select {
 		width: auto;
 		min-width: 4.5rem;
 		flex: 0 0 auto;
+	}
+	.value-row input {
+		min-width: 0;
 	}
 	.unit-static {
 		font-size: var(--text-sm);
@@ -625,7 +623,7 @@
 		padding: 0.3rem 0.2rem;
 	}
 	.modal input, .modal select {
-		background: var(--surface-raised);
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);

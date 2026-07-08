@@ -6,7 +6,7 @@
 	import { Collapsible } from 'bits-ui';
 	import { getLedgers, checkLedger, AuthError } from '$lib/money/api';
 	import { selectedLedger, availableLedgers } from '$lib/money/stores/ledger';
-	import { AppShell, ShellHeader, NavLink, Select, Chip } from '$lib/components/ui';
+	import { AppShell, ShellHeader, HeaderNav, Select, Chip } from '$lib/components/ui';
 	import { Cog } from 'lucide-svelte';
 
 	let { children } = $props();
@@ -58,6 +58,14 @@
 		return page.url.pathname.startsWith(`${moneyBase}${path}`);
 	}
 
+	const navItems = $derived([
+		{ href: `${moneyBase}/accounts`, label: 'Accounts', active: isActive('/accounts') },
+		{ href: `${moneyBase}/transactions`, label: 'Transactions', active: isActive('/transactions') },
+		{ href: `${moneyBase}/reports/income-statement`, label: 'Reports', active: isActive('/reports') },
+		{ href: `${moneyBase}/taxes`, label: 'Taxes', active: isActive('/taxes') },
+		{ href: `${moneyBase}/business/invoices`, label: 'Business', active: isActive('/business') },
+	]);
+
 	const ledgerOptions = $derived($availableLedgers.map((l) => ({ value: l, label: l })));
 
 	const onSettings = $derived(page.url.pathname.startsWith(`${moneyBase}/settings`));
@@ -77,11 +85,7 @@
 		{#snippet header()}
 			<ShellHeader title="Money">
 				{#snippet nav()}
-					<NavLink href="{moneyBase}/accounts" active={isActive('/accounts')}>Accounts</NavLink>
-					<NavLink href="{moneyBase}/transactions" active={isActive('/transactions')}>Transactions</NavLink>
-					<NavLink href="{moneyBase}/reports/income-statement" active={isActive('/reports')}>Reports</NavLink>
-					<NavLink href="{moneyBase}/taxes" active={isActive('/taxes')}>Taxes</NavLink>
-					<NavLink href="{moneyBase}/business/invoices" active={isActive('/business')}>Business</NavLink>
+					<HeaderNav items={navItems} ariaLabel="Money section" />
 				{/snippet}
 				{#snippet tools()}
 					{#if $availableLedgers.length > 1}
@@ -187,16 +191,6 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-	}
-
-	:global(.money-control-select) {
-		background: var(--surface-card);
-		color: var(--text-primary);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-pill);
-		padding: 0.2rem 0.55rem;
-		font-size: var(--text-xs);
-		font-family: inherit;
 	}
 
 	:global(.money-control-input) {

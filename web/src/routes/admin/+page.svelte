@@ -208,7 +208,7 @@
 		<div class="banner error">{error}</div>
 	{:else if stats}
 		<!-- System banner -->
-		<section class="card system-banner">
+		<section class="card system-banner card-grid">
 			<div class="banner-cell">
 				<div class="cell-label">Status</div>
 				<div class="cell-value">
@@ -309,7 +309,7 @@
 			<header class="section-header">
 				<h2>Task activity</h2>
 			</header>
-			<div class="kpi-grid">
+			<div class="kpi-grid card-grid">
 				<div class="kpi">
 					<div class="kpi-label">Interactive 24h</div>
 					<div class="kpi-value">{formatNumber(stats.tasks.interactive_24h)}</div>
@@ -362,7 +362,7 @@
 				<header class="section-header">
 					<h2>Modules</h2>
 				</header>
-				<div class="module-grid">
+				<div class="module-grid card-grid">
 					{#each Object.entries(stats.modules) as [name, mod] (name)}
 						<div class="module-card" class:module-warn={moduleErrorCount(mod) > 0}>
 							<div class="module-name">{name}</div>
@@ -523,9 +523,8 @@
 	   the banner inherits the column flex and stacks vertically even when
 	   there's plenty of room for four side-by-side cells. */
 	.admin-page .system-banner {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-		gap: 0.75rem 1.5rem;
+		--card-min: 150px;
+		--card-gap: 0.75rem 1.5rem;
 	}
 
 	.banner-cell {
@@ -587,9 +586,8 @@
 	}
 
 	.kpi-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-		gap: 0.75rem 1.5rem;
+		--card-min: 140px;
+		--card-gap: 0.75rem 1.5rem;
 	}
 
 	.kpi {
@@ -801,9 +799,7 @@
 	}
 
 	.module-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-		gap: 0.75rem;
+		--card-min: 220px;
 	}
 
 	.module-card {
