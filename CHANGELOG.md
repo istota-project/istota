@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.3] - 2026-07-08
+
 ### Added
 - Section navigation in the web app (Health, Money, Location) collapses into a dropdown on phone-width screens instead of wrapping, keeping the header on one line.
 
@@ -806,7 +808,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.26.2...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.26.3...main
+[0.26.3]: https://gitlab.com/cynium/istota/-/releases/v0.26.3
 [0.26.2]: https://gitlab.com/cynium/istota/-/releases/v0.26.2
 [0.26.1]: https://gitlab.com/cynium/istota/-/releases/v0.26.1
 [0.26.0]: https://gitlab.com/cynium/istota/-/releases/v0.26.0
