@@ -10,6 +10,7 @@
 		type ImmunizationRef,
 		type ParsedImmunization,
 	} from '$lib/api';
+	import { Select, type SelectOption } from '$lib/components/ui';
 
 	type Mode = 'file' | 'paste';
 	let mode: Mode = $state('file');
@@ -30,6 +31,11 @@
 	let warnings: string[] = $state([]);
 	let parsed: ParsedImmunization[] = $state([]);
 	let refs: ImmunizationRef[] = $state([]);
+
+	const nameOptions: SelectOption[] = $derived([
+		{ value: 'Unknown', label: 'Unknown — leave as note' },
+		...refs.map((r) => ({ value: r.name, label: r.display_name })),
+	]);
 
 	onMount(async () => {
 		try {
@@ -285,12 +291,13 @@
 				{#each parsed as row, i (i)}
 					<tr class:warn={row.name === 'Unknown' || !row.date_given}>
 						<td>
-							<select bind:value={row.name}>
-								<option value="Unknown">Unknown — leave as note</option>
-								{#each refs as r (r.name)}
-									<option value={r.name}>{r.display_name}</option>
-								{/each}
-							</select>
+							<Select
+								value={row.name}
+								options={nameOptions}
+								onValueChange={(v) => (row.name = v)}
+								ariaLabel="Vaccine"
+								fullWidth
+							/>
 						</td>
 						<td>
 							<input type="date" bind:value={row.date_given} />
@@ -393,9 +400,6 @@
 	}
 
 	.card {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
 		padding: 0.85rem 1rem;
 		margin-bottom: 0.75rem;
 		display: flex;
@@ -546,8 +550,7 @@
 		font-size: 0.78rem;
 		color: var(--text-dim);
 	}
-	input,
-	select {
+	input {
 		padding: 0.25rem 0.4rem;
 		background: var(--surface-base);
 		border: 1px solid var(--border-default);

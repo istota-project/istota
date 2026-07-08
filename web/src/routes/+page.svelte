@@ -17,7 +17,7 @@
 <div class="dashboard">
 	{#if user}
 		<h1>Dashboard</h1>
-		<div class="feature-grid">
+		<div class="feature-grid card-grid" style="--card-min: 200px; --card-gap: 1rem;">
 			{#if user.features.chat}
 				<a href="{base}/chat" class="feature-card">
 					<div class="feature-title">Chat</div>
@@ -57,11 +57,6 @@
 		font-size: 1.1rem;
 		font-weight: 600;
 		margin: 0 0 1.5rem;
-	}
-	.feature-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-		gap: 1rem;
 	}
 	.feature-card {
 		display: block;

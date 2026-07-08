@@ -4,6 +4,8 @@ export { default as Sidebar } from './Sidebar.svelte';
 export { default as SidebarToggle } from './SidebarToggle.svelte';
 export { default as CategoryGroup } from './CategoryGroup.svelte';
 export { default as NavLink } from './NavLink.svelte';
+export { default as HeaderNav } from './HeaderNav.svelte';
+export type { NavItem } from './HeaderNav.svelte';
 export { default as Chip } from './Chip.svelte';
 export { default as Button } from './Button.svelte';
 export { default as Select } from './Select.svelte';

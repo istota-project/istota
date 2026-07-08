@@ -34,7 +34,7 @@
 	{:else if clients.length === 0}
 		<div class="empty">No clients configured.</div>
 	{:else}
-		<div class="client-grid">
+		<div class="client-grid card-grid">
 			{#each clients as client (client.key)}
 				<div class="client-card">
 					<div class="card-header">
@@ -85,9 +85,7 @@
 	}
 
 	.client-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-		gap: 0.75rem;
+		--card-min: 280px;
 		padding: 0.25rem;
 	}
 

@@ -75,6 +75,18 @@
 	let briefingError = $state('');
 	let briefingSaving = $state(false);
 
+	const resourceTypeOptions: SelectOption[] = $derived([
+		{ value: '', label: 'Type…' },
+		...resourceTypes.map((rt) => ({ value: rt.type, label: rt.label })),
+	]);
+	const permissionOptions: SelectOption[] = [
+		{ value: 'read', label: 'read' },
+		{ value: 'readwrite', label: 'readwrite' },
+	];
+	const briefingOutputOptions: SelectOption[] = $derived(
+		briefingOutputs.map((o) => ({ value: o, label: o })),
+	);
+
 	type ConfirmKind =
 		| { kind: 'resource'; id: number; label: string }
 		| { kind: 'briefing'; id: number; label: string };
@@ -634,12 +646,13 @@
 				<h3>Add resource</h3>
 				<div class="add-grid">
 					<SettingsField label="Type">
-						<select bind:value={newRes.type}>
-							<option value="">Type…</option>
-							{#each resourceTypes as rt (rt.type)}
-								<option value={rt.type}>{rt.label}</option>
-							{/each}
-						</select>
+						<Select
+							value={newRes.type}
+							options={resourceTypeOptions}
+							onValueChange={(v) => (newRes.type = v)}
+							ariaLabel="Type"
+							fullWidth
+						/>
 					</SettingsField>
 					<SettingsField label="Path">
 						<input
@@ -652,10 +665,13 @@
 						<input type="text" placeholder="(optional)" bind:value={newRes.name} />
 					</SettingsField>
 					<SettingsField label="Permissions">
-						<select bind:value={newRes.permissions}>
-							<option value="read">read</option>
-							<option value="readwrite">readwrite</option>
-						</select>
+						<Select
+							value={newRes.permissions}
+							options={permissionOptions}
+							onValueChange={(v) => (newRes.permissions = v)}
+							ariaLabel="Permissions"
+							fullWidth
+						/>
 					</SettingsField>
 					<SettingsField label="Extras (JSON)" wide>
 						<textarea
@@ -753,11 +769,13 @@
 						/>
 					</SettingsField>
 					<SettingsField label="Output">
-						<select bind:value={newBriefing.output}>
-							{#each briefingOutputs as opt (opt)}
-								<option value={opt}>{opt}</option>
-							{/each}
-						</select>
+						<Select
+							value={newBriefing.output}
+							options={briefingOutputOptions}
+							onValueChange={(v) => (newBriefing.output = v)}
+							ariaLabel="Output"
+							fullWidth
+						/>
 					</SettingsField>
 					<SettingsField label="Conversation token">
 						<input
@@ -881,7 +899,7 @@
 
 	.add-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
 		gap: 0.6rem;
 	}
 

@@ -9,6 +9,7 @@
 		type Diagnosis,
 		type Encounter,
 	} from '$lib/api';
+	import { Select, type SelectOption } from '$lib/components/ui';
 
 	// Suggested types — the server accepts any free-text encounter_type, so
 	// these are just defaults for the dropdowns. Unknown types from the API
@@ -147,6 +148,15 @@
 		),
 	);
 
+	const formTypeOptions: SelectOption[] = ENCOUNTER_TYPES.map((t) => ({
+		value: t,
+		label: typeLabel(t),
+	}));
+	const typeFilterOptions: SelectOption[] = $derived([
+		{ value: '', label: 'All types' },
+		...allTypes.map((t) => ({ value: t, label: typeLabel(t) })),
+	]);
+
 	onMount(load);
 </script>
 
@@ -170,11 +180,13 @@
 			</label>
 			<label>
 				<span>Type</span>
-				<select bind:value={formType}>
-					{#each ENCOUNTER_TYPES as t}
-						<option value={t}>{typeLabel(t)}</option>
-					{/each}
-				</select>
+				<Select
+						value={formType}
+						options={formTypeOptions}
+						onValueChange={(v) => (formType = v)}
+						ariaLabel="Type"
+						fullWidth
+					/>
 			</label>
 			<label>
 				<span>Provider</span>
@@ -211,12 +223,12 @@
 <div class="filter-bar">
 	<label>
 		<span>Type</span>
-		<select bind:value={typeFilter} onchange={load}>
-			<option value="">All types</option>
-			{#each allTypes as t (t)}
-				<option value={t}>{typeLabel(t)}</option>
-			{/each}
-		</select>
+		<Select
+				value={typeFilter}
+				options={typeFilterOptions}
+				onValueChange={(v) => { typeFilter = v; load(); }}
+				ariaLabel="Type filter"
+			/>
 	</label>
 	<label>
 		<span>Since</span>
@@ -349,7 +361,7 @@
 	}
 	.quick-form .row {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
 		gap: 0.65rem;
 	}
 	.quick-form label {
@@ -364,10 +376,9 @@
 		font-size: var(--text-xs);
 	}
 	.quick-form input,
-	.quick-form select,
 	.quick-form textarea {
 		padding: 0.3rem 0.5rem;
-		background: var(--surface-raised);
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);
@@ -405,15 +416,26 @@
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 	}
+	/* The Type filter is a <Select> (inline-flex trigger + chevron); the Since/
+	   Until fields are native date inputs. They derive different heights from
+	   the same padding, so pin an explicit shared box: same height, border-box,
+	   horizontal-only padding. Both then render an identical 2rem-tall field. */
 	.filter-bar input,
-	.filter-bar select {
-		padding: 0.3rem 0.5rem;
+	.filter-bar :global(.ui-select-trigger) {
+		box-sizing: border-box;
+		height: 2rem;
+		padding: 0 0.5rem;
 		background: var(--surface-raised);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);
 		font: inherit;
 		font-size: var(--text-sm);
+	}
+	.filter-bar :global(.ui-select-trigger) {
+		min-width: 9rem;
+		/* Push the chevron to the right edge instead of hugging the label. */
+		justify-content: space-between;
 	}
 
 	.layout {
@@ -438,11 +460,7 @@
 	}
 	.card {
 		display: block;
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
 		padding: 0.7rem 0.9rem;
-		text-decoration: none;
 		color: var(--text-primary);
 	}
 	.card:hover { border-color: #555; }

@@ -15,7 +15,7 @@
 		type FeedsFeedState,
 		type ServiceCard as ServiceCardData,
 	} from '$lib/api';
-	import { Button, Modal } from '$lib/components/ui';
+	import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
 	import {
 		ServiceCard,
 		SettingsLayout,
@@ -57,6 +57,11 @@
 		$state(null);
 
 	let fileInput: HTMLInputElement | undefined = $state();
+
+	const categorySelectOptions: SelectOption[] = $derived([
+		{ value: '', label: '(none)' },
+		...categoryOptions().map((slug) => ({ value: slug, label: slug })),
+	]);
 
 	async function refresh() {
 		loading = true;
@@ -350,7 +355,7 @@
 						{refreshing ? 'Queueing…' : 'Refresh all now'}
 					</Button>
 				{/snippet}
-				<div class="diag-grid">
+				<div class="diag-grid card-grid">
 					<div class="diag">
 						<span class="diag-value">{diagnostics.total_feeds}</span>
 						<span class="diag-label">subscriptions</span>
@@ -591,12 +596,13 @@
 				<input type="text" bind:value={adding.title} />
 			</SettingsField>
 			<SettingsField label="Category">
-				<select bind:value={adding.category}>
-					<option value="">(none)</option>
-					{#each categoryOptions() as slug (slug)}
-						<option value={slug}>{slug}</option>
-					{/each}
-				</select>
+				<Select
+					value={adding.category}
+					options={categorySelectOptions}
+					onValueChange={(v) => { if (adding) adding.category = v; }}
+					ariaLabel="Category"
+					fullWidth
+				/>
 			</SettingsField>
 			<SettingsField label="Poll interval (minutes, optional)">
 				<input
@@ -633,12 +639,13 @@
 				<input type="text" bind:value={editing.draft.title} />
 			</SettingsField>
 			<SettingsField label="Category">
-				<select bind:value={editing.draft.category}>
-					<option value="">(none)</option>
-					{#each categoryOptions() as slug (slug)}
-						<option value={slug}>{slug}</option>
-					{/each}
-				</select>
+				<Select
+					value={editing.draft.category}
+					options={categorySelectOptions}
+					onValueChange={(v) => { if (editing) editing.draft.category = v; }}
+					ariaLabel="Category"
+					fullWidth
+				/>
 			</SettingsField>
 			<SettingsField label="Poll interval (minutes)">
 				<input
@@ -688,9 +695,8 @@
 	   styling (diagnostics, type pill, title cell, container queries) stays. */
 
 	.diag-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-		gap: 0.5rem;
+		--card-min: 140px;
+		--card-gap: 0.5rem;
 	}
 
 	.diag {
@@ -908,7 +914,7 @@
 
 	@container settings (max-width: 420px) {
 		.diag-grid {
-			grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+			--card-min: 110px;
 		}
 
 		.diag.wide {

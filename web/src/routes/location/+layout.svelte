@@ -30,7 +30,7 @@
 		Sidebar,
 		SidebarToggle,
 		CategoryGroup,
-		NavLink,
+		HeaderNav,
 		Chip,
 	} from '$lib/components/ui';
 	import { Cog } from 'lucide-svelte';
@@ -68,6 +68,11 @@
 		const current = page.url.pathname;
 		return current === `${base}${path}` || current === `${base}${path}/`;
 	}
+
+	const navItems = $derived([
+		{ href: `${base}/location`, label: 'Today', active: isExactActive('/location') },
+		{ href: `${base}/location/history`, label: 'History', active: isActive('/location/history') },
+	]);
 
 	const onSettings = $derived(
 		page.url.pathname.startsWith(`${base}/location/settings`),
@@ -253,8 +258,7 @@
 	{#snippet header()}
 		<ShellHeader title="Location">
 			{#snippet nav()}
-				<NavLink href="{base}/location" active={isExactActive('/location')}>Today</NavLink>
-				<NavLink href="{base}/location/history" active={isActive('/location/history')}>History</NavLink>
+				<HeaderNav items={navItems} ariaLabel="Location section" />
 			{/snippet}
 			{#snippet tools()}
 				{#if !onSettings}

@@ -1,0 +1,33 @@
+/* Shared card-grid primitive — imported by app.css, so every module
+   (dashboard, health, feeds, money, admin, settings) lays out its card/tile
+   walls the same way and none of them overflow on a phone.
+
+   `.card-grid` is LAYOUT only: a responsive auto-fit wall. Set the minimum
+   card width per grid with `--card-min` (default 240px) and the gap with
+   `--card-gap` (default 0.75rem; accepts a two-value `row col` gap):
+
+       <div class="card-grid" style="--card-min: 200px;">…</div>
+       // or, when the element already has a semantic class:
+       .feed-grid { --card-min: 320px; --card-gap: 1rem; }
+
+   The `min(--card-min, 100%)` guard is the whole point — a fixed
+   `minmax(320px, 1fr)` can't shrink a track below 320px, so on a viewport
+   narrower than that the row overflows and the page scrolls sideways.
+   `min(…, 100%)` lets a lone card collapse to the viewport width while
+   keeping the multi-column layout on wider screens. `auto-fit` (not
+   `auto-fill`) so a single card stretches to fill instead of stranding a
+   min-width card beside empty phantom tracks.
+
+   The card *visual* (surface / border / radius) is intentionally NOT here:
+   `.card` already means different things across the app (bordered content
+   cards, borderless feed + cash-flow tiles, `--border-subtle` settings cards
+   via `.settings .card`), so a global `.card` rule would leak a border onto
+   the borderless ones. Each module owns its card surface; the health module's
+   shared card visual lives scoped in health/+layout.svelte, mirroring how
+   settings.css scopes `.settings .card`. */
+
+.card-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(var(--card-min, 240px), 100%), 1fr));
+	gap: var(--card-gap, 0.75rem);
+}

@@ -5,7 +5,7 @@
 		putHealthSettings,
 		type HealthSettings,
 	} from '$lib/api';
-	import { Button } from '$lib/components/ui';
+	import { Button, Select } from '$lib/components/ui';
 	import {
 		SettingsLayout,
 		SettingsCard,
@@ -25,6 +25,24 @@
 		sex: null,
 		display_units: { weight: 'kg', height: 'cm', temp: 'C' },
 	});
+
+	const sexOptions = [
+		{ value: '', label: '—' },
+		{ value: 'M', label: 'Male' },
+		{ value: 'F', label: 'Female' },
+	];
+	const weightUnitOptions = [
+		{ value: 'kg', label: 'kg' },
+		{ value: 'lb', label: 'lb' },
+	];
+	const heightUnitOptions = [
+		{ value: 'cm', label: 'cm' },
+		{ value: 'ft_in', label: 'ft / in' },
+	];
+	const tempUnitOptions = [
+		{ value: 'C', label: '°C' },
+		{ value: 'F', label: '°F' },
+	];
 
 	let dobInput = $state('');
 	let heightInput = $state('');
@@ -201,11 +219,13 @@
 			label="Biological sex"
 			hint="Used for sex-specific reference ranges on biomarkers."
 		>
-			<select bind:value={settings.sex}>
-				<option value={null}>—</option>
-				<option value="M">Male</option>
-				<option value="F">Female</option>
-			</select>
+			<Select
+				value={settings.sex ?? ''}
+				options={sexOptions}
+				onValueChange={(v) => (settings.sex = v === '' ? null : (v as 'M' | 'F'))}
+				ariaLabel="Biological sex"
+				fullWidth
+			/>
 		</SettingsField>
 	</SettingsCard>
 
@@ -214,24 +234,33 @@
 		description="All values are stored in metric. Choose how they're shown."
 	>
 		<SettingsField label="Weight">
-			<select bind:value={settings.display_units.weight}>
-				<option value="kg">kg</option>
-				<option value="lb">lb</option>
-			</select>
+			<Select
+				value={settings.display_units.weight}
+				options={weightUnitOptions}
+				onValueChange={(v) => (settings.display_units.weight = v as 'kg' | 'lb')}
+				ariaLabel="Weight unit"
+				fullWidth
+			/>
 		</SettingsField>
 
 		<SettingsField label="Height">
-			<select bind:value={settings.display_units.height}>
-				<option value="cm">cm</option>
-				<option value="ft_in">ft / in</option>
-			</select>
+			<Select
+				value={settings.display_units.height}
+				options={heightUnitOptions}
+				onValueChange={(v) => (settings.display_units.height = v as 'cm' | 'ft_in')}
+				ariaLabel="Height unit"
+				fullWidth
+			/>
 		</SettingsField>
 
 		<SettingsField label="Temperature">
-			<select bind:value={settings.display_units.temp}>
-				<option value="C">°C</option>
-				<option value="F">°F</option>
-			</select>
+			<Select
+				value={settings.display_units.temp}
+				options={tempUnitOptions}
+				onValueChange={(v) => (settings.display_units.temp = v as 'C' | 'F')}
+				ariaLabel="Temperature unit"
+				fullWidth
+			/>
 		</SettingsField>
 	</SettingsCard>
 

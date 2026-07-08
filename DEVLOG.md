@@ -2,6 +2,40 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-07: web UI — responsive card grids, collapsing nav, and one dropdown control
+
+A frontend-only pass to make the web UI hold together on phones and stop mixing dropdown styles. Three threads: a shared responsive card-grid primitive, a link-only header that collapses to a dropdown under 768px, and standardizing every native `<select>` onto the shared `Select` component.
+
+**Card grids.** The Health stats page overflowed sideways on phones: its grid used `repeat(auto-fill, minmax(380px, 1fr))`, and `auto-fill` can't shrink a track below the fixed `380px`, so on a viewport narrower than that the row is wider than the screen. The other modules had the same latent trap at various widths (feeds 320px, money clients 280px, admin/settings tiles, etc.) — ~20 grids total, `auto-fill`/`auto-fit` chosen at random. Added a global `.card-grid` layout primitive (`lib/styles/cards.css`, imported by `app.css`, mirroring how `settings.css` is wired) whose track is `minmax(min(var(--card-min, 240px), 100%), 1fr)`. The `min(…, 100%)` guard lets a lone card collapse to the viewport width while keeping the multi-column layout wider; `auto-fit` so a single card fills instead of stranding beside empty tracks. Simple card walls adopt it with a `--card-min` knob; the bespoke feeds grid (list-view variant + galleries) kept its own grid but got the same guard inline; genuine form-field/`<dl>` grids got the guard without the class.
+
+The card *visual* couldn't be globalized: `.card` already means conflicting things across the app (bordered health cards, deliberately borderless feed and cash-flow tiles, `--border-subtle` settings cards). A global bare `.card` would have leaked a border onto the borderless ones. So the ~9 identical bordered health cards dedup their surface into `.health-frame :global(.card)` scoped in the health layout, the same pattern `settings.css` uses for `.settings .card`. Non-health modules keep their own (legitimately different) card surfaces.
+
+**Collapsing header nav.** The Health/Money/Location headers are link-only nav; on a phone they wrapped. Added a `HeaderNav` component that renders `NavLink`s on desktop and a native `<select>` under 768px (native, deliberately — the OS picker is better touch UX than a custom popup on a phone). Each layout now builds a `$derived` `navItems` array (preserving its exact active-detection) and passes it in. Feeds is excluded — its header nav is the sort control + chips, not links.
+
+**Select standardization.** ~28 native `<select>` elements were replaced with the shared bits-ui-backed `Select` component (`value` + `onValueChange`, options arrays, string↔value coercion where the bound value wasn't a string, preserving any `onchange` side effect). The split that mattered: settings-context forms and toolbar filters sit on `surface-base`/`surface-card`, where `Select`/`Select fullWidth` already match; the health entry forms styled their native inputs `surface-raised`, so converting only the selects would have mismatched. Per the decision to unify on the settings pattern, those forms' input backgrounds were migrated `surface-raised → surface-base` (they sit on `surface-card` containers, so darker inputs read as inset, the settings look) and their selects converted on top. Two native holdouts stay: the `HeaderNav` mobile dropdown, and the stats inline unit picker (must stay compact and match the value input beside it). The eight straightforward card-form files were fanned out to three parallel subagents with a tight spec; the two edge files (stats, history) and all review/verification were done inline.
+
+**Three bugs surfaced and fixed along the way** (verified live in the browser via the dev server):
+- Stats "log measurement" value field collapsed to near-zero width. A later `.modal select { width: 100% }` rule (specificity 0,1,1) overrode `.unit-select`'s `width: auto` (0,1,0), and with `flex: 0 0 auto` the unit picker refused to shrink and ate the row. Fixed by raising the unit-select's specificity (`.value-row .unit-select`).
+- History filter-bar Type dropdown didn't line up with the Since/Until date inputs. A native `<input type="date">` and the inline-flex Select trigger derive different heights from the same padding, so both were pinned to an explicit `height: 2rem; box-sizing: border-box`, and the chevron right-aligned with `justify-content: space-between`.
+- `Select fullWidth` triggers rendered ~4px shorter than the text inputs beside them in every form. Measured live: inputs are 30px (inherited `line-height: 1.5`, 18px), the trigger was 26px (base `line-height: 1.2`, 14.4px). Fixed once at the component level — `line-height: 1.5` on the `--full` variant — so all forms track native input height.
+
+**Key changes:**
+- New `.card-grid` global primitive; ~20 card/tile grids migrated or guarded; no more horizontal overflow on phones.
+- New `HeaderNav` component; Health/Money/Location nav collapses to a dropdown under 768px.
+- ~28 native `<select>` unified onto the `Select` component; health entry-form inputs migrated to the `surface-base` pattern.
+- `Select fullWidth` height now matches native inputs; two alignment/width bugs fixed.
+
+**Files added/modified:**
+- `web/src/lib/styles/cards.css` (new) — `.card-grid` layout primitive; `web/src/app.css` imports it
+- `web/src/lib/components/ui/HeaderNav.svelte` (new) + `index.ts` export — desktop links / mobile dropdown
+- `web/src/lib/components/ui/Select.svelte` — `line-height: 1.5` on the `--full` variant
+- `web/src/routes/health/+layout.svelte` — shared `:global(.card)` surface; `HeaderNav`
+- `web/src/routes/{money,location}/+layout.svelte`, `money/{accounts,reports}/+layout.svelte` — `HeaderNav`; year picker unified on `Select`
+- `web/src/routes/{settings,feeds/settings,health/settings}` and the health entry-form pages — native `<select>` → `Select`; health forms migrated to `surface-base`
+- `web/src/routes/{+page,admin,feeds,money/business/clients,money/settings}` and health pages — `.card-grid` adoption / overflow guard
+- `web/src/routes/health/stats/+page.svelte` — value/unit width fix; metric picker → `Select`
+- `web/src/routes/health/history/+page.svelte` — filter-bar height + chevron alignment; selects → `Select`
+
 ## 2026-07-07: money `add-transaction` wrote to an orphan file no ledger read (ISSUE-158)
 
 `istota-skill money add-transaction` returned `status: ok`, its post-write `bean-check` passed, and the transaction was **not in the ledger** — invisible to every query, balance, invoice, and report. Low blast radius only because it isn't the primary write path (`sync-monarch` / `import-csv` are, and both worked); the defect sat unnoticed for months, leaving a fossil trail of orphaned entries under `ledgers/transactions/`.

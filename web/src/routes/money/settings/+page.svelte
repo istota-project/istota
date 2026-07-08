@@ -274,7 +274,7 @@
 				{#if entities.length === 0}
 					<p class="empty">No entities configured.</p>
 				{:else}
-					<div class="entity-grid">
+					<div class="entity-grid card-grid">
 						{#each entities as entity (entity.key)}
 							<div class="entity">
 								<div class="entity-head">
@@ -378,9 +378,8 @@
 	}
 
 	.entity-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-		gap: 0.6rem;
+		--card-min: 220px;
+		--card-gap: 0.6rem;
 	}
 
 	.entity {

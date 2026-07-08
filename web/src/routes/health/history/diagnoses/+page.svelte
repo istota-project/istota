@@ -10,6 +10,19 @@
 		type Diagnosis,
 		type Encounter,
 	} from '$lib/api';
+	import { Select, type SelectOption } from '$lib/components/ui';
+
+	const statusOptions: SelectOption[] = [
+		{ value: 'active', label: 'Active' },
+		{ value: 'chronic', label: 'Chronic' },
+		{ value: 'resolved', label: 'Resolved' },
+	];
+	const severityOptions: SelectOption[] = [
+		{ value: '', label: '—' },
+		{ value: 'mild', label: 'Mild' },
+		{ value: 'moderate', label: 'Moderate' },
+		{ value: 'severe', label: 'Severe' },
+	];
 
 	let loading = $state(true);
 	let error = $state('');
@@ -52,6 +65,14 @@
 	const active = $derived(diagnoses.filter((d) => d.status === 'active'));
 	const chronic = $derived(diagnoses.filter((d) => d.status === 'chronic'));
 	const resolved = $derived(diagnoses.filter((d) => d.status === 'resolved'));
+
+	const encounterOptions: SelectOption[] = $derived([
+		{ value: '', label: '—' },
+		...encounters.map((e) => ({
+			value: String(e.id),
+			label: `${formatDate(e.encounter_date)} · ${e.encounter_type}`,
+		})),
+	]);
 
 	async function submit(e: Event) {
 		e.preventDefault();
@@ -158,11 +179,13 @@
 			</label>
 			<label>
 				<span>Status</span>
-				<select bind:value={formStatus}>
-					<option value="active">Active</option>
-					<option value="chronic">Chronic</option>
-					<option value="resolved">Resolved</option>
-				</select>
+				<Select
+					value={formStatus}
+					options={statusOptions}
+					onValueChange={(v) => (formStatus = v as 'active' | 'chronic' | 'resolved')}
+					ariaLabel="Status"
+					fullWidth
+				/>
 			</label>
 			<label>
 				<span>ICD-10</span>
@@ -170,12 +193,13 @@
 			</label>
 			<label>
 				<span>Severity</span>
-				<select bind:value={formSeverity}>
-					<option value="">—</option>
-					<option value="mild">Mild</option>
-					<option value="moderate">Moderate</option>
-					<option value="severe">Severe</option>
-				</select>
+				<Select
+					value={formSeverity}
+					options={severityOptions}
+					onValueChange={(v) => (formSeverity = v as '' | 'mild' | 'moderate' | 'severe')}
+					ariaLabel="Severity"
+					fullWidth
+				/>
 			</label>
 			<label>
 				<span>Date diagnosed</span>
@@ -189,12 +213,13 @@
 			{/if}
 			<label>
 				<span>Linked encounter</span>
-				<select bind:value={formEncounterId}>
-					<option value="">—</option>
-					{#each encounters as e (e.id)}
-						<option value={String(e.id)}>{formatDate(e.encounter_date)} · {e.encounter_type}</option>
-					{/each}
-				</select>
+				<Select
+					value={formEncounterId}
+					options={encounterOptions}
+					onValueChange={(v) => (formEncounterId = v)}
+					ariaLabel="Linked encounter"
+					fullWidth
+				/>
 			</label>
 		</div>
 		<label class="full">
@@ -407,7 +432,7 @@
 	}
 	.form .row {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
 		gap: 0.65rem;
 	}
 	.form label {
@@ -422,9 +447,9 @@
 		font-size: var(--text-xs);
 	}
 	.form label.full { grid-column: 1 / -1; }
-	.form input, .form select, .form textarea {
+	.form input, .form textarea {
 		padding: 0.3rem 0.5rem;
-		background: var(--surface-raised);
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);

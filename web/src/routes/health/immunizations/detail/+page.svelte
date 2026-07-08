@@ -10,6 +10,15 @@
 		type Encounter,
 		type Immunization,
 	} from '$lib/api';
+	import { Select, type SelectOption } from '$lib/components/ui';
+
+	const routeOptions: SelectOption[] = [
+		{ value: '', label: '' },
+		{ value: 'IM', label: 'IM' },
+		{ value: 'SC', label: 'SC' },
+		{ value: 'oral', label: 'Oral' },
+		{ value: 'nasal', label: 'Nasal' },
+	];
 
 	let id = $derived(Number(page.url.searchParams.get('id')) || 0);
 	let loading = $state(true);
@@ -150,17 +159,15 @@
 			</label>
 			<label>
 				<span>Route</span>
-				<select
+				<Select
 					value={immunization.route ?? ''}
-					onchange={(e) =>
-						(immunization!.route = (e.currentTarget as HTMLSelectElement).value || null)}
-				>
-					<option value=""></option>
-					<option value="IM">IM</option>
-					<option value="SC">SC</option>
-					<option value="oral">Oral</option>
-					<option value="nasal">Nasal</option>
-				</select>
+					options={routeOptions}
+					onValueChange={(v) => {
+						if (immunization) immunization.route = v || null;
+					}}
+					ariaLabel="Route"
+					fullWidth
+				/>
 			</label>
 			<label>
 				<span>Site</span>
@@ -283,9 +290,6 @@
 	.btn.danger:hover:not(:disabled) { color: #e88; }
 
 	.card {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
 		padding: 0.85rem 1rem;
 		display: flex;
 		flex-direction: column;
@@ -293,7 +297,7 @@
 	}
 	.form .row {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
 		gap: 0.65rem;
 	}
 	label {
@@ -311,10 +315,9 @@
 		font-size: var(--text-xs);
 	}
 	input,
-	select,
 	textarea {
 		padding: 0.3rem 0.5rem;
-		background: var(--surface-raised);
+		background: var(--surface-base);
 		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
 		color: var(--text-primary);
