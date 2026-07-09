@@ -474,3 +474,54 @@ class TestActivitySurface:
         adapter._client = _Client()
         with pytest.raises(gm.GarminRateLimited):
             adapter.get_activities_by_date("2026-07-01", "2026-07-08", "running")
+
+
+class TestGarminRouteMove:
+    """Stage 3: Garmin auth is a cross-module connected service. Its four
+    auth routes live on the module-agnostic garmin_routes router (not
+    health-gated); only /garmin/sync stays on the health router."""
+
+    def _paths(self, router) -> set[str]:
+        return {
+            r.path for r in router.routes if hasattr(r, "path")
+        }
+
+    def test_auth_routes_on_garmin_router(self):
+        from istota import garmin_routes
+        paths = self._paths(garmin_routes.router)
+        assert {"/status", "/connect", "/mfa", "/disconnect"} <= paths
+
+    def test_garmin_auth_routes_removed_from_health_router(self):
+        from istota.health.routes import router as health_router
+        paths = self._paths(health_router)
+        assert "/garmin/status" not in paths
+        assert "/garmin/connect" not in paths
+        assert "/garmin/mfa" not in paths
+        assert "/garmin/disconnect" not in paths
+        # But daily-summary sync stays health-owned.
+        assert "/garmin/sync" in paths
+
+    def test_garmin_auth_routes_not_health_gated(self):
+        """The moved routes must NOT depend on get_user_context (which gates
+        on the health module) — a health-opted-out user still needs Garmin
+        auth for the location importer. Inspect each route endpoint's own
+        source (not the module docstring)."""
+        import inspect
+
+        from istota import garmin_routes
+        for route in garmin_routes.router.routes:
+            endpoint = getattr(route, "endpoint", None)
+            if endpoint is None:
+                continue
+            src = inspect.getsource(endpoint)
+            assert "get_user_context" not in src, route.path
+            assert "HealthContext" not in src, route.path
+
+    def test_garmin_in_connected_service_schema(self):
+        from istota.secret_schema import CONNECTED_SERVICE_SCHEMA
+        assert "garmin" in CONNECTED_SERVICE_SCHEMA
+        entry = CONNECTED_SERVICE_SCHEMA["garmin"]
+        assert entry.get("custom_ui") is True
+        assert set(entry["used_by"]) == {"health", "location"}
+        # No operator-writable keys — the blob is machine-managed.
+        assert entry["fields"] == []

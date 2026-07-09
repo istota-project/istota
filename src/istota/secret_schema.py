@@ -45,6 +45,21 @@ CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
         "oauth": True,
         "fields": [],
     },
+    "garmin": {
+        "label": "Garmin Connect",
+        # Cross-module: the health module syncs daily summaries and the
+        # location module imports GPS tracks, both off one shared token
+        # blob. Auth routes live at /istota/api/garmin/* (module-agnostic).
+        "used_by": ("health", "location"),
+        # custom_ui: not a writable-fields service and not a simple OAuth
+        # redirect either — it is an interactive email/password → MFA flow.
+        # The settings page renders the bespoke GarminCard instead of the
+        # generic ServiceCard. No operator-writable keys (the blob is
+        # machine-managed), so fields is empty and CLI validation yields an
+        # empty key set.
+        "custom_ui": True,
+        "fields": [],
+    },
     "ntfy": {
         "label": "ntfy push",
         # ntfy is consumed by `notifications._send_ntfy`, which is called

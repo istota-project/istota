@@ -30,7 +30,6 @@ from fastapi import Form
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from istota.health import db as health_db
-from istota.health import garmin as health_garmin
 from istota.health import garmin_sync as health_garmin_sync
 from istota.health._loader import UserNotFoundError, resolve_for_user
 from istota.health._migrate import ensure_initialised
@@ -2335,85 +2334,11 @@ def _user_tz(request: Request, user_id: str) -> str | None:
     return getattr(uc, "timezone", None) if uc else None
 
 
-@router.get("/garmin/status")
-async def api_garmin_status(
-    request: Request, ctx: HealthContext = Depends(get_user_context),
-):
-    user_id = _user_id_from_request(request)
-    db_path = _framework_db_path(request)
-
-    def _query():
-        return health_garmin.get_status(db_path, user_id)
-    return await asyncio.to_thread(_query)
-
-
-@router.post("/garmin/connect")
-async def api_garmin_connect(
-    request: Request,
-    _csrf: None = Depends(verify_origin),
-    ctx: HealthContext = Depends(get_user_context),
-):
-    body = await request.json()
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "body must be an object"}, status_code=400)
-    email = body.get("email")
-    password = body.get("password")
-    if not isinstance(email, str) or not isinstance(password, str):
-        return JSONResponse(
-            {"error": "email and password are required"}, status_code=400,
-        )
-    user_id = _user_id_from_request(request)
-    db_path = _framework_db_path(request)
-
-    def _do():
-        return health_garmin.connect(
-            db_path, user_id=user_id, email=email, password=password,
-        )
-
-    try:
-        return await asyncio.to_thread(_do)
-    except health_garmin.GarminAuthError as exc:
-        return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
-    except health_garmin.GarminNotInstalled as exc:
-        return JSONResponse({"status": "error", "error": str(exc)}, status_code=503)
-
-
-@router.post("/garmin/mfa")
-async def api_garmin_mfa(
-    request: Request,
-    _csrf: None = Depends(verify_origin),
-    ctx: HealthContext = Depends(get_user_context),
-):
-    body = await request.json()
-    if not isinstance(body, dict) or not isinstance(body.get("code"), str):
-        return JSONResponse({"error": "code is required"}, status_code=400)
-    user_id = _user_id_from_request(request)
-    db_path = _framework_db_path(request)
-
-    def _do():
-        return health_garmin.complete_mfa(
-            db_path, user_id=user_id, code=body["code"],
-        )
-
-    try:
-        return await asyncio.to_thread(_do)
-    except health_garmin.GarminAuthError as exc:
-        return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
-
-
-@router.post("/garmin/disconnect")
-async def api_garmin_disconnect(
-    request: Request,
-    _csrf: None = Depends(verify_origin),
-    ctx: HealthContext = Depends(get_user_context),
-):
-    user_id = _user_id_from_request(request)
-    db_path = _framework_db_path(request)
-
-    def _do():
-        return health_garmin.disconnect(db_path, user_id=user_id)
-
-    return await asyncio.to_thread(_do)
+# Garmin auth (status / connect / mfa / disconnect) moved to the
+# module-agnostic router in ``istota.garmin_routes`` — Garmin is a
+# cross-module connected service, so its auth surface is no longer gated on
+# the health module. ``/garmin/sync`` stays here: it is a health consumer
+# (daily summaries into the health stats table), not auth.
 
 
 @router.post("/garmin/sync")

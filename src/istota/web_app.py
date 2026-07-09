@@ -2435,6 +2435,7 @@ def _build_service_card(
         "last_updated": last_updated,
         "used_by": list(schema.get("used_by", ())),
         "oauth": bool(schema.get("oauth", False)),
+        "custom_ui": bool(schema.get("custom_ui", False)),
     }
     if extra:
         card.update(extra)
@@ -4059,6 +4060,17 @@ from istota.health.routes import verify_origin as _health_verify_origin
 app.include_router(_health_router, prefix="/istota/api/health", tags=["health"])
 app.dependency_overrides[_health_require_auth] = _require_api_auth
 app.dependency_overrides[_health_verify_origin] = _verify_origin
+
+# Garmin auth API — module-agnostic (Garmin is a cross-module connected
+# service). Not gated on the health module: a health-opted-out user can
+# still connect Garmin for the location track importer.
+from istota.garmin_routes import require_auth as _garmin_require_auth
+from istota.garmin_routes import router as _garmin_router
+from istota.garmin_routes import verify_origin as _garmin_verify_origin
+
+app.include_router(_garmin_router, prefix="/istota/api/garmin", tags=["garmin"])
+app.dependency_overrides[_garmin_require_auth] = _require_api_auth
+app.dependency_overrides[_garmin_verify_origin] = _verify_origin
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():

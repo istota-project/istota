@@ -9,7 +9,8 @@
 		type GarminStatus,
 	} from '$lib/api';
 	import { Button } from '$lib/components/ui';
-	import { SettingsCard, SettingsField } from '$lib/components/settings';
+	import SettingsCard from './SettingsCard.svelte';
+	import SettingsField from './SettingsField.svelte';
 
 	let loading = $state(true);
 	let busy = $state(false);

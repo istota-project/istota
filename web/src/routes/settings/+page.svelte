@@ -21,6 +21,7 @@
 	import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
 	import {
 		ServiceCard,
+		GarminCard,
 		SettingsLayout,
 		SettingsCard,
 		SettingsField,
@@ -827,13 +828,17 @@
 		{/if}
 
 		{#each activeServices as svc (svc.service)}
-			<ServiceCard
-				service={svc}
-				onChanged={reloadServices}
-				onConnect={connectGoogle}
-				onDisconnect={disconnectGoogle}
-				oauthBusy={oauthBusy}
-			/>
+			{#if svc.custom_ui && svc.service === 'garmin'}
+				<GarminCard />
+			{:else}
+				<ServiceCard
+					service={svc}
+					onChanged={reloadServices}
+					onConnect={connectGoogle}
+					onDisconnect={disconnectGoogle}
+					oauthBusy={oauthBusy}
+				/>
+			{/if}
 		{/each}
 </SettingsLayout>
 

@@ -12,7 +12,6 @@
 		SettingsField,
 	} from '$lib/components/settings';
 	import { cmToFtIn, ftInToCm } from '$lib/health/units';
-	import GarminCard from './GarminCard.svelte';
 
 	let loading = $state(true);
 	let saving = $state(false);
@@ -264,7 +263,6 @@
 		</SettingsField>
 	</SettingsCard>
 
-	<GarminCard />
 </SettingsLayout>
 
 <style>
