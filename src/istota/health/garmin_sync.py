@@ -396,7 +396,7 @@ def sync_garmin(
 
     if adapter is None:
         try:
-            adapter = _load_authenticated_adapter(framework_db_path, ctx.user_id)
+            adapter = gm.acquire_client(framework_db_path, ctx.user_id)
         except gm.GarminAuthError as exc:
             result.auth_error = True
             result.errors.append(str(exc))
@@ -502,17 +502,3 @@ def _unit_for(metric: str) -> str:
     return STAT_METRICS.get(metric, "")
 
 
-def _load_authenticated_adapter(
-    framework_db_path: Path, user_id: str,
-) -> gm.GarminAdapter:
-    """Build an adapter and rehydrate it from encrypted-store tokens.
-
-    Raises :class:`gm.GarminAuthError` when no tokens are stored — caller
-    surfaces this as a "needs reconnect" signal.
-    """
-    tokens = gm.load_tokens(framework_db_path, user_id)
-    if not tokens:
-        raise gm.GarminAuthError("no Garmin tokens — connect via /garmin/connect")
-    adapter = gm._build_adapter()
-    adapter.load_tokens(tokens)
-    return adapter

@@ -359,3 +359,118 @@ class TestErrorDetection:
         assert gm._looks_like_transient_network_error(Exception("connection reset"))
         # Not transient:
         assert not gm._looks_like_transient_network_error(Exception("400 bad request"))
+
+
+# ---------------------------------------------------------------------------
+# acquire_client — the single sanctioned way to get an authenticated Garmin
+# adapter, shared by the health daily-sync and the location track importer.
+# ---------------------------------------------------------------------------
+
+
+class _RotatingFakeAdapter:
+    """Fake whose load_tokens simulates garth rotating the OAuth blob on
+    rehydrate (login). serialize_tokens returns the rotated value, so a
+    correct acquire_client persists it back to the store."""
+
+    def __init__(self, rotated: dict[str, Any]) -> None:
+        self._rotated = rotated
+        self.loaded_with: dict[str, Any] | None = None
+        self._tokens: dict[str, Any] | None = None
+
+    def load_tokens(self, tokens: dict[str, Any]) -> None:
+        self.loaded_with = dict(tokens)
+        # Rehydrate rotated the refresh token; the fresh state lives only
+        # in memory until someone persists it.
+        self._tokens = dict(self._rotated)
+
+    def serialize_tokens(self) -> dict[str, Any]:
+        if self._tokens is None:
+            raise gm.GarminAuthError("not connected")
+        return dict(self._tokens)
+
+
+class TestAcquireClient:
+    def setup_method(self) -> None:
+        gm.set_adapter_factory(None)
+
+    def teardown_method(self) -> None:
+        gm.set_adapter_factory(None)
+
+    def test_no_tokens_raises_auth_error(self, fdb):
+        gm.set_adapter_factory(lambda: _RotatingFakeAdapter({"tokenstore": "X"}))
+        with pytest.raises(gm.GarminAuthError):
+            gm.acquire_client(fdb, "alice")
+
+    def test_returns_authenticated_adapter(self, fdb):
+        gm.store_tokens(fdb, "alice", {"tokenstore": "OLD"})
+        adapter = _RotatingFakeAdapter({"tokenstore": "OLD"})
+        gm.set_adapter_factory(lambda: adapter)
+        got = gm.acquire_client(fdb, "alice")
+        assert got is adapter
+        assert adapter.loaded_with == {"tokenstore": "OLD"}
+
+    def test_persists_rotated_tokens(self, fdb):
+        """The Mulder-#2 fix: rehydrate can rotate the refresh token; if we
+        don't persist the rotation, the next daily-sync loads a dead blob
+        and wipes it. acquire_client must write the rotated blob back."""
+        gm.store_tokens(fdb, "alice", {"tokenstore": "OLD"})
+        gm.set_adapter_factory(
+            lambda: _RotatingFakeAdapter({"tokenstore": "NEW"})
+        )
+        gm.acquire_client(fdb, "alice")
+        assert gm.load_tokens(fdb, "alice") == {"tokenstore": "NEW"}
+
+    def test_persist_can_be_skipped(self, fdb):
+        gm.store_tokens(fdb, "alice", {"tokenstore": "OLD"})
+        gm.set_adapter_factory(
+            lambda: _RotatingFakeAdapter({"tokenstore": "NEW"})
+        )
+        gm.acquire_client(fdb, "alice", persist_rotation=False)
+        assert gm.load_tokens(fdb, "alice") == {"tokenstore": "OLD"}
+
+
+class TestActivitySurface:
+    """The adapter exposes GPS-activity endpoints (used by the track
+    importer) through the same _call_optional wrapper the daily summaries
+    use, so the importer inherits 429 / auth / transient handling."""
+
+    def test_real_adapter_has_activity_methods(self):
+        adapter = gm._RealGarminAdapter.__new__(gm._RealGarminAdapter)
+        assert hasattr(adapter, "get_activities_by_date")
+        assert hasattr(adapter, "get_activity_details")
+
+    def test_get_activities_by_date_delegates(self):
+        class _Client:
+            def get_activities_by_date(self, start, end, activitytype):
+                return [{"start": start, "end": end, "type": activitytype}]
+
+        adapter = gm._RealGarminAdapter.__new__(gm._RealGarminAdapter)
+        adapter._client = _Client()
+        out = adapter.get_activities_by_date("2026-07-01", "2026-07-08", "running")
+        assert out == [{"start": "2026-07-01", "end": "2026-07-08",
+                        "type": "running"}]
+
+    def test_get_activity_details_passes_maxpoly(self):
+        seen = {}
+
+        class _Client:
+            def get_activity_details(self, activity_id, maxpoly=None):
+                seen["id"] = activity_id
+                seen["maxpoly"] = maxpoly
+                return {"geoPolylineDTO": {"polyline": []}}
+
+        adapter = gm._RealGarminAdapter.__new__(gm._RealGarminAdapter)
+        adapter._client = _Client()
+        out = adapter.get_activity_details("42", maxpoly=4000)
+        assert seen == {"id": "42", "maxpoly": 4000}
+        assert out == {"geoPolylineDTO": {"polyline": []}}
+
+    def test_activity_rate_limit_raises(self):
+        class _Client:
+            def get_activities_by_date(self, *a, **k):
+                raise Exception("429 Too Many Requests, Retry-After: 30")
+
+        adapter = gm._RealGarminAdapter.__new__(gm._RealGarminAdapter)
+        adapter._client = _Client()
+        with pytest.raises(gm.GarminRateLimited):
+            adapter.get_activities_by_date("2026-07-01", "2026-07-08", "running")
