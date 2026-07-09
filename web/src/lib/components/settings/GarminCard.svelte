@@ -6,6 +6,7 @@
 		submitGarminMfa,
 		disconnectGarmin,
 		syncGarmin,
+		importGarminTracks,
 		type GarminStatus,
 	} from '$lib/api';
 	import { Button } from '$lib/components/ui';
@@ -112,6 +113,23 @@
 		}
 	}
 
+	async function importTracks() {
+		busy = true;
+		resetBanners();
+		try {
+			const r = await importGarminTracks(30);
+			if (r.activities === 0) {
+				info = 'No new GPS activities to import in the last 30 days.';
+			} else {
+				info = `Imported ${r.inserted} track points from ${r.activities} activit${r.activities === 1 ? 'y' : 'ies'} into your location history.`;
+			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Track import failed';
+		} finally {
+			busy = false;
+		}
+	}
+
 	async function doDisconnect() {
 		busy = true;
 		resetBanners();
@@ -143,7 +161,7 @@
 
 <SettingsCard
 	title="Garmin Connect"
-	description="Pull daily summaries (sleep, stress, body battery, steps, SpO₂, HRV, VO₂ max, resting HR, body composition) into your stats."
+	description="Connect once for both Health and Location. Sync daily summaries (sleep, stress, body battery, steps, SpO₂, HRV, VO₂ max, resting HR, body composition) into your stats, and import GPS tracks from watch-recorded runs, hikes, and walks into your location history."
 >
 	{#if loading}
 		<p class="muted">Loading…</p>
@@ -167,7 +185,10 @@
 		{/if}
 		<div class="actions">
 			<Button variant="primary" onclick={syncNow} disabled={busy}>
-				{busy ? 'Syncing…' : 'Sync now'}
+				{busy ? 'Working…' : 'Sync health data'}
+			</Button>
+			<Button variant="subtle" onclick={importTracks} disabled={busy}>
+				{busy ? 'Working…' : 'Import GPS tracks'}
 			</Button>
 			<Button variant="ghost" onclick={doDisconnect} disabled={busy}>
 				Disconnect

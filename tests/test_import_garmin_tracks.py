@@ -1,34 +1,18 @@
-"""Tests for scripts/import_garmin_tracks.py.
+"""Tests for the Garmin track importer core (istota.location.garmin_import).
 
-The script is a standalone cron artifact; its pure logic is extracted into
-importable functions so it can be tested without Garmin or the live DB.
-The DB-glue tests run against a temp per-user location.db built from
-istota.location.db.init_db.
+The pure logic (parse_ts / filter_shadowed / downsample / parse_polyline)
+is tested without Garmin or the live DB; the DB-glue tests run against a
+temp per-user location.db built from istota.location.db.init_db.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
-
 import pytest
 
 from istota.location import db as location_db
+from istota.location import garmin_import as igt
 
 
-def _load_script():
-    repo_root = Path(__file__).resolve().parent.parent
-    path = repo_root / "scripts" / "import_garmin_tracks.py"
-    spec = importlib.util.spec_from_file_location("_igt", path)
-    mod = importlib.util.module_from_spec(spec)
-    # Register before exec so @dataclass can resolve cls.__module__.
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-igt = _load_script()
 TP = igt.TrackPoint
 
 
