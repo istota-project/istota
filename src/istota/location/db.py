@@ -36,7 +36,7 @@ from istota.location.models import (
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 # Tables in FK-target-first order: places -> visits -> location_pings,
@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS location_pings (
     activity_type TEXT,
     wifi TEXT,
     place_id INTEGER REFERENCES places(id),
-    visit_id INTEGER REFERENCES visits(id)
+    visit_id INTEGER REFERENCES visits(id),
+    source TEXT NOT NULL DEFAULT 'overland'
 );
 CREATE INDEX IF NOT EXISTS idx_location_pings_time ON location_pings(timestamp);
 
@@ -139,9 +140,16 @@ def init_db(path: Path) -> None:
             # no-op once already DELETE.
             conn.execute("PRAGMA journal_mode = DELETE")
             conn.executescript(SCHEMA_SQL)
+            _migrate_schema(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO schema_meta(key, value) "
                 "VALUES('version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+            # A v1 DB wrote version='1' with INSERT OR IGNORE; keep the
+            # recorded version honest after an additive migration.
+            conn.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'version'",
                 (str(SCHEMA_VERSION),),
             )
             if fresh:
@@ -152,6 +160,28 @@ def init_db(path: Path) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Additive, idempotent schema migrations for pre-existing DBs.
+
+    ``executescript(SCHEMA_SQL)`` uses ``CREATE TABLE IF NOT EXISTS``, so a
+    table that already exists is never re-created and never gains new
+    columns. Column additions run here, each guarded by a
+    ``PRAGMA table_info`` presence check so re-running is a no-op.
+
+    v2 (garmin-track-import-to-location): ``location_pings.source`` — a
+    first-class provenance column so Overland and Garmin (and any future
+    source) pings are distinguishable by a plain predicate. Existing rows
+    predate multi-source ingest and are all Overland, so the DEFAULT
+    backfills them correctly.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(location_pings)")}
+    if "source" not in cols:
+        conn.execute(
+            "ALTER TABLE location_pings "
+            "ADD COLUMN source TEXT NOT NULL DEFAULT 'overland'"
+        )
 
 
 @contextmanager
@@ -351,19 +381,42 @@ def insert_ping(
     wifi: str | None = None,
     place_id: int | None = None,
     visit_id: int | None = None,
+    source: str = "overland",
+    received_at: str | None = None,
 ) -> int:
-    cur = conn.execute(
-        """
-        INSERT INTO location_pings (
-            timestamp, lat, lon, altitude, accuracy, speed, course,
-            battery, activity_type, wifi, place_id, visit_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            timestamp, lat, lon, altitude, accuracy, speed, course,
-            battery, activity_type, wifi, place_id, visit_id,
-        ),
-    )
+    """Insert a ping. ``source`` tags provenance ('overland' native, 'garmin'
+    imported). ``received_at`` overrides the schema ``datetime('now')``
+    default — the Garmin importer passes the point's own historical
+    timestamp so retention (which deletes by ``received_at``) treats a
+    backfilled ping as contemporaneous, not as 'arrived today'."""
+    if received_at is None:
+        cur = conn.execute(
+            """
+            INSERT INTO location_pings (
+                timestamp, lat, lon, altitude, accuracy, speed, course,
+                battery, activity_type, wifi, place_id, visit_id, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                timestamp, lat, lon, altitude, accuracy, speed, course,
+                battery, activity_type, wifi, place_id, visit_id, source,
+            ),
+        )
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO location_pings (
+                timestamp, received_at, lat, lon, altitude, accuracy, speed,
+                course, battery, activity_type, wifi, place_id, visit_id,
+                source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                timestamp, received_at, lat, lon, altitude, accuracy, speed,
+                course, battery, activity_type, wifi, place_id, visit_id,
+                source,
+            ),
+        )
     return int(cur.lastrowid or 0)
 
 

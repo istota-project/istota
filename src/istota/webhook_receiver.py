@@ -242,6 +242,7 @@ def _process_feature(
         activity_type=activity_type,
         wifi=props.get("wifi"),
         place_id=place_id,
+        source="overland",
     )
 
     if low_accuracy:
