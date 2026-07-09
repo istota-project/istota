@@ -32,6 +32,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -152,6 +153,16 @@ class GarminAdapter(Protocol):
     def get_user_summary(self, date: str) -> dict[str, Any] | None: ...
 
     def get_body_composition(self, date: str) -> dict[str, Any] | None: ...
+
+    # GPS activities (track importer).
+    def get_activities_by_date(
+        self, startdate: str, enddate: str | None = None,
+        activitytype: str | None = None,
+    ) -> list[dict[str, Any]] | None: ...
+
+    def get_activity_details(
+        self, activity_id: str, *, maxpoly: int = 4000,
+    ) -> dict[str, Any] | None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +351,29 @@ class _RealGarminAdapter:
     def get_body_composition(self, date: str) -> dict[str, Any] | None:
         return self._call_optional("get_body_composition", date)
 
-    def _call_optional(self, method: str, *args: Any) -> Any:
+    # -- GPS activities (track importer) -------------------------------------
+    #
+    # Routed through _call_optional like the daily summaries, so callers
+    # inherit 429 (GarminRateLimited) / auth (GarminAuthError) / transient
+    # retry. A non-auth, non-429 failure returns None → the importer skips
+    # that activity.
+
+    def get_activities_by_date(
+        self, startdate: str, enddate: str | None = None,
+        activitytype: str | None = None,
+    ) -> list[dict[str, Any]] | None:
+        return self._call_optional(
+            "get_activities_by_date", startdate, enddate, activitytype,
+        )
+
+    def get_activity_details(
+        self, activity_id: str, *, maxpoly: int = 4000,
+    ) -> dict[str, Any] | None:
+        return self._call_optional(
+            "get_activity_details", activity_id, maxpoly=maxpoly,
+        )
+
+    def _call_optional(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """Call ``method`` on the SDK client with retry-once on transient
         failures and Retry-After honoring on 429.
 
@@ -356,7 +389,7 @@ class _RealGarminAdapter:
         last_exc: BaseException | None = None
         for attempt in (1, 2):
             try:
-                return fn(*args)
+                return fn(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 if _looks_like_auth_error(exc):
@@ -560,6 +593,69 @@ def load_tokens(db_path: Path, user_id: str) -> dict[str, Any] | None:
         return None
     sdk = wrapper.get("sdk")
     return sdk if isinstance(sdk, dict) else None
+
+
+@contextmanager
+def _garmin_token_lock(user_id: str):
+    """Host-local exclusive lock serialising Garmin token writes for a user.
+
+    Both consumers of the token blob (the health daily-sync and the
+    location track importer) run on the same host, so a host-local
+    ``fcntl.flock`` is sufficient to stop them clobbering each other's
+    rotated-token writes. Anchored in the OS temp dir (never the Nextcloud
+    FUSE mount, where flock is unreliable)."""
+    import fcntl
+    import re
+    import tempfile
+
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", user_id) or "_"
+    lock_path = Path(tempfile.gettempdir()) / f"istota-garmin-{safe}.lock"
+    with open(lock_path, "w") as fp:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+
+
+def acquire_client(
+    db_path: Path, user_id: str, *, persist_rotation: bool = True,
+) -> GarminAdapter:
+    """Load stored tokens, rehydrate an authenticated adapter, and persist
+    any rotated tokens back under a per-user lock.
+
+    This is the ONLY sanctioned way to obtain an authenticated Garmin
+    client. Both the health daily-sync and the location track importer go
+    through it, so the token blob has a single writer per acquisition and a
+    rotation is never discarded — rehydrate (``client.login(tokenstore=…)``)
+    can rotate the refresh token in memory; if a caller logged in and threw
+    the rotated state away, the next sync would load a now-dead blob and
+    ``mark_token_error`` would wipe it ("reconnect forever").
+
+    Raises :class:`GarminAuthError` when no tokens are stored or rehydrate
+    fails — the caller surfaces this as a "reconnect" signal.
+
+    ``persist_rotation=False`` skips the write-back (a pure inspection path;
+    note the server-side rotation still happened during login, so this is
+    only safe when a fresh acquisition will follow before the next sync)."""
+    db_path = _validate_db_path(db_path)
+    tokens = load_tokens(db_path, user_id)
+    if not tokens:
+        raise GarminAuthError(
+            "no Garmin tokens — connect via Settings → Connected services",
+        )
+    adapter = _build_adapter()
+    adapter.load_tokens(tokens)  # rehydrate; may rotate the blob in memory
+    if persist_rotation:
+        try:
+            rotated = adapter.serialize_tokens()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("garmin token re-serialise after rehydrate failed: %s", exc)
+            rotated = None
+        if rotated:
+            with _garmin_token_lock(user_id):
+                store_tokens(db_path, user_id, rotated)
+    return adapter
 
 
 def clear_tokens(db_path: Path, user_id: str) -> None:
