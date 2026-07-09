@@ -57,7 +57,7 @@ Location data lives in per-user SQLite files at `{workspace}/location/data/locat
 
 | Table | Purpose |
 |---|---|
-| `location_pings` | Raw GPS data |
+| `location_pings` | Raw GPS data (carries a `source` column: `overland` for native phone pings, `garmin` for imported watch tracks) |
 | `places` | Named geofences with coordinates and radius |
 | `visits` | Detected place visits (arrival/departure) |
 | `location_state` | Per-user tracking state |
@@ -66,6 +66,22 @@ Location data lives in per-user SQLite files at `{workspace}/location/data/locat
 Old pings are cleaned after `location_ping_retention_days` (default 365).
 
 The two Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) remain in the framework `istota.db` for cross-user dedup. Skill subcommands and web routes that need reverse geocoding open a second connection via `location.db.with_geocode_conn(framework_db_path)`.
+
+## Garmin track import
+
+Overland (the phone tracker) is the normal source of pings, but activities recorded on a Garmin watch without the phone (watch-only runs, hikes where the phone stays packed or dies) leave gaps. `scripts/import_garmin_tracks.py` pulls GPS tracks for watch-recorded running / hiking / walking activities and inserts them into `location.db` as `source='garmin'` pings, **only where Overland has no native coverage** — native always wins.
+
+It authenticates through the shared Garmin connection (Settings → Connected services; the same credentials the health module uses), so connect Garmin once and both features work. The dedup is spatiotemporal: a Garmin point is dropped only when a native ping exists within both a time band (`--guard-band`, default 300 s) and a distance band (`--guard-radius`, default 150 m) of it — so a phone left at home (which keeps emitting stationary pings) never shadows a run happening elsewhere. Imported points are placeless breadcrumbs (`place_id` NULL) that show on the map and in history but don't create place visits. Re-running is idempotent (evict-then-reinsert per activity), and a late Overland upload for a gap-filled window evicts the now-covered imports on the next run.
+
+```
+# Dry-run (read-only) — see what would import over the last 30 days
+scripts/import_garmin_tracks.py --user stefan --days-back 30 --dry-run
+
+# Nightly rolling import
+scripts/import_garmin_tracks.py --user stefan --days-back 7
+```
+
+**Environment / cron.** The script decrypts the Garmin token blob, so it needs `ISTOTA_DB_PATH` and `ISTOTA_SECRET_KEY` in its environment and must run in the real scheduler/cron environment where `location.db` is writable (never inside a task sandbox, where the DB is read-only). Because istota's CRON.md `command:` jobs deliberately strip `*_SECRET`/`*_TOKEN` vars, wire the nightly run as a **system cron entry or systemd timer that sources the istota `EnvironmentFile`** (the same one the systemd units use), not as a CRON.md job. `--dry-run` is read-only and safe to run anywhere the env is available.
 
 ## Network access
 
