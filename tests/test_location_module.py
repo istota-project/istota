@@ -87,7 +87,7 @@ class TestInitDb:
             row = conn.execute(
                 "SELECT value FROM schema_meta WHERE key='version'"
             ).fetchone()
-        assert row["value"] == "1"
+        assert row["value"] == "2"
 
     def test_init_db_writes_schema_only_sentinel_on_fresh(self, location_path):
         location_db.init_db(location_path)
@@ -165,6 +165,127 @@ class TestInitDb:
 # ctx-manager protocol; sqlite3.Connection already implements __enter__
 # and __exit__ for transaction handling but the conn is left open. We
 # rely on tmp_path teardown to close the file handles.
+
+
+# -- source column (multi-source provenance) --------------------------------
+
+
+class TestSourceColumn:
+    """Stage 1 of garmin-track-import-to-location: location_pings carries a
+    first-class `source` column so Overland and Garmin (and any future
+    source) pings are distinguishable by a plain predicate."""
+
+    def test_fresh_db_has_source_column_default_overland(self, location_path):
+        location_db.init_db(location_path)
+        with location_db.connect(location_path) as conn:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(location_pings)"
+            )}
+            assert "source" in cols
+            ping_id = location_db.insert_ping(
+                conn, "2026-07-08T10:00:00Z", 34.0, -118.0,
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT source FROM location_pings WHERE id = ?", (ping_id,),
+            ).fetchone()
+        assert row["source"] == "overland"
+
+    def test_insert_ping_writes_explicit_source(self, location_path):
+        location_db.init_db(location_path)
+        with location_db.connect(location_path) as conn:
+            ping_id = location_db.insert_ping(
+                conn, "2026-07-08T10:00:00Z", 34.0, -118.0, source="garmin",
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT source FROM location_pings WHERE id = ?", (ping_id,),
+            ).fetchone()
+        assert row["source"] == "garmin"
+
+    def test_insert_ping_received_at_override(self, location_path):
+        """The importer stamps received_at with the ping's real historical
+        timestamp so retention treats a backfilled ping as contemporaneous,
+        not as 'arrived today'."""
+        location_db.init_db(location_path)
+        historical = "2025-01-02T03:04:05Z"
+        with location_db.connect(location_path) as conn:
+            ping_id = location_db.insert_ping(
+                conn, historical, 34.0, -118.0,
+                source="garmin", received_at=historical,
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT received_at FROM location_pings WHERE id = ?",
+                (ping_id,),
+            ).fetchone()
+        assert row["received_at"] == historical
+
+    def test_insert_ping_received_at_defaults_to_now(self, location_path):
+        location_db.init_db(location_path)
+        with location_db.connect(location_path) as conn:
+            ping_id = location_db.insert_ping(
+                conn, "2026-07-08T10:00:00Z", 34.0, -118.0,
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT received_at FROM location_pings WHERE id = ?",
+                (ping_id,),
+            ).fetchone()
+        # Schema default datetime('now') → a non-null timestamp, not the
+        # ping's own (which carried a 'Z').
+        assert row["received_at"] is not None
+        assert not row["received_at"].endswith("Z")
+
+    def test_migration_adds_source_to_legacy_v1_db(self, location_path):
+        """A pre-existing v1 location.db (location_pings without a source
+        column) gets the column added and every existing row backfilled to
+        'overland' on the next init_db, without losing data."""
+        # Build a v1-shaped DB by hand: location_pings sans `source`.
+        conn = sqlite3.connect(location_path)
+        conn.executescript(
+            """
+            CREATE TABLE location_pings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                received_at TEXT NOT NULL DEFAULT (datetime('now')),
+                lat REAL NOT NULL,
+                lon REAL NOT NULL,
+                altitude REAL, accuracy REAL, speed REAL, course REAL,
+                battery REAL, activity_type TEXT, wifi TEXT,
+                place_id INTEGER, visit_id INTEGER
+            );
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_meta(key, value) VALUES('version', '1');
+            INSERT INTO location_pings (timestamp, lat, lon)
+                VALUES ('2026-01-01T00:00:00Z', 10.0, 20.0);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        # Migrate.
+        location_db.init_db(location_path)
+
+        with location_db.connect(location_path) as conn:
+            cols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(location_pings)"
+            )}
+            assert "source" in cols
+            row = conn.execute(
+                "SELECT lat, lon, source FROM location_pings"
+            ).fetchone()
+            assert row["lat"] == 10.0 and row["lon"] == 20.0
+            assert row["source"] == "overland"
+
+        # Idempotent: a second init_db must not raise (duplicate-column) or
+        # change the row.
+        location_db.init_db(location_path)
+        with location_db.connect(location_path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM location_pings"
+            ).fetchone()["c"]
+        assert count == 1
 
 
 # -- loader -----------------------------------------------------------------
