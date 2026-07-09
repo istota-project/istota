@@ -481,6 +481,7 @@ export interface ServiceCard {
 	last_updated: string | null;
 	used_by?: string[];
 	oauth?: boolean;
+	custom_ui?: boolean;  // render a bespoke card (garmin) instead of fields
 	connected?: boolean;  // google_workspace OAuth state
 	enabled?: boolean;    // google_workspace module flag
 }
@@ -1333,15 +1334,36 @@ export interface GarminSyncResponse {
 	auth_error: boolean;
 }
 
+// Garmin auth is a cross-module connected service: its routes live at
+// /api/garmin/*, not under /api/health. (Daily-summary sync stays health-
+// owned — see syncGarmin below.)
+async function garminFetch<T>(path: string, init?: RequestInit): Promise<T> {
+	const resp = await fetch(`${base}/api/garmin${path}`, {
+		...init,
+		credentials: 'same-origin',
+	});
+	if (resp.status === 401) throw new AuthError();
+	if (!resp.ok) {
+		let body: { error?: string } = {};
+		try {
+			body = await resp.json();
+		} catch {
+			// ignore
+		}
+		throw new Error(body.error || `Garmin API error: ${resp.status}`);
+	}
+	return resp.json();
+}
+
 export async function getGarminStatus(): Promise<GarminStatus> {
-	return healthFetch('/garmin/status');
+	return garminFetch('/status');
 }
 
 export async function connectGarmin(
 	email: string,
 	password: string,
 ): Promise<GarminConnectResponse> {
-	return healthFetch('/garmin/connect', {
+	return garminFetch('/connect', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ email, password }),
@@ -1349,7 +1371,7 @@ export async function connectGarmin(
 }
 
 export async function submitGarminMfa(code: string): Promise<GarminConnectResponse> {
-	return healthFetch('/garmin/mfa', {
+	return garminFetch('/mfa', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ code }),
@@ -1357,7 +1379,7 @@ export async function submitGarminMfa(code: string): Promise<GarminConnectRespon
 }
 
 export async function disconnectGarmin(): Promise<{ status: string }> {
-	return healthFetch('/garmin/disconnect', { method: 'POST' });
+	return garminFetch('/disconnect', { method: 'POST' });
 }
 
 export async function syncGarmin(days_back = 7): Promise<GarminSyncResponse> {
