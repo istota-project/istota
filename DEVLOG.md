@@ -2,6 +2,39 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-08: Garmin GPS track import into location + Garmin as a cross-module connected service
+
+Stefan records runs/hikes on a Garmin watch that the phone-based Overland tracker never sees (watch-only activities, or the phone left home/dead). This adds a standalone importer that pulls those GPS tracks into the per-user `location.db`, filling only the gaps where native Overland pings are absent. Along the way Garmin stopped being a health-module feature and became a shared connected service, since both Health (daily summaries) and Location (tracks) now consume one token blob.
+
+The draft spec was reviewed by two subagents before building. Scully verified all twelve concrete API claims against the code (buildable as written). Mulder found six real failure modes; the load-bearing one killed the original design: the dedup was purely temporal ("drop a Garmin point if any native ping exists near its timestamp"), but a phone left at home keeps emitting *stationary* native pings for the whole activity window — so a watch-only run would be fully shadowed (nothing imported) or produce a Home↔route teleporting sawtooth. Confirmed the premise against the code (`activity_type='stationary'` is a real, expected data category). Fix: the shadow filter is now **spatiotemporal** — a Garmin point is dropped only when a native ping is within both a time band (default 300s) AND a distance band (default 150m). The spatial gate means far-away home pings can't shadow a run elsewhere, which also lets the time band be generous without harming watch-only imports.
+
+Two of Mulder's other findings were resolved by architectural decisions Stefan called rather than by patches: (1) provenance became a first-class `source` column on `location_pings` (`overland`/`garmin`) instead of a bolt-on sidecar table — the sidecar could desync and let an imported ping masquerade as native, corrupting the filter; a column is written atomically with the row and makes "native" a plain predicate. (2) A single shared `garmin.acquire_client` owns the token lifecycle: rehydrate (`client.login(tokenstore=…)`) can rotate the refresh token in memory, and a second consumer that discarded the rotation would leave the daily-sync loading a dead blob that then gets wiped ("reconnect forever"). `acquire_client` re-persists the rotated blob under a per-user lock, and both consumers go through it.
+
+Other fixes folded in: imported pings are placeless (`place_id` NULL) route breadcrumbs — snapping mid-route points to nearby named places, combined with imports' `accuracy=None` (which `reconcile_visits`' accuracy-CASE trusts), would have fabricated phantom visits; placeless imports also mean the importer needs no `reconcile_visits` call at all. Native timestamps are parsed to epoch defensively (Overland stores them heterogeneously — Z, offset, or microseconds-no-Z). `received_at` is set to the point's own historical timestamp so retention treats a backfill as contemporaneous. Idempotency is evict-then-reinsert per activity under a per-user flock.
+
+Built in six commits, TDD throughout; the pure logic (spatiotemporal filter incl. the phone-at-home regression, downsample, polyline parse, evict/reinsert convergence) is fully unit-tested. Two items remain that can only be done on the deploy host: confirming the live Garmin polyline point key names against the API (hard-coded to the documented shape with defensive skipping), and wiring the nightly cron — which must be a system cron / systemd timer sourcing the service EnvironmentFile, since the in-tree scheduled-job path strips the secret key needed to decrypt the token blob.
+
+**Key changes:**
+- Spatiotemporal native-coverage shadow filter (time band AND distance band) — replaces the temporal-only design that dropped watch-only runs.
+- First-class `source` column on `location_pings` (schema v2, additive guarded migration backfilling existing rows to `overland`); `insert_ping` gains `source`/`received_at`.
+- Shared `garmin.acquire_client` with token-rotation re-persist under a per-user lock; daily-sync refactored onto it; adapter gains GPS-activity methods through the existing `_call_optional` (inherits 429/auth/transient handling).
+- Garmin auth extracted to a module-agnostic router, no longer gated on the health module; added to the connected-services schema with a `custom_ui` flag; the card moved from Health settings to the general Connected services list.
+- Standalone importer with dry-run, per-user flock, evict-then-reinsert idempotency, placeless source-tagged inserts.
+
+**Files added/modified:**
+- `scripts/import_garmin_tracks.py` (new) — the importer (pure logic + fetch/DB glue + CLI)
+- `tests/test_import_garmin_tracks.py` (new) — pure-logic + DB-glue tests
+- `src/istota/garmin_routes.py` (new) — module-agnostic Garmin auth router
+- `src/istota/location/db.py` — `source` column, schema v2 + `_migrate_schema`, `insert_ping` params
+- `src/istota/health/garmin.py` — `acquire_client`, `_garmin_token_lock`, adapter GPS-activity methods, `_call_optional` kwargs
+- `src/istota/health/garmin_sync.py` — refactored onto `acquire_client`
+- `src/istota/health/routes.py` — Garmin auth routes removed (sync stays)
+- `src/istota/web_app.py` — mount the Garmin router
+- `src/istota/secret_schema.py` — `garmin` connected service (`custom_ui`)
+- `src/istota/webhook_receiver.py` — Overland stamps `source="overland"`
+- `web/src/lib/components/settings/GarminCard.svelte` (moved from health settings), `web/src/lib/api.ts`, `web/src/routes/settings/+page.svelte`, `web/src/routes/health/settings/+page.svelte`
+- `docs/features/location.md` — Garmin import + env/cron note
+
 ## 2026-07-07: web UI — responsive card grids, collapsing nav, and one dropdown control
 
 A frontend-only pass to make the web UI hold together on phones and stop mixing dropdown styles. Three threads: a shared responsive card-grid primitive, a link-only header that collapses to a dropdown under 768px, and standardizing every native `<select>` onto the shared `Select` component.

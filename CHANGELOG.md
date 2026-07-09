@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Garmin GPS track import into the location module. A new importer pulls tracks for watch-recorded runs, hikes, and walks into your location history and map, filling only the gaps where the phone-based tracker has no data — your phone's track always wins where it exists. It never double-tracks a run the phone already recorded, and re-running is safe. Imported points show on the map but don't create place visits.
+- Location pings now record their source (phone tracker vs. Garmin), so the two can be told apart.
+
+### Changed
+- Garmin Connect moved from the Health settings page to Settings → Connected services, since it now feeds both Health (daily summaries) and Location (GPS tracks). Connect once and both use it; the Health settings page links across to it.
+
 ## [0.26.3] - 2026-07-08
 
 ### Added
