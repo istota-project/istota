@@ -78,6 +78,7 @@ from .storage import ensure_user_directories_v2
 from .scheduler_deferred import (  # noqa: F401  -- re-exported for back-compat
     _KNOWN_DEFERRED_SUFFIXES,
     _load_deferred_json,
+    _process_deferred_garmin_import,
     _process_deferred_health_ops,
     _process_deferred_kg_ops,
     _process_deferred_kv_ops,
@@ -1378,6 +1379,7 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     _process_deferred_kv_ops(config, task, user_temp_dir)
     _process_deferred_kg_ops(config, task, user_temp_dir)
     _process_deferred_health_ops(config, task, user_temp_dir)
+    _process_deferred_garmin_import(config, task, user_temp_dir)
     _process_deferred_user_alerts(config, task, user_temp_dir)
     _deliver_deferred_email_output(config, task, user_temp_dir)
     _warn_unconsumed_deferred_files(task, user_temp_dir)

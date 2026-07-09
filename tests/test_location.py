@@ -3583,3 +3583,73 @@ class TestCurrentLastAlias:
                 patch.object(sys, "argv", ["loc", "last"]):
             main()
         assert m.called
+
+
+class TestGarminImportSkill:
+    """The location skill's import-garmin-tracks subcommand. In a sandbox
+    (no master key) it delegates by writing a deferred op the scheduler
+    runs post-task."""
+
+    def _run(self, args, env, monkeypatch):
+        import io
+        import sys
+        from istota import secrets_store
+        from istota.skills.location import cmd_import_garmin_tracks
+
+        # Force the delegated path deterministically.
+        monkeypatch.setattr(secrets_store, "secret_key_available", lambda: False)
+        with patch.dict("os.environ", env, clear=False):
+            captured = io.StringIO()
+            old = sys.stdout
+            sys.stdout = captured
+            try:
+                cmd_import_garmin_tracks(args)
+                code = 0
+            except SystemExit as e:
+                code = e.code or 0
+            finally:
+                sys.stdout = old
+        return code, captured.getvalue()
+
+    def test_delegated_write(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = {
+            "ISTOTA_USER_ID": "alice",
+            "ISTOTA_DEFERRED_DIR": str(deferred),
+            "ISTOTA_TASK_ID": "99",
+        }
+        args = MagicMock(days_back=14, dry_run=False)
+        code, out = self._run(args, env, monkeypatch)
+        assert code == 0
+        payload = json.loads(out)
+        assert payload["status"] == "ok" and payload["queued"] is True
+        opfile = deferred / "task_99_garmin_import.json"
+        assert opfile.exists()
+        assert json.loads(opfile.read_text()) == {"days_back": 14}
+
+    def test_delegated_dry_run_rejected(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = {
+            "ISTOTA_USER_ID": "alice",
+            "ISTOTA_DEFERRED_DIR": str(deferred),
+            "ISTOTA_TASK_ID": "99",
+        }
+        args = MagicMock(days_back=7, dry_run=True)
+        code, out = self._run(args, env, monkeypatch)
+        assert code == 1
+        assert "dry-run is only available in direct mode" in json.loads(out)["error"]
+        assert not (deferred / "task_99_garmin_import.json").exists()
+
+    def test_no_task_context_errors(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        # No ISTOTA_DEFERRED_DIR / ISTOTA_TASK_ID → can't delegate.
+        env = {"ISTOTA_USER_ID": "alice",
+               "ISTOTA_DEFERRED_DIR": "", "ISTOTA_TASK_ID": ""}
+        args = MagicMock(days_back=7, dry_run=False)
+        code, out = self._run(args, env, monkeypatch)
+        assert code == 1
+        assert "web UI" in json.loads(out)["error"]
