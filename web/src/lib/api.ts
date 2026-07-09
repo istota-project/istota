@@ -1382,6 +1382,29 @@ export async function disconnectGarmin(): Promise<{ status: string }> {
 	return garminFetch('/disconnect', { method: 'POST' });
 }
 
+export interface GarminImportResponse {
+	dry_run: boolean;
+	inserted: number;
+	activities: number;
+	details: Array<{
+		activity_id: number;
+		type: string;
+		start: string;
+		distance_m: number | null;
+		fetched: number;
+		inserted: number;
+		shadowed: number;
+	}>;
+}
+
+export async function importGarminTracks(days_back = 7): Promise<GarminImportResponse> {
+	return garminFetch('/import-tracks', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ days_back }),
+	});
+}
+
 export async function syncGarmin(days_back = 7): Promise<GarminSyncResponse> {
 	return healthFetch('/garmin/sync', {
 		method: 'POST',

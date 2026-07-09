@@ -143,3 +143,54 @@ async def api_garmin_disconnect(
         return health_garmin.disconnect(db_path, user_id=user_id)
 
     return await asyncio.to_thread(_do)
+
+
+@router.post("/import-tracks")
+async def api_garmin_import_tracks(
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    _user: dict = Depends(require_auth),
+):
+    """One-click GPS-track import into the user's location.db. A Location
+    feature — gated on the location module, not health. Runs the shared
+    importer inline (in a thread); returns the per-activity summary."""
+    from istota.location.garmin_import import ImportOptions, import_tracks
+
+    user_id = _user_id(request)
+    db_path = _framework_db_path(request)
+    cfg = getattr(request.app.state, "istota_config", None)
+    if cfg is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    if not cfg.is_module_enabled(user_id, "location"):
+        return JSONResponse(
+            {"status": "error", "error": "location module disabled"},
+            status_code=403,
+        )
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        body = {}
+    days_back = body.get("days_back", 7) if isinstance(body, dict) else 7
+    try:
+        days_back = max(1, min(365, int(days_back)))
+    except (TypeError, ValueError):
+        days_back = 7
+    dry_run = bool(body.get("dry_run")) if isinstance(body, dict) else False
+
+    def _do():
+        return import_tracks(
+            user_id, framework_db_path=db_path, config=cfg,
+            options=ImportOptions(days_back=days_back, dry_run=dry_run),
+        ).to_dict()
+
+    try:
+        return await asyncio.to_thread(_do)
+    except health_garmin.GarminAuthError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
+    except health_garmin.GarminRateLimited:
+        return JSONResponse(
+            {"status": "error", "error": "Garmin rate-limited — try again later"},
+            status_code=429,
+        )
