@@ -73,6 +73,12 @@ Overland (the phone tracker) is the normal source of pings, but activities recor
 
 It authenticates through the shared Garmin connection (Settings → Connected services; the same credentials the health module uses), so connect Garmin once and both features work. The dedup is spatiotemporal: a Garmin point is dropped only when a native ping exists within both a time band (`--guard-band`, default 300 s) and a distance band (`--guard-radius`, default 150 m) of it — so a phone left at home (which keeps emitting stationary pings) never shadows a run happening elsewhere. Imported points are placeless breadcrumbs (`place_id` NULL) that show on the map and in history but don't create place visits. Re-running is idempotent (evict-then-reinsert per activity), and a late Overland upload for a gap-filled window evicts the now-covered imports on the next run.
 
+The importer core lives in `istota.location.garmin_import` (`import_tracks()`), shared by three access points:
+
+- **Web button** — "Import GPS tracks" on the Garmin card (Settings → Connected services) calls `POST /istota/api/garmin/import-tracks` (gated on the location module), which runs the importer inline and reports how many points it added.
+- **Assistant / chat** — the `location import-garmin-tracks` skill subcommand. Because the sandbox can write `location.db` but not decrypt the Garmin tokens (the master key is stripped), a sandboxed call *delegates*: it writes a `task_<id>_garmin_import.json` deferred op and the scheduler runs the import in-process post-task, then notifies the user with the result. An operator shell that has `ISTOTA_SECRET_KEY` runs it directly instead.
+- **CLI / cron** — `scripts/import_garmin_tracks.py`, a thin wrapper over the same module (below).
+
 ```
 # Dry-run (read-only) — see what would import over the last 30 days
 scripts/import_garmin_tracks.py --user stefan --days-back 30 --dry-run

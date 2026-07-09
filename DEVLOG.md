@@ -35,6 +35,17 @@ Built in six commits, TDD throughout; the pure logic (spatiotemporal filter incl
 - `web/src/lib/components/settings/GarminCard.svelte` (moved from health settings), `web/src/lib/api.ts`, `web/src/routes/settings/+page.svelte`, `web/src/routes/health/settings/+page.svelte`
 - `docs/features/location.md` — Garmin import + env/cron note
 
+**Follow-up (same day): one-click UX + chat access.** The importer started life as a cron-only script, which left two gaps: no on-demand trigger from the web UI, and no way for the assistant to run it (the location skill had no track-import subcommand, so web chat / Talk couldn't reach it). Fixing both meant lifting the importer's core out of the standalone script into a proper module, `istota.location.garmin_import` (`import_tracks()` → a structured `ImportResult`); the script is now a thin CLI wrapper and the tests import the module directly. Two consumers were then added on top: a `POST /api/garmin/import-tracks` endpoint (gated on the location module, runs inline in a thread) behind an "Import GPS tracks" button on the Garmin card, and a `location import-garmin-tracks` skill subcommand. The health "Sync now" button was relabelled "Sync health data" now that the card is cross-module. The chat path needed the deferred-op pattern rather than health `garmin-sync`'s enqueue-and-poll: inside the sandbox `location.db` is writable (it's the user's own workspace) but the master key that decrypts the Garmin tokens is stripped, so the skill writes `task_<id>_garmin_import.json` and the scheduler runs the import post-task in the daemon process where the key lives, then notifies the user. That works from chat where `garmin-sync`'s path doesn't — its enqueue hits the read-only framework DB and just tells the user to use the web UI. Validated on the deploy host: the skill's direct-mode dry-run returns the same four watch-only activities as the raw script.
+
+**Follow-up files:**
+- `src/istota/location/garmin_import.py` (new) — shared importer core (`import_tracks` / `ImportOptions` / `ImportResult`)
+- `scripts/import_garmin_tracks.py` — reduced to a thin CLI over the module
+- `src/istota/garmin_routes.py` — `POST /import-tracks`
+- `src/istota/skills/location/__init__.py` — `import-garmin-tracks` subcommand (direct / delegated)
+- `src/istota/scheduler_deferred.py`, `src/istota/scheduler.py` — `_process_deferred_garmin_import` + wiring
+- `web/src/lib/api.ts`, `web/src/lib/components/settings/GarminCard.svelte` — button + client
+- `tests/test_import_garmin_tracks.py`, `tests/test_scheduler.py`, `tests/test_location.py` — module / deferred / skill tests
+
 ## 2026-07-07: web UI — responsive card grids, collapsing nav, and one dropdown control
 
 A frontend-only pass to make the web UI hold together on phones and stop mixing dropdown styles. Three threads: a shared responsive card-grid primitive, a link-only header that collapses to a dropdown under 768px, and standardizing every native `<select>` onto the shared `Select` component.
