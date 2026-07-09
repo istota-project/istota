@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Garmin GPS track import into the location module. A new importer pulls tracks for watch-recorded runs, hikes, and walks into your location history and map, filling only the gaps where the phone-based tracker has no data — your phone's track always wins where it exists. It never double-tracks a run the phone already recorded, and re-running is safe. Imported points show on the map but don't create place visits.
+- One-click GPS track import: an "Import GPS tracks" button on the Garmin card (Settings → Connected services) imports the last 30 days on demand. You can also ask the assistant in chat ("import my garmin tracks") — it runs the import and reports back what it added.
 - Location pings now record their source (phone tracker vs. Garmin), so the two can be told apart.
 
 ### Changed

@@ -275,10 +275,11 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Key fns**: Uses `nextcloud_client.py` (OCS + WebDAV)
 
 ### `location/` - GPS Location + Calendar Attendance
-**Subcommands**: `current`, `history`, `places`, `learn`, `update`, `delete`, `attendance`, `reverse-geocode`, `day-summary`, `discover`, `dismiss-cluster`, `list-dismissed`, `restore-dismissed`, `place-stats`
+**Subcommands**: `current`, `history`, `places`, `learn`, `update`, `delete`, `attendance`, `reverse-geocode`, `day-summary`, `discover`, `dismiss-cluster`, `list-dismissed`, `restore-dismissed`, `place-stats`, `import-garmin-tracks`
 **Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`
 **Optional deps**: `caldav` (in `calendar` extra group)
 **Shared logic**: cluster discovery, dismiss-zone management, and per-place visit stats live in `istota.location_logic` (pure SQL + `geo.haversine`). Both the FastAPI web routes and this skill import the same `_location_*` helpers — the web UI's "discovered clusters", "dismissed clusters", and place-detail visit stats are now reachable from CLI parity.
+**`import-garmin-tracks`**: imports Garmin watch GPS tracks into `location.db` via the shared `istota.location.garmin_import.import_tracks` (also driving the web "Import GPS tracks" button and the cron script). Direct/delegated split like health `garmin-sync`: with `ISTOTA_SECRET_KEY` in env it runs inline; sandboxed it writes a `task_<id>_garmin_import.json` deferred op that `scheduler_deferred._process_deferred_garmin_import` runs in-process post-task (where the key lives) and notifies the user. Unlike `garmin-sync`'s enqueue path, the deferred-op path works from the sandbox — `location.db` is the user's writable workspace; only the token-decrypt key is stripped.
 
 ### `bookmarks/` - Karakeep Bookmark Management
 **Subcommands**: `search`, `list`, `get`, `add`, `tags`, `tag`, `untag`, `lists`, `list-bookmarks`, `summarize`, `stats`
