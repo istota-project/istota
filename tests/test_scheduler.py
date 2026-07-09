@@ -846,6 +846,110 @@ class TestLoadDeferredEmailOutput:
 
 
 # ---------------------------------------------------------------------------
+# TestDeferredGarminImport
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredGarminImport:
+    """The delegated Garmin track import: a sandboxed skill call writes
+    task_<id>_garmin_import.json, the scheduler runs the import in-process
+    (where the master key lives) and notifies the user."""
+
+    def _make_task(self, task_id=7, user_id="alice"):
+        import istota.db as _db
+        return _db.Task(
+            id=task_id, status="completed", source_type="web",
+            user_id=user_id, prompt="import my garmin tracks",
+        )
+
+    def _write_op(self, tmp_path, task_id=7, user_id="alice", **payload):
+        user_dir = tmp_path / user_id
+        user_dir.mkdir(exist_ok=True)
+        (user_dir / f"task_{task_id}_garmin_import.json").write_text(
+            json.dumps(payload or {"days_back": 30})
+        )
+        return user_dir
+
+    def test_runs_import_and_notifies(self, tmp_path, monkeypatch):
+        from istota import scheduler_deferred as sd
+        from istota.location import garmin_import as gi
+        import istota.notifications as notif
+
+        user_dir = self._write_op(tmp_path, days_back=14)
+        config = Config(temp_dir=tmp_path)
+
+        calls = {}
+
+        def fake_import(user_id, *, framework_db_path, config, options):
+            calls["user_id"] = user_id
+            calls["days_back"] = options.days_back
+            return gi.ImportResult(False, 42, 2, [{"inserted": 42}])
+
+        sent = []
+        monkeypatch.setattr(gi, "import_tracks", fake_import)
+        monkeypatch.setattr(
+            notif, "send_notification",
+            lambda cfg, uid, msg, **k: sent.append((uid, msg)) or True,
+        )
+
+        n = sd._process_deferred_garmin_import(config, self._make_task(), user_dir)
+
+        assert n == 42
+        assert calls == {"user_id": "alice", "days_back": 14}
+        assert sent and sent[0][0] == "alice"
+        assert "42" in sent[0][1] and "2 activit" in sent[0][1]
+        # File consumed.
+        assert not (user_dir / "task_7_garmin_import.json").exists()
+
+    def test_no_activities_message(self, tmp_path, monkeypatch):
+        from istota import scheduler_deferred as sd
+        from istota.location import garmin_import as gi
+        import istota.notifications as notif
+
+        user_dir = self._write_op(tmp_path)
+        config = Config(temp_dir=tmp_path)
+        monkeypatch.setattr(
+            gi, "import_tracks",
+            lambda *a, **k: gi.ImportResult(False, 0, 0, []),
+        )
+        sent = []
+        monkeypatch.setattr(
+            notif, "send_notification",
+            lambda cfg, uid, msg, **k: sent.append(msg) or True,
+        )
+        sd._process_deferred_garmin_import(config, self._make_task(), user_dir)
+        assert sent and "no new GPS activities" in sent[0]
+
+    def test_skips_when_location_disabled(self, tmp_path, monkeypatch):
+        from istota import scheduler_deferred as sd
+        from istota.location import garmin_import as gi
+
+        user_dir = self._write_op(tmp_path)
+        config = Config(temp_dir=tmp_path)
+        monkeypatch.setattr(config, "is_module_enabled", lambda uid, mod, **k: False)
+        called = []
+        monkeypatch.setattr(gi, "import_tracks",
+                            lambda *a, **k: called.append(1))
+
+        n = sd._process_deferred_garmin_import(config, self._make_task(), user_dir)
+        assert n == 0
+        assert not called                       # import never attempted
+        assert not (user_dir / "task_7_garmin_import.json").exists()
+
+    def test_no_file_is_noop(self, tmp_path):
+        from istota import scheduler_deferred as sd
+        (tmp_path / "alice").mkdir()
+        config = Config(temp_dir=tmp_path)
+        assert sd._process_deferred_garmin_import(
+            config, self._make_task(), tmp_path / "alice",
+        ) == 0
+
+    def test_garmin_import_in_known_suffixes(self):
+        from istota.scheduler_deferred import _KNOWN_DEFERRED_SUFFIXES
+        assert "garmin_import" in _KNOWN_DEFERRED_SUFFIXES
+
+
+# ---------------------------------------------------------------------------
 # TestDownloadTalkAttachments
 # ---------------------------------------------------------------------------
 

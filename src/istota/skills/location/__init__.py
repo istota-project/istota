@@ -816,6 +816,87 @@ def cmd_place_stats(args):
     print(json.dumps(result, indent=2))
 
 
+def cmd_import_garmin_tracks(args):
+    """Import Garmin watch GPS tracks into location history.
+
+    Two modes, mirroring the health ``garmin-sync`` split:
+
+    * **Direct** — ``ISTOTA_SECRET_KEY`` is in env (operator shell / the
+      scheduler daemon). The importer decrypts the Garmin token blob and
+      runs inline; the JSON result is printed.
+    * **Delegated** — the key isn't present (sandboxed LLM Bash call from
+      web chat / Talk). location.db is writable in the sandbox, but the
+      master key needed to decrypt the Garmin tokens is stripped, so the
+      command writes a deferred op (``task_<id>_garmin_import.json``) that
+      the scheduler runs post-task in the daemon process, where the key
+      lives. The user gets a notification with the result.
+    """
+    from istota import secrets_store
+
+    user_id = os.environ.get("ISTOTA_USER_ID", "")
+    if not user_id:
+        print(json.dumps({"status": "error", "error": "ISTOTA_USER_ID not set"}))
+        sys.exit(1)
+    days_back = args.days_back
+
+    if secrets_store.secret_key_available():
+        from istota.health import garmin as gm
+        from istota.location.garmin_import import ImportOptions, import_tracks
+        fw = os.environ.get("ISTOTA_DB_PATH", "")
+        if not fw:
+            print(json.dumps({"status": "error", "error": "ISTOTA_DB_PATH not set"}))
+            sys.exit(1)
+        try:
+            result = import_tracks(
+                user_id, framework_db_path=Path(fw),
+                options=ImportOptions(days_back=days_back, dry_run=args.dry_run),
+            )
+        except gm.GarminAuthError as e:
+            print(json.dumps({
+                "status": "error",
+                "error": f"Garmin not connected ({e}). Connect it in "
+                         "Settings → Connected services.",
+            }))
+            sys.exit(1)
+        except gm.GarminRateLimited:
+            print(json.dumps({
+                "status": "error",
+                "error": "Garmin rate-limited — try again later.",
+            }))
+            sys.exit(1)
+        print(json.dumps({"status": "ok", **result.to_dict()}))
+        return
+
+    # Delegated path.
+    if args.dry_run:
+        print(json.dumps({
+            "status": "error",
+            "error": "--dry-run is only available in direct mode (an operator "
+                     "shell). From chat, run the real import or use the web UI.",
+        }))
+        sys.exit(1)
+    deferred = os.environ.get("ISTOTA_DEFERRED_DIR", "")
+    task_id = os.environ.get("ISTOTA_TASK_ID", "")
+    if not deferred or not task_id:
+        print(json.dumps({
+            "status": "error",
+            "error": "Garmin track import needs ISTOTA_SECRET_KEY (direct) or a "
+                     "task context to delegate. Use the web UI 'Import GPS "
+                     "tracks' button under Settings → Connected services.",
+        }))
+        sys.exit(1)
+    path = Path(deferred) / f"task_{task_id}_garmin_import.json"
+    path.write_text(json.dumps({"days_back": days_back}))
+    print(json.dumps({
+        "status": "ok",
+        "queued": True,
+        "message": f"Garmin track import queued (last {days_back} days). It runs "
+                   "right after this task; new watch-recorded tracks will appear "
+                   "in your location history, and you'll get a notification with "
+                   "the result.",
+    }))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Location tracking CLI")
     sub = parser.add_subparsers(dest="command")
@@ -882,6 +963,17 @@ def build_parser():
     pstats_target.add_argument("--name", help="Place name")
     pstats_target.add_argument("--id", type=int, help="Place ID")
 
+    gimport = sub.add_parser(
+        "import-garmin-tracks",
+        help="Import Garmin watch GPS tracks into location history "
+             "(fills gaps where the phone tracker has no data)",
+    )
+    gimport.add_argument("--days-back", type=int, default=30,
+                         help="How many days back to import (default 30)")
+    gimport.add_argument("--dry-run", action="store_true",
+                         help="Report what would import without writing "
+                              "(direct/operator mode only)")
+
     return parser
 
 
@@ -905,6 +997,7 @@ def main():
         "list-dismissed": cmd_list_dismissed,
         "restore-dismissed": cmd_restore_dismissed,
         "place-stats": cmd_place_stats,
+        "import-garmin-tracks": cmd_import_garmin_tracks,
     }
 
     if args.command in commands:

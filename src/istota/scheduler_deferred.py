@@ -46,6 +46,7 @@ _KNOWN_DEFERRED_SUFFIXES = (
     "user_alerts",
     "email_output",
     "health_ops",
+    "garmin_import",
 )
 
 # Operator-facing recovery artifacts. Written by deferred-op handlers when
@@ -874,6 +875,96 @@ def _process_deferred_health_ops(
             )
     path.unlink(missing_ok=True)
     return count
+
+
+def _process_deferred_garmin_import(
+    config: Config, task: db.Task, user_temp_dir: Path,
+) -> int:
+    """Run a delegated Garmin GPS-track import into the user's location.db.
+
+    A sandboxed ``istota-skill location import-garmin-tracks`` call can't
+    decrypt the Garmin token blob (the master key is stripped in the
+    sandbox), so it writes ``task_<id>_garmin_import.json`` and the
+    scheduler runs the import here, in the daemon process where
+    ``ISTOTA_SECRET_KEY`` is in scope. The result is pushed back to the user
+    as a notification. User id always comes from the task.
+    """
+    loaded = _load_deferred_json(
+        user_temp_dir, task.id, "garmin_import", expected_type=dict,
+    )
+    if loaded is None:
+        return 0
+    path, data = loaded
+
+    if not config.is_module_enabled(task.user_id, "location"):
+        logger.info(
+            "Skipping deferred garmin import for task %d: location module disabled",
+            task.id,
+        )
+        path.unlink(missing_ok=True)
+        return 0
+
+    try:
+        days_back = max(1, min(365, int(data.get("days_back", 7) or 7)))
+    except (TypeError, ValueError):
+        days_back = 7
+
+    from .notifications import send_notification
+
+    try:
+        from istota.health import garmin as gm
+        from istota.location.garmin_import import ImportOptions, import_tracks
+    except ImportError as e:
+        logger.warning("Garmin import unavailable for task %d: %s", task.id, e)
+        path.unlink(missing_ok=True)
+        return 0
+
+    try:
+        result = import_tracks(
+            task.user_id, framework_db_path=config.db_path, config=config,
+            options=ImportOptions(days_back=days_back),
+        )
+    except gm.GarminAuthError:
+        send_notification(
+            config, task.user_id,
+            "🗺️ Garmin track import couldn't run — Garmin isn't connected. "
+            "Connect it in Settings → Connected services.",
+            purpose="notification",
+        )
+        path.unlink(missing_ok=True)
+        return 0
+    except gm.GarminRateLimited:
+        send_notification(
+            config, task.user_id,
+            "🗺️ Garmin track import was rate-limited by Garmin — try again later.",
+            purpose="notification",
+        )
+        path.unlink(missing_ok=True)
+        return 0
+    except Exception as e:  # noqa: BLE001 — a bad import must not wedge the drain
+        logger.warning("Deferred garmin import failed for task %d: %s", task.id, e)
+        path.unlink(missing_ok=True)
+        return 0
+
+    if result.activities:
+        msg = (
+            f"🗺️ Garmin track import: added {result.inserted_total} GPS points "
+            f"from {result.activities} activit"
+            f"{'y' if result.activities == 1 else 'ies'} to your location "
+            "history (last %d days)." % days_back
+        )
+    else:
+        msg = (
+            "🗺️ Garmin track import: no new GPS activities found in the last "
+            f"{days_back} days."
+        )
+    send_notification(config, task.user_id, msg, purpose="notification")
+    logger.info(
+        "Deferred garmin import task %d: inserted=%d activities=%d",
+        task.id, result.inserted_total, result.activities,
+    )
+    path.unlink(missing_ok=True)
+    return result.inserted_total
 
 
 def _purge_deferred_files_for_retry(task: db.Task, user_temp_dir: Path) -> None:
