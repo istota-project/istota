@@ -362,8 +362,15 @@ def _daterange_local(days_back: int, today: _dt.date) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
-def _resolve_location_db(user_id: str, workspace: str | None):
-    """Return an initialised per-user location.db path."""
+def _resolve_location_db(user_id: str, workspace: str | None, framework_db: Path):
+    """Return an initialised per-user location.db path.
+
+    As a cron artifact the script can't rely on its working directory, so
+    when resolving through config we pin ``config.db_path`` to the
+    known-absolute framework DB (``ISTOTA_DB_PATH``). Otherwise
+    ``load_config`` may return a *relative* ``db_path`` and the module-
+    enabled check in ``resolve_for_user`` stats it against the wrong CWD.
+    """
     from istota.location import db as location_db
     if workspace:
         from istota.location.workspace import synthesize_location_context
@@ -371,7 +378,9 @@ def _resolve_location_db(user_id: str, workspace: str | None):
     else:
         from istota.config import load_config
         from istota.location._loader import resolve_for_user
-        ctx = resolve_for_user(user_id, load_config())
+        config = load_config()
+        config.db_path = framework_db
+        ctx = resolve_for_user(user_id, config)
     location_db.init_db(ctx.db_path)
     return ctx.db_path
 
@@ -419,7 +428,7 @@ def run(args: argparse.Namespace) -> int:
 
     activities.sort(key=lambda a: a.get("startTimeGMT") or "")
 
-    db_path = _resolve_location_db(args.user, args.workspace)
+    db_path = _resolve_location_db(args.user, args.workspace, framework_db)
     report: list[dict] = []
 
     if args.dry_run:

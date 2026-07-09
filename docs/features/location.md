@@ -81,7 +81,7 @@ scripts/import_garmin_tracks.py --user stefan --days-back 30 --dry-run
 scripts/import_garmin_tracks.py --user stefan --days-back 7
 ```
 
-**Environment / cron.** The script decrypts the Garmin token blob, so it needs `ISTOTA_DB_PATH` and `ISTOTA_SECRET_KEY` in its environment and must run in the real scheduler/cron environment where `location.db` is writable (never inside a task sandbox, where the DB is read-only). Because istota's CRON.md `command:` jobs deliberately strip `*_SECRET`/`*_TOKEN` vars, wire the nightly run as a **system cron entry or systemd timer that sources the istota `EnvironmentFile`** (the same one the systemd units use), not as a CRON.md job. `--dry-run` is read-only and safe to run anywhere the env is available.
+**Environment / cron.** The script decrypts the Garmin token blob, so it needs `ISTOTA_DB_PATH` (the framework istota.db — also used to resolve the per-user `location.db`, so the script is working-directory independent) and `ISTOTA_SECRET_KEY` in its environment, and must run in the real scheduler/cron environment where `location.db` is writable (never inside a task sandbox, where the DB is read-only). Because istota's CRON.md `command:` jobs deliberately strip `*_SECRET`/`*_TOKEN` vars, wire the nightly run as a **system cron entry or systemd timer that sources the service `EnvironmentFile`** and sets `ISTOTA_DB_PATH`, not as a CRON.md job. `--dry-run` is read-only and safe to run anywhere the env is available.
 
 ## Network access
 
