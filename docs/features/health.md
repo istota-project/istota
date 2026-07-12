@@ -12,7 +12,7 @@ Health is an on-by-default module with per-user opt-out via `disabled_modules` i
 
 **Biomarker trends** — Per-marker trend charts with out-of-range zones shaded. LLM-generated educational explainer cards for flagged markers (never diagnoses or prescriptions — hard guardrails in the prompt). Explainers cached per-user per `(name, direction)`.
 
-**Garmin Connect** — OAuth connection via the health settings web page. Sync runs on demand (the web sync button, the `garmin-sync` skill CLI, or a user-configured CRON job), not on an automatic schedule. It pulls sleep (duration, score, stages), stress, body battery, steps, active calories, SpO2, HRV, VO2 max, and respiration. A multi-day backfill is available but not auto-triggered on connect.
+**Garmin Connect** — OAuth connection via the general **Settings → Connected services** page. Garmin is a cross-module connected service, shared with the location track importer — connect once and both features use the same token. Sync runs on demand (the "Sync health data" button on that Garmin card, the `garmin-sync` skill CLI, or a user-configured CRON job), not on an automatic schedule. It pulls sleep (duration, score, stages), stress, body battery, steps, active calories, SpO2, HRV, VO2 max, and respiration. A multi-day backfill is available but not auto-triggered on connect.
 
 **Immunizations** — Registry of administered vaccines with date, product, manufacturer, lot, site, route, and facility. Bundled canonical vaccine reference list with recommended schedules. Coverage tracker shows due-soon and overdue immunizations. Bulk import from MyChart/clipboard paste with dry-run preview. Static educational explainers per vaccine.
 
@@ -61,7 +61,7 @@ Garmin Connect OAuth tokens are not stored here — they live in the framework-l
 | `/health/bloodwork/upload` | Drag-and-drop OCR review-and-confirm |
 | `/health/bloodwork/marker?name=…` | Trend chart, related markers, clinical description, explainer card |
 | `/health/immunizations` | Registry table, coverage status, import controls |
-| `/health/settings` | DOB/height/sex, display preferences, Garmin Connect/disconnect |
+| `/health/settings` | DOB/height/sex, display preferences (Garmin connect/sync lives on Settings → Connected services) |
 
 ## Skill CLI
 

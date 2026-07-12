@@ -136,7 +136,7 @@ A light/dark theme toggle in the shell header switches the whole UI between them
 
 **Money**: accounting dashboard with ledger queries, transaction management, invoicing, and work log tracking. Backed by the in-process `money` module (no external service). Requires the `money` module to be enabled (on by default).
 
-**Health**: body stats grid with sparklines, bloodwork matrix (dates × markers with flag-colored cells, CSV import/export), panel detail with inline edit and source preview, per-marker trend charts with out-of-range zones and LLM explainer, medical history timeline with encounters and diagnoses, immunization tracking with coverage status strip, vaccine drill-down pages with clinical explainers, Garmin Connect integration on the settings page. Requires the `health` module to be enabled (on by default).
+**Health**: body stats grid with sparklines, bloodwork matrix (dates × markers with flag-colored cells, CSV import/export), panel detail with inline edit and source preview, per-marker trend charts with out-of-range zones and LLM explainer, medical history timeline with encounters and diagnoses, immunization tracking with coverage status strip, vaccine drill-down pages with clinical explainers. Garmin Connect (daily-summary sync) is on the general Settings → Connected services page, shared with Location. Requires the `health` module to be enabled (on by default).
 
 **Location**: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover clusters, create/edit/delete, visit stats). Requires GPS tracking to be enabled.
 
@@ -155,7 +155,8 @@ A light/dark theme toggle in the shell header switches the whole UI between them
 | `/istota/api/feeds` | Native feeds module (per-user SQLite) |
 | `/istota/money/api/*` | Money module (ledger, transactions, invoicing) |
 | `/istota/api/location/*` | Places CRUD, pings, trips |
-| `/istota/api/health/*` | Stats, panels, biomarkers, encounters, diagnoses, immunizations, Garmin, settings |
+| `/istota/api/health/*` | Stats, panels, biomarkers, encounters, diagnoses, immunizations, Garmin sync, settings |
+| `/istota/api/garmin/*` | Garmin connected-service auth (status, connect, MFA, disconnect) + GPS track import; shared by Health and Location |
 | `/istota/api/chat/config` | Chat limits + streaming intervals |
 | `/istota/api/chat/rooms` | Room CRUD (list/create); `DELETE /chat/rooms/{id}` hard-deletes |
 | `/istota/api/chat/rooms/{id}/messages` | Message history + send |
