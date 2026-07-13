@@ -50,6 +50,12 @@ PY
 sed -i.bak -E "s/^version = \".*\"/version = \"$NEW\"/" pyproject.toml
 rm pyproject.toml.bak
 
+# Reconcile the lockfile to the bumped version so the tagged tree isn't born
+# dirty (the editable root package pins its own version in uv.lock).
+if command -v uv >/dev/null 2>&1; then
+  uv lock --quiet
+fi
+
 # Bump the dev-mode mock backend so VITE_MOCK_API=1 reports the new version.
 if [ -f web/vite-mock-api.ts ]; then
   sed -i.bak -E "s/^([[:space:]]+version: ')[^']*(',)/\\1$NEW\\2/" web/vite-mock-api.ts
@@ -111,6 +117,8 @@ if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
 fi
 
 git add CHANGELOG.md pyproject.toml
+# Stage the reconciled lockfile too (only changes when uv is present).
+[ -f uv.lock ] && git add uv.lock || true
 # vite-mock-api.ts is bumped above only when present; stage it the same way so
 # the version bump lands in this commit instead of leaving the tree dirty.
 [ -f web/vite-mock-api.ts ] && git add web/vite-mock-api.ts || true
