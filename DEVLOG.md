@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-13: Rollout incident — `db_relocate` skipped every DB; harden against premature-empty destinations
+
+The module-DB relocation shipped the day before was deployed to the production host via Ansible and appeared to wipe all per-user module data (feeds, location, health, money) — every user showed near-empty modules, with feed counts *identical across users* (the tell-tale sign of freshly-seeded empty DBs).
+
+Root cause, verified read-only on the host: **no data was lost.** The Ansible play rendered `config.toml` with `module_data_dir` set and restarted the services (new code) *before* the relocation task ran. The new code saw the empty local path, created fresh empty WAL DBs there, and started writing. Then `db_relocate` ran — but its destination-exists guard was "skip if the file exists", so it saw the just-created empty DBs and skipped all twelve (0 `.migrated-*` archives on the mount). The real data sat untouched on the rclone mount the whole time (framework DBs at their original paths, e.g. a 14 MB feeds.db and 8.6 MB location.db for the primary user). Recovery was: stop services, move the empty local DBs aside (preserving them), re-run `db_relocate` against the intact mount source with the destinations cleared, restart. All row counts restored exactly (19,577 feed entries / 65,461 location pings / 114 health stats for the primary user).
+
+The fix makes `db_relocate` self-heal this race instead of relying on Ansible ordering. When the destination exists it now compares *data-row counts* (summed across all non-meta tables — schema/version tables are excluded, since a fresh DB has those but no real rows): an **empty** destination (0 data rows) with a **non-empty** source is backed up as `.premature-<ts>` and replaced from the source (`migrated_over_empty`); a destination that **already holds data** is left alone with a loud WARNING (`skip_dest_has_data`), never silently clobbered. So a prematurely-started service can no longer strand the real data, and a genuine re-run still can't overwrite good data. The mount source is never deleted regardless — only renamed to `.migrated-<ts>` on success.
+
+**Key changes:**
+- `db_relocate`: `_data_row_count` (meta-table-excluded); destination-exists branch splits into replace-empty vs. skip-has-data; `_perform_migration` extracted; CLI summary reports skipped-with-data.
+- Regression tests: replace-empty-premature-destination (the exact incident), skip-when-destination-has-data, dry-run-over-empty.
+
+**Files added/modified:**
+- `src/istota/db_relocate.py` — self-heal logic + `import sqlite3`.
+- `tests/test_db_relocate.py` — incident regression coverage.
+
 ## 2026-07-12: Move per-user module DBs to local disk on WAL; fix dispatch-loop stall
 
 The scheduler's main dispatch loop stalled for ~6.5 minutes and tripped the stall watchdog. Investigation traced it to SQLite lock contention making the loop's own DB reads block on the 30s busy timeout — not a throughput ceiling (the workload is a per-minute cron plus a few pollers). Two root causes, both structural, plus durability and defense-in-depth.

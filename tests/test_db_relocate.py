@@ -74,16 +74,48 @@ class TestRelocateModule:
         assert not old.exists()
         assert list(old.parent.glob("location.db.migrated-*"))
 
-    def test_idempotent_skip_when_destination_exists(self, tmp_path):
+    def test_skips_when_destination_already_has_data(self, tmp_path):
         cfg = _config(tmp_path)
         _make_legacy_delete_db(cfg, "alice", "location")
         first = db_relocate.relocate_module(cfg, "alice", "location")
         assert first["status"] == "migrated"
 
-        # A second legacy file should NOT clobber the migrated destination.
+        # A second legacy file must NOT clobber a destination that holds data.
         _make_legacy_delete_db(cfg, "alice", "location")
         second = db_relocate.relocate_module(cfg, "alice", "location")
-        assert second["status"] == "skip_exists"
+        assert second["status"] == "skip_dest_has_data"
+        # destination data preserved
+        new = cfg.module_db_path("alice", "location")
+        conn = sqlite3.connect(new)
+        try:
+            assert conn.execute("SELECT id FROM marker").fetchone()[0] == 42
+        finally:
+            conn.close()
+
+    def test_replaces_empty_premature_destination(self, tmp_path):
+        """The exact ISSUE-156 rollout failure: a service auto-created an empty
+        DB at the destination before relocation ran. The migrator must back it
+        up and restore the real data from the mount, not silently skip."""
+        from istota.location.db import init_db as loc_init
+
+        cfg = _config(tmp_path)
+        _make_legacy_delete_db(cfg, "alice", "location")  # source has marker row 42
+        new = cfg.module_db_path(cfg_user := "alice", "location")
+        loc_init(new)  # empty schema-only DB, as a prematurely-started service would create
+        assert db_relocate._data_row_count(new) == 0
+
+        r = db_relocate.relocate_module(cfg, "alice", "location")
+        assert r["status"] == "migrated_over_empty"
+        assert r.get("replaced_empty") is True
+
+        # Real data restored, WAL, and the empty dest backed up (not deleted).
+        assert _journal_mode(new) == "wal"
+        conn = sqlite3.connect(new)
+        try:
+            assert conn.execute("SELECT id FROM marker").fetchone()[0] == 42
+        finally:
+            conn.close()
+        assert list(new.parent.glob("location.db.premature-*"))
 
     def test_dry_run_moves_nothing(self, tmp_path):
         cfg = _config(tmp_path)
@@ -91,6 +123,20 @@ class TestRelocateModule:
         r = db_relocate.relocate_module(cfg, "alice", "location", dry_run=True)
         assert r["status"] == "would_migrate"
         assert not cfg.module_db_path("alice", "location").exists()
+
+    def test_dry_run_over_empty_destination_reports_without_moving(self, tmp_path):
+        from istota.location.db import init_db as loc_init
+
+        cfg = _config(tmp_path)
+        _make_legacy_delete_db(cfg, "alice", "location")
+        new = cfg.module_db_path("alice", "location")
+        loc_init(new)
+
+        r = db_relocate.relocate_module(cfg, "alice", "location", dry_run=True)
+        assert r["status"] == "would_migrate_over_empty"
+        # nothing renamed aside, dest still empty
+        assert not list(new.parent.glob("location.db.premature-*"))
+        assert db_relocate._data_row_count(new) == 0
 
 
 class TestRelocateAll:
