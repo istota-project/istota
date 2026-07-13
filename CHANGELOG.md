@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Per-user module databases (feeds, health, location, money) now live on local disk and run in WAL mode instead of on the Nextcloud mount, which restores concurrent reads and writes. Your files (bloodwork uploads, ledgers, feed exports) stay in Nextcloud as before; only the database index moved. A one-time relocation runs automatically on deploy, and the databases are snapshotted back to Nextcloud daily so they stay backed up off-host.
+
+### Fixed
+- The scheduler could stall for several minutes under database lock contention, briefly pausing all task dispatch. Fixed the connection handling and storage that caused it, with a safeguard so a locked read skips a cycle instead of blocking the loop.
+
 ## [0.27.0] - 2026-07-08
 
 ### Added
