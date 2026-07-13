@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-12: Move per-user module DBs to local disk on WAL; fix dispatch-loop stall
+
+The scheduler's main dispatch loop stalled for ~6.5 minutes and tripped the stall watchdog. Investigation traced it to SQLite lock contention making the loop's own DB reads block on the 30s busy timeout — not a throughput ceiling (the workload is a per-minute cron plus a few pollers). Two root causes, both structural, plus durability and defense-in-depth.
+
+**Cause 1 — the framework DB re-issued WAL on every connection open.** `db.get_db` ran `PRAGMA journal_mode=WAL` on *every* `sqlite3.connect`, including pure reads. journal_mode is persistent in the file header, so this only bought a write-lock acquisition per open that races sibling readers — exactly the contention that wedges a hot loop. Three sibling modules (`secrets_store`, `user_profiles`, `user_briefings`) already carried comments explaining this and had been fixed; the main framework pool never was. WAL now moves to `init_db` (once); `get_db` sets `synchronous=NORMAL` and takes an optional `busy_timeout_ms`.
+
+**Cause 2 — the four per-user module DBs were forced onto DELETE journal mode.** feeds/health/location/money DBs lived inside each user's workspace on the FUSE-backed mount, where WAL's mmap'd `-shm` file SIGBUSes the process (ISSUE-157). DELETE mode dodges `-shm` but gives *zero* reader/writer concurrency — so a per-minute reader landing mid-contention serializes the whole loop (ISSUE-156). The fix is to get them off the FUSE mount: they now resolve to `Config.module_db_path(user, module)` on local disk (default `{db_path.parent}/modules/{user}/{module}.db`) and run WAL. Crucially, **only the `.db` moved** — each loader's `data_dir` (health uploads, money ledgers, feeds exports — the user-facing files) stays in the workspace on the mount. The `module_db_path` seam is passed as the existing `db_path=` override into each module's `synthesize_*`, so it's a one-line change per loader. An explicit `module_data_dir` under the mount is refused (a WAL-SIGBUS footgun guard); the derived default is trusted-local and unguarded.
+
+**Migration + durability.** `db_relocate` is an idempotent migrator: copy each on-mount DB to its local path, call the module's `init_db` (which flips the copied DELETE-mode file to WAL and re-asserts schema), `quick_check`, then archive the old file as `*.migrated-<ts>` (so a re-run is a no-op and data stays recoverable). Ansible runs it once with services stopped, gated on a `find` for legacy on-mount `.db` files. Because the DBs left the Nextcloud-synced workspaces, `db_backup` restores off-host durability: on a timer it snapshots the framework DB + every module DB to `{mount}/istota-db-backups` via SQLite's online-backup API (a consistent copy of a live WAL DB, no writer stop).
+
+**Defense-in-depth (Cause-1/2 already remove the mechanism).** The dispatch scan and idle pre-check (both pure reads) now use a short 2s `busy_timeout` (`main_loop_read_timeout_ms`); a lock past that raises `OperationalError` and the loop skips the tick (re-dispatching ~0.5s later) instead of blocking 30s and tripping the watchdog.
+
+TDD throughout: WAL-once/no-reissue, the busy_timeout override + skip-on-lock degradation, `module_db_path` layout + under-mount guard + derived default, each module's DELETE→WAL flip (incl. converting a relocated DELETE file), the migrator's copy/flip/archive/idempotency, and the backup's online-snapshot readability. Also caught and fixed a latent test-isolation gap the change exposed: two `web_app` fixtures set a tmp mount but left `db_path` repo-relative, so the derived module path wrote into the repo — found with a tripwire (`data/modules` as a file) that named the offending tests. Full suite green (6673 pass). The Ansible play and the live production relocation (operator-run, services stopped) are the only parts not exercisable off the deploy host.
+
+**Key changes:**
+- `get_db`: WAL set once in `init_db`, not per-open; `synchronous=NORMAL`; optional `busy_timeout_ms`.
+- `Config.module_db_path()` + `module_data_dir` (local-disk root, under-mount guard, derived default); loaders pass it as `db_path=`.
+- feeds/health/location/money `init_db` flipped DELETE→WAL; `db_health` enumeration + docstring de-mount-ified.
+- New `db_relocate` (migration) and `db_backup` (online-backup snapshots) modules + daemon wiring + Ansible.
+- `main_loop_read_timeout_ms` skip-on-lock for the dispatch scan + idle pre-check.
+- Config example, Ansible defaults/template, AGENTS.md, `.claude/rules/{config,scheduler}.md` updated.
+- Unrelated: de-rotted a knowledge-graph test that hardcoded a now-past `valid_until`.
+
+**Files added/modified:**
+- `src/istota/db.py` — WAL to `init_db`; `get_db` no-reissue + `synchronous=NORMAL` + `busy_timeout_ms`.
+- `src/istota/config.py` — `module_data_dir` field + parse; `module_db_path()`; `SchedulerConfig` `main_loop_read_timeout_ms` + `db_backup_*`.
+- `src/istota/{feeds,health,location,money}/_loader.py` — pass `db_path=module_db_path(...)`.
+- `src/istota/{feeds,health,location,money}/db.py` — `init_db` DELETE→WAL; stale connect() comments.
+- `src/istota/db_relocate.py`, `src/istota/db_backup.py` — new.
+- `src/istota/scheduler.py` — dispatch/idle skip-on-lock; `check_db_health` local enumeration; backup loop wiring.
+- `src/istota/db_health.py` — module docstring (local, not mount).
+- `deploy/ansible/{defaults/main.yml,templates/config.toml.j2,tasks/main.yml}` — knobs + relocation play + `module_data_dir` dir.
+- `config/config.example.toml`, `AGENTS.md`, `.claude/rules/{config,scheduler}.md` — docs.
+- `tests/` — `test_module_db_local.py`, `test_db_relocate.py`, `test_db_backup.py` (new); `test_db.py`, `test_config.py`, `test_scheduler.py`, `test_location_module.py`, `test_web_app.py`, `test_web_app_money.py`, `test_knowledge_graph.py`.
+
 ## 2026-07-08: Garmin GPS track import into location + Garmin as a cross-module connected service
 
 Stefan records runs/hikes on a Garmin watch that the phone-based Overland tracker never sees (watch-only activities, or the phone left home/dead). This adds a standalone importer that pulls those GPS tracks into the per-user `location.db`, filling only the gaps where native Overland pings are absent. Along the way Garmin stopped being a health-module feature and became a shared connected service, since both Health (daily summaries) and Location (tracks) now consume one token blob.
