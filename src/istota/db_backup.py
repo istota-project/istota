@@ -21,11 +21,49 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 MODULES = ("feeds", "health", "location", "money")
+
+# The last-run timestamp is persisted next to the framework DB (local disk) so
+# the daily-backup clock survives scheduler restarts. Without this the in-memory
+# clock reset to "now" on every boot, and a host that deploys more than once a
+# day (auto-update cron) would defer the backup forever.
+_LAST_RUN_FILENAME = ".db_backup_last_run"
+
+
+def _last_run_path(config) -> Path | None:
+    db_path = getattr(config, "db_path", None)
+    if not db_path:
+        return None
+    return Path(db_path).parent / _LAST_RUN_FILENAME
+
+
+def last_backup_time(config) -> float:
+    """Epoch seconds of the last successful backup attempt, or 0.0 if never /
+    unreadable. The scheduler seeds its in-memory clock from this at boot, so an
+    overdue backup fires promptly and a recent one is not repeated."""
+    path = _last_run_path(config)
+    if path is None or not path.exists():
+        return 0.0
+    try:
+        return float(path.read_text().strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _write_last_run(config, ts: float) -> None:
+    path = _last_run_path(config)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(ts))
+    except OSError as exc:  # best-effort — a write failure just risks an extra backup
+        logger.warning("db_backup_last_run_write_failed path=%s err=%s", path, exc)
 
 
 def backup_destination(config) -> Path | None:
@@ -54,6 +92,13 @@ def _snapshot_one(src: Path, dest: Path, label: str) -> dict:
         except sqlite3.OperationalError:
             pass
         src_conn.backup(dst_conn)
+        # The backup API copies the source header verbatim, so the cold copy
+        # inherits WAL journal_mode. Force it to DELETE: a WAL-headed file would
+        # try to create a -shm on the FUSE mount if ever opened in place, which
+        # SIGBUSes (the very reason the live DBs moved off the mount). The cold
+        # copy is single-file rollback-journal; restore copies it back and
+        # init_db re-flips to WAL locally.
+        dst_conn.execute("PRAGMA journal_mode=DELETE")
     finally:
         dst_conn.close()
         src_conn.close()
@@ -98,5 +143,9 @@ def backup_databases(config) -> list[dict]:
             _run(src, root / user_id / f"{module}.db", f"{module}:{user_id}")
 
     ok = sum(1 for r in results if r["status"] == "ok")
+    # Persist the clock only after a real attempt (root resolved). A disabled or
+    # no-destination run returns earlier without writing, so the daemon keeps
+    # retrying instead of marking a phantom backup.
+    _write_last_run(config, time.time())
     logger.info("db_backup complete: %d snapshotted, root=%s", ok, root)
     return results
