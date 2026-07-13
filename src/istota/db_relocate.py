@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -69,31 +70,50 @@ def legacy_db_path(config, user_id: str, module: str) -> Path | None:
     return user_root / module / "data" / f"{module}.db"
 
 
-def _archive(path: Path, stamp: str) -> None:
-    """Rename a file (and any WAL sidecars) out of the way with a stamp suffix."""
+# schema/version bookkeeping tables carry rows even in a freshly-created DB, so
+# they must not count toward "does this DB hold real user data".
+_META_TABLES = {"schema_meta", "schema_migrations", "sqlite_sequence"}
+
+
+def _rename_aside(path: Path, suffix: str) -> None:
+    """Rename a file (and any WAL sidecars) out of the way with a `.suffix`."""
     for p in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
         if p.exists():
-            p.rename(p.with_name(p.name + f".migrated-{stamp}"))
+            p.rename(p.with_name(p.name + f".{suffix}"))
 
 
-def relocate_module(config, user_id: str, module: str, *, dry_run: bool = False) -> dict:
-    """Relocate one user's one module DB. Returns a status dict.
+def _data_row_count(path: Path) -> int:
+    """Total user-data rows across all tables, excluding schema/meta bookkeeping.
 
-    status ∈ {skip_exists, no_source, migrated, would_migrate, check_failed}.
+    0 means "schema only, no real data" — the signature of a DB a prematurely
+    started service auto-created before relocation ran. Non-zero means the DB
+    holds data we must not clobber.
     """
-    new_path = config.module_db_path(user_id, module)
-    old_path = legacy_db_path(config, user_id, module)
-    result = {"user": user_id, "module": module, "new": str(new_path)}
+    conn = sqlite3.connect(path)
+    try:
+        tables = [
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        total = 0
+        for t in tables:
+            if t in _META_TABLES:
+                continue
+            total += conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0]
+        return total
+    except sqlite3.DatabaseError:
+        # Unreadable/corrupt destination — treat as "has data" so we don't
+        # clobber it; the operator gets a WARN via the skip path.
+        return -1
+    finally:
+        conn.close()
 
-    if new_path.exists():
-        return {**result, "status": "skip_exists"}
-    if old_path is None or not old_path.exists():
-        return {**result, "status": "no_source", "old": str(old_path) if old_path else None}
-    result["old"] = str(old_path)
 
-    if dry_run:
-        return {**result, "status": "would_migrate"}
-
+def _perform_migration(old_path: Path, new_path: Path, module: str, user_id: str) -> dict:
+    """Copy old→new, flip to WAL, quick_check, archive old. Returns a status dict."""
+    result = {"user": user_id, "module": module, "new": str(new_path), "old": str(old_path)}
     new_path.parent.mkdir(parents=True, exist_ok=True)
     # DELETE-mode DB is a single file (no live -wal/-shm with services stopped),
     # but copy any sidecars defensively before flipping the journal.
@@ -115,12 +135,76 @@ def relocate_module(config, user_id: str, module: str, *, dry_run: bool = False)
         return {**result, "status": "check_failed", "issues": report.issues_after}
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    _archive(old_path, stamp)
+    _rename_aside(old_path, f"migrated-{stamp}")
     logger.info(
         "db_relocated user=%s module=%s -> %s (old archived .migrated-%s)",
         user_id, module, new_path, stamp,
     )
     return {**result, "status": "migrated", "archived_stamp": stamp}
+
+
+def relocate_module(config, user_id: str, module: str, *, dry_run: bool = False) -> dict:
+    """Relocate one user's one module DB. Returns a status dict.
+
+    status ∈ {skip_exists, no_source, migrated, migrated_over_empty,
+    would_migrate, would_migrate_over_empty, skip_dest_has_data, check_failed}.
+
+    The destination-exists case is the one that bit ISSUE-156's rollout: a
+    service restarted with the new code (module_data_dir set) *before* this
+    migrator ran, auto-creating an empty DB at the destination. Skipping on
+    mere existence stranded the real data on the mount. So when the destination
+    exists we compare data-row counts: an *empty* destination is backed up and
+    replaced from a non-empty source; a destination that already holds data is
+    left alone with a loud WARN (never silently clobbered).
+    """
+    new_path = config.module_db_path(user_id, module)
+    old_path = legacy_db_path(config, user_id, module)
+    result = {"user": user_id, "module": module, "new": str(new_path)}
+    if old_path is not None:
+        result["old"] = str(old_path)
+
+    have_source = old_path is not None and old_path.exists()
+
+    if new_path.exists():
+        if not have_source:
+            return {**result, "status": "skip_exists"}
+        src_rows = _data_row_count(old_path)
+        dst_rows = _data_row_count(new_path)
+        if dst_rows == 0 and src_rows > 0:
+            # Empty destination (premature service start) shadowing real source.
+            if dry_run:
+                return {**result, "status": "would_migrate_over_empty",
+                        "src_rows": src_rows, "dst_rows": dst_rows}
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            _rename_aside(new_path, f"premature-{stamp}")
+            logger.warning(
+                "db_relocate_over_empty user=%s module=%s: destination was an "
+                "empty auto-created DB (0 rows), source has %d rows; backed up "
+                "destination as .premature-%s and migrating",
+                user_id, module, src_rows, stamp,
+            )
+            migrated = _perform_migration(old_path, new_path, module, user_id)
+            if migrated["status"] == "migrated":
+                migrated["status"] = "migrated_over_empty"
+            migrated["replaced_empty"] = True
+            return migrated
+        if dst_rows != 0:
+            logger.warning(
+                "db_relocate_skip_dest_has_data user=%s module=%s: destination "
+                "already holds %d rows (src=%d); not overwriting",
+                user_id, module, dst_rows, src_rows,
+            )
+            return {**result, "status": "skip_dest_has_data",
+                    "src_rows": src_rows, "dst_rows": dst_rows}
+        return {**result, "status": "skip_exists"}
+
+    if not have_source:
+        return {**result, "status": "no_source", "old": str(old_path) if old_path else None}
+
+    if dry_run:
+        return {**result, "status": "would_migrate"}
+
+    return _perform_migration(old_path, new_path, module, user_id)
 
 
 def relocate_all(config, *, dry_run: bool = False) -> list[dict]:
@@ -158,16 +242,24 @@ def main() -> int:
     config = load_config()
 
     results = relocate_all(config, dry_run=args.dry_run)
-    moved = failed = 0
+    _MOVED = {"migrated", "migrated_over_empty", "would_migrate", "would_migrate_over_empty"}
+    moved = failed = warned = 0
     for r in results:
         status = r["status"]
-        if status in ("migrated", "would_migrate"):
+        if status in _MOVED:
             moved += 1
             print(f"{r['user']}/{r['module']}: {status} -> {r['new']}")
+        elif status == "skip_dest_has_data":
+            warned += 1
+            print(
+                f"{r['user']}/{r['module']}: skip_dest_has_data "
+                f"(dst={r.get('dst_rows')} rows already present, src={r.get('src_rows')})",
+                file=sys.stderr,
+            )
         elif status in ("check_failed", "error"):
             failed += 1
             print(f"{r['user']}/{r['module']}: {status}", file=sys.stderr)
-    print(f"done: {moved} relocated, {failed} failed", file=sys.stderr)
+    print(f"done: {moved} relocated, {warned} skipped-with-data, {failed} failed", file=sys.stderr)
     return 1 if failed else 0
 
 
