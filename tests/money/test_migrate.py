@@ -88,6 +88,18 @@ class TestEnsureInitialised:
         assert (tmp_path / "money" / "data" / "money.db").is_file()
         assert config_store.get_meta(ctx.db_path, "schema_version") == "1"
 
+    def test_db_is_born_wal(self, tmp_path):
+        # config_store owns first-touch of money.db (before money.db.init_db),
+        # so it must set WAL — the DB now lives on local disk and the other
+        # module DBs are WAL from creation (ISSUE-157 invariant).
+        ctx = _make_ctx(tmp_path)
+        _migrate.ensure_initialised(ctx)
+        conn = sqlite3.connect(ctx.db_path)
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        finally:
+            conn.close()
+
     def test_idempotent(self, tmp_path):
         ctx = _make_ctx(tmp_path)
         _migrate.ensure_initialised(ctx)

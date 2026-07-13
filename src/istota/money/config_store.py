@@ -168,6 +168,14 @@ def init_db(db_path: Path | str) -> None:
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with _connect(db_path) as conn:
+        # config_store owns first-touch of money.db (ensure_initialised calls it
+        # before money.db.init_db), so set WAL here so the DB is born WAL like
+        # the other module DBs. It lives on local disk (Config.module_db_path),
+        # so WAL's mmap'd -shm is safe — the SIGBUS that forced DELETE (ISSUE-157)
+        # was a FUSE-mount artifact. Set once at init (persists in the file
+        # header); not re-issued per _connect, since re-issuing takes a write
+        # lock that races sibling readers (the dispatch-stall cause).
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
