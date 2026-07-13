@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,11 @@ FIXED_DAY = "2026-07-12"
 def _config(tmp_path: Path, **sched) -> Config:
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
+    # Default to an explicit db_backup_dir so integration tests exercise the
+    # "operator-designated durable target" path and don't trip the mount-liveness
+    # guard (a tmp dir isn't a real OS mountpoint). Pass db_backup_dir="" to
+    # exercise the mount-derived default resolution.
+    sched.setdefault("db_backup_dir", str(tmp_path / "backups"))
     return Config(
         db_path=tmp_path / "istota.db",
         nextcloud=NextcloudConfig(),
@@ -57,12 +63,13 @@ def _add_place(path: Path) -> None:
 
 
 def _root(tmp_path: Path) -> Path:
-    return tmp_path / "mount" / "istota-db-backups"
+    # Matches the explicit db_backup_dir the _config helper sets by default.
+    return tmp_path / "backups"
 
 
 class TestBackupDestination:
     def test_defaults_under_mount(self, tmp_path):
-        cfg = _config(tmp_path)
+        cfg = _config(tmp_path, db_backup_dir="")
         assert db_backup.backup_destination(cfg) == (tmp_path / "mount" / "istota-db-backups")
 
     def test_explicit_dir_wins(self, tmp_path):
@@ -70,7 +77,7 @@ class TestBackupDestination:
         assert db_backup.backup_destination(cfg) == (tmp_path / "elsewhere")
 
     def test_none_without_mount_or_dir(self, tmp_path):
-        cfg = _config(tmp_path)
+        cfg = _config(tmp_path, db_backup_dir="")
         cfg.nextcloud_mount_path = None
         assert db_backup.backup_destination(cfg) is None
 
@@ -115,7 +122,7 @@ class TestBackupDatabases:
         assert not _root(tmp_path).exists()
 
     def test_no_destination_is_noop(self, tmp_path):
-        cfg = _config(tmp_path)
+        cfg = _config(tmp_path, db_backup_dir="")
         cfg.nextcloud_mount_path = None
         db.init_db(cfg.db_path)
         assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
@@ -149,7 +156,7 @@ class TestBackupClockPersistence:
         assert after > 0.0  # a real timestamp was written
 
     def test_noop_does_not_persist_last_run(self, tmp_path):
-        cfg = _config(tmp_path)
+        cfg = _config(tmp_path, db_backup_dir="")
         cfg.nextcloud_mount_path = None
         db.init_db(cfg.db_path)
         db_backup.backup_databases(cfg, today=FIXED_DAY)
@@ -310,3 +317,71 @@ class TestBackupPermissions:
         # Dir 0700, file 0600 -> no group/other bits.
         assert stat.S_IMODE(dated.stat().st_mode) == 0o700
         assert stat.S_IMODE(snap.stat().st_mode) == 0o600
+
+
+class TestMountLiveness:
+    """A mount-derived destination must not be written when the mount is down —
+    otherwise the 'backup' lands on local disk under a stale mountpoint and
+    silently vanishes when the mount returns (Mulder #1)."""
+
+    def test_mount_derived_skips_when_not_mounted(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, db_backup_dir="")  # mount-derived destination
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert results == []
+        # Nothing written, clock not advanced.
+        assert not (tmp_path / "mount" / "istota-db-backups").exists()
+        assert db_backup.last_backup_time(cfg) == 0.0
+
+    def test_mount_derived_runs_when_mounted(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, db_backup_dir="")
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+        assert (tmp_path / "mount" / "istota-db-backups" / FIXED_DAY / "framework" / "istota.db").exists()
+
+    def test_explicit_dir_is_trusted_without_ismount(self, tmp_path, monkeypatch):
+        # An explicit db_backup_dir is the operator's choice; don't ismount-gate it.
+        cfg = _config(tmp_path)  # explicit db_backup_dir
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+
+
+class TestClockOnlyAdvancesOnOk:
+    def test_clock_not_advanced_when_all_error(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+
+        def _boom(src, dest, label):
+            raise OSError("simulated write failure")
+
+        monkeypatch.setattr(db_backup, "_snapshot_one", _boom)
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert results and all(r["status"] == "error" for r in results)
+        # Clock stays stale so the staleness alert can eventually fire.
+        assert db_backup.last_backup_time(cfg) == 0.0
+
+    def test_clock_advances_on_partial_ok(self, tmp_path):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)  # framework will be ok even if modules are missing
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert db_backup.last_backup_time(cfg) > 0.0
+
+
+class TestForceEntrypoint:
+    def test_main_runs_backup_immediately(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr("istota.config.load_config", lambda: cfg)
+        monkeypatch.setattr(sys, "argv", ["istota.db_backup"])
+        rc = db_backup.main()
+        assert rc == 0
+        # A dated dir for today's real date exists (main() ignores the interval).
+        dated = [p for p in _root(tmp_path).iterdir() if p.is_dir()]
+        assert len(dated) == 1

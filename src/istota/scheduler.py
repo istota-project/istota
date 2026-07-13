@@ -2509,6 +2509,27 @@ def _operator_alert_user(config: Config) -> str | None:
     return None
 
 
+def _send_operator_alert(config: Config, user_id: str, message: str, *, timeout: float = 30.0) -> None:
+    """Send an operator alert without letting a hung Talk delivery stall the
+    caller. `send_notification` ultimately runs on the persistent asyncio loop
+    with no timeout, so on the single-threaded main loop a wedged Nextcloud would
+    block dispatch indefinitely (ISSUE-143 class) — and a backup-destination
+    outage is exactly when Talk is likely also degraded. Run the send on a
+    short-lived daemon thread and only wait `timeout`; if it's still going we
+    return and let it finish (or die) in the background."""
+    def _do() -> None:
+        try:
+            send_notification(config, user_id, message, purpose="alert")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("operator_alert_failed err=%s", exc)
+
+    t = threading.Thread(target=_do, name="operator-alert", daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        logger.error("operator_alert_timed_out after %ss — send still running in background", timeout)
+
+
 def _alert_backup_problems(config: Config, results: list[dict]) -> None:
     """Fire one operator alert when a backup run reports any errored or suspect
     (row-count collapse) DB. Best-effort — never raises into the loop."""
@@ -2525,10 +2546,38 @@ def _alert_backup_problems(config: Config, results: list[dict]) -> None:
         "A 'suspect' DB was empty/unreadable vs. the prior good snapshot and was "
         "kept aside as .suspect; the prior good copy is preserved. Check the live DB."
     )
-    try:
-        send_notification(config, user, message, purpose="alert")
-    except Exception as exc:  # noqa: BLE001
-        logger.error("db_backup_alert_failed err=%s", exc)
+    _send_operator_alert(config, user, message)
+
+
+def _maybe_alert_backup_stale(
+    config: Config, now: float, persisted: float, already_alerted: bool
+) -> bool:
+    """Alert once when the persisted backup clock is older than 2x the interval
+    (backups have silently stopped). Re-arms on recovery. Returns the new
+    already_alerted state. Gated on a prior successful run (`persisted > 0`) so a
+    fresh deploy that simply hasn't backed up yet doesn't false-alarm."""
+    if not (config.scheduler.db_backup_enabled and config.scheduler.db_backup_interval):
+        return already_alerted
+    stale_after = 2 * config.scheduler.db_backup_interval
+    if persisted > 0 and now - persisted >= stale_after:
+        if already_alerted:
+            return True
+        age_h = int((now - persisted) / 3600)
+        interval_h = config.scheduler.db_backup_interval // 3600
+        logger.error(
+            "db_backup_stale last_run=%.0f age_s=%.0f — backups appear stopped",
+            persisted, now - persisted,
+        )
+        user = _operator_alert_user(config)
+        if user:
+            _send_operator_alert(
+                config, user,
+                f"⚠️ DB backups appear to have stopped — no successful snapshot in "
+                f"{age_h}h (interval is {interval_h}h). Check the scheduler and the "
+                "backup destination.",
+            )
+        return True
+    return False
 
 
 class LoopWatchdog:
@@ -3982,36 +4031,15 @@ def run_daemon(config: Config) -> None:
                 logger.error("Error running DB backup: %s", e)
             last_db_backup = now
 
-        # Staleness alert (issue #6): the persisted clock advances on every real
-        # attempt, so a last-run older than 2x the interval means the backup has
-        # silently stopped running (the clock-reset defect's failure mode). Alert
-        # once, re-arm on recovery. Gated on a prior successful run (persisted > 0)
-        # so a fresh deploy that just hasn't backed up yet doesn't false-alarm.
+        # Staleness alert (issue #6): a persisted last-run older than 2x the
+        # interval means backups have silently stopped (the clock-reset defect's
+        # failure mode). The clock now only advances on a durable OK run, so this
+        # also catches the mount-down case where snapshots can't be written.
         if config.scheduler.db_backup_enabled and config.scheduler.db_backup_interval:
             persisted = _db_backup.last_backup_time(config)
-            stale_after = 2 * config.scheduler.db_backup_interval
-            if persisted > 0 and now - persisted >= stale_after:
-                if not backup_stale_alerted:
-                    backup_stale_alerted = True
-                    logger.error(
-                        "db_backup_stale last_run=%.0f age_s=%.0f — backups appear stopped",
-                        persisted, now - persisted,
-                    )
-                    alert_user = _operator_alert_user(config)
-                    if alert_user:
-                        try:
-                            send_notification(
-                                config, alert_user,
-                                "⚠️ DB backups appear to have stopped — no successful "
-                                f"snapshot in {int((now - persisted) / 3600)}h "
-                                f"(interval is {config.scheduler.db_backup_interval // 3600}h). "
-                                "Check the scheduler and the backup destination.",
-                                purpose="alert",
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            logger.error("db_backup_stale_alert_failed err=%s", exc)
-            else:
-                backup_stale_alerted = False
+            backup_stale_alerted = _maybe_alert_backup_stale(
+                config, now, persisted, backup_stale_alerted
+            )
 
         # Emit the periodic process-health line (threads / fds / rss /
         # running-tasks / active-workers). interval == 0 disables it.

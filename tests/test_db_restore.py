@@ -21,6 +21,8 @@ from istota.config import (
 def _config(tmp_path: Path, **sched) -> Config:
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
+    # Explicit db_backup_dir so backup_databases doesn't ismount-gate the tmp dir.
+    sched.setdefault("db_backup_dir", str(tmp_path / "backups"))
     return Config(
         db_path=tmp_path / "istota.db",
         nextcloud=NextcloudConfig(),
@@ -58,6 +60,13 @@ def _place_count(path: Path) -> int:
         return conn.execute("SELECT COUNT(*) FROM places").fetchone()[0]
     finally:
         conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_daemon(monkeypatch):
+    """Default every restore test to 'no scheduler daemon running' so a real
+    dev daemon holding the flock can't turn restores into daemon_running."""
+    monkeypatch.setattr(db_restore, "_daemon_running", lambda *a, **k: False)
 
 
 class TestRestoreFramework:
@@ -176,6 +185,55 @@ class TestRestoreSafety:
         )
         assert res["date"] == "2026-07-11"
         assert _place_count(path) == 1  # the older snapshot's count
+
+
+class TestRestoreDaemonGuard:
+    def test_refuses_when_daemon_running(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        path = _seed_module_db(cfg, "alice", "location")
+        _add_place(path)
+        db_backup.backup_databases(cfg, today="2026-07-12")
+        path.unlink()
+
+        monkeypatch.setattr(db_restore, "_daemon_running", lambda *a, **k: True)
+        res = db_restore.restore_database(cfg, user="alice", module="location")
+        assert res["status"] == "daemon_running"
+        assert not path.exists()  # nothing copied while the daemon holds the DB
+
+    def test_dry_run_allowed_while_daemon_running(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        path = _seed_module_db(cfg, "alice", "location")
+        _add_place(path)
+        db_backup.backup_databases(cfg, today="2026-07-12")
+        path.unlink()
+
+        monkeypatch.setattr(db_restore, "_daemon_running", lambda *a, **k: True)
+        res = db_restore.restore_database(cfg, user="alice", module="location", dry_run=True)
+        assert res["status"] == "would_restore"  # read-only, safe even if daemon up
+
+
+class TestRestoreSidecars:
+    def test_clears_stale_wal_shm(self, tmp_path):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        path = _seed_module_db(cfg, "alice", "location")
+        _add_place(path)
+        db_backup.backup_databases(cfg, today="2026-07-12")
+
+        # Simulate a live-WAL DB at the restore target: main file + stale sidecars.
+        wal = path.with_name(path.name + "-wal")
+        shm = path.with_name(path.name + "-shm")
+        wal.write_bytes(b"stale-wal")
+        shm.write_bytes(b"stale-shm")
+
+        res = db_restore.restore_database(cfg, user="alice", module="location")
+        assert res["status"] == "restored"
+        # The stale sidecars must be gone so they can't be replayed onto the copy.
+        assert not wal.exists()
+        assert not shm.exists()
+        assert _place_count(path) == 1
 
 
 class TestListSnapshots:
