@@ -101,10 +101,17 @@ def resolve_for_user(
         istota_config, user_id, "feeds", "tumblr_api_key", "TUMBLR_API_KEY",
     )
 
+    # DB lives on local disk (WAL-safe); workspace files stay on the mount.
+    db_override = None
+    resolver = getattr(istota_config, "module_db_path", None)
+    if callable(resolver):
+        db_override = resolver(user_id, "feeds")
+
     return synthesize_feeds_context(
         user_id,
         workspace,
         tumblr_api_key=tumblr_api_key,
+        db_path=db_override,
     )
 
 

@@ -1236,6 +1236,82 @@
     - not istota_web_only
     - (_location_legacy_tables_check.stdout | default('') | trim) == 'location_pings'
 
+# Ensure the local-disk root for per-user module DBs exists (feeds/health/
+# location/money). The app also mkdirs it on first write, but create it here
+# with correct ownership.
+- name: Create module_data_dir (local-disk per-user module DBs)
+  file:
+    path: "{{ istota_module_data_dir }}"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0750"
+  when: not istota_web_only
+
+# One-time relocation: per-user module DBs (feeds/health/location/money) from
+# the Nextcloud FUSE mount to local disk, flipping DELETE journal → WAL. The
+# module DBs had to run DELETE mode on the mount (WAL's -shm SIGBUSes on FUSE),
+# which serialised readers vs. the writer and let a per-minute reader stall the
+# dispatch loop. On local disk WAL is safe and restores concurrency.
+#
+# The migrator (istota.db_relocate) is idempotent: it skips when the local
+# destination exists and archives each moved on-mount DB to <name>.migrated-<ts>
+# (so the archived file no longer matches the *.db find below). This whole block
+# is therefore skipped on re-runs once every module DB has been relocated.
+- name: Detect legacy on-mount module DBs
+  find:
+    paths: "{{ istota_nextcloud_mount_path }}/Users"
+    patterns: "feeds.db,health.db,location.db,money.db"
+    recurse: true
+    file_type: file
+  register: _legacy_module_dbs
+  changed_when: false
+  failed_when: false
+  when:
+    - not istota_web_only
+    - istota_use_nextcloud_mount | default(false) | bool
+
+- name: Relocate module DBs from mount to local disk
+  block:
+    - name: Stop services for module DB relocation
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - "{{ istota_namespace }}-scheduler"
+        - "{{ istota_namespace }}-web"
+        - "{{ istota_namespace }}-webhooks"
+      failed_when: false  # missing units (e.g. webhooks disabled) are fine
+
+    - name: Run module DB relocation migrator
+      command: >-
+        {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.db_relocate
+      args:
+        chdir: "{{ istota_repo_dir }}"
+      environment:
+        ISTOTA_ADMINS_FILE: "/etc/{{ istota_namespace }}/admins"
+      register: _module_relocate_result
+
+    - name: Show module relocation output
+      debug:
+        msg: "{{ _module_relocate_result.stdout_lines }}"
+
+    # Bring services back up explicitly (end-of-play handlers wouldn't fire on a
+    # re-run where no template changed) — same pattern as the location block.
+    - name: Restart services after module DB relocation
+      systemd:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - "{{ istota_namespace }}-scheduler"
+        - "{{ istota_namespace }}-web"
+        - "{{ istota_namespace }}-webhooks"
+      failed_when: false
+  when:
+    - not istota_web_only
+    - istota_use_nextcloud_mount | default(false) | bool
+    - (_legacy_module_dbs.matched | default(0)) > 0
+
 - name: Deploy istota-scheduler systemd service
   template:
     src: istota-scheduler.service.j2

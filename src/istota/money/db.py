@@ -62,9 +62,9 @@ CREATE TABLE IF NOT EXISTS kv_store (
 def get_db(db_path: Path | str):
     """Context manager for database connections with row factory.
 
-    journal_mode is set once by ``init_db`` and persists in the SQLite file
-    header. 30s busy handler absorbs the reader/writer serialization that
-    DELETE journal mode implies (no WAL concurrency).
+    journal_mode (WAL) is set once by ``init_db`` and persists in the SQLite
+    file header — not re-issued here. 30s busy handler absorbs any residual
+    contention instead of raising SQLITE_BUSY.
     """
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
@@ -82,11 +82,12 @@ def get_db(db_path: Path | str):
 def init_db(db_path: Path | str) -> None:
     """Create tables if they don't exist."""
     with get_db(db_path) as conn:
-        # DELETE (rollback journal), NOT WAL: this DB lives on the rclone
-        # FUSE-backed Nextcloud mount where WAL's mmap'd -shm file can SIGBUS
-        # the process (ISSUE-157). Issued unconditionally so a pre-existing WAL
-        # DB converts on first touch; no-op once already DELETE.
-        conn.execute("PRAGMA journal_mode=DELETE")
+        # WAL: this DB now lives on LOCAL disk (Config.module_db_path, off the
+        # rclone FUSE mount), so WAL's mmap'd -shm is safe — the SIGBUS that
+        # forced DELETE (ISSUE-157) was a FUSE artifact. WAL restores
+        # reader/writer concurrency. Issued unconditionally so a relocated
+        # DELETE-mode DB converts on first touch; no-op once WAL.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         _migrate_monarch_synced_columns(conn)
 

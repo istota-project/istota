@@ -2390,3 +2390,52 @@ class TestUnreadMessageCounts:
             # existing cursor (0) preserved → the message stays unread
             assert db.get_room_read_state(conn, "r1", "web", "alice") == 0
             assert db.count_unread_messages(conn, "r1", "web", "alice") == 1
+
+
+class TestConnectionPragmas:
+    """WAL journal mode is set once at init_db and persists in the file
+    header; get_db must NOT re-issue it (re-issuing takes a write lock on
+    every open and races sibling readers — the stall root cause). get_db
+    sets synchronous=NORMAL per connection (cheap, safe under WAL)."""
+
+    def test_init_db_sets_wal(self, db_path):
+        # A raw connection (not get_db) sees WAL already set by init_db.
+        conn = sqlite3.connect(db_path)
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+        assert mode.lower() == "wal"
+
+    def test_get_db_does_not_reissue_journal_mode(self, db_path, monkeypatch):
+        seen: list[str] = []
+        real_connect = sqlite3.connect
+
+        def spy_connect(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            conn.set_trace_callback(seen.append)
+            return conn
+
+        monkeypatch.setattr(db.sqlite3, "connect", spy_connect)
+        with db.get_db(db_path) as conn:
+            conn.execute("SELECT 1")
+
+        assert not any("journal_mode" in s.lower() for s in seen), (
+            f"get_db re-issued journal_mode: {seen}"
+        )
+
+    def test_get_db_sets_synchronous_normal(self, db_path):
+        with db.get_db(db_path) as conn:
+            # NORMAL == 1
+            assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+
+
+class TestBusyTimeoutParam:
+    def test_busy_timeout_override(self, db_path):
+        with db.get_db(db_path, busy_timeout_ms=2000) as conn:
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 2000
+
+    def test_default_keeps_30s(self, db_path):
+        # connect(timeout=30.0) => busy_timeout 30000; not overridden.
+        with db.get_db(db_path) as conn:
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000

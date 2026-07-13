@@ -10,6 +10,7 @@ import random
 import re
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -610,9 +611,17 @@ def _count_pending(config: Config, user_id: str, queue_type: str) -> int:
     Uses the claimability-aware count so a follow-up gated behind an active task
     in the same room reads as 0 — the idle worker keeps sleeping cheaply instead
     of busy-polling claim_task until the gate clears.
+
+    Reads with a short busy_timeout so a locked DB reads as "no work" (the worker
+    keeps idling) rather than blocking; the next idle poll retries.
     """
-    with db.get_db(config.db_path) as conn:
-        return db.count_claimable_tasks_for_user_queue(conn, user_id, queue_type)
+    timeout_ms = config.scheduler.main_loop_read_timeout_ms or None
+    try:
+        with db.get_db(config.db_path, busy_timeout_ms=timeout_ms) as conn:
+            return db.count_claimable_tasks_for_user_queue(conn, user_id, queue_type)
+    except sqlite3.OperationalError as exc:
+        logger.warning("idle_precheck_db_locked user=%s queue=%s err=%s", user_id, queue_type, exc)
+        return 0
 
 
 def _worker_idle_wait(
@@ -784,17 +793,25 @@ class WorkerPool:
         2. Instance-level bg cap: max_background_workers
         3. Per-user caps: effective_user_max_fg_workers / effective_user_max_bg_workers
         """
-        with db.get_db(self.config.db_path) as conn:
-            fg_users = db.get_users_with_pending_fg_queue_tasks(conn)
-            bg_users = db.get_users_with_pending_bg_queue_tasks(conn)
-            # Pre-fetch *claimable* task counts for users that may need multiple
-            # workers. Claimable (not raw pending) so a follow-up gated behind an
-            # active task in the same room counts as 0 — dispatch won't spawn a
-            # doomed extra worker that can only busy-poll claim_task until the
-            # gate clears. A task in a different, ungated room still counts, so
-            # legitimate parallelism is unaffected.
-            fg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "foreground") for uid in fg_users}
-            bg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "background") for uid in bg_users}
+        # Short busy_timeout: this scan is pure reads, so a DB locked past the
+        # budget means "skip this dispatch tick" (dispatch runs again in ~0.5s)
+        # rather than blocking the main loop for 30s and tripping the watchdog.
+        timeout_ms = self.config.scheduler.main_loop_read_timeout_ms or None
+        try:
+            with db.get_db(self.config.db_path, busy_timeout_ms=timeout_ms) as conn:
+                fg_users = db.get_users_with_pending_fg_queue_tasks(conn)
+                bg_users = db.get_users_with_pending_bg_queue_tasks(conn)
+                # Pre-fetch *claimable* task counts for users that may need multiple
+                # workers. Claimable (not raw pending) so a follow-up gated behind an
+                # active task in the same room counts as 0 — dispatch won't spawn a
+                # doomed extra worker that can only busy-poll claim_task until the
+                # gate clears. A task in a different, ungated room still counts, so
+                # legitimate parallelism is unaffected.
+                fg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "foreground") for uid in fg_users}
+                bg_pending = {uid: db.count_claimable_tasks_for_user_queue(conn, uid, "background") for uid in bg_users}
+        except sqlite3.OperationalError as exc:
+            logger.warning("dispatch_scan_db_locked err=%s (skipping tick)", exc)
+            return
 
         fg_cap = self.config.scheduler.max_foreground_workers
         bg_cap = self.config.scheduler.max_background_workers
@@ -2456,28 +2473,22 @@ def check_db_health(config: Config) -> list[CheckReport]:
     # 1. Framework DB (local disk, but cheap to check and worth confirming).
     reports.append(check_and_repair(config.db_path, label="framework"))
 
-    # 2. Per-user module DBs on the Nextcloud mount. Probe the filesystem
-    #    rather than calling each module's resolver: resolvers raise for
-    #    disabled-module, missing-mount, missing-user, etc., and we don't
-    #    want any of those to skip a *file* that's actually on disk and
-    #    might be corrupt.
-    mount = getattr(config, "nextcloud_mount_path", None)
-    if mount is None:
-        return reports
-
-    from .storage import get_user_bot_path  # local import: avoids cycle
-
+    # 2. Per-user module DBs. These now live on LOCAL disk at
+    #    config.module_db_path(user_id, module) (off the Nextcloud mount so WAL
+    #    is safe). Probe each resolved path directly rather than calling the
+    #    module resolvers: resolvers raise for disabled-module / missing-user /
+    #    missing-mount, and we don't want any of those to skip a *file* that is
+    #    actually on disk and might be corrupt.
     for user_id in config.users:
-        try:
-            bot_path = get_user_bot_path(user_id, config.bot_dir_name)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "db_health_user_path_failed user=%s err=%s", user_id, exc,
-            )
-            continue
-        user_root = Path(mount) / bot_path.lstrip("/")
         for module in ("feeds", "health", "location", "money"):
-            db_path = user_root / module / "data" / f"{module}.db"
+            try:
+                db_path = config.module_db_path(user_id, module)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "db_health_module_path_failed user=%s module=%s err=%s",
+                    user_id, module, exc,
+                )
+                continue
             reports.append(
                 check_and_repair(db_path, label=f"{module}:{user_id}")
             )
@@ -3774,6 +3785,9 @@ def run_daemon(config: Config) -> None:
     last_channel_sleep_cycle_check = 0.0
     last_heartbeat_check = 0.0
     last_db_health_check = 0.0
+    # Start the backup clock at "now" so a restart doesn't trigger a full
+    # snapshot every boot — first backup fires after one interval.
+    last_db_backup = time.time()
     last_status_write = 0.0
     last_trigger_check = 0.0
     # Init to "now" (not 0.0) so the first stats line fires after one full
@@ -3922,6 +3936,23 @@ def run_daemon(config: Config) -> None:
             except Exception as e:  # noqa: BLE001
                 logger.error("Error running DB health checks: %s", e)
             last_db_health_check = now
+
+        # Snapshot local DBs to the mount for off-host durability (they left the
+        # Nextcloud-synced workspaces when they moved to local disk). Same
+        # watchdog-suspend treatment as the health sweep — a full snapshot over
+        # every per-user DB can take a while.
+        if (
+            config.scheduler.db_backup_enabled
+            and config.scheduler.db_backup_interval
+            and now - last_db_backup >= config.scheduler.db_backup_interval
+        ):
+            try:
+                from .db_backup import backup_databases
+                with watchdog.suspended():
+                    backup_databases(config)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Error running DB backup: %s", e)
+            last_db_backup = now
 
         # Emit the periodic process-health line (threads / fds / rss /
         # running-tasks / active-workers). interval == 0 disables it.

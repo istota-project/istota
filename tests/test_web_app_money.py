@@ -55,6 +55,7 @@ def _istota_config(tmp_path, *, with_money: bool = False) -> Config:
         "bob": UserConfig(display_name="Bob", disabled_modules=["money"]),
     }
     return Config(
+        db_path=tmp_path / "istota.db",
         nextcloud_mount_path=tmp_path / "mount",
         site=SiteConfig(enabled=True, hostname="example.com"),
         users=users,

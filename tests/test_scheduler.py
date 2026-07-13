@@ -7354,17 +7354,8 @@ class TestCheckDbHealth:
     def test_sweep_covers_framework_and_per_user_dbs(self, tmp_path):
         from istota.scheduler import check_db_health
 
-        mount = tmp_path / "mount"
         framework_db = tmp_path / "istota.db"
         self._make_db(framework_db)
-
-        # alice has feeds + health; bob has location only; the absent
-        # files should be silently skipped, not error out.
-        for user, modules in (("alice", ("feeds", "health")), ("bob", ("location",))):
-            for module in modules:
-                self._make_db(
-                    mount / "Users" / user / "istota" / module / "data" / f"{module}.db"
-                )
 
         config = Config(
             db_path=framework_db,
@@ -7373,32 +7364,37 @@ class TestCheckDbHealth:
             email=EmailConfig(),
             scheduler=SchedulerConfig(),
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=mount,
+            nextcloud_mount_path=tmp_path / "mount",
+            module_data_dir=tmp_path / "local",
             users={"alice": UserConfig(), "bob": UserConfig()},
         )
+
+        # Module DBs now live on LOCAL disk at module_db_path. alice has feeds +
+        # health present; bob has location; absent files are still reported so
+        # operators see what was probed.
+        for user, modules in (("alice", ("feeds", "health")), ("bob", ("location",))):
+            for module in modules:
+                self._make_db(config.module_db_path(user, module))
 
         reports = check_db_health(config)
         labels = {r.label: r for r in reports}
 
-        # Framework + 4 per-user modules per user (feeds/health/location/money)
-        # = 1 + 2*4 = 9 reports. Missing per-module files are still reported
-        # so operators can see what was probed.
+        # Framework + 4 per-user modules per user = 1 + 2*4 = 9 reports.
         assert "framework" in labels
         assert labels["framework"].ok
         for user in ("alice", "bob"):
             for module in ("feeds", "health", "location", "money"):
                 assert f"{module}:{user}" in labels
 
-        # The two DBs we didn't create should report as missing (ok=True,
-        # no issues, no repair attempted).
+        # A DB we didn't create reports as missing (ok=True, no repair).
         missing = labels["money:alice"]
         assert missing.ok and not missing.repair_attempted
 
-        # And the ones we did create should be clean.
+        # And the ones we did create are clean.
         present = labels["feeds:alice"]
         assert present.ok and not present.repair_attempted
 
-    def test_no_mount_skips_per_user_dbs(self, tmp_path):
+    def test_probes_module_dbs_without_mount(self, tmp_path):
         from istota.scheduler import check_db_health
 
         framework_db = tmp_path / "istota.db"
@@ -7412,12 +7408,16 @@ class TestCheckDbHealth:
             scheduler=SchedulerConfig(),
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=None,
+            module_data_dir=tmp_path / "local",
             users={"alice": UserConfig()},
         )
 
         reports = check_db_health(config)
-        # Only the framework DB — no mount means no per-user paths to probe.
-        assert [r.label for r in reports] == ["framework"]
+        labels = [r.label for r in reports]
+        # Module DBs are local now — they're probed regardless of mount.
+        assert "framework" in labels
+        for module in ("feeds", "health", "location", "money"):
+            assert f"{module}:alice" in labels
 
 
 class TestReconcileVisitsMissingDb:
@@ -7845,3 +7845,55 @@ class TestWorkerIdleWait:
         # A transient read error must not skip a possibly-present task.
         assert result == (5, True)
         assert run_one.calls == 1
+
+
+class TestMainLoopReadTimeout:
+    """The dispatch scan and idle pre-check use a short busy_timeout; a locked
+    DB degrades to 'skip this tick' rather than blocking the loop 30s."""
+
+    def _config(self, tmp_path):
+        db_path = tmp_path / "loop.db"
+        db.init_db(db_path)
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(),
+            talk=TalkConfig(),
+            email=EmailConfig(),
+            scheduler=SchedulerConfig(main_loop_read_timeout_ms=2000),
+            temp_dir=tmp_path / "temp",
+        )
+
+    def test_count_pending_returns_zero_on_lock(self, tmp_path):
+        from istota.scheduler import _count_pending
+        config = self._config(tmp_path)
+
+        def boom(*a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+        with patch("istota.scheduler.db.get_db", side_effect=boom):
+            assert _count_pending(config, "alice", "foreground") == 0
+
+    def test_dispatch_skips_tick_on_lock(self, tmp_path):
+        config = self._config(tmp_path)
+        pool = WorkerPool(config)
+
+        def boom(*a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+        with patch("istota.scheduler.db.get_db", side_effect=boom):
+            pool.dispatch()  # must not raise
+        assert pool.active_count == 0
+
+    def test_count_pending_passes_configured_timeout(self, tmp_path):
+        from istota.scheduler import _count_pending
+        config = self._config(tmp_path)
+        seen = {}
+        real = db.get_db
+
+        def spy(path, **kwargs):
+            seen.update(kwargs)
+            return real(path, **kwargs)
+
+        with patch("istota.scheduler.db.get_db", side_effect=spy):
+            _count_pending(config, "alice", "foreground")
+        assert seen.get("busy_timeout_ms") == 2000

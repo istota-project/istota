@@ -24,7 +24,8 @@ def run_daemon(config: Config) -> None
    - Poll TASKS.md files (every `tasks_file_poll_interval`)
    - Run cleanup checks (every `briefing_check_interval`)
    - Check heartbeats (every `heartbeat_check_interval`)
-   - Sweep SQLite DBs (framework + per-user feeds/health/location/money) with `PRAGMA quick_check` + self-healing `REINDEX` (every `db_health_check_interval`, default 24h; runs immediately on the first tick of the daemon so a fresh deploy surfaces latent index corruption without waiting a day)
+   - Sweep SQLite DBs (framework + per-user feeds/health/location/money, all local now) with `PRAGMA quick_check` + self-healing `REINDEX` (every `db_health_check_interval`, default 24h; runs immediately on the first tick of the daemon so a fresh deploy surfaces latent index corruption without waiting a day)
+   - Snapshot local DBs to `{mount}/istota-db-backups` via the SQLite online-backup API (every `db_backup_interval`, default 24h; off-host durability now that module DBs are local — clock starts at boot, first snapshot after one interval)
    - Emit the `scheduler_stats` health line (every `scheduler_stats_interval`, default 60s; first emit after one full interval; `0` disables)
    - Check invoice schedules (every `briefing_check_interval`)
    - `pool.dispatch()`
@@ -182,6 +183,7 @@ class UserWorker(threading.Thread):
 | TASKS.md | `poll_all_tasks_files()` (tasks_file_poller.py) | `tasks_file_poll_interval` | `istota_file_tasks` |
 | Heartbeat | `check_heartbeats()` (heartbeat.py) | `heartbeat_check_interval` | `heartbeat_state` |
 | DB health | `check_db_health()` → `db_health.check_and_repair()` | `db_health_check_interval` | — (logs only) |
+| DB backup | `db_backup.backup_databases()` (SQLite online-backup → `{mount}/istota-db-backups`) | `db_backup_interval` | — (logs only) |
 | Scheduler stats | `_emit_scheduler_stats()` (daemon-only) | `scheduler_stats_interval` | — (logs only) |
 | Shared files | `discover_and_organize_shared_files()` (shared_file_organizer.py) | `shared_file_check_interval` | `user_resources` |
 | Briefings | `check_briefings()` | `briefing_check_interval` | `briefing_state` |
@@ -217,7 +219,9 @@ After task completion, if enabled + `auto_index_conversations`:
 | `tasks_file_poll_interval` | 30s | TASKS.md poller |
 | `shared_file_check_interval` | 120s | Shared file organizer |
 | `heartbeat_check_interval` | 60s | Heartbeat checks |
-| `db_health_check_interval` | 86400s (24h) | SQLite `quick_check` + `REINDEX` self-heal across framework + per-user feeds/health/location/money DBs (covers Nextcloud-mount FUSE/network induced index corruption) |
+| `db_health_check_interval` | 86400s (24h) | SQLite `quick_check` + `REINDEX` self-heal across framework + per-user feeds/health/location/money DBs. Backstop now that module DBs are local (was for FUSE-mount corruption); enumerates via `Config.module_db_path`, no longer mount-gated |
+| `main_loop_read_timeout_ms` | 2000ms | `busy_timeout` for the dispatch scan + idle pre-check (read-only). A lock past this raises `OperationalError` → the loop skips the tick (re-dispatches ~0.5s later) instead of blocking 30s and tripping the stall watchdog. Passed as `db.get_db(..., busy_timeout_ms=)`. 0 = keep the 30s connect timeout. Defense-in-depth on top of WAL |
+| `db_backup_enabled` / `db_backup_interval` / `db_backup_dir` | true / 86400s / "" | `db_backup.backup_databases` snapshots the framework DB + every per-user module DB to `db_backup_dir` (default `{nextcloud_mount}/istota-db-backups`) via SQLite's online-backup API — off-host durability now that module DBs left the Nextcloud-synced workspaces. Backup clock starts at daemon boot (first snapshot after one interval, not on every restart). No mount + no dir = logged no-op |
 | `scheduler_stats_interval` | 60s | One `scheduler_stats threads=… fds=… rss_mb=… tasks_running=… workers_active=…` INFO line per interval on logger `istota.scheduler.stats`, daemon-only. Surfaces resource leaks (ISSUE-101 class) in minutes via `journalctl … \| grep scheduler_stats`. psutil-derived fields (`fds`/`rss_mb`) omitted with a one-time WARN when psutil is unavailable; DB hiccup → `tasks_running=?`. First emit after one full interval. `0` disables. |
 | `loop_stall_alert_seconds` | 180s | Defense-in-depth (ISSUE-143). `LoopWatchdog` runs on its own daemon thread, watches a last-tick timestamp the main loop bumps each iteration (`watchdog.tick()`), and logs an ERROR + fires one operator alert (`send_notification(purpose="alert")` to the first admin/user via `_operator_alert_user`) when the loop hasn't ticked in this long. Re-arms on recovery so a transient stall pages once. `0` disables. |
 | `worker_idle_timeout` | 10s | Cumulative-idle linger before a worker exits. The worker re-checks for work on a fine cadence for up to this long (continuous emptiness) before exiting; resets whenever a task is claimed. (Pre-phase-2 this was effectively capped to ~one `poll_interval` with a single recheck — the knob is now honoured.) |
