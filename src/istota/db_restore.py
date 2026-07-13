@@ -21,6 +21,7 @@ Run with the services stopped (the live files are being overwritten).
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import shutil
 import sys
@@ -34,6 +35,41 @@ from .db_backup import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Same flock the scheduler daemon holds (scheduler.run_daemon). Restoring over a
+# live WAL DB corrupts it, so we refuse when the daemon is running.
+_DAEMON_LOCK_PATH = Path("/tmp/istota-scheduler-daemon.lock")
+
+
+def _daemon_running(lock_path: Path = _DAEMON_LOCK_PATH) -> bool:
+    """True if the scheduler daemon holds its singleton flock. We test by trying
+    to take the lock non-blocking; success means no daemon (we release it again)."""
+    if not lock_path.exists():
+        return False
+    try:
+        f = open(lock_path, "a")  # append: don't truncate the daemon's lock file
+    except OSError:
+        return False
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        f.close()
+
+
+def _clear_wal_sidecars(dest: Path) -> None:
+    """Remove any stale ``-wal`` / ``-shm`` sidecars next to a restored DB. A
+    leftover WAL from the old live DB would be replayed onto the just-restored
+    file on next open and corrupt it; init_db re-creates a fresh WAL anyway."""
+    for suffix in ("-wal", "-shm"):
+        sidecar = dest.with_name(dest.name + suffix)
+        try:
+            sidecar.unlink(missing_ok=True)
+        except OSError as exc:  # noqa: BLE001
+            logger.warning("db_restore_sidecar_unlink_failed path=%s err=%s", sidecar, exc)
 
 
 def list_snapshots(config) -> list[dict]:
@@ -101,9 +137,19 @@ def restore_database(
     if dry_run:
         return {**result, "status": "would_restore"}
 
+    # Never overwrite a DB the scheduler has open in WAL — copying the main file
+    # under a live connection corrupts it once the next checkpoint replays -wal.
+    if _daemon_running():
+        logger.error(
+            "db_restore refused label=%s — scheduler daemon is running; stop it first",
+            resolved_label,
+        )
+        return {**result, "status": "daemon_running"}
+
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
+        _clear_wal_sidecars(dest)
     except OSError as exc:  # noqa: BLE001
         logger.error("db_restore_failed label=%s err=%s", resolved_label, exc)
         return {**result, "status": "error", "error": str(exc)}
@@ -181,7 +227,7 @@ def main() -> int:
         line = f"{r['label']}: {status}"
         if "date" in r:
             line += f" (date={r['date']}, rows={r.get('rows')})"
-        if status in ("error", "refused_empty", "no_destination"):
+        if status in ("error", "refused_empty", "no_destination", "daemon_running"):
             failed += 1
             print(line, file=sys.stderr)
         elif status == "no_snapshot" and not args.all:

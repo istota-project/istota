@@ -37,6 +37,7 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 import time
 from datetime import date as _date
 from pathlib import Path
@@ -108,6 +109,33 @@ def backup_destination(config) -> Path | None:
     if mount:
         return Path(mount) / "istota-db-backups"
     return None
+
+
+def _destination_is_durable(config) -> bool:
+    """True when the backup destination is a real off-host target.
+
+    An explicit ``db_backup_dir`` is trusted (the operator chose it). A
+    mount-derived destination is durable ONLY if the Nextcloud mount is actually
+    mounted: if the rclone FUSE mount is down, the mountpoint reverts to an
+    ordinary local directory, and a naive ``mkdir`` would write the "backup" to
+    local disk under the stale mountpoint — silently defeating off-host
+    durability with no error (the copies vanish when the mount returns). Guard
+    against that by requiring ``os.path.ismount`` before treating a mount-derived
+    destination as usable.
+    """
+    explicit = (getattr(config.scheduler, "db_backup_dir", "") or "").strip()
+    if explicit:
+        return True
+    mount = getattr(config, "nextcloud_mount_path", None)
+    if not mount:
+        return False
+    if not os.path.ismount(str(mount)):
+        logger.error(
+            "db_backup skipped: Nextcloud mount %s is not mounted — refusing to "
+            "write backups to local disk under a stale mountpoint", mount,
+        )
+        return False
+    return True
 
 
 def _date_str(today: str | None) -> str:
@@ -257,6 +285,11 @@ def backup_databases(config, *, today: str | None = None) -> list[dict]:
             "local DBs have no durable backup target configured"
         )
         return []
+    if not _destination_is_durable(config):
+        # Not a real off-host target right now (mount down). Do NOT write to a
+        # stale mountpoint, and do NOT advance the persisted clock — leaving it
+        # stale is what lets the staleness alert eventually fire.
+        return []
 
     date_str = _date_str(today)
     dated_root = root / date_str
@@ -297,12 +330,47 @@ def backup_databases(config, *, today: str | None = None) -> list[dict]:
     ok = sum(1 for r in results if r["status"] == "ok")
     suspect = sum(1 for r in results if r["status"] == "suspect")
     errored = sum(1 for r in results if r["status"] == "error")
-    # Persist the clock only after a real attempt (root resolved). A disabled or
-    # no-destination run returns earlier without writing, so the daemon keeps
-    # retrying instead of marking a phantom backup.
-    _write_last_run(config, time.time())
+    # Persist the clock only when at least one DB actually snapshotted OK.
+    # A run where every DB errored (or there was nothing to back up) must leave
+    # the clock stale so the staleness alert can eventually fire — advancing it
+    # on a fully-failed run would silently suppress that safety net.
+    if ok > 0:
+        _write_last_run(config, time.time())
+    else:
+        logger.error(
+            "db_backup produced no OK snapshot (%d error) — leaving last-run "
+            "clock stale so staleness alerting can fire", errored,
+        )
     logger.info(
         "db_backup complete: %d snapshotted, %d suspect, %d error, root=%s",
         ok, suspect, errored, dated_root,
     )
     return results
+
+
+def main() -> int:
+    """Force an immediate backup, ignoring the interval clock. Useful right
+    after a deploy to close the gap before the first scheduled run."""
+    import argparse
+
+    from istota.config import load_config
+
+    argparse.ArgumentParser(prog="istota.db_backup").parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    config = load_config()
+
+    results = backup_databases(config)
+    if not results:
+        print("db_backup: nothing done (disabled, no destination, or mount down)", file=sys.stderr)
+        return 1
+    ok = sum(1 for r in results if r["status"] == "ok")
+    suspect = [r for r in results if r["status"] == "suspect"]
+    errored = [r for r in results if r["status"] == "error"]
+    for r in suspect + errored:
+        print(f"{r['label']}: {r['status']}", file=sys.stderr)
+    print(f"done: {ok} snapshotted, {len(suspect)} suspect, {len(errored)} error", file=sys.stderr)
+    return 1 if errored else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
