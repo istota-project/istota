@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-07-13
+
 ### Added
 - A restore command brings a per-user database back from its most recent good off-host snapshot, refusing to overwrite a database the app still has open or to restore an obviously-empty snapshot by mistake.
 
@@ -828,7 +830,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.27.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.28.0...main
+[0.28.0]: https://gitlab.com/cynium/istota/-/releases/v0.28.0
 [0.27.0]: https://gitlab.com/cynium/istota/-/releases/v0.27.0
 [0.26.3]: https://gitlab.com/cynium/istota/-/releases/v0.26.3
 [0.26.2]: https://gitlab.com/cynium/istota/-/releases/v0.26.2
