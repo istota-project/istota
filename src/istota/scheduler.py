@@ -3785,9 +3785,12 @@ def run_daemon(config: Config) -> None:
     last_channel_sleep_cycle_check = 0.0
     last_heartbeat_check = 0.0
     last_db_health_check = 0.0
-    # Start the backup clock at "now" so a restart doesn't trigger a full
-    # snapshot every boot — first backup fires after one interval.
-    last_db_backup = time.time()
+    # Seed the backup clock from the persisted last-run timestamp so it survives
+    # restarts: an overdue backup (or one that never ran) fires promptly, a
+    # recent one waits out the remaining interval. Without this the clock reset
+    # every boot and a host deploying more than once a day never backed up.
+    from . import db_backup as _db_backup
+    last_db_backup = _db_backup.last_backup_time(config)
     last_status_write = 0.0
     last_trigger_check = 0.0
     # Init to "now" (not 0.0) so the first stats line fires after one full

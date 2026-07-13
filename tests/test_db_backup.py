@@ -100,3 +100,52 @@ class TestBackupDatabases:
         cfg.nextcloud_mount_path = None
         db.init_db(cfg.db_path)
         assert db_backup.backup_databases(cfg) == []
+
+
+class TestBackupClockPersistence:
+    """The daily-backup clock must survive scheduler restarts (else frequent
+    deploys defer it forever). last_backup_time reads a persisted timestamp;
+    backup_databases writes it after a real attempt."""
+
+    def test_last_backup_time_zero_when_never_run(self, tmp_path):
+        cfg = _config(tmp_path)
+        assert db_backup.last_backup_time(cfg) == 0.0
+
+    def test_backup_persists_last_run(self, tmp_path):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        before = db_backup.last_backup_time(cfg)
+        db_backup.backup_databases(cfg)
+        after = db_backup.last_backup_time(cfg)
+        assert before == 0.0
+        assert after > 0.0  # a real timestamp was written
+
+    def test_noop_does_not_persist_last_run(self, tmp_path):
+        # No destination (no mount) → nothing attempted → clock stays at 0 so
+        # the daemon keeps retrying instead of marking a phantom backup.
+        cfg = _config(tmp_path)
+        cfg.nextcloud_mount_path = None
+        db.init_db(cfg.db_path)
+        db_backup.backup_databases(cfg)
+        assert db_backup.last_backup_time(cfg) == 0.0
+
+    def test_disabled_does_not_persist_last_run(self, tmp_path):
+        cfg = _config(tmp_path, db_backup_enabled=False)
+        db.init_db(cfg.db_path)
+        db_backup.backup_databases(cfg)
+        assert db_backup.last_backup_time(cfg) == 0.0
+
+
+class TestColdCopyIsDeleteMode:
+    def test_snapshot_is_delete_journal_mode(self, tmp_path):
+        # The cold copy on the mount must not carry a WAL header (its -shm would
+        # SIGBUS on FUSE if ever opened in place).
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        db_backup.backup_databases(cfg)
+        snap = tmp_path / "mount" / "istota-db-backups" / "framework" / "istota.db"
+        conn = sqlite3.connect(snap)
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+        finally:
+            conn.close()
