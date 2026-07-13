@@ -122,7 +122,12 @@ def resolve_for_user(
     workspace = Path(mount) / get_user_bot_path(
         user_id, istota_config.bot_dir_name,
     ).lstrip("/")
-    ctx = synthesize_user_context(workspace)
+    # DB lives on local disk (WAL-safe); ledgers/ stays on the mount.
+    db_override = None
+    resolver = getattr(istota_config, "module_db_path", None)
+    if callable(resolver):
+        db_override = resolver(user_id, "money")
+    ctx = synthesize_user_context(workspace, db_path=db_override)
     # Lazy import — _migrate imports config_store, which imports model
     # dataclasses. Keeping the import here avoids a startup-time cost when
     # the module isn't enabled for any user.

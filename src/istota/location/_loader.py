@@ -59,7 +59,13 @@ def resolve_for_user(
         user_id, istota_config.bot_dir_name,
     ).lstrip("/")
 
-    return synthesize_location_context(user_id, workspace)
+    # DB lives on local disk (WAL-safe); workspace files stay on the mount.
+    db_override = None
+    resolver = getattr(istota_config, "module_db_path", None)
+    if callable(resolver):
+        db_override = resolver(user_id, "location")
+
+    return synthesize_location_context(user_id, workspace, db_path=db_override)
 
 
 def list_users(

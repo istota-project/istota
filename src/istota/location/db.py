@@ -133,12 +133,12 @@ def init_db(path: Path) -> None:
         conn = sqlite3.connect(path, timeout=30.0)
         try:
             conn.execute("PRAGMA busy_timeout = 30000")
-            # DELETE (rollback journal), NOT WAL: this DB lives on the rclone
-            # FUSE-backed Nextcloud mount where WAL's mmap'd -shm file can
-            # SIGBUS the process (ISSUE-157). Set unconditionally (not just
-            # when fresh) so pre-existing WAL DBs convert on first touch;
-            # no-op once already DELETE.
-            conn.execute("PRAGMA journal_mode = DELETE")
+            # WAL: this DB now lives on LOCAL disk (Config.module_db_path, off
+            # the rclone FUSE mount), so WAL's mmap'd -shm is safe — the SIGBUS
+            # that forced DELETE (ISSUE-157) was a FUSE artifact. WAL restores
+            # reader/writer concurrency. Issued unconditionally so a relocated
+            # DELETE-mode DB converts on first touch; no-op once WAL.
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(SCHEMA_SQL)
             _migrate_schema(conn)
             conn.execute(

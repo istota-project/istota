@@ -46,6 +46,7 @@ def _make_config(tmp_path, users=None, mount_path=None, web=None):
             ),
         }
     return Config(
+        db_path=tmp_path / "istota.db",
         nextcloud_mount_path=Path(mount_path) if mount_path else tmp_path / "mount",
         site=SiteConfig(enabled=True, hostname="example.com"),
         users=users,

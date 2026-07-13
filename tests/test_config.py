@@ -133,6 +133,33 @@ class TestConfigLoading:
         cfg = load_config(p)
         assert cfg.db_path == Path("mydb.sqlite")
 
+    def test_load_module_data_dir_and_backup_knobs(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            'module_data_dir = "/srv/local/modules"\n\n'
+            "[scheduler]\n"
+            "main_loop_read_timeout_ms = 1500\n"
+            "db_backup_enabled = false\n"
+            "db_backup_interval = 43200\n"
+            'db_backup_dir = "/srv/backups"\n'
+        )
+        cfg = load_config(p)
+        assert cfg.module_data_dir == Path("/srv/local/modules")
+        assert cfg.scheduler.main_loop_read_timeout_ms == 1500
+        assert cfg.scheduler.db_backup_enabled is False
+        assert cfg.scheduler.db_backup_interval == 43200
+        assert cfg.scheduler.db_backup_dir == "/srv/backups"
+
+    def test_module_data_dir_defaults_none(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text('db_path = "d.sqlite"\n')
+        cfg = load_config(p)
+        assert cfg.module_data_dir is None
+        # derives alongside the framework DB
+        assert cfg.module_db_path("alice", "feeds") == (
+            Path("d.sqlite").resolve().parent / "modules" / "alice" / "feeds.db"
+        )
+
     def test_stale_skills_block_warns_not_fails(self, tmp_path, caplog):
         # The [skills] section is obsolete (single-axis selection has no knobs).
         # A stale block must keep loading, with a warning — never raise.

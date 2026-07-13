@@ -52,6 +52,14 @@ bot_name = "Istota"
 # Database path (relative to working directory or absolute)
 db_path = "data/istota.db"
 
+# Local-disk root for per-user module SQLite DBs (feeds/health/location/money).
+# These MUST live on local disk, NOT the Nextcloud mount: WAL's mmap'd -shm file
+# SIGBUSes the process on the rclone FUSE mount, so they'd be stuck on the
+# slower DELETE journal mode (no reader/writer concurrency). User-facing files
+# (health uploads, money ledgers, feeds exports) stay on the mount; only the
+# .db relocates here. A path under nextcloud_mount_path is refused at runtime.
+module_data_dir = "data/modules"
+
 # =============================================================================
 # File Access Configuration
 # =============================================================================
@@ -364,6 +372,18 @@ worker_idle_timeout = 10
 # picked up sub-second. Set to 0 or >= worker_idle_timeout to restore the legacy
 # single coarse wait + single recheck.
 worker_idle_poll_interval = 0.5
+# Busy-timeout (ms) for the main dispatch loop's read-only scans. A DB locked
+# past this budget makes the loop skip the tick (it re-dispatches ~0.5s later)
+# instead of blocking up to 30s and tripping the stall watchdog. 0 keeps the
+# 30s default. Defense-in-depth on top of WAL — leave at 2000 unless you have a
+# reason to change it.
+main_loop_read_timeout_ms = 2000
+# Snapshot local DBs (framework + per-user modules) to the Nextcloud mount for
+# off-host durability — they left the Nextcloud-synced workspaces when they
+# moved to local disk. Uses SQLite's online backup API (consistent live copy).
+db_backup_enabled = true
+db_backup_interval = 86400          # seconds between snapshots (daily)
+# db_backup_dir = ""                # empty = {nextcloud_mount}/istota-db-backups
 
 # ============================================================================
 # Briefing Defaults

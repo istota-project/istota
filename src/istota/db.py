@@ -539,6 +539,13 @@ def init_db(db_path: Path) -> None:
     """Initialize database with schema."""
     schema_path = Path(__file__).parent.parent.parent / "schema.sql"
     with sqlite3.connect(db_path) as conn:
+        # WAL is set ONCE here, not on every get_db open. journal_mode is
+        # persistent in the SQLite file header, so re-issuing it per
+        # connection only buys a needless write-lock acquisition that races
+        # sibling readers (the dispatch-loop stall root cause). istota.db is
+        # on local disk, so WAL's mmap'd -shm is safe (unlike the per-user
+        # module DBs, which historically lived on the FUSE mount).
+        conn.execute("PRAGMA journal_mode=WAL")
         # Migrations read rows by column name (e.g. the unified-rooms backfill),
         # so this connection needs the same Row factory the runtime get_db path
         # uses — a raw connection yields tuples and name-indexing raises
@@ -552,11 +559,27 @@ def init_db(db_path: Path) -> None:
 
 
 @contextmanager
-def get_db(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """Get database connection with row factory."""
+def get_db(
+    db_path: Path, *, busy_timeout_ms: int | None = None
+) -> Iterator[sqlite3.Connection]:
+    """Get database connection with row factory.
+
+    ``busy_timeout_ms`` overrides the default 30s lock wait — pass a small
+    value (e.g. 2000) for the main dispatch loop's read-only scans so a lock
+    held past that budget raises ``OperationalError`` (caller skips the tick)
+    instead of blocking the loop for 30s and tripping the stall watchdog.
+    """
     # timeout=30.0 waits up to 30s for locks instead of failing immediately
     conn = sqlite3.connect(db_path, timeout=30.0)
-    conn.execute("PRAGMA journal_mode=WAL")
+    # journal_mode is NOT re-issued here — it is persistent in the file header
+    # and set once by init_db. Re-issuing WAL per open takes a write lock that
+    # races sibling readers (dispatch-loop stall root cause). synchronous is a
+    # per-connection setting (not stored in the header), so it is set each open;
+    # NORMAL is the safe, faster choice under WAL.
+    conn.execute("PRAGMA synchronous=NORMAL")
+    if busy_timeout_ms is not None:
+        # Overrides the 30s connect timeout for this connection.
+        conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     conn.row_factory = sqlite3.Row
     try:
         yield conn

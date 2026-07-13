@@ -53,8 +53,14 @@ def resolve_for_user(
         user_id, istota_config.bot_dir_name,
     ).lstrip("/")
 
+    # DB lives on local disk (WAL-safe); uploads/ stays on the mount.
+    db_override = None
+    resolver = getattr(istota_config, "module_db_path", None)
+    if callable(resolver):
+        db_override = resolver(user_id, "health")
+
     framework_db = getattr(istota_config, "db_path", None)
-    ctx = synthesize_health_context(user_id, workspace)
+    ctx = synthesize_health_context(user_id, workspace, db_path=db_override)
     if framework_db:
         from dataclasses import replace
         ctx = replace(ctx, framework_db_path=Path(framework_db))

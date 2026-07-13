@@ -121,6 +121,9 @@ class SchedulerConfig:
     shared_file_check_interval: int = 120  # seconds between shared file organization checks
     heartbeat_check_interval: int = 60  # seconds between heartbeat checks
     db_health_check_interval: int = 86400  # seconds between SQLite quick_check sweeps over per-user DBs
+    db_backup_enabled: bool = True  # checkpoint + snapshot local DBs (framework + per-user modules) to the mount so they stay off-host durable now that they've left Nextcloud-synced workspaces
+    db_backup_interval: int = 86400  # seconds between DB backup snapshots (default daily)
+    db_backup_dir: str = ""  # snapshot destination; empty = {nextcloud_mount}/istota-db-backups. Backup requires a resolvable destination on durable (off-host) storage
     scheduler_stats_interval: int = 60  # seconds between scheduler_stats health-line emits (0 = disabled)
     loop_stall_alert_seconds: int = 180  # alert if the main dispatch loop hasn't ticked in this long (0 = disabled)
     talk_poll_interval: int = 10  # seconds between Talk polls
@@ -157,6 +160,7 @@ class SchedulerConfig:
     temp_file_retention_days: int = 7  # delete temp files older than N days, 0 to disable
     worker_idle_timeout: int = 10    # cumulative-idle seconds a worker lingers (re-checking) before exiting
     worker_idle_poll_interval: float = 0.5  # idle re-check cadence (0 or >= worker_idle_timeout = legacy single coarse wait + recheck)
+    main_loop_read_timeout_ms: int = 2000  # busy_timeout for the dispatch scan's read-only queries; a lock past this skips the tick instead of blocking the loop 30s (0 = keep the 30s default)
     max_foreground_workers: int = 5  # instance-level foreground (interactive) worker cap
     max_background_workers: int = 3  # instance-level background (scheduled/briefing) worker cap
     user_max_foreground_workers: int = 2  # global per-user fg worker default
@@ -649,6 +653,14 @@ class Config:
     disabled_skills: list[str] = field(default_factory=list)  # instance-wide skills to exclude
     custom_system_prompt: bool = False  # Use config/system-prompt.md instead of Claude Code's default
     temp_dir: Path = field(default_factory=lambda: Path("/tmp/istota"))
+    # Local-disk root for per-user module SQLite DBs (feeds/health/location/money).
+    # These live OFF the Nextcloud mount so they can use WAL safely — WAL's
+    # mmap'd -shm SIGBUSes on the rclone FUSE mount (ISSUE-157). User-facing
+    # workspace files (health uploads, money ledgers, feeds exports) stay on the
+    # mount; only the .db relocates here. None (default) derives
+    # ``{db_path.parent}/modules`` — i.e. alongside the framework DB, which is
+    # already local. Set explicitly to override (guarded against the mount).
+    module_data_dir: Path | None = None
     config_path: Path | None = None  # Set by load_config() to the file actually loaded
 
     @property
@@ -668,6 +680,36 @@ class Config:
     def use_mount(self) -> bool:
         """Whether to use local mount instead of rclone CLI."""
         return self.nextcloud_mount_path is not None
+
+    def module_db_path(self, user_id: str, module: str) -> Path:
+        """Local-disk path for a user's per-module SQLite DB.
+
+        ``{module_data_dir}/{user_id}/{module}.db``. Module DBs live on local
+        disk (not the Nextcloud mount) so they can use WAL — WAL's mmap'd -shm
+        SIGBUSes on the rclone FUSE mount (ISSUE-157). The module loaders pass
+        the result as the ``db_path`` override into their workspace synth, so
+        the user-facing ``data_dir`` (health uploads, money ledgers, feeds
+        exports) stays on the mount while only the ``.db`` relocates.
+
+        When ``module_data_dir`` is unset (None) the root derives as
+        ``{db_path.parent}/modules`` — alongside the framework DB, which is
+        already local, so it needs no guard. An *explicitly* configured
+        ``module_data_dir`` is refused if it resolves under
+        ``nextcloud_mount_path`` — a WAL DB there would SIGBUS the process, so
+        a misconfigured value fails loud rather than at runtime.
+        """
+        if self.module_data_dir is not None:
+            root = Path(self.module_data_dir).resolve()
+            mount = self.nextcloud_mount_path
+            if mount is not None and root.is_relative_to(Path(mount).resolve()):
+                raise ValueError(
+                    f"module_data_dir {root} is under nextcloud_mount_path "
+                    f"{mount}; per-module DBs must live on local disk (WAL -shm "
+                    "SIGBUSes on the FUSE mount — ISSUE-157)"
+                )
+        else:
+            root = Path(self.db_path).parent.resolve() / "modules"
+        return root / user_id / f"{module}.db"
 
     def get_user(self, nc_username: str) -> UserConfig | None:
         """Get user config by Nextcloud username. Returns None if user not configured."""
@@ -1062,6 +1104,9 @@ def load_config(config_path: Path | None = None) -> Config:
     if "temp_dir" in data:
         config.temp_dir = Path(data["temp_dir"])
 
+    if "module_data_dir" in data:
+        config.module_data_dir = Path(data["module_data_dir"])
+
     if "nextcloud" in data:
         nc = data["nextcloud"]
         config.nextcloud = NextcloudConfig(
@@ -1125,6 +1170,9 @@ def load_config(config_path: Path | None = None) -> Config:
             shared_file_check_interval=sched.get("shared_file_check_interval", 120),
             heartbeat_check_interval=sched.get("heartbeat_check_interval", 60),
             db_health_check_interval=sched.get("db_health_check_interval", 86400),
+            db_backup_enabled=sched.get("db_backup_enabled", True),
+            db_backup_interval=sched.get("db_backup_interval", 86400),
+            db_backup_dir=sched.get("db_backup_dir", ""),
             scheduler_stats_interval=sched.get("scheduler_stats_interval", 60),
             loop_stall_alert_seconds=sched.get("loop_stall_alert_seconds", 180),
             talk_poll_interval=sched.get("talk_poll_interval", 10),
@@ -1149,6 +1197,7 @@ def load_config(config_path: Path | None = None) -> Config:
             temp_file_retention_days=sched.get("temp_file_retention_days", 7),
             worker_idle_timeout=sched.get("worker_idle_timeout", 10),
             worker_idle_poll_interval=sched.get("worker_idle_poll_interval", 0.5),
+            main_loop_read_timeout_ms=sched.get("main_loop_read_timeout_ms", 2000),
             scheduled_job_max_consecutive_failures=sched.get("scheduled_job_max_consecutive_failures", 5),
             cron_max_staleness_minutes=sched.get("cron_max_staleness_minutes", 60),
             max_foreground_workers=sched.get("max_foreground_workers", 5),

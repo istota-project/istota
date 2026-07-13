@@ -273,13 +273,15 @@ rclone_remote: str = "nextcloud"
 nextcloud_mount_path: Path | None = None
 skills_dir: Path = Path("config/skills")
 temp_dir: Path = Path("/tmp/istota")
+module_data_dir: Path | None = None  # local-disk root for per-user module DBs (feeds/health/location/money); None derives {db_path.parent}/modules. MUST be local (WAL -shm SIGBUSes on the FUSE mount); an explicit value under nextcloud_mount_path is refused
 max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
 max_knowledge_facts: int = 0  # cap knowledge graph facts per prompt (0 = unlimited)
 disabled_skills: list[str] = []    # instance-wide skills to exclude
 bundled_skills_dir: Path | None = None  # override for testing
 ```
-Properties:
+Properties / methods:
 - `use_mount`: `bool` — True if `nextcloud_mount_path` set
+- `module_db_path(user_id, module) -> Path`: local-disk path for a per-user module DB (`{module_data_dir or db_path.parent/modules}/{user}/{module}.db`). The seam each module loader passes as its `db_path=` override; workspace/`data_dir` stays on the mount. Explicit `module_data_dir` under the mount raises `ValueError` (WAL SIGBUS guard); the derived default is trusted-local, unguarded. Single enumerator for `db_health.check_db_health` + `db_backup` + `db_relocate`
 - `bot_dir_name`: `str` — sanitized `bot_name` for filesystem use (ASCII lowercase, spaces→underscores)
 - `caldav_url`: derived from `nextcloud.url + /remote.php/dav`
 - `caldav_username`: `nextcloud.username`

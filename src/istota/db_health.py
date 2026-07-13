@@ -1,11 +1,12 @@
 """SQLite self-healing helpers.
 
-Per-user module DBs (feeds, health, location, money) live on the
-Nextcloud mount, where ungraceful shutdowns and FUSE/network hiccups can
-leave SQLite's index pages out of sync with table pages. ``PRAGMA
-quick_check`` catches this cheaply; ``REINDEX`` repairs it when the
-table itself is still intact (which is the common failure mode we see
-in practice — see the deathcults-tumblr ghost-unread incident).
+Per-user module DBs (feeds, health, location, money) now live on local
+disk (``Config.module_db_path``), which removes the FUSE/network hiccup
+class that historically left SQLite's index pages out of sync with table
+pages while these DBs sat on the Nextcloud mount. The sweep is kept as a
+cheap backstop: ``PRAGMA quick_check`` catches latent index damage;
+``REINDEX`` repairs it when the table itself is still intact (the common
+failure mode seen in practice).
 
 Usage::
 

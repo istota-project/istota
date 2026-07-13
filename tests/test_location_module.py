@@ -105,13 +105,14 @@ class TestInitDb:
             ).fetchone()
         assert row2["value"] == sentinel_first
 
-    def test_init_db_sets_delete_mode(self, location_path):
-        # DELETE, not WAL: the DB lives on the rclone FUSE mount where WAL's
-        # mmap'd -shm file can SIGBUS the process (ISSUE-157).
+    def test_init_db_sets_wal_mode(self, location_path):
+        # WAL: the DB now lives on local disk (Config.module_db_path, off the
+        # FUSE mount), so WAL's -shm is safe — the SIGBUS that forced DELETE
+        # (ISSUE-157) was a FUSE artifact. WAL restores reader/writer concurrency.
         location_db.init_db(location_path)
         with location_db.connect(location_path) as conn:
             row = conn.execute("PRAGMA journal_mode").fetchone()
-        assert row[0] == "delete"
+        assert row[0] == "wal"
 
     def test_connect_does_not_re_issue_wal_pragma(self, location_path):
         """``connect`` must not touch journal_mode — re-issuing it

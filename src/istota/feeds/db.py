@@ -118,14 +118,14 @@ def init_db(db_path: Path) -> None:
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
-        # DELETE (rollback journal), NOT WAL: this DB lives on the rclone
-        # FUSE-backed Nextcloud mount, and WAL's mmap'd -shm shared-memory
-        # file cannot be reliably backed there — a failed page fault raises
-        # SIGBUS and kills the whole process (ISSUE-157). DELETE uses no -shm
-        # and no mmap. journal_mode is persistent in the file header, so
-        # issuing this unconditionally also converts pre-existing WAL DBs on
-        # first touch; it's a cheap no-op once already DELETE.
-        conn.execute("PRAGMA journal_mode = DELETE")
+        # WAL: this DB now lives on LOCAL disk (Config.module_db_path, off the
+        # rclone FUSE mount), so WAL's mmap'd -shm is safe again — the SIGBUS
+        # that forced DELETE mode (ISSUE-157) was a FUSE-mount artifact. WAL
+        # gives reader/writer concurrency, which DELETE (whole-file lock) did
+        # not — the dispatch-loop contention fix. journal_mode is persistent in
+        # the file header, so issuing this unconditionally also converts a
+        # relocated DELETE-mode DB to WAL on first touch; no-op once WAL.
+        conn.execute("PRAGMA journal_mode = WAL")
         current = _read_schema_version(conn)
         for target_version, migrate in _MIGRATIONS:
             if current < target_version:
@@ -181,9 +181,10 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     """
     conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    # 30s busy handler: DELETE journal mode serializes readers vs. the writer
-    # (no WAL concurrency), so absorb the brief contention between the web
-    # reader and the */5min feeds poll instead of raising SQLITE_BUSY.
+    # journal_mode (WAL) is set once by init_db and persists in the file
+    # header — NOT re-issued here (re-issuing takes a write lock per open).
+    # 30s busy handler absorbs any residual contention between the web reader
+    # and the */5min feeds poll instead of raising SQLITE_BUSY.
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
     try:

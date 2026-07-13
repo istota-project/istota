@@ -617,8 +617,12 @@ class TestFormatFactsForPrompt:
         assert "stefan knows python" in text
 
     def test_temporary_marker(self, conn):
+        # A future valid_until so the fact is still "current" and carries the
+        # [temporary] marker. Computed (not hardcoded) so it can't rot past the
+        # date the way a literal "2026-07-01" did.
+        future = (date.today() + timedelta(days=30)).isoformat()
         add_fact(conn, "user1", "stefan", "staying_in", "warsaw",
-                 valid_until="2026-07-01")
+                 valid_until=future)
 
         facts = get_current_facts(conn, "user1")
         text = format_facts_for_prompt(facts)
