@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A restore command brings a per-user database back from its most recent good off-host snapshot, refusing to overwrite a database the app still has open or to restore an obviously-empty snapshot by mistake.
+
 ### Changed
 - Per-user module databases (feeds, health, location, money) now live on local disk and run in WAL mode instead of on the Nextcloud mount, which restores concurrent reads and writes. Your files (bloodwork uploads, ledgers, feed exports) stay in Nextcloud as before; only the database index moved. A one-time relocation runs automatically on deploy, and the databases are snapshotted back to Nextcloud daily so they stay backed up off-host.
+- Off-host database backups now keep a rolling history of dated daily snapshots instead of overwriting a single copy, so a corrupted or emptied database can't wipe out the last good backup. A snapshot that suddenly comes back empty is set aside rather than trusted, backups are skipped instead of written to the wrong place when the Nextcloud mount is down, and you're alerted if backups start failing or silently stop.
 
 ### Fixed
 - The scheduler could stall for several minutes under database lock contention, briefly pausing all task dispatch. Fixed the connection handling and storage that caused it, with a safeguard so a locked read skips a cycle instead of blocking the loop.
