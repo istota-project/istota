@@ -2509,6 +2509,28 @@ def _operator_alert_user(config: Config) -> str | None:
     return None
 
 
+def _alert_backup_problems(config: Config, results: list[dict]) -> None:
+    """Fire one operator alert when a backup run reports any errored or suspect
+    (row-count collapse) DB. Best-effort — never raises into the loop."""
+    problems = [r for r in results if r.get("status") in ("error", "suspect")]
+    if not problems:
+        return
+    user = _operator_alert_user(config)
+    if not user:
+        return
+    lines = "\n".join(f"• {r['label']}: {r['status']}" for r in problems)
+    message = (
+        f"⚠️ DB backup problem — {len(problems)} database(s) failed or were "
+        f"quarantined on the latest snapshot:\n{lines}\n"
+        "A 'suspect' DB was empty/unreadable vs. the prior good snapshot and was "
+        "kept aside as .suspect; the prior good copy is preserved. Check the live DB."
+    )
+    try:
+        send_notification(config, user, message, purpose="alert")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("db_backup_alert_failed err=%s", exc)
+
+
 class LoopWatchdog:
     """Defense-in-depth monitor for a stalled scheduler main loop (ISSUE-143).
 
@@ -3791,6 +3813,8 @@ def run_daemon(config: Config) -> None:
     # every boot and a host deploying more than once a day never backed up.
     from . import db_backup as _db_backup
     last_db_backup = _db_backup.last_backup_time(config)
+    # Re-armable flag so a silently-stopped backup pages once, not every tick.
+    backup_stale_alerted = False
     last_status_write = 0.0
     last_trigger_check = 0.0
     # Init to "now" (not 0.0) so the first stats line fires after one full
@@ -3952,10 +3976,42 @@ def run_daemon(config: Config) -> None:
             try:
                 from .db_backup import backup_databases
                 with watchdog.suspended():
-                    backup_databases(config)
+                    backup_results = backup_databases(config)
+                _alert_backup_problems(config, backup_results)
             except Exception as e:  # noqa: BLE001
                 logger.error("Error running DB backup: %s", e)
             last_db_backup = now
+
+        # Staleness alert (issue #6): the persisted clock advances on every real
+        # attempt, so a last-run older than 2x the interval means the backup has
+        # silently stopped running (the clock-reset defect's failure mode). Alert
+        # once, re-arm on recovery. Gated on a prior successful run (persisted > 0)
+        # so a fresh deploy that just hasn't backed up yet doesn't false-alarm.
+        if config.scheduler.db_backup_enabled and config.scheduler.db_backup_interval:
+            persisted = _db_backup.last_backup_time(config)
+            stale_after = 2 * config.scheduler.db_backup_interval
+            if persisted > 0 and now - persisted >= stale_after:
+                if not backup_stale_alerted:
+                    backup_stale_alerted = True
+                    logger.error(
+                        "db_backup_stale last_run=%.0f age_s=%.0f — backups appear stopped",
+                        persisted, now - persisted,
+                    )
+                    alert_user = _operator_alert_user(config)
+                    if alert_user:
+                        try:
+                            send_notification(
+                                config, alert_user,
+                                "⚠️ DB backups appear to have stopped — no successful "
+                                f"snapshot in {int((now - persisted) / 3600)}h "
+                                f"(interval is {config.scheduler.db_backup_interval // 3600}h). "
+                                "Check the scheduler and the backup destination.",
+                                purpose="alert",
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error("db_backup_stale_alert_failed err=%s", exc)
+            else:
+                backup_stale_alerted = False
 
         # Emit the periodic process-health line (threads / fds / rss /
         # running-tasks / active-workers). interval == 0 disables it.

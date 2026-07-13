@@ -223,6 +223,7 @@ istota_scheduler_main_loop_read_timeout_ms: 2000 # Busy-timeout for the dispatch
 istota_scheduler_db_backup_enabled: true         # Snapshot local DBs (framework + modules) to the mount for off-host durability
 istota_scheduler_db_backup_interval: 86400       # Seconds between DB backup snapshots (default daily)
 istota_scheduler_db_backup_dir: ""               # Snapshot destination; empty = {nextcloud_mount}/istota-db-backups
+istota_scheduler_db_backup_retention: 7          # Newest dated snapshot dirs to keep (0 = keep all); dirs holding the newest good copy of a DB are never pruned
 istota_scheduler_stats_interval: 60              # scheduler_stats health line interval (0 = disabled)
 
 # Local-disk root for per-user module DBs (feeds/health/location/money). MUST be

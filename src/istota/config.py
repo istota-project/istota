@@ -124,6 +124,7 @@ class SchedulerConfig:
     db_backup_enabled: bool = True  # checkpoint + snapshot local DBs (framework + per-user modules) to the mount so they stay off-host durable now that they've left Nextcloud-synced workspaces
     db_backup_interval: int = 86400  # seconds between DB backup snapshots (default daily)
     db_backup_dir: str = ""  # snapshot destination; empty = {nextcloud_mount}/istota-db-backups. Backup requires a resolvable destination on durable (off-host) storage
+    db_backup_retention: int = 7  # number of newest dated snapshot dirs to keep (0 = keep all). Older dirs are pruned, but any dir holding the newest good copy of a DB is protected from pruning
     scheduler_stats_interval: int = 60  # seconds between scheduler_stats health-line emits (0 = disabled)
     loop_stall_alert_seconds: int = 180  # alert if the main dispatch loop hasn't ticked in this long (0 = disabled)
     talk_poll_interval: int = 10  # seconds between Talk polls
@@ -1173,6 +1174,7 @@ def load_config(config_path: Path | None = None) -> Config:
             db_backup_enabled=sched.get("db_backup_enabled", True),
             db_backup_interval=sched.get("db_backup_interval", 86400),
             db_backup_dir=sched.get("db_backup_dir", ""),
+            db_backup_retention=sched.get("db_backup_retention", 7),
             scheduler_stats_interval=sched.get("scheduler_stats_interval", 60),
             loop_stall_alert_seconds=sched.get("loop_stall_alert_seconds", 180),
             talk_poll_interval=sched.get("talk_poll_interval", 10),
