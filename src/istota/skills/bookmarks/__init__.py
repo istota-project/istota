@@ -12,6 +12,7 @@ Usage:
     python -m istota.skills.bookmarks list-bookmarks LIST_ID [--limit N]
     python -m istota.skills.bookmarks summarize BOOKMARK_ID
     python -m istota.skills.bookmarks stats
+    python -m istota.skills.bookmarks highlights [--bookmark BOOKMARK_ID] [--limit N]
 
 Environment variables:
     KARAKEEP_BASE_URL  — API base URL (e.g. https://keep.example.com/api/v1)
@@ -59,7 +60,11 @@ class KarakeepClient:
     def _paginate(self, path: str, params: dict, limit: int, key: str = "bookmarks") -> list:
         """Fetch paginated results, following cursors up to limit."""
         results = []
-        params = {**params, "includeContent": False}
+        params = dict(params)
+        # includeContent only applies to bookmark payloads; other endpoints
+        # (tags, highlights) have no content field and may reject the param.
+        if key == "bookmarks":
+            params["includeContent"] = False
         if limit:
             params["limit"] = min(limit, 100)
 
@@ -179,6 +184,17 @@ class KarakeepClient:
     def stats(self) -> dict:
         return self._request("GET", "/users/me/stats")
 
+    # --- Highlights ---
+
+    def list_highlights(self, limit: int = 0) -> list[dict]:
+        # limit=0 means "all", following the list_tags convention.
+        return self._paginate("/highlights", {}, limit, key="highlights")
+
+    def get_bookmark_highlights(self, bookmark_id: str) -> list[dict]:
+        return self._paginate(
+            f"/bookmarks/{bookmark_id}/highlights", {}, limit=0, key="highlights"
+        )
+
 
 def get_client() -> KarakeepClient:
     """Create a client from environment variables."""
@@ -208,6 +224,20 @@ def format_bookmark(bm: dict) -> dict:
     elif content_type == "text":
         result["text"] = content.get("text")
     return result
+
+
+def format_highlight(h: dict) -> dict:
+    """Format a raw API highlight into a concise summary dict."""
+    return {
+        "id": h["id"],
+        "bookmark_id": h.get("bookmarkId"),
+        "text": h.get("text"),
+        "note": h.get("note"),
+        "color": h.get("color"),
+        "created": h.get("createdAt"),
+        "start_offset": h.get("startOffset"),
+        "end_offset": h.get("endOffset"),
+    }
 
 
 # --- Command handlers ---
@@ -343,6 +373,19 @@ def cmd_stats(args) -> dict:
     return {"status": "ok", "stats": stats}
 
 
+def cmd_highlights(args) -> dict:
+    client = get_client()
+    if args.bookmark:
+        highlights = client.get_bookmark_highlights(args.bookmark)
+    else:
+        highlights = client.list_highlights(limit=args.limit)
+    return {
+        "status": "ok",
+        "count": len(highlights),
+        "highlights": [format_highlight(h) for h in highlights],
+    }
+
+
 # --- CLI ---
 
 
@@ -409,6 +452,11 @@ def build_parser() -> argparse.ArgumentParser:
     # stats
     sub.add_parser("stats", help="User stats")
 
+    # highlights
+    p_hl = sub.add_parser("highlights", help="List highlights (all, or for one bookmark)")
+    p_hl.add_argument("--bookmark", help="Only highlights on this bookmark ID")
+    p_hl.add_argument("--limit", type=int, default=0, help="Max results (0 = all)")
+
     return parser
 
 
@@ -428,6 +476,7 @@ def main(argv=None):
         "list-bookmarks": cmd_list_bookmarks,
         "summarize": cmd_summarize,
         "stats": cmd_stats,
+        "highlights": cmd_highlights,
     }
 
     try:

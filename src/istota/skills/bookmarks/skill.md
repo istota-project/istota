@@ -50,6 +50,11 @@ istota-skill bookmarks summarize BOOKMARK_ID
 
 # User stats
 istota-skill bookmarks stats
+
+# Highlights (read-only) — passages the user highlighted in an article
+istota-skill bookmarks highlights                       # all highlights (default: all, not capped)
+istota-skill bookmarks highlights --limit 50            # cap the sweep
+istota-skill bookmarks highlights --bookmark BOOKMARK_ID  # only this bookmark's highlights
 ```
 
 ## Output
@@ -82,3 +87,4 @@ All commands return JSON with `status: ok|error`:
 - Bookmark IDs are opaque strings (e.g. `ieidlxygmwj87oxz5hxttoc8`)
 - Summarize triggers Karakeep's AI — the summary appears asynchronously
 - The `--in-list` flag on `list` accepts a list name (case-insensitive) and resolves it to its ID automatically
+- `highlights` is read-only and returns `{status, count, highlights}`. Each highlight carries `id`, `bookmark_id`, `text` (the highlighted passage, may be null), `note` (the user's annotation, may be null), `color`, `created`, and `start_offset`/`end_offset`. Resolve the parent article with `get <bookmark_id>` for its title and URL. Unlike `list`/`search`, `--limit` defaults to `0` (all) since highlights are meant to be swept in full.
