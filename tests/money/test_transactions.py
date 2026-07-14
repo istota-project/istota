@@ -26,6 +26,7 @@ from istota.money.core.transactions import (
     parse_monarch_csv,
     parse_tags,
     sync_all_profiles,
+    sync_monarch,
     add_transaction,
     backup_ledger,
     append_to_ledger,
@@ -424,6 +425,117 @@ class TestProfileConfigParsing:
         assert p.sync.lookback_days == 45
         assert p.sync.default_account == "Expenses:TopLevel"
         assert p.sync.recategorize_account == "Expenses:TopRecat"
+
+
+class TestSyncMonarchPendingGuard:
+    """ISSUE-160: don't book a Monarch transaction until it settles.
+
+    Monarch drops a pending row and re-creates it with a new id and the
+    final (post-tip) amount when it settles. sync-monarch dedups on
+    monarch-id and a content hash of date+amount+merchant, so the pending
+    and settled twins both look new and the pending copy is left stale
+    when the settled one lands in a later sync. Skipping pending rows at
+    the source means the ghost is never booked in the first place.
+    """
+
+    def _config(self):
+        return MonarchConfig(
+            credentials=MonarchCredentials(session_id="s", csrftoken="c"),
+            sync=MonarchSyncSettings(default_account="Assets:Bank:Checking"),
+            accounts={}, categories={}, tags=MonarchTagFilters(),
+        )
+
+    def _ledger(self, tmp_path):
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text(
+            "2024-01-01 open Assets:Bank:Checking\n"
+            "2024-01-01 open Liabilities:Visa\n"
+            "2024-01-01 open Expenses:Meals\n"
+        )
+        return ledger
+
+    def test_pending_row_is_skipped(self, tmp_path):
+        ledger = self._ledger(tmp_path)
+        txns = [{
+            "id": "248903185098537619", "date": "2026-07-11",
+            "merchant": {"name": "Hi Tops"},
+            "category": {"name": "Meals"},
+            "account": {"displayName": "Visa"},
+            "amount": -29.68, "notes": "", "tags": [],
+            "pending": True,
+        }]
+        result = sync_monarch(ledger, self._config(), transactions=txns)
+        assert result["status"] == "ok"
+        assert result["transaction_count"] == 0
+        assert result["pending_skipped_count"] == 1
+        # Nothing booked
+        assert "Hi Tops" not in ledger.read_text()
+
+    def test_settled_row_imports_normally(self, tmp_path):
+        ledger = self._ledger(tmp_path)
+        txns = [{
+            "id": "249176335512173524", "date": "2026-07-13",
+            "merchant": {"name": "Hi Tops"},
+            "category": {"name": "Meals"},
+            "account": {"displayName": "Visa"},
+            "amount": -35.00, "notes": "", "tags": [],
+            "pending": False,
+        }]
+        result = sync_monarch(ledger, self._config(), transactions=txns)
+        assert result["status"] == "ok"
+        assert result["transaction_count"] == 1
+        assert result["pending_skipped_count"] == 0
+        assert "Hi Tops" in ledger.read_text()
+
+    def test_missing_pending_field_imports(self, tmp_path):
+        """Back-compat: a row with no ``pending`` key is treated as settled."""
+        ledger = self._ledger(tmp_path)
+        txns = [{
+            "id": "mon-1", "date": "2026-07-13",
+            "merchant": {"name": "Corner Store"},
+            "category": {"name": "Meals"},
+            "account": {"displayName": "Visa"},
+            "amount": -12.00, "notes": "", "tags": [],
+        }]
+        result = sync_monarch(ledger, self._config(), transactions=txns)
+        assert result["transaction_count"] == 1
+        assert result["pending_skipped_count"] == 0
+
+    def test_pending_then_settled_sequence_yields_one_entry(self, tmp_path):
+        """The two-sync pending→settled lifecycle books exactly one entry."""
+        ledger = self._ledger(tmp_path)
+        config = self._config()
+
+        # First sync: only the pending pre-tip charge is available.
+        pending = {
+            "id": "248903185098537619", "date": "2026-07-11",
+            "merchant": {"name": "Hi Tops"},
+            "category": {"name": "Meals"},
+            "account": {"displayName": "Visa"},
+            "amount": -29.68, "notes": "", "tags": [],
+            "pending": True,
+        }
+        r1 = sync_monarch(ledger, config, transactions=[pending])
+        assert r1["transaction_count"] == 0
+
+        # Second sync: Monarch has dropped the pending row and created a
+        # fresh settled row with a new id and the post-tip amount.
+        settled = {
+            "id": "249176335512173524", "date": "2026-07-13",
+            "merchant": {"name": "Hi Tops"},
+            "category": {"name": "Meals"},
+            "account": {"displayName": "Visa"},
+            "amount": -35.00, "notes": "", "tags": [],
+            "pending": False,
+        }
+        r2 = sync_monarch(ledger, config, transactions=[settled])
+        assert r2["transaction_count"] == 1
+
+        # Exactly one Hi Tops entry, and it's the settled $35.00 — no ghost.
+        text = ledger.read_text()
+        assert text.count('"Hi Tops"') == 1
+        assert "35.00" in text
+        assert "29.68" not in text
 
 
 class TestSyncAllProfiles:
