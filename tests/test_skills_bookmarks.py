@@ -10,6 +10,7 @@ from istota.skills.bookmarks import (
     build_parser,
     cmd_add,
     cmd_get,
+    cmd_highlights,
     cmd_list,
     cmd_list_bookmarks,
     cmd_lists,
@@ -19,6 +20,7 @@ from istota.skills.bookmarks import (
     cmd_tag,
     cmd_tags,
     cmd_untag,
+    format_highlight,
     main,
 )
 
@@ -151,6 +153,45 @@ SAMPLE_TAG_ATTACH_RESPONSE = {
 
 SAMPLE_TAG_DETACH_RESPONSE = {
     "detached": ["tag_2"],
+}
+
+SAMPLE_HIGHLIGHT = {
+    "id": "hl_abc123",
+    "bookmarkId": "bk_abc123",
+    "text": "The highlighted passage of text.",
+    "note": "Stefan's annotation on this passage.",
+    "color": "yellow",
+    "startOffset": 100,
+    "endOffset": 140,
+    "createdAt": "2026-07-14T09:00:00Z",
+    "userId": "user_1",
+}
+
+SAMPLE_HIGHLIGHT_NO_TEXT = {
+    "id": "hl_notext",
+    "bookmarkId": "bk_abc123",
+    "text": None,
+    "note": "A note without captured text.",
+    "color": "blue",
+    "startOffset": 0,
+    "endOffset": 0,
+    "createdAt": "2026-07-14T10:00:00Z",
+    "userId": "user_1",
+}
+
+SAMPLE_HIGHLIGHTS_RESPONSE = {
+    "highlights": [SAMPLE_HIGHLIGHT, SAMPLE_HIGHLIGHT_NO_TEXT],
+    "nextCursor": None,
+}
+
+SAMPLE_HIGHLIGHTS_WITH_CURSOR = {
+    "highlights": [SAMPLE_HIGHLIGHT],
+    "nextCursor": "hl_cursor_page2",
+}
+
+SAMPLE_HIGHLIGHTS_PAGE2 = {
+    "highlights": [SAMPLE_HIGHLIGHT_NO_TEXT],
+    "nextCursor": None,
 }
 
 
@@ -572,6 +613,68 @@ class TestKarakeepClientStats:
         assert stats["numTags"] == 80
 
 
+class TestKarakeepClientHighlights:
+    @patch("istota.skills.bookmarks.httpx.request")
+    def test_list_highlights(self, mock_request):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_HIGHLIGHTS_RESPONSE
+        mock_request.return_value = mock_resp
+
+        client = KarakeepClient("https://keep.example.com/api/v1", "key")
+        highlights = client.list_highlights()
+
+        assert len(highlights) == 2
+        assert highlights[0]["id"] == "hl_abc123"
+        # Endpoint hit
+        assert mock_request.call_args[0][1].endswith("/highlights")
+
+    @patch("istota.skills.bookmarks.httpx.request")
+    def test_list_highlights_paginates(self, mock_request):
+        page1 = MagicMock()
+        page1.status_code = 200
+        page1.json.return_value = SAMPLE_HIGHLIGHTS_WITH_CURSOR
+
+        page2 = MagicMock()
+        page2.status_code = 200
+        page2.json.return_value = SAMPLE_HIGHLIGHTS_PAGE2
+
+        mock_request.side_effect = [page1, page2]
+
+        client = KarakeepClient("https://keep.example.com/api/v1", "key")
+        highlights = client.list_highlights()
+
+        assert len(highlights) == 2
+        assert mock_request.call_count == 2
+        assert mock_request.call_args_list[1][1]["params"]["cursor"] == "hl_cursor_page2"
+
+    @patch("istota.skills.bookmarks.httpx.request")
+    def test_list_highlights_omits_include_content(self, mock_request):
+        """The /highlights endpoint has no content; don't inject includeContent."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_HIGHLIGHTS_RESPONSE
+        mock_request.return_value = mock_resp
+
+        client = KarakeepClient("https://keep.example.com/api/v1", "key")
+        client.list_highlights()
+
+        assert "includeContent" not in mock_request.call_args[1]["params"]
+
+    @patch("istota.skills.bookmarks.httpx.request")
+    def test_get_bookmark_highlights(self, mock_request):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_HIGHLIGHTS_RESPONSE
+        mock_request.return_value = mock_resp
+
+        client = KarakeepClient("https://keep.example.com/api/v1", "key")
+        highlights = client.get_bookmark_highlights("bk_abc123")
+
+        assert len(highlights) == 2
+        assert mock_request.call_args[0][1].endswith("/bookmarks/bk_abc123/highlights")
+
+
 # --- CLI / Parser Tests ---
 
 
@@ -693,6 +796,23 @@ class TestBuildParser:
         parser = build_parser()
         args = parser.parse_args(["stats"])
         assert args.command == "stats"
+
+    def test_highlights_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["highlights"])
+        assert args.command == "highlights"
+        assert args.bookmark is None
+        assert args.limit == 0  # "all" by default, unlike list/search
+
+    def test_highlights_with_bookmark(self):
+        parser = build_parser()
+        args = parser.parse_args(["highlights", "--bookmark", "bk_abc123"])
+        assert args.bookmark == "bk_abc123"
+
+    def test_highlights_with_limit(self):
+        parser = build_parser()
+        args = parser.parse_args(["highlights", "--limit", "50"])
+        assert args.limit == 50
 
 
 # --- Command Handler Tests ---
@@ -940,6 +1060,40 @@ class TestCmdStats:
         assert result["stats"]["numBookmarks"] == 500
 
 
+class TestCmdHighlights:
+    @patch("istota.skills.bookmarks.get_client")
+    def test_highlights_all(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.list_highlights.return_value = [SAMPLE_HIGHLIGHT, SAMPLE_HIGHLIGHT_NO_TEXT]
+        mock_get_client.return_value = mock_client
+
+        parser = build_parser()
+        args = parser.parse_args(["highlights"])
+        result = cmd_highlights(args)
+
+        assert result["status"] == "ok"
+        assert result["count"] == 2
+        assert result["highlights"][0]["id"] == "hl_abc123"
+        assert result["highlights"][0]["bookmark_id"] == "bk_abc123"
+        mock_client.list_highlights.assert_called_once_with(limit=0)
+        mock_client.get_bookmark_highlights.assert_not_called()
+
+    @patch("istota.skills.bookmarks.get_client")
+    def test_highlights_for_bookmark(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.get_bookmark_highlights.return_value = [SAMPLE_HIGHLIGHT]
+        mock_get_client.return_value = mock_client
+
+        parser = build_parser()
+        args = parser.parse_args(["highlights", "--bookmark", "bk_abc123"])
+        result = cmd_highlights(args)
+
+        assert result["status"] == "ok"
+        assert result["count"] == 1
+        mock_client.get_bookmark_highlights.assert_called_once_with("bk_abc123")
+        mock_client.list_highlights.assert_not_called()
+
+
 # --- Main / Integration Tests ---
 
 
@@ -1014,3 +1168,33 @@ class TestFormatBookmark:
         bm = {**SAMPLE_BOOKMARK_LINK, "content": {"type": "unknown"}}
         result = format_bookmark(bm)
         assert result["id"] == "bk_abc123"
+
+
+class TestFormatHighlight:
+    def test_format_highlight_projects_fields(self):
+        result = format_highlight(SAMPLE_HIGHLIGHT)
+
+        assert result["id"] == "hl_abc123"
+        assert result["bookmark_id"] == "bk_abc123"
+        assert result["text"] == "The highlighted passage of text."
+        assert result["note"] == "Stefan's annotation on this passage."
+        assert result["color"] == "yellow"
+        assert result["created"] == "2026-07-14T09:00:00Z"
+        assert result["start_offset"] == 100
+        assert result["end_offset"] == 140
+
+    def test_format_highlight_tolerates_null_text(self):
+        result = format_highlight(SAMPLE_HIGHLIGHT_NO_TEXT)
+
+        assert result["id"] == "hl_notext"
+        assert result["text"] is None
+        assert result["note"] == "A note without captured text."
+
+    def test_format_highlight_tolerates_missing_fields(self):
+        result = format_highlight({"id": "hl_min", "bookmarkId": "bk_1"})
+
+        assert result["id"] == "hl_min"
+        assert result["bookmark_id"] == "bk_1"
+        assert result["text"] is None
+        assert result["note"] is None
+        assert result["color"] is None

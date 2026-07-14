@@ -282,8 +282,9 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **`import-garmin-tracks`**: imports Garmin watch GPS tracks into `location.db` via the shared `istota.location.garmin_import.import_tracks` (also driving the web "Import GPS tracks" button and the cron script). Direct/delegated split like health `garmin-sync`: with `ISTOTA_SECRET_KEY` in env it runs inline; sandboxed it writes a `task_<id>_garmin_import.json` deferred op that `scheduler_deferred._process_deferred_garmin_import` runs in-process post-task (where the key lives) and notifies the user. Unlike `garmin-sync`'s enqueue path, the deferred-op path works from the sandbox — `location.db` is the user's writable workspace; only the token-decrypt key is stripped.
 
 ### `bookmarks/` - Karakeep Bookmark Management
-**Subcommands**: `search`, `list`, `get`, `add`, `tags`, `tag`, `untag`, `lists`, `list-bookmarks`, `summarize`, `stats`
+**Subcommands**: `search`, `list`, `get`, `add`, `tags`, `tag`, `untag`, `lists`, `list-bookmarks`, `summarize`, `stats`, `highlights`
 **Env vars**: `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY`
+**Note**: `highlights [--bookmark ID] [--limit N]` reads Karakeep highlights (read-only; `--limit` defaults to `0` = all). `_paginate` injects `includeContent=False` only for the bookmarks key, so the tags/highlights endpoints never receive it.
 
 ### `feeds/` - Native RSS / Atom / Tumblr / Are.na (in-process)
 **Subcommands**: `list`, `categories`, `entries`, `add`, `remove`, `refresh`, `poll`, `run-scheduled`, `import-opml`, `export-opml`, `star`, `starred`, `mark-read`

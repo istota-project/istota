@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-14: Karakeep highlights — bookmarks skill subcommand
+
+Added read-only highlights access to the bookmarks skill: `istota-skill bookmarks highlights [--bookmark ID] [--limit N]`. Karakeep highlights are structured records (`text`, `note`, `color`, `bookmarkId`, offsets) that resolve back to their parent bookmark, so they carry provenance a screenshot never could. The skill had wired search/list/get/tags/lists/summarize/stats but never the highlights endpoints; this fills the gap. `--limit` defaults to `0` (all), unlike `list`/`search`, since highlights are meant to be swept in full.
+
+The one live-behavior unknown the spec flagged — whether `/highlights` rejects the `includeContent=False` param that `_paginate` injected — got resolved in code rather than probed: `_paginate` now injects `includeContent` only when `key == "bookmarks"`, so the tags and highlights endpoints never receive a param that's meaningless there (also drops it from the tags path, which was sending it needlessly). Existing behavior for search/list is unchanged.
+
+The scheduling/export half of the spec is deliberately out of the repo: a standalone stdlib-only export script (one vault note per article, incremental via the `kv` seen-set, managed-region sentinel that preserves hand-written prose) lives on the deployment's user data dir and shells out to `istota-skill` for all Karakeep + kv access, so credentials never leave the skill runtime. The nightly cron that runs it is an owner-wired one-liner in the live installation, not a code change here. Spec moved to Done.
+
+**Key changes:**
+- `bookmarks` skill: `list_highlights` / `get_bookmark_highlights` on the client, `format_highlight` projector (null-`text`/`note` tolerant), `cmd_highlights` handler returning `{status, count, highlights}`, parser + `commands` wiring, docstring + `skill.md`.
+- `_paginate`: `includeContent` gated to the bookmarks key.
+- 11 new unit tests (pagination + cursor follow, per-bookmark path, handler shape, `--bookmark`, formatter null-tolerance) + `SAMPLE_HIGHLIGHT` fixtures; full file 82 pass.
+
+**Files added/modified:**
+- `src/istota/skills/bookmarks/__init__.py` — highlights client methods, formatter, handler, parser, `_paginate` gate.
+- `src/istota/skills/bookmarks/skill.md` — highlights usage + output notes.
+- `tests/test_skills_bookmarks.py` — highlights fixtures + tests.
+
 ## 2026-07-13: Rollout incident — `db_relocate` skipped every DB; harden against premature-empty destinations
 
 The module-DB relocation shipped the day before was deployed to the production host via Ansible and appeared to wipe all per-user module data (feeds, location, health, money) — every user showed near-empty modules, with feed counts *identical across users* (the tell-tale sign of freshly-seeded empty DBs).
