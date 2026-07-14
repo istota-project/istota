@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Monarch sync no longer books pending (not-yet-settled) card charges. Monarch replaces a pending charge with a fresh one carrying a new id and the final amount once it settles, which left the pre-tip pending copy stranded in the ledger as a duplicate. Transactions are now imported only after they settle, so the final amount (tip included) is the only entry that lands. A recently-pending charge appears a sync or two later.
+
 ## [0.28.0] - 2026-07-13
 
 ### Added

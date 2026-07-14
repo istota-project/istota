@@ -628,9 +628,23 @@ def sync_monarch(
     # Build lookup of all fetched transactions by ID for reconciliation
     all_txn_by_id = {txn.get("id"): txn for txn in transactions if txn.get("id")}
 
-    # Filter by tags if configured
+    # Filter out pending transactions and by tags if configured.
+    #
+    # ISSUE-160: Monarch doesn't mutate a pending row in place when it
+    # settles — it drops the pending transaction and creates a fresh one
+    # with a new id and the final (post-tip) amount. Since our dedup keys
+    # on monarch-id and a content hash of date+amount+merchant, the pending
+    # and settled twins both look new, and the pending copy is left stale in
+    # the ledger once its settled sibling lands in a later sync. Skipping
+    # pending rows at the source means the ghost is never booked; the settled
+    # row becomes the only entry that ever lands (1–3 day settle lag is
+    # acceptable for a reconciliation-first ledger).
+    pending_skipped_count = 0
     filtered_transactions = []
     for txn in transactions:
+        if txn.get("pending"):
+            pending_skipped_count += 1
+            continue
         txn_tags = [t.get("name", "") for t in txn.get("tags", [])]
         if not filter_by_tags(
             txn_tags,
@@ -851,6 +865,7 @@ def sync_monarch(
         "transaction_count": len(entries),
         "skipped_count": skipped_count,
         "content_skipped_count": content_skipped_count,
+        "pending_skipped_count": pending_skipped_count,
         "recategorized_count": len(recategorized_entries),
         "recat_skipped_legacy_count": len(recat_skipped_legacy),
         "category_changed_count": len(category_change_entries),
@@ -946,6 +961,10 @@ def sync_monarch(
         messages.append(f"Updated {len(category_change_entries)} categories")
     if not entries and not recategorized_entries and not category_change_entries:
         messages.append("No changes")
+    if pending_skipped_count:
+        messages.append(
+            f"Skipped {pending_skipped_count} pending (not yet settled)"
+        )
 
     result["message"] = ". ".join(messages)
     return result
