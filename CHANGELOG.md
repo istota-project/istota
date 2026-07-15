@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-07-14
+
 ### Added
 - The bookmarks skill can now read Karakeep highlights — the passages you've highlighted in an article, with your annotations. Fetch all of them or just one bookmark's, ready to pull into notes.
 
@@ -836,7 +838,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.28.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.29.0...main
+[0.29.0]: https://gitlab.com/cynium/istota/-/releases/v0.29.0
 [0.28.0]: https://gitlab.com/cynium/istota/-/releases/v0.28.0
 [0.27.0]: https://gitlab.com/cynium/istota/-/releases/v0.27.0
 [0.26.3]: https://gitlab.com/cynium/istota/-/releases/v0.26.3
