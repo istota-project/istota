@@ -90,6 +90,25 @@ reconcile_min_pings: int = 3             # walk-by filter
 reconcile_min_dwell_sec: int = 60
 ```
 
+### `WebConfig` (`[web]`) — token retention fields
+```
+token_storage: str = "ephemeral"   # "ephemeral" | "encrypted"; anything else → warning + ephemeral
+```
+`"encrypted"` retains the login's user-scoped Nextcloud OAuth pair in the
+`web_user_tokens` framework table, encrypted with the **web-only**
+`ISTOTA_WEB_TOKEN_KEY` env var (≥32 chars; distinct scrypt salt from the
+`ISTOTA_SECRET_KEY` store — see `src/istota/web_tokens.py`). The key is a
+runtime env var like `ISTOTA_SECRET_KEY`, *not* a config field, and is
+delivered only to the web unit (Ansible `web-secrets.env` /
+Docker `/data/.web_token_key`). `"encrypted"` without the key logs one ERROR
+at web startup and behaves as ephemeral. Docker-path override:
+`ISTOTA_WEB_TOKEN_STORAGE` env var (validated the same way).
+
+### `WebChatConfig` (`[web.chat]`) — read-sync knob
+```
+talk_read_sync_interval: int = 60   # Talk→web read pull cadence (s); 0 disables the pull
+```
+
 ### `SiteConfig`
 ```
 enabled: bool = False        hostname: str = ""           base_path: str = ""
@@ -331,7 +350,7 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 
 **briefing_configs table (Phase 7b).** Per-user briefings live in `briefing_configs` (id PK, `UNIQUE(user_id, name)`). The `cron_expression` column stores the cron string, `components` is a JSON dict of per-component flags, and `enabled` lets the web UI mute a briefing without deleting it. Output (`talk` / `email` / `both`) is packed into `components.__output__` since the legacy schema has no dedicated column; reads hoist it back into the dataclass. The scheduler imports `[[briefings]]` blocks from TOML on startup via `user_briefings.import_from_user_configs(db_path, config.users)` (idempotent — only writes rows whose `(user_id, name)` pair doesn't already exist). At config-load time, `_apply_user_briefings` merges DB rows into `config.users[uid].briefings` so `check_briefings` and `get_briefings_for_user` (in `skills/briefing`) read DB and TOML rows uniformly. Web UI reads/writes via `GET/POST /istota/api/settings/briefings` and `DELETE /istota/api/settings/briefings/{id}`; payload accepts `{name, cron, conversation_token?, output?, components?, enabled?}`. The GET response also returns a `rooms` list (auto-provisioned `log_channel` + `alerts_channel` tokens) so the UI can offer them as conversation_token picks. Ansible deploys provision via `istota briefing ensure --user … --name … --cron … [--conversation-token …] [--output …] [--components-json '{…}'] [--component k=v] [--disabled]` (idempotent upsert with `STATE: created|updated|noop` output). See `src/istota/user_briefings.py`.
 
-**Secret env var overrides** (applied after TOML, enables `EnvironmentFile=`). Naming convention is `ISTOTA_<SECTION>_<FIELD>` matching the config dataclass path — same convention as docker-compose env vars, so a single env-var name works across both deploy paths. The literal `ISTOTA_SECRET_KEY` (master Fernet key, not a config field) and runtime injection vars (`ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `ISTOTA_TASK_ID`, etc.) are intentionally outside this convention — they aren't config overrides.
+**Secret env var overrides** (applied after TOML, enables `EnvironmentFile=`). Naming convention is `ISTOTA_<SECTION>_<FIELD>` matching the config dataclass path — same convention as docker-compose env vars, so a single env-var name works across both deploy paths. The literal `ISTOTA_SECRET_KEY` and `ISTOTA_WEB_TOKEN_KEY` (Fernet key sources, not config fields) and runtime injection vars (`ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `ISTOTA_TASK_ID`, etc.) are intentionally outside this convention — they aren't config overrides. `ISTOTA_WEB_TOKEN_STORAGE` *is* an override (→ `web.token_storage`, value-validated), added for the docker path.
 
 | Env Var | Config Field |
 |---|---|

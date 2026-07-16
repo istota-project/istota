@@ -708,3 +708,16 @@ CREATE TABLE IF NOT EXISTS _migration_state (
     name        TEXT PRIMARY KEY,
     applied_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- User-scoped Nextcloud OAuth pair (post-as-user Talk mirroring + read-state
+-- sync). Encrypted with the *web-only* ISTOTA_WEB_TOKEN_KEY — not the shared
+-- ISTOTA_SECRET_KEY — so only the web process can decrypt. expires_at is
+-- plaintext ISO UTC so refresh checks don't need a decrypt.
+CREATE TABLE IF NOT EXISTS web_user_tokens (
+    user_id       TEXT PRIMARY KEY,
+    access_token  TEXT NOT NULL,            -- Fernet ciphertext (web key)
+    refresh_token TEXT NOT NULL,            -- Fernet ciphertext (web key)
+    expires_at    TEXT NOT NULL,            -- ISO 8601 UTC, plaintext
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);

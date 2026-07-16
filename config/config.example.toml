@@ -584,6 +584,14 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # oauth2_token_endpoint = ""                       # server-to-server token URL
 # oauth2_userinfo_endpoint = ""                    # server-to-server identity URL
 # oauth2_redirect_uri = ""                         # explicit override; otherwise derived from request
+#
+# User-scoped OAuth token retention. "ephemeral" (default) discards the OAuth
+# pair after login. "encrypted" retains it in the web_user_tokens table,
+# encrypted with the web-only ISTOTA_WEB_TOKEN_KEY env var (>=32 chars,
+# delivered to the web unit ONLY — never the scheduler/webhooks). Enables
+# post-as-user Talk mirroring of web messages and web<->Talk read-state sync.
+# NC OAuth2 tokens grant full account access, so this is a deliberate opt-in.
+# token_storage = "ephemeral"                      # "ephemeral" | "encrypted"
 
 # In-app web chat surface (always-on companion to Talk; reachable from the
 # "Chat" tab). All knobs have sensible defaults — this block is only for tuning.
@@ -595,6 +603,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # rate_limit_window_seconds = 300
 # sse_poll_interval_ms = 200                        # server-side SSE generator cadence
 # client_poll_interval_ms = 1500                    # client polling fallback cadence
+# talk_read_sync_interval = 60                      # Talk→web read pull cadence (s); 0 disables; needs token_storage = "encrypted"
 
 # ============================================================================
 # Google Workspace Integration

@@ -409,10 +409,14 @@ oauth2_userinfo_endpoint = "{{ istota_web_oauth2_userinfo_endpoint }}"
 {% if istota_web_oauth2_redirect_uri %}
 oauth2_redirect_uri = "{{ istota_web_oauth2_redirect_uri }}"
 {% endif %}
+token_storage = "{{ istota_web_token_storage }}"
 {% if not istota_use_environment_file %}
 oauth2_client_secret = "{{ istota_web_oauth2_client_secret }}"
 session_secret_key = "{{ istota_web_secret_key }}"
 {% endif %}
+
+[web.chat]
+talk_read_sync_interval = {{ istota_web_chat_talk_read_sync_interval }}
 {% endif %}
 {% if istota_google_workspace_enabled %}
 

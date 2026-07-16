@@ -100,22 +100,55 @@ def clean_message_content(message: dict, bot_username: str | None = None) -> str
 
 
 class TalkClient:
-    """Client for Nextcloud Talk user API (not bot API)."""
+    """Client for Nextcloud Talk user API (not bot API).
+
+    Two auth modes: the default basic-auth mode acts as the configured bot
+    account; ``bearer_token`` switches every request to
+    ``Authorization: Bearer <token>`` — a *user-scoped* OAuth2 access token,
+    so the client acts as that user (post-as-user mirroring, read-marker
+    sync). Bearer instances are short-lived, constructed per request in the
+    web process; the daemon's persistent singleton stays basic-auth.
+    """
 
     # Default timeout for short API calls (list rooms, send message, etc.).
     # httpx default is 5s which is too aggressive when the server is busy
     # (e.g. during task execution).
     DEFAULT_TIMEOUT = 15
 
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        bearer_token: str | None = None,
+        timeout: float | None = None,
+    ):
         self.config = config
         self.base_url = config.nextcloud.url.rstrip("/")
-        self.auth = (config.nextcloud.username, config.nextcloud.app_password)
+        self.bearer_token = bearer_token
+        # Per-instance default timeout override — the short-lived bearer
+        # clients in the web request path use a tighter bound (~5s) than the
+        # daemon's DEFAULT_TIMEOUT so a slow NC can't stall a web request.
+        self._timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT
+        # httpx treats auth=None as "no auth" — bearer mode carries its
+        # credential in the Authorization header instead.
+        self.auth = (
+            None
+            if bearer_token
+            else (config.nextcloud.username, config.nextcloud.app_password)
+        )
         # Persistent httpx client, created lazily on the persistent asyncio loop
         # via get_talk_client(). Until Stage 6 the methods below still open a
         # transient client per call; this one is created and idle.
         self._client: httpx.AsyncClient | None = None
         self._closed = False
+
+    def _headers(self, *, json_body: bool = False) -> dict:
+        """Standard OCS headers, plus the bearer credential when in user mode."""
+        headers = {"OCS-APIRequest": "true", "Accept": "application/json"}
+        if json_body:
+            headers["Content-Type"] = "application/json"
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        return headers
 
     @property
     def is_closed(self) -> bool:
@@ -130,7 +163,7 @@ class TalkClient:
         if self._closed:
             raise RuntimeError("TalkClient is closed")
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.DEFAULT_TIMEOUT)
+            self._client = httpx.AsyncClient(timeout=self._timeout)
         return self._client
 
     async def aclose(self) -> None:
@@ -162,11 +195,7 @@ class TalkClient:
         response = await client.post(
             url,
             auth=self.auth,
-            headers={
-                "OCS-APIRequest": "true",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers=self._headers(json_body=True),
             json=data,
         )
         response.raise_for_status()
@@ -192,11 +221,7 @@ class TalkClient:
         response = await client.put(
             url,
             auth=self.auth,
-            headers={
-                "OCS-APIRequest": "true",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers=self._headers(json_body=True),
             json={"message": message},
         )
         response.raise_for_status()
@@ -213,11 +238,7 @@ class TalkClient:
         response = await client.post(
             url,
             auth=self.auth,
-            headers={
-                "OCS-APIRequest": "true",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers=self._headers(json_body=True),
             json={"roomType": room_type, "roomName": name[:200]},
         )
         response.raise_for_status()
@@ -236,11 +257,7 @@ class TalkClient:
         response = await client.post(
             url,
             auth=self.auth,
-            headers={
-                "OCS-APIRequest": "true",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers=self._headers(json_body=True),
             json={"newParticipant": participant, "source": source},
         )
         response.raise_for_status()
@@ -258,14 +275,39 @@ class TalkClient:
         response = await client.put(
             url,
             auth=self.auth,
-            headers={
-                "OCS-APIRequest": "true",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers=self._headers(json_body=True),
             json={"roomName": name[:200]},
         )
         response.raise_for_status()
+
+    async def mark_conversation_read(self, conversation_token: str) -> bool:
+        """Mark a whole conversation read for the authenticated identity.
+
+        ``POST /chat/{token}/read`` with no ``lastReadMessage`` marks everything
+        read (Talk capability ``chat-read-last``). Used with a user bearer token
+        to sync the web UI's mark-read into Nextcloud Talk. Returns a success
+        bool and never raises to callers — a Talk failure must not fail the web
+        request that triggered it.
+        """
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat"
+            f"/{conversation_token}/read"
+        )
+        try:
+            client = await self._ensure_open()
+            response = await client.post(
+                url,
+                auth=self.auth,
+                headers=self._headers(),
+                timeout=5,
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.warning(
+                "mark_conversation_read failed for %s: %s", conversation_token, e,
+            )
+            return False
 
     async def list_conversations(self) -> list[dict]:
         """List all conversations the user is part of."""
@@ -275,7 +317,7 @@ class TalkClient:
         response = await client.get(
             url,
             auth=self.auth,
-            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            headers=self._headers(),
         )
         response.raise_for_status()
         return response.json().get("ocs", {}).get("data", [])
@@ -323,7 +365,7 @@ class TalkClient:
         response = await client.get(
             url,
             auth=self.auth,
-            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            headers=self._headers(),
             params=params,
             timeout=request_timeout,
         )
@@ -352,7 +394,7 @@ class TalkClient:
         response = await client.get(
             url,
             auth=self.auth,
-            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            headers=self._headers(),
             params={"lookIntoFuture": 0, "limit": 1},
         )
         response.raise_for_status()
@@ -376,7 +418,7 @@ class TalkClient:
         response = await client.get(
             url,
             auth=self.auth,
-            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            headers=self._headers(),
             params={"lookIntoFuture": 0, "limit": limit},
             timeout=30,
         )
@@ -395,7 +437,7 @@ class TalkClient:
         response = await client.get(
             url,
             auth=self.auth,
-            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            headers=self._headers(),
         )
         response.raise_for_status()
         return response.json().get("ocs", {}).get("data", [])
@@ -408,7 +450,7 @@ class TalkClient:
         response = await client.get(
             url,
             auth=self.auth,
-            headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+            headers=self._headers(),
         )
         response.raise_for_status()
         return response.json().get("ocs", {}).get("data", {})
@@ -433,7 +475,7 @@ class TalkClient:
             response = await client.get(
                 url,
                 auth=self.auth,
-                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+                headers=self._headers(),
                 params=params,
                 timeout=30,
             )
@@ -480,7 +522,7 @@ class TalkClient:
             response = await client.get(
                 url,
                 auth=self.auth,
-                headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+                headers=self._headers(),
                 params=params,
                 timeout=30,
             )

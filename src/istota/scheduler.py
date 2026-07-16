@@ -2047,12 +2047,28 @@ def process_one_task(
         # For a web-origin mirror leg, repost the user's question (attributed)
         # before the reply so the Talk transcript isn't an orphaned answer. Pure
         # Talk-surface post — never persisted to the canonical messages store.
+        # Suppressed when the web process already posted the turn *as the user*
+        # at ingest (post-as-user mirroring): the user turn's `talk` external-id
+        # stamp is the signal. A framework-DB read — the scheduler never touches
+        # the user token.
         if _talk_is_mirror and task.source_type == "web" and task.prompt:
-            run_coro(post_result_to_talk(
-                config, task, _format_mirror_user_repost(config, task),
-                reference_id=f"istota:task:{task.id}:prompt",
-                target_token=talk_token,
-            ))
+            _user_posted = False
+            try:
+                with db.get_db(config.db_path) as conn:
+                    _user_posted = db.user_turn_has_external_id(
+                        conn, task_id, "talk",
+                    )
+            except Exception as e:
+                logger.debug(
+                    "user-turn external-id check failed for task %d: %s",
+                    task_id, e,
+                )
+            if not _user_posted:
+                run_coro(post_result_to_talk(
+                    config, task, _format_mirror_user_repost(config, task),
+                    reference_id=f"istota:task:{task.id}:prompt",
+                    target_token=talk_token,
+                ))
         response_msg_id = run_coro(post_result_to_talk(
             config, task, post_talk_message, use_reply_threading=True,
             reference_id=f"istota:task:{task.id}:result",

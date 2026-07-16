@@ -98,6 +98,19 @@ def main() -> int:
                 )
                 return 1
 
+    # [web] token_storage: a typo'd value would template cleanly and the
+    # loader would silently fall back to "ephemeral" — the operator thinks
+    # token retention is on, but it isn't. Fail the play instead.
+    web = raw.get("web", {})
+    token_storage = web.get("token_storage")
+    if token_storage is not None and token_storage not in ("ephemeral", "encrypted"):
+        print(
+            f"validate_config: [web] token_storage={token_storage!r}; "
+            "expected 'ephemeral' or 'encrypted'",
+            file=sys.stderr,
+        )
+        return 1
+
     sys.path.insert(0, str(cfg_path.parent.parent / "src"))
     try:
         mod = __import__(f"{package}.config", fromlist=["load_config"])

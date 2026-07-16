@@ -100,9 +100,15 @@ def record_inbound(
         # intact.
         db.undismiss_room(conn, room_token, user_id)
 
-        # 2. Echo check (loop-prevention ledger). Dormant for v1 Talk+web.
+        # 2. Echo check (loop-prevention ledger) — armed by post-as-user
+        #    mirroring: a web-origin row stamped with a Talk id catches the
+        #    Talk echo of that mirror even when its referenceId was stripped.
+        #    Rows that originated on this very surface are excluded — that's
+        #    a re-polled duplicate, not a mirror, and it must reach
+        #    `create_task`'s dedup (which returns the existing task id).
         if external_id is not None and db.message_has_external_id(
             conn, room_token, surface, str(external_id),
+            exclude_origin=surface,
         ):
             logger.info(
                 "Dropping echo of a mirrored message on %s (room=%s ext=%s)",
@@ -139,9 +145,18 @@ def record_inbound(
             (room_token, task_id),
         ).fetchone()
         if not already:
+            # Stamp the surface-native message id (Talk's message id) so the
+            # canonical row knows where it exists on that surface: this feeds
+            # both the echo ledger and the Talk→web read-sync cursor cap
+            # (`room_max_talk_synced_message_id`).
             db.add_message(
                 conn, room_token, role="user", body=text,
                 origin_surface=surface, task_id=task_id,
+                external_ids=(
+                    {surface: str(external_id)}
+                    if external_id is not None
+                    else None
+                ),
             )
 
     return room_token, task_id
