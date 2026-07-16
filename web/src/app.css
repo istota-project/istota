@@ -206,9 +206,9 @@ a:hover { color: var(--accent-hover); }
 .markdown p:last-child { margin-bottom: 0; }
 .markdown ul,
 .markdown ol { margin: 0 0 1rem; padding-left: 1.3rem; }
-.markdown li { margin: 0.1rem 0; }
+.markdown li { margin: 0.5rem 0; }
 .markdown li > ul,
-.markdown li > ol { margin: 0.1rem 0; }
+.markdown li > ol { margin: 0.5rem 0; }
 .markdown h1,
 .markdown h2,
 .markdown h3,
