@@ -15,6 +15,7 @@
 		onReject,
 		onToggleStar,
 		onRoomClick,
+		aggregate = false,
 	}: {
 		message: ChatMessage;
 		// True when this message continues a run from the same author, so the
@@ -30,6 +31,10 @@
 		// Aggregate views: click the message's room label to jump into that room.
 		// Only rendered when both the handler and message.roomName are present.
 		onRoomClick?: (token: string) => void;
+		// True in the cross-room views (All messages / Unread / Starred), where
+		// the hover bar carries only the task number — model and timings are
+		// room-level detail that belongs in the room view.
+		aggregate?: boolean;
 	} = $props();
 
 	const isUser = $derived(message.role === 'user');
@@ -60,6 +65,7 @@
 	const meta = $derived.by(() => {
 		const parts: string[] = [];
 		if (message.taskId) parts.push(`#${message.taskId}`);
+		if (aggregate) return parts;
 		// Drop a provider prefix (e.g. `anthropic/`) then a leading `claude-` for
 		// a compact label; native/openrouter slugs keep their distinguishing tail.
 		if (message.model) parts.push(message.model.replace(/^[^/]+\//, '').replace(/^claude-/, ''));
@@ -102,7 +108,7 @@
 	<div class="cmd-row">
 		{#if showRoomChip}
 			<button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
-				#{message.roomName}
+				{message.roomName}
 			</button>
 		{/if}
 		<div class="cmd-output markdown" class:error={message.error}>{@html bodyHtml}</div>
@@ -129,7 +135,7 @@
 					{#if time}<time class="stamp">{time}</time>{/if}
 					{#if showRoomChip}
 						<button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button" title="Go to room">
-							#{message.roomName}
+							{message.roomName}
 						</button>
 					{/if}
 				</div>
@@ -271,7 +277,7 @@
 	.star-btn:hover,
 	.star-btn.starred { color: #f5b300; }
 
-	/* Room label chip (aggregate views): a small clickable #room tag in the
+	/* Room label chip (aggregate views): a small clickable room tag in the
 	   author header that jumps into the room. */
 	.room-chip {
 		background: var(--surface-raised);

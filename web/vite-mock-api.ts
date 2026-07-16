@@ -100,6 +100,12 @@ const user = {
 	display_name: 'Stefan',
 	bot_name: 'Istota',
 	is_admin: true,
+	// Present only when the instance runs [web] token_storage = "encrypted";
+	// set to null to preview the "Not connected" card.
+	nextcloud_token: {
+		connected: true,
+		expires_at: new Date(Date.now() + 3600_000).toISOString(),
+	} as { connected: boolean; expires_at: string | null } | null,
 	features: {
 		chat: true,
 		feeds: true,
@@ -1258,6 +1264,10 @@ const handlers: MockHandler[] = [
 		}
 		if (url === '/istota/api/settings/modules' && method === 'GET') {
 			return mockModulesResponse();
+		}
+		if (url === '/istota/api/settings/nextcloud-token' && method === 'DELETE') {
+			user.nextcloud_token = { connected: false, expires_at: null };
+			return { ok: true };
 		}
 		const moduleSvcMatch = url.match(/^\/istota\/api\/settings\/module-services\/([^/?]+)$/);
 		if (moduleSvcMatch && method === 'GET') {

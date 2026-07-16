@@ -189,32 +189,36 @@
 				open={sidebarOpen}
 				onClose={() => (sidebarOpen = false)}
 			>
-			<button
-				class="feed-btn special"
-				class:active={!$selectedFeedId && !$selectedCategoryId && !$showStarred && !$showUnseen}
-				onclick={handleAllClick}
-				type="button"
-			>
-				<span class="feed-name">All</span>
-			</button>
-			<button
-				class="feed-btn special"
-				class:active={$showUnseen && !$showStarred && !$selectedFeedId}
-				onclick={handleUnreadClick}
-				type="button"
-			>
-				<Circle size={12} />
-				<span class="feed-name">Unread</span>
-			</button>
-			<button
-				class="feed-btn special"
-				class:active={$showStarred}
-				onclick={handleStarredClick}
-				type="button"
-			>
-				<Star size={12} />
-				<span class="feed-name">Starred</span>
-			</button>
+			<!-- Cross-feed views, above the feed list. Mirrors the chat sidebar's
+			     All / Unread / Starred entries so the two read the same. -->
+			<div class="views">
+				<button
+					class="view-btn"
+					class:active={!$selectedFeedId && !$selectedCategoryId && !$showStarred && !$showUnseen}
+					onclick={handleAllClick}
+					type="button"
+				>
+					<span class="view-name">All</span>
+				</button>
+				<button
+					class="view-btn"
+					class:active={$showUnseen && !$showStarred && !$selectedFeedId}
+					onclick={handleUnreadClick}
+					type="button"
+				>
+					<Circle size={12} />
+					<span class="view-name">Unread</span>
+				</button>
+				<button
+					class="view-btn"
+					class:active={$showStarred}
+					onclick={handleStarredClick}
+					type="button"
+				>
+					<Star size={12} />
+					<span class="view-name">Starred</span>
+				</button>
+			</div>
 			{#each groupedFeeds as [category, catFeeds] (category)}
 				{@const catId = catFeeds[0]?.category.id ?? 0}
 				<CategoryGroup
@@ -267,10 +271,8 @@
 		text-align: left;
 	}
 
-	.feed-btn.special {
-		color: var(--text-muted);
-	}
-
+	/* .views / .view-btn / .view-name (the All / Unread / Starred block) come
+	   from web/src/lib/styles/sidebar.css, shared with the chat sidebar. */
 	.feed-btn:hover {
 		background: var(--surface-raised);
 	}

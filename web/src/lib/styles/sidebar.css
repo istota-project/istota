@@ -1,0 +1,61 @@
+/* Shared sidebar primitives — imported by app.css, so every sidebar that
+   offers cross-item views (chat rooms, feeds) renders them identically.
+
+   `.views` is the block of All / Unread / Starred entries that sits above a
+   sidebar's item list, separated from it by a rule. Each entry is a
+   `.view-btn` wrapping an optional icon plus a `.view-name`:
+
+       <div class="views">
+         <button class="view-btn" class:active={…}>
+           <Circle size={12} />
+           <span class="view-name">Unread</span>
+         </button>
+       </div>
+
+   Scoped under `.sidebar` (the <aside> Sidebar.svelte renders) so these
+   deliberately generic names can't leak into unrelated markup. Trailing
+   slots — a count chip, say — are the host's own business; give them a
+   non-shrinking class of their own so `.view-name`'s ellipsis can't clip
+   them.
+
+   The item rows *below* the views (`.feed-btn`, `.room-btn`) are per-sidebar
+   and intentionally not shared: feeds runs its list at --text-sm, chat at
+   --text-base. */
+.sidebar .views {
+	display: flex;
+	flex-direction: column;
+	margin-bottom: 0.5rem;
+	padding-bottom: 0.5rem;
+	border-bottom: 1px solid var(--border-subtle);
+}
+
+.sidebar .view-btn {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	width: 100%;
+	background: none;
+	border: none;
+	color: var(--text-muted);
+	font: inherit;
+	font-size: var(--text-base);
+	cursor: pointer;
+	padding: 0.3rem 0.6rem;
+	border-radius: 0.3rem;
+	transition: background var(--transition-fast);
+	text-align: left;
+}
+
+.sidebar .view-btn:hover {
+	background: var(--surface-raised);
+}
+
+.sidebar .view-btn.active {
+	background: var(--surface-raised);
+	color: var(--text-primary);
+}
+
+.sidebar .view-name {
+	flex: 1;
+	min-width: 0;
+}

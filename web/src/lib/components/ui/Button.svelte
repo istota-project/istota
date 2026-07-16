@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 
-	type Variant = 'primary' | 'ghost' | 'pill' | 'subtle' | 'danger-icon';
+	type Variant = 'primary' | 'secondary' | 'ghost' | 'pill' | 'subtle' | 'danger-icon';
 	type Size = 'sm' | 'md';
 
 	interface Props {
@@ -65,6 +65,19 @@
 	}
 	.btn-primary:hover:not(:disabled) {
 		background: var(--accent-hover);
+	}
+
+	/* Same filled shape as primary, quieter colour — for the reversing half of
+	   a pair (Disconnect next to Connect), where a ghost button would read as a
+	   different kind of control rather than a calmer one. Sits on --surface-card
+	   surfaces, so it can't use btn-pill's matching background. */
+	.btn-secondary {
+		background: var(--surface-raised);
+		color: var(--text-muted);
+	}
+	.btn-secondary:hover:not(:disabled) {
+		background: var(--border-default);
+		color: var(--text-primary);
 	}
 
 	.btn-pill {

@@ -615,33 +615,6 @@
 		</SettingsCard>
 	{/if}
 
-	{#if ncToken}
-		<SettingsCard
-			title="Nextcloud connection"
-			description="When connected, messages you send from web chat appear in Nextcloud Talk under your own name, and read state syncs between web and Talk."
-		>
-			<div class="nc-token-row">
-				{#if ncToken.connected}
-					<span class="nc-token-status connected">Connected</span>
-					<Button
-						variant="ghost"
-						size="sm"
-						onclick={disconnectNextcloud}
-						disabled={ncTokenBusy}
-					>
-						{ncTokenBusy ? 'Disconnecting…' : 'Disconnect'}
-					</Button>
-				{:else}
-					<span class="nc-token-status">Not connected</span>
-					<p class="hint">
-						Log out and back in to connect — the connection is established at
-						login.
-					</p>
-				{/if}
-			</div>
-		</SettingsCard>
-	{/if}
-
 	<SettingsCard title="Resources ({resources.length})">
 		<p class="hint">
 			Calendars, folders, modules, and integrations available to your
@@ -860,7 +833,7 @@
 			</form>
 		</SettingsCard>
 
-		{#if activeServices.length > 0}
+		{#if activeServices.length > 0 || ncToken}
 			<div class="subsection-heading">
 				<h2>Connected services</h2>
 				<p class="hint">
@@ -873,6 +846,37 @@
 					<a href="{base}/location/settings">location</a>).
 				</p>
 			</div>
+		{/if}
+
+		{#if ncToken}
+			{@const nc = ncToken}
+			<SettingsCard
+				title="Nextcloud"
+				description="When connected, messages you send from web chat appear in Nextcloud Talk under your own name, and read state syncs between web and Talk."
+			>
+				{#snippet status()}
+					<span class="status-pill status-{nc.connected ? 'configured' : 'missing'}">
+						{nc.connected ? 'Connected' : 'Not connected'}
+					</span>
+				{/snippet}
+				{#if nc.connected}
+					<div class="oauth-actions">
+						<Button
+							variant="secondary"
+							size="sm"
+							onclick={disconnectNextcloud}
+							disabled={ncTokenBusy}
+						>
+							{ncTokenBusy ? 'Disconnecting…' : 'Disconnect'}
+						</Button>
+					</div>
+				{:else}
+					<p class="empty">
+						Log out and back in to connect — the connection is established at
+						login.
+					</p>
+				{/if}
+			</SettingsCard>
 		{/if}
 
 		{#each activeServices as svc (svc.service)}
@@ -962,20 +966,11 @@
 	}
 
 
-	.nc-token-row {
+	/* Mirrors ServiceCard's Connect/Disconnect row so the Nextcloud card and
+	   the OAuth service cards below it line up. */
+	.oauth-actions {
 		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		flex-wrap: wrap;
-	}
-
-	.nc-token-status {
-		font-size: var(--text-sm);
-		color: var(--text-muted);
-	}
-
-	.nc-token-status.connected {
-		color: var(--success, #3fb950);
+		gap: 0.5rem;
 	}
 
 	.module-toggles {

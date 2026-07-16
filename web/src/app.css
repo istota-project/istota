@@ -1,5 +1,6 @@
 @import './lib/styles/settings.css';
 @import './lib/styles/cards.css';
+@import './lib/styles/sidebar.css';
 
 :root {
 	color-scheme: dark;
