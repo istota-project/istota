@@ -533,6 +533,21 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 applied_at  TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        # User-scoped Nextcloud OAuth pair, encrypted with the *web-only* key
+        # (ISTOTA_WEB_TOKEN_KEY — not the shared ISTOTA_SECRET_KEY). Written and
+        # decrypted only by the web process (istota.web_tokens); the scheduler
+        # reads nothing here. expires_at is plaintext ISO UTC so refresh checks
+        # don't need a decrypt.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS web_user_tokens (
+                user_id       TEXT PRIMARY KEY,
+                access_token  TEXT NOT NULL,
+                refresh_token TEXT NOT NULL,
+                expires_at    TEXT NOT NULL,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
     except sqlite3.OperationalError:
         pass
 
@@ -2763,17 +2778,75 @@ def set_message_external_id(
     )
 
 
+def user_turn_has_external_id(
+    conn: sqlite3.Connection, task_id: int, surface: str,
+) -> bool:
+    """True when a task's user turn already carries an external id on
+    `surface` — the scheduler's signal that the web process already posted the
+    turn as the user (post-as-user mirroring), so the legacy attributed repost
+    must be suppressed. A pure framework-DB read; the scheduler never touches
+    the token itself."""
+    row = conn.execute(
+        "SELECT external_ids FROM messages "
+        "WHERE task_id = ? AND role = 'user' LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None or not row["external_ids"]:
+        return False
+    try:
+        ext = json.loads(row["external_ids"])
+    except (ValueError, TypeError):
+        return False
+    return isinstance(ext, dict) and surface in ext
+
+
+def room_max_talk_synced_message_id(
+    conn: sqlite3.Connection, room_token: str,
+) -> int:
+    """The highest `messages.id` in a room that has a `"talk"` external id —
+    i.e. the newest canonical message that demonstrably exists in Talk. The
+    Talk→web read-sync cursor is capped here so Talk read-state can't swallow
+    web-only rows (WebTransport system messages) the user never saw in Talk.
+    0 when nothing is stamped yet (sync starts working for post-deploy rows)."""
+    rows = conn.execute(
+        "SELECT id, external_ids FROM messages "
+        "WHERE room_token = ? AND external_ids IS NOT NULL ORDER BY id DESC",
+        (room_token,),
+    ).fetchall()
+    for r in rows:
+        try:
+            ext = json.loads(r["external_ids"])
+        except (ValueError, TypeError):
+            continue
+        if isinstance(ext, dict) and "talk" in ext:
+            return int(r["id"])
+    return 0
+
+
 def message_has_external_id(
-    conn: sqlite3.Connection, room_token: str, surface: str, external_id: str,
+    conn: sqlite3.Connection,
+    room_token: str,
+    surface: str,
+    external_id: str,
+    *,
+    exclude_origin: str | None = None,
 ) -> bool:
     """True if any message in the room already records `external_id` on
-    `surface` — used by inbound echo detection."""
+    `surface` — used by inbound echo detection.
+
+    ``exclude_origin`` skips rows whose `origin_surface` matches: a row that
+    originated on the inbound surface itself isn't a mirror echo — it's the
+    same message re-polled (inbound Talk ids are stamped at ingest now), and
+    that case must fall through to `create_task`'s duplicate dedup so the
+    caller gets the existing task id instead of an echo drop."""
     rows = conn.execute(
-        "SELECT external_ids FROM messages "
+        "SELECT origin_surface, external_ids FROM messages "
         "WHERE room_token = ? AND external_ids IS NOT NULL",
         (room_token,),
     ).fetchall()
     for r in rows:
+        if exclude_origin is not None and r["origin_surface"] == exclude_origin:
+            continue
         try:
             ext = json.loads(r["external_ids"])
         except (ValueError, TypeError):
@@ -3009,12 +3082,19 @@ def mark_all_rooms_read(conn: sqlite3.Connection, user_id: str) -> int:
     """Advance the user's web read cursor to the newest message in every room
     they can see (same visibility as `list_member_rooms`). Returns the number
     of rooms whose cursor actually moved."""
-    moved = 0
+    return len(mark_all_rooms_read_tokens(conn, user_id))
+
+
+def mark_all_rooms_read_tokens(conn: sqlite3.Connection, user_id: str) -> list[str]:
+    """Same as `mark_all_rooms_read`, returning the tokens of the rooms whose
+    cursor actually moved — the web→Talk read-sync push needs the identities,
+    not just the count (only actually-advanced rooms get an NC call)."""
+    moved: list[str] = []
     for room in list_member_rooms(conn, user_id):
         max_id = room_max_message_id(conn, room.token)
         if max_id > get_room_read_state(conn, room.token, "web", user_id):
             set_room_read_state(conn, room.token, "web", max_id, user_id)
-            moved += 1
+            moved.append(room.token)
     return moved
 
 

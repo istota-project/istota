@@ -615,6 +615,21 @@ istota_web_oauth2_userinfo_endpoint: ""  # Optional override
 istota_web_oauth2_redirect_uri: ""       # Optional override; defaults to https://{site_hostname}/istota/callback
 istota_web_secret_key: ""                # Session signing key (vault); generate with `python3 -c 'import secrets;print(secrets.token_hex(32))'`
 
+# User-scoped Nextcloud OAuth token retention (post-as-user Talk mirroring +
+# read-state sync). "ephemeral" (default) discards the OAuth pair at login;
+# "encrypted" retains it in the web_user_tokens table, encrypted with the
+# web-only key below. NC OAuth2 tokens grant full account access, so this is
+# a deliberate opt-in.
+istota_web_token_storage: "ephemeral"
+# Web-only Fernet key source (vault); >=32 chars, generate with
+# `python3 -c 'import secrets;print(secrets.token_hex(32))'`. Rendered into
+# /etc/{namespace}/web-secrets.env and loaded ONLY by the web unit — never
+# the scheduler or webhooks units (that separation is the point).
+istota_web_token_key: ""
+# Talk→web read-state pull cadence in seconds (0 disables the pull;
+# web→Talk push is unaffected). Only active with token storage "encrypted".
+istota_web_chat_talk_read_sync_interval: 60
+
 # Master key for the encrypted ``secrets`` table. Populated into
 # /etc/{{ istota_namespace }}/secrets.env as ISTOTA_SECRET_KEY. Generate
 # with: ``python3 -c "import secrets; print(secrets.token_hex(32))"`` and

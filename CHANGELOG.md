@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-room chat views: All, Unread, and Starred entries in the web chat sidebar show one combined message stream across every room, with a room label on each message that jumps to its room. The Unread entry carries a total-unread badge and the views page backwards on scroll like a room transcript.
 - Per-message starring in web chat: hover any finished message (from either surface — web or Talk) and hit the star to bookmark it. Stars are private to you, and the Starred view collects them.
 - A mark-all-read button in the chat header clears every room's unread badge in one confirmed click.
+- Opt-in Nextcloud connection for web chat (encrypted token storage): a message sent from the web UI now appears in the bound Talk conversation instantly, authored by you, with the bot's answer following as its own post — replacing the bot-attributed repost at task completion. The retained login token is encrypted with a key only the web process holds, and a settings card shows the connection with a Disconnect button.
+- Read-state sync between web chat and Talk (same opt-in): reading a room in the web UI clears its badge on your Talk clients, and reading it in Talk clears the web badge within a minute. Web-only notification messages keep their badge until actually seen in web.
 
 ## [0.29.0] - 2026-07-14
 

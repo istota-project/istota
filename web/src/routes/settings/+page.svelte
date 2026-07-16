@@ -12,11 +12,14 @@
 		getBriefings,
 		upsertBriefing,
 		deleteBriefing,
+		getMe,
+		disconnectNextcloudToken,
 		type ServiceCard as ServiceCardData,
 		type UserProfile,
 		type UserResourceRow,
 		type ResourceTypeSchema,
 		type UserBriefingRow,
+		type NextcloudTokenStatus,
 	} from '$lib/api';
 	import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
 	import {
@@ -33,6 +36,9 @@
 	let error = $state('');
 	let info = $state('');
 	let oauthBusy = $state(false);
+	// null = operator hasn't enabled encrypted token storage → no card.
+	let ncToken: NextcloudTokenStatus | null = $state(null);
+	let ncTokenBusy = $state(false);
 
 	// Full IANA timezone list from the browser (no hardcoded list / extra dep).
 	// Older engines may not implement supportedValuesOf — fall back to UTC.
@@ -96,14 +102,16 @@
 	async function refresh() {
 		loading = true;
 		try {
-			const [svcResp, profResp, resResp, briefResp, modResp] = await Promise.all([
+			const [svcResp, profResp, resResp, briefResp, modResp, meResp] = await Promise.all([
 				getSettingsServices(),
 				getProfile(),
 				getResources(),
 				getBriefings(),
 				getModules(),
+				getMe(),
 			]);
 			services = svcResp.services;
+			ncToken = meResp.nextcloud_token ?? null;
 			profile = profResp.profile;
 			if (profile) {
 				// Normalize optional routing fields so the bindings are safe.
@@ -200,6 +208,19 @@
 		if (v) next[purpose] = v;
 		else delete next[purpose];
 		profile.routing = next;
+	}
+
+	async function disconnectNextcloud() {
+		ncTokenBusy = true;
+		try {
+			await disconnectNextcloudToken();
+			ncToken = { connected: false, expires_at: null };
+			info = 'Nextcloud connection removed.';
+		} catch (e) {
+			error = (e as Error).message || 'Disconnect failed';
+		} finally {
+			ncTokenBusy = false;
+		}
 	}
 
 	function connectGoogle() {
@@ -594,6 +615,33 @@
 		</SettingsCard>
 	{/if}
 
+	{#if ncToken}
+		<SettingsCard
+			title="Nextcloud connection"
+			description="When connected, messages you send from web chat appear in Nextcloud Talk under your own name, and read state syncs between web and Talk."
+		>
+			<div class="nc-token-row">
+				{#if ncToken.connected}
+					<span class="nc-token-status connected">Connected</span>
+					<Button
+						variant="ghost"
+						size="sm"
+						onclick={disconnectNextcloud}
+						disabled={ncTokenBusy}
+					>
+						{ncTokenBusy ? 'Disconnecting…' : 'Disconnect'}
+					</Button>
+				{:else}
+					<span class="nc-token-status">Not connected</span>
+					<p class="hint">
+						Log out and back in to connect — the connection is established at
+						login.
+					</p>
+				{/if}
+			</div>
+		</SettingsCard>
+	{/if}
+
 	<SettingsCard title="Resources ({resources.length})">
 		<p class="hint">
 			Calendars, folders, modules, and integrations available to your
@@ -913,6 +961,22 @@
 		justify-content: flex-end;
 	}
 
+
+	.nc-token-row {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.nc-token-status {
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+	}
+
+	.nc-token-status.connected {
+		color: var(--success, #3fb950);
+	}
 
 	.module-toggles {
 		display: flex;

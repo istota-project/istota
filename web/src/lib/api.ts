@@ -17,6 +17,11 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 	return resp.json();
 }
 
+export interface NextcloudTokenStatus {
+	connected: boolean;
+	expires_at: string | null;
+}
+
 export interface User {
 	username: string;
 	display_name: string;
@@ -32,6 +37,12 @@ export interface User {
 		google_workspace_enabled: boolean;
 		admin: boolean;
 	};
+	// null when the operator hasn't enabled encrypted token storage.
+	nextcloud_token?: NextcloudTokenStatus | null;
+}
+
+export async function disconnectNextcloudToken(): Promise<{ ok: boolean; was_connected: boolean }> {
+	return apiFetch('/settings/nextcloud-token', { method: 'DELETE' });
 }
 
 export interface AdminStatsUserSource {

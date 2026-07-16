@@ -185,7 +185,43 @@ straight onto `db.create_task` (the duplicate-Talk-message guard returns the
 existing id rather than inserting twice). **Both** surfaces route their creates
 through it — Talk inside its poll transaction, email inside its poll transaction
 — and it is the entry point a future driver-ingested surface (web chat) would
-use across its own boundary.
+use across its own boundary. `record_inbound` stamps the surface-native message
+id into the canonical user row's `external_ids` (Talk ids at ingest) — feeding
+both the echo ledger and the Talk→web read-sync cursor cap.
+
+## Post-as-user mirroring + echo prevention (user-scoped OAuth)
+
+When `[web] token_storage = "encrypted"` and `ISTOTA_WEB_TOKEN_KEY` are set
+(web unit only — see `istota.web_tokens`), a web send into a Talk-bound room is
+posted to Talk *as the user* at ingest time by the web process
+(`web_app._mirror_web_turn_as_user`): a short-lived
+`TalkClient(config, bearer_token=…, timeout=5)` sends the prompt with
+`referenceId = WEBMIRROR_REF_PREFIX + <canonical message id>`
+(`transport.WEBMIRROR_REF_PREFIX = "istota:webmirror:"`, defined in
+`_types.py`), then stamps the returned Talk id onto the canonical user row.
+That stamp doubles as the scheduler's repost-suppression signal
+(`db.user_turn_has_external_id(task_id, "talk")` — the mirror branch skips
+`_format_mirror_user_repost` when present) and as the echo ledger entry.
+
+Echo prevention is two independent guards:
+1. **referenceId fast-path** (`transport/talk/inbound.py`): any polled message
+   whose `referenceId` starts with `WEBMIRROR_REF_PREFIX` is skipped before
+   dispatch — race-free even when the long-poll beats the stamp write, because
+   the marker travels inside the Talk message. The poll cursor still advances
+   and the `talk_messages` context cache still keeps the turn.
+2. **external-ids ledger** (`record_inbound`): `db.message_has_external_id`
+   with `exclude_origin=surface` — catches a referenceId-stripped echo, while a
+   row that *originated* on the inbound surface (a re-polled duplicate) is
+   excluded so it still reaches `create_task`'s duplicate dedup.
+
+Read-state sync rides the same token: web→Talk is an event-driven
+`mark_conversation_read` push (fire-and-forget, only on actual cursor advance);
+Talk→web is a throttled per-user pull on the web rooms poll
+(`[web.chat] talk_read_sync_interval`, default 60s) that advances the web
+cursor of fully-read (`unreadMessages == 0`) Talk-bound rooms up to
+`db.room_max_talk_synced_message_id` — never past web-only system messages.
+Everything is web-process-only, feature-gated, and degrades to the legacy
+behaviour (attributed repost, web-only read state) on any failure.
 
 ## Outbound
 

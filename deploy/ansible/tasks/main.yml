@@ -782,6 +782,27 @@
     state: absent
   when: not istota_use_environment_file | default(false) and not istota_web_only
 
+# Web-only secrets: ISTOTA_WEB_TOKEN_KEY is delivered to the web unit ONLY
+# (never the scheduler/webhooks EnvironmentFile) — the custody boundary of the
+# user-scoped Nextcloud OAuth token feature. Mode 0600: systemd reads
+# EnvironmentFile= as root before dropping privileges.
+- name: Deploy web-only secrets environment file
+  template:
+    src: web-secrets.env.j2
+    dest: "/etc/{{ istota_namespace }}/web-secrets.env"
+    owner: root
+    group: root
+    mode: '0600'
+  when: (istota_web_token_key | default('') | length > 0) and not istota_web_only
+  notify:
+    - "restart istota-web"
+
+- name: Remove web-only secrets environment file when no token key configured
+  file:
+    path: "/etc/{{ istota_namespace }}/web-secrets.env"
+    state: absent
+  when: (istota_web_token_key | default('') | length == 0) and not istota_web_only
+
 - name: Deploy istota configuration
   template:
     src: config.toml.j2

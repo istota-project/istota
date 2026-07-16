@@ -30,6 +30,10 @@ Environment=ISTOTA_ADMINS_FILE=/etc/{{ istota_namespace }}/admins
 {% if istota_use_environment_file | default(false) %}
 EnvironmentFile=/etc/{{ istota_namespace }}/secrets.env
 {% endif %}
+{% if istota_web_token_key | default('') | length > 0 %}
+# Web-only: the user-token key never enters the scheduler/webhooks units.
+EnvironmentFile=/etc/{{ istota_namespace }}/web-secrets.env
+{% endif %}
 
 # Logging
 StandardOutput=journal

@@ -15,6 +15,13 @@ transport-abstraction spec for why neither is renamed.
 
 from __future__ import annotations
 
+# referenceId prefix stamped on a web-origin user turn the web process posted
+# into Talk *as the user* (post-as-user mirroring). The Talk poller drops any
+# message carrying it — the marker travels inside the Talk message itself, so
+# the echo check is race-free against the external-id stamp write. Shared by
+# transport.talk.inbound (the skip) and web_app (the post).
+WEBMIRROR_REF_PREFIX = "istota:webmirror:"
+
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 

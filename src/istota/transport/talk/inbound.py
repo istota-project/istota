@@ -14,7 +14,7 @@ from ... import db
 from ...async_runtime import get_talk_client
 from ...config import Config
 from ...talk import TalkClient, clean_message_content
-from .._types import IncomingMessage
+from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage
 from ..ingest import ingest_message
 
 logger = logging.getLogger("istota.transport.talk.inbound")
@@ -451,6 +451,24 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
                 # Skip system messages
                 if message_type == "system":
+                    continue
+
+                # Skip the Talk echo of a web-origin user turn the web process
+                # posted *as the user* (post-as-user mirroring). The marker
+                # travels inside the message payload, so this works even when
+                # the long-poll delivers the echo before the external-id stamp
+                # lands in the DB. The message is user-authored (the bot-own
+                # filter below can't catch it); the poll cursor has already
+                # advanced and the talk_messages cache upsert above kept it —
+                # the turn is legitimately part of the conversation context.
+                reference_id = msg.get("referenceId") or ""
+                if isinstance(reference_id, str) and reference_id.startswith(
+                    WEBMIRROR_REF_PREFIX
+                ):
+                    logger.debug(
+                        "Skipping web-mirror echo in %s (ref=%s)",
+                        conversation_token, reference_id,
+                    )
                     continue
 
                 # Skip bot's own messages

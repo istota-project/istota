@@ -95,6 +95,18 @@ def _reload_config():
             client_kwargs={"scope": " ".join(_config.google_workspace.scopes)},
             authorize_params={"access_type": "offline", "prompt": "consent"},
         )
+    # token_storage = "encrypted" without the web-only key is a deploy
+    # misconfiguration: fail loud once, then run as ephemeral (the
+    # web_tokens.feature_enabled gate is False everywhere downstream).
+    if _config.web.token_storage == "encrypted":
+        from . import web_tokens as _wt  # noqa: PLC0415
+        if not _wt.token_key_available():
+            logger.error(
+                "[web] token_storage = \"encrypted\" is configured but "
+                "ISTOTA_WEB_TOKEN_KEY is missing or too short — running as "
+                "\"ephemeral\" (no post-as-user mirroring, no read sync). "
+                "Provision the key for the web unit only.",
+            )
 
 
 def _publish_config(app: FastAPI) -> None:
@@ -396,6 +408,26 @@ async def callback(request: Request):
         except Exception as e:  # noqa: BLE001
             logger.warning("user_profile auto-seed failed user=%s: %s", username, e)
 
+    # Retain the user-scoped OAuth pair when the operator opted in
+    # ([web] token_storage = "encrypted" + ISTOTA_WEB_TOKEN_KEY provisioned).
+    # Every successful login overwrites the stored pair, so a dead refresh
+    # token self-heals here. Best-effort: a storage failure must not break
+    # login (the feature degrades to today's behaviour).
+    if _config and _config.db_path:
+        try:
+            from . import web_tokens as _wt  # noqa: PLC0415
+
+            if _wt.feature_enabled(_config) and token.get("refresh_token"):
+                _wt.store_tokens(
+                    _config.db_path,
+                    username,
+                    token.get("access_token", ""),
+                    token["refresh_token"],
+                    token.get("expires_in", 3600),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("web token persistence failed user=%s: %s", username, e)
+
     request.session.clear()
     request.session["user"] = {
         "username": username,
@@ -573,12 +605,25 @@ async def api_me(user: dict = Depends(_require_api_auth)):
         features["google_workspace_enabled"] = _config.google_workspace.enabled
         if _config.google_workspace.enabled:
             features["google_workspace"] = _has_google_token(username)
+    # Nextcloud user-token status: null when the feature is off (ephemeral /
+    # keyless), {connected: false} when on but nothing stored (user hasn't
+    # logged in since enablement, or disconnected), {connected: true,
+    # expires_at} when a pair is held. Drives the settings card.
+    nextcloud_token = None
+    if _config:
+        from . import web_tokens as _wt  # noqa: PLC0415
+        if _wt.feature_enabled(_config):
+            nextcloud_token = (
+                _wt.token_status(_config.db_path, username)
+                or {"connected": False, "expires_at": None}
+            )
     return {
         "username": username,
         "display_name": user.get("display_name", username),
         "bot_name": _config.bot_name if _config else "Istota",
         "is_admin": is_admin,
         "features": features,
+        "nextcloud_token": nextcloud_token,
     }
 
 
@@ -1372,17 +1417,21 @@ def _chat_owned_room(username: str, room_id: int):
     return room
 
 
-def _chat_mark_room_read(username: str, room_id: int) -> int | None:
+def _chat_mark_room_read(username: str, room_id: int) -> dict | None:
     """Advance the user's web read cursor for a room to its current newest
-    message. Returns the new cursor, or None if the room isn't the user's."""
+    message. Returns ``{cursor, advanced, room_token}``, or None if the room
+    isn't the user's. ``advanced`` gates the web→Talk read push — the UI fires
+    mark-read on every visibilitychange, so no-op calls are common and must
+    not hit Nextcloud."""
     from . import db
     with db.get_db(_config.db_path) as conn:
         room = db.get_web_chat_room(conn, room_id)
         if room is None or room.user_id != username:
             return None
+        old = db.get_room_read_state(conn, room.token, "web", username)
         max_id = db.room_max_message_id(conn, room.token)
         db.set_room_read_state(conn, room.token, "web", max_id, username)
-    return max_id
+    return {"cursor": max_id, "advanced": max_id > old, "room_token": room.token}
 
 
 def _chat_update_room(
@@ -2030,6 +2079,256 @@ def _chat_create_web_task(
     return ("ok", task_id)
 
 
+# Fire-and-forget background tasks (web→Talk read pushes). Held in a set so
+# they aren't garbage-collected mid-flight; every coroutine passed in catches
+# its own exceptions, so a failure can only ever log.
+_bg_tasks: set = set()
+
+
+def _fire_and_forget(coro) -> None:
+    task = asyncio.get_running_loop().create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+def _room_talk_ref(room_token: str) -> str | None:
+    """The Talk surface_ref bound to a room, or None (web-only room)."""
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        bindings = db.list_room_bindings(conn, room_token)
+    return next((b.surface_ref for b in bindings if b.surface == "talk"), None)
+
+
+async def _push_read_to_talk(username: str, room_token: str) -> None:
+    """Web→Talk read sync: mark the bound Talk conversation read as the user.
+    Called only when the web cursor actually advanced. Best-effort — the one
+    user-visible artifact of failure is a badge that doesn't auto-clear."""
+    try:
+        from . import web_tokens
+
+        if not _config or not web_tokens.feature_enabled(_config):
+            return
+        talk_ref = await asyncio.to_thread(_room_talk_ref, room_token)
+        if not talk_ref:
+            return
+        access = await asyncio.to_thread(
+            web_tokens.get_access_token, _config.db_path, _config, username,
+        )
+        if not access:
+            return
+        from .talk import TalkClient
+
+        client = TalkClient(_config, bearer_token=access, timeout=5)
+        try:
+            # mark_conversation_read logs + returns False on failure.
+            await client.mark_conversation_read(talk_ref)
+        finally:
+            await client.aclose()
+    except Exception as e:  # noqa: BLE001 — never propagate into the request
+        logger.warning(
+            "read push to Talk failed user=%s room=%s: %s",
+            username, room_token, e,
+        )
+
+
+# Talk→web read-state pull throttle: user -> monotonic timestamp of the last
+# pull. Process-local by design (a web restart just pulls once immediately).
+_talk_read_pull_state: dict[str, float] = {}
+
+
+async def _pull_talk_read_state(username: str) -> None:
+    """Talk→web read sync, piggybacked on the web rooms poll (at most one NC
+    conversation-list fetch per user per `talk_read_sync_interval`).
+
+    For each web-visible room bound to a Talk conversation the user has fully
+    read (`unreadMessages == 0` under their own bearer token), advance their
+    web cursor — but only up to the newest canonical message that actually
+    exists in Talk (`room_max_talk_synced_message_id`), so Talk read-state
+    can't swallow web-only system messages the user never saw there."""
+    try:
+        from . import db, web_tokens
+
+        if not _config or not web_tokens.feature_enabled(_config):
+            return
+        interval = _config.web.chat.talk_read_sync_interval
+        if interval <= 0:
+            return
+        now = time.monotonic()
+        last = _talk_read_pull_state.get(username)
+        if last is not None and now - last < interval:
+            return
+        # Stamp before the fetch so a failing NC isn't hammered every poll.
+        _talk_read_pull_state[username] = now
+
+        access = await asyncio.to_thread(
+            web_tokens.get_access_token, _config.db_path, _config, username,
+        )
+        if not access:
+            return
+        from .talk import TalkClient
+
+        client = TalkClient(_config, bearer_token=access, timeout=5)
+        try:
+            conversations = await client.list_conversations()
+        finally:
+            await client.aclose()
+        fully_read = {
+            c.get("token")
+            for c in conversations
+            if c.get("token") and c.get("unreadMessages") == 0
+        }
+        if not fully_read:
+            return
+
+        def _advance() -> int:
+            advanced = 0
+            with db.get_db(_config.db_path) as conn:
+                for room in db.list_member_rooms(conn, username):
+                    bindings = db.list_room_bindings(conn, room.token)
+                    talk_ref = next(
+                        (b.surface_ref for b in bindings if b.surface == "talk"),
+                        None,
+                    )
+                    if not talk_ref or talk_ref not in fully_read:
+                        continue
+                    cap = db.room_max_talk_synced_message_id(conn, room.token)
+                    if cap <= 0:
+                        continue  # nothing Talk-synced yet (pre-deploy rows)
+                    current = db.get_room_read_state(
+                        conn, room.token, "web", username,
+                    )
+                    if cap > current:
+                        db.set_room_read_state(
+                            conn, room.token, "web", cap, username,
+                        )
+                        advanced += 1
+            return advanced
+
+        advanced = await asyncio.to_thread(_advance)
+        if advanced:
+            logger.debug(
+                "talk read pull user=%s advanced %d room cursor(s)",
+                username, advanced,
+            )
+    except Exception as e:  # noqa: BLE001 — the rooms poll must never fail
+        logger.warning("talk read pull failed user=%s: %s", username, e)
+
+
+async def _post_as_user(
+    access: str, talk_ref: str, text: str, message_id: int, username: str,
+) -> int | None:
+    """One post-as-user attempt against the bound Talk room, with a single
+    forced-refresh retry on 401 (clock skew / early revocation on a
+    supposedly-live token). Returns the posted Talk message id, or None."""
+    from . import web_tokens
+    from .talk import TalkClient
+    from .transport import WEBMIRROR_REF_PREFIX
+
+    reference_id = f"{WEBMIRROR_REF_PREFIX}{message_id}"
+    for attempt in (0, 1):
+        client = TalkClient(_config, bearer_token=access, timeout=5)
+        try:
+            resp = await client.send_message(
+                talk_ref, text, reference_id=reference_id,
+            )
+            posted = resp.get("ocs", {}).get("data", {}).get("id")
+            return int(posted) if posted else None
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if attempt == 0 and status == 401:
+                access = await asyncio.to_thread(
+                    lambda: web_tokens.get_access_token(
+                        _config.db_path, _config, username, force_refresh=True,
+                    ),
+                )
+                if access:
+                    continue
+            logger.warning(
+                "post-as-user Talk post failed user=%s room=%s status=%s",
+                username, talk_ref, status,
+            )
+            return None
+        except Exception as e:
+            logger.warning(
+                "post-as-user Talk post failed user=%s room=%s: %s",
+                username, talk_ref, e,
+            )
+            return None
+        finally:
+            await client.aclose()
+    return None
+
+
+async def _mirror_web_turn_as_user(
+    username: str, room_token: str, text: str, task_id: int,
+) -> None:
+    """Post a just-ingested web user turn into the room's bound Talk
+    conversation *as the user*, at send time — so the message appears in Talk
+    instantly, authored by the user, instead of as the bot's attributed repost
+    at task completion.
+
+    On success the posted Talk message id is stamped onto the canonical user
+    row (`set_message_external_id`): that stamp is both the echo-check ledger
+    entry and the scheduler's repost-suppression signal. On any failure —
+    feature off, no binding, no live token, post error — nothing is stamped
+    and the scheduler's legacy attributed repost covers the mirror leg exactly
+    as before. Never raises into the request path.
+    """
+    from . import db, web_tokens
+
+    if not _config or not web_tokens.feature_enabled(_config):
+        return
+
+    def _lookup() -> tuple[str | None, int | None]:
+        with db.get_db(_config.db_path) as conn:
+            bindings = db.list_room_bindings(conn, room_token)
+            talk_ref = next(
+                (b.surface_ref for b in bindings if b.surface == "talk"), None,
+            )
+            if talk_ref is None:
+                return None, None
+            row = conn.execute(
+                "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
+                "AND role = 'user' LIMIT 1",
+                (room_token, task_id),
+            ).fetchone()
+            return talk_ref, (int(row["id"]) if row else None)
+
+    try:
+        talk_ref, message_id = await asyncio.to_thread(_lookup)
+        if not talk_ref or message_id is None:
+            return  # web-only room (or turn not stored) — nothing to mirror
+
+        access = await asyncio.to_thread(
+            web_tokens.get_access_token, _config.db_path, _config, username,
+        )
+        if not access:
+            logger.debug(
+                "post-as-user skipped user=%s room=%s (no live token)",
+                username, room_token,
+            )
+            return
+
+        posted_id = await _post_as_user(
+            access, talk_ref, text, message_id, username,
+        )
+        if posted_id is None:
+            return
+
+        def _stamp():
+            with db.get_db(_config.db_path) as conn:
+                db.set_message_external_id(
+                    conn, message_id, "talk", str(posted_id),
+                )
+
+        await asyncio.to_thread(_stamp)
+    except Exception as e:  # noqa: BLE001 — never fail the send request
+        logger.warning(
+            "post-as-user mirror failed user=%s room=%s: %s",
+            username, room_token, e,
+        )
+
+
 @api_router.get("/chat/config")
 async def chat_config(user: dict = Depends(_require_api_auth)):
     """Client-facing chat knobs."""
@@ -2044,6 +2343,9 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
 
 @api_router.get("/chat/rooms")
 async def chat_list_rooms(user: dict = Depends(_require_api_auth)):
+    # Talk→web read sync rides the rooms poll (throttled server-side), and
+    # runs BEFORE the listing so freshly-cleared badges show in this payload.
+    await _pull_talk_read_state(user["username"])
     rooms = await asyncio.to_thread(_chat_list_rooms, user["username"])
     return {"rooms": rooms}
 
@@ -2168,13 +2470,19 @@ async def chat_mark_room_read(
     _csrf: None = Depends(_verify_origin),
 ):
     """Mark a room read on the web surface — advances the per-user web read
-    cursor to the room's newest message so the sidebar unread badge clears."""
-    cursor = await asyncio.to_thread(
+    cursor to the room's newest message so the sidebar unread badge clears.
+    When the cursor actually advanced, the read state is also pushed to a
+    bound Talk conversation as the user (fire-and-forget, feature-gated)."""
+    result = await asyncio.to_thread(
         _chat_mark_room_read, user["username"], room_id,
     )
-    if cursor is None:
+    if result is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
-    return {"ok": True, "last_read_message_id": cursor}
+    if result["advanced"]:
+        _fire_and_forget(
+            _push_read_to_talk(user["username"], result["room_token"]),
+        )
+    return {"ok": True, "last_read_message_id": result["cursor"]}
 
 
 def _chat_set_message_star(username: str, message_id: int, starred: bool) -> bool:
@@ -2249,12 +2557,14 @@ def _chat_aggregate_messages(
     }
 
 
-def _chat_mark_all_read(username: str) -> int:
+def _chat_mark_all_read(username: str) -> list[str]:
+    """Advance every visible room's web cursor. Returns the tokens of the
+    rooms whose cursor actually moved (they get the Talk read push)."""
     from . import db
     with db.get_db(_config.db_path) as conn:
-        updated = db.mark_all_rooms_read(conn, username)
-    logger.info("mark_all_rooms_read user=%s rooms_updated=%d", username, updated)
-    return updated
+        moved = db.mark_all_rooms_read_tokens(conn, username)
+    logger.info("mark_all_rooms_read user=%s rooms_updated=%d", username, len(moved))
+    return moved
 
 
 @api_router.get("/chat/messages")
@@ -2312,9 +2622,12 @@ async def chat_read_all_rooms(
     _csrf: None = Depends(_verify_origin),
 ):
     """Mark every visible room read on the web surface in one action (the
-    header's mark-all chip). Returns how many rooms' cursors moved."""
-    updated = await asyncio.to_thread(_chat_mark_all_read, user["username"])
-    return {"ok": True, "updated": updated}
+    header's mark-all chip). Returns how many rooms' cursors moved. Rooms
+    whose cursor actually moved get the Talk read push too."""
+    moved = await asyncio.to_thread(_chat_mark_all_read, user["username"])
+    for room_token in moved:
+        _fire_and_forget(_push_read_to_talk(user["username"], room_token))
+    return {"ok": True, "updated": len(moved)}
 
 
 @api_router.post("/chat/rooms/{room_id}/messages")
@@ -2391,6 +2704,10 @@ async def chat_send_message(
             headers={"Retry-After": str(value)},
         )
     task_id = value
+    # Post-as-user mirror into a bound Talk room, at send time (bounded ~5s,
+    # best-effort). When it succeeds the scheduler suppresses its completion-
+    # time attributed repost; when it doesn't, the repost covers the mirror.
+    await _mirror_web_turn_as_user(username, room.token, text, task_id)
     return {
         "task_id": task_id,
         "status": "pending",
@@ -2518,6 +2835,23 @@ async def google_status(user: dict = Depends(_require_api_auth)):
         return {"enabled": False, "connected": False}
     connected = _has_google_token(user["username"])
     return {"enabled": True, "connected": connected}
+
+
+@api_router.delete("/settings/nextcloud-token")
+async def nextcloud_token_disconnect(
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Delete the user's stored Nextcloud OAuth pair (settings "Disconnect").
+    The web session is untouched — only the retained token goes away; the next
+    login re-mints a pair if the feature is still enabled."""
+    from . import web_tokens as _wt
+    deleted = await asyncio.to_thread(
+        _wt.delete_tokens, _config.db_path, user["username"],
+    )
+    if deleted:
+        logger.info("Nextcloud token disconnected for user %s", user["username"])
+    return {"ok": True, "was_connected": deleted}
 
 
 @api_router.delete("/google/disconnect")

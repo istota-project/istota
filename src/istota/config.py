@@ -399,6 +399,12 @@ class WebChatConfig:
     rate_limit_window_seconds: int = 300
     sse_poll_interval_ms: int = 200
     client_poll_interval_ms: int = 1500
+    # Talk→web read-state pull cadence (seconds). At most one Nextcloud
+    # conversation-list fetch per user per interval, piggybacked on the web
+    # rooms poll. 0 disables the pull (web→Talk push is unaffected). Only
+    # active when [web] token_storage = "encrypted" and the web token key
+    # is provisioned.
+    talk_read_sync_interval: int = 60
 
 
 @dataclass
@@ -421,7 +427,10 @@ class WebConfig:
     oauth2_token_endpoint: str = ""
     oauth2_userinfo_endpoint: str = ""
     oauth2_redirect_uri: str = ""       # explicit override; otherwise derived from request
-    token_storage: str = "ephemeral"    # self-documenting; only "ephemeral" supported today
+    # "ephemeral" (default): the OAuth pair is discarded after login.
+    # "encrypted": retain it in web_user_tokens, encrypted with the web-only
+    # ISTOTA_WEB_TOKEN_KEY — enables post-as-user Talk mirroring + read sync.
+    token_storage: str = "ephemeral"
     session_secret_key: str = ""
     chat: WebChatConfig = field(default_factory=WebChatConfig)
 
@@ -1461,7 +1470,18 @@ def load_config(config_path: Path | None = None) -> Config:
             client_poll_interval_ms=chat_data.get(
                 "client_poll_interval_ms", _chat_defaults.client_poll_interval_ms
             ),
+            talk_read_sync_interval=chat_data.get(
+                "talk_read_sync_interval", _chat_defaults.talk_read_sync_interval
+            ),
         )
+        _token_storage = w.get("token_storage", "ephemeral")
+        if _token_storage not in ("ephemeral", "encrypted"):
+            logger.warning(
+                "[web] token_storage=%r is not a known value "
+                "(expected 'ephemeral' or 'encrypted'); using 'ephemeral'",
+                _token_storage,
+            )
+            _token_storage = "ephemeral"
         config.web = WebConfig(
             enabled=w.get("enabled", False),
             port=w.get("port", 8766),
@@ -1471,7 +1491,7 @@ def load_config(config_path: Path | None = None) -> Config:
             oauth2_token_endpoint=w.get("oauth2_token_endpoint", ""),
             oauth2_userinfo_endpoint=w.get("oauth2_userinfo_endpoint", ""),
             oauth2_redirect_uri=w.get("oauth2_redirect_uri", ""),
-            token_storage=w.get("token_storage", "ephemeral"),
+            token_storage=_token_storage,
             session_secret_key=w.get("session_secret_key", ""),
             chat=web_chat,
         )
@@ -1542,6 +1562,19 @@ def load_config(config_path: Path | None = None) -> Config:
         val = os.environ.get(env_var)
         if val:
             setattr(getattr(config, section), field_name, val)
+
+    # Docker-path override for the web token-storage mode (not a secret, but it
+    # rides the same env channel as the other web knobs so the compose file can
+    # default the demo stack to encrypted without templating TOML).
+    _token_storage_env = os.environ.get("ISTOTA_WEB_TOKEN_STORAGE", "").strip()
+    if _token_storage_env:
+        if _token_storage_env in ("ephemeral", "encrypted"):
+            config.web.token_storage = _token_storage_env
+        else:
+            logger.warning(
+                "ISTOTA_WEB_TOKEN_STORAGE=%r is not a known value; ignoring",
+                _token_storage_env,
+            )
 
     # Native-brain API key lives two levels deep (brain.native.api_key), so it
     # doesn't fit the flat section/field table above.

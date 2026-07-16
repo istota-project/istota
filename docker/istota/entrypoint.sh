@@ -976,6 +976,20 @@ if [ -z "${ISTOTA_SECRET_KEY:-}" ]; then
 fi
 export ISTOTA_SECRET_KEY
 
+# --- Web-only user-token key ---
+#
+# ISTOTA_WEB_TOKEN_KEY encrypts the user-scoped Nextcloud OAuth pairs in the
+# web_user_tokens table (post-as-user Talk mirroring + read-state sync). It
+# is generated and persisted here so the web service can pick it up, but it
+# is deliberately NOT exported into this (scheduler) process — only the web
+# service loads it. That custody boundary is the point of the separate key.
+WEB_TOKEN_KEY_FILE="/data/.web_token_key"
+if [ ! -f "$WEB_TOKEN_KEY_FILE" ]; then
+    ( umask 077 && python3 -c "import secrets; print(secrets.token_hex(32), end='')" > "$WEB_TOKEN_KEY_FILE" )
+    chmod 600 "$WEB_TOKEN_KEY_FILE"
+    echo "[istota] Generated new web token key (persisted to ${WEB_TOKEN_KEY_FILE}; web service only)."
+fi
+
 # --- Initialize database ---
 
 echo "[istota] Initializing database..."

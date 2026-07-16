@@ -12,6 +12,7 @@ and web chat are the designed-for next consumers — adding one is a new
 """
 
 from ._types import (
+    WEBMIRROR_REF_PREFIX,
     DeliveryOptions,
     IncomingMessage,
     Transport,
@@ -30,6 +31,7 @@ from .talk import TalkTransport
 from .web import WebTransport
 
 __all__ = [
+    "WEBMIRROR_REF_PREFIX",
     "IncomingMessage",
     "Transport",
     "TransportCapabilities",
