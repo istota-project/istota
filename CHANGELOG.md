@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opt-in Nextcloud connection for web chat (encrypted token storage): a message sent from the web UI now appears in the bound Talk conversation instantly, authored by you, with the bot's answer following as its own post — replacing the bot-attributed repost at task completion. The retained login token is encrypted with a key only the web process holds, and a settings card shows the connection with a Disconnect button.
 - Read-state sync between web chat and Talk (same opt-in): reading a room in the web UI clears its badge on your Talk clients, and reading it in Talk clears the web badge within a minute. Web-only notification messages keep their badge until actually seen in web.
 
+### Changed
+- Rendered lists in web chat have more space between items, so they're easier to scan.
+
+### Fixed
+- The admin dashboard's system banner stacked its cells vertically instead of laying them out side by side.
+
 ## [0.29.0] - 2026-07-14
 
 ### Added
