@@ -1459,7 +1459,18 @@ export interface ChatHistoryMessage {
 	duration_seconds?: number | null;
 	// The model that produced this answer (canonical ID), null when unknown.
 	model?: string | null;
+	// Durable (messages-store-backed) rows carry the message's stable id and the
+	// requesting user's star flag; aux (tasks-only) turns carry neither and are
+	// not starrable.
+	msg_id?: number;
+	starred?: boolean;
+	// Aggregate-view rows (GET /chat/messages) additionally carry their room.
+	room_token?: string;
+	room_name?: string;
 }
+
+/** Cross-room aggregate views (sidebar All / Unread / Starred). */
+export type ChatView = 'all' | 'unread' | 'starred';
 
 export interface ChatHistory {
 	messages: ChatHistoryMessage[];
@@ -1563,6 +1574,44 @@ export function getRoomMessages(
 		params.set('before_id', String(opts.before.id));
 	}
 	return apiFetch<ChatHistory>(`/chat/rooms/${id}/messages?${params.toString()}`);
+}
+
+/** One page of the cross-room message stream for an aggregate view. Same
+ * message shape as the per-room endpoint plus room_token / room_name; same
+ * keyset-cursor contract (`before.ts` is the raw stored created_at). */
+export function getChatMessagesView(
+	view: ChatView,
+	opts: { limit?: number; before?: { ts: string; id: number } | null } = {},
+): Promise<ChatHistory> {
+	const params = new URLSearchParams({ view, limit: String(opts.limit ?? 50) });
+	if (opts.before) {
+		params.set('before_ts', opts.before.ts);
+		params.set('before_id', String(opts.before.id));
+	}
+	return apiFetch<ChatHistory>(`/chat/messages?${params.toString()}`);
+}
+
+/** Star / unstar a durable message for the current user. */
+export function setChatMessageStarred(
+	msgId: number,
+	starred: boolean,
+): Promise<{ ok: boolean; starred: boolean }> {
+	return apiFetch<{ ok: boolean; starred: boolean }>(
+		`/chat/messages/${msgId}/star`,
+		{
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ starred }),
+		},
+	);
+}
+
+/** Advance every room's web read cursor at once (the header mark-all chip). */
+export function markAllRoomsRead(): Promise<{ ok: boolean; updated: number }> {
+	return apiFetch<{ ok: boolean; updated: number }>(
+		'/chat/rooms/read-all',
+		{ method: 'POST', headers: { 'Content-Type': 'application/json' } },
+	);
 }
 
 /** Mark a room read on the web surface — clears its sidebar unread badge by

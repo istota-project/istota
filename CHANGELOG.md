@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Cross-room chat views: All, Unread, and Starred entries in the web chat sidebar show one combined message stream across every room, with a room label on each message that jumps to its room. The Unread entry carries a total-unread badge and the views page backwards on scroll like a room transcript.
+- Per-message starring in web chat: hover any finished message (from either surface — web or Talk) and hit the star to bookmark it. Stars are private to you, and the Starred view collects them.
+- A mark-all-read button in the chat header clears every room's unread badge in one confirmed click.
+
 ## [0.29.0] - 2026-07-14
 
 ### Added

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Star } from 'lucide-svelte';
 	import { renderMarkdown } from '$lib/markdown';
 	import type { ChatMessage } from '$lib/stores/chat';
 	import { renderGroups } from '$lib/stores/segments';
@@ -12,6 +13,8 @@
 		botName = 'Istota',
 		onConfirm,
 		onReject,
+		onToggleStar,
+		onRoomClick,
 	}: {
 		message: ChatMessage;
 		// True when this message continues a run from the same author, so the
@@ -21,6 +24,12 @@
 		botName?: string;
 		onConfirm: (cid: number, taskId: number) => void;
 		onReject: (cid: number, taskId: number) => void;
+		// Star toggle for durable messages (rows carrying msgId). Absent → no
+		// star affordance (e.g. surfaces that don't support starring).
+		onToggleStar?: (cid: number) => void;
+		// Aggregate views: click the message's room label to jump into that room.
+		// Only rendered when both the handler and message.roomName are present.
+		onRoomClick?: (token: string) => void;
 	} = $props();
 
 	const isUser = $derived(message.role === 'user');
@@ -65,13 +74,43 @@
 		if (Number.isNaN(d.getTime())) return '';
 		return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 	});
+
+	// Star affordance: durable messages only (msgId = the messages-store row),
+	// and only when the surface passes a toggle handler.
+	const starrable = $derived(typeof message.msgId === 'number' && !!onToggleStar);
+	const showRoomChip = $derived(!!message.roomName && !!onRoomClick);
 </script>
 
+{#snippet starButton()}
+	<button
+		class="star-btn"
+		class:starred={message.starred}
+		onclick={() => onToggleStar?.(message.cid)}
+		aria-label={message.starred ? 'Unstar message' : 'Star message'}
+		aria-pressed={message.starred ? 'true' : 'false'}
+		title={message.starred ? 'Unstar' : 'Star'}
+		type="button"
+	>
+		<Star size={14} fill={message.starred ? 'currentColor' : 'none'} />
+	</button>
+{/snippet}
+
 {#if isSystem}
-	<!-- Command (!…) output. Left-aligned block, not a centered notice: it
-	     carries lists / code / tables that must read left-to-right. -->
+	<!-- Command (!…) output / delivered notifications. Left-aligned block, not a
+	     centered notice: it carries lists / code / tables that must read
+	     left-to-right. Durable system rows (msgId) are starrable too. -->
 	<div class="cmd-row">
+		{#if showRoomChip}
+			<button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
+				#{message.roomName}
+			</button>
+		{/if}
 		<div class="cmd-output markdown" class:error={message.error}>{@html bodyHtml}</div>
+		{#if starrable}
+			<div class="msg-actions cmd-actions">
+				{@render starButton()}
+			</div>
+		{/if}
 	</div>
 {:else}
 	<div class="msg" class:continuation class:error={message.error}>
@@ -88,6 +127,11 @@
 				<div class="meta">
 					<span class="author" class:bot={!isUser}>{author}</span>
 					{#if time}<time class="stamp">{time}</time>{/if}
+					{#if showRoomChip}
+						<button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button" title="Go to room">
+							#{message.roomName}
+						</button>
+					{/if}
 				</div>
 			{/if}
 
@@ -142,8 +186,19 @@
 			{/if}
 		</div>
 
-		{#if meta.length && !message.streaming}
-			<div class="meta-footer">{meta.join(' · ')}</div>
+		<!-- Floating per-message actions bar (top-right): the hover metadata plus
+		     the star toggle. One bar so the two hover surfaces can't collide; a
+		     starred message keeps its star visible at rest. Future per-message
+		     actions (copy, …) land here. -->
+		{#if starrable || (meta.length && !message.streaming)}
+			<div class="msg-actions">
+				{#if meta.length && !message.streaming}
+					<span class="meta-footer">{meta.join(' · ')}</span>
+				{/if}
+				{#if starrable}
+					{@render starButton()}
+				{/if}
+			</div>
 		{/if}
 	</div>
 {/if}
@@ -166,15 +221,27 @@
 	.msg:hover .hover-time { opacity: 1; }
 	.msg:hover .meta-footer { opacity: 1; }
 
-	/* Subtle per-message metadata at the top-right, revealed on hover. Absolutely
-	   positioned so it overlays the row's top-right corner instead of consuming a
-	   flex column — otherwise it narrows the message content (badly on mobile).
-	   `top` is set per row-type below so its baseline lines up with the time on
-	   the left, which lives in different spots: the author header on a fresh group,
-	   the gutter on a continuation. */
-	.meta-footer {
+	/* Floating per-message actions bar at the top-right, holding the hover
+	   metadata and the star toggle. Absolutely positioned so it overlays the
+	   row's top-right corner instead of consuming a flex column — otherwise it
+	   narrows the message content (badly on mobile). `top` is set per row-type
+	   below so its baseline lines up with the time on the left, which lives in
+	   different spots: the author header on a fresh group, the gutter on a
+	   continuation. */
+	.msg-actions {
 		position: absolute;
 		right: 0.75rem;
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+	/* Fresh group: time sits in the .meta author header (next to the name). */
+	.msg:not(.continuation) .msg-actions { top: 0.6rem; }
+	/* Continuation: time sits in the left gutter (.hover-time), higher up. */
+	.msg.continuation .msg-actions { top: 0.15rem; }
+
+	/* Subtle per-message metadata, revealed on hover (child of the actions bar). */
+	.meta-footer {
 		font-size: var(--text-xs);
 		color: var(--text-dim);
 		font-variant-numeric: tabular-nums;
@@ -182,10 +249,47 @@
 		opacity: 0;
 		transition: opacity var(--transition-fast);
 	}
-	/* Fresh group: time sits in the .meta author header (next to the name). */
-	.msg:not(.continuation) .meta-footer { top: 0.6rem; }
-	/* Continuation: time sits in the left gutter (.hover-time), higher up. */
-	.msg.continuation .meta-footer { top: 0.15rem; }
+
+	/* Star toggle: hidden at rest, revealed on row hover / keyboard focus; a
+	   starred message keeps it visible (filled, gold) like the feeds cards. */
+	.star-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: none;
+		border: none;
+		padding: 0.1rem;
+		color: var(--text-dim);
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity var(--transition-fast), color var(--transition-fast);
+	}
+	.msg:hover .star-btn,
+	.cmd-row:hover .star-btn,
+	.star-btn:focus-visible,
+	.star-btn.starred { opacity: 1; }
+	.star-btn:hover,
+	.star-btn.starred { color: #f5b300; }
+
+	/* Room label chip (aggregate views): a small clickable #room tag in the
+	   author header that jumps into the room. */
+	.room-chip {
+		background: var(--surface-raised);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-pill);
+		color: var(--text-muted);
+		font: inherit;
+		font-size: var(--text-xs);
+		line-height: 1.2;
+		padding: 0.05rem 0.5rem;
+		cursor: pointer;
+		max-width: 12rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		transition: color var(--transition-fast), border-color var(--transition-fast);
+	}
+	.room-chip:hover { color: var(--text-primary); border-color: var(--text-dim); }
 
 	.gutter {
 		flex: 0 0 2.25rem;
@@ -261,10 +365,14 @@
 	.cmd-output.error { color: #e0a0a0; }
 
 	/* Command (!…) output: a left-aligned block set apart from the conversation
-	   by a subtle card, so its lists / code / tables render left-to-right. */
+	   by a subtle card, so its lists / code / tables render left-to-right.
+	   Position anchor for its own star bar (durable system rows in views). */
 	.cmd-row {
 		padding: 0.2rem 0.75rem 0.5rem;
+		position: relative;
 	}
+	.cmd-row .room-chip { margin-bottom: 0.25rem; }
+	.msg-actions.cmd-actions { top: 0.3rem; }
 	.cmd-output {
 		max-width: 900px;
 		font-size: var(--text-sm);

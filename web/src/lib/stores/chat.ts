@@ -17,15 +17,19 @@ import {
 	deleteChatRoom,
 	ChatRoomBusyError,
 	getChatConfig,
+	getChatMessagesView,
 	getRoomMessages,
 	getChatRooms,
 	getTaskEvents,
+	markAllRoomsRead,
 	markRoomRead,
 	sendChatMessage,
+	setChatMessageStarred,
 	updateChatRoom,
 	promoteChatRoom,
 	type ChatRoom,
 	type ChatHistory,
+	type ChatView,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
 import { applyEvent as applySegmentEvent, type ChatMessage, type Segment, type ToolEntry } from '$lib/stores/segments';
@@ -102,6 +106,16 @@ export interface ChatSession {
 	activeTaskId: Writable<number | null>;
 	loaded: Writable<boolean>;
 	error: Writable<string>;
+	// Cross-room aggregate views: 'room' renders the active room's live
+	// transcript; the other three render a read-only stream across all member
+	// rooms (no composer, no live streaming — reload on entry).
+	view: Writable<'room' | ChatView>;
+	selectView: (v: ChatView) => Promise<void>;
+	// Star / unstar the durable message behind a transcript row (optimistic,
+	// reverted on failure). No-op for rows without a msgId.
+	toggleStar: (cid: number) => Promise<void>;
+	// Advance every room's web read cursor at once (header mark-all chip).
+	markAllRead: () => Promise<void>;
 	// Older-history paging (ISSUE-131): whether an older page exists, an
 	// in-flight guard, and the fetch-and-prepend action the scroll handler calls.
 	hasMore: Writable<boolean>;
@@ -130,6 +144,10 @@ function createSession(): ChatSession {
 	const activeTaskId = writable<number | null>(null);
 	const loaded = writable(false);
 	const error = writable('');
+	// Which pane the transcript renders: the active room, or a cross-room
+	// aggregate view (All / Unread / Starred). Aggregate views are read-only
+	// reading surfaces — no composer, no SSE; re-entering refreshes.
+	const view = writable<'room' | ChatView>('room');
 	// Older-history paging (ISSUE-131). `oldestCursor` is the keyset to fetch the
 	// next older page (raw stored created_at + id), `hasMore` whether one exists,
 	// `loadingOlder` a re-entrancy guard the scroll handler reads. Reset per room.
@@ -514,6 +532,12 @@ function createSession(): ChatSession {
 			createdAt: m.created_at,
 			durationSeconds: typeof m.duration_seconds === 'number' ? m.duration_seconds : undefined,
 			model: typeof m.model === 'string' && m.model ? m.model : undefined,
+			// Durable-store identity → the star affordance; room labels ride along
+			// on aggregate-view rows.
+			msgId: typeof m.msg_id === 'number' ? m.msg_id : undefined,
+			starred: typeof m.msg_id === 'number' ? !!m.starred : undefined,
+			roomToken: m.room_token,
+			roomName: m.room_name,
 		};
 	}
 
@@ -562,12 +586,97 @@ function createSession(): ChatSession {
 		}
 	}
 
+	// Load (or reload) the first page of an aggregate view into the transcript.
+	// Shared by selectView and the mark-all-read reload of an open Unread view.
+	async function loadViewPage(v: ChatView) {
+		try {
+			const hist = await getChatMessagesView(v);
+			// Switched away mid-fetch — drop the page.
+			if (get(view) !== v) return;
+			messages.set(hist.messages.map(buildHistoryMessage));
+			oldestCursor = hist.oldest_cursor ?? null;
+			hasMore.set(!!hist.has_more);
+		} catch {
+			error.set('Failed to load messages');
+		}
+	}
+
+	// Enter an aggregate view: tear down the room's live machinery (stream,
+	// queue, notif poll, paging state), deselect the room, and load the first
+	// page. The rooms-refresh timer keeps running so sidebar badges stay live.
+	async function selectView(v: ChatView) {
+		stopActive();
+		view.set(v);
+		activeRoomId.set(null);
+		messages.set([]);
+		await loadViewPage(v);
+	}
+
+	// Star/unstar a transcript row optimistically; revert on failure. In the
+	// Starred view a successful unstar also removes the row (kept during flight
+	// so a failure can revert in place) — mirrors the feeds starred view.
+	async function toggleStar(cid: number) {
+		const m = get(messages).find((x) => x.cid === cid);
+		if (!m || typeof m.msgId !== 'number') return;
+		const next = !m.starred;
+		updateMsg(cid, (mm) => { mm.starred = next; });
+		try {
+			await setChatMessageStarred(m.msgId, next);
+			if (!next && get(view) === 'starred') {
+				messages.update((arr) => arr.filter((x) => x.cid !== cid));
+			}
+		} catch {
+			updateMsg(cid, (mm) => { mm.starred = !next; });
+			error.set("Couldn't update star.");
+		}
+	}
+
+	// Mark every room read in one shot (the header chip). Badges zero locally on
+	// success; an open Unread view reloads to its (likely empty) fresh state.
+	async function markAllRead() {
+		try {
+			await markAllRoomsRead();
+		} catch {
+			error.set("Couldn't mark all rooms read.");
+			return;
+		}
+		rooms.update((r) => r.map((x) => ({ ...x, unread_count: 0 })));
+		if (get(view) === 'unread') await loadViewPage('unread');
+	}
+
 	// Fetch the next older page and prepend it (scroll-up paging). The scroll
 	// handler captures the scroll anchor before calling and restores it after the
 	// store updates, so the viewport stays put. Never touches active_tasks /
 	// enqueueStream — an older page carries no in-flight slot, and resuming one
 	// here would double-stream a task.
 	async function loadOlder() {
+		const v = get(view);
+		if (v !== 'room') {
+			// Aggregate views page the cross-room endpoint. No aux/notif dedup
+			// bands here — the durable store is the only source — but dedup by
+			// msg_id anyway so a boundary anomaly can't double a row.
+			if (!get(hasMore) || get(loadingOlder) || !oldestCursor) return;
+			loadingOlder.set(true);
+			try {
+				const hist = await getChatMessagesView(v, { before: oldestCursor });
+				if (get(view) !== v) return;
+				const have = new Set<number>();
+				for (const m of get(messages)) {
+					if (typeof m.msgId === 'number') have.add(m.msgId);
+				}
+				const page = hist.messages
+					.filter((m) => typeof m.msg_id !== 'number' || !have.has(m.msg_id))
+					.map(buildHistoryMessage);
+				if (page.length) messages.update((cur) => [...page, ...cur]);
+				oldestCursor = hist.oldest_cursor ?? null;
+				hasMore.set(!!hist.has_more);
+			} catch {
+				// Transient — leave the cursor untouched so the next scroll retries.
+			} finally {
+				loadingOlder.set(false);
+			}
+			return;
+		}
 		const roomId = get(activeRoomId);
 		if (roomId == null || !get(hasMore) || get(loadingOlder) || !oldestCursor) return;
 		loadingOlder.set(true);
@@ -636,8 +745,9 @@ function createSession(): ChatSession {
 	}
 
 	async function selectRoom(id: number) {
-		if (get(activeRoomId) === id) return;
+		if (get(activeRoomId) === id && get(view) === 'room') return;
 		stopActive();
+		view.set('room');
 		activeRoomId.set(id);
 		saveSetting('chat.activeRoomId', id);
 		setRoomUnread(id, 0); // optimistic — chip vanishes immediately on click
@@ -819,6 +929,7 @@ function createSession(): ChatSession {
 
 	return {
 		rooms, activeRoomId, messages, status, activeTaskId, loaded, error,
+		view, selectView, toggleStar, markAllRead,
 		hasMore, loadingOlder, loadOlder,
 		init, selectRoom, selectRoomByToken, newRoom, renameRoom, promoteRoom, archiveRoom,
 		deleteRoom, send, cancel, confirm, reject, teardown,

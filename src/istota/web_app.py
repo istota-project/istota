@@ -35,6 +35,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
+from . import db as _db
 from .config import load_config
 from .location_logic import (
     _location_discover_places,
@@ -1639,7 +1640,7 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
         }
     trace = _row_get(row, "execution_trace")
     actions = _row_get(row, "actions_taken")
-    return {
+    out = {
         "role": "assistant", "text": text,
         "task_id": _row_get(row, "task_id") or _row_get(row, "id"),
         "status": status, "created_at": _row_get(row, "created_at"),
@@ -1650,6 +1651,14 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
         ),
         "model": _row_get(row, "model_used") or None,
     }
+    # Store-sourced rows carry the message's stable id + the requesting user's
+    # star flag; aux (`tasks`-only) rows have neither — such turns aren't
+    # starrable until mirrored to the durable store.
+    msg_id = _row_get(row, "msg_id")
+    if msg_id is not None:
+        out["msg_id"] = msg_id
+        out["starred"] = bool(_row_get(row, "starred"))
+    return out
 
 
 def _row_get(row, key: str):
@@ -1660,21 +1669,23 @@ def _row_get(row, key: str):
 
 # Surface filter shared by the spine query and its `has_more` probe: web/talk
 # turns render both halves; scheduled posts render the assistant only (the
-# synthetic cron prompt was never user-authored).
-_SPINE_SURFACE = (
-    "((m.origin_surface IN ('web', 'talk') AND m.role IN ('user', 'assistant')) "
-    "OR (m.origin_surface = 'scheduled' AND m.role = 'assistant'))"
-)
+# synthetic cron prompt was never user-authored). Canonical definition lives in
+# db.py so the cross-room aggregate query (`db.list_messages_across_rooms`)
+# can't drift from the per-room spine.
+_SPINE_SURFACE = _db.TRANSCRIPT_SURFACE_FILTER
 # Columns the spine query selects: the durable turn + the LEFT JOIN tasks
 # enrichment (trace / timing / model). `m.id AS msg_id` is the raw keyset
-# tiebreaker for the cursor.
+# tiebreaker for the cursor AND the message's stable star key; `starred` is the
+# requesting user's star flag (the join takes the username as the query's FIRST
+# positional parameter).
 _SPINE_COLUMNS = (
     "SELECT m.role AS role, m.body AS body, m.task_id AS task_id, "
     "  m.id AS msg_id, m.created_at AS created_at, t.status AS status, "
     "  t.actions_taken AS actions_taken, t.execution_trace AS execution_trace, "
     "  t.started_at AS started_at, t.completed_at AS completed_at, "
-    "  t.model_used AS model_used "
+    "  t.model_used AS model_used, (s.message_id IS NOT NULL) AS starred "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
+    "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
 )
 # Columns the aux (`tasks`) gap-fill query selects.
 _AUX_COLUMNS = (
@@ -1733,7 +1744,7 @@ def _chat_room_messages(
             msg_rows = conn.execute(
                 _SPINE_COLUMNS + f"WHERE m.room_token = ? AND {_SPINE_SURFACE} "
                 "ORDER BY m.created_at DESC, m.id DESC LIMIT ?",
-                (token, limit * 2),
+                (username, token, limit * 2),
             ).fetchall()
         else:
             before_ts, before_id = before
@@ -1741,7 +1752,7 @@ def _chat_room_messages(
                 _SPINE_COLUMNS + f"WHERE m.room_token = ? AND {_SPINE_SURFACE} "
                 "AND (m.created_at, m.id) < (?, ?) "
                 "ORDER BY m.created_at DESC, m.id DESC LIMIT ?",
-                (token, before_ts, before_id, limit * 2),
+                (username, token, before_ts, before_id, limit * 2),
             ).fetchall()
 
         # 2. Aux gap-fill (failed/cancelled answers, in-flight slots, legacy
@@ -1823,6 +1834,11 @@ def _chat_room_messages(
             notes = db.list_system_messages_in_band(
                 conn, token, lo_ts=page_lo, hi_ts=before[0],
             )
+        # Star flags for the system rows (the spine rows carry theirs via the
+        # message_stars join; notes come from a separate read).
+        note_star_ids = db.get_starred_message_ids(
+            conn, username, [n.id for n in notes],
+        )
 
         # 4. Paging metadata: the page's oldest spine (or aux-only) row gives the
         #    next cursor; `has_more` ORs a spine probe with a band-eligible
@@ -1867,6 +1883,7 @@ def _chat_room_messages(
             messages.append({
                 "role": "user", "text": r["body"], "task_id": tid,
                 "created_at": r["created_at"],
+                "msg_id": r["msg_id"], "starred": bool(r["starred"]),
             })
         else:  # assistant — a stored assistant row is by definition a completed turn
             messages.append(_assistant_message_dict(r, r["body"], r["status"] or "completed"))
@@ -1913,6 +1930,8 @@ def _chat_room_messages(
         messages.append({
             "role": n.role, "text": text, "notif_id": n.id,
             "created_at": n.created_at,
+            # `notif_id` kept for back-compat; `msg_id` is the uniform star key.
+            "msg_id": n.id, "starred": n.id in note_star_ids,
         })
     # Normalize every turn's created_at to explicit ISO 8601 UTC. The stored
     # values are naive UTC (SQLite datetime('now') / strftime, and the Talk-cache
@@ -2156,6 +2175,146 @@ async def chat_mark_room_read(
     if cursor is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
     return {"ok": True, "last_read_message_id": cursor}
+
+
+def _chat_set_message_star(username: str, message_id: int, starred: bool) -> bool:
+    """Star/unstar a message for ``username``. Returns False (→ 404) when the
+    message doesn't exist or the user isn't a member of its room — the two are
+    deliberately indistinguishable so the endpoint can't be used to probe which
+    message ids exist in foreign rooms."""
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        token = db.get_message_room(conn, message_id)
+        if token is None or not db.is_room_member(conn, token, username):
+            return False
+        db.set_message_starred(conn, message_id, username, starred)
+    logger.debug(
+        "message star user=%s msg_id=%s starred=%s", username, message_id, starred,
+    )
+    return True
+
+
+def _chat_aggregate_messages(
+    username: str,
+    view: str,
+    limit: int,
+    before: tuple[str, int] | None,
+) -> dict:
+    """One page of the cross-room All / Unread / Starred stream, oldest-first,
+    in the same message shape as the per-room endpoint plus `room_token` /
+    `room_name`. Durable store only — no aux gap-fill, no in-flight slots (the
+    aggregate panes are reading surfaces; the room view is the live console)."""
+    from . import db
+    before_ts, before_id = before if before is not None else (None, None)
+    with db.get_db(_config.db_path) as conn:
+        # limit+1 → the extra row is the has_more probe.
+        rows = db.list_messages_across_rooms(
+            conn, username, view=view, limit=limit + 1,
+            before_ts=before_ts, before_id=before_id,
+        )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    # Rows arrive newest-first; the page's last row is its oldest → the cursor
+    # (raw stored created_at + id, NOT the display value — same contract as the
+    # per-room endpoint).
+    oldest_cursor = (
+        {"ts": rows[-1]["created_at"], "id": rows[-1]["msg_id"]} if rows else None
+    )
+    messages: list[dict] = []
+    for r in reversed(rows):  # oldest-first for rendering
+        base = {
+            "msg_id": r["msg_id"], "starred": bool(r["starred"]),
+            "room_token": r["room_token"], "room_name": r["room_name"] or "",
+        }
+        if r["role"] == "user":
+            d = {
+                "role": "user", "text": r["body"], "task_id": r["task_id"],
+                "created_at": r["created_at"], **base,
+            }
+        elif r["role"] == "assistant":
+            d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
+            d.update(base)
+        else:  # system — same shape as the per-room notes merge
+            text = f"**{r['title']}**\n\n{r['body']}" if r["title"] else r["body"]
+            d = {
+                "role": r["role"], "text": text, "notif_id": r["msg_id"],
+                "created_at": r["created_at"], **base,
+            }
+        d["created_at"] = _iso_utc(d.get("created_at"))
+        messages.append(d)
+    return {
+        "messages": messages,
+        "has_more": has_more,
+        "oldest_cursor": oldest_cursor,
+    }
+
+
+def _chat_mark_all_read(username: str) -> int:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        updated = db.mark_all_rooms_read(conn, username)
+    logger.info("mark_all_rooms_read user=%s rooms_updated=%d", username, updated)
+    return updated
+
+
+@api_router.get("/chat/messages")
+async def chat_messages_view(
+    view: str = "all",
+    limit: int = 50,
+    before_ts: str | None = None,
+    before_id: int | None = None,
+    user: dict = Depends(_require_api_auth),
+):
+    """Cross-room message stream for the All / Unread / Starred views."""
+    if view not in ("all", "unread", "starred"):
+        return JSONResponse({"error": "unknown view"}, status_code=400)
+    # Same both-or-neither cursor contract as the per-room endpoint.
+    if (before_ts is None) != (before_id is None):
+        return JSONResponse(
+            {"error": "before_ts and before_id must be supplied together"},
+            status_code=400,
+        )
+    before = (before_ts, before_id) if before_ts is not None else None
+    limit = max(1, min(limit, 200))
+    return await asyncio.to_thread(
+        _chat_aggregate_messages, user["username"], view, limit, before,
+    )
+
+
+@api_router.put("/chat/messages/{message_id}/star")
+async def chat_star_message(
+    message_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Star or unstar a durable message for the requesting user."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = None
+    starred = data.get("starred") if isinstance(data, dict) else None
+    if not isinstance(starred, bool):
+        return JSONResponse(
+            {"error": "body must be {\"starred\": true|false}"}, status_code=422,
+        )
+    ok = await asyncio.to_thread(
+        _chat_set_message_star, user["username"], message_id, starred,
+    )
+    if not ok:
+        return JSONResponse({"error": "message not found"}, status_code=404)
+    return {"ok": True, "starred": starred}
+
+
+@api_router.post("/chat/rooms/read-all")
+async def chat_read_all_rooms(
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Mark every visible room read on the web surface in one action (the
+    header's mark-all chip). Returns how many rooms' cursors moved."""
+    updated = await asyncio.to_thread(_chat_mark_all_read, user["username"])
+    return {"ok": True, "updated": updated}
 
 
 @api_router.post("/chat/rooms/{room_id}/messages")

@@ -323,6 +323,98 @@ function mockCommandResult(text: string): string | null {
 	return `Mock command result for \`${text}\`.`;
 }
 
+// ---- Cross-room views + starring mock state ----
+// Stars are keyed on the synthetic per-message ids below (user = id*10+1,
+// assistant = id*10+2) so both room history and the aggregate views agree.
+const mockStars = new Set<number>();
+const mockUserMsgId = (t: MockChatTask) => t.id * 10 + 1;
+const mockAsstMsgId = (t: MockChatTask) => t.id * 10 + 2;
+// Everything newer than this reads as unread (assistant rows only); read-all
+// advances it to now. Seeded ~16h back so the last few turns light up.
+let mockReadCursorMs = Date.now() - 16 * 60 * 60 * 1000;
+
+function mockRoomFor(token: string): MockChatRoom | undefined {
+	return mockChatRooms.find((r) => r.token === token);
+}
+
+// A finished task's (user, assistant) message pair, in the history payload
+// shape — shared by the per-room endpoint and the aggregate views.
+function mockFinishedTurn(t: MockChatTask): { user: any; assistant: any } {
+	const evs = mockTaskEvents(t);
+	const ev = evs.find((e) => e.kind === 'result');
+	const result = (ev?.payload as any).text as string;
+	// Mirror the backend: a finished turn carries its tool trace + duration so
+	// the action strip + timing persist on reload (ISSUE-122).
+	const tools = evs
+		.filter((e) => e.kind === 'tool_start')
+		.map((e) => (e.payload as any).description as string);
+	// Ordered segments rebuilt from the event timeline (mirrors the backend
+	// `_trace_segments`): consecutive text_deltas collapse into one text
+	// segment, tool_starts become tool segments, and the canonical result
+	// reconciles the trailing answer.
+	const segments: { kind: string; text: string }[] = [];
+	for (const e of evs) {
+		if (e.kind === 'text_delta') {
+			const last = segments[segments.length - 1];
+			if (last && last.kind === 'text') last.text += (e.payload as any).text;
+			else segments.push({ kind: 'text', text: (e.payload as any).text });
+		} else if (e.kind === 'thinking') {
+			const last = segments[segments.length - 1];
+			if (last && last.kind === 'thinking') last.text += (e.payload as any).text;
+			else segments.push({ kind: 'thinking', text: (e.payload as any).text });
+		} else if (e.kind === 'tool_start') {
+			segments.push({ kind: 'tool', text: (e.payload as any).description });
+		}
+	}
+	if (result) {
+		const last = segments[segments.length - 1];
+		if (last && last.kind === 'text') last.text = result;
+		else segments.push({ kind: 'text', text: result });
+	}
+	const done = evs.find((e) => e.kind === 'done');
+	return {
+		user: {
+			role: 'user', text: t.prompt, task_id: t.id,
+			created_at: new Date(t.createdAt).toISOString(),
+			msg_id: mockUserMsgId(t), starred: mockStars.has(mockUserMsgId(t)),
+		},
+		assistant: {
+			role: 'assistant', text: result, task_id: t.id,
+			status: 'completed', created_at: new Date(t.createdAt).toISOString(),
+			tools, segments, duration_seconds: (done?.payload as any)?.duration_seconds ?? null,
+			model: (done?.payload as any)?.model ?? null,
+			msg_id: mockAsstMsgId(t), starred: mockStars.has(mockAsstMsgId(t)),
+		},
+	};
+}
+
+// Flattened durable message rows across every room, for the aggregate views.
+function mockAggregateRows(): any[] {
+	const now = Date.now();
+	const rows: { msg: any; createdAt: number }[] = [];
+	for (const t of mockChatTasks.values()) {
+		if (now - t.createdAt < MOCK_TASK_DONE_MS) continue; // durable turns only
+		const room = mockRoomFor(t.roomToken);
+		if (!room || room.archived) continue;
+		const turn = mockFinishedTurn(t);
+		rows.push({ msg: { ...turn.user, room_token: room.token, room_name: room.name }, createdAt: t.createdAt });
+		rows.push({ msg: { ...turn.assistant, room_token: room.token, room_name: room.name }, createdAt: t.createdAt });
+	}
+	rows.sort((a, b) => (a.createdAt - b.createdAt) || (a.msg.msg_id - b.msg.msg_id));
+	return rows.map((r) => ({ ...r.msg, _createdAtMs: r.createdAt }));
+}
+
+function mockUnreadCount(token: string): number {
+	const now = Date.now();
+	let n = 0;
+	for (const t of mockChatTasks.values()) {
+		if (t.roomToken !== token) continue;
+		if (now - t.createdAt < MOCK_TASK_DONE_MS) continue;
+		if (t.createdAt > mockReadCursorMs) n++; // one unread assistant row per turn
+	}
+	return n;
+}
+
 const chatHandler: MockHandler = ({ url, method, body }) => {
 	if (!url.startsWith('/istota/api/chat/')) return undefined;
 	const path = url.split('?')[0];
@@ -332,7 +424,55 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 	}
 
 	if (path === '/istota/api/chat/rooms' && method === 'GET') {
-		return { rooms: mockChatRooms.filter((r) => !r.archived) };
+		return {
+			rooms: mockChatRooms
+				.filter((r) => !r.archived)
+				.map((r) => ({ ...r, unread_count: mockUnreadCount(r.token) })),
+		};
+	}
+	if (path === '/istota/api/chat/rooms/read-all' && method === 'POST') {
+		const moved = mockChatRooms.filter((r) => !r.archived && mockUnreadCount(r.token) > 0).length;
+		mockReadCursorMs = Date.now();
+		return { ok: true, updated: moved };
+	}
+	// Cross-room aggregate views (All / Unread / Starred).
+	if (path === '/istota/api/chat/messages' && method === 'GET') {
+		const q = new URL(`http://x${url}`).searchParams;
+		const viewName = q.get('view') || 'all';
+		if (!['all', 'unread', 'starred'].includes(viewName)) return { error: 'unknown view' };
+		const limit = Math.max(1, Math.min(Number(q.get('limit') || '50'), 200));
+		const beforeTs = q.get('before_ts');
+		const beforeId = q.get('before_id');
+		const before = beforeTs != null && beforeId != null
+			? { ts: Date.parse(beforeTs), id: Number(beforeId) }
+			: null;
+		let rows = mockAggregateRows(); // oldest-first
+		if (viewName === 'unread') {
+			rows = rows.filter((m) => m.role !== 'user' && m._createdAtMs > mockReadCursorMs);
+		} else if (viewName === 'starred') {
+			rows = rows.filter((m) => mockStars.has(m.msg_id));
+		}
+		const older = before
+			? rows.filter((m) => m._createdAtMs < before.ts || (m._createdAtMs === before.ts && m.msg_id < before.id))
+			: rows;
+		const page = older.slice(Math.max(0, older.length - limit));
+		const oldest = page[0];
+		const hasMore = oldest ? older.length > page.length : false;
+		return {
+			messages: page.map(({ _createdAtMs, ...m }) => m),
+			has_more: hasMore,
+			oldest_cursor: oldest
+				? { ts: new Date(oldest._createdAtMs).toISOString(), id: oldest.msg_id }
+				: null,
+		};
+	}
+	const starMatch = path.match(/^\/istota\/api\/chat\/messages\/(\d+)\/star$/);
+	if (starMatch && method === 'PUT') {
+		const msgId = Number(starMatch[1]);
+		const starred = !!body?.starred;
+		if (starred) mockStars.add(msgId);
+		else mockStars.delete(msgId);
+		return { ok: true, starred };
 	}
 	if (path === '/istota/api/chat/rooms' && method === 'POST') {
 		const room: MockChatRoom = {
@@ -388,47 +528,14 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 		const messages: any[] = [];
 		let active: any = null;
 		for (const t of tasks) {
-			messages.push({ role: 'user', text: t.prompt, task_id: t.id, created_at: new Date(t.createdAt).toISOString() });
 			if (now - t.createdAt >= MOCK_TASK_DONE_MS) {
-				const evs = mockTaskEvents(t);
-				const ev = evs.find((e) => e.kind === 'result');
-				const result = (ev?.payload as any).text as string;
-				// Mirror the backend: a finished turn carries its tool trace +
-				// duration so the action strip + timing persist on reload (ISSUE-122).
-				const tools = evs
-					.filter((e) => e.kind === 'tool_start')
-					.map((e) => (e.payload as any).description as string);
-				// Ordered segments rebuilt from the event timeline (mirrors the
-				// backend `_trace_segments`): consecutive text_deltas collapse into
-				// one text segment, tool_starts become tool segments, and the
-				// canonical result reconciles the trailing answer.
-				const segments: { kind: string; text: string }[] = [];
-				for (const e of evs) {
-					if (e.kind === 'text_delta') {
-						const last = segments[segments.length - 1];
-						if (last && last.kind === 'text') last.text += (e.payload as any).text;
-						else segments.push({ kind: 'text', text: (e.payload as any).text });
-					} else if (e.kind === 'thinking') {
-						const last = segments[segments.length - 1];
-						if (last && last.kind === 'thinking') last.text += (e.payload as any).text;
-						else segments.push({ kind: 'thinking', text: (e.payload as any).text });
-					} else if (e.kind === 'tool_start') {
-						segments.push({ kind: 'tool', text: (e.payload as any).description });
-					}
-				}
-				if (result) {
-					const last = segments[segments.length - 1];
-					if (last && last.kind === 'text') last.text = result;
-					else segments.push({ kind: 'text', text: result });
-				}
-				const done = evs.find((e) => e.kind === 'done');
-				messages.push({
-					role: 'assistant', text: result, task_id: t.id,
-					status: 'completed', created_at: new Date(t.createdAt).toISOString(),
-					tools, segments, duration_seconds: (done?.payload as any)?.duration_seconds ?? null,
-					model: (done?.payload as any)?.model ?? null,
-				});
+				// Finished turn: the shared builder carries msg_id/starred (and the
+				// full segments/tools shape) so history matches the backend payload.
+				const turn = mockFinishedTurn(t);
+				messages.push(turn.user, turn.assistant);
 			} else {
+				// In-flight: aux-only on the backend too — no msg_id, not starrable.
+				messages.push({ role: 'user', text: t.prompt, task_id: t.id, created_at: new Date(t.createdAt).toISOString() });
 				active = { id: t.id, status: 'running' };
 			}
 		}

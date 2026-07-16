@@ -511,6 +511,22 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 PRIMARY KEY (room_token, surface, user_id)
             )
         """)
+        # Per-user message bookmarks ("stars", web UI). Rooms are shared, so
+        # stars are keyed per (message, user) — one member's star never shows
+        # for another. The FK cascade is decorative (PRAGMA foreign_keys
+        # unset); delete_web_chat_room hand-deletes matching rows.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_stars (
+                message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                user_id    TEXT NOT NULL,
+                starred_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (message_id, user_id)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_stars_user "
+            "ON message_stars (user_id, message_id)"
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS _migration_state (
                 name        TEXT PRIMARY KEY,
@@ -2314,7 +2330,13 @@ def delete_web_chat_room(
         (token,),
     )
     # Unified-rooms tables — FK cascades are decorative (foreign_keys unset),
-    # so hand-delete every row keyed on the token.
+    # so hand-delete every row keyed on the token. Stars first: they key on
+    # message ids that are about to disappear.
+    conn.execute(
+        "DELETE FROM message_stars WHERE message_id IN "
+        "(SELECT id FROM messages WHERE room_token = ?)",
+        (token,),
+    )
     conn.execute("DELETE FROM messages WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_bindings WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_read_state WHERE room_token = ?", (token,))
@@ -2838,6 +2860,162 @@ def initialize_room_read_state(
         (room_token, surface, user_id, room_max_message_id(conn, room_token)),
     )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Per-message stars + cross-room aggregate views (web chat)
+# ---------------------------------------------------------------------------
+
+# Which `messages` rows render as transcript turns. Shared by the per-room
+# spine query (web_app._SPINE_SURFACE) and the cross-room aggregate below:
+# web/talk turns render both halves; scheduled posts render the assistant only
+# (the synthetic cron prompt was never user-authored). Expects the messages
+# table aliased as `m`.
+TRANSCRIPT_SURFACE_FILTER = (
+    "((m.origin_surface IN ('web', 'talk') AND m.role IN ('user', 'assistant')) "
+    "OR (m.origin_surface = 'scheduled' AND m.role = 'assistant'))"
+)
+
+
+def set_message_starred(
+    conn: sqlite3.Connection, message_id: int, user_id: str, starred: bool,
+) -> bool:
+    """Star/unstar a durable message for one user. Idempotent both ways.
+    Returns False only when the message id doesn't exist (the star state then
+    matches the request by definition of there being nothing to star)."""
+    exists = conn.execute(
+        "SELECT 1 FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    if exists is None:
+        return False
+    if starred:
+        conn.execute(
+            "INSERT OR IGNORE INTO message_stars (message_id, user_id) "
+            "VALUES (?, ?)",
+            (message_id, user_id),
+        )
+    else:
+        conn.execute(
+            "DELETE FROM message_stars WHERE message_id = ? AND user_id = ?",
+            (message_id, user_id),
+        )
+    return True
+
+
+def get_message_room(conn: sqlite3.Connection, message_id: int) -> str | None:
+    """The room token a message belongs to (for server-side membership checks
+    on the star endpoint), or None for an unknown id."""
+    row = conn.execute(
+        "SELECT room_token FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    return row["room_token"] if row else None
+
+
+def get_starred_message_ids(
+    conn: sqlite3.Connection, user_id: str, message_ids: list[int],
+) -> set[int]:
+    """The subset of `message_ids` this user has starred."""
+    ids = [int(i) for i in message_ids]
+    if not ids:
+        return set()
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT message_id FROM message_stars "
+        f"WHERE user_id = ? AND message_id IN ({placeholders})",
+        [user_id, *ids],
+    ).fetchall()
+    return {int(r["message_id"]) for r in rows}
+
+
+def list_messages_across_rooms(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    view: str = "all",
+    limit: int = 50,
+    before_ts: str | None = None,
+    before_id: int | None = None,
+) -> list[sqlite3.Row]:
+    """One page of the cross-room message stream for the All / Unread / Starred
+    web views, newest-first, keyset-paginated on ``(created_at, id)``.
+
+    Reads the durable `messages` store only (no `tasks` gap-fill, no in-flight
+    placeholders — a cross-room reading surface doesn't need the live-room aux
+    merge). Visibility = membership minus dismissals minus archived rooms,
+    matching `list_member_rooms`. Rows carry the room token/name, the LEFT JOIN
+    `tasks` enrichment columns the per-room spine also selects, and a `starred`
+    flag for the requesting user.
+
+    Views:
+    - ``all``: every transcript-rendered row, own turns included.
+    - ``unread``: rows past the user's per-room web read cursor, excluding
+      their own turns — the same math as `count_unread_messages`, so the view
+      and the sidebar badges always agree. A room with no cursor row yet
+      contributes everything (COALESCE to 0); in practice the rooms listing
+      seeds cursors on every load.
+    - ``starred``: rows the user has starred, still in transcript order.
+    """
+    if view not in ("all", "unread", "starred"):
+        raise ValueError(f"unknown view: {view!r}")
+    # System rows (alerts / logs / web-routed notifications) render in the
+    # aggregate views too — count_unread_messages counts them, so Unread must
+    # show them.
+    surface = f"({TRANSCRIPT_SURFACE_FILTER} OR m.role = 'system')"
+    sql = (
+        "SELECT m.role AS role, m.body AS body, m.title AS title, "
+        "  m.task_id AS task_id, m.id AS msg_id, m.created_at AS created_at, "
+        "  m.room_token AS room_token, r.name AS room_name, "
+        "  t.status AS status, t.actions_taken AS actions_taken, "
+        "  t.execution_trace AS execution_trace, t.started_at AS started_at, "
+        "  t.completed_at AS completed_at, t.model_used AS model_used, "
+        "  (s.message_id IS NOT NULL) AS starred "
+        "FROM messages m "
+        "JOIN rooms r ON r.token = m.room_token AND r.archived = 0 "
+        "JOIN room_members mm ON mm.room_token = m.room_token "
+        "  AND mm.user_id = :user "
+        "LEFT JOIN message_stars s ON s.message_id = m.id "
+        "  AND s.user_id = :user "
+        "LEFT JOIN tasks t ON t.id = m.task_id "
+    )
+    if view == "unread":
+        sql += (
+            "LEFT JOIN room_read_state rs ON rs.room_token = m.room_token "
+            "  AND rs.surface = 'web' AND rs.user_id = :user "
+        )
+    sql += (
+        "WHERE NOT EXISTS (SELECT 1 FROM room_dismissals d "
+        "  WHERE d.room_token = m.room_token AND d.user_id = :user) "
+        f"AND {surface} "
+    )
+    if view == "unread":
+        sql += (
+            "AND m.role != 'user' "
+            "AND m.id > COALESCE(rs.last_read_message_id, 0) "
+        )
+    elif view == "starred":
+        sql += "AND s.message_id IS NOT NULL "
+    if before_ts is not None:
+        sql += "AND (m.created_at, m.id) < (:before_ts, :before_id) "
+    sql += "ORDER BY m.created_at DESC, m.id DESC LIMIT :limit"
+    return conn.execute(sql, {
+        "user": user_id,
+        "limit": limit,
+        "before_ts": before_ts,
+        "before_id": before_id,
+    }).fetchall()
+
+
+def mark_all_rooms_read(conn: sqlite3.Connection, user_id: str) -> int:
+    """Advance the user's web read cursor to the newest message in every room
+    they can see (same visibility as `list_member_rooms`). Returns the number
+    of rooms whose cursor actually moved."""
+    moved = 0
+    for room in list_member_rooms(conn, user_id):
+        max_id = room_max_message_id(conn, room.token)
+        if max_id > get_room_read_state(conn, room.token, "web", user_id):
+            set_room_read_state(conn, room.token, "web", max_id, user_id)
+            moved += 1
+    return moved
 
 
 def _migrate_unified_rooms(conn: sqlite3.Connection) -> None:
