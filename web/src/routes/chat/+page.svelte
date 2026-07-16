@@ -1,20 +1,31 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { page } from '$app/state';
-	import { Plus, MessageSquare, Cloud, ChevronDown } from 'lucide-svelte';
+	import { Plus, MessageSquare, Cloud, ChevronDown, Circle, Star, CheckCheck } from 'lucide-svelte';
 	import AppShell from '$lib/components/ui/AppShell.svelte';
 	import ShellHeader from '$lib/components/ui/ShellHeader.svelte';
 	import Sidebar from '$lib/components/ui/Sidebar.svelte';
 	import SidebarToggle from '$lib/components/ui/SidebarToggle.svelte';
 	import KebabMenu from '$lib/components/ui/KebabMenu.svelte';
+	import Chip from '$lib/components/ui/Chip.svelte';
 	import Message from '$lib/components/chat/Message.svelte';
 	import Composer from '$lib/components/chat/Composer.svelte';
 	import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
 	import { getChatSession } from '$lib/stores/chat';
-	import { getMe, type ChatRoom } from '$lib/api';
+	import { getMe, type ChatRoom, type ChatView } from '$lib/api';
 
 	const session = getChatSession();
-	const { rooms, activeRoomId, messages, status, loaded, hasMore, loadingOlder } = session;
+	const { rooms, activeRoomId, messages, status, loaded, hasMore, loadingOlder, view } = session;
+
+	// Cross-room views: the transcript pane renders either the active room
+	// ('room') or a read-only aggregate stream (all/unread/starred).
+	const inViewMode = $derived($view !== 'room');
+	const VIEW_LABELS: Record<ChatView, string> = {
+		all: 'All messages', unread: 'Unread', starred: 'Starred',
+	};
+	// Client-side total for the sidebar Unread badge (sum of per-room counts;
+	// the active room is already held at 0 by the store).
+	const unreadTotal = $derived($rooms.reduce((n, r) => n + (r.unread_count ?? 0), 0));
 
 	// The room whose settings modal is open (null = closed).
 	let settingsRoom = $state<ChatRoom | null>(null);
@@ -40,6 +51,9 @@
 		const prev = $messages[i - 1];
 		const cur = $messages[i];
 		if (!prev || prev.role !== cur.role || cur.role === 'system') return false;
+		// Aggregate views interleave rooms: a room change always starts a fresh
+		// group (the header carries the room chip).
+		if (prev.roomToken !== cur.roomToken) return false;
 		// A message that opens a new day starts a fresh group (full header) under
 		// the day divider, even from the same author within the window.
 		if (startsNewDay(i)) return false;
@@ -93,8 +107,12 @@
 			// Deep link: /chat?room=<token> selects that room for this load,
 			// overriding the persisted-room default. An unknown / not-owned token
 			// isn't in the per-user list → silent fallback to the default.
+			// /chat?view=all|unread|starred opens an aggregate view instead; an
+			// unknown value falls back silently, same as an unknown room token.
 			const token = page.url.searchParams.get('room');
+			const v = page.url.searchParams.get('view');
 			if (token) session.selectRoomByToken(token);
+			else if (v === 'all' || v === 'unread' || v === 'starred') session.selectView(v);
 		});
 		getMe()
 			.then((me) => {
@@ -167,6 +185,21 @@
 		sidebarOpen = false;
 	}
 
+	function selectView(v: ChatView) {
+		session.selectView(v);
+		sidebarOpen = false;
+	}
+
+	// Mark every room read (header chip). Confirmed like the feeds equivalent —
+	// it's a bulk, not-really-undoable cursor advance.
+	async function handleMarkAllRead() {
+		const confirmed = window.confirm(
+			"Mark all rooms as read? This can't be undone.",
+		);
+		if (!confirmed) return;
+		await session.markAllRead();
+	}
+
 	async function createRoom() {
 		const name = newRoomName.trim();
 		if (!name) return;
@@ -200,8 +233,11 @@
 
 <AppShell>
 	{#snippet header()}
-		<ShellHeader title={activeRoom ? activeRoom.name : 'Chat'}>
+		<ShellHeader title={inViewMode ? VIEW_LABELS[$view as ChatView] : (activeRoom ? activeRoom.name : 'Chat')}>
 			{#snippet tools()}
+				<Chip icon onclick={handleMarkAllRead} title="Mark all rooms as read">
+					<CheckCheck size={14} />
+				</Chip>
 				<SidebarToggle
 					open={sidebarOpen}
 					label="Rooms"
@@ -241,6 +277,42 @@
 					{/if}
 				</div>
 			{/snippet}
+
+			<!-- Cross-room views, above the rooms list (mirrors the feeds sidebar's
+			     All / Unread / Starred entries). Selecting one deselects the room. -->
+			<div class="views">
+				<button
+					class="view-btn"
+					class:active={$view === 'all'}
+					onclick={() => selectView('all')}
+					type="button"
+				>
+					<span class="view-name">All</span>
+				</button>
+				<button
+					class="view-btn"
+					class:active={$view === 'unread'}
+					onclick={() => selectView('unread')}
+					type="button"
+				>
+					<Circle size={12} />
+					<span class="view-name">Unread</span>
+					{#if unreadTotal > 0}
+						<span class="unread-chip" title={`${unreadTotal} unread`}>
+							{unreadTotal > 99 ? '99+' : unreadTotal}
+						</span>
+					{/if}
+				</button>
+				<button
+					class="view-btn"
+					class:active={$view === 'starred'}
+					onclick={() => selectView('starred')}
+					type="button"
+				>
+					<Star size={12} />
+					<span class="view-name">Starred</span>
+				</button>
+			</div>
 
 			{#each $rooms as room (room.id)}
 				{@const isTalk = room.origin === 'talk' || !!room.talk_token}
@@ -288,9 +360,21 @@
 				<div class="chat-empty">Loading…</div>
 			{:else if $messages.length === 0}
 				<div class="chat-empty">
-					<MessageSquare size={28} />
-					<p>{activeRoom ? `Ask anything in #${activeRoom.name.replace(/^#+/, '')}.` : 'Ask Istota anything.'}</p>
-					<span class="hint">Configuration help, quick tasks, or one-off questions.</span>
+					{#if $view === 'unread'}
+						<CheckCheck size={28} />
+						<p>All caught up</p>
+					{:else if $view === 'starred'}
+						<Star size={28} />
+						<p>Nothing starred yet.</p>
+						<span class="hint">Hover a message and hit the star.</span>
+					{:else if $view === 'all'}
+						<MessageSquare size={28} />
+						<p>No messages yet</p>
+					{:else}
+						<MessageSquare size={28} />
+						<p>{activeRoom ? `Ask anything in #${activeRoom.name.replace(/^#+/, '')}.` : 'Ask Istota anything.'}</p>
+						<span class="hint">Configuration help, quick tasks, or one-off questions.</span>
+					{/if}
 				</div>
 			{:else}
 				<!-- Older-history affordance (B3): a spinner while a page loads, a
@@ -313,6 +397,8 @@
 						{botName}
 						onConfirm={session.confirm}
 						onReject={session.reject}
+						onToggleStar={session.toggleStar}
+						onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
 					/>
 				{/each}
 			{/if}
@@ -324,12 +410,15 @@
 			</button>
 		{/if}
 		</div>
-		<Composer
-			onSend={(t, atts) => session.send(t, atts)}
-			onCancel={() => session.cancel()}
-			busy={busy}
-			placeholder="Your message…"
-		/>
+		{#if !inViewMode}
+			<!-- Sending is room-scoped; aggregate views are read-only panes. -->
+			<Composer
+				onSend={(t, atts) => session.send(t, atts)}
+				onCancel={() => session.cancel()}
+				busy={busy}
+				placeholder="Your message…"
+			/>
+		{/if}
 	</div>
 
 	{#if settingsRoom}
@@ -467,6 +556,38 @@
 		color: var(--text-dim);
 		text-transform: uppercase;
 	}
+
+	/* Cross-room view entries above the rooms list — styled like the feeds
+	   sidebar's All / Unread / Starred buttons (.feed-btn.special). */
+	.views {
+		display: flex;
+		flex-direction: column;
+		margin-bottom: 0.5rem;
+		padding-bottom: 0.5rem;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+	.view-btn {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		width: 100%;
+		background: none;
+		border: none;
+		color: var(--text-muted);
+		font: inherit;
+		font-size: var(--text-base);
+		cursor: pointer;
+		padding: 0.3rem 0.6rem;
+		border-radius: 0.3rem;
+		transition: background var(--transition-fast);
+		text-align: left;
+	}
+	.view-btn:hover { background: var(--surface-raised); }
+	.view-btn.active {
+		background: var(--surface-raised);
+		color: var(--text-primary);
+	}
+	.view-name { flex: 1; min-width: 0; }
 
 	.room-new { padding: 0 0.25rem 0.4rem; }
 	.room-add {

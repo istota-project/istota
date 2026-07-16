@@ -691,6 +691,18 @@ CREATE TABLE IF NOT EXISTS room_read_state (
     PRIMARY KEY (room_token, surface, user_id)
 );
 
+-- Per-user message bookmarks ("stars", web UI). Rooms are shared, so stars
+-- are keyed per (message, user) — one member's star never shows for another.
+-- FK cascade decorative; delete_web_chat_room hand-deletes matching rows.
+CREATE TABLE IF NOT EXISTS message_stars (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    starred_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (message_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_stars_user
+    ON message_stars (user_id, message_id);
+
 -- One-time data-migration ledger (markered, so heavy backfills run once).
 CREATE TABLE IF NOT EXISTS _migration_state (
     name        TEXT PRIMARY KEY,

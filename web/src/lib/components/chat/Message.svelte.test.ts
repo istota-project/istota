@@ -1,8 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { render, cleanup } from '@testing-library/svelte';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { writable, type Writable } from 'svelte/store';
 import { tick } from 'svelte';
 import { applyEvent, type ChatMessage, type Segment } from '$lib/stores/segments';
+import Message from './Message.svelte';
 import StreamHarness from './StreamHarness.svelte';
 
 afterEach(cleanup);
@@ -142,5 +143,94 @@ describe('live streaming reaches the DOM (Message + keyed each)', () => {
 		expect(chip?.textContent ?? '').not.toContain('REASONING_LEADIN');
 		// … the chip carries only the tool action.
 		expect(chip?.textContent ?? '').toContain('web search');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Per-message starring + cross-room labels
+// ---------------------------------------------------------------------------
+
+function finished(over: Partial<ChatMessage> = {}): ChatMessage {
+	return {
+		cid: 1, role: 'assistant', text: 'the answer', streaming: false,
+		segments: [{ kind: 'text', id: 's1', text: 'the answer', settled: false }],
+		createdAt: '2026-07-10T12:00:00Z',
+		...over,
+	};
+}
+
+const noop = () => {};
+
+describe('star affordance', () => {
+	it('renders no star button without msgId', () => {
+		const { container } = render(Message, {
+			message: finished(), onConfirm: noop, onReject: noop, onToggleStar: noop,
+		});
+		expect(container.querySelector('.star-btn')).toBeNull();
+	});
+
+	it('renders no star button without an onToggleStar handler', () => {
+		const { container } = render(Message, {
+			message: finished({ msgId: 42 }), onConfirm: noop, onReject: noop,
+		});
+		expect(container.querySelector('.star-btn')).toBeNull();
+	});
+
+	it('renders a hover-revealed star button for a durable message', () => {
+		const { container } = render(Message, {
+			message: finished({ msgId: 42, starred: false }),
+			onConfirm: noop, onReject: noop, onToggleStar: noop,
+		});
+		const btn = container.querySelector('.star-btn');
+		expect(btn).not.toBeNull();
+		expect(btn?.getAttribute('aria-label')).toBe('Star message');
+		expect(btn?.getAttribute('aria-pressed')).toBe('false');
+		// Hidden at rest (hover/focus reveals it via CSS); not marked starred.
+		expect(btn?.classList.contains('starred')).toBe(false);
+	});
+
+	it('shows the filled / at-rest state when starred', () => {
+		const { container } = render(Message, {
+			message: finished({ msgId: 42, starred: true }),
+			onConfirm: noop, onReject: noop, onToggleStar: noop,
+		});
+		const btn = container.querySelector('.star-btn');
+		expect(btn?.classList.contains('starred')).toBe(true);
+		expect(btn?.getAttribute('aria-label')).toBe('Unstar message');
+		expect(btn?.getAttribute('aria-pressed')).toBe('true');
+		expect(btn?.querySelector('svg')?.getAttribute('fill')).toBe('currentColor');
+	});
+
+	it('fires onToggleStar with the message cid', async () => {
+		const onToggleStar = vi.fn();
+		const { container } = render(Message, {
+			message: finished({ cid: 7, msgId: 42 }),
+			onConfirm: noop, onReject: noop, onToggleStar,
+		});
+		await fireEvent.click(container.querySelector('.star-btn')!);
+		expect(onToggleStar).toHaveBeenCalledWith(7);
+	});
+});
+
+describe('room label chip (aggregate views)', () => {
+	it('renders a clickable room chip when roomName is set and a handler is passed', async () => {
+		const onRoomClick = vi.fn();
+		const { container } = render(Message, {
+			message: finished({ msgId: 42, roomToken: 'tok-1', roomName: 'general' }),
+			onConfirm: noop, onReject: noop, onRoomClick,
+		});
+		const chip = container.querySelector('.room-chip');
+		expect(chip).not.toBeNull();
+		expect(chip?.textContent).toContain('general');
+		await fireEvent.click(chip!);
+		expect(onRoomClick).toHaveBeenCalledWith('tok-1');
+	});
+
+	it('renders no room chip without a handler (room mode)', () => {
+		const { container } = render(Message, {
+			message: finished({ msgId: 42, roomToken: 'tok-1', roomName: 'general' }),
+			onConfirm: noop, onReject: noop,
+		});
+		expect(container.querySelector('.room-chip')).toBeNull();
 	});
 });

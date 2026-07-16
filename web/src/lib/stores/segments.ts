@@ -52,6 +52,16 @@ export interface ChatMessage {
 	// The model that produced this answer (canonical ID), from the terminal
 	// `done` event or the history payload. Shown in the message meta.
 	model?: string;
+	// Durable-store identity: the `messages.id` star key. Absent for in-flight /
+	// failed turns that exist only as tasks rows (not starrable) and for locally
+	// appended placeholders.
+	msgId?: number;
+	// Whether the current user has starred this message.
+	starred?: boolean;
+	// Set on aggregate-view (All / Unread / Starred) rows so the transcript can
+	// label each message with its room and jump to it.
+	roomToken?: string;
+	roomName?: string;
 }
 
 // ---- Helpers ----------------------------------------------------------------
