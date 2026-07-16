@@ -255,29 +255,6 @@
 			open={sidebarOpen}
 			onClose={() => (sidebarOpen = false)}
 		>
-			{#snippet extras()}
-				<div class="room-new">
-					{#if creatingRoom}
-						<!-- svelte-ignore a11y_autofocus -->
-						<input
-							class="room-input"
-							bind:value={newRoomName}
-							placeholder="Room name…"
-							autofocus
-							onkeydown={(e) => {
-								if (e.key === 'Enter') createRoom();
-								if (e.key === 'Escape') { creatingRoom = false; newRoomName = ''; }
-							}}
-							onblur={() => { if (!newRoomName.trim()) creatingRoom = false; }}
-						/>
-					{:else}
-						<button class="room-add" onclick={() => (creatingRoom = true)} type="button">
-							<Plus size={14} /> New room
-						</button>
-					{/if}
-				</div>
-			{/snippet}
-
 			<!-- Cross-room views, above the rooms list (mirrors the feeds sidebar's
 			     All / Unread / Starred entries). Selecting one deselects the room. -->
 			<div class="views">
@@ -312,6 +289,28 @@
 					<Star size={12} />
 					<span class="view-name">Starred</span>
 				</button>
+			</div>
+
+			<!-- Sits with the rooms list it adds to, below the cross-room views. -->
+			<div class="room-new">
+				{#if creatingRoom}
+					<!-- svelte-ignore a11y_autofocus -->
+					<input
+						class="room-input"
+						bind:value={newRoomName}
+						placeholder="Room name…"
+						autofocus
+						onkeydown={(e) => {
+							if (e.key === 'Enter') createRoom();
+							if (e.key === 'Escape') { creatingRoom = false; newRoomName = ''; }
+						}}
+						onblur={() => { if (!newRoomName.trim()) creatingRoom = false; }}
+					/>
+				{:else}
+					<button class="room-add" onclick={() => (creatingRoom = true)} type="button">
+						<Plus size={14} /> New room
+					</button>
+				{/if}
 			</div>
 
 			{#each $rooms as room (room.id)}
@@ -399,6 +398,7 @@
 						onReject={session.reject}
 						onToggleStar={session.toggleStar}
 						onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
+						aggregate={inViewMode}
 					/>
 				{/each}
 			{/if}
@@ -559,37 +559,12 @@
 
 	/* Cross-room view entries above the rooms list — styled like the feeds
 	   sidebar's All / Unread / Starred buttons (.feed-btn.special). */
-	.views {
-		display: flex;
-		flex-direction: column;
-		margin-bottom: 0.5rem;
-		padding-bottom: 0.5rem;
-		border-bottom: 1px solid var(--border-subtle);
-	}
-	.view-btn {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
-		width: 100%;
-		background: none;
-		border: none;
-		color: var(--text-muted);
-		font: inherit;
-		font-size: var(--text-base);
-		cursor: pointer;
-		padding: 0.3rem 0.6rem;
-		border-radius: 0.3rem;
-		transition: background var(--transition-fast);
-		text-align: left;
-	}
-	.view-btn:hover { background: var(--surface-raised); }
-	.view-btn.active {
-		background: var(--surface-raised);
-		color: var(--text-primary);
-	}
-	.view-name { flex: 1; min-width: 0; }
+	/* .views / .view-btn / .view-name (the All / Unread / Starred block) come
+	   from web/src/lib/styles/sidebar.css, shared with the feeds sidebar. */
 
-	.room-new { padding: 0 0.25rem 0.4rem; }
+	/* No horizontal padding: this sits inside .sidebar-list, which already
+	   insets its children, so the button lines up with the rows around it. */
+	.room-new { padding: 0 0 0.4rem; }
 	.room-add {
 		display: flex;
 		align-items: center;

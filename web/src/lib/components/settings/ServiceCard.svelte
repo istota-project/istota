@@ -143,7 +143,7 @@
 			</p>
 		{:else if oauthConnected}
 			<div class="oauth-actions">
-				<Button variant="ghost" size="sm" onclick={onDisconnect} disabled={oauthBusy}>
+				<Button variant="secondary" size="sm" onclick={onDisconnect} disabled={oauthBusy}>
 					{oauthBusy ? 'Disconnecting…' : 'Disconnect'}
 				</Button>
 			</div>

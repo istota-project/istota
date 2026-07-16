@@ -233,4 +233,34 @@ describe('room label chip (aggregate views)', () => {
 		});
 		expect(container.querySelector('.room-chip')).toBeNull();
 	});
+
+	it('renders the room name without a leading hash', () => {
+		const { container } = render(Message, {
+			message: finished({ msgId: 42, roomToken: 'tok-1', roomName: 'general' }),
+			onConfirm: noop, onReject: noop, onRoomClick: noop,
+		});
+		expect(container.querySelector('.room-chip')?.textContent?.trim()).toBe('general');
+	});
+});
+
+describe('hover metadata', () => {
+	const withMeta = () =>
+		finished({ taskId: 7, model: 'anthropic/claude-opus-4-8', durationSeconds: 12 });
+
+	it('shows task, model and duration in room mode', () => {
+		const { container } = render(Message, {
+			message: withMeta(), onConfirm: noop, onReject: noop,
+		});
+		const footer = container.querySelector('.meta-footer')?.textContent ?? '';
+		expect(footer).toContain('#7');
+		expect(footer).toContain('opus-4-8');
+		expect(footer).toContain('12s');
+	});
+
+	it('shows only the task number in the aggregate views', () => {
+		const { container } = render(Message, {
+			message: withMeta(), onConfirm: noop, onReject: noop, aggregate: true,
+		});
+		expect(container.querySelector('.meta-footer')?.textContent?.trim()).toBe('#7');
+	});
 });

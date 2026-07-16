@@ -5,15 +5,25 @@
 		title: string;
 		description?: string;
 		actions?: Snippet;
+		// Rendered beside the title (typically a .status-pill), matching the
+		// header layout ServiceCard uses for connected services.
+		status?: Snippet;
 		children: Snippet;
 	}
 
-	let { title, description, actions, children }: Props = $props();
+	let { title, description, actions, status, children }: Props = $props();
 </script>
 
 <section class="card">
 	<header class="section-header">
-		<h2>{title}</h2>
+		{#if status}
+			<div class="title">
+				<h2>{title}</h2>
+				{@render status()}
+			</div>
+		{:else}
+			<h2>{title}</h2>
+		{/if}
 		{#if actions}
 			<div class="header-actions">{@render actions()}</div>
 		{/if}
