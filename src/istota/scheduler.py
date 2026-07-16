@@ -2082,24 +2082,40 @@ def process_one_task(
         except Exception as e:
             logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
 
-    # Record the mirror's Talk post id in the assistant message's external_ids
-    # ledger (loop-prevention infra — dormant for v1 since Talk self-filters bot
-    # posts by author, but makes the no-echo invariant explicit for a future
-    # surface that doesn't).
-    if response_msg_id and _talk_is_mirror and task.conversation_token:
+    # Record the reply's Talk post id in the assistant message's external_ids
+    # ledger. Two consumers: loop-prevention (explicit no-echo invariant for a
+    # future surface that doesn't self-filter bot posts the way Talk does), and
+    # the Talk→web read-sync cap (`room_max_talk_synced_message_id`), which only
+    # advances the web cursor to the newest *stamped* row.
+    #
+    # Runs for any Talk leg, mirror or native. It was mirror-only through
+    # ISSUE-161, which left Talk-origin replies unstamped: the cap then stalled
+    # at the user's own inbound turn and the reply they'd just read in Talk
+    # stayed unread in web forever.
+    #
+    # Guarded on the post having gone to the room's *own* bound Talk channel: a
+    # task force-routed elsewhere (`output_target="talk:<other>"`) returns a
+    # post id from a foreign conversation, and writing that into this room's
+    # ledger would wrongly advance its read cap.
+    if response_msg_id and task.conversation_token and talk_token:
         try:
             with db.get_db(config.db_path) as conn:
-                row = conn.execute(
-                    "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
-                    "AND role = 'assistant' LIMIT 1",
-                    (task.conversation_token, task_id),
-                ).fetchone()
-                if row:
-                    db.set_message_external_id(
-                        conn, row["id"], "talk", str(response_msg_id),
-                    )
+                bindings = db.list_room_bindings(conn, task.conversation_token)
+                talk_ref = next(
+                    (b.surface_ref for b in bindings if b.surface == "talk"), None,
+                )
+                if talk_ref == talk_token:
+                    row = conn.execute(
+                        "SELECT id FROM messages WHERE room_token = ? "
+                        "AND task_id = ? AND role = 'assistant' LIMIT 1",
+                        (task.conversation_token, task_id),
+                    ).fetchone()
+                    if row:
+                        db.set_message_external_id(
+                            conn, row["id"], "talk", str(response_msg_id),
+                        )
         except Exception as e:
-            logger.debug("Failed to record mirror external_id for task %d: %s", task_id, e)
+            logger.debug("Failed to record talk external_id for task %d: %s", task_id, e)
 
     # Cache the result so it's immediately available for context building.
     # The result is always posted as its own message, so its real Talk ID is
