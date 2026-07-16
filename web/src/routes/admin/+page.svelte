@@ -518,11 +518,14 @@
 		margin: 0;
 	}
 
-	/* Specificity bump: `.settings .card` (from settings.css) sets
-	   `display: flex; flex-direction: column`. Without `.admin-page` here
-	   the banner inherits the column flex and stacks vertically even when
-	   there's plenty of room for four side-by-side cells. */
+	/* `.settings .card` (from settings.css) sets `display: flex; flex-direction:
+	   column` at specificity (0,2,0), which beats the global `.card-grid`
+	   layout (0,1,0). The banner is itself a `.card`, so it needs `display: grid`
+	   restated here (same specificity as `.settings .card`, but scoped, so it
+	   wins) — otherwise the cells stack in a column. The grid track sizing still
+	   comes from `.card-grid` via `--card-min` / `--card-gap`. */
 	.admin-page .system-banner {
+		display: grid;
 		--card-min: 150px;
 		--card-gap: 0.75rem 1.5rem;
 	}
