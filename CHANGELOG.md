@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The cross-room chat views (All, Unread, Starred) are quieter: the room label drops its hash, and hovering a message shows only its task number and star instead of the model and timings. Room views are unchanged.
+- The feeds sidebar's All / Unread / Starred entries match the chat sidebar's, and chat's New room button now sits below the views rather than above them.
+- The Nextcloud connection card moved under Connected services, above Google Workspace, and reads like the other service cards — a status pill beside the title. Connect and Disconnect are now the same button in two colours.
+
 ## [0.30.0] - 2026-07-16
 
 ### Added
