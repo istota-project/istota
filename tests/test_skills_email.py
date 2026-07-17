@@ -309,6 +309,10 @@ class TestCmdSend:
         args.body = "Test body"
         args.body_file = None
         args.html = False
+        args.cc = None
+        args.bcc = None
+        args.attach = None
+        args.reply_to = None
 
         result = cmd_send(args)
 
@@ -318,8 +322,15 @@ class TestCmdSend:
             body="Test body",
             config=mock_config.return_value,
             content_type="plain",
+            cc=None,
+            bcc=None,
+            attachments=None,
+            reply_to=None,
         )
-        assert result == {"status": "ok", "to": "alice@example.com", "subject": "Hello"}
+        assert result == {
+            "status": "ok", "to": "alice@example.com", "cc": [],
+            "subject": "Hello", "attachments": [],
+        }
 
     @patch("istota.skills.email._config_from_env")
     @patch("istota.skills.email.send_email")
