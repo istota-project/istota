@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - A reply that continued an email thread from a web chat room rendered as a grey command-output note instead of a normal assistant message. It now appears as a proper chat bubble; genuine alerts and logs routed to a room still show as notes.
 
+### Removed
+- Per-user static site hosting (the `/~user/` sites and the `website` skill) is gone. It was generic file publishing rather than a core capability and will return later as a cleaner standalone skill. The bot's own web root is unaffected — it can still edit files there — and existing files under your web folder are untouched.
+
 ## [0.30.0] - 2026-07-16
 
 ### Added

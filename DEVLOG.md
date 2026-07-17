@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-17: Remove per-user static site hosting (ISSUE-171)
+
+Per-user `/~user/` static sites left core. They were generic static-file publishing, not a Personal OS concern, and they coupled istota to a Nextcloud-mount path plus a server's nginx autoindex config — exactly the ambient coupling the Nextcloud-decoupling program is trying to shed. The per-user surface is gone; the bot's own instance-wide web root stays (a future standalone static-site skill can build on it).
+
+**The split that made this surgical.** The `[site]` config carried two unrelated things: `site.hostname` (the deployment's public DNS name) and the per-user static-hosting machinery. `hostname` turned out to be load-bearing for the web app — it drives the OAuth2 redirect URI, the origin/CSRF check, and the location webhook URL, all independent of whether static hosting is on. So `SiteConfig` (`enabled`/`hostname`/`base_path`) stays as an instance-level concept: the bot's own web root at `base_path`, bound read-write into the sandbox so the agent can still edit it, plus the public hostname. Everything *per-user* was removed.
+
+**Removed (per-user `/~user/`).** The `website` skill (to return later as a cleaner standalone skill parameterized by a target directory); per-user `site_enabled` everywhere — `UserConfig`, the `user_profiles` DB column across `schema.sql` and every read/write/merge/import path, the `--site-enabled`/`--no-site` CLI flags, the `web_app` profile field, and the web frontend (`api.ts`, the Settings checkbox, the mock API); the per-user nginx `/~user/` location loop, the per-user html-dir Ansible tasks, the `_istota_site_users` fact, the `www-data`-to-mount group task, and `user-index.html.j2`.
+
+**Kept (instance web root).** `WEBSITE_PATH`/`WEBSITE_URL` now point at the bot's own root and are gated on `site.enabled` + `base_path` (no per-user check); the prompt gains a "Web Root (your own static site)" resource section on the same gate; the sandbox RW bind of `base_path`; and the nginx `root` + site-root Ansible tasks under `istota_site_enabled`.
+
+**DB note.** `schema.sql` drops the `site_enabled` column so fresh installs are clean, but there's no destructive `DROP COLUMN` migration — existing production DBs keep a harmless orphan column that nothing reads or writes (it has a `DEFAULT 0`, so omitting it from inserts is fine).
+
+Rewrote the two executor test classes for the instance-level behavior and dropped the per-user `site_enabled` tests. Full suite green (6948 passed, 7 skipped); Svelte `check` clean; the rendered Ansible `[site]` block validated as TOML in both enabled/disabled states. Committed `99ed668` + a follow-up mock-shape sync `400e9f1`.
+
+**Files added/modified:**
+- `src/istota/config.py` — trimmed `SiteConfig` docstring to instance-level intent; removed `UserConfig.site_enabled` + its TOML parse (kept `Config.site` + `[site]` parsing)
+- `src/istota/executor.py` — instance-level `base_path` bwrap bind, `WEBSITE_PATH`/`WEBSITE_URL` env, and "Web Root" prompt section; removed the per-user variants
+- `src/istota/user_profiles.py` — removed `site_enabled` from the dataclass, `_PROFILE_COLUMNS`, and all row/insert/update/merge/import paths
+- `src/istota/cli.py`, `src/istota/web_app.py` — removed the CLI flags + profile field
+- `web/src/lib/api.ts`, `web/src/routes/settings/+page.svelte`, `web/vite-mock-api.ts` — removed the profile field + Settings checkbox
+- `schema.sql` — dropped the `site_enabled` column
+- `src/istota/skills/website/skill.md` — deleted
+- `config/config.example.toml`, `deploy/wizard.sh`, `deploy/ansible/{defaults,tasks,templates,README}` — reworked `[site]` docs to instance-web-root + hostname; removed per-user nginx/html/template plumbing; deleted `user-index.html.j2`
+- `.claude/rules/{config,executor,scheduler,skills}.md` — doc updates
+- `tests/test_executor.py`, `tests/test_config.py`, `tests/test_user_profiles.py`, `tests/test_cli_user_ensure.py` — rewrote/removed site tests
+
 ## 2026-07-17: Email two-way client + read scoping + quiet senders
 
 The email skill could only `send` and `output` — it could never read a mailbox. This adds the read half and closes the loop, in three stages, all with a hard multi-tenant read-scoping invariant that had to ship with the first read verb.
