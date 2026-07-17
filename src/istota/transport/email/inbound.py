@@ -137,6 +137,30 @@ def poll_emails(config: Config) -> list[int]:
             if sent_email_match and sent_email_match.user_id != user_id:
                 sent_email_match = None
 
+            # Quiet sender: this is someone's mail (owner resolved above), but the
+            # user has asked for it to be filed silently — no task, no session. We
+            # mark it processed and leave it in INBOX for a briefing / cron to read
+            # back on demand (`email from-senders`). This runs AFTER owner
+            # resolution (a quiet sender is still someone's mail, never the discard
+            # branch) and BEFORE the untrusted-sender confirmation gate below (a
+            # filtered message must not raise a gate prompt for a task that will
+            # never exist).
+            if config.is_quiet_email_sender(user_id, envelope.sender, conn):
+                db.mark_email_processed(
+                    conn,
+                    email_id=envelope.id,
+                    sender_email=envelope.sender,
+                    subject=envelope.subject,
+                    user_id=user_id,
+                    task_id=None,
+                    routing_method="quiet",
+                )
+                logger.info(
+                    "Filed quiet mail from %s for user %s (no task)",
+                    envelope.sender, user_id,
+                )
+                continue
+
             # An *emissary* reply — an external contact replying to a mail we sent
             # — is one resolved purely by the thread (we don't recognise the
             # sender otherwise). That drives the prompt template; a self-reply

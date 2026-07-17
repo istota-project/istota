@@ -266,6 +266,7 @@
 				timezone: profile.timezone,
 				email_addresses: profile.email_addresses,
 				trusted_email_senders: profile.trusted_email_senders,
+				quiet_email_senders: profile.quiet_email_senders,
 				disabled_skills: profile.disabled_skills,
 				disabled_modules: profile.disabled_modules,
 				site_enabled: profile.site_enabled,
@@ -523,6 +524,18 @@
 					oninput={(e) => {
 						if (profile)
 							profile.trusted_email_senders = parseListInput(
+								(e.currentTarget as HTMLInputElement).value,
+							);
+					}}
+				/>
+			</SettingsField>
+			<SettingsField label="Quiet email senders (filed silently — no task; fnmatch patterns, comma-separated)">
+				<input
+					type="text"
+					value={profileListString(profile.quiet_email_senders)}
+					oninput={(e) => {
+						if (profile)
+							profile.quiet_email_senders = parseListInput(
 								(e.currentTarget as HTMLInputElement).value,
 							);
 					}}

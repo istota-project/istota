@@ -175,6 +175,7 @@ smtp_host = "{{ istota_email_smtp_host }}"
 smtp_port = {{ istota_email_smtp_port }}
 poll_folder = "{{ istota_email_poll_folder }}"
 bot_email = "{{ istota_email_bot_address }}"
+imap_timeout_seconds = {{ istota_email_imap_timeout_seconds }}
 {% endif %}
 
 {# Role aliases (fast/general/smart) → concrete model ids. The native brain has

@@ -935,6 +935,7 @@
     {% if (user_item.value.display_name | default('')) %}--display-name "{{ user_item.value.display_name }}"{% endif %}
     {% for email in user_item.value.email_addresses | default([]) %}--email "{{ email }}" {% endfor %}
     {% for sender in user_item.value.trusted_email_senders | default([]) %}--trusted-sender "{{ sender }}" {% endfor %}
+    {% for sender in user_item.value.quiet_email_senders | default([]) %}--quiet-sender "{{ sender }}" {% endfor %}
     {% if (user_item.value.log_channel | default('')) %}--log-channel "{{ user_item.value.log_channel }}"{% endif %}
     {% if (user_item.value.alerts_channel | default('')) %}--alerts-channel "{{ user_item.value.alerts_channel }}"{% endif %}
     {% if user_item.value.max_foreground_workers is defined %}--max-foreground-workers {{ user_item.value.max_foreground_workers }}{% endif %}

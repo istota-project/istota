@@ -787,6 +787,8 @@ def cmd_user_ensure(args):
         updates["email_addresses"] = list(args.email)
     if args.trusted_sender is not None:
         updates["trusted_email_senders"] = list(args.trusted_sender)
+    if args.quiet_sender is not None:
+        updates["quiet_email_senders"] = list(args.quiet_sender)
     if args.log_channel is not None:
         updates["log_channel"] = args.log_channel
     if args.alerts_channel is not None:
@@ -884,6 +886,8 @@ def cmd_user_ensure(args):
         print(f"  alerts_channel: {profile.alerts_channel}")
     if profile.trusted_email_senders:
         print(f"  trusted_senders: {', '.join(profile.trusted_email_senders)}")
+    if profile.quiet_email_senders:
+        print(f"  quiet_senders: {', '.join(profile.quiet_email_senders)}")
     if profile.disabled_modules:
         print(f"  disabled_modules: {', '.join(profile.disabled_modules)}")
     if profile.default_destination and profile.default_destination != "talk":
@@ -923,6 +927,7 @@ def cmd_user_show(args):
         "disabled_skills": profile.disabled_skills,
         "disabled_modules": profile.disabled_modules,
         "trusted_email_senders": profile.trusted_email_senders,
+        "quiet_email_senders": profile.quiet_email_senders,
         "routing": profile.routing,
         "default_destination": profile.default_destination,
         "email_reply_routing": profile.email_reply_routing,
@@ -1414,6 +1419,11 @@ def main():
     user_ensure_parser.add_argument(
         "--trusted-sender", action="append",
         help="Trusted email sender pattern (repeatable; fnmatch syntax)",
+    )
+    user_ensure_parser.add_argument(
+        "--quiet-sender", action="append",
+        help="Quiet email sender pattern — mail filed silently, no task "
+             "(repeatable; fnmatch syntax)",
     )
     user_ensure_parser.add_argument("--log-channel", help="Talk room token for verbose execution logs")
     user_ensure_parser.add_argument("--alerts-channel", help="Talk room token for confirmations and alerts")

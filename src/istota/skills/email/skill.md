@@ -17,7 +17,7 @@ The bot has one shared mailbox. You can read it with these verbs (all print a JS
 - `search "<IMAP SEARCH>"` — a raw IMAP SEARCH string, passed to the server verbatim (e.g. `FROM "alice@x.com" SUBJECT "invoice"`, `UNSEEN`, `SINCE 1-Jan-2026`). A malformed string errors — it does not silently narrow to a subject match.
 - `thread <id>` — the message's reply chain, in order (a real References/In-Reply-To walk).
 - `attachments <id> --dest PATH` — download an email's attachments to a directory.
-- `from-senders --senders a@x.com,b@y.com [--since …]` — batch-fetch mail from named senders via server-side search. Use this for digests: one read over N messages instead of many.
+- `from-senders --senders a@x.com,b@y.com [--since …]` — batch-fetch mail from named senders via server-side search. Use this for digests: one read over N messages instead of many. This is the read-back path for *quiet senders* (see below): a briefing or scheduled job runs `from-senders --senders <quiet list> --since <last-run>` and composes one summary, instead of every newsletter spawning its own session.
 - `newsletters --sources a@x.com,example.com [--since …]` — like `from-senders`, `--sources` required (domains match by substring).
 
 ### Scope — whose mail you see

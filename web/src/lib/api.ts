@@ -596,6 +596,7 @@ export interface UserProfile {
 	timezone: string;
 	email_addresses: string[];
 	trusted_email_senders: string[];
+	quiet_email_senders: string[];
 	log_channel: string;
 	alerts_channel: string;
 	disabled_skills: string[];

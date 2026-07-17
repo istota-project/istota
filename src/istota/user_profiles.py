@@ -50,6 +50,7 @@ class UserProfile:
     max_background_workers: int = 0
     disabled_skills: list[str] = field(default_factory=list)
     trusted_email_senders: list[str] = field(default_factory=list)
+    quiet_email_senders: list[str] = field(default_factory=list)
     disabled_modules: list[str] = field(default_factory=list)
     # Purpose-keyed delivery routing: {purpose -> output_target descriptor}.
     routing: dict[str, str] = field(default_factory=dict)
@@ -63,7 +64,7 @@ _PROFILE_COLUMNS = (
     "display_name", "email_addresses", "timezone",
     "log_channel", "alerts_channel",
     "site_enabled", "max_foreground_workers", "max_background_workers",
-    "disabled_skills", "trusted_email_senders",
+    "disabled_skills", "trusted_email_senders", "quiet_email_senders",
     "disabled_modules",
     "routing", "default_destination", "email_reply_routing",
 )
@@ -71,7 +72,8 @@ _PROFILE_COLUMNS = (
 # Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
 _DICT_COLUMNS = frozenset({"routing"})
 _LIST_COLUMNS = frozenset({
-    "email_addresses", "disabled_skills", "trusted_email_senders", "disabled_modules",
+    "email_addresses", "disabled_skills", "trusted_email_senders",
+    "quiet_email_senders", "disabled_modules",
 })
 
 
@@ -107,6 +109,7 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         max_background_workers=int(row["max_background_workers"] or 0),
         disabled_skills=_parse_json_list(row["disabled_skills"]),
         trusted_email_senders=_parse_json_list(row["trusted_email_senders"]),
+        quiet_email_senders=_parse_json_list(row["quiet_email_senders"]),
         disabled_modules=_parse_json_list(row["disabled_modules"]),
         routing=_parse_json_dict(row["routing"]),
         default_destination=row["default_destination"] or "talk",
@@ -232,6 +235,7 @@ def ensure_profile(
         max_background_workers=int(_attr(seed_from, "max_background_workers") or 0),
         email_addresses=list(_attr(seed_from, "email_addresses") or []),
         trusted_email_senders=list(_attr(seed_from, "trusted_email_senders") or []),
+        quiet_email_senders=list(_attr(seed_from, "quiet_email_senders") or []),
         disabled_skills=list(_attr(seed_from, "disabled_skills") or []),
         disabled_modules=list(_attr(seed_from, "disabled_modules") or []),
         routing=dict(_attr(seed_from, "routing") or {}),
@@ -452,6 +456,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         int(profile.max_background_workers or 0),
         json.dumps(list(profile.disabled_skills)),
         json.dumps(list(profile.trusted_email_senders)),
+        json.dumps(list(profile.quiet_email_senders)),
         json.dumps(list(profile.disabled_modules)),
         json.dumps(dict(profile.routing)),
         profile.default_destination or "talk",
@@ -514,6 +519,7 @@ def import_from_user_configs(
             max_background_workers=int(getattr(user_config, "max_background_workers", 0) or 0),
             disabled_skills=list(getattr(user_config, "disabled_skills", []) or []),
             trusted_email_senders=list(getattr(user_config, "trusted_email_senders", []) or []),
+            quiet_email_senders=list(getattr(user_config, "quiet_email_senders", []) or []),
             disabled_modules=list(getattr(user_config, "disabled_modules", []) or []),
             routing=dict(getattr(user_config, "routing", {}) or {}),
             default_destination=getattr(user_config, "default_destination", "") or "talk",
@@ -562,7 +568,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     # "user cleared this" signal.
     for attr in (
         "email_addresses", "disabled_skills",
-        "trusted_email_senders", "disabled_modules",
+        "trusted_email_senders", "quiet_email_senders", "disabled_modules",
     ):
         setattr(user_config, attr, list(getattr(profile, attr) or []))
 
