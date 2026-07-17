@@ -777,17 +777,37 @@ class Config:
 
         Deliberately unlike :meth:`is_trusted_email_sender`: it does NOT
         implicitly match the user's own addresses (you never want your own mail
-        silently dropped) and has no runtime DB table — the ``conn`` argument is
-        accepted for call-site symmetry but unused.
+        silently dropped) and has no *dedicated* runtime table (there is no
+        ``add_quiet_sender`` equivalent).
+
+        It DOES read the user's ``quiet_email_senders`` from the live
+        ``user_profiles`` row when a DB is configured — same as
+        :meth:`is_module_enabled` — so a pattern added via ``/settings`` or
+        ``istota user ensure`` takes effect on the next poll without a daemon
+        restart. Falls back to the in-memory ``UserConfig`` on the init/test
+        paths or an unseeded row. ``conn`` is reused for the read when given.
         """
         from fnmatch import fnmatch
 
-        user = self.users.get(user_id)
-        if not user:
-            return False
+        patterns: list[str] | None = None
+        if self.db_path is not None and Path(self.db_path).exists():
+            try:
+                from . import user_profiles as _up
+                profile = _up.get_profile(Path(self.db_path), user_id, conn=conn)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("is_quiet_email_sender DB read failed: %s", e)
+                profile = None
+            if profile is not None:
+                patterns = profile.quiet_email_senders or []
+
+        if patterns is None:
+            user = self.users.get(user_id)
+            if not user:
+                return False
+            patterns = user.quiet_email_senders
 
         sender_lower = sender_email.lower()
-        for pattern in user.quiet_email_senders:
+        for pattern in patterns:
             if fnmatch(sender_lower, pattern.lower()):
                 return True
         return False
