@@ -51,6 +51,7 @@ class EmailConfig:
     poll_folder: str = "INBOX"
     bot_email: str = ""  # bot's email address (to skip own messages)
     confirm_sender_match: bool = True  # require confirmation for sender-match routing (prevents From: spoofing)
+    imap_timeout_seconds: int = 30  # socket timeout for IMAP connections (0/unset → 30)
 
     @property
     def effective_smtp_user(self) -> str:
@@ -1150,6 +1151,8 @@ def load_config(config_path: Path | None = None) -> Config:
             smtp_password=email.get("smtp_password", ""),
             poll_folder=email.get("poll_folder", "INBOX"),
             bot_email=email.get("bot_email", ""),
+            confirm_sender_match=email.get("confirm_sender_match", True),
+            imap_timeout_seconds=email.get("imap_timeout_seconds", 30),
         )
 
     if "conversation" in data:
