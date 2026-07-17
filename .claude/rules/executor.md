@@ -101,7 +101,7 @@ def build_prompt(
 | Money | `MONEY_USER` | The istota user_id (in-process facade; config resolved from the per-user money DB via `resolve_for_user`). `MONEY_CONFIG` is gone — there is no standalone money config path. |
 | Feeds | `FEEDS_USER` | From the user's `feeds` resource (in-process; defaults to istota user_id) |
 | Location | `LOCATION_DB_PATH` | `istota.location.resolve_for_user(user_id, config).db_path` via the location skill's `setup_env` hook. Per-user `{workspace}/location/data/location.db`. Skill subcommands needing the framework geocode caches (`reverse_geocode`, `day_summary`) open a second conn to `ISTOTA_DB_PATH`. |
-| Website | `WEBSITE_PATH`, `WEBSITE_URL` | `config.site.*` (if enabled + user site_enabled) |
+| Website | `WEBSITE_PATH`, `WEBSITE_URL` | `config.site.*` (bot's own web root; if `site.enabled` + `base_path`) |
 | Developer | `DEVELOPER_REPOS_DIR` | `config.developer.repos_dir` (if enabled) |
 | Developer | `GITLAB_URL` | `config.developer.gitlab_url` (if enabled) |
 | Developer | `GITLAB_DEFAULT_NAMESPACE` | `config.developer.gitlab_default_namespace` (if enabled + set) |

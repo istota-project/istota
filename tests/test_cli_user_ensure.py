@@ -38,7 +38,6 @@ class _FakeArgs:
             "max_background_workers": None,
             "disabled_skill": None,
             "disabled_module": None,
-            "site_enabled": None,
             "default_destination": None,
             "route": None,
             "email_reply_routing": None,

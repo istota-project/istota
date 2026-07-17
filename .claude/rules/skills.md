@@ -204,7 +204,6 @@ Operator overrides in `config/skills/` can still use `skill.toml` as a fallback.
 | `developer` | — | git, gitlab, repo, repository, commit, branch, MR, ... | — | — |
 | `location` | — | location, gps, where, place, tracking, ... | — | — |
 | `bookmarks` | — | bookmark, karakeep, save, read later, ... | — | — |
-| `website` | — | website, site, publish, blog, ... | — | — |
 | `feeds` | — | feed, feeds, rss, subscribe, subscription, add feed, remove feed, unsubscribe, opml | — | — |
 | `google_workspace` | — | google drive, google docs, google sheets, google calendar, google chat, google workspace, gmail, spreadsheet, gws | — | — |
 | `money` | — | accounting, ledger, beancount, invoice, invoicing, expense, transaction, ... | — | — |

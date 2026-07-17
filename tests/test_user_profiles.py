@@ -68,13 +68,6 @@ class TestUpdate:
         with pytest.raises(ValueError, match="no user_profile row"):
             user_profiles.update_profile(db_path, "ghost", timezone="UTC")
 
-    def test_site_enabled_coercion(self, db_path):
-        user_profiles.ensure_profile(db_path, "alice")
-        user_profiles.update_profile(db_path, "alice", site_enabled=True)
-        assert user_profiles.get_profile(db_path, "alice").site_enabled is True
-        user_profiles.update_profile(db_path, "alice", site_enabled=False)
-        assert user_profiles.get_profile(db_path, "alice").site_enabled is False
-
     def test_updated_at_bumps(self, db_path):
         user_profiles.ensure_profile(db_path, "alice")
         with sqlite3.connect(db_path) as conn:
@@ -94,13 +87,11 @@ class TestUpsert:
             timezone="UTC",
             email_addresses=["alice@x.com"],
             log_channel="abc123",
-            site_enabled=True,
         ))
         p = user_profiles.get_profile(db_path, "alice")
         assert p.display_name == "Alice the Second"
         assert p.email_addresses == ["alice@x.com"]
         assert p.log_channel == "abc123"
-        assert p.site_enabled is True
 
 
 class TestDelete:

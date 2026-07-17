@@ -236,14 +236,6 @@
     append: yes
   when: not istota_update_only and not istota_web_only and istota_site_enabled
 
-- name: Add www-data to nextcloud-mount group for site hosting
-  user:
-    name: www-data
-    groups: nextcloud-mount
-    append: yes
-  notify: restart nginx
-  when: not istota_update_only and not istota_web_only and istota_site_enabled and istota_use_nextcloud_mount
-
 - name: Allow Docker containers to access host ports
   community.general.ufw:
     rule: allow
@@ -945,7 +937,6 @@
     {% for purpose, descriptor in (user_item.value.routing | default({})).items() %}--route "{{ purpose }}={{ descriptor }}" {% endfor %}
     {% if (user_item.value.default_destination | default('')) %}--default-destination "{{ user_item.value.default_destination }}"{% endif %}
     {% if (user_item.value.email_reply_routing | default('')) %}--email-reply-routing "{{ user_item.value.email_reply_routing }}"{% endif %}
-    {% if user_item.value.site_enabled | default(false) %}--site-enabled{% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"
   loop: "{{ istota_users | dict2items }}"
@@ -2126,7 +2117,7 @@
   when: istota_use_nextcloud_mount and not istota_web_only
 
 # ============================================================
-# NGINX SITE HOSTING
+# NGINX (web UI + webhooks reverse proxy + bot web root)
 # ============================================================
 
 # nginx — inlined (replace with a dedicated role if you prefer)
@@ -2135,15 +2126,6 @@
     name: nginx
     state: present
   when: (istota_site_enabled or istota_location_enabled | default(false) or istota_web_enabled | default(false)) and not istota_update_only and not istota_web_only
-
-- name: Build list of site users
-  set_fact:
-    _istota_site_users: >-
-      {{ istota_users | dict2items
-         | selectattr('value.site_enabled', 'defined')
-         | selectattr('value.site_enabled', 'equalto', true)
-         | list }}
-  when: not istota_web_only
 
 - name: Create site root html directory
   file:
@@ -2162,31 +2144,6 @@
     group: www-data
     mode: "0644"
     force: no
-  when: istota_site_enabled and not istota_web_only
-
-- name: Create per-user html directories
-  file:
-    path: "{{ istota_nextcloud_mount_path }}/Users/{{ item.key }}/{{ istota_namespace }}/html"
-    state: directory
-    owner: "{{ istota_user }}"
-    group: www-data
-    mode: "0755"
-  loop: "{{ _istota_site_users | default([]) }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: istota_site_enabled and not istota_web_only
-
-- name: Deploy default index.html for site users
-  template:
-    src: user-index.html.j2
-    dest: "{{ istota_nextcloud_mount_path }}/Users/{{ item.key }}/{{ istota_namespace }}/html/index.html"
-    owner: "{{ istota_user }}"
-    group: www-data
-    mode: "0644"
-    force: no
-  loop: "{{ _istota_site_users | default([]) }}"
-  loop_control:
-    label: "{{ item.key }}"
   when: istota_site_enabled and not istota_web_only
 
 - name: Deploy nginx config

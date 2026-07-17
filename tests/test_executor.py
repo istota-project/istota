@@ -1183,7 +1183,9 @@ class TestAllowlistPatternConversion:
 
 
 class TestWebsiteEnvVars:
-    def _make_config(self, tmp_path, site_enabled=True, user_site_enabled=True):
+    """The bot's own instance-wide web root — no per-user gating."""
+
+    def _make_config(self, tmp_path, site_enabled=True, base_path="set"):
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
@@ -1192,13 +1194,12 @@ class TestWebsiteEnvVars:
         (skills_dir / "files.md").write_text("File operations guide.")
         mount_path = tmp_path / "mount"
         mount_path.mkdir(parents=True)
+        resolved_base = str(tmp_path / "html") if base_path == "set" else base_path
         site = SiteConfig(
             enabled=site_enabled,
             hostname="istota.example.com",
+            base_path=resolved_base,
         )
-        users = {}
-        if user_site_enabled is not None:
-            users["alice"] = UserConfig(site_enabled=user_site_enabled)
         return Config(
             db_path=db_path,
             skills_dir=skills_dir,
@@ -1206,7 +1207,7 @@ class TestWebsiteEnvVars:
             temp_dir=tmp_path / "temp",
             nextcloud_mount_path=mount_path,
             site=site,
-            users=users,
+            users={"alice": UserConfig()},
         )
 
     def _make_task(self, conn):
@@ -1225,8 +1226,8 @@ class TestWebsiteEnvVars:
             execute_task(task, config, [], conn=conn)
 
         env = mock_run.call_args[1]["env"]
-        assert env["WEBSITE_PATH"] == str(tmp_path / "mount" / "Users" / "alice" / "istota" / "html")
-        assert env["WEBSITE_URL"] == "https://istota.example.com/~alice"
+        assert env["WEBSITE_PATH"] == str(tmp_path / "html")
+        assert env["WEBSITE_URL"] == "https://istota.example.com/"
 
     @patch("istota.executor.subprocess.run")
     def test_website_env_vars_not_set_when_site_disabled(self, mock_run, tmp_path):
@@ -1244,8 +1245,8 @@ class TestWebsiteEnvVars:
         assert "WEBSITE_URL" not in env
 
     @patch("istota.executor.subprocess.run")
-    def test_website_env_vars_not_set_when_user_not_enabled(self, mock_run, tmp_path):
-        config = self._make_config(tmp_path, user_site_enabled=False)
+    def test_website_env_vars_not_set_when_no_base_path(self, mock_run, tmp_path):
+        config = self._make_config(tmp_path, base_path="")
         (tmp_path / "temp" / "alice").mkdir(parents=True)
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
@@ -1368,47 +1369,48 @@ class TestWebsitePromptSection:
         db.init_db(db_path)
         mount_path = tmp_path / "mount"
         mount_path.mkdir(parents=True)
+        base_path = str(tmp_path / "html")
         config = Config(
             db_path=db_path,
             nextcloud_mount_path=mount_path,
-            site=SiteConfig(enabled=True, hostname="istota.example.com"),
-            users={"alice": UserConfig(site_enabled=True)},
+            site=SiteConfig(enabled=True, hostname="istota.example.com", base_path=base_path),
+            users={"alice": UserConfig()},
         )
         with db.get_db(db_path) as conn:
             task_id = db.create_task(conn, prompt="build my website", user_id="alice", source_type="talk")
             task = db.get_task(conn, task_id)
         prompt = build_prompt(task, [], config)
-        assert "https://istota.example.com/~alice" in prompt
-        assert "Users/alice/istota/html" in prompt
-        assert "Website:" in prompt
+        assert "https://istota.example.com/" in prompt
+        assert base_path in prompt
+        assert "Web Root" in prompt
 
     def test_website_not_in_prompt_when_disabled(self, tmp_path):
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         config = Config(
             db_path=db_path,
-            site=SiteConfig(enabled=False),
-            users={"alice": UserConfig(site_enabled=True)},
+            site=SiteConfig(enabled=False, base_path=str(tmp_path / "html")),
+            users={"alice": UserConfig()},
         )
         with db.get_db(db_path) as conn:
             task_id = db.create_task(conn, prompt="build my website", user_id="alice", source_type="talk")
             task = db.get_task(conn, task_id)
         prompt = build_prompt(task, [], config)
-        assert "Website:" not in prompt
+        assert "Web Root" not in prompt
 
-    def test_website_not_in_prompt_when_user_not_enabled(self, tmp_path):
+    def test_website_not_in_prompt_when_no_base_path(self, tmp_path):
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         config = Config(
             db_path=db_path,
-            site=SiteConfig(enabled=True, hostname="istota.example.com"),
-            users={"alice": UserConfig(site_enabled=False)},
+            site=SiteConfig(enabled=True, hostname="istota.example.com", base_path=""),
+            users={"alice": UserConfig()},
         )
         with db.get_db(db_path) as conn:
             task_id = db.create_task(conn, prompt="build my website", user_id="alice", source_type="talk")
             task = db.get_task(conn, task_id)
         prompt = build_prompt(task, [], config)
-        assert "Website:" not in prompt
+        assert "Web Root" not in prompt
 
 
 # ---------------------------------------------------------------------------

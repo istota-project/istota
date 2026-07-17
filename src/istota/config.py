@@ -269,7 +269,6 @@ class UserConfig:
     resources: list[ResourceConfig] = field(default_factory=list)
     log_channel: str = ""  # Talk room token for verbose task execution logs
     alerts_channel: str = ""  # Talk room token for confirmations and alerts
-    site_enabled: bool = False  # static website hosting at /~user/
     max_foreground_workers: int = 0  # per-user fg worker override (0 = use global default)
     max_background_workers: int = 0  # per-user bg worker override (0 = use global default)
     disabled_skills: list[str] = field(default_factory=list)  # skills to exclude from selection
@@ -439,7 +438,13 @@ class WebConfig:
 
 @dataclass
 class SiteConfig:
-    """Static website hosting configuration."""
+    """Instance web-root + public hostname.
+
+    ``base_path`` is the bot's own static web root (instance-wide, not
+    per-user) that the agent may edit. ``hostname`` is the deployment's
+    public DNS name, used by the web app for OAuth2 redirect derivation,
+    origin/CSRF checks, and webhook URLs — independent of ``enabled``.
+    """
     enabled: bool = False
     hostname: str = ""        # e.g. "istota.example.com"
     base_path: str = ""       # e.g. "/srv/app/istota/html"
@@ -1071,7 +1076,6 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         resources=resources,
         log_channel=user_data.get("log_channel", ""),
         alerts_channel=user_data.get("alerts_channel", ""),
-        site_enabled=user_data.get("site_enabled", False),
         max_foreground_workers=user_data.get("max_foreground_workers", 0),
         max_background_workers=user_data.get("max_background_workers", 0),
         disabled_skills=user_data.get("disabled_skills", []),

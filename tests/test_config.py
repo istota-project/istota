@@ -923,10 +923,6 @@ class TestSiteConfig:
         cfg = Config()
         assert cfg.site.enabled is False
 
-    def test_user_config_site_enabled_default(self):
-        uc = UserConfig()
-        assert uc.site_enabled is False
-
     def test_load_from_toml(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
@@ -946,25 +942,6 @@ base_path = "/srv/app/istota/html"
         cfg = load_config(config_file)
         assert cfg.site.enabled is False
         assert cfg.site.hostname == ""
-
-    def test_user_site_enabled_from_toml(self, tmp_path):
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[users.alice]
-display_name = "Alice"
-site_enabled = true
-""")
-        cfg = load_config(config_file)
-        assert cfg.users["alice"].site_enabled is True
-
-    def test_user_site_enabled_default_false_in_toml(self, tmp_path):
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[users.bob]
-display_name = "Bob"
-""")
-        cfg = load_config(config_file)
-        assert cfg.users["bob"].site_enabled is False
 
 
         assert cfg.config_path == config_file

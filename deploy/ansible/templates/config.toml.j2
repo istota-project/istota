@@ -373,10 +373,10 @@ cron = "{{ istota_channel_sleep_cycle_cron }}"
 lookback_hours = {{ istota_channel_sleep_cycle_lookback_hours }}
 memory_retention_days = {{ istota_channel_sleep_cycle_memory_retention_days }}
 {% endif %}
-{% if istota_site_enabled %}
+{% if istota_site_enabled or istota_hostname %}
 
 [site]
-enabled = true
+enabled = {{ istota_site_enabled | default(false) | lower }}
 base_path = "{{ istota_site_base_path }}"
 hostname = "{{ istota_hostname }}"
 {% endif %}

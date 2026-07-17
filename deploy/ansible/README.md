@@ -68,7 +68,7 @@ All variables with defaults are documented in `defaults/main.yml`. Key groups:
 | Sleep cycle | `istota_sleep_cycle_enabled` | `false` |
 | Channel sleep cycle | `istota_channel_sleep_cycle_enabled` | `false` |
 | Whisper transcription | `istota_whisper_enabled` | `false` |
-| Nginx site hosting | `istota_site_enabled` | `false` |
+| Bot web root (nginx) | `istota_site_enabled` | `false` |
 | Node.js | `istota_nodejs_enabled` | `false` |
 | Developer/GitLab | `istota_developer_enabled` | `false` |
 | Database backups | `istota_backup_enabled` | `true` |
@@ -81,7 +81,7 @@ The following external role dependencies have been inlined as direct tasks. You 
 - **Docker**: `apt-get install docker.io docker-compose-plugin` (when `istota_browser_enabled`)
 - **rclone**: `curl https://rclone.org/install.sh | bash` + config file (when `istota_configure_rclone`)
 - **rclone mount**: Systemd unit for FUSE mount (when `istota_use_nextcloud_mount`)
-- **nginx**: `apt-get install nginx` (when `istota_site_enabled`)
+- **nginx**: `apt-get install nginx` (when `istota_site_enabled`, location, or web enabled)
 - **Node.js**: NodeSource 20.x setup (when `istota_nodejs_enabled`)
 
 ## Update mode

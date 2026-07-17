@@ -554,15 +554,21 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # `{workspace}/money/ledgers/*.beancount`.
 
 # ============================================================================
-# Static Website Hosting
+# Web Root + Public Hostname
 # ============================================================================
-# Serves static files at https://{hostname}/~{user_id}/ for users with
-# site_enabled = true. Files written directly to base_path/{user_id}/.
+# `hostname` is the deployment's public DNS name. It is used by the web UI
+# (OAuth2 redirect + origin/CSRF checks) and the location webhook URL — set
+# it whenever the web or location features are enabled, regardless of
+# `enabled` below.
+#
+# `enabled` + `base_path` control the bot's own static web root: the agent
+# may edit files under `base_path`. Serving is left to whatever web server
+# points at that directory. (Per-user `/~user/` sites were removed.)
 
 # [site]
 # enabled = false
-# hostname = "istota.example.com"                # public hostname
-# base_path = "/srv/app/istota/html"       # local directory for site files
+# hostname = "istota.example.com"          # public hostname
+# base_path = "/srv/app/istota/html"       # bot's static web root
 
 # ============================================================================
 # Authenticated Web Interface (Nextcloud built-in OAuth2)
@@ -636,7 +642,6 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 display_name = "Alice"
 email_addresses = ["alice@example.com", "alice.work@company.com"]
 timezone = "America/New_York"  # IANA timezone for briefing scheduling
-# site_enabled = true  # enable static website at /~alice/
 # alerts_channel = "alertsroom456"  # Talk room for confirmations and security alerts
 # trusted_email_senders = ["*@company.com"]  # trusted senders bypass email confirmation gate
 
