@@ -235,10 +235,12 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Env vars**: `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `ISTOTA_DEFERRED_DIR`, `ISTOTA_TASK_ID`
 **Note**: `always_include` core skill. Persistent per-user, namespaced JSON store. Writes go through deferred-DB pattern under sandbox. Set ops (`set-add`/`set-remove`/`set-contains`/`set-size`/`set-members`) operate on a JSON-array value at `<ns>/<key>` with plain-string members — added so membership-tracking patterns (seen IDs, processed hashes) don't have to round-trip the full array through `get`. Deferred `set-add`/`set-remove` carry only the member list; the scheduler re-reads the current value at apply time so concurrent ops compose correctly.
 
-### `email/` - IMAP/SMTP
-**Subcommands**: `send`, `output`
-**Env vars**: `IMAP_HOST/PORT/USER/PASSWORD`, `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM`, `ISTOTA_TASK_ID`, `ISTOTA_DEFERRED_DIR`
-**Key fns**: `list_emails()`, `read_email()`, `send_email()`, `reply_to_email()`, `search_emails()`, `get_newsletters()`, `delete_email()`, `cmd_output()`
+### `email/` - IMAP/SMTP (two-way client)
+**Read subcommands**: `list` (+`--since`/`--from`/`--unread`, snippet + has_attachments), `read` (headers, plain **and** html, attachment manifest), `search` (raw IMAP SEARCH string, verbatim — errors, never silent subject-match), `thread` (real References/In-Reply-To walk), `attachments <id> --dest`, `from-senders --senders` (server-side SEARCH, no 100-truncation — the digest/batching path), `newsletters --sources` (required). Every read verb takes `--scope {mine,shared,all}` (default `all`).
+**Write subcommands**: `send` (+`--cc`/`--bcc`/`--attach`(repeatable)/`--reply-to`; Bcc never transmitted), `reply`/`reply-all <id>` (threaded from a fetched message), `mark <id> {read,unread,flagged}` + `delete <id>` (destructive — refuse without `--confirmed`), `output` (deferred structured reply).
+**Read scoping**: shared `istota.email_ownership` module resolves who owns an inbound message (plus-address → sender-match → thread-match); the inbound poll (`transport/email/inbound.py`) and the read-scope filter agree exactly, so an unscoped read can't leak one user's mail to another. `shared`/`all` fail closed if the framework DB (thread arm) is unavailable. `--scope mine` pushes `TO bot+<user>@ OR FROM <addrs>` down to the server. Fetched bodies/snippets are wrapped in an untrusted-content delimiter; the whole payload carries an `untrusted: true` notice.
+**Env vars**: `IMAP_HOST/PORT/USER/PASSWORD`, `IMAP_TIMEOUT`, `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM`, `ISTOTA_USER_ID`, `ISTOTA_DB_PATH`, `ISTOTA_TASK_ID`, `ISTOTA_DEFERRED_DIR`. Read verbs `load_config()` (via `ISTOTA_CONFIG_PATH`) for the user table + DB (scoping); IMAP/SMTP creds come from the proxy-injected env.
+**Key fns**: `list_emails()`, `read_email()`, `fetch_emails_full()`, `send_email()`, `reply_to_email()`, `mark_email()`, `search_emails()`, `get_newsletters()`, `delete_email()`, `cmd_output()`; `email_ownership.resolve_email_owner/owner_in_scope`.
 
 ### `calendar/` - CalDAV
 **Subcommands**: `list` (`--date`, `--week`), `create`, `update` (`--clear-location`, `--clear-description`), `delete`
