@@ -37,31 +37,9 @@ server {
   # include /etc/nginx/snippets/letsencrypt.conf;
 
 {% if istota_site_enabled %}
+  # The bot's own static web root
   root {{ istota_home }}/html;
-
-  # Per-user site locations
-{% for user in _istota_site_users %}
-  location /~{{ user.key }} {
-    alias {{ istota_nextcloud_mount_path }}/Users/{{ user.key }}/{{ istota_namespace }}/html;
-    autoindex on;
-    # To prevent issues with nginx serving from rclone fuse mount
-    sendfile off;
-    open_file_cache off;
-{% for route in user.value.site_private_routes | default([]) %}
-
-    location /~{{ user.key }}{{ route }} {
-      alias {{ istota_nextcloud_mount_path }}/Users/{{ user.key }}/{{ istota_namespace }}/html{{ route }};
-      # Restrict to private/local networks only
-      allow 10.0.0.0/8;
-      allow 172.16.0.0/12;
-      allow 192.168.0.0/16;
-      deny all;
-      autoindex on;
-    }
-{% endfor %}
-  }
-
-{% endfor %}
+  autoindex on;
 {% endif %}
 
 {% if istota_web_enabled %}

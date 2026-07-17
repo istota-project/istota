@@ -113,6 +113,11 @@ talk_read_sync_interval: int = 60   # Talk→web read pull cadence (s); 0 disabl
 ```
 enabled: bool = False        hostname: str = ""           base_path: str = ""
 ```
+`hostname` is the deployment's public DNS name (web OAuth2 redirect + origin/CSRF
+checks + location webhook URL), used regardless of `enabled`. `enabled` +
+`base_path` are the bot's own instance-wide static web root, bound RW into the
+sandbox so the agent can edit it. Per-user `/~user/` static sites were removed
+(ISSUE-171).
 
 ### `NetworkConfig`
 ```
@@ -228,7 +233,6 @@ timezone: str = "UTC"                     briefings: list[BriefingConfig] = []
 resources: list[ResourceConfig] = []
 log_channel: str = ""                     # Talk room for verbose execution logs
 alerts_channel: str = ""                  # Talk room for confirmations/alerts
-site_enabled: bool = False
 max_foreground_workers: int = 0           max_background_workers: int = 0  # 0 = use global default
 disabled_skills: list[str] = []           # per-user skills to exclude
 trusted_email_senders: list[str] = []     # patterns for trusted senders (email gate)
@@ -323,7 +327,7 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 4. Parse `[security]` section → `SecurityConfig`
 5. Call `load_admin_users()` → `config.admin_users`
 6. Apply env var overrides for secrets (`ISTOTA_NEXTCLOUD_APP_PASSWORD` → `nextcloud.app_password`, etc.)
-7. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, site_enabled, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
+7. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
 8. **Phase 7a**: `_apply_user_resources(config)` overlays the `user_resources` DB table onto `config.users[*].resources`. Each row becomes a `ResourceConfig` entry with extras decoded from JSON. Dedup is keyed on `(type, path)` — DB wins. Distinct paths coexist.
 9. **Modules refactor (between 7a and 7b)**: `_migrate_obsolete_resources(config)` first calls `secrets_store.import_from_user_configs` (idempotent — extends `_IMPORT_MAP` to absorb karakeep `base_url`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources(db_path)` deletes `user_resources` rows whose type is in the retired set (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`), then filters those types out of `uc.resources` in memory so the rest of the load cycle sees post-cleanup state.
 10. **Phase 7b**: `_apply_user_briefings(config)` overlays the `briefing_configs` DB table onto `config.users[*].briefings`. Each row becomes a `BriefingConfig` entry. Dedup is keyed on `name` — DB wins. Disabled DB rows (`enabled=0`) drop the matching TOML name without scheduling, so the web UI can mute a TOML-templated briefing without re-templating.

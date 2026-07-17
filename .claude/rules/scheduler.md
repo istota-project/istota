@@ -291,7 +291,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `task_logs` | — | task_id, level, message, timestamp |
 | `task_events` | `TaskEvent` (in `events.py`) | id, task_id, seq, kind, payload (JSON), created_at; `UNIQUE(task_id, seq)`. Task-event-streaming log. `seq` monotonic per task (writer-assigned). Read via `db.get_task_events(task_id, since_seq)`; `seq` resumed across retries via `db.get_max_task_event_seq` (log kept, not wiped on retry); cleared via `db.delete_task_events(task_id)` only in `cleanup_old_tasks` (retention). Cascade clause decorative — hand-deleted. |
 | `memory_chunks` | — | (from memory_search.py schema) |
-| `user_profiles` | — | user_id, display_name, timezone, log_channel, alerts_channel, site_enabled, max_foreground_workers, max_background_workers, email_addresses (JSON), disabled_skills (JSON), disabled_modules (JSON), trusted_email_senders (JSON) |
+| `user_profiles` | — | user_id, display_name, timezone, log_channel, alerts_channel, max_foreground_workers, max_background_workers, email_addresses (JSON), disabled_skills (JSON), disabled_modules (JSON), trusted_email_senders (JSON) |
 | `secrets` | — | user_id, service, key, value (Fernet ciphertext), created_at, updated_at, last_accessed_at |
 | `knowledge_facts` | — | id, user_id, subject, predicate, object, source, source_task_id, valid_from, valid_to, created_at |
 | `knowledge_facts_audit` | — | id, fact_id, user_id, op, payload (JSON), source_task_id, created_at |

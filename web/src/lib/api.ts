@@ -603,7 +603,6 @@ export interface UserProfile {
 	disabled_modules: string[];
 	max_foreground_workers: number;
 	max_background_workers: number;
-	site_enabled: boolean;
 	default_destination: string;
 	routing: Record<string, string>;
 	// Read-only hint from the server: surfaces available for delivery routing.

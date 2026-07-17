@@ -3238,7 +3238,6 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "disabled_modules":       {"type": "list[str]"},
     "max_foreground_workers": {"type": "int"},
     "max_background_workers": {"type": "int"},
-    "site_enabled":           {"type": "bool"},
     "default_destination":    {"type": "descriptor"},
     "routing":                {"type": "routing"},
 }
@@ -3426,7 +3425,6 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "disabled_modules": profile.disabled_modules,
         "max_foreground_workers": profile.max_foreground_workers,
         "max_background_workers": profile.max_background_workers,
-        "site_enabled": profile.site_enabled,
         "default_destination": profile.default_destination,
         "routing": profile.routing,
         "delivery_surfaces": _registered_delivery_surfaces(),

@@ -269,7 +269,6 @@
 				quiet_email_senders: profile.quiet_email_senders,
 				disabled_skills: profile.disabled_skills,
 				disabled_modules: profile.disabled_modules,
-				site_enabled: profile.site_enabled,
 				default_destination: profile.default_destination || 'talk',
 				routing: profile.routing || {},
 			};
@@ -618,10 +617,6 @@
 					onValueChange={(v) => setRoute('log', v)}
 				/>
 			</SettingsField>
-			<SettingsField label="Static website hosting at /~user/" checkbox>
-				<input type="checkbox" bind:checked={profile.site_enabled} />
-			</SettingsField>
-
 			{#if profileError}
 				<div class="banner error">{profileError}</div>
 			{/if}

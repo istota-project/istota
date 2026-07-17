@@ -45,7 +45,6 @@ class UserProfile:
     timezone: str = "UTC"
     log_channel: str = ""
     alerts_channel: str = ""
-    site_enabled: bool = False
     max_foreground_workers: int = 0
     max_background_workers: int = 0
     disabled_skills: list[str] = field(default_factory=list)
@@ -63,7 +62,7 @@ class UserProfile:
 _PROFILE_COLUMNS = (
     "display_name", "email_addresses", "timezone",
     "log_channel", "alerts_channel",
-    "site_enabled", "max_foreground_workers", "max_background_workers",
+    "max_foreground_workers", "max_background_workers",
     "disabled_skills", "trusted_email_senders", "quiet_email_senders",
     "disabled_modules",
     "routing", "default_destination", "email_reply_routing",
@@ -104,7 +103,6 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         timezone=row["timezone"] or "UTC",
         log_channel=row["log_channel"] or "",
         alerts_channel=row["alerts_channel"] or "",
-        site_enabled=bool(row["site_enabled"]),
         max_foreground_workers=int(row["max_foreground_workers"] or 0),
         max_background_workers=int(row["max_background_workers"] or 0),
         disabled_skills=_parse_json_list(row["disabled_skills"]),
@@ -230,7 +228,6 @@ def ensure_profile(
         timezone=timezone or _attr(seed_from, "timezone") or "UTC",
         log_channel=_attr(seed_from, "log_channel") or "",
         alerts_channel=_attr(seed_from, "alerts_channel") or "",
-        site_enabled=bool(_attr(seed_from, "site_enabled") or False),
         max_foreground_workers=int(_attr(seed_from, "max_foreground_workers") or 0),
         max_background_workers=int(_attr(seed_from, "max_background_workers") or 0),
         email_addresses=list(_attr(seed_from, "email_addresses") or []),
@@ -351,10 +348,6 @@ def update_profile_with_status(
             if (current or "origin+thread") != (value or "origin+thread"):
                 same = False
                 break
-        elif col == "site_enabled":
-            if bool(current) != bool(value):
-                same = False
-                break
         elif col in {"max_foreground_workers", "max_background_workers"}:
             if int(current or 0) != int(value or 0):
                 same = False
@@ -398,8 +391,6 @@ def update_profile(
             value = json.dumps(list(value or []))
         elif col in _DICT_COLUMNS:
             value = json.dumps(dict(value or {}))
-        elif col == "site_enabled":
-            value = 1 if value else 0
         elif col in {"max_foreground_workers", "max_background_workers"}:
             value = int(value or 0)
         elif col == "default_destination":
@@ -451,7 +442,6 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         profile.timezone,
         profile.log_channel,
         profile.alerts_channel,
-        1 if profile.site_enabled else 0,
         int(profile.max_foreground_workers or 0),
         int(profile.max_background_workers or 0),
         json.dumps(list(profile.disabled_skills)),
@@ -514,7 +504,6 @@ def import_from_user_configs(
             timezone=getattr(user_config, "timezone", "") or "UTC",
             log_channel=getattr(user_config, "log_channel", "") or "",
             alerts_channel=getattr(user_config, "alerts_channel", "") or "",
-            site_enabled=bool(getattr(user_config, "site_enabled", False)),
             max_foreground_workers=int(getattr(user_config, "max_foreground_workers", 0) or 0),
             max_background_workers=int(getattr(user_config, "max_background_workers", 0) or 0),
             disabled_skills=list(getattr(user_config, "disabled_skills", []) or []),
@@ -559,7 +548,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "email_reply_routing", profile.email_reply_routing or "origin+thread")
     for attr in (
         "log_channel", "alerts_channel",
-        "site_enabled", "max_foreground_workers", "max_background_workers",
+        "max_foreground_workers", "max_background_workers",
     ):
         setattr(user_config, attr, getattr(profile, attr))
 

@@ -750,10 +750,10 @@ istota_developer_github_api_allowlist:            # API endpoint allowlist (enfo
   - "PATCH /repos/*/pulls/*"
   - "PATCH /repos/*/issues/*"
 
-# Nginx site hosting
+# Bot's own static web root (instance-wide; per-user /~user/ sites were removed)
 istota_site_enabled: false
 istota_site_base_path: "{{ istota_home }}/html"
-# Public hostname for nginx (site hosting, webhooks, etc.)
+# Public hostname for nginx (web UI, webhooks, bot web root)
 istota_hostname: "{{ istota_namespace }}.example.com"
 
 # Backup settings

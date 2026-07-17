@@ -251,7 +251,7 @@ def _coerce_extras_value(raw: str):
     """Best-effort coerce a CLI ``key=value`` string to its natural Python type.
 
     Operators shouldn't have to learn JSON quoting just to pass an integer
-    like ``default_radius=75`` or a bool like ``site_enabled=true``. We try
+    like ``default_radius=75`` or a bool like ``reconcile_enabled=true``. We try
     JSON first (handles ints, floats, bools, null, lists, dicts) and fall
     back to a plain string. Mirrors how TOML would have parsed the same
     field.
@@ -816,8 +816,6 @@ def cmd_user_ensure(args):
             )
             sys.exit(1)
         updates["disabled_modules"] = names
-    if args.site_enabled is not None:
-        updates["site_enabled"] = args.site_enabled
     if args.default_destination is not None:
         from .transport import parse_output_target
         if args.default_destination and not parse_output_target(args.default_destination):
@@ -921,7 +919,6 @@ def cmd_user_show(args):
         "timezone": profile.timezone,
         "log_channel": profile.log_channel,
         "alerts_channel": profile.alerts_channel,
-        "site_enabled": profile.site_enabled,
         "max_foreground_workers": profile.max_foreground_workers,
         "max_background_workers": profile.max_background_workers,
         "disabled_skills": profile.disabled_skills,
@@ -1465,13 +1462,6 @@ def main():
             "surface only), or 'thread' (email only)."
         ),
     )
-    site_group = user_ensure_parser.add_mutually_exclusive_group()
-    site_group.add_argument("--site-enabled", dest="site_enabled", action="store_const", const=True,
-                            help="Enable static website hosting at /~user/")
-    site_group.add_argument("--no-site", dest="site_enabled", action="store_const", const=False,
-                            help="Disable static website hosting")
-    user_ensure_parser.set_defaults(site_enabled=None)
-
     # user show  (Phase 6: dump the DB row as JSON)
     user_show_parser = user_subparsers.add_parser("show", help="Show stored profile row as JSON")
     user_show_parser.add_argument("--name", required=True, help="User ID")

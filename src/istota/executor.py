@@ -1072,7 +1072,7 @@ def build_bwrap_cmd(
             else:
                 _ro_bind(rpath)
 
-    # --- Static site directory (RW) ---
+    # --- Instance web root (RW) — the bot's own static site directory ---
     if config.site.enabled and config.site.base_path:
         site_dir = Path(config.site.base_path)
         if site_dir.exists():
@@ -1879,14 +1879,11 @@ def build_prompt(
         )
         resource_sections.append(f"Reminders Files:\n{reminders_list}")
 
-    if config.site.enabled:
-        user_config = config.get_user(task.user_id)
-        if user_config and user_config.site_enabled:
-            site_url = f"https://{config.site.hostname}/~{task.user_id}"
-            site_path = config.nextcloud_mount_path / "Users" / task.user_id / config.bot_dir_name / "html"
-            resource_sections.append(
-                f"Website:\n  - URL: {site_url}\n  - Path: {site_path} (readwrite)"
-            )
+    if config.site.enabled and config.site.base_path:
+        site_lines = [f"  - Path: {config.site.base_path} (readwrite)"]
+        if config.site.hostname:
+            site_lines.insert(0, f"  - URL: https://{config.site.hostname}/")
+        resource_sections.append("Web Root (your own static site):\n" + "\n".join(site_lines))
 
     resources_text = "\n\n".join(resource_sections) if resource_sections else "No specific resources configured."
 
@@ -2691,13 +2688,11 @@ def execute_task(
                 config.devbox.max_output_bytes
             )
 
-        # Static website hosting
-        if config.site.enabled and task:
-            user_config = config.get_user(task.user_id)
-            if user_config and user_config.site_enabled:
-                site_dir = config.nextcloud_mount_path / "Users" / task.user_id / config.bot_dir_name / "html"
-                env["WEBSITE_PATH"] = str(site_dir)
-                env["WEBSITE_URL"] = f"https://{config.site.hostname}/~{task.user_id}"
+        # Instance web root — the bot's own static site directory
+        if config.site.enabled and config.site.base_path:
+            env["WEBSITE_PATH"] = str(config.site.base_path)
+            if config.site.hostname:
+                env["WEBSITE_URL"] = f"https://{config.site.hostname}/"
 
         # Declarative env vars from skill manifests
         from .skills._env import (
