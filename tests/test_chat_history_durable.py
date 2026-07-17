@@ -142,6 +142,29 @@ class TestTranscriptSurvivesRetention:
         web_app._config.db_path = db_path
         return web_app._chat_room_messages
 
+    def test_get_turn_message_id_roundtrips_and_recovers(self, db_path):
+        # ISSUE-172: the star-key lookup used to backfill a live-settled turn's
+        # msg_id must return the stored id, and recover it when store_turn_message
+        # returned None (retry re-completion — row already present).
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="talk")
+            t = _task(conn, "tok", "q", "a")
+            aid = db.store_turn_message(
+                conn, "tok", role="assistant", body="a", task_id=t,
+                origin_surface="talk",
+            )
+            assert isinstance(aid, int)
+            # Same id via lookup.
+            assert db.get_turn_message_id(conn, "tok", t, "assistant") == aid
+            # A duplicate store returns None; lookup still recovers the id.
+            assert db.store_turn_message(
+                conn, "tok", role="assistant", body="a", task_id=t,
+                origin_surface="talk",
+            ) is None
+            assert db.get_turn_message_id(conn, "tok", t, "assistant") == aid
+            # No user turn stored → None.
+            assert db.get_turn_message_id(conn, "tok", t, "user") is None
+
     def test_turn_survives_task_deletion(self, db_path):
         with db.get_db(db_path) as conn:
             db.register_room(conn, "tok", "u", origin="talk")

@@ -1217,11 +1217,19 @@ def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
     retries) or when a real ``done`` is still deliverable normally.
     """
     from . import db
+    synth_msg_id: int | None = None
     with db.get_db(_config.db_path) as conn:
         task = db.get_task(conn, task_id)
         if task is None or task.status not in _TERMINAL_TASK_STATUSES:
             return []
         pending = db.get_task_events(conn, task_id, after_seq)
+        # The durable star key for a completed room turn, so a synthesized
+        # terminal frame makes the turn starrable just like the live `done`
+        # event does (ISSUE-172).
+        if task.status == "completed" and task.conversation_token:
+            synth_msg_id = db.get_turn_message_id(
+                conn, task.conversation_token, task_id, "assistant",
+            )
     if any(e["kind"] == "done" for e in pending):
         return []  # a real terminal frame is still on its way to this client
     seq = max([after_seq, *(e["seq"] for e in pending)]) + 1
@@ -1240,6 +1248,8 @@ def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
     }
     if task.model_used:
         done_payload["model"] = task.model_used
+    if synth_msg_id is not None:
+        done_payload["msg_id"] = synth_msg_id
     frames.append({"seq": seq + 1, "kind": "done", "payload": done_payload})
     return frames
 

@@ -1796,6 +1796,12 @@ def process_one_task(
         and CONFIRMATION_PATTERN.search(result)
     )
 
+    # The durable `messages.id` of this task's stored assistant turn, when it
+    # was persisted below. Threaded into the terminal `done` event so a
+    # freshly-settled web turn learns its star key without a history refetch
+    # (ISSUE-172).
+    stored_assistant_msg_id: int | None = None
+
     with db.get_db(config.db_path) as conn:
         if success:
             if is_confirmation_request:
@@ -1821,11 +1827,18 @@ def process_one_task(
                     and task.conversation_token
                     and db.get_room(conn, task.conversation_token) is not None
                 ):
-                    db.store_turn_message(
+                    stored_assistant_msg_id = db.store_turn_message(
                         conn, task.conversation_token, role="assistant",
                         body=result, task_id=task_id,
                         origin_surface=task.source_type,
                     )
+                    # A retry that re-completes the task finds the row already
+                    # stored (store returns None) — recover its id so the star
+                    # key still rides the terminal event.
+                    if stored_assistant_msg_id is None:
+                        stored_assistant_msg_id = db.get_turn_message_id(
+                            conn, task.conversation_token, task_id, "assistant",
+                        )
 
                 # Index conversation for memory search (non-critical).
                 # Skip silent scheduled jobs: high-volume retrieve-and-render
@@ -2030,6 +2043,8 @@ def process_one_task(
                 "stop_reason": "completed" if success else "error",
                 "duration_seconds": round(event_writer.elapsed_seconds(), 1),
                 **({"model": task.model_used} if task.model_used else {}),
+                **({"msg_id": stored_assistant_msg_id}
+                   if stored_assistant_msg_id is not None else {}),
             })
             event_writer.finish()
             # Prune the ephemeral text_delta rows now the canonical result/

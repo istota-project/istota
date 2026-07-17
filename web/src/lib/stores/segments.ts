@@ -382,6 +382,14 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
 			if (typeof payload.model === 'string' && payload.model) {
 				m.model = payload.model;
 			}
+			// Durable-store id for the just-settled turn (ISSUE-172): light up the
+			// star affordance without waiting for a history refetch. A turn only
+			// becomes starrable now that it is committed — so seed `starred` false
+			// when it's the first time we learn the id.
+			if (typeof payload.msg_id === 'number') {
+				m.msgId = payload.msg_id;
+				if (m.starred === undefined) m.starred = false;
+			}
 			if (!m.text) m.text = answerText(m);
 			break;
 	}

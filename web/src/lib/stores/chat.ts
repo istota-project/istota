@@ -454,6 +454,11 @@ function createSession(): ChatSession {
 				messages.update((arr) => [...arr, {
 					cid: nextCid(), role: 'system', text: m.text, segments: [],
 					streaming: false, createdAt: m.created_at,
+					// Carry the durable star key from the same history row (ISSUE-172):
+					// a live-appended notification is starrable immediately, not only
+					// after a reload re-reads it through buildHistoryMessage.
+					msgId: typeof m.msg_id === 'number' ? m.msg_id : undefined,
+					starred: typeof m.msg_id === 'number' ? !!m.starred : undefined,
 				}]);
 			}
 			// A notification just landed in the open room — persist the read cursor
@@ -485,6 +490,10 @@ function createSession(): ChatSession {
 				messages.update((arr) => [...arr, {
 					cid: nextCid(), role: 'user', text: um.text, taskId: at.id,
 					segments: [], streaming: false, createdAt: um.created_at,
+					// Star key from the history row, parity with buildHistoryMessage
+					// (ISSUE-172) so a picked-up user turn is starrable without reload.
+					msgId: typeof um.msg_id === 'number' ? um.msg_id : undefined,
+					starred: typeof um.msg_id === 'number' ? !!um.starred : undefined,
 				}]);
 			}
 			const ph: ChatMessage = {

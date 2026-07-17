@@ -224,6 +224,26 @@ describe('applyEvent reducer', () => {
 		expect(m.model).toBeUndefined();
 	});
 
+	it('done carries the durable msg_id → starrable, starred seeded false (ISSUE-172)', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['result', { text: 'ok' }],
+			['done', { duration_seconds: 2, msg_id: 4711 }],
+		]);
+		expect(m.msgId).toBe(4711);
+		expect(m.starred).toBe(false);
+	});
+
+	it('done without a msg_id leaves the star key unset', () => {
+		const m = freshAssistant();
+		feed(m, [
+			['result', { text: 'ok' }],
+			['done', { duration_seconds: 2 }],
+		]);
+		expect(m.msgId).toBeUndefined();
+		expect(m.starred).toBeUndefined();
+	});
+
 	it('empty whitespace narration is settled but not renderable', () => {
 		const m = freshAssistant();
 		feed(m, [
