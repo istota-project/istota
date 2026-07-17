@@ -34,6 +34,7 @@ def get_email_config(config: Config) -> EmailConfig:
         smtp_user=config.email.smtp_user,
         smtp_password=config.email.smtp_password,
         bot_email=config.email.bot_email,
+        imap_timeout=config.email.imap_timeout_seconds,
     )
 
 

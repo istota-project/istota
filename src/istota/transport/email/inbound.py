@@ -11,11 +11,11 @@ task id mid-loop, so — like Talk — email cannot hand un-ingested
 """
 
 import logging
-import re
 import uuid
 
 from ... import db
 from ...config import Config
+from ...email_ownership import extract_user_from_recipient, match_thread
 from ...email_support import compute_thread_id, get_email_config, is_synthetic_email_thread_token
 from ...skills.email import download_attachments, list_emails, read_email
 from ...storage import ensure_user_directories_v2, upload_file_to_inbox_v2
@@ -24,61 +24,11 @@ from ..ingest import ingest_message
 
 logger = logging.getLogger("istota.transport.email.inbound")
 
-
-def _extract_user_from_recipient(config: Config, email) -> str | None:
-    """Extract user_id from plus-addressed recipient.
-
-    Checks To and Cc headers for bot+{user_id}@domain pattern.
-    Returns user_id if found and valid, None otherwise.
-    """
-    if not config.email.bot_email or "@" not in config.email.bot_email:
-        return None
-
-    bot_local, bot_domain = config.email.bot_email.split("@", 1)
-
-    pattern = re.compile(
-        rf"^{re.escape(bot_local)}\+(.+)@{re.escape(bot_domain)}$",
-        re.IGNORECASE,
-    )
-
-    for addr in list(getattr(email, "to", ())) + list(getattr(email, "cc", ())):
-        match = pattern.match(addr)
-        if match:
-            candidate = match.group(1).lower()
-            if candidate in config.users:
-                return candidate
-            else:
-                logger.warning(
-                    "Plus-address user '%s' not found in config (from %s)",
-                    candidate, addr,
-                )
-    return None
-
-
-def _match_thread(conn, email) -> db.SentEmail | None:
-    """Check if an inbound email is a reply to one of our sent emails.
-
-    Checks In-Reply-To first (direct reply), then References (thread chain).
-    Returns the matching SentEmail or None.
-    """
-    # For imap-tools Email objects, In-Reply-To isn't directly exposed.
-    # But References header contains the full thread chain including
-    # In-Reply-To. We parse both from the email's headers.
-
-    # Check references: split by whitespace to get individual Message-IDs
-    if email.references:
-        ref_ids = email.references.split()
-        if ref_ids:
-            # Check the last reference first (most likely the direct parent)
-            match = db.find_sent_email_by_message_id(conn, ref_ids[-1])
-            if match:
-                return match
-            # Fall back to checking all references
-            match = db.find_sent_email_by_references(conn, ref_ids)
-            if match:
-                return match
-
-    return None
+# Backwards-compatible aliases: ownership resolution moved to the shared
+# `email_ownership` module (so the skill's read-scope filter resolves ownership
+# identically). Kept importable under their old names for existing callers/tests.
+_extract_user_from_recipient = extract_user_from_recipient
+_match_thread = match_thread
 
 
 def poll_emails(config: Config) -> list[int]:
