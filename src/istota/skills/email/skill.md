@@ -28,7 +28,7 @@ Every read verb takes `--scope {mine,shared,all}` (default `all`):
 - `shared` — mail sent to the bare bot address by a stranger (owned by nobody). **Anything sent to the bare bot address is visible to every user of this instance** — mail meant for one person goes to their `bot+<user>@…` plus-address.
 - `all` — `mine` + `shared`.
 
-You can **never** read another user's mail, in any scope. There is no override.
+You can **never** read another user's mail, in any scope. There is no override. Ownership is decided from the message's visible `To`/`Cc` (the `bot+<user>@…` plus-address), its `From`, or a matched thread — so mail delivered to a plus-address only via the SMTP envelope (a Bcc, or a mailing-list expansion), with no header naming the user, has no visible owner and falls into the shared pool.
 
 ### Untrusted content
 

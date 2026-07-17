@@ -99,6 +99,9 @@ class TestQuietBranch:
             assert row["task_id"] is None
 
     def test_quiet_mail_left_in_inbox(self, db_path, tmp_path):
+        # Filed silently means: marked processed (routing_method=quiet) but never
+        # removed from IMAP. Guards against a future regression that deletes or
+        # moves quiet mail — and asserts the quiet row (so it's not vacuous).
         cfg = _config(db_path, tmp_path, quiet_email_senders=["*@stratechery.com"])
         env = _env("ben@stratechery.com")
         mail = _mail("ben@stratechery.com")
@@ -107,6 +110,25 @@ class TestQuietBranch:
              patch("istota.skills.email.delete_email") as del_mock:
             poll_emails(cfg)
         del_mock.assert_not_called()
+        with db.get_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT routing_method FROM processed_emails WHERE email_id=?", ("1",),
+            ).fetchone()
+            assert row is not None and row["routing_method"] == "quiet"
+
+    def test_quiet_edit_via_profile_takes_effect_without_restart(self, db_path, tmp_path):
+        # A quiet pattern written to the user_profiles row AFTER config load (as
+        # the settings card / `user ensure` does) is honoured on the next poll —
+        # is_quiet_email_sender reads the live row, not the startup snapshot.
+        cfg = _config(db_path, tmp_path, quiet_email_senders=[])  # empty at load
+        user_profiles.upsert_profile(db_path, user_profiles.UserProfile(
+            user_id="alice", email_addresses=["alice@personal.com"],
+            quiet_email_senders=["*@stratechery.com"],
+        ))
+        env = _env("ben@stratechery.com")
+        mail = _mail("ben@stratechery.com", to=("bot+alice@test.com",))
+        task_ids = _run_poll(cfg, env, mail)
+        assert task_ids == []  # filtered by the freshly-written pattern
 
     def test_non_quiet_sender_still_creates_task(self, db_path, tmp_path):
         cfg = _config(db_path, tmp_path, quiet_email_senders=["*@stratechery.com"])

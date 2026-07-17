@@ -340,6 +340,36 @@ class TestListFilters:
         assert 'FROM "alice@x.com"' in crit_str
         assert "UNSEEN" in crit_str
 
+    def test_scope_mine_pushes_ownership_server_side(self, skill_env):
+        # --scope mine must not fetch the whole INBOX window then filter — it
+        # pushes TO bot+<user>@ OR FROM <user addrs> down to the server so a busy
+        # shared box can't truncate the caller's mail out of the window.
+        captured = {}
+
+        def fake_list(*, folder, limit, config, criteria):
+            captured["criteria"] = str(criteria)
+            return []
+
+        args = MagicMock(scope="mine", limit=5, since=None, from_addr=None, unread=False)
+        with patch("istota.skills.email.list_emails", side_effect=fake_list):
+            cmd_list(args)
+        assert 'TO "bot+stefan@x.cynium.com"' in captured["criteria"]
+        assert 'FROM "stefan@personal.com"' in captured["criteria"]
+        assert "OR" in captured["criteria"]
+
+
+class TestParseSince:
+    def test_iso_date(self):
+        from istota.skills.email import _parse_since
+        assert _parse_since("2026-01-15") == date(2026, 1, 15)
+
+    def test_relative_days_requires_d_suffix(self):
+        from istota.skills.email import _parse_since
+        assert _parse_since("7d") is not None
+        # A bare year must NOT be read as a day-count — it errors.
+        with pytest.raises(ValueError):
+            _parse_since("2026")
+
 
 # --------------------------------------------------------------------------
 # read / search / from-senders / newsletters / thread commands
