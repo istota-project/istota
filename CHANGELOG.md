@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The assistant can now read your mailbox, not just send. New email commands list, search, read, thread, and fetch attachments, batch-fetch mail from named senders for digests, and reply / reply-all in-thread, with cc, bcc, and attachments on outbound mail.
 - Read scoping: you see your own mail plus the shared pool (anything sent to the bare bot address), and never another user's. Mail meant for one person goes to their `bot+<you>@…` plus-address.
 - Quiet senders: name senders (fnmatch patterns) whose mail should be filed silently — no task, no assistant session. Their mail waits in the inbox for a briefing or scheduled job to read back on demand. Set it per user on the Settings → Preferences card or with `istota user ensure --quiet-sender`.
+- Push notifications can target a specific ntfy topic per send. Your configured topic stays the default; pass a topic to route a single push elsewhere, so you can subscribe selectively per device or per category (alerts vs briefings vs newsletters) on one server.
 
 ### Changed
 - Marking or deleting mail now requires an explicit confirmation flag, so a stray or content-driven request can't quietly change or destroy your mailbox.
@@ -18,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The cross-room chat views (All, Unread, Starred) are quieter: the room label drops its hash, and hovering a message shows only its task number and star instead of the model and timings. Room views are unchanged.
 - The feeds sidebar's All / Unread / Starred entries match the chat sidebar's, and chat's New room button now sits below the views rather than above them.
 - The Nextcloud connection card moved under Connected services, above Google Workspace, and reads like the other service cards — a status pill beside the title. Connect and Disconnect are now the same button in two colours.
+
+### Fixed
+- A reply that continued an email thread from a web chat room rendered as a grey command-output note instead of a normal assistant message. It now appears as a proper chat bubble; genuine alerts and logs routed to a room still show as notes.
 
 ## [0.30.0] - 2026-07-16
 

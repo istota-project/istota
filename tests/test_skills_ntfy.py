@@ -181,6 +181,42 @@ class TestTopicValidation:
         post.assert_called_once()
 
 
+class TestTopicOverride:
+    def test_flag_overrides_env_default(self, monkeypatch):
+        monkeypatch.setenv("NTFY_TOPIC", "default-topic")
+        args = build_parser().parse_args(["send", "hi", "--topic", "briefings"])
+        with patch("istota.skills.ntfy.httpx.post", return_value=_ok_response()) as post:
+            rc = cmd_send(args)
+        assert rc == 0
+        assert post.call_args.args == ("https://ntfy.sh/briefings",)
+
+    def test_flag_works_without_env_default(self, monkeypatch):
+        monkeypatch.delenv("NTFY_TOPIC", raising=False)
+        args = build_parser().parse_args(["send", "hi", "--topic", "briefings"])
+        with patch("istota.skills.ntfy.httpx.post", return_value=_ok_response()) as post:
+            rc = cmd_send(args)
+        assert rc == 0
+        assert post.call_args.args == ("https://ntfy.sh/briefings",)
+
+    def test_env_default_used_when_flag_absent(self, monkeypatch):
+        monkeypatch.setenv("NTFY_TOPIC", "default-topic")
+        args = build_parser().parse_args(["send", "hi"])
+        with patch("istota.skills.ntfy.httpx.post", return_value=_ok_response()) as post:
+            cmd_send(args)
+        assert post.call_args.args == ("https://ntfy.sh/default-topic",)
+
+    def test_malformed_override_rejected(self, monkeypatch, capsys):
+        monkeypatch.setenv("NTFY_TOPIC", "valid-default")
+        args = build_parser().parse_args(["send", "hi", "--topic", "bad/topic"])
+        with patch("istota.skills.ntfy.httpx.post") as post:
+            rc = cmd_send(args)
+        assert rc == 1
+        post.assert_not_called()
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "error"
+        assert "malformed" in out["error"].lower()
+
+
 class TestErrorRedaction:
     def test_authorization_token_redacted_from_error_body(self, monkeypatch, capsys):
         monkeypatch.setenv("NTFY_TOPIC", "t")

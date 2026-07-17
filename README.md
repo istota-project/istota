@@ -8,6 +8,8 @@
 
 It ships with a set of skills the agent loads on demand — calendar, email, web browsing, git, accounting, transcription, and more — plus native web modules: multi-room chat, an RSS reader, location tracking, and health and accounting dashboards. It is multi-user out of the box, with per-user memory, filesystem sandboxing, and resource permissions.
 
+> **Pre-1.0 and under active development.** Istota has not reached a stable 1.0 release. Interfaces, config, and database schema can change between releases, sometimes in breaking ways. Pin to a release and read the CHANGELOG before upgrading.
+
 ## How it works
 
 ```

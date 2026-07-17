@@ -76,8 +76,8 @@ CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
             # operators of self-hosted servers need to fill it in. Marking
             # it optional means topic-only users see "configured" rather
             # than "partial" in the settings UI.
-            {"key": "server_url", "label": "Server URL", "type": "url",      "optional": True},
-            {"key": "topic",      "label": "Topic",      "type": "text"},
+            {"key": "server_url", "label": "Server URL",   "type": "url",      "optional": True},
+            {"key": "topic",      "label": "Default topic", "type": "text"},
             {"key": "token",      "label": "Access token (optional)", "type": "password"},
             {"key": "username",   "label": "Username (optional)",     "type": "text"},
             {"key": "password",   "label": "Password (optional)",     "type": "password"},

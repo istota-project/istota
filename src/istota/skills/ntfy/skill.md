@@ -22,7 +22,12 @@ istota-skill ntfy send "disk 91% full" --title "zorg" --priority 4 --tags "warni
 
 # Click action (opens URL when the notification is tapped)
 istota-skill ntfy send "PR ready for review" --click "https://github.com/foo/bar/pull/42"
+
+# Route to a specific topic (overrides the configured default for this call)
+istota-skill ntfy send "morning briefing ready" --topic briefings
 ```
+
+`--topic` overrides the user's default topic for one call — same server and auth, different destination. Use it to route by category (alerts vs briefings vs newsletters) so the user can subscribe selectively per device.
 
 Returns JSON on stdout: `{"status":"ok"}` on success, `{"status":"error","error":"..."}` on failure (and exit code 1).
 
