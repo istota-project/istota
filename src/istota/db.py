@@ -2741,6 +2741,27 @@ def store_turn_message(
     )
 
 
+def get_turn_message_id(
+    conn: sqlite3.Connection,
+    room_token: str,
+    task_id: int,
+    role: str = "assistant",
+) -> int | None:
+    """The durable `messages.id` of a task's stored turn, or None if absent.
+
+    The star key the web transcript gates on. Recovers the id when
+    `store_turn_message` returned None (a retry that re-completed a task —
+    the row already existed) and lets the terminal event / synthetic backstop
+    tell a freshly-settled turn its id so it becomes starrable without a
+    history refetch (ISSUE-172)."""
+    row = conn.execute(
+        "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
+        "AND role = ? LIMIT 1",
+        (room_token, task_id, role),
+    ).fetchone()
+    return row["id"] if row else None
+
+
 def list_system_messages(
     conn: sqlite3.Connection, room_token: str, limit: int = 50,
 ) -> list[Message]:
