@@ -387,6 +387,34 @@ def _store_scheduled_room_turn(conn, task, body: str) -> None:
     )
 
 
+def _store_web_room_turn(conn, task, body: str) -> None:
+    """Store a foreign task's conversational reply into a web room as an
+    assistant turn (ISSUE-164).
+
+    When a non-web/non-talk task (e.g. an email round-trip continued from a web
+    room) fans its result into the web room it is *conversing in* —
+    ``output_target`` names ``web:<its own conversation_token>`` — that result is
+    a real turn, not an out-of-band notice. Storing it as a ``role='assistant'``
+    spine row makes the web transcript render it as a chat bubble, exactly like a
+    native web reply, instead of the ``role='system'`` cmd-output block a
+    ``WebTransport.deliver`` push produces (the notification lane).
+
+    ``origin_surface='web'`` so the row satisfies the shared transcript filter
+    and reads as a turn belonging to the web room. Talk/web-origin tasks are
+    already stored by the task-success branch (their native surface); this covers
+    only the foreign-origin case, and ``store_turn_message`` dedups on
+    ``(room, role, task_id)`` so an overlap is a harmless no-op. Self-gating on
+    room existence; idempotent across retries."""
+    if not task.conversation_token:
+        return
+    if db.get_room(conn, task.conversation_token) is None:
+        return
+    db.store_turn_message(
+        conn, task.conversation_token, role="assistant",
+        body=body, task_id=task.id, origin_surface="web",
+    )
+
+
 def download_talk_attachments(config: Config, attachments: list[str]) -> list[str]:
     """
     Get local paths for Talk attachments.
@@ -1687,6 +1715,19 @@ def process_one_task(
     web_push_dests = [
         d for d in plan if d.surface == "web" and d.kind == "push"
     ]
+    # Split by whether the push target IS the task's own conversation room.
+    # An own-conversation web push is a conversational reply (an assistant turn →
+    # chat bubble), not an out-of-band notice; delivering it via
+    # WebTransport.deliver would write a role='system' row and render it as
+    # cmd-output (ISSUE-164). Those are stored as assistant spine rows instead
+    # and dropped from the system-push lane. Foreign-room pushes stay
+    # notifications (role='system'), the correct use of that lane.
+    web_own_conv_dests = [
+        d for d in web_push_dests if d.channel == task.conversation_token
+    ]
+    web_foreign_dests = [
+        d for d in web_push_dests if d.channel != task.conversation_token
+    ]
 
     # Track if we need to call istota_file handler after db connection closes.
     # The transport derives success from the task's terminal status at delivery.
@@ -1834,7 +1875,11 @@ def process_one_task(
                         post_email = True
                     if plan_ntfy:
                         post_ntfy = True
-                    if web_push_dests:
+                    if web_own_conv_dests:
+                        # Conversational reply into its own web room → assistant
+                        # bubble, not a system cmd-output push (ISSUE-164).
+                        _store_web_room_turn(conn, task, delivery_result)
+                    if web_foreign_dests:
                         post_web = True
                     if plan_file:
                         call_file_handler = True
@@ -2171,9 +2216,12 @@ def process_one_task(
         if file_transport is not None:
             run_coro(file_transport.deliver("", result, task=task))
     if post_web:
-        # A foreign task (e.g. an email reply) routed into a web room: push the
-        # result as an unsolicited room message via WebTransport.deliver. The
-        # own-origin web case never reaches here (its leg resolved to stream).
+        # A foreign task (e.g. an alert or a reply routed into a room it is NOT
+        # conversing in) pushed into a web room: deliver as an unsolicited system
+        # message via WebTransport.deliver. Own-conversation web pushes are
+        # excluded here (web_foreign_dests) — they were stored as assistant
+        # bubbles above (ISSUE-164). The own-origin web-source case never reaches
+        # this branch at all (its web leg resolved to stream).
         web_transport = registry.get("web")
         if web_transport is not None:
             if task.source_type == "briefing":
@@ -2181,7 +2229,7 @@ def process_one_task(
                 web_result = pb["body"] if pb else strip_briefing_preamble(result)
             else:
                 web_result = result
-            for dest in web_push_dests:
+            for dest in web_foreign_dests:
                 run_coro(web_transport.deliver(dest.channel, web_result, task=task))
 
     return task_id, success

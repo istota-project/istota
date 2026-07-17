@@ -4,13 +4,18 @@ Credentials are injected by the skill proxy from the encrypted secrets table.
 The skill never reads the secrets DB itself; everything arrives as env vars:
 
     NTFY_SERVER_URL  optional, defaults to https://ntfy.sh
-    NTFY_TOPIC       required — destination topic on the user's ntfy server
+    NTFY_TOPIC       default destination topic on the user's ntfy server
+                     (required unless --topic is passed)
     NTFY_TOKEN       optional — bearer token (preferred when set)
     NTFY_USERNAME    optional — basic-auth username
     NTFY_PASSWORD    optional — basic-auth password (paired with username)
 
+``--topic`` overrides ``NTFY_TOPIC`` for a single call, so one configured
+server can route to many topics (per-device or per-category subscriptions)
+without extra config. Auth and server stay shared; only the topic varies.
+
 Usage:
-    python -m istota.skills.ntfy send MESSAGE [--title T] [--priority N] [--tags ...] [--click URL]
+    python -m istota.skills.ntfy send MESSAGE [--topic NAME] [--title T] [--priority N] [--tags ...] [--click URL]
 """
 
 from __future__ import annotations
@@ -67,13 +72,16 @@ def _scrub(value: str) -> str:
 
 
 def cmd_send(args: argparse.Namespace) -> int:
-    topic = (os.environ.get("NTFY_TOPIC") or "").strip()
+    # --topic overrides the configured default for this one call (ISSUE-166):
+    # one server, many topics (per-device / per-category routing).
+    topic = (getattr(args, "topic", None) or os.environ.get("NTFY_TOPIC") or "").strip()
     if not topic:
         return _emit({
             "status": "error",
             "error": (
                 "ntfy not configured for this user (no topic). "
-                "Set one at /istota/settings → Connected services → ntfy."
+                "Set a default at /istota/settings → Connected services → ntfy, "
+                "or pass --topic."
             ),
         })
     if not _TOPIC_RE.match(topic):
@@ -129,6 +137,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     send = sub.add_parser("send", help="Send a push notification")
     send.add_argument("message", help="Notification body")
+    send.add_argument(
+        "--topic", default=None,
+        help="Destination topic (overrides the configured default for this call)",
+    )
     send.add_argument("--title", default=None, help="Notification title")
     send.add_argument(
         "--priority", type=int, default=None, choices=[1, 2, 3, 4, 5],

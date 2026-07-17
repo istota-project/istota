@@ -2006,10 +2006,12 @@ class TestProcessOneTask:
         assert "result" in kinds and "done" in kinds  # lifecycle survives
 
     @patch("istota.scheduler.asyncio.run", return_value=None)
-    def test_email_reply_pushes_into_web_room(self, mock_arun, db_path, tmp_path):
-        # An email-source task (e.g. a thread-matched reply) routed into a web
-        # room must push the result via WebTransport.deliver — a foreign task
-        # cross-surface into a stream surface. (Stage 2 cross-surface delivery.)
+    def test_email_reply_into_own_web_room_renders_as_bubble(self, mock_arun, db_path, tmp_path):
+        # ISSUE-164: an email-source task (e.g. a thread-matched reply) fanned
+        # into the web room it is *conversing in* (output_target names its own
+        # conversation_token) is a real turn, not a notification. It must land as
+        # an assistant chat bubble (a spine row), NOT a role='system' cmd-output
+        # push via WebTransport.deliver.
         from istota.transport.web import default_web_room_token
         config = self._make_config(db_path, tmp_path)
         room_token = default_web_room_token(config, "testuser")
@@ -2030,8 +2032,43 @@ class TestProcessOneTask:
         assert success is True
 
         with db.get_db(db_path) as conn:
-            msgs = db.list_system_messages(conn, room_token)
-        assert any(m.body == "Here is the answer" for m in msgs)
+            turns = [m for m in db.get_messages(conn, room_token) if m.role == "assistant"]
+            notes = db.list_system_messages(conn, room_token)
+        assert any(m.body == "Here is the answer" for m in turns)
+        # Must NOT have been delivered as a system (cmd-output) note.
+        assert all(m.body != "Here is the answer" for m in notes)
+
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_reply_into_foreign_web_room_stays_system_note(self, mock_arun, db_path, tmp_path):
+        # The other half of ISSUE-164's discriminator: a task fanned into a web
+        # room it is NOT conversing in (a foreign room, e.g. a pinned alert
+        # destination) is an out-of-band notice and must stay a role='system'
+        # note (WebTransport.deliver). Only own-conversation pushes become bubbles.
+        from istota.transport.web import default_web_room_token
+        config = self._make_config(db_path, tmp_path)
+        own_token = default_web_room_token(config, "testuser")
+        foreign_token = "web-testuser-foreign"
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, foreign_token, "testuser", origin="web")
+            db.create_task(
+                conn, prompt="reply body", user_id="testuser",
+                source_type="email", conversation_token=own_token,
+                output_target=f"web:{foreign_token}",
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(True, "Here is the answer", None, None),
+        ):
+            result = process_one_task(config)
+        assert result is not None and result[1] is True
+
+        with db.get_db(db_path) as conn:
+            notes = db.list_system_messages(conn, foreign_token)
+            own_turns = [m for m in db.get_messages(conn, own_token) if m.role == "assistant"]
+        # Foreign room: system note. Own conversation room: no bubble (not a target).
+        assert any(m.body == "Here is the answer" for m in notes)
+        assert all(m.body != "Here is the answer" for m in own_turns)
 
     @patch("istota.scheduler.post_result_to_talk", return_value=4242)
     @patch("istota.scheduler.run_coro", return_value=4242)
@@ -2543,9 +2580,12 @@ class TestProcessOneTask:
 
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
-            msgs = db.list_system_messages(conn, room_token)
+            # ISSUE-164: an own-conversation reply lands as an assistant turn
+            # (chat bubble), not a system note. The question text is delivered
+            # for the user to answer by replying.
+            turns = [m for m in db.get_messages(conn, room_token) if m.role == "assistant"]
         assert task.status == "completed"  # not pending_confirmation
-        assert any("confirmation" in m.body for m in msgs)
+        assert any("confirmation" in m.body for m in turns)
 
     @patch("istota.scheduler._drain_deferred_ops")
     @patch("istota.scheduler.execute_task")
