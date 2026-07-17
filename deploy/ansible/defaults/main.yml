@@ -293,6 +293,7 @@ istota_email_smtp_host: ""
 istota_email_smtp_port: 587
 istota_email_poll_folder: "INBOX"
 istota_email_bot_address: ""
+istota_email_imap_timeout_seconds: 30  # socket timeout for IMAP connections
 
 # Conversation context settings
 istota_conversation_enabled: true               # false = no conversation context at all
@@ -367,6 +368,8 @@ istota_experimental_features: []
 #     trusted_email_senders:        # patterns for trusted email senders (plus-address gate)
 #       - "*@example.com"           # domain wildcard
 #       - "bob@other.com"           # exact match
+#     quiet_email_senders:          # patterns whose mail is filed silently — no task, no session
+#       - "*@stratechery.com"       # read back on demand via `email from-senders`
 #     max_foreground_workers: 2    # per-user override (0 or omit = use global default)
 #     max_background_workers: 1    # per-user override (0 or omit = use global default)
 #     disabled_skills: []          # per-user skill exclusion list

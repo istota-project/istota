@@ -274,6 +274,7 @@ class UserConfig:
     max_background_workers: int = 0  # per-user bg worker override (0 = use global default)
     disabled_skills: list[str] = field(default_factory=list)  # skills to exclude from selection
     trusted_email_senders: list[str] = field(default_factory=list)  # patterns for trusted senders
+    quiet_email_senders: list[str] = field(default_factory=list)  # patterns whose mail is filed silently (no task)
     disabled_modules: list[str] = field(default_factory=list)  # modules to disable (default-on otherwise)
     routing: dict[str, str] = field(default_factory=dict)  # purpose -> output_target descriptor
     default_destination: str = "talk"  # fallback delivery descriptor
@@ -765,6 +766,32 @@ class Config:
 
         return False
 
+    def is_quiet_email_sender(
+        self, user_id: str, sender_email: str, conn: "sqlite3.Connection | None" = None,
+    ) -> bool:
+        """Check whether ``sender_email`` is on the user's quiet-senders list.
+
+        Quiet = mail is filed silently (marked processed, left in INBOX), with
+        no task and no session. fnmatch over the user's ``quiet_email_senders``
+        patterns.
+
+        Deliberately unlike :meth:`is_trusted_email_sender`: it does NOT
+        implicitly match the user's own addresses (you never want your own mail
+        silently dropped) and has no runtime DB table — the ``conn`` argument is
+        accepted for call-site symmetry but unused.
+        """
+        from fnmatch import fnmatch
+
+        user = self.users.get(user_id)
+        if not user:
+            return False
+
+        sender_lower = sender_email.lower()
+        for pattern in user.quiet_email_senders:
+            if fnmatch(sender_lower, pattern.lower()):
+                return True
+        return False
+
     def email_reply_routing_for(self, user_id: str) -> str:
         """Per-user mirror policy for email replies to messages we sent.
 
@@ -1029,6 +1056,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         max_background_workers=user_data.get("max_background_workers", 0),
         disabled_skills=user_data.get("disabled_skills", []),
         trusted_email_senders=user_data.get("trusted_email_senders", []),
+        quiet_email_senders=user_data.get("quiet_email_senders", []),
         disabled_modules=user_data.get("disabled_modules", []),
         routing=dict(user_data.get("routing", {}) or {}),
         default_destination=user_data.get("default_destination", "talk") or "talk",

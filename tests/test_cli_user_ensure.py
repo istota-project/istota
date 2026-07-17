@@ -31,6 +31,7 @@ class _FakeArgs:
             "tz": None,
             "email": None,
             "trusted_sender": None,
+            "quiet_sender": None,
             "log_channel": None,
             "alerts_channel": None,
             "max_foreground_workers": None,
@@ -60,6 +61,20 @@ def cfg_with_db(tmp_path: Path, monkeypatch):
     )
     monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
     return cfg, db_path
+
+
+class TestUserEnsureQuietSender:
+    def test_quiet_senders_persist(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice",
+            quiet_sender=["*@stratechery.com", "news@x.com"],
+        ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile is not None
+        assert profile.quiet_email_senders == ["*@stratechery.com", "news@x.com"]
 
 
 class TestUserEnsureDisabledModule:

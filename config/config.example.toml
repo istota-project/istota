@@ -209,6 +209,7 @@ smtp_port = 587
 # Polling settings
 poll_folder = "INBOX"
 bot_email = "istota@example.com"  # bot's email address (to skip own messages)
+# imap_timeout_seconds = 30  # socket timeout for IMAP connections (fail fast on a dead host)
 
 [conversation]
 # Enable conversation context (uses Sonnet to select relevant previous messages)

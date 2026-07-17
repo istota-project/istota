@@ -323,6 +323,16 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # Quiet email senders: fnmatch patterns whose mail is filed silently (no
+    # task, no session). Mirrors trusted_email_senders. JSON array.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "quiet_email_senders TEXT NOT NULL DEFAULT '[]'"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError
     # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id
