@@ -10,12 +10,21 @@ no-op on macOS) so each command is sandboxed per-execution.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
 import time
 
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
 
 from .env import ToolEnv
+
+# Read the pipe in chunks rather than by line. ``StreamReader.readline`` raises
+# ValueError once a single line exceeds the reader's 64 KiB limit (minified JS,
+# base64, ``jq -c``); chunked reads have no per-line ceiling and stream just as
+# incrementally (NB-6).
+_READ_CHUNK_BYTES = 65536
 
 
 def make_bash_tool(env: ToolEnv) -> AgentTool:
@@ -60,43 +69,58 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(env.cwd),
                 env=env.subprocess_env,
+                # Own process group so a timeout/abort/cancel can SIGKILL the
+                # whole tree — a command that backgrounds children (or a bwrap
+                # wrapper) otherwise survives a bare child kill (NB-7).
+                start_new_session=True,
             )
         except (OSError, ValueError) as exc:
             return ToolResult(content=[TextContent(text=f"Failed to start command: {exc}")])
 
         out = bytearray()
+        total_bytes = 0
         truncated = False
         deadline = time.monotonic() + timeout_s
         status = "ok"
 
-        while True:
-            if abort is not None and abort.is_set():
-                status = "aborted"
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                status = "timeout"
-                break
-            try:
-                chunk = await asyncio.wait_for(proc.stdout.readline(), timeout=min(remaining, 0.5))
-            except asyncio.TimeoutError:
-                if proc.returncode is not None:
+        # try/finally so *every* exit path — normal, timeout, abort, and a hard
+        # task cancellation (CancelledError, a BaseException the loop's
+        # `except Exception` won't catch) — kills and reaps the process group
+        # instead of leaking a live subprocess holding its pipe (NB-6/NB-11).
+        try:
+            while True:
+                if abort is not None and abort.is_set():
+                    status = "aborted"
                     break
-                continue
-            if not chunk:
-                break  # EOF
-            if len(out) < env.max_output_bytes:
-                out.extend(chunk)
-                if len(out) >= env.max_output_bytes:
-                    truncated = True
-            if on_update is not None:
-                await on_update(chunk.decode("utf-8", "replace"))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    status = "timeout"
+                    break
+                try:
+                    chunk = await asyncio.wait_for(
+                        proc.stdout.read(_READ_CHUNK_BYTES), timeout=min(remaining, 0.5)
+                    )
+                except asyncio.TimeoutError:
+                    if proc.returncode is not None:
+                        break
+                    continue
+                if not chunk:
+                    break  # EOF
+                total_bytes += len(chunk)
+                if len(out) < env.max_output_bytes:
+                    out.extend(chunk[: env.max_output_bytes - len(out)])
+                    if len(out) >= env.max_output_bytes:
+                        truncated = True
+                if on_update is not None:
+                    await on_update(chunk.decode("utf-8", "replace"))
 
-        if status in ("aborted", "timeout"):
-            _kill(proc)
+            if status == "ok":
+                # Reap so returncode is available for the exit-code suffix.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+        finally:
+            _kill_process_group(proc)
             await _reap(proc)
-        else:
-            await proc.wait()
 
         text = out.decode("utf-8", "replace")
         if truncated:
@@ -122,8 +146,11 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         # model sees only a short stub so noisy output doesn't bloat the window —
         # but the status suffix is appended so a failure still surfaces.
         if exclude_from_context:
+            # Report the true byte count (NB-20), not the truncation-capped
+            # buffer length — the point of the stub is to tell the model how
+            # much output it isn't seeing.
             stub = (
-                f"[output shown to user; {len(out)} bytes omitted from context]"
+                f"[output shown to user; {total_bytes} bytes omitted from context]"
                 + status_suffix
             )
             return ToolResult(content=[TextContent(text=stub)])
@@ -132,15 +159,28 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
     return AgentTool(schema=schema, execute=_execute, execution_mode="sequential")
 
 
-def _kill(proc) -> None:
+def _kill_process_group(proc) -> None:
+    """SIGKILL the subprocess's whole process group.
+
+    ``start_new_session=True`` gave the child its own group, so killing the
+    group takes down any backgrounded grandchildren (and a bwrap wrapper) that
+    a bare ``proc.kill()`` would leave running (NB-7). Falls back to killing the
+    direct child if the group can't be resolved. Synchronous (no await) so it
+    still fires while a CancelledError is unwinding the coroutine."""
+    if proc.returncode is not None:
+        return
     try:
-        proc.kill()
-    except ProcessLookupError:
-        pass
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
 
 
 async def _reap(proc) -> None:
+    # Best-effort: the SIGKILL already fired synchronously, so even if this await
+    # is interrupted (CancelledError) the OS/asyncio child watcher still reaps
+    # the dead process — this just avoids a "pending task destroyed" warning.
     try:
         await asyncio.wait_for(proc.wait(), timeout=5)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
         pass

@@ -108,3 +108,60 @@ class TestBash:
     async def test_exclude_from_context_default_includes_output(self, tmp_path):
         result = await _run(make_bash_tool(_env(tmp_path)), {"command": "echo visible"})
         assert "visible" in _text(result)
+
+
+class TestBashProcessHandling:
+    """NB-6/NB-7/NB-11: long lines must not crash the tool, and timeout/abort/
+    cancel must kill the whole process group (no orphaned grandchildren)."""
+
+    async def test_long_line_does_not_crash(self, tmp_path):
+        # A single line far larger than asyncio's default 64 KiB StreamReader
+        # limit used to raise ValueError (minified JS, base64, `jq -c`).
+        env = _env(tmp_path, max_output_bytes=500_000)
+        big = 200_000
+        result = await _run(
+            make_bash_tool(env),
+            {"command": f"printf 'x%.0s' $(seq 1 {big})"},
+        )
+        text = _text(result)
+        assert "Failed to start" not in text
+        # The bulk of the long line is captured (up to the cap), not lost.
+        assert text.count("x") > 100_000
+
+    async def test_timeout_kills_backgrounded_grandchild(self, tmp_path):
+        # A command that backgrounds a child which holds the stdout pipe open.
+        # Without a process-group kill the grandchild survives and the poll
+        # would hang on the open pipe. The whole group must die on timeout.
+        marker = tmp_path / "alive.txt"
+        cmd = (
+            f"(while true; do echo tick > {marker}; sleep 0.1; done) & "
+            "echo started; sleep 30"
+        )
+        result = await _run(
+            make_bash_tool(_env(tmp_path)),
+            {"command": cmd, "timeout": 500},
+        )
+        assert "timed out" in _text(result).lower()
+        # Give any surviving grandchild a moment to prove it's still writing.
+        await asyncio.sleep(0.5)
+        mtime1 = marker.stat().st_mtime if marker.exists() else 0
+        await asyncio.sleep(0.5)
+        mtime2 = marker.stat().st_mtime if marker.exists() else 0
+        assert mtime1 == mtime2, "grandchild survived the timeout (process group not killed)"
+
+    async def test_cancel_reaps_subprocess(self, tmp_path):
+        # A hard task cancellation (CancelledError) landing inside _execute must
+        # not leak the subprocess — the finally block kills the group.
+        marker = tmp_path / "alive.txt"
+        cmd = f"while true; do echo tick > {marker}; sleep 0.1; done"
+        tool = make_bash_tool(_env(tmp_path))
+        task = asyncio.ensure_future(_run(tool, {"command": cmd}))
+        await asyncio.sleep(0.4)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.5)
+        mtime1 = marker.stat().st_mtime if marker.exists() else 0
+        await asyncio.sleep(0.5)
+        mtime2 = marker.stat().st_mtime if marker.exists() else 0
+        assert mtime1 == mtime2, "subprocess survived cancellation"
