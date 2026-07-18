@@ -32,6 +32,7 @@ import {
 	type ChatView,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
+import { resetCommandCatalogue } from '$lib/components/chat/autocomplete/providers';
 import { applyEvent as applySegmentEvent, type ChatMessage, type Segment, type ToolEntry } from '$lib/stores/segments';
 
 // The message / segment model lives in the pure reducer module so it can be
@@ -930,6 +931,8 @@ function createSession(): ChatSession {
 	function teardown() {
 		stopActive();
 		stopRoomsRefresh();
+		// Drop the cached command/alias catalogue so a fresh session refetches it.
+		resetCommandCatalogue();
 		if (onVisibility && typeof document !== 'undefined') {
 			document.removeEventListener('visibilitychange', onVisibility);
 			onVisibility = null;
