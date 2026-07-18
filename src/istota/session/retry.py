@@ -34,16 +34,30 @@ class ErrorClassification:
 
 
 _OVERFLOW_PATTERNS = re.compile(
-    r"context.?length|too.?many.?tokens|maximum.?context|"
-    r"prompt.?is.?too.?long|exceeds.?the.?maximum|input.?too.?large",
+    r"context.?length|context.?window|context.?size|too.?many.?tokens|"
+    r"maximum.?context|prompt.?is.?too.?long|input.?too.?large|"
+    # "exceeds the maximum/available/model's context", llama.cpp / vLLM / etc.
+    r"exceeds.{0,40}context|reduce.?the.?(length|number.?of.?(messages|tokens))",
     re.IGNORECASE,
 )
 
+# Transient signals matched on the error *text* only (used when no status code
+# is available). Deliberately phrase-based, not bare numbers/words: a permanent
+# 400 whose body happens to quote "503" or "timeout" must not read as transient
+# (NB-13a). Real 5xx are handled by the status-code branch, not this regex.
 _OVERLOADED_PATTERNS = re.compile(
-    r"overloaded|529|503|502|500|504|"
-    r"rate.?limit|429|too.?many.?requests|"
-    r"connection.?error|timeout|ECONNRESET|ECONNREFUSED|"
-    r"network|socket.?hang.?up",
+    r"overloaded|"
+    r"rate.?limit|too.?many.?requests|"
+    r"connection.?(error|reset|refused|timed?.?out)|"
+    r"ECONNRESET|ECONNREFUSED|"
+    r"network.?error|socket.?hang.?up|read.?timed?.?out|request.?timed?.?out",
+    re.IGNORECASE,
+)
+
+# Rate-limit signals in error text (word-boundaried so "generate" doesn't match
+# on a bare "rate", NB-13b).
+_RATE_LIMIT_PATTERNS = re.compile(
+    r"rate.?limit|too.?many.?requests|\b429\b",
     re.IGNORECASE,
 )
 
@@ -55,6 +69,19 @@ def classify_error(error_message: str, status_code: int | None = None) -> ErrorC
     routed to compaction rather than treated as a permanent client error.
     """
     error_message = error_message or ""
+
+    # A hard rate-limit status wins over any overflow-looking text: a tokens-
+    # per-minute 429 may read "too many tokens" but it's a rate limit, not a
+    # context overflow (NB-13). Checked before the overflow-text match.
+    if status_code == 429:
+        return ErrorClassification(
+            retryable=True,
+            is_context_overflow=False,
+            is_rate_limit=True,
+            is_auth_error=False,
+            category="transient",
+            status_code=status_code,
+        )
 
     if _OVERFLOW_PATTERNS.search(error_message):
         return ErrorClassification(
@@ -76,7 +103,7 @@ def classify_error(error_message: str, status_code: int | None = None) -> ErrorC
             status_code=status_code,
         )
 
-    if status_code == 429 or (status_code is None and "rate" in error_message.lower()):
+    if status_code is None and _RATE_LIMIT_PATTERNS.search(error_message):
         return ErrorClassification(
             retryable=True,
             is_context_overflow=False,
@@ -153,8 +180,10 @@ async def retry_with_backoff(
             return result
 
         retry_count += 1
-        delay = min(base_delay * (2 ** (retry_count - 1)), max_delay)
-        delay *= 0.5 + random.random()  # jitter — avoid thundering herd
+        # Jitter first, then cap — so max_delay is a true ceiling, not 1.5× it
+        # (NB-13). Multiplier in [0.5, 1.5).
+        delay = base_delay * (2 ** (retry_count - 1)) * (0.5 + random.random())
+        delay = min(delay, max_delay)
 
         if on_retry:
             on_retry(retry_count, max_retries, delay, getattr(result, "error_message", "") or "")

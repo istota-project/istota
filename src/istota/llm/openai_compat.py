@@ -57,6 +57,38 @@ _REASONING_EFFORT_WIRE = {
     "max": "high",
 }
 
+# Model families on OpenAI's own endpoint that require ``max_completion_tokens``
+# instead of ``max_tokens`` (NB-12). Matched as a lowercase prefix of the id.
+_OPENAI_REASONING_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+
+def _uses_max_completion_tokens(base_url: str, model: str) -> bool:
+    if "api.openai.com" not in (base_url or ""):
+        return False
+    return model.lower().startswith(_OPENAI_REASONING_PREFIXES)
+
+
+def _tool_delta_index(tc: dict, tool_acc: dict, id_to_index: dict) -> int:
+    """Resolve the accumulator slot for a streamed tool_call delta (NB-16).
+
+    Prefers the wire ``index``. When absent: a new ``id`` opens a new slot; a
+    known ``id`` maps back to its slot; a delta with neither (a bare argument
+    continuation) appends to the most recently opened slot.
+    """
+    idx = tc.get("index")
+    if idx is not None:
+        tc_id = tc.get("id")
+        if tc_id:
+            id_to_index[tc_id] = idx
+        return idx
+    tc_id = tc.get("id")
+    if tc_id:
+        if tc_id not in id_to_index:
+            id_to_index[tc_id] = len(tool_acc)
+        return id_to_index[tc_id]
+    # No index, no id: continuation of the open (highest) slot, or slot 0.
+    return max(tool_acc) if tool_acc else 0
+
 
 class OpenAICompatibleProvider:
     def __init__(
@@ -73,6 +105,7 @@ class OpenAICompatibleProvider:
         }
         if extra_headers:
             headers.update(extra_headers)
+        self._base_url = base_url or ""
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout, headers=headers)
         # Opt-in: add Anthropic/OpenRouter cache_control breakpoints. Off by
         # default so a plain-OpenAI / local endpoint never sees the extension.
@@ -154,13 +187,21 @@ class OpenAICompatibleProvider:
         body: dict = {
             "model": model,
             "messages": wire,
-            "max_tokens": max_tokens,
             "stream": True,
             # Ask the server for a trailing usage chunk; without this OpenAI-
             # compatible endpoints (OpenAI, LM Studio, vLLM, OpenRouter) report
             # no token usage in streaming mode and cost telemetry stays zero.
             "stream_options": {"include_usage": True},
         }
+        # NB-12: OpenAI's own o-series / gpt-5 reasoning models 400 on
+        # ``max_tokens`` and require ``max_completion_tokens``. Only the direct
+        # OpenAI endpoint is affected — OpenRouter and others normalize — so the
+        # gate is scoped to ``api.openai.com`` to avoid breaking a local server
+        # that only knows ``max_tokens``.
+        if _uses_max_completion_tokens(self._base_url, model):
+            body["max_completion_tokens"] = max_tokens
+        else:
+            body["max_tokens"] = max_tokens
         if tools_wire is not None:
             body["tools"] = tools_wire
 
@@ -346,6 +387,10 @@ class OpenAICompatibleProvider:
         thinking_parts: list[str] = []
         # index -> {"id", "name", "args"}
         tool_acc: dict[int, dict] = {}
+        # NB-16: some endpoints omit ``index``. Track id→slot and a running
+        # counter so index-less parallel calls don't all merge into slot 0, and
+        # an id-less argument continuation appends to the open call.
+        id_to_index: dict[str, int] = {}
         finish_reason: str | None = None
         usage_raw: dict | None = None
         saw_done = False
@@ -411,7 +456,7 @@ class OpenAICompatibleProvider:
                 yield TextDelta(text=content)
 
             for tc in delta.get("tool_calls") or []:
-                idx = tc.get("index", 0)
+                idx = _tool_delta_index(tc, tool_acc, id_to_index)
                 slot = tool_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
                 if tc.get("id"):
                     slot["id"] = tc["id"]
@@ -478,7 +523,11 @@ class OpenAICompatibleProvider:
                 args = json.loads(slot["args"]) if slot["args"] else {}
             except json.JSONDecodeError:
                 args = {}
-            content.append(ToolCallContent(id=slot["id"], name=slot["name"], arguments=args))
+            # NB-16: synthesize a stable id when the endpoint sent none — an
+            # empty id would collide with any other id-less call in the pair
+            # sanitizer (which keys on id) and some endpoints 400 on "".
+            call_id = slot["id"] or f"call_{idx}"
+            content.append(ToolCallContent(id=call_id, name=slot["name"], arguments=args))
 
         usage = Usage()
         if usage_raw:

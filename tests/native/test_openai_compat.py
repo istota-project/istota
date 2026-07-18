@@ -56,6 +56,28 @@ class TestRequestBuilding:
         assert user["role"] == "user"
         assert "hello" in str(user["content"])
 
+    def test_openai_reasoning_model_uses_max_completion_tokens(self):
+        # NB-12: o-series / gpt-5 on api.openai.com 400 on max_tokens (require
+        # max_completion_tokens). Only the direct OpenAI endpoint is affected.
+        p = OpenAICompatibleProvider(api_key="k", base_url="https://api.openai.com/v1")
+        for model in ["o1", "o3-mini", "gpt-5", "o4-mini"]:
+            body = p._build_chat_completion_request("", [], [], model, 100)
+            assert body.get("max_completion_tokens") == 100, model
+            assert "max_tokens" not in body, model
+
+    def test_openai_non_reasoning_model_keeps_max_tokens(self):
+        p = OpenAICompatibleProvider(api_key="k", base_url="https://api.openai.com/v1")
+        body = p._build_chat_completion_request("", [], [], "gpt-4o", 100)
+        assert body["max_tokens"] == 100
+        assert "max_completion_tokens" not in body
+
+    def test_non_openai_endpoint_keeps_max_tokens_for_reasoning(self):
+        # OpenRouter / others normalize; only the direct OpenAI endpoint 400s.
+        p = OpenAICompatibleProvider(api_key="k", base_url="https://openrouter.ai/api/v1")
+        body = p._build_chat_completion_request("", [], [], "o3", 100)
+        assert body["max_tokens"] == 100
+        assert "max_completion_tokens" not in body
+
     def test_assistant_tool_call_converted(self):
         msg = AssistantMessage(
             content=[
@@ -265,6 +287,46 @@ class TestWireIntegrity:
         done = (await self._collect(lines))[-1]
         assert isinstance(done, StreamDone)
         assert done.message.stop_reason == "content_filter"
+
+    async def test_parallel_tool_calls_without_index_do_not_merge(self):
+        # NB-16: some endpoints omit `index`. Two calls with distinct ids must
+        # not both collapse into slot 0.
+        lines = [
+            'data: {"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"Read","arguments":"{}"}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"id":"b","function":{"name":"Grep","arguments":"{}"}}]}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+            "data: [DONE]",
+        ]
+        done = (await self._collect(lines))[-1]
+        calls = done.message.tool_calls
+        assert len(calls) == 2
+        assert {c.name for c in calls} == {"Read", "Grep"}
+
+    async def test_index_less_argument_continuation_appends(self):
+        # A follow-up delta with neither index nor id continues the open call.
+        lines = [
+            'data: {"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"Read","arguments":"{\\"p\\":"}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\\"/x\\"}"}}]}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+            "data: [DONE]",
+        ]
+        done = (await self._collect(lines))[-1]
+        calls = done.message.tool_calls
+        assert len(calls) == 1
+        assert calls[0].arguments == {"p": "/x"}
+
+    async def test_empty_tool_call_id_synthesized(self):
+        # NB-16: a server that never sends an id must not produce ToolCallContent
+        # with id="" (empty ids collide in the pair sanitizer).
+        lines = [
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"Read","arguments":"{}"}}]}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+            "data: [DONE]",
+        ]
+        done = (await self._collect(lines))[-1]
+        calls = done.message.tool_calls
+        assert len(calls) == 1
+        assert calls[0].id  # non-empty synthesized id
 
 
 class FakeStreamResponse:
