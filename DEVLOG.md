@@ -2,6 +2,34 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-18: Memory search & web-chat `!search` overhaul
+
+Fixed a long-standing bug where `!search` in a room returned almost nothing, and rebuilt the web-chat search UX into clickable, jump-to-response result cards. Five staged changes across the Python backend and the SvelteKit frontend.
+
+**The reported bug.** Default-scope `!search <query>` in a room returned only the searcher's own live-task conversation chunks — it dropped memory-file hits, the current channel's history, and any conversation whose `tasks` row had aged out of retention. `--all` worked; the bare command didn't. Root cause: the `!search` read path (`commands._search_memory` / `cmd_search`) never searched the `channel:{token}` namespace or the channel-memory source types (the two working callers — executor recall and the skill CLI — both do), and it applied a room-scope filter that discarded every non-conversation hit and every conversation whose task row no longer existed.
+
+**Read-path parity (Stage 1).** `_search_memory` now takes `conversation_token`, searches the `channel:{token}` namespace, and defaults to the full source set (conversation + `memory_file` + `user_memory` + `channel_memory` + `channel_memory_durable`). Each hit is classified onto an `is_memory` axis independent of task-row existence: conversation rows are room-bound (room token from the task row, or the durable `messages` store via the new `db.get_message_room_for_task` when the task row is gone — so retention no longer erases scope); channel-memory rows are tagged with the current room; personal-memory rows are not room-bound. `cmd_search`'s scope filter now room-scopes only the conversation axis and never discards memory hits in the current-room view. Conversation rows dedup by `task_id`, memory rows by `(source_type, source_id)`.
+
+**FTS forgiveness (Stage 2).** `_escape_fts5_query` gained `prefix` (append `*` per term, so `falcon` matches `falcons`) and `match_mode` (implicit-AND vs explicit-OR). `search()`/`_search_bm25` thread these plus an `allow_or_fallback` retry. `!search` opts into prefix matching + OR forgiveness; the executor recall path and the skill CLI keep strict AND / no prefix / no fallback via unchanged defaults (a whole-prompt OR query would flood recall with noise) — the non-regression requirement, confirmed at the call sites.
+
+**Structured payload + result cards (Stages 3–4).** `CommandResult` gained an optional `data` field; `cmd_search` sets `ctx.result_data` (an output slot on `CommandContext`, so the handler keeps its plain-string return and its many string-asserting tests) and `dispatch` threads it onto the delivered result. The web POST forwards it as `command_data`. A new `SearchResults.svelte` renders result cards; the chat store attaches the payload to the assistant bubble when `kind === 'search_results'`, else falls back to markdown. Talk ignores `data` entirely and keeps its text body with deep links.
+
+**Jump-to-response + deep link (Stage 5).** A conversation card's "Jump to reply" calls a new store `jumpToTask(roomToken, taskId)`: it selects the room if needed, pages older history (5-page bound) to locate the turn, then signals `scrollTarget`; the route scrolls the `data-cid`-anchored row into view with a 2s highlight pulse (reduced-motion aware). `/chat?room=<token>&task=<id>` deep-links straight to a turn. Unknown-room / not-found / cross-room-foreign cases degrade to a transient error, never broken state.
+
+**Review pass (Mulder + Scully).** Two review agents went over the diff. Scully verified spec conformance and the recall non-regression at the exact call sites. Mulder found one real MEDIUM bug: the OR-forgiveness gate keyed on `search()`'s *global* BM25 emptiness, but room-scoping happens later in `cmd_search` — so a strict AND match in *another* room (reachable via the user namespace, then scope-filtered out) suppressed the OR retry and the in-room loose match never surfaced, silently defeating forgiveness in its target case. Fixed by moving the forgiveness decision to key on the *scoped* result: `cmd_search` runs a strict pass, assembles + scope-filters, and only if that is empty re-runs with explicit OR mode. Reproduced with a failing test first. Mulder cleared the high-damage areas (no privacy leak across shared rooms, dedup sound, retention fallback correct, `data` never leaks to the Talk push surface).
+
+**Files added/modified:**
+- `src/istota/commands.py` — `_search_memory` (channel namespace, `is_memory` scope axis, retention fallback, dedup), `cmd_search` (scoped strict→OR two-pass, `_assemble` helper, `_build_search_data`), `CommandResult.data`, `CommandContext.result_data`, `dispatch` threading.
+- `src/istota/memory/search.py` — `_escape_fts5_query(prefix=, match_mode=)`, `_search_bm25`/`search` gained `match_mode`/`prefix`/`allow_or_fallback`.
+- `src/istota/db.py` — `get_message_room_for_task`.
+- `src/istota/web_app.py` — web POST forwards `command_data`.
+- `web/src/lib/stores/chat.ts` — `jumpToTask`/`scrollToCid`/`scrollTarget`, search-results attach on inline command.
+- `web/src/lib/stores/segments.ts` — `SearchResultsData`/`SearchResultItem` types, `ChatMessage.searchResults`.
+- `web/src/lib/components/chat/SearchResults.svelte` (new), `Message.svelte` (`data-cid`/`data-task-id` anchors, card render, `onJump`).
+- `web/src/routes/chat/+page.svelte` — scroll-to-cid effect + highlight, `&task=<id>` deep link.
+- `web/src/lib/api.ts` — `SendResult.command_data`.
+- Tests: `tests/test_commands_search.py` (new), extended `test_memory_search.py` / `test_commands.py` / `test_web_chat.py`; `web/.../SearchResults.svelte.test.ts` (new), `chat.jump.test.ts` (new), extended `Message.svelte.test.ts`.
+
 ## 2026-07-18: Room model badge + canonical model names in the UI
 
 Follow-on UI work on the per-room model default (below). Added a badge beside the room title in the web chat header showing the room's standing default, and made the model/alias displays name the actual canonical model everywhere.

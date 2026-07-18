@@ -2790,6 +2790,20 @@ def store_turn_message(
     )
 
 
+def get_message_room_for_task(conn: sqlite3.Connection, task_id: int) -> str | None:
+    """The canonical room token for a task's stored turn, or None if absent.
+
+    A thin read over the durable `messages` store so a conversation search hit
+    keeps its room scope after the `tasks` row ages out of retention (the tasks
+    table is a display concern; `messages` holds the durable room↔turn mapping).
+    Returns the room of the first message carrying this task_id."""
+    row = conn.execute(
+        "SELECT room_token FROM messages WHERE task_id = ? LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row["room_token"] if row else None
+
+
 def get_turn_message_id(
     conn: sqlite3.Connection,
     room_token: str,

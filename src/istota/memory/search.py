@@ -567,16 +567,24 @@ def reindex_all(
 # Search
 # ---------------------------------------------------------------------------
 
-def _escape_fts5_query(query: str) -> str:
+def _escape_fts5_query(query: str, *, prefix: bool = False, match_mode: str = "and") -> str:
     """Escape a user query for safe FTS5 MATCH usage.
 
     Quotes each term to neutralize FTS5 operators (AND, OR, NOT, NEAR, etc.).
+
+    ``prefix`` appends ``*`` to each quoted term (``"falcon"*``) so a term
+    matches longer words (``falcon`` → ``falcons``). ``match_mode`` joins the
+    terms as an implicit AND (default — every term must match) or an explicit
+    ``OR`` (any term matches, the interactive-search forgiveness path).
     """
     # Split into words and quote each one
     terms = query.split()
     if not terms:
         return '""'
-    return " ".join(f'"{t}"' for t in terms)
+    suffix = "*" if prefix else ""
+    quoted = [f'"{t}"{suffix}' for t in terms]
+    joiner = " OR " if match_mode == "or" else " "
+    return joiner.join(quoted)
 
 
 def _build_user_filter(user_id: str, include_user_ids: list[str] | None = None) -> tuple[str, list[str]]:
@@ -609,9 +617,11 @@ def _search_bm25(
     entities: list[str] | None = None,
     now: str | None = None,
     include_expired: bool = False,
+    match_mode: str = "and",
+    prefix: bool = False,
 ) -> list[SearchResult]:
     """Full-text BM25 search via FTS5."""
-    escaped = _escape_fts5_query(query)
+    escaped = _escape_fts5_query(query, prefix=prefix, match_mode=match_mode)
 
     user_filter, user_params = _build_user_filter(user_id, include_user_ids)
 
@@ -886,6 +896,9 @@ def search(
     recency_half_life_days: float = 0.0,
     now: str | None = None,
     include_expired: bool = False,
+    match_mode: str = "and",
+    allow_or_fallback: bool = False,
+    prefix: bool = False,
 ) -> list[SearchResult]:
     """Hybrid search: BM25 + vector with RRF fusion.
 
@@ -910,13 +923,30 @@ def search(
             recency decay; defaults to today. Injectable for tests.
         include_expired: When True, skip the episode-window filter and return
             chunks whose ``valid_until`` has passed (ISSUE-109 #2). Default False.
+        match_mode: FTS join for the BM25 pass — "and" (implicit AND of every
+            term, the precise default) or "or" (any term). Vector search is
+            unaffected (it's semantic, not lexical).
+        prefix: When True, BM25 terms become prefix queries (``"falcon"*``) so a
+            near-miss token still matches. Interactive search opts in.
+        allow_or_fallback: When True and the strict (AND) BM25 pass returns no
+            rows, retry the BM25 pass once in OR mode before fusing. The recall
+            path leaves this False — a whole-prompt OR query floods recall with
+            low-precision noise injected into every task.
     """
     # Fetch more from each source for fusion
     fetch_limit = limit * 3
 
     bm25_results = _search_bm25(conn, user_id, query, fetch_limit, source_types,
                                  include_user_ids, since=since, topics=topics, entities=entities,
-                                 now=now, include_expired=include_expired)
+                                 now=now, include_expired=include_expired,
+                                 match_mode=match_mode, prefix=prefix)
+    if not bm25_results and allow_or_fallback and match_mode != "or":
+        # Strict AND found nothing — relax to OR so a partial-term match still
+        # returns something (interactive-search forgiveness).
+        bm25_results = _search_bm25(conn, user_id, query, fetch_limit, source_types,
+                                     include_user_ids, since=since, topics=topics, entities=entities,
+                                     now=now, include_expired=include_expired,
+                                     match_mode="or", prefix=prefix)
     vec_results = _search_vec(conn, user_id, query, fetch_limit, source_types,
                                include_user_ids, since=since, topics=topics, entities=entities,
                                now=now, include_expired=include_expired)

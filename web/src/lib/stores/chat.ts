@@ -33,12 +33,16 @@ import {
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
 import { resetCommandCatalogue } from '$lib/components/chat/autocomplete/providers';
-import { applyEvent as applySegmentEvent, type ChatMessage, type Segment, type ToolEntry } from '$lib/stores/segments';
+import {
+	applyEvent as applySegmentEvent,
+	type ChatMessage, type Segment, type ToolEntry,
+	type SearchResultsData, type SearchResultItem,
+} from '$lib/stores/segments';
 
 // The message / segment model lives in the pure reducer module so it can be
 // unit-tested without a DOM; re-export here so existing `$lib/stores/chat`
 // importers keep working.
-export type { ChatMessage, Segment, ToolEntry };
+export type { ChatMessage, Segment, ToolEntry, SearchResultsData, SearchResultItem };
 
 /** Build an assistant message's `segments` from a finished task's history
  * payload. Tool entries render as neutral "done" chips (history carries no
@@ -125,6 +129,12 @@ export interface ChatSession {
 	init: () => Promise<void>;
 	selectRoom: (id: number) => Promise<void>;
 	selectRoomByToken: (token: string) => Promise<boolean>;
+	// Jump-to-response: resolve a search result's turn (select room + page to it)
+	// and signal the transcript to scroll. `scrollTarget` is the signal the route
+	// watches to perform the DOM scroll + transient highlight.
+	jumpToTask: (roomToken: string, taskId: number) => Promise<boolean>;
+	scrollToCid: (cid: number) => void;
+	scrollTarget: Writable<{ cid: number; nonce: number } | null>;
 	newRoom: (name: string) => Promise<void>;
 	renameRoom: (id: number, name: string) => Promise<void>;
 	updateRoomSettings: (
@@ -836,6 +846,65 @@ function createSession(): ChatSession {
 		return true;
 	}
 
+	// Jump-to-response (memory-search overhaul): a search result card asks the
+	// transcript to scroll to a specific turn. The store owns resolution (select
+	// the room, page history to find the turn); the DOM scroll + highlight is the
+	// route's job, driven by the `scrollTarget` signal. The nonce lets a repeated
+	// jump to the same cid re-fire the effect.
+	const scrollTarget = writable<{ cid: number; nonce: number } | null>(null);
+	let scrollNonce = 0;
+	function scrollToCid(cid: number) {
+		scrollTarget.set({ cid, nonce: ++scrollNonce });
+	}
+
+	// The cid of the (assistant, else any) transcript row for a task, or null.
+	function findCidByTask(taskId: number): number | null {
+		const msgs = get(messages);
+		const assistant = msgs.find((m) => m.taskId === taskId && m.role === 'assistant');
+		if (assistant) return assistant.cid;
+		const any = msgs.find((m) => m.taskId === taskId);
+		return any ? any.cid : null;
+	}
+
+	const JUMP_MAX_PAGES = 5;
+
+	// Select the target room (if needed), locate the task's turn — paging older
+	// history up to a bound when it's outside the loaded window — then scroll to
+	// it. Returns false (and sets a transient error) on any miss rather than
+	// throwing, so a stale/foreign link degrades gracefully.
+	async function jumpToTask(roomToken: string, taskId: number): Promise<boolean> {
+		try {
+			const room = get(rooms).find((r) => r.token === roomToken);
+			if (!room) {
+				error.set("Couldn't open that conversation.");
+				return false;
+			}
+			if (get(activeRoomId) !== room.id || get(view) !== 'room') {
+				const ok = await selectRoomByToken(roomToken);
+				if (!ok) {
+					error.set("Couldn't open that conversation.");
+					return false;
+				}
+			}
+			let cid = findCidByTask(taskId);
+			let pages = 0;
+			while (cid == null && get(hasMore) && !get(loadingOlder) && pages < JUMP_MAX_PAGES) {
+				await loadOlder();
+				pages += 1;
+				cid = findCidByTask(taskId);
+			}
+			if (cid == null) {
+				error.set("Couldn't locate that message.");
+				return false;
+			}
+			scrollToCid(cid);
+			return true;
+		} catch {
+			error.set("Couldn't jump to that message.");
+			return false;
+		}
+	}
+
 	async function send(text: string, attachments: { path: string; name: string }[] = []) {
 		const roomId = get(activeRoomId);
 		const trimmed = text.trim();
@@ -879,9 +948,13 @@ function createSession(): ChatSession {
 		}
 		if (res.task_id == null) {
 			// !command ran inline — no task, no stream.
+			const cd = res.command_data as SearchResultsData | null | undefined;
 			updateMsg(phCid, (m) => {
 				m.role = 'system';
 				m.text = res.inline_result || '';
+				// A structured search_results payload renders as result cards; any
+				// other kind (or absent data) falls back to the markdown text.
+				if (cd && cd.kind === 'search_results') m.searchResults = cd;
 				m.progress = undefined;
 				m.streaming = false;
 			});
@@ -956,6 +1029,7 @@ function createSession(): ChatSession {
 		view, selectView, toggleStar, markAllRead,
 		hasMore, loadingOlder, loadOlder,
 		init, selectRoom, selectRoomByToken, newRoom, renameRoom, updateRoomSettings,
+		jumpToTask, scrollToCid, scrollTarget,
 		promoteRoom, archiveRoom,
 		deleteRoom, send, cancel, confirm, reject, teardown,
 	};

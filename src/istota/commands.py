@@ -44,6 +44,11 @@ class CommandContext:
     args: str
     surface: str = "talk"
     registry: "TransportRegistry | None" = None
+    # Output slot: a handler that returns plain text but also has a structured
+    # payload (e.g. !search's result cards) sets this; ``dispatch`` threads it
+    # onto the returned ``CommandResult.data`` for rich stream surfaces. Most
+    # handlers leave it None and just return their text.
+    result_data: dict | None = None
 
 
 @dataclass
@@ -60,10 +65,17 @@ class CommandResult:
     handled: bool
     text: str | None = None
     delivered: bool = False
+    # Optional structured payload for rich stream surfaces (web chat). Push
+    # surfaces (Talk) ignore it and render `text`; the web caller forwards it as
+    # `command_data` so the client can render a dedicated component. Additive and
+    # backward-compatible — absent `data` behaves exactly as before.
+    data: dict | None = None
 
 
-# Type for command handlers — a single surface-agnostic context in, text out.
-CommandHandler = Callable[[CommandContext], Awaitable[str]]
+# Type for command handlers — a single surface-agnostic context in. A handler
+# returns plain `text`, or a `CommandResult` when it also carries a structured
+# `data` payload (e.g. !search's clickable result cards).
+CommandHandler = Callable[[CommandContext], Awaitable["str | CommandResult"]]
 
 # Command registry: name -> (handler, help_text)
 COMMANDS: dict[str, tuple[CommandHandler, str]] = {}
@@ -212,9 +224,13 @@ async def _deliver_result(
     surface: str,
     conversation_token: str,
     text: str,
+    data: dict | None = None,
 ) -> CommandResult:
     """Push ``text`` to the surface (push transports) or return it for the caller
-    to render (stream surfaces / no registered transport)."""
+    to render (stream surfaces / no registered transport).
+
+    ``data`` (a structured payload) rides along on the returned result for
+    stream surfaces to render; push transports deliver only ``text``."""
     transport = registry.get(surface) if registry is not None else None
     is_push = (
         transport is not None
@@ -225,8 +241,8 @@ async def _deliver_result(
             await transport.deliver(conversation_token, text)
         except Exception as e:
             logger.error("Command delivery to %s failed: %s", surface, e, exc_info=True)
-        return CommandResult(handled=True, text=text, delivered=True)
-    return CommandResult(handled=True, text=text, delivered=False)
+        return CommandResult(handled=True, text=text, delivered=True, data=data)
+    return CommandResult(handled=True, text=text, delivered=False, data=data)
 
 
 async def dispatch(
@@ -265,7 +281,7 @@ async def dispatch(
 
     handler, _ = COMMANDS[cmd_name]
 
-    async def _run(active_conn: sqlite3.Connection) -> str:
+    async def _run(active_conn: sqlite3.Connection) -> tuple[str, dict | None]:
         ctx = CommandContext(
             config=config,
             conn=active_conn,
@@ -275,19 +291,25 @@ async def dispatch(
             surface=surface,
             registry=registry,
         )
-        return await handler(ctx)
+        result = await handler(ctx)
+        # A handler returns plain text (and may set ``ctx.result_data`` for a
+        # structured payload), or a CommandResult carrying its own text + data.
+        if isinstance(result, CommandResult):
+            return (result.text or "", result.data if result.data is not None else ctx.result_data)
+        return (result, ctx.result_data)
 
+    data: dict | None = None
     try:
         if conn is not None:
-            text = await _run(conn)
+            text, data = await _run(conn)
         else:
             with db.get_db(config.db_path) as own_conn:
-                text = await _run(own_conn)
+                text, data = await _run(own_conn)
     except Exception as e:
         logger.error("Command !%s failed: %s", cmd_name, e, exc_info=True)
         text = f"Command `!{cmd_name}` failed: {e}"
 
-    return await _deliver_result(config, registry, surface, conversation_token, text or "")
+    return await _deliver_result(config, registry, surface, conversation_token, text or "", data)
 
 
 # =============================================================================
@@ -1148,33 +1170,83 @@ def _summarize_chunk(content: str) -> str:
     return text[:200] + "..."
 
 
+# Personal / channel memory source types — not room-bound conversation turns.
+_MEMORY_SOURCE_TYPES = ("memory_file", "user_memory", "channel_memory", "channel_memory_durable")
+# The full default search set: room conversation turns + every memory kind.
+_DEFAULT_SEARCH_SOURCE_TYPES = ["conversation", *_MEMORY_SOURCE_TYPES]
+# Channel-scoped memory (belongs to the current room we fetched channel:{token} for).
+_CHANNEL_MEMORY_SOURCE_TYPES = ("channel_memory", "channel_memory_durable")
+
+
 def _search_memory(
     config: Config,
     conn: sqlite3.Connection,
     user_id: str,
     query: str,
+    *,
     limit: int = 20,
     source_types: list[str] | None = None,
     since: str | None = None,
+    conversation_token: str | None = None,
+    match_mode: str = "and",
+    allow_or_fallback: bool = False,
+    prefix: bool = False,
 ) -> list[dict]:
-    """Search the memory index and resolve task/room metadata."""
+    """Search the memory index and classify each hit onto a scope axis.
+
+    Mirrors the two correct search callers (executor recall + the memory_search
+    skill CLI): when ``conversation_token`` is set, the ``channel:{token}``
+    namespace is searched too, and the default source set covers conversation
+    turns plus every memory kind.
+
+    Each result is classified independent of task-row existence:
+      - ``conversation`` rows are room-bound — room token from the task row, or
+        the durable ``messages`` store when the task row has aged out; else
+        room-unknown (``conversation_token=None``, shown only under ``--all``).
+      - ``channel_memory`` / ``channel_memory_durable`` rows belong to the
+        current channel (we only fetched ``channel:{current}``): tagged with the
+        current room token and ``is_memory=True``.
+      - ``memory_file`` / ``user_memory`` rows are the user's personal memory —
+        not room-bound, ``is_memory=True``, room token ``None``.
+
+    Results are deduped by ``task_id`` (conversation) and
+    ``(source_type, source_id)`` (memory), keeping the higher-ranked hit.
+    """
     if source_types is None:
-        source_types = ["conversation", "memory_file"]
+        source_types = list(_DEFAULT_SEARCH_SOURCE_TYPES)
+
+    include_user_ids = [f"channel:{conversation_token}"] if conversation_token else None
+
     try:
         results = memory_search_mod.search(
             conn, user_id, query, limit=limit,
             source_types=source_types,
             since=since,
+            include_user_ids=include_user_ids,
+            match_mode=match_mode,
+            allow_or_fallback=allow_or_fallback,
+            prefix=prefix,
         )
     except Exception as e:
         logger.debug("Memory search failed: %s", e)
         return []
 
-    out = []
+    out: list[dict] = []
+    seen_conv: set[int] = set()
+    seen_mem: set[tuple[str, str]] = set()
+
     for r in results:
+        is_memory = r.source_type in _MEMORY_SOURCE_TYPES
         entry: dict = {
             "summary": _summarize_chunk(r.content),
             "source_type": r.source_type,
+            "source_id": r.source_id,
+            "is_memory": is_memory,
+            "task_id": None,
+            "talk_message_id": None,
+            "conversation_token": None,
+            "date": "",
+            "room": "",
         }
 
         if r.source_type == "conversation":
@@ -1184,30 +1256,41 @@ def _search_memory(
             except (ValueError, TypeError):
                 task_id = None
 
-            if task_id:
+            room_token: str | None = None
+            if task_id is not None:
+                if task_id in seen_conv:
+                    continue  # keep the higher-ranked chunk for this turn
+                seen_conv.add(task_id)
                 task = db.get_task(conn, task_id)
                 if task:
-                    entry["task_id"] = task_id
-                    entry["conversation_token"] = task.conversation_token
+                    room_token = task.conversation_token
                     entry["talk_message_id"] = task.talk_message_id
                     created = task.created_at or ""
                     entry["date"] = created[:10] if len(created) >= 10 else created
-                    entry["room"] = task.conversation_token or ""
                 else:
-                    entry["task_id"] = task_id
-                    entry["conversation_token"] = None
-                    entry["date"] = ""
-                    entry["room"] = ""
-            else:
-                entry["task_id"] = None
-                entry["conversation_token"] = None
-                entry["date"] = ""
-                entry["room"] = ""
-        else:
-            entry["task_id"] = None
-            entry["conversation_token"] = None
-            entry["date"] = ""
-            entry["room"] = ""
+                    # Task row aged out of retention — recover room scope from
+                    # the durable messages store so the hit isn't dropped.
+                    try:
+                        room_token = db.get_message_room_for_task(conn, task_id)
+                    except Exception:
+                        room_token = None
+            entry["task_id"] = task_id
+            entry["conversation_token"] = room_token
+            entry["room"] = room_token or ""
+
+        elif r.source_type in _CHANNEL_MEMORY_SOURCE_TYPES:
+            key = (r.source_type, str(r.source_id))
+            if key in seen_mem:
+                continue
+            seen_mem.add(key)
+            entry["conversation_token"] = conversation_token
+            entry["room"] = conversation_token or ""
+
+        else:  # memory_file / user_memory — personal, not room-bound
+            key = (r.source_type, str(r.source_id))
+            if key in seen_mem:
+                continue
+            seen_mem.add(key)
 
         out.append(entry)
 
@@ -1363,6 +1446,37 @@ def _format_search_results(results: list[dict], query: str) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _build_search_data(
+    config: Config, query: str, results: list[dict], text: str,
+) -> dict:
+    """Build the structured `search_results` payload for rich stream surfaces.
+
+    Maps each enriched result dict onto the surface-neutral card shape the web
+    client renders. A conversation card carries the `task_id` the client jumps
+    to; a `talk_link` is included only when a `talk_message_id` is present (the
+    Talk deep-link ceiling). `text` is the plain-text fallback (the transcript's
+    durable record, and what a non-structured client shows)."""
+    out: list[dict] = []
+    for r in results:
+        room_token = r.get("conversation_token")
+        talk_message_id = r.get("talk_message_id")
+        talk_link = r.get("talk_link")
+        if not talk_link and room_token and talk_message_id:
+            talk_link = _build_message_link(config, room_token, talk_message_id)
+        room_name = r.get("room_name") or None
+        out.append({
+            "source_type": r.get("source_type"),
+            "summary": r.get("summary", ""),
+            "date": r.get("date", ""),
+            "room_token": room_token,
+            "room_name": room_name,
+            "task_id": r.get("task_id"),
+            "talk_message_id": talk_message_id,
+            "talk_link": talk_link,
+        })
+    return {"kind": "search_results", "query": query, "results": out, "text": text}
+
+
 @command("search", "Search conversation history: `!search <query>`, `!search --all <query>`, `!search --since DATE <query>`, `!search --memories <query>`")
 async def cmd_search(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
@@ -1375,13 +1489,7 @@ async def cmd_search(ctx: CommandContext):
             "Filters: `--since YYYY-MM-DD`, `--week`, `--memories`"
         )
 
-    # The memory index (conversations + memory files) is the surface-agnostic
-    # backbone — it works on Talk, web chat, and any future surface.
-    source_types = ["memory_file"] if parsed.memories_only else None
-    mem_results = _search_memory(
-        config, conn, user_id, parsed.query,
-        source_types=source_types, since=parsed.since,
-    )
+    source_types = list(_MEMORY_SOURCE_TYPES) if parsed.memories_only else None
 
     # The Nextcloud Talk full-text search is a Talk-only enhancement layered on
     # top of the memory index; skip it on other surfaces and for memories-only.
@@ -1390,45 +1498,66 @@ async def cmd_search(ctx: CommandContext):
     else:
         talk_results = await _search_talk_api(config, parsed.query)
 
-    # Merge and deduplicate (memory results take priority)
-    seen_task_ids: set[int] = set()
-    all_results: list[dict] = []
+    def _assemble(mem_results: list[dict]) -> list[dict]:
+        """Merge memory + Talk hits, apply the --since / room-scope filters, cap.
+        Memory results take priority for task-id dedup."""
+        seen_task_ids: set[int] = set()
+        merged: list[dict] = []
+        for r in mem_results:
+            tid = r.get("task_id")
+            if tid:
+                seen_task_ids.add(tid)
+            merged.append(r)
+        for r in talk_results:
+            tid = r.get("task_id")
+            if tid and tid in seen_task_ids:
+                continue
+            merged.append(r)
 
-    for r in mem_results:
-        tid = r.get("task_id")
-        if tid:
-            seen_task_ids.add(tid)
-        all_results.append(r)
+        if parsed.since and talk_results:
+            merged = [r for r in merged if not r.get("date") or r["date"] >= parsed.since]
 
-    for r in talk_results:
-        tid = r.get("task_id")
-        if tid and tid in seen_task_ids:
-            continue
-        all_results.append(r)
+        # Apply room scoping. Only the conversation/Talk axis is room-bound;
+        # memory rows (personal + current-channel memory) are never discarded in
+        # the current-room view, and are excluded from a specific-room search
+        # (they belong to the current room / the user, not the named room).
+        if parsed.scope is None:
+            merged = [
+                r for r in merged
+                if r.get("is_memory") or r.get("conversation_token") == conversation_token
+            ]
+        elif parsed.scope != "all":
+            merged = [
+                r for r in merged
+                if not r.get("is_memory") and r.get("conversation_token") == parsed.scope
+            ]
+        return merged[:8]
 
-    # Filter Talk results by date when --since is set
-    if parsed.since and talk_results:
-        all_results = [
-            r for r in all_results
-            if not r.get("date") or r["date"] >= parsed.since
-        ]
+    # The memory index is the surface-agnostic backbone. Pass the current room so
+    # the channel namespace + channel-memory source types are searched, with
+    # prefix matching for forgiveness. Run strict AND first (precision); if the
+    # *scoped* result is empty, retry once in OR mode. The forgiveness gate has
+    # to key on the scoped emptiness — a strict AND match in another room (found
+    # via the user namespace) would otherwise suppress the OR retry even though
+    # it never survives the scope filter, silently defeating forgiveness.
+    def _run(match_mode: str) -> list[dict]:
+        return _search_memory(
+            config, conn, user_id, parsed.query,
+            source_types=source_types, since=parsed.since,
+            conversation_token=conversation_token,
+            match_mode=match_mode, prefix=True,
+        )
 
-    # Apply room scoping
-    if parsed.scope is None:
-        all_results = [
-            r for r in all_results
-            if r.get("conversation_token") == conversation_token
-        ]
-    elif parsed.scope != "all":
-        all_results = [
-            r for r in all_results
-            if r.get("conversation_token") == parsed.scope
-        ]
-
-    all_results = all_results[:8]
+    all_results = _assemble(_run("and"))
+    if not all_results:
+        all_results = _assemble(_run("or"))
 
     if not all_results:
-        return f"No results for \"{parsed.query}\"."
+        # The plain-text message is the durable record; the empty structured
+        # card lets a rich stream client render "no results" in place.
+        text = f"No results for \"{parsed.query}\"."
+        ctx.result_data = _build_search_data(config, parsed.query, [], text)
+        return text
 
     # Resolve room display names for all unique tokens
     tokens = {r["conversation_token"] for r in all_results if r.get("conversation_token")}
@@ -1444,7 +1573,9 @@ async def cmd_search(ctx: CommandContext):
         if ctx.surface == "talk" and token and msg_id:
             r["talk_link"] = _build_message_link(config, token, msg_id)
 
-    return _format_search_results(all_results, parsed.query)
+    text = _format_search_results(all_results, parsed.query)
+    ctx.result_data = _build_search_data(config, parsed.query, all_results, text)
+    return text
 
 
 @command("trust", "Trust an email sender: `!trust sender@example.com`")

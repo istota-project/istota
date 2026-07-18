@@ -29,6 +29,30 @@ export type Segment =
 	| { kind: 'thinking'; id: string; text: string; settled: boolean }
 	| { kind: 'tool'; id: string; tool: ToolEntry };
 
+// One structured !search result. Mirrors the backend `_build_search_data`
+// per-result shape; a conversation card carries the `task_id` the client jumps
+// to, a memory card carries none.
+export interface SearchResultItem {
+	source_type: string;
+	summary: string;
+	date: string;
+	room_token: string | null;
+	room_name: string | null;
+	task_id: number | null;
+	talk_message_id: number | null;
+	talk_link: string | null;
+}
+
+// The `command_data` payload a !search inline command produces (kind ===
+// 'search_results'). Rendered as result cards instead of the markdown fallback.
+export interface SearchResultsData {
+	kind: 'search_results';
+	query: string;
+	results: SearchResultItem[];
+	// Plain-text fallback (the transcript's durable record).
+	text: string;
+}
+
 export interface ChatMessage {
 	cid: number;
 	role: 'user' | 'assistant' | 'system';
@@ -62,6 +86,9 @@ export interface ChatMessage {
 	// label each message with its room and jump to it.
 	roomToken?: string;
 	roomName?: string;
+	// System rows only: when a !search command produced structured results, the
+	// row renders result cards from this instead of its markdown `text`.
+	searchResults?: SearchResultsData;
 }
 
 // ---- Helpers ----------------------------------------------------------------

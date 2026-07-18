@@ -829,6 +829,24 @@ class TestChatMessagesApi:
         assert body["task_id"] is None
         assert "inline_result" in body
         assert "!help" in body["inline_result"]
+        # A non-structured command carries no command_data payload.
+        assert body.get("command_data") is None
+
+    async def test_search_command_returns_structured_data(self, chat_client):
+        """!search on the web surface forwards a structured `command_data`
+        payload alongside the plain-text fallback."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        resp = await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "!search nonexistenttermxyz"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["task_id"] is None
+        assert body.get("command_data") is not None
+        assert body["command_data"]["kind"] == "search_results"
 
     async def test_model_prefix_creates_task_with_override(self, chat_client):
         """`!model <alias> <prompt>` must create a real task carrying the model

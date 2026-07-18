@@ -2274,7 +2274,8 @@ class TestCmdSearchFiltering:
 
     @pytest.mark.asyncio
     async def test_memories_only_passes_source_types(self, make_config, db_path):
-        """--memories should pass source_types=["memory_file"] to _search_memory."""
+        """--memories passes the full memory source set (files + user + channel)
+        to _search_memory — not just conversation-less memory_file."""
         config = make_config()
         with (
             db.get_db(db_path) as conn,
@@ -2288,7 +2289,9 @@ class TestCmdSearchFiltering:
             await cmd_search(_ctx(config, conn, "alice", "room1", "--all --memories test"))
 
         call_kwargs = mock_mem.call_args
-        assert call_kwargs.kwargs.get("source_types") == ["memory_file"]
+        assert call_kwargs.kwargs.get("source_types") == [
+            "memory_file", "user_memory", "channel_memory", "channel_memory_durable",
+        ]
 
     @pytest.mark.asyncio
     async def test_since_passed_to_search_memory(self, make_config, db_path):

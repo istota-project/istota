@@ -2782,7 +2782,11 @@ async def chat_send_message(
 
             result = await asyncio.to_thread(_run_cmd)
             if result.handled:
-                return {"task_id": None, "inline_result": result.text or ""}
+                return {
+                    "task_id": None,
+                    "inline_result": result.text or "",
+                    "command_data": result.data,
+                }
 
     outcome, value = await asyncio.to_thread(
         _chat_create_web_task, username, room.token, text, attachments,
