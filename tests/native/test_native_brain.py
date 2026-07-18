@@ -209,6 +209,42 @@ class TestToolUse:
         assert tool_names == {"Read"}
 
 
+class TestProviderLifecycle:
+    """NB-17: a self-built provider's HTTP client is closed per task; an
+    injected provider is left alone (the caller owns it)."""
+
+    def test_injected_provider_not_closed(self, tmp_path):
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
+        )
+        brain = _brain(provider)
+        assert brain._owns_provider is False
+        brain.execute(_req("hi", tmp_path))  # must not raise / close the mock
+
+    def test_self_built_provider_is_closed(self, tmp_path):
+        closed = {"v": False}
+
+        class _Prov:
+            async def stream(self, *a, **k):
+                from istota.llm.provider import StreamDone
+
+                yield StreamDone(
+                    message=AssistantMessage(
+                        content=[TextContent(text="ok")], stop_reason="end_turn"
+                    )
+                )
+
+            async def aclose(self):
+                closed["v"] = True
+
+        brain = _brain(MockProvider([]))
+        # Simulate a self-built provider.
+        brain._provider = _Prov()
+        brain._owns_provider = True
+        brain.execute(_req("hi", tmp_path))
+        assert closed["v"] is True
+
+
 class TestFsConfinement:
     """NB-1: fs_read_roots/fs_write_roots thread into the file tools' ToolEnv."""
 

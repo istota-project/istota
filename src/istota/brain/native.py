@@ -215,6 +215,10 @@ class NativeBrain:
         self._config = config
         # ``provider`` injectable for tests; production builds from config.
         self._provider = provider if provider is not None else make_provider(config)
+        # We own (and must close) a provider we built ourselves; an injected one
+        # belongs to the caller (NB-17). A fresh NativeBrain + provider is built
+        # per task, so its httpx client is closed at task end rather than leaked.
+        self._owns_provider = provider is None
 
     # --- Model resolution --------------------------------------------------
     #
@@ -280,8 +284,17 @@ class NativeBrain:
         The scheduler calls brains from a thread pool, so ``asyncio.run`` here is
         safe — each task gets its own loop.
         """
+        async def _run_and_close() -> BrainResult:
+            try:
+                return await self._execute_async(req)
+            finally:
+                # Close the per-task httpx client on the loop it was used on, so
+                # a long-running daemon doesn't leak an fd/socket per task
+                # (NB-17, ISSUE-101 class). Only when we own the provider.
+                await self._maybe_close_provider()
+
         try:
-            return asyncio.run(self._execute_async(req))
+            return asyncio.run(_run_and_close())
         except Exception as e:  # noqa: BLE001 — never let the brain crash the worker
             logger.exception("NativeBrain.execute raised")
             return BrainResult(
@@ -290,6 +303,17 @@ class NativeBrain:
                 stop_reason="error",
                 model_used=req.model or self._config.model,
             )
+
+    async def _maybe_close_provider(self) -> None:
+        if not self._owns_provider:
+            return
+        aclose = getattr(self._provider, "aclose", None)
+        if aclose is None:
+            return
+        try:
+            await aclose()
+        except Exception:  # noqa: BLE001 — cleanup is best-effort
+            logger.debug("provider aclose raised", exc_info=True)
 
     async def _execute_async(self, req: BrainRequest) -> BrainResult:
         abort = asyncio.Event()
