@@ -58,6 +58,29 @@ class TestClassifyError:
         c = classify_error("maximum context length exceeded", status_code=400)
         assert c.is_context_overflow is True
 
+    def test_permanent_400_quoting_a_5xx_code_is_not_retryable(self):
+        # NB-13a: a permanent client error whose body happens to quote "503" or
+        # "timeout" must not be misclassified as transient.
+        c = classify_error("invalid request: field 'x' must be 503 or lower", status_code=400)
+        assert c.retryable is False
+        assert c.category == "permanent"
+        c2 = classify_error("bad parameter: timeout must be positive", status_code=400)
+        assert c2.retryable is False
+
+    def test_rate_word_inside_another_word_is_not_a_rate_limit(self):
+        # NB-13b: "generate" contains "rate" — must not read as a rate limit.
+        c = classify_error("failed to generate a response")
+        assert c.is_rate_limit is False
+        assert c.category == "permanent"
+
+    def test_token_rate_limit_429_is_transient_not_overflow(self):
+        # NB-13: a tokens-per-minute 429 may read like overflow ("too many
+        # tokens") but a 429 status is a rate limit, not a context overflow.
+        c = classify_error("rate limit: too many tokens per minute", status_code=429)
+        assert c.is_rate_limit is True
+        assert c.is_context_overflow is False
+        assert c.category == "transient"
+
 
 @dataclass
 class _Res:
@@ -124,6 +147,33 @@ class TestRetryWithBackoff:
         res = await retry_with_backoff(run, max_retries=2, base_delay=0)
         assert res.success is False
         assert calls == 3  # initial + 2 retries
+
+    @pytest.mark.asyncio
+    async def test_jitter_never_exceeds_max_delay(self, monkeypatch):
+        # NB-13: jitter must be applied before the cap, so max_delay is a true
+        # ceiling (not 1.5× it). Force the max jitter multiplier (1.5×).
+        import istota.session.retry as retry_mod
+
+        monkeypatch.setattr(retry_mod.random, "random", lambda: 1.0)
+        seen: list[float] = []
+
+        seq = [_Res(success=False, error_message="overloaded", status_code=503), _Res(success=True)]
+        calls = 0
+
+        async def run():
+            nonlocal calls
+            r = seq[calls]
+            calls += 1
+            return r
+
+        await retry_with_backoff(
+            run,
+            max_retries=3,
+            base_delay=100.0,
+            max_delay=0.01,
+            on_retry=lambda n, m, delay, err: seen.append(delay),
+        )
+        assert seen and all(d <= 0.01 for d in seen)
 
     @pytest.mark.asyncio
     async def test_abort_during_sleep_returns_last_error(self):
