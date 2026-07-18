@@ -240,6 +240,24 @@ async def _complete_simple(provider, model: str, prompt: str) -> str:
     return final_text or "".join(text_parts)
 
 
+def _truncate_middle(text: str, max_chars: int) -> str:
+    """Keep the head and tail of ``text``, eliding the middle to fit ``max_chars``.
+
+    The summarization request must itself fit the model window — serializing a
+    whole overflowing prefix into one prompt would overflow the summary call and
+    yield an empty summary (NB-10). Head+tail preserves the task goal (early) and
+    the most recent progress (late); the elided middle is what a summary
+    compresses most anyway.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    keep = max_chars // 2
+    head = text[:keep]
+    tail = text[-keep:]
+    elided = len(text) - 2 * keep
+    return f"{head}\n\n… [{elided} chars elided to fit the summarization window] …\n\n{tail}"
+
+
 async def compact_messages(
     messages_to_compact: list,
     previous_summary: str | None,
@@ -247,12 +265,16 @@ async def compact_messages(
     provider,
     model: str,
     convert_to_llm,
+    max_input_chars: int = 0,
 ) -> tuple[str, CompactionDetails]:
     """Generate (or update) a structured summary, tracking file operations.
 
     Returns ``(summary_text, merged_details)``. File-operation details are merged
     with the previous cycle's and carried forward. On any provider failure the
     previous summary is returned unchanged — compaction never crashes the loop.
+
+    ``max_input_chars`` (0 = unbounded) caps the serialized conversation fed to
+    the summarizer so the summary request can't itself overflow the window.
     """
     new_ops = _extract_file_operations(messages_to_compact)
     merged_details = CompactionDetails(
@@ -272,6 +294,7 @@ async def compact_messages(
     try:
         llm_messages = convert_to_llm(messages_to_compact)
         conversation_text = _serialize_for_summary(llm_messages)
+        conversation_text = _truncate_middle(conversation_text, max_input_chars)
     except Exception as e:  # noqa: BLE001 — conversion must not crash compaction
         logger.warning("Compaction serialization failed: %s", e)
         return previous_summary or "", merged_details

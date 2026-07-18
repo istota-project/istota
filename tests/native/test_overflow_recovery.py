@@ -56,14 +56,24 @@ class _ScriptedProvider:
     def __init__(self, behaviors):
         self.behaviors = list(behaviors)
         self.calls = 0
+        self.prompts: list[str] = []
 
     async def stream(
         self, system_prompt, messages, tools, *, model="", max_tokens=16384, **kw
     ) -> AsyncIterator:
         self.calls += 1
+        # Record the last user message text (the compaction summary call passes
+        # the whole serialized conversation as one user message).
+        try:
+            self.prompts.append(messages[-1].content[0].text)
+        except Exception:  # noqa: BLE001
+            self.prompts.append("")
         kind, payload = self.behaviors.pop(0) if self.behaviors else ("done", "")
         yield StreamStart()
-        if kind == "overflow":
+        # Any non-"done" kind (overflow / transient) surfaces as a pre-commit
+        # StreamError carrying ``payload`` as the message — classify_error then
+        # decides overflow-vs-transient from the text.
+        if kind != "done":
             yield StreamError(
                 message=AssistantMessage(stop_reason="error", error_message=payload)
             )
@@ -151,6 +161,53 @@ class TestRecoveryEndToEnd:
         assert result.stop_reason == "error"
         assert "context length" in result.result_text
         assert spy["continue"] == 2  # exactly two recovery attempts
+
+    def test_empty_summary_fails_with_overflow_error(self, tmp_path, monkeypatch):
+        # NB-10: if compaction produces no summary (the summary request itself
+        # overflowed, no prior summary to fall back on), the brain must fail with
+        # the overflow error rather than continue with the user's request gone.
+        spy = {"continue": 0}
+        real_continue = native_mod.run_agent_loop_continue
+
+        async def _spy_continue(*a, **k):
+            spy["continue"] += 1
+            return await real_continue(*a, **k)
+
+        monkeypatch.setattr(native_mod, "run_agent_loop_continue", _spy_continue)
+
+        # overflow, then the compaction summary call returns empty text.
+        provider = _ScriptedProvider([_OVERFLOW, ("done", "")])
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.success is False
+        assert result.stop_reason == "error"
+        assert "context length" in result.result_text  # the original overflow cause
+        assert spy["continue"] == 0  # never continued with an empty summary
+
+    def test_transient_error_during_compaction_is_retried(self, tmp_path, monkeypatch):
+        # NB-10: compaction runs through the retrying provider, so a transient
+        # 429 during the summary call is retried instead of failing the recovery.
+        monkeypatch.setattr(native_mod, "_API_RETRY_BASE_DELAY", 0.0)
+        spy = {"continue": 0}
+        real_continue = native_mod.run_agent_loop_continue
+
+        async def _spy_continue(*a, **k):
+            spy["continue"] += 1
+            return await real_continue(*a, **k)
+
+        monkeypatch.setattr(native_mod, "run_agent_loop_continue", _spy_continue)
+
+        provider = _ScriptedProvider(
+            [
+                _OVERFLOW,                              # initial turn overflows
+                ("transient", "HTTP 429: rate limited"),  # summary call: transient
+                ("done", "SUMMARY"),                    # summary call retried → ok
+                ("done", "Recovered answer."),          # continue
+            ]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.success is True
+        assert result.result_text == "Recovered answer."
+        assert spy["continue"] == 1
 
     def test_non_overflow_error_not_recovered(self, tmp_path, monkeypatch):
         spy = {"continue": 0}

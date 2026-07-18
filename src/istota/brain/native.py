@@ -90,6 +90,14 @@ _API_RETRY_MAX_DELAY = 120.0
 # list_aliases() table.
 _BUILTIN_ROLE_NAMES = ("fast", "general", "smart")
 
+
+def _compaction_input_chars(window: int) -> int:
+    """Char budget for the text fed to the summarizer so the summary request
+    itself fits the window (NB-10). ~3 tokens of window as chars (window*3 ≈
+    window*4 chars minus room for the summary prompt scaffolding + output),
+    floored so a tiny/zero window still yields a usable budget."""
+    return max(8000, window * 3)
+
 # Reactive overflow recovery: how many force-compact + continue attempts a single
 # task may make before giving up and returning the overflow error. Bounded so a
 # genuinely too-large single turn can't thrash compaction forever.
@@ -431,9 +439,14 @@ class NativeBrain:
                 to_compact,
                 compaction_state["summary"],
                 compaction_state["details"],
-                self._provider,
+                # Through the retrying provider so a transient 429 during the
+                # summary call is retried, not treated as a failed compaction
+                # (NB-10).
+                provider,
                 model,
                 self._convert_to_llm,
+                # Bound the summary input so the summary request can't overflow.
+                max_input_chars=_compaction_input_chars(window),
             )
             compaction_state["summary"] = summary
             compaction_state["details"] = details
@@ -559,20 +572,40 @@ class NativeBrain:
                     _MAX_OVERFLOW_RECOVERIES,
                 )
                 _rec_window = self._config.context_window or get_model_info(model).context_window
+                # Preserve the overflow error before clearing, so an unusable
+                # recovery can fail with the real cause instead of a wrong answer.
+                overflow_error = last_error_message
                 recovery_ctx, summary, details = await _build_recovery_context(
                     transcript,
                     context.system_prompt,
                     context.tools,
                     compaction_state["summary"],
                     compaction_state["details"],
-                    self._provider,
+                    # Retrying provider (NB-10) so a transient error during the
+                    # recovery summary call is retried, not swallowed.
+                    provider,
                     model,
                     self._convert_to_llm,
                     keep_recent_tokens=(
                         self._config.compaction_keep_recent_tokens
                         or derive_keep_recent_tokens(_rec_window)
                     ),
+                    max_input_chars=_compaction_input_chars(_rec_window),
                 )
+                # If compaction produced no summary (the summary request itself
+                # overflowed and there was no prior summary to fall back on),
+                # continuing would answer with the user's request gone from
+                # context — a confident non-answer. Fail with the overflow error
+                # instead (NB-10).
+                if not (summary and summary.strip()):
+                    logger.warning(
+                        "native overflow recovery produced no summary; failing with overflow error"
+                    )
+                    final_stop["reason"] = "error"
+                    last_error_message = (
+                        overflow_error or "context window exceeded and compaction failed"
+                    )
+                    break
                 compaction_state["summary"] = summary
                 compaction_state["details"] = details
                 # Clear the error markers so the post-continue re-check sees the
@@ -823,6 +856,7 @@ async def _build_recovery_context(
     model: str,
     convert_to_llm,
     keep_recent_tokens: int = 20000,
+    max_input_chars: int = 0,
 ) -> tuple[AgentContext, str, object]:
     """Force-compact ``transcript`` and return a context ready for continue.
 
@@ -838,7 +872,8 @@ async def _build_recovery_context(
     to_compact = transcript[:cut]
     remaining = transcript[cut:]
     summary, details = await compact_messages(
-        to_compact, prev_summary, prev_details, provider, model, convert_to_llm
+        to_compact, prev_summary, prev_details, provider, model, convert_to_llm,
+        max_input_chars=max_input_chars,
     )
     messages: list = [
         CompactionSummaryMessage(summary=summary, tokens_before=0, details=details),
