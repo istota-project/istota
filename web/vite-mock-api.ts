@@ -429,6 +429,35 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 		return { max_prompt_chars: 32000, max_attachment_mb: 25, attachment_extensions: ['pdf', 'png', 'jpg'], client_poll_interval_ms: 600 };
 	}
 
+	if (path === '/istota/api/chat/commands') {
+		return {
+			commands: [
+				{ name: 'check', help: 'Run Claude Code health check' },
+				{ name: 'cron', help: 'List/enable/disable scheduled jobs: `!cron`, `!cron enable <name>`' },
+				{ name: 'export', help: 'Export conversation history to a file: `!export [markdown|text]`' },
+				{ name: 'help', help: 'List available commands' },
+				{ name: 'memory', help: 'Show memory: `!memory user`, `!memory channel`, `!memory facts`' },
+				{ name: 'models', help: 'List available model aliases (and what they resolve to)' },
+				{ name: 'more', help: 'Show execution trace for a task: `!more #31875` or `!more 31875`' },
+				{ name: 'search', help: 'Search conversation history: `!search <query>`' },
+				{ name: 'skills', help: 'List available skills and their triggers' },
+				{ name: 'status', help: 'Show your running/pending tasks and system status' },
+				{ name: 'stop', help: 'Cancel your currently running task' },
+				{ name: 'trust', help: 'Trust an email sender: `!trust sender@example.com`' },
+				{ name: 'untrust', help: 'Remove a trusted email sender: `!untrust sender@example.com`' },
+			],
+			model_aliases: [
+				{ alias: 'fast', target: 'claude-haiku-4-5', effort: null },
+				{ alias: 'general', target: 'claude-sonnet-4-6', effort: null },
+				{ alias: 'smart', target: 'claude-opus-4-8', effort: null },
+				{ alias: 'opus', target: 'claude-opus-4-8', effort: null },
+				{ alias: 'opus-high', target: 'claude-opus-4-8', effort: 'high' },
+				{ alias: 'sonnet', target: 'claude-sonnet-4-6', effort: null },
+				{ alias: 'haiku', target: 'claude-haiku-4-5', effort: null },
+			],
+		};
+	}
+
 	if (path === '/istota/api/chat/rooms' && method === 'GET') {
 		return {
 			rooms: mockChatRooms

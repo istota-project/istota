@@ -1,6 +1,10 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { SendHorizontal, Square, Paperclip, X } from 'lucide-svelte';
 	import { uploadChatAttachment, type ChatAttachment } from '$lib/api';
+	import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
+	import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
+	import { commandProvider, modelAliasProvider } from './autocomplete/providers';
 
 	let {
 		onSend,
@@ -21,6 +25,34 @@
 	let uploading = $state(0);
 	let dragOver = $state(false);
 	let uploadError = $state('');
+
+	// Prefix autocomplete. modelAliasProvider is ordered first so `!model <alias>`
+	// (with the space) wins over the bare-! command matcher.
+	const AC_LIST_ID = 'chat-ac-listbox';
+	const acOptionId = (key: string) => `chat-ac-opt-${key}`;
+	const ac = createAutocomplete([modelAliasProvider(), commandProvider()], {
+		onAccept: applyAccept,
+	});
+	let acActiveDescendant = $derived(
+		ac.open && ac.suggestions[ac.activeIndex]
+			? acOptionId(ac.suggestions[ac.activeIndex].key)
+			: undefined,
+	);
+
+	function syncAc() {
+		if (textarea) ac.sync(textarea.value, textarea.selectionStart ?? textarea.value.length);
+	}
+
+	async function applyAccept(r: AcceptResult) {
+		text = r.text;
+		await tick();
+		if (textarea) {
+			textarea.setSelectionRange(r.caret, r.caret);
+			autoGrow();
+			// Re-sync so a chained trigger (e.g. `!model ` → alias list) activates.
+			ac.sync(text, r.caret);
+		}
+	}
 
 	function autoGrow() {
 		if (!textarea) return;
@@ -44,6 +76,9 @@
 	}
 	function onBlur() {
 		setViewport(VIEWPORT_DEFAULT);
+		// The popover accepts on mousedown (preventDefault keeps focus), so a
+		// click on a row does not blur first — safe to close here.
+		ac.close();
 	}
 
 	async function upload(files: FileList | File[]) {
@@ -74,7 +109,25 @@
 		queueMicrotask(autoGrow);
 	}
 
+	function onInput() {
+		autoGrow();
+		syncAc();
+	}
+
+	// Caret-only moves (no text change) don't fire input; re-evaluate the match
+	// on the arrow/home/end keys and on click so the trigger tracks the caret.
+	const CARET_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End']);
+	function onKeyup(e: KeyboardEvent) {
+		if (CARET_KEYS.has(e.key)) syncAc();
+	}
+
 	function onKeydown(e: KeyboardEvent) {
+		// The engine consumes Arrow/Tab/Enter/Escape only while the popover is
+		// open; when closed it returns false and Enter-to-send runs as before.
+		if (ac.onKeydown(e)) {
+			e.preventDefault();
+			return;
+		}
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
 			submit();
@@ -131,18 +184,37 @@
 			class="file-hidden"
 			onchange={(e) => { const f = (e.target as HTMLInputElement).files; if (f) upload(f); (e.target as HTMLInputElement).value = ''; }}
 		/>
-		<textarea
-			bind:this={textarea}
-			bind:value={text}
-			oninput={autoGrow}
-			onkeydown={onKeydown}
-			onpaste={onPaste}
-			onfocus={onFocus}
-			onblur={onBlur}
-			{placeholder}
-			rows="1"
-			aria-label="Message"
-		></textarea>
+		<div class="ta-wrap">
+			{#if ac.open}
+				<AutocompletePopover
+					suggestions={ac.suggestions}
+					activeIndex={ac.activeIndex}
+					listId={AC_LIST_ID}
+					optionId={acOptionId}
+					onaccept={(i) => ac.accept(i)}
+					onhover={(i) => ac.setActive(i)}
+				/>
+			{/if}
+			<textarea
+				bind:this={textarea}
+				bind:value={text}
+				oninput={onInput}
+				onkeydown={onKeydown}
+				onkeyup={onKeyup}
+				onclick={syncAc}
+				onpaste={onPaste}
+				onfocus={onFocus}
+				onblur={onBlur}
+				{placeholder}
+				rows="1"
+				aria-label="Message"
+				role="combobox"
+				aria-expanded={ac.open}
+				aria-controls={AC_LIST_ID}
+				aria-autocomplete="list"
+				aria-activedescendant={acActiveDescendant}
+			></textarea>
+		</div>
 		{#if busy && onCancel}
 			<button class="icon-btn send stop" onclick={onCancel} type="button" aria-label="Stop" title="Stop">
 				<Square size={16} />
@@ -170,6 +242,7 @@
 	}
 	.composer.drag { background: var(--surface-raised); outline: 1px dashed var(--border-default); }
 	.composer-row { display: flex; align-items: flex-end; gap: 0.5rem; }
+	.ta-wrap { position: relative; flex: 1; display: flex; }
 
 	textarea {
 		flex: 1;

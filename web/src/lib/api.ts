@@ -1520,6 +1520,27 @@ export function getChatConfig(): Promise<ChatConfig> {
 	return apiFetch<ChatConfig>('/chat/config');
 }
 
+export interface ChatCommand {
+	name: string;
+	help: string;
+}
+
+export interface ChatModelAlias {
+	alias: string;
+	target: string | null;
+	effort: string | null;
+}
+
+export interface ChatCommands {
+	commands: ChatCommand[];
+	model_aliases: ChatModelAlias[];
+}
+
+/** Command + model-alias catalogue powering the composer autocomplete. */
+export function fetchChatCommands(): Promise<ChatCommands> {
+	return apiFetch<ChatCommands>('/chat/commands');
+}
+
 export function getChatRooms(): Promise<{ rooms: ChatRoom[] }> {
 	return apiFetch<{ rooms: ChatRoom[] }>('/chat/rooms');
 }

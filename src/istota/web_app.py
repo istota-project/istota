@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as _db
+from .brain import make_brain
 from .config import load_config
 from .location_logic import (
     _location_discover_places,
@@ -2349,6 +2350,31 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
         "attachment_extensions": chat.attachment_extensions,
         "client_poll_interval_ms": chat.client_poll_interval_ms,
     }
+
+
+@api_router.get("/chat/commands")
+async def chat_commands(user: dict = Depends(_require_api_auth)):
+    """Command + model-alias catalogue that powers the composer autocomplete.
+
+    Derived at request time from the in-memory command registry and the active
+    brain's alias table — no storage. Model aliases degrade to an empty list if
+    the brain can't resolve them, so the primary (command) feature still works.
+    """
+    from . import commands
+
+    cmds = [
+        {"name": name, "help": help_text}
+        for name, (_handler, help_text) in sorted(commands.COMMANDS.items())
+    ]
+    aliases: list[dict] = []
+    try:
+        aliases = [
+            {"alias": alias, "target": model, "effort": effort}
+            for alias, model, effort in make_brain(_config.brain).list_aliases()
+        ]
+    except Exception as e:  # noqa: BLE001 — aliases degrade independently
+        logger.warning("chat_commands: model aliases unavailable: %s", e)
+    return {"commands": cmds, "model_aliases": aliases}
 
 
 @api_router.get("/chat/rooms")

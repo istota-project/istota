@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-17: Web chat command autocomplete
+
+Typing `!` in the web chat composer now opens an autocomplete dropdown of available commands, filtered live as you type, navigable with the arrow keys, accepted with Tab or Enter, dismissed with Escape. Built as a reusable prefix-autocomplete primitive rather than a one-off so other triggers can plug in — the `!model <alias>` prefix is the second provider, shipped in the same change to prove the seam. Spec in `Specs/Done/web-chat-command-autocomplete.md`.
+
+**Two layers: a trigger-agnostic engine + per-trigger providers.** A `CompletionProvider` is a small data object describing one trigger: `match(text, caret)` decides whether it's active and what token/range to replace, `getSuggestions(query)` returns the filtered list (sync or cached-async). The engine (`useAutocomplete.svelte.ts`, a runes module so its reactive state crosses into the component) owns first-matching-provider selection, an async stale-guard, keyboard nav with wrap, Escape-suppression, and the accept-splice. Adding a future trigger (an `@mention`, a `/menu`) is a new provider object, not a composer rewrite.
+
+**Command list comes from the backend.** There was no endpoint exposing the command registry — commands only existed in `commands.COMMANDS` (name + a single help string, no structured metadata, no per-surface or admin gating at dispatch). Added `GET /chat/commands` returning `{commands, model_aliases}`, serialized from the registry and the active brain's `list_aliases()`; aliases degrade to `[]` independently so the command feature survives a brain failure. The frontend caches it once per session (reset on session teardown). Chose to serialize the help text as-is rather than enrich the registry, keeping `commands.py` and all 13 handlers untouched.
+
+**Composer wiring.** The composer's only keyboard handling was Enter-to-send, so arrow/Tab/Escape were free. The engine consumes those keys only while the popover is open (returns false when closed, so Enter-to-send is untouched); Tab and Enter both accept, Escape opts out and the next Enter sends. The popover is a plain upward-anchored `role=listbox` (the composer is pinned to the bottom), not a bits-ui portal, so it anchors to the textarea and is driven from the composer's own keydown. Full combobox/listbox ARIA. Mouse rows accept on `mousedown` + `preventDefault` to keep focus.
+
+**Verification.** 4 backend endpoint tests + 224 existing web tests green; 37 new frontend tests (engine 11, popover 5, providers 13, composer 8, mounting the real component with only the network fetch mocked) in a 120-test suite; `svelte-check` clean; production build succeeds; and a live mock-API dev-server pass (type `!`, filter to `!models`/`!more`/`!memory`, arrow-navigate, accept).
+
+**Files added/modified:**
+- `src/istota/web_app.py` — new `GET /chat/commands` endpoint; hoisted `make_brain` to a module-level import so the alias table is reachable (and mockable).
+- `web/src/lib/components/chat/autocomplete/` — new package: `types.ts`, `useAutocomplete.svelte.ts` (engine), `AutocompletePopover.svelte`, `providers.ts` (`commandProvider` + `modelAliasProvider` + per-session catalogue cache), plus their tests.
+- `web/src/lib/components/chat/Composer.svelte` — instantiate the engine, wrap the textarea, wire input/keyup/click/keydown/blur, ARIA, accept write-back with caret restore.
+- `web/src/lib/api.ts` — `fetchChatCommands` + `ChatCommand`/`ChatModelAlias`/`ChatCommands` types.
+- `web/src/lib/stores/chat.ts` — reset the catalogue cache on session teardown.
+- `web/vite-mock-api.ts` — mock `GET /chat/commands` so the dev preview works.
+- `tests/test_web_chat_commands.py`, `web/src/lib/components/chat/Composer.autocomplete.svelte.test.ts` — new test files.
+
 ## 2026-07-17: Remove per-user static site hosting (ISSUE-171)
 
 Per-user `/~user/` static sites left core. They were generic static-file publishing, not a Personal OS concern, and they coupled istota to a Nextcloud-mount path plus a server's nginx autoindex config — exactly the ambient coupling the Nextcloud-decoupling program is trying to shed. The per-user surface is gone; the bot's own instance-wide web root stays (a future standalone static-site skill can build on it).

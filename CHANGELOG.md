@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Web chat command autocomplete: type `!` in the composer to get a live-filtered dropdown of available commands, navigate with the arrow keys, and accept with Tab or Enter. Typing `!model ` completes model aliases the same way.
 - The assistant can now read your mailbox, not just send. New email commands list, search, read, thread, and fetch attachments, batch-fetch mail from named senders for digests, and reply / reply-all in-thread, with cc, bcc, and attachments on outbound mail.
 - Read scoping: you see your own mail plus the shared pool (anything sent to the bare bot address), and never another user's. Mail meant for one person goes to their `bot+<you>@…` plus-address.
 - Quiet senders: name senders (fnmatch patterns) whose mail should be filed silently — no task, no assistant session. Their mail waits in the inbox for a briefing or scheduled job to read back on demand. Set it per user on the Settings → Preferences card or with `istota user ensure --quiet-sender`.
