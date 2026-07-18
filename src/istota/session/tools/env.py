@@ -53,6 +53,9 @@ class ToolEnv:
     bash_timeout_seconds: int = 120
     max_output_bytes: int = 30_000
     max_read_lines: int = 2000
+    # Hard byte cap on a single file read (Read / Grep per-file) so a multi-GB
+    # file can't stall or OOM the worker before the line caps apply (NB-19).
+    max_read_bytes: int = 25_000_000
     read_roots: tuple[Path, ...] | None = None
     write_roots: tuple[Path, ...] | None = None
 

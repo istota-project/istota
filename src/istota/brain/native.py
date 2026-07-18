@@ -90,6 +90,13 @@ _API_RETRY_MAX_DELAY = 120.0
 # list_aliases() table.
 _BUILTIN_ROLE_NAMES = ("fast", "general", "smart")
 
+# The BrainResult.stop_reason vocabulary the executor documents. The loop's raw
+# agent_end reasons (max_turns / loop_detected / "") are normalized into this
+# set so a future stop_reason-keyed dispatch can't be surprised (NB-18).
+_DOCUMENTED_STOP_REASONS = frozenset(
+    {"completed", "cancelled", "timeout", "oom", "transient_api_error", "error", "not_found"}
+)
+
 
 def _compaction_input_chars(window: int) -> int:
     """Char budget for the text fed to the summarizer so the summary request
@@ -775,13 +782,31 @@ class NativeBrain:
                 usage=usage,
                 model_used=model,
             )
-        # "" (natural), "max_turns", "loop_detected" — all produced output.
+        # Natural end, or a backstop stop (max_turns / loop_detected). Normalize
+        # the tag to the documented BrainResult vocabulary — the raw loop reasons
+        # would leak out of it and break any future stop_reason-keyed dispatch
+        # (NB-18). Both backstops "completed" (they terminated cleanly and kept
+        # whatever text was produced).
+        result_text = text
+        if not result_text.strip():
+            # A backstop that produced no answer would otherwise be an empty
+            # success. Give the surface a meaningful line and avoid a retry storm
+            # (retrying a wedged model just wedges again).
+            if stop_reason == "max_turns":
+                result_text = (
+                    "(stopped: reached the maximum number of steps without a final answer)"
+                )
+            elif stop_reason == "loop_detected":
+                result_text = (
+                    "(stopped: detected a repeating tool-call loop with no progress)"
+                )
+        normalized = stop_reason if stop_reason in _DOCUMENTED_STOP_REASONS else "completed"
         return BrainResult(
             success=True,
-            result_text=text,
+            result_text=result_text,
             actions_taken=actions_json,
             execution_trace=trace_json,
-            stop_reason=stop_reason or "completed",
+            stop_reason=normalized,
             usage=usage,
             model_used=model,
         )

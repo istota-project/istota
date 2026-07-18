@@ -31,6 +31,10 @@ class ToolResult:
     content: list[TextContent | ImageContent] = field(default_factory=list)
     details: Any = None
     terminate: bool = False  # hint to stop after this batch
+    # A tool can flag a non-fatal, self-reported failure (e.g. "file not found")
+    # without raising, so ToolEndEvent.success / the persisted trace reflect it
+    # (NB-19). The loop reads this on a successfully-returned result.
+    is_error: bool = False
 
 
 # Streaming partial results during tool execution. The tool calls this with

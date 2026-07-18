@@ -35,14 +35,34 @@ def _ok(s: str) -> ToolResult:
 
 
 def _err(s: str) -> ToolResult:
-    # The loop marks a result as error via the executed/finalize path; for
-    # immediate in-tool failures we still return a ToolResult and rely on the
-    # text being self-describing. NativeBrain surfaces is_error separately.
-    return ToolResult(content=_text(s))
+    # is_error=True so ToolEndEvent.success and the persisted trace reflect a
+    # self-reported failure (file not found, bad regex, path outside workspace)
+    # without the tool having to raise (NB-19).
+    return ToolResult(content=_text(s), is_error=True)
 
 
 def _looks_binary(data: bytes) -> bool:
     return b"\x00" in data[:_BINARY_SNIFF_BYTES]
+
+
+def _read_bytes_capped(path: Path, cap: int) -> tuple[bytes, bool]:
+    """Read up to ``cap`` bytes. Returns ``(data, truncated)``. Bounds the read
+    so a multi-GB file can't OOM the worker before line caps apply (NB-19)."""
+    if cap <= 0:
+        return path.read_bytes(), False
+    with path.open("rb") as fh:
+        data = fh.read(cap + 1)
+    if len(data) > cap:
+        return data[:cap], True
+    return data, False
+
+
+def _safe_mtime(p: Path) -> float:
+    """``st_mtime`` or 0 if the path vanished between listing and stat (NB-19)."""
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -73,12 +93,14 @@ def make_read_tool(env: ToolEnv) -> AgentTool:
             return _err(f"File not found: {path}")
         if path.is_dir():
             return _err(f"Path is a directory, not a file: {path}")
-        raw = path.read_bytes()
+        raw, byte_truncated = _read_bytes_capped(path, env.max_read_bytes)
         if _looks_binary(raw):
             return _err(f"Cannot read binary file: {path} ({len(raw)} bytes)")
 
         text = raw.decode("utf-8", "replace")
         lines = text.splitlines()
+        if byte_truncated:
+            lines.append(f"… [file exceeds {env.max_read_bytes} bytes; read was truncated]")
         offset = max(int(args.get("offset") or 1), 1)
         limit = int(args.get("limit") or env.max_read_lines)
         start = offset - 1
@@ -224,7 +246,7 @@ def make_glob_tool(env: ToolEnv) -> AgentTool:
             return _err(f"Search path not found: {root}")
         pattern = args["pattern"]
         matches = [p for p in root.glob(pattern) if p.is_file() and env.contains(p)]
-        matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        matches.sort(key=_safe_mtime, reverse=True)
         if not matches:
             return _ok(f"No files match {pattern!r} under {root}.")
         listing = "\n".join(str(p) for p in matches[:200])
@@ -271,13 +293,27 @@ def make_grep_tool(env: ToolEnv) -> AgentTool:
         if root.is_file():
             yield root
             return
+        # A glob with a path separator is matched against the file's path
+        # relative to the root (fnmatch's `*` spans `/`, so `src/**/*.py` works);
+        # a bare glob matches the basename (NB-19). Previously only the basename
+        # was ever matched, so any path-glob silently found nothing.
+        path_glob = bool(glob_filter and "/" in glob_filter)
         for dirpath, dirnames, filenames in os.walk(root):
             # Skip the usual noise so the native grep isn't drowned by VCS/venv.
             dirnames[:] = [d for d in dirnames if d not in {".git", "__pycache__", "node_modules", ".venv"}]
             for name in filenames:
-                if glob_filter and not fnmatch.fnmatch(name, glob_filter):
-                    continue
-                yield Path(dirpath) / name
+                fpath = Path(dirpath) / name
+                if glob_filter:
+                    if path_glob:
+                        try:
+                            rel = fpath.relative_to(root).as_posix()
+                        except ValueError:
+                            rel = fpath.as_posix()
+                        if not fnmatch.fnmatch(rel, glob_filter):
+                            continue
+                    elif not fnmatch.fnmatch(name, glob_filter):
+                        continue
+                yield fpath
 
     def _grep(args: dict) -> ToolResult:
         try:
@@ -304,7 +340,7 @@ def make_grep_tool(env: ToolEnv) -> AgentTool:
             if not env.contains(fpath):
                 continue
             try:
-                raw = fpath.read_bytes()
+                raw, _ = _read_bytes_capped(fpath, env.max_read_bytes)
             except OSError:
                 continue
             if _looks_binary(raw):
