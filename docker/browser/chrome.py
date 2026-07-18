@@ -8,6 +8,7 @@ and disconnects before navigation so Cloudflare cannot detect a debugger.
 import logging
 import os
 import subprocess
+import threading
 import time
 import urllib.request
 
@@ -18,6 +19,20 @@ log = logging.getLogger(__name__)
 PROFILE_DIR = os.environ.get("BROWSER_PROFILE_DIR", "/data/browser-profile")
 EXTENSION_DIR = "/app/stealth-extension"
 CHROME_PORT = 9222
+
+# Serializes the Chrome OS-process lifecycle (launch/ensure/restart/recover/
+# cleanup) across the threads that touch it: the Flask request thread and the
+# browse-watchdog thread. Without it, the watchdog's recover_wedged_chrome()
+# nulls _chrome_proc and relaunches while a freshly-unblocked Flask request runs
+# ensure_chrome() concurrently -- two Popen()s race for the same --user-data-dir
+# and --remote-debugging-port, orphaning one Chrome (ISSUE-173 follow-up).
+# Reentrant because ensure_chrome/restart_chrome/recover_wedged_chrome call
+# launch_chrome() while already holding it. Deliberately does NOT guard the
+# CDP/Patchright helpers (connect_cdp/get_context/...): those run on the Flask
+# thread *during* a browse, so locking them would let a wedged browse hold this
+# lock and deadlock the very watchdog meant to kill it. The wedge always sits in
+# a CDP call, which holds no lock here, so the watchdog can always acquire it.
+_chrome_lock = threading.RLock()
 
 # Chrome process
 _chrome_proc = None
@@ -36,8 +51,6 @@ _pw_context = None
 def launch_chrome():
     """Launch Chrome directly with debugging port and stealth extension."""
     global _chrome_proc, _launching
-
-    _launching = True
 
     chrome_path = os.environ.get(
         "CHROME_EXECUTABLE", "/usr/bin/google-chrome-stable",
@@ -73,19 +86,21 @@ def launch_chrome():
     ]
 
     env = {**os.environ, "DISPLAY": ":99"}
-    try:
-        _chrome_proc = subprocess.Popen(
-            args, env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        _wait_for_chrome_ready()
-        log.info(
-            "Chrome launched (pid=%d, debug_port=%d)",
-            _chrome_proc.pid, CHROME_PORT,
-        )
-    finally:
-        _launching = False
+    with _chrome_lock:
+        _launching = True
+        try:
+            _chrome_proc = subprocess.Popen(
+                args, env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            _wait_for_chrome_ready()
+            log.info(
+                "Chrome launched (pid=%d, debug_port=%d)",
+                _chrome_proc.pid, CHROME_PORT,
+            )
+        finally:
+            _launching = False
 
 
 def devtools_responding(timeout=2):
@@ -129,28 +144,30 @@ def _wait_for_chrome_ready(timeout=15):
 def ensure_chrome():
     """Ensure Chrome process is running, relaunch if dead."""
     global _chrome_proc
-    if _chrome_proc is not None and _chrome_proc.poll() is None:
-        return
-    log.warning("Chrome not running -- launching")
-    disconnect_cdp()
-    launch_chrome()
+    with _chrome_lock:
+        if _chrome_proc is not None and _chrome_proc.poll() is None:
+            return
+        log.warning("Chrome not running -- launching")
+        disconnect_cdp()
+        launch_chrome()
 
 
 def restart_chrome():
     """Kill and restart Chrome."""
     global _chrome_proc
-    disconnect_cdp()
-    if _chrome_proc:
-        try:
-            _chrome_proc.terminate()
-            _chrome_proc.wait(timeout=5)
-        except Exception:
+    with _chrome_lock:
+        disconnect_cdp()
+        if _chrome_proc:
             try:
-                _chrome_proc.kill()
+                _chrome_proc.terminate()
+                _chrome_proc.wait(timeout=5)
             except Exception:
-                pass
-    _chrome_proc = None
-    launch_chrome()
+                try:
+                    _chrome_proc.kill()
+                except Exception:
+                    pass
+        _chrome_proc = None
+        launch_chrome()
 
 
 def recover_wedged_chrome():
@@ -163,22 +180,28 @@ def recover_wedged_chrome():
     when the process dies, the request unwinds, and the stale Patchright
     connection is rebuilt lazily by the next connect_cdp() (which already
     re-probes and disconnects a dead browser). Only touches the subprocess
-    handle and the urllib readiness probe, both thread-safe, so this is the
-    variant the browse watchdog calls while the Flask thread is blocked
-    (ISSUE-149 renderer/session wedge; ISSUE-173).
+    handle, the urllib readiness probe, and _chrome_lock -- never Patchright --
+    so this is the variant the browse watchdog calls while the Flask thread is
+    blocked (ISSUE-149 renderer/session wedge; ISSUE-173).
+
+    Takes _chrome_lock so it can't race a concurrent launch on the Flask thread
+    (the double-Popen orphan). This cannot deadlock against the wedged request:
+    the wedge sits in a CDP call, which holds no lock here; the lock is only ever
+    held briefly (a bounded launch/kill), never across the CDP call being killed.
     """
     global _chrome_proc
-    proc, _chrome_proc = _chrome_proc, None
-    if proc is not None:
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
+    with _chrome_lock:
+        proc, _chrome_proc = _chrome_proc, None
+        if proc is not None:
             try:
-                proc.kill()
+                proc.terminate()
+                proc.wait(timeout=5)
             except Exception:
-                pass
-    launch_chrome()
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        launch_chrome()
 
 
 def is_chrome_running():
@@ -194,8 +217,20 @@ def connect_cdp(retries=3):
     """
     global _pw, _pw_browser, _pw_context
     if _pw_browser is not None:
+        # Verify the existing CDP connection is genuinely live before reusing it.
+        # Neither `.contexts` nor is_connected() is reliable here: both read
+        # cached local state, so a websocket killed from the watchdog thread
+        # (recover_wedged_chrome) isn't noticed until Patchright's sync dispatcher
+        # happens to pump the disconnect event -- until then a dead connection
+        # reports live and hands back a page bound to a closed socket (ISSUE-173
+        # follow-up). new_browser_cdp_session() forces a real round-trip over the
+        # socket and raises at once if it's dead, regardless of dispatcher timing.
         try:
-            _ = _pw_browser.contexts
+            session = _pw_browser.new_browser_cdp_session()
+            try:
+                session.detach()
+            except Exception:
+                pass
             return
         except Exception:
             disconnect_cdp()
@@ -263,14 +298,15 @@ def get_page_by_index(tab_index):
 def cleanup():
     """Clean up CDP connection and Chrome process."""
     global _chrome_proc
-    disconnect_cdp()
-    if _chrome_proc:
-        try:
-            _chrome_proc.terminate()
-            _chrome_proc.wait(timeout=5)
-        except Exception:
+    with _chrome_lock:
+        disconnect_cdp()
+        if _chrome_proc:
             try:
-                _chrome_proc.kill()
+                _chrome_proc.terminate()
+                _chrome_proc.wait(timeout=5)
             except Exception:
-                pass
-        _chrome_proc = None
+                try:
+                    _chrome_proc.kill()
+                except Exception:
+                    pass
+            _chrome_proc = None
