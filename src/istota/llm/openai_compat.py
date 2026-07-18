@@ -111,6 +111,10 @@ class OpenAICompatibleProvider:
         # default so a plain-OpenAI / local endpoint never sees the extension.
         self._prompt_caching = prompt_caching
 
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client (frees pooled sockets/fds). NB-17."""
+        await self._client.aclose()
+
     async def stream(
         self,
         system_prompt: str,
