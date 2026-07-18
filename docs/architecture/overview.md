@@ -2,13 +2,43 @@
 
 Istota is a self-hosted personal AI assistant that runs on your own server and integrates with Nextcloud — files, calendars, and Talk messaging — when you connect it. It dispatches each task to a pluggable **Brain**. Three brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model), and `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (subscription billing; it composes `ClaudeCodeBrain` for model resolution). Swapping brains doesn't touch executor orchestration. Messages arrive from Nextcloud Talk, the in-app web chat, email, file-based task queues, scheduled jobs, the interactive REPL, or the CLI — each surface sits behind a uniform [Transport](#input-channels) seam. They flow through a SQLite task queue, get claimed by per-user worker threads, and produce responses delivered back to the originating channel.
 
-```
-Talk (polling) ──────►┐
-Web chat (HTTP/SSE) ─►│
-Email (IMAP) ────────►├─► SQLite queue ──► Scheduler ──► Brain ──► Talk / Web / Email / …
-TASKS.md (file) ─────►│                    (WorkerPool)  (pluggable)
-CLI / REPL ──────────►│
-CRON.md (scheduled) ─►┘
+```mermaid
+flowchart TB
+    subgraph interactive["Interactive surfaces — user sends, reply expected"]
+        talk["Nextcloud Talk"]
+        web["Web chat"]
+        email["Email (IMAP)"]
+        repl["CLI / REPL"]
+        file["TASKS.md"]
+    end
+
+    subgraph automated["Automated triggers — scheduler-polled, no live user"]
+        cron["CRON.md<br/>(scheduled jobs)"]
+        brief["Briefings"]
+    end
+
+    interactive --> ingest(["ingest_message /<br/>create_task"])
+    automated --> poll(["scheduler poll →<br/>create_task"])
+    ingest --> queue[("SQLite tasks queue")]
+    poll --> queue
+    queue -->|"claim_task"| sched["Scheduler<br/>WorkerPool · per-user threads"]
+
+    sched --> fork{"task payload"}
+    fork -->|"prompt"| brain["Brain — LLM agent loop<br/>executor + BrainRequest"]
+    fork -->|"command"| cmd["Shell command<br/>deterministic · no model"]
+    fork -->|"skill"| skill["Skill CLI<br/>deterministic · no model"]
+
+    brain -. "writes JSON" .-> deferred[/"ISTOTA_DEFERRED_DIR<br/>deferred op files"/]
+    skill -. "writes JSON" .-> deferred
+
+    deferred -->|"drain (post-success)"| sched
+    sched -->|"subtask → create_task"| queue
+    sched -. "KG · KV · health · sent-emails" .-> stores[("terminal DB writes<br/>KG · KV · module DBs")]
+
+    brain --> plan["resolve_delivery_plan"]
+    cmd --> plan
+    skill --> plan
+    plan --> out["Transports<br/>Talk · Web · Email · ntfy · TASKS.md"]
 ```
 
 Tool calling, function dispatch, and the agent loop live in the brain, not the executor — and which code runs them depends on the brain. With `ClaudeCodeBrain` (the default) they are Claude Code's job, so new Claude Code capabilities (tool use, model improvements) come for free. With `NativeBrain` they are Istota's own: an in-process loop that dispatches tools, compacts context, and retries against any OpenAI-compatible model. Either way the executor's job is the same — it constructs the prompt and hands off a `BrainRequest`.
@@ -27,6 +57,44 @@ Every interaction follows the same path:
 8. Post-completion: conversation indexed for memory search, deferred DB operations processed, scheduled job counters reset
 
 Task lifecycle: `pending` -> `locked` -> `running` -> `completed` | `failed` | `pending_confirmation` -> `cancelled`
+
+## From schedule to agent: the subtask handoff
+
+A scheduled job is not always an agent invocation. A `CRON.md` job carries one of three payloads, and only the first puts a model in the loop:
+
+- **`prompt`** (or `prompt_file`) — a natural-language request. The task routes straight to the **Brain**: an LLM task.
+- **`command`** — a shell command run in a subprocess (`_execute_command_task`). Deterministic, no model.
+- **`skill`** — a skill CLI invocation such as `istota-skill feeds run-scheduled` (`_execute_skill_task`, auto-promoted from a pure `istota-skill …` command row). Deterministic, no model.
+
+The dispatch fork lives in `process_one_task`: `task.skill` and `task.command` take the deterministic paths; everything else goes to the Brain.
+
+So how does a "dumb" schedule reach the agent? Through the **deferred subtask** mechanism. The two task paths that run with a deferred directory set — the sandboxed **Brain** path (bwrap mounts its database read-only, so the model can't write the DB directly and defers instead) and the **skill** path (which reuses the same rail) — write JSON op files into `ISTOTA_DEFERRED_DIR`, and the unsandboxed scheduler applies them *after* the task succeeds. A raw shell `command:` row is not given `ISTOTA_DEFERRED_DIR`, so this handoff belongs to skill and Brain tasks, not arbitrary shell commands. One of those file types is a subtask request:
+
+```
+$ISTOTA_DEFERRED_DIR/task_${ISTOTA_TASK_ID}_subtasks.json
+```
+
+A deterministic **skill** run — including an auto-promoted `istota-skill …` cron row — that emits this file hands its follow-up work to an agent. On success, `_drain_deferred_ops → _process_deferred_subtasks` reads it and calls `db.create_task(source_type="subtask", …)`. A deferred subtask carries a natural-language **`prompt`** — a `command` key is explicitly rejected — so the new task always routes to the Brain. That is the handoff from a deterministic schedule to an LLM task:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cron as CRON.md job
+    participant Sched as Scheduler
+    participant Det as Deterministic skill run
+    participant Dir as ISTOTA_DEFERRED_DIR
+    participant Brain as Brain (LLM)
+
+    Cron->>Sched: due — create_task(source_type="scheduled")
+    Sched->>Det: dispatch (no model in the loop)
+    Det->>Dir: write task_ID_subtasks.json { prompt }
+    Det-->>Sched: exit 0 (success)
+    Sched->>Dir: drain deferred ops
+    Dir-->>Sched: subtask prompt(s)
+    Sched->>Brain: create_task(source_type="subtask") → LLM task
+```
+
+Guardrails on this path: subtask creation is **admin-only**, prompt-only (never a nested `command`), rate-limited (`max_subtasks_per_task`, `max_subtask_depth`, `max_subtask_prompt_chars`), and the child's `conversation_token` is pinned to the parent so a subtask can't redirect its own output. The same deferred-writeback rail carries the other post-success writes — knowledge-graph facts, KV entries, health ops, sent-email records — but those are terminal writes to their own stores; only the subtask arm re-enters the task queue.
 
 ## Module map
 
