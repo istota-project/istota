@@ -229,3 +229,27 @@ class TestCompactMessages:
             [_user("hi")], "earlier summary", None, _BoomProvider(), "m", _to_llm
         )
         assert summary == "earlier summary"
+
+    @pytest.mark.asyncio
+    async def test_input_truncated_to_max_chars(self):
+        # NB-10: the serialized conversation fed to the summarizer is bounded so
+        # the summary request can't itself overflow.
+        from istota.llm.provider import StreamDone
+
+        class _RecordingProvider:
+            def __init__(self):
+                self.prompt = ""
+
+            async def stream(self, system_prompt, messages, tools, *, model="", max_tokens=16384):
+                self.prompt = messages[-1].content[0].text
+                yield StreamDone(message=AssistantMessage(content=[TextContent(text="S")]))
+
+        provider = _RecordingProvider()
+        # Ten big messages → a large serialized transcript.
+        msgs = [_user("Q" * 20000) for _ in range(10)]
+        await compact_messages(
+            msgs, None, None, provider, "m", _to_llm, max_input_chars=10000
+        )
+        assert "elided to fit" in provider.prompt
+        # The elided conversation section is bounded (plus fixed scaffolding).
+        assert len(provider.prompt) < 30000
