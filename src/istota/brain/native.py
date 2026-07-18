@@ -82,6 +82,15 @@ _MAX_OVERFLOW_RECOVERIES = 2
 
 _RECOVERY_NUDGE = "[context was compacted; continue]"
 
+# NB-15: markers appended to a final answer whose last turn ended on a
+# non-clean finish reason, so a truncated/filtered response is visibly flagged
+# rather than delivered as a complete one. Keyed on the provider's mapped
+# stop_reason (see openai_compat._FINISH_REASON_MAP).
+_TRUNCATION_MARKERS = {
+    "max_tokens": "[truncated: the response hit the output token limit]",
+    "content_filter": "[note: the response was cut short by the model provider's content filter]",
+}
+
 
 class _RetryingProvider:
     """Wrap a provider with turn-level retry on *immediate* transient errors.
@@ -266,6 +275,10 @@ class NativeBrain:
         actions: list[str] = []
         last_assistant_text = ""
         last_error_message = ""
+        # The final assistant turn's stop_reason, so a truncated (max_tokens) or
+        # filtered (content_filter) answer can be marked visible rather than
+        # delivered as a clean completion (NB-15).
+        last_assistant_stop = {"value": ""}
 
         # Final-turn suppression (see spec "NativeBrain integration"): every
         # turn_end carries assistant text, and the *last* text-bearing turn's
@@ -330,6 +343,7 @@ class NativeBrain:
             elif event.type == "turn_end":
                 msg = event.message
                 if isinstance(msg, AssistantMessage):
+                    last_assistant_stop["value"] = msg.stop_reason or ""
                     # Capture the provider's error text so _build_result can
                     # surface it; the scheduler only sees result_text, and an
                     # empty error reads as a generic failure (and a policy
@@ -543,8 +557,17 @@ class NativeBrain:
                 model_used=model,
             )
 
+        # NB-15: a final answer the model was forced to cut short (output token
+        # cap) or that the endpoint's content filter clipped is delivered with a
+        # visible marker instead of masquerading as a complete response.
+        result_text = last_assistant_text
+        if not final_stop["reason"] and result_text:
+            marker = _TRUNCATION_MARKERS.get(last_assistant_stop["value"])
+            if marker:
+                result_text = f"{result_text}\n\n{marker}"
+
         return self._build_result(
-            final_stop["reason"], last_assistant_text, last_error_message,
+            final_stop["reason"], result_text, last_error_message,
             trace, actions, usage, model,
         )
 
