@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Native brain: per-model capability and window overrides via `[brain.native.model_overrides]`, so a non-Anthropic reasoning or vision model (or a small-window local model) declares its real capabilities instead of falling back to the conservative default. The bundled model catalog also gained common OpenAI entries. Compaction sizing (`compaction_reserve_tokens` / `compaction_keep_recent_tokens`) now scales with the model window and is operator-tunable.
 - Web chat search results are now clickable cards: a conversation result has a "Jump to reply" button that opens the right room and scrolls to the exact message with a brief highlight; memory results show their source and a preview. Share or bookmark `/chat?room=<token>&task=<id>` to link straight to a reply.
 - Per-room model default: a chat room can carry a standing model and effort that applies to every message in it, on both web chat and Nextcloud Talk. Set it in the web room settings, or with `!room model <alias>` / `!room effort <level>` from either surface. An inline `!model` on a single message still overrides it, and `!model default` falls back to the instance default for that one message. The room's default shows as a badge next to the room title in web chat, which you can click to change it.
 - Web chat command autocomplete: type `!` in the composer to get a live-filtered dropdown of available commands, navigate with the arrow keys, and accept with Tab or Enter. Typing `!model ` completes model aliases the same way.
@@ -25,11 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Nextcloud connection card moved under Connected services, above Google Workspace, and reads like the other service cards — a status pill beside the title. Connect and Disconnect are now the same button in two colours.
 
 ### Fixed
+- Native brain (`brain.kind = "native"`) reliability: truncated or failed model responses (a mid-stream provider error, or a connection dropped before completion) are no longer delivered as a successful answer — they retry instead. A backend that reuses the same tool-call id every turn no longer trips a false "repeating loop" stop. Bash commands that background children are killed as a group on timeout or cancel, and very long output lines no longer crash the tool. Context-overflow recovery no longer answers with the request dropped, and a request that exceeds the model's window is reported cleanly instead of guessing.
+- Native brain on non-Anthropic endpoints: reasoning models keep their configured effort, vision models get image tool results, OpenAI's own o-series / gpt-5 models are called with the field they require, and common overflow / rate-limit phrasings are classified correctly.
 - `!search <query>` in a room now finds what's actually there. It previously returned almost nothing without `--all` — it missed the room's own conversation history, the channel's notes, and your personal memory, and dropped older conversations once they aged out. It now searches all of them, `--memories` returns your memory notes in-room, and near-miss queries (a partial or slightly-off term) still return results instead of nothing.
 - A reply that continued an email thread from a web chat room rendered as a grey command-output note instead of a normal assistant message. It now appears as a proper chat bubble; genuine alerts and logs routed to a room still show as notes.
 
 ### Removed
 - Per-user static site hosting (the `/~user/` sites and the `website` skill) is gone. It was generic file publishing rather than a core capability and will return later as a cleaner standalone skill. The bot's own web root is unaffected — it can still edit files there — and existing files under your web folder are untouched.
+
+### Security
+- Native brain (`brain.kind = "native"`) file tools are now confined to each task's own workspace on a sandboxed deployment, matching the isolation the default Claude Code brain already enforces. Previously the native brain's in-process file tools could read or write outside a user's own directory. Deployments running the default brain were never affected.
 
 ## [0.30.0] - 2026-07-16
 

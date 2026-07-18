@@ -180,6 +180,12 @@ executor routes per task via `brain.resolve_brain_kind(task.source_type, config.
 unknown target kinds are logged and ignored. See `.claude/rules/brain.md` for the
 protocol, ClaudeCodeBrain, NativeBrain, and `NativeBrainConfig` fields.
 
+`NativeBrainConfig` (`[brain.native]`) — model-agnosticism knobs (see `.claude/rules/brain.md` "NativeBrain"):
+- `model_overrides: dict = {}` (`[brain.native.model_overrides."<model-id>"]`) — per-model partial `ModelInfo` (any of `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`, prices). Applied globally at config load via `llm.catalog.set_model_overrides`, merged over the bundled entry (or the conservative default) in `get_model_info`. Lets a non-Anthropic reasoning/vision or small-window model declare real capabilities instead of being degraded to no-thinking / no-vision / 200k (NB-4). Unknown keys are dropped.
+- `compaction_reserve_tokens: int = 0` / `compaction_keep_recent_tokens: int = 0` — compaction sizing; `0` = derive from the model window (`session.compaction.derive_reserve_tokens` / `derive_keep_recent_tokens`, capped at the legacy 16k/20k so a 200k model is unchanged), so a small-window model compacts sensibly instead of using Anthropic-sized constants (NB-14).
+
+Built-in role aliases (`fast`/`general`/`smart`) resolve to `native.model` on the native brain unless remapped via `[models.roles]` (NB-3) — so stock config's `extraction_model`/`curation_model = "general"` never reaches the wire as a literal alias string.
+
 ### `ModelsConfig`
 ```
 roles: dict[str, str] = {}   # operator-rebound role aliases ([models.roles] in TOML)

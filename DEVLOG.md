@@ -2,6 +2,50 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-18: Native brain harness audit — reliability, security, model-agnosticism fixes
+
+Ran a thorough audit of the native brain harness (the in-process agent loop behind `brain.kind = "native"`) against the design docs, then worked down the fix-priority list. The harness faithfully implements the committed design; the defects clustered in three areas — wire-level robustness on generic OpenAI-compatible endpoints, the file-tool sandbox story, and degraded behavior on non-Anthropic models. Ten commits, ~all findings addressed, +33 tests, full suite green (7085 passed). Findings are tracked as NB-1…NB-24 in the audit doc (kept in the project notes, not the repo).
+
+**File-tool confinement (NB-1, critical).** The native file tools (Read/Write/Edit/Grep/Glob) run in-process, outside bwrap, and `ToolEnv.resolve` accepted any absolute path — so a native task could read the framework DB or the instance config and write arbitrary files with daemon privileges, bypassing the per-user isolation the CLI-brain path gets from bwrap. `ToolEnv` now enforces a symlink-resolved read/write path allowlist; the executor computes the same user-data roots bwrap would bind (`native_fs_roots`) and passes them via new `BrainRequest.fs_read_roots`/`fs_write_roots`, active only under effective sandboxing (`sandbox_enabled` + bwrap available) so the boundary matches the CLI path exactly. Grep/Glob also drop per-file symlink escapes.
+
+**Wire integrity (NB-2 + NB-15, critical + minor).** The SSE parser laundered two truncation modes into a clean `StreamDone(end_turn)`: a mid-stream `data: {"error":…}` frame (HTTP 200, OpenRouter's upstream-failure pattern) had no `choices` and was discarded, then the stream EOF'd into success; and a connection close without `[DONE]`/`finish_reason` also read as clean. Both now surface as `StreamError` so the task retries instead of delivering a wrong/short answer as success. `content_filter` is preserved (not mapped to `end_turn`), and a final answer whose last turn ended on `max_tokens`/`content_filter` gets a visible marker.
+
+**Native role defaults (NB-3, critical).** A `kind="native"` deploy with stock config sent the literal string `"general"` as the wire model id — `extraction_model`/`curation_model` default to the `general` role alias and NativeBrain passed unknown names through verbatim with no role-target defaults, so every sleep-cycle/curation call 400'd. The three built-in role aliases now resolve to the single configured native model unless remapped via `[models.roles]`; provider aliases still pass through untranslated.
+
+**Bash process handling (NB-6/7/11/20).** Ported the scheduler's own killpg discipline into the native Bash tool: read the pipe in 64 KiB chunks instead of `readline()` (a line past asyncio's default StreamReader limit raised an uncaught `ValueError`), `start_new_session=True` + `os.killpg` on timeout/abort (a command that backgrounds children survived a bare child kill), and a `try/finally` that reaps on every exit path including a hard `CancelledError` the loop's `except Exception` can't catch. The `exclude_from_context` stub reports the true byte count.
+
+**Structural one-liners (NB-5/8/9).** Loop-pair detection now pairs a tool result with the call in its own local group (adjacency), not a transcript-wide id map — endpoints that reuse a deterministic per-response id (`call_0`) were making six progressing calls hash identically and hard-stopping as `loop_detected`. App-hook exceptions (`prepare_arguments`, `before_tool_call`, `after_tool_call`) are contained into error results in both sequential and parallel modes (they previously crashed the loop or silently orphaned a call). The cancel poll runs off the event loop via `asyncio.to_thread` so a locked SQLite `cancel_check` can't freeze streaming/tool execution/the deadline timer.
+
+**Model-agnosticism bundle (NB-4/14/13c).** Added `[brain.native.model_overrides]` (a per-model capability/window table, applied globally at config load) plus stable `gpt-4o`/`o1`/`o3` catalog entries, so a non-Anthropic reasoning/vision model or a small-window local model isn't crippled by the 5-entry catalog's conservative default. Compaction reserve/keep-recent now scale with the model window (`[brain.native]` `compaction_reserve_tokens`/`compaction_keep_recent_tokens` override), and a `CompactionSummaryMessage` is counted in the token estimate (it renders as a real user message but had no `.content`, so it read as 0 tokens and later compactions fired late). The overflow regex catches common non-Anthropic phrasings.
+
+**Overflow-recovery hardening (NB-10).** The worst case answered with the user's request gone: recovery serialized the whole overflowing prefix into one summary request that itself overflowed, `compact_messages` fell back to an empty summary, and the continue proceeded. Now the summary input is middle-elided to fit the window, compaction runs through the retrying provider (a transient 429 during the summary call is retried), and an empty-summary recovery fails with the original overflow error instead of a confident non-answer.
+
+**OpenAI reasoning + delta edges + retry footguns (NB-12/16/13a-b).** OpenAI's own o-series/gpt-5 models 400 on `max_tokens` (require `max_completion_tokens`) — scoped the field swap to `api.openai.com` so OpenRouter/local servers are unaffected. Tool-call delta accumulation keys on index/id (no more parallel-call merge into slot 0 on index-less endpoints; empty ids synthesized). The retry classifier is phrase-based (a permanent 400 quoting "503"/"timeout" no longer reads transient), rate-limit matching is word-boundaried ("generate" no longer matches "rate"), a 429 is a rate limit even with overflow-looking text, and jitter is applied before the `max_delay` cap.
+
+**File-tool quality + stop_reason + cleanup (NB-19/18/21/17).** `ToolResult.is_error` propagates so `ToolEndEvent.success` reflects self-reported failures; Read/Grep read bounded by `max_read_bytes`; Grep path-globs (`src/**/*.py`) match the relative path; Glob's mtime sort tolerates a vanished path. `BrainResult.stop_reason` is normalized to the documented vocabulary (`max_turns`/`loop_detected` → `completed`) with an informative message instead of an empty success. The tool-pair sanitizer maintains its seen-id set incrementally (was O(n²) per request). The per-task httpx client is closed after the task (was leaked).
+
+**Deferred (latent / test-only):** NB-22 (steering contract, no consumer), NB-23 (usage accounting — cache double-billing latent while prices are 0), NB-24 (replay.py test-only, risk already reduced by NB-2).
+
+**Files added/modified:**
+- `src/istota/session/tools/env.py` — `ToolEnv` read/write roots + symlink-resolved allowlist (`resolve`/`contains`), `ToolPathError`, `max_read_bytes`.
+- `src/istota/session/tools/files.py` — confinement plumbing, `is_error` on failures, bounded reads, Grep path-globs, safe Glob sort.
+- `src/istota/session/tools/bash.py` — chunked reads, `start_new_session` + process-group kill, `try/finally` reap, true byte count.
+- `src/istota/session/tools/__init__.py` — export `ToolPathError`, docstring corrected.
+- `src/istota/session/loop_detection.py` — adjacency pairing.
+- `src/istota/session/retry.py` — phrase-based transient regex, word-boundaried rate limit, 429-before-overflow, jitter-before-cap.
+- `src/istota/session/compaction.py` — `derive_reserve_tokens`/`derive_keep_recent_tokens`, `_msg_tokens` (counts summary), `compact_messages(max_input_chars=)` middle-elision.
+- `src/istota/agent/loop.py` — hook-exception containment (`_prepare_tool_call`/`_finalize`), parallel error-result synthesis, `is_error` propagation.
+- `src/istota/agent/tools.py` — `ToolResult.is_error`.
+- `src/istota/agent/sanitize.py` — incremental seen-id set.
+- `src/istota/brain/native.py` — role-target defaults, `content_filter`/`max_tokens` marker, off-loop cancel poll, window-derived compaction sizing, overflow-recovery empty-summary fail + retrying provider, `stop_reason` normalization, per-task provider close.
+- `src/istota/brain/_types.py` — `BrainRequest.fs_read_roots`/`fs_write_roots`.
+- `src/istota/llm/openai_compat.py` — error-frame/EOF handling, `content_filter`, `max_completion_tokens` gate, tool-delta index/id resolver, synthesized ids, `aclose`.
+- `src/istota/llm/catalog.py` — `set_model_overrides` + merge in `get_model_info`.
+- `src/istota/llm/model_catalog.json` — gpt-4o / gpt-4o-mini / o1 / o3 / o3-mini entries.
+- `src/istota/config.py` — `NativeBrainConfig` `model_overrides` / `compaction_reserve_tokens` / `compaction_keep_recent_tokens` parsing + `set_model_overrides` at load.
+- `src/istota/executor.py` — `native_fs_confinement_active`, `native_fs_roots`, `BrainRequest` wiring.
+- Tests: `tests/native/` (tools_files, tools_bash, native_brain, openai_compat, session_loop_detection, session_compaction, session_retry, overflow_recovery, llm_catalog, agent_loop), `tests/test_sandbox.py`, `tests/test_config.py`.
+
 ## 2026-07-18: Memory search & web-chat `!search` overhaul
 
 Fixed a long-standing bug where `!search` in a room returned almost nothing, and rebuilt the web-chat search UX into clickable, jump-to-response result cards. Five staged changes across the Python backend and the SvelteKit frontend.
