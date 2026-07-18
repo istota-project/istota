@@ -117,14 +117,19 @@ describe('modelAliasProvider', () => {
 		expect(p.match('!model', 6)).toBeNull();
 	});
 
-	it('suggests aliases filtered by the query, target as description', async () => {
+	it('suggests aliases filtered by the query, canonical model as description', async () => {
 		const list = await modelAliasProvider().getSuggestions('op');
 		expect(list.map((s) => s.label)).toEqual(['opus', 'opus-high']);
 		expect(list[0]).toMatchObject({
 			value: 'opus ',
 			label: 'opus',
-			description: 'claude-opus-4-8',
+			description: '(claude-opus-4-8)',
 			key: 'model:opus',
+		});
+		// Effort-bearing alias carries the effort in the parens too.
+		expect(list[1]).toMatchObject({
+			label: 'opus-high',
+			description: '(claude-opus-4-8 · high)',
 		});
 	});
 });

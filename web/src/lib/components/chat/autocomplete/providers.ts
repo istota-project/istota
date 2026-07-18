@@ -108,7 +108,11 @@ export function modelAliasProvider(): CompletionProvider {
 			return rank(model_aliases, query, (a) => a.alias).map((a) => ({
 				value: `${a.alias} `,
 				label: a.alias,
-				description: a.target ?? '',
+				// Show the canonical model the alias resolves to (with effort) in
+				// parens, so opaque role aliases like `smart` are legible.
+				description: a.target
+					? `(${a.target}${a.effort ? ` · ${a.effort}` : ''})`
+					: '',
 				key: `model:${a.alias}`,
 			}));
 		},

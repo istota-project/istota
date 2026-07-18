@@ -33,7 +33,12 @@
 	// the room header badge, so the dropdown and the badge name a model the same.
 	$effect(() => {
 		getBaseModelChoices().then((choices) => {
-			modelOptions = [{ value: '', label: 'Default model' }, ...choices];
+			// Show the canonical model id in parens next to the alias, so the pick
+			// is unambiguous (e.g. `opus (claude-opus-4-8)`).
+			modelOptions = [
+				{ value: '', label: 'Default model' },
+				...choices.map((c) => ({ value: c.value, label: `${c.label} (${c.value})` })),
+			];
 		});
 	});
 
