@@ -11,7 +11,6 @@
 	import Message from '$lib/components/chat/Message.svelte';
 	import Composer from '$lib/components/chat/Composer.svelte';
 	import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
-	import { getBaseModelChoices } from '$lib/components/chat/autocomplete/providers';
 	import { getChatSession } from '$lib/stores/chat';
 	import { getMe, type ChatRoom, type ChatView } from '$lib/api';
 
@@ -43,22 +42,14 @@
 	const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
 	const busy = $derived($status === 'sending' || $status === 'streaming');
 
-	// Reverse-map canonical model id → its base alias for a compact header badge
-	// (e.g. `claude-opus-4-8` → `opus`). Cached per session with the composer's
-	// autocomplete catalogue.
-	let aliasByModel = $state<Record<string, string>>({});
-	$effect(() => {
-		getBaseModelChoices().then((choices) => {
-			aliasByModel = Object.fromEntries(choices.map((c) => [c.value, c.label]));
-		});
-	});
-	// The room's standing model default, as a short label for the header badge.
-	// null when the room has no default (or in a cross-room view).
+	// The room's standing model default as a header badge — the canonical model
+	// name (e.g. `claude-opus-4-8`), not the alias, so it's unambiguous. null
+	// when the room has no default (or in a cross-room view).
 	const modelBadge = $derived.by(() => {
 		if (inViewMode || !activeRoom) return null;
 		const { model, effort } = activeRoom;
 		if (!model && !effort) return null;
-		let label = model ? (aliasByModel[model] ?? model.replace(/^claude-/, '')) : 'default';
+		let label = model ?? 'default model';
 		if (effort) label += ` · ${effort}`;
 		return label;
 	});
