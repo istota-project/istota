@@ -1360,6 +1360,41 @@
   notify:
     - "restart istota-browser"
 
+# Detect browser image-source changes so an edit to docker/browser/*.py (which
+# Ansible doesn't otherwise track — the source lives in the repo, not in a
+# template) triggers an image rebuild. Same mechanism as the devbox image hash
+# below: hash the build-context files on the host and pin the digest into a
+# marker under {{ istota_home }}. When the digest differs from the previous run
+# the copy is "changed" and notifies the restart-browser handler, which does
+# `build && up -d --force-recreate`. Without this, a code-only change ships to
+# the host via git but the running container keeps the old image until the
+# compose template or env file happens to change.
+- name: Hash browser image content (Dockerfile + source)
+  ansible.builtin.shell: |
+    find {{ istota_repo_dir }}/docker/browser \
+        -type f ! -path '*/__pycache__/*' ! -name '*.pyc' ! -name '.DS_Store' \
+        -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 sha256sum \
+        | sha256sum \
+        | awk '{print $1}'
+  register: browser_content_hash
+  changed_when: false
+  when: istota_browser_enabled and not istota_web_only
+
+- name: Track browser image-content checksum (triggers rebuild on change)
+  ansible.builtin.copy:
+    dest: "{{ istota_home }}/.browser-image.sha256"
+    content: "{{ browser_content_hash.stdout }}\n"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: "0644"
+  when:
+    - istota_browser_enabled and not istota_web_only
+    - browser_content_hash.stdout is defined
+  notify:
+    - "restart istota-browser"
+
 - name: Check if browser container is running
   shell: "docker ps -q -f name=istota-browser"
   register: browser_running

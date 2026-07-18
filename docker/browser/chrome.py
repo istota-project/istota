@@ -153,6 +153,34 @@ def restart_chrome():
     launch_chrome()
 
 
+def recover_wedged_chrome():
+    """Kill and relaunch Chrome from a watchdog thread (Playwright-free).
+
+    Like restart_chrome(), but it does NOT call disconnect_cdp(): Patchright's
+    sync objects are bound to the Flask thread that created them and must never
+    be touched from another thread. Killing the Chrome OS process is enough to
+    unblock a wedged in-flight CDP call on the Flask thread — that call raises
+    when the process dies, the request unwinds, and the stale Patchright
+    connection is rebuilt lazily by the next connect_cdp() (which already
+    re-probes and disconnects a dead browser). Only touches the subprocess
+    handle and the urllib readiness probe, both thread-safe, so this is the
+    variant the browse watchdog calls while the Flask thread is blocked
+    (ISSUE-149 renderer/session wedge; ISSUE-173).
+    """
+    global _chrome_proc
+    proc, _chrome_proc = _chrome_proc, None
+    if proc is not None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    launch_chrome()
+
+
 def is_chrome_running():
     """Check if Chrome process is alive."""
     return _chrome_proc is not None and _chrome_proc.poll() is None
