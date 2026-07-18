@@ -33,6 +33,26 @@ export async function getModelAliases() {
 	return (await loadCatalogue()).model_aliases;
 }
 
+/** Base model choices for the room-default picker: one `{value: canonical id,
+ *  label: alias}` per distinct model, effort-suffixed aliases excluded (effort
+ *  is a separate control). When several aliases map to one model, a provider
+ *  alias (its name appears in the canonical id, e.g. `opus` in `claude-opus-4-8`)
+ *  is preferred over a role alias like `smart`, so the label reads naturally.
+ *  The room header badge and the settings dropdown both consume this, so they
+ *  never disagree on how a model is named. Insertion order = first-seen. */
+export async function getBaseModelChoices(): Promise<{ value: string; label: string }[]> {
+	const labelByTarget = new Map<string, string>();
+	for (const a of await getModelAliases()) {
+		if (!a.target || a.effort !== null) continue;
+		const cur = labelByTarget.get(a.target);
+		if (cur === undefined) labelByTarget.set(a.target, a.alias);
+		else if (!a.target.includes(cur) && a.target.includes(a.alias)) {
+			labelByTarget.set(a.target, a.alias);
+		}
+	}
+	return [...labelByTarget].map(([value, label]) => ({ value, label }));
+}
+
 /** Prefix matches first, then substring matches; input order preserved within
  *  each group (the catalogue is already sorted server-side). */
 function rank<T>(items: T[], query: string, keyOf: (item: T) => string): T[] {
