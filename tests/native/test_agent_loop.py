@@ -374,6 +374,106 @@ class TestHooks:
         )
         assert len(provider.calls) == 1
 
+    async def test_before_hook_exception_becomes_error_result(self):
+        # NB-8: a before-hook that raises must not crash the loop or orphan the
+        # tool call — it becomes an error result and the loop continues.
+        def _before(hook_ctx):
+            raise RuntimeError("hook boom")
+
+        provider = MockProvider([_tool_turn("echo", {"value": "x"}), _text_turn("ok")])
+        sink = _Sink()
+        out = await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[_echo_tool([])]),
+            _config(provider, before_tool_call=_before),
+            sink,
+        )
+        tr = [m for m in out if isinstance(m, ToolResultMessage)]
+        assert len(tr) == 1
+        assert tr[0].is_error is True
+        assert "hook" in tr[0].content[0].text.lower()
+        # The call was paired with a tool_execution_end (not orphaned).
+        assert "tool_execution_end" in sink.types()
+
+    async def test_after_hook_exception_becomes_error_result(self):
+        def _after(hook_ctx):
+            raise RuntimeError("after boom")
+
+        provider = MockProvider([_tool_turn("echo", {"value": "x"}), _text_turn("ok")])
+        sink = _Sink()
+        out = await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[_echo_tool([])]),
+            _config(provider, after_tool_call=_after),
+            sink,
+        )
+        tr = [m for m in out if isinstance(m, ToolResultMessage)]
+        assert len(tr) == 1
+        assert tr[0].is_error is True
+        assert "tool_execution_end" in sink.types()
+
+    async def test_prepare_arguments_exception_becomes_error_result(self):
+        def _boom(_args):
+            raise ValueError("bad args")
+
+        async def _never(call_id, args, ou, ab):
+            return ToolResult(content=[TextContent(text="x")])
+
+        tool = AgentTool(
+            schema=ToolSchema(name="boom", description="d", parameters=[]),
+            execute=_never,
+            execution_mode="sequential",
+            prepare_arguments=_boom,
+        )
+        provider = MockProvider([_tool_turn("boom", {}), _text_turn("ok")])
+        out = await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[tool]),
+            _config(provider),
+            _Sink(),
+        )
+        tr = [m for m in out if isinstance(m, ToolResultMessage)]
+        assert len(tr) == 1
+        assert tr[0].is_error is True
+
+    async def test_after_hook_exception_parallel_mode_no_orphan(self):
+        # Parallel mode: gather(return_exceptions=True) previously swallowed a
+        # raising after-hook and `continue`d, leaving the call with no result
+        # message and no tool_execution_end. Both parallel calls must yield an
+        # error result.
+        def _after(hook_ctx):
+            raise RuntimeError("after boom")
+
+        async def _par_exec(call_id, args, ou, ab):
+            return ToolResult(content=[TextContent(text="ok")])
+
+        par_tool = AgentTool(
+            schema=ToolSchema(
+                name="par",
+                description="d",
+                parameters=[ToolParameter(name="value", type="string", required=False)],
+            ),
+            execute=_par_exec,
+            execution_mode="parallel",
+        )
+        two_calls = AssistantMessage(
+            content=[
+                ToolCallContent(id="c1", name="par", arguments={"value": "a"}),
+                ToolCallContent(id="c2", name="par", arguments={"value": "b"}),
+            ],
+            stop_reason="tool_use",
+        )
+        provider = MockProvider([two_calls, _text_turn("ok")])
+        out = await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[par_tool]),
+            _config(provider, after_tool_call=_after),
+            _Sink(),
+        )
+        tr = [m for m in out if isinstance(m, ToolResultMessage)]
+        assert len(tr) == 2  # neither call orphaned
+        assert all(m.is_error for m in tr)
+
 
 # --------------------------------------------------------------------------- #
 # prepare_next_turn + stop conditions

@@ -320,6 +320,33 @@ class TestErrorAndStops:
         result = _brain(provider).execute(req)
         assert result.result_text == "Cancelled by user"
 
+    def test_cancel_poll_runs_off_the_event_loop(self, tmp_path):
+        # NB-9: cancel_check is a synchronous DB read; the poller must run it via
+        # asyncio.to_thread so SQLite lock contention can't freeze the loop.
+        import contextlib
+        import threading
+
+        seen = {}
+
+        async def _drive():
+            loop_thread = threading.get_ident()
+
+            def check():
+                seen["thread"] = threading.get_ident()
+                seen["loop_thread"] = loop_thread
+                return False
+
+            abort = asyncio.Event()
+            task = asyncio.create_task(NativeBrain._poll_cancel(check, abort))
+            await asyncio.sleep(0.1)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_drive())
+        assert seen.get("thread") is not None
+        assert seen["thread"] != seen["loop_thread"]
+
     def test_error_surfaces_message_into_result_text(self, tmp_path):
         # The scheduler classifies policy refusals / errors from result_text; an
         # empty string reads as a generic failure. The provider's error_message

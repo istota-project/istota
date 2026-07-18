@@ -542,9 +542,18 @@ async def _execute_parallel(
     all_results: dict[int, tuple[ToolCallContent, ToolResult, bool, int]] = {}
     for idx, (tc, result, is_error) in immediate.items():
         all_results[idx] = (tc, result, is_error, 0)
-    for item in executed_results:
+    for k, item in enumerate(executed_results):
         if isinstance(item, Exception):
-            continue  # _execute_prepared catches; defensive only
+            # _run's callees (_execute_prepared / _finalize) contain their own
+            # errors, so this is defensive — but if anything unexpected raises,
+            # synthesize an error result rather than dropping the call, which
+            # would orphan the tool_call (no result message, no
+            # tool_execution_end) and force the wire sanitizer to paper over it
+            # (NB-8). gather preserves order, so prepared_list[k] is this call.
+            idx, tc, _prep = prepared_list[k]
+            logger.warning("parallel tool run raised idx=%s tool=%s: %s", idx, tc.name, item)
+            all_results[idx] = (tc, _error_result(f"Tool run error: {item}"), True, 0)
+            continue
         idx, tc, final, duration_ms = item
         all_results[idx] = (tc, final.result, final.is_error, duration_ms)
 
@@ -593,10 +602,22 @@ async def _prepare_tool_call(
             is_error=True,
         )
 
-    if tool.prepare_arguments is not None:
-        args = tool.prepare_arguments(tc.arguments)
-    else:
-        args = coerce_arguments(tc.arguments, tool.schema)
+    # Argument coercion / the app's prepare_arguments hook must never crash the
+    # loop or orphan the call — a raise becomes an immediate error result the
+    # model sees, and the batch keeps going (NB-8).
+    try:
+        if tool.prepare_arguments is not None:
+            args = tool.prepare_arguments(tc.arguments)
+        else:
+            args = coerce_arguments(tc.arguments, tool.schema)
+    except Exception as exc:  # noqa: BLE001 — contain into an error result
+        logger.warning("tool_prepare_error tool=%s id=%s: %s", tc.name, tc.id, exc)
+        return _Prepared(
+            tool_call=tc,
+            immediate=True,
+            result=_error_result(f"Argument preparation failed: {exc}"),
+            is_error=True,
+        )
 
     missing = _missing_required(args, tool.schema)
     if missing:
@@ -614,7 +635,16 @@ async def _prepare_tool_call(
             args=args,
             context=ctx,
         )
-        decision = await _maybe_await(config.before_tool_call(hook_ctx))
+        try:
+            decision = await _maybe_await(config.before_tool_call(hook_ctx))
+        except Exception as exc:  # noqa: BLE001 — app-hook bug, don't crash/orphan
+            logger.warning("before_tool_call hook raised tool=%s id=%s: %s", tc.name, tc.id, exc)
+            return _Prepared(
+                tool_call=tc,
+                immediate=True,
+                result=_error_result(f"before_tool_call hook error: {exc}"),
+                is_error=True,
+            )
         if decision and decision.block:
             reason = decision.reason or "blocked by policy"
             return _Prepared(
@@ -669,7 +699,24 @@ async def _finalize(
             is_error=is_error,
             context=ctx,
         )
-        override = await _maybe_await(config.after_tool_call(hook_ctx))
+        # A raising after-hook must not crash the loop (sequential mode) or be
+        # swallowed by gather into a dropped, orphaned call (parallel mode). Fail
+        # the call closed with an error result — an after-hook is often a policy
+        # gate, so falling open to the raw result would be the wrong default
+        # (NB-8).
+        try:
+            override = await _maybe_await(config.after_tool_call(hook_ctx))
+        except Exception as exc:  # noqa: BLE001 — contain into an error result
+            logger.warning(
+                "after_tool_call hook raised tool=%s id=%s: %s",
+                prepared.tool_call.name,
+                prepared.tool_call.id,
+                exc,
+            )
+            return _Finalized(
+                result=_error_result(f"after_tool_call hook error: {exc}"),
+                is_error=True,
+            )
         if override:
             content = override.content if override.content is not None else result.content
             details = override.details if override.details is not None else result.details

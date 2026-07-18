@@ -45,25 +45,44 @@ def detect_repeated_tool_calls(
     """Return the repeating signature if a tool call+result recurs more than
     ``max_repeats`` times within the last ``window`` tool executions, else None.
 
-    Pairs each assistant ``tool_call`` to its ``tool_result`` by id, builds a
-    signature per completed pair, and counts signatures over the trailing
-    ``window`` pairs. Unpaired (dangling) calls are skipped.
+    Pairs each assistant ``tool_call`` to its ``tool_result`` by **adjacency** —
+    a result matches a call in the *same local group* (the results immediately
+    following that assistant message), not via a transcript-wide id map. Some
+    endpoints (llama.cpp / vLLM) emit deterministic per-response ids like
+    ``call_0`` reused every turn; a global map would pair every historical call
+    with the newest result and hash six progressing calls identically, tripping
+    a false ``loop_detected`` hard stop (NB-5). Within one assistant message,
+    parallel-call ids are unique, so local id matching (with a positional
+    fallback for id-less endpoints) is safe. Unpaired (dangling) calls are
+    skipped.
     """
-    # Map every result to its tool_call_id for pairing.
-    results: dict[str, ToolResultMessage] = {}
-    for msg in messages:
-        if isinstance(msg, ToolResultMessage) and msg.tool_call_id:
-            results[msg.tool_call_id] = msg
-
     signatures: list[str] = []
-    for msg in messages:
-        if not isinstance(msg, AssistantMessage):
+    i = 0
+    n = len(messages)
+    while i < n:
+        msg = messages[i]
+        if not (isinstance(msg, AssistantMessage) and msg.tool_calls):
+            i += 1
             continue
-        for call in msg.tool_calls:
-            result = results.get(call.id)
+        # Collect the run of tool results immediately following this message —
+        # they belong to this message's calls.
+        j = i + 1
+        local_by_id: dict[str, ToolResultMessage] = {}
+        local_in_order: list[ToolResultMessage] = []
+        while j < n and isinstance(messages[j], ToolResultMessage):
+            r = messages[j]
+            if r.tool_call_id:
+                local_by_id[r.tool_call_id] = r
+            local_in_order.append(r)
+            j += 1
+        for idx, call in enumerate(msg.tool_calls):
+            result = local_by_id.get(call.id)
+            if result is None and idx < len(local_in_order):
+                result = local_in_order[idx]  # positional fallback (id-less)
             if result is None:
                 continue  # dangling call — not a completed execution
             signatures.append(_signature(call.name, call.arguments, _result_text(result)))
+        i = j if j > i + 1 else i + 1
 
     recent = signatures[-window:]
     counts: dict[str, int] = {}

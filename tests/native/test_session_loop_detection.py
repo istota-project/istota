@@ -68,3 +68,40 @@ class TestDetectRepeatedToolCalls:
         # A dangling call with no result is skipped, not counted.
         msgs = [_call("x", "Bash", {"command": "ls"})]
         assert detect_repeated_tool_calls(msgs) is None
+
+    def test_non_unique_ids_with_distinct_results_does_not_fire(self):
+        # NB-5: endpoints that emit deterministic per-response ids (call_0,
+        # llama.cpp / vLLM style) reuse the same id every turn. Six progressing
+        # `tail log` calls each get a DIFFERENT result — must NOT trip. The old
+        # global last-write-wins result map paired every call with the newest
+        # result, hashing them identically.
+        msgs = []
+        for i in range(8):
+            msgs.append(_call("call_0", "Bash", {"command": "tail log"}))
+            msgs.append(_result("call_0", "Bash", f"line {i}"))
+        assert detect_repeated_tool_calls(msgs) is None
+
+    def test_non_unique_ids_with_identical_results_fires(self):
+        # Same reused id AND identical result each turn = genuinely stuck.
+        msgs = []
+        for _ in range(6):
+            msgs.append(_call("call_0", "Bash", {"command": "ls"}))
+            msgs.append(_result("call_0", "Bash", "same output"))
+        assert detect_repeated_tool_calls(msgs) is not None
+
+    def test_parallel_calls_in_one_message_pair_by_local_id(self):
+        # An assistant message with two parallel calls, followed by their two
+        # results, must pair each call with its own result (unique ids within
+        # the message), not cross-pair.
+        msgs = [
+            AssistantMessage(
+                content=[
+                    ToolCallContent(id="call_0", name="Read", arguments={"file_path": "a"}),
+                    ToolCallContent(id="call_1", name="Read", arguments={"file_path": "b"}),
+                ],
+                stop_reason="tool_use",
+            ),
+            _result("call_0", "Read", "alpha"),
+            _result("call_1", "Read", "beta"),
+        ]
+        assert detect_repeated_tool_calls(msgs) is None
