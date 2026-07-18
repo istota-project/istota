@@ -193,6 +193,80 @@ class TestSSEParsing:
         assert done.message.usage.cache_read_tokens == 40
 
 
+class TestWireIntegrity:
+    """NB-2 / NB-15: silent-truncation and finish-reason holes must not be
+    laundered into a clean StreamDone(end_turn)."""
+
+    async def _collect(self, lines, model="m"):
+        return [e async for e in _provider()._parse_sse_lines(_aiter(lines), model)]
+
+    async def test_midstream_error_frame_becomes_stream_error(self):
+        # OpenRouter's documented upstream-failure pattern: HTTP 200, then a
+        # data frame carrying an {"error": ...} object and no choices.
+        lines = [
+            'data: {"choices":[{"delta":{"content":"partial"}}]}',
+            'data: {"error":{"message":"upstream model timed out","code":502}}',
+        ]
+        events = await self._collect(lines)
+        assert isinstance(events[-1], StreamError)
+        assert events[-1].message.stop_reason == "error"
+        assert "upstream model timed out" in events[-1].message.error_message
+        # It must NOT emit a clean StreamDone.
+        assert not any(isinstance(e, StreamDone) for e in events)
+
+    async def test_eof_without_done_or_finish_reason_is_error(self):
+        # Connection drops mid-stream: content deltas, then nothing — no
+        # finish_reason, no [DONE]. Truncated answer, must be an error.
+        lines = [
+            'data: {"choices":[{"delta":{"content":"half an ans"}}]}',
+        ]
+        events = await self._collect(lines)
+        assert isinstance(events[-1], StreamError)
+        assert events[-1].message.stop_reason == "error"
+        assert "truncat" in events[-1].message.error_message.lower()
+        assert not any(isinstance(e, StreamDone) for e in events)
+
+    async def test_finish_reason_without_done_is_clean(self):
+        # A finish_reason with no trailing [DONE] is a legitimate completion
+        # (some endpoints omit [DONE]).
+        lines = [
+            'data: {"choices":[{"delta":{"content":"done"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        ]
+        events = await self._collect(lines)
+        assert isinstance(events[-1], StreamDone)
+        assert events[-1].message.stop_reason == "end_turn"
+
+    async def test_done_without_finish_reason_is_clean(self):
+        # [DONE] with no per-choice finish_reason still counts as a clean end.
+        lines = [
+            'data: {"choices":[{"delta":{"content":"ok"}}]}',
+            "data: [DONE]",
+        ]
+        events = await self._collect(lines)
+        assert isinstance(events[-1], StreamDone)
+
+    async def test_length_finish_reason_maps_to_max_tokens(self):
+        lines = [
+            'data: {"choices":[{"delta":{"content":"cut off"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+            "data: [DONE]",
+        ]
+        done = (await self._collect(lines))[-1]
+        assert isinstance(done, StreamDone)
+        assert done.message.stop_reason == "max_tokens"
+
+    async def test_content_filter_finish_reason_preserved(self):
+        lines = [
+            'data: {"choices":[{"delta":{"content":"blocked"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"content_filter"}]}',
+            "data: [DONE]",
+        ]
+        done = (await self._collect(lines))[-1]
+        assert isinstance(done, StreamDone)
+        assert done.message.stop_reason == "content_filter"
+
+
 class FakeStreamResponse:
     def __init__(self, status_code, body=b"", lines=None):
         self.status_code = status_code

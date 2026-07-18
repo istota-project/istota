@@ -35,11 +35,14 @@ from .types import (
 
 logger = logging.getLogger("istota.llm.openai_compat")
 
-# OpenAI finish_reason → istota stop_reason
+# OpenAI finish_reason → istota stop_reason. ``content_filter`` is preserved
+# (not laundered into ``end_turn``) so a filtered/blocked answer is visible
+# downstream rather than delivered as a clean completion (NB-15).
 _FINISH_REASON_MAP = {
     "stop": "end_turn",
     "tool_calls": "tool_use",
     "length": "max_tokens",
+    "content_filter": "content_filter",
 }
 
 # The OpenAI-compatible ``reasoning_effort`` field accepts only low/medium/high.
@@ -345,6 +348,7 @@ class OpenAICompatibleProvider:
         tool_acc: dict[int, dict] = {}
         finish_reason: str | None = None
         usage_raw: dict | None = None
+        saw_done = False
 
         async for raw in lines:
             line = raw.strip()
@@ -352,12 +356,37 @@ class OpenAICompatibleProvider:
                 continue
             payload = line[len("data:") :].strip()
             if payload == "[DONE]":
+                saw_done = True
                 break
             try:
                 data = json.loads(payload)
             except json.JSONDecodeError:
                 logger.debug("Skipping non-JSON SSE payload: %s", payload[:100])
                 continue
+
+            # Mid-stream error frame (HTTP 200 body, no choices): OpenRouter and
+            # some gateways report an upstream failure as a ``data: {"error":…}``
+            # SSE frame rather than a non-200 status. Surface it as a StreamError
+            # instead of discarding it and EOF-ing into a false clean completion
+            # (NB-2). Anthropic's compat layer nests it under ``error``; a few
+            # gateways nest it inside the choice — handle both.
+            err = data.get("error")
+            if err is None:
+                ch = (data.get("choices") or [{}])[0]
+                err = ch.get("error") if isinstance(ch, dict) else None
+            if err is not None:
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                code = err.get("code") if isinstance(err, dict) else None
+                detail = f"HTTP {code}: {msg}" if code else (msg or "stream error")
+                yield StreamError(
+                    message=AssistantMessage(
+                        content=[TextContent(text="".join(text_parts))] if text_parts else [],
+                        stop_reason="error",
+                        error_message=f"Provider error frame: {detail}",
+                        model=model,
+                    )
+                )
+                return
 
             if data.get("usage"):
                 usage_raw = data["usage"]
@@ -398,6 +427,25 @@ class OpenAICompatibleProvider:
 
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
+
+        # A stream that ends without ever signalling completion — no
+        # ``finish_reason`` and no ``[DONE]`` sentinel — is a truncated response
+        # (dropped connection, gateway cut-off). Delivering the partial text as a
+        # clean ``end_turn`` would report a wrong/short answer as success (NB-2).
+        # Surface it as an error so the task retries instead.
+        if finish_reason is None and not saw_done:
+            yield StreamError(
+                message=AssistantMessage(
+                    content=[TextContent(text="".join(text_parts))] if text_parts else [],
+                    stop_reason="error",
+                    error_message=(
+                        "Stream ended without completion (no finish_reason or "
+                        "[DONE]); response likely truncated."
+                    ),
+                    model=model,
+                )
+            )
+            return
 
         yield StreamDone(
             message=self._assemble_message(

@@ -68,6 +68,44 @@ class TestTextCompletion:
         assert result.usage.output_tokens == 20
         assert result.usage.turns == 1
 
+    def test_max_tokens_truncation_marker(self, tmp_path):
+        # NB-15: a final answer cut off at the output-token cap is delivered with
+        # a visible marker, not as a clean completion.
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="The answer is fo")],
+                    usage=Usage(input_tokens=10, output_tokens=5),
+                    stop_reason="max_tokens",
+                )
+            ]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.success is True
+        assert "The answer is fo" in result.result_text
+        assert "truncated" in result.result_text.lower()
+
+    def test_content_filter_marker(self, tmp_path):
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="partial")],
+                    usage=Usage(input_tokens=10, output_tokens=2),
+                    stop_reason="content_filter",
+                )
+            ]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert "partial" in result.result_text
+        assert "content filter" in result.result_text.lower()
+
+    def test_clean_completion_has_no_marker(self, tmp_path):
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="all good")], stop_reason="end_turn")]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.result_text == "all good"
+
     def test_system_prompt_from_custom_file(self, tmp_path):
         sysfile = tmp_path / "sys.md"
         sysfile.write_text("You are a test bot.")
