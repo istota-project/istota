@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-17: Per-room model / effort default (cross-surface)
+
+A chat room can now carry a standing default model + effort that applies to every message in it, on **both** Nextcloud Talk and web chat. Precedence: an inline `!model <alias>` on a message > the room default > the instance default.
+
+**Where it resolves — the single choke point.** The default lives on the shared `rooms` registry (`rooms.model` / `rooms.effort`, canonical values), not the per-user `web_chat_rooms` handle. That's what makes it surface-independent: a Talk message and a web message in the same room resolve the same default. The resolution happens in `transport.ingest.record_inbound`, the one inbound path every surface (Talk, web, email, future Matrix) routes through. After it resolves the canonical room token, it fills a task's `model`/`effort` from the room when the message carried no inline override. Email is not a room surface, so it never inherits a room default.
+
+**Two front-ends over the same columns.** A surface-agnostic `!room` command (`!room` shows current, `!room model <alias>`, `!room effort <level>`, `default` clears) works identically in Talk and web through the existing `commands.dispatch`. The web room-settings modal gained model + effort dropdowns fed by the alias table `GET /chat/commands` already returns; `PATCH /chat/rooms/{id}` validates against the brain's known models + effort levels and writes the registry row.
+
+**Mulder + Scully review, three fixes.** Ran the two review agents on the first cut. Both independently flagged the same top defect, plus one more:
+
+1. **`!model default` couldn't escape a room default.** The `default` alias resolves to `(None, None)`, indistinguishable at `record_inbound` from "no prefix" — so in a defaulted room, `!model default` silently re-inherited the room's model. Fixed by threading an explicit "a `!model` prefix was used" bit from the upstream parse (web POST + Talk inbound) through to `record_inbound` as `apply_room_default`, so any explicit per-message model choice — including an explicit "use the instance default" — wins. Added a `model_prefix_used` field to `IncomingMessage` for the Talk path.
+2. **`!room model <alias>` wiped a separately-set `!room effort`.** `set_room_model_effort` writes both columns and most aliases carry no effort, so `!room effort high` then `!room model opus` reset effort to null. Made the two knobs orthogonal: a plain alias sets model only (new `db.set_room_model`), an effort-bearing alias (`opus-high`) still sets both (explicit both-pick), and `!room model default` remains a full reset.
+3. **A room pinned to a since-retired model became un-renameable in the web UI.** The modal always sent every field, so a name-only rename re-sent a stale canonical model that PATCH validation would 400. The modal now sends only changed fields, which also finally exercises the backend's `_UNSET` partial-merge.
+
+Left as deliberate: the default is room-global (in a shared room, one participant's setting applies to every sender) — that's the intended semantic for shared rooms, documented in AGENTS.md.
+
+**Verification.** TDD throughout: 22 backend tests in `tests/test_room_model_default.py` (DB roundtrip, cross-surface resolution, precedence incl. the `!model default` escape, the `!room` command incl. effort orthogonality) + 5 web PATCH tests in `tests/test_web_chat.py`. Full backend suite green (6980 passed, 7 skipped); `svelte-check` clean; 120 web vitest green; end-to-end smoke checks of both the `!room` command semantics and the `!model default` escape.
+
+**Files added/modified:**
+- `schema.sql`, `src/istota/db.py` — `rooms.model` / `rooms.effort` columns (+ migration); `Room` dataclass + `_row_to_room`; `set_room_model_effort` / `set_room_effort` / `set_room_model`.
+- `src/istota/transport/ingest.py` — room-default fill in `record_inbound` + `apply_room_default` gate.
+- `src/istota/transport/_types.py`, `src/istota/transport/talk/inbound.py` — `IncomingMessage.model_prefix_used` + Talk wiring.
+- `src/istota/commands.py` — `!room` command (`cmd_room`).
+- `src/istota/web_app.py` — `PATCH /chat/rooms/{id}` model/effort + validation; `/chat/rooms` payload; `_UNSET` merge.
+- `web/src/lib/components/chat/RoomSettings.svelte`, `web/src/lib/stores/chat.ts`, `web/src/lib/api.ts`, `web/src/lib/components/chat/autocomplete/providers.ts`, `web/vite-mock-api.ts` — model/effort dropdowns, `updateRoomSettings`, `getModelAliases`, mock.
+- `AGENTS.md`, `.claude/rules/transport.md` — docs.
+
 ## 2026-07-17: Web chat command autocomplete
 
 Typing `!` in the web chat composer now opens an autocomplete dropdown of available commands, filtered live as you type, navigable with the arrow keys, accepted with Tab or Enter, dismissed with Escape. Built as a reusable prefix-autocomplete primitive rather than a one-off so other triggers can plug in — the `!model <alias>` prefix is the second provider, shipped in the same change to prove the seam. Spec in `Specs/Done/web-chat-command-autocomplete.md`.

@@ -119,7 +119,7 @@ const user = {
 };
 
 // ---- Web chat mock state ----
-interface MockChatRoom { id: number; token: string; name: string; archived: boolean; created_at: string; updated_at: string; }
+interface MockChatRoom { id: number; token: string; name: string; archived: boolean; created_at: string; updated_at: string; model?: string | null; effort?: string | null; }
 interface MockChatTask { id: number; roomToken: string; prompt: string; createdAt: number; variant?: 'simple' | 'multiround'; }
 const mockChatRooms: MockChatRoom[] = [
 	{ id: 1, token: 'web-stefan-general', name: 'general', archived: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
@@ -524,6 +524,8 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
 		if (!room) return { error: 'room not found' };
 		if (body?.name != null) room.name = String(body.name).slice(0, 80);
 		if (body?.archived != null) room.archived = !!body.archived;
+		if ('model' in (body ?? {})) room.model = (String(body.model || '').trim() || null) as string | null;
+		if ('effort' in (body ?? {})) room.effort = (String(body.effort || '').trim() || null) as string | null;
 		return room;
 	}
 	if (roomPatch && method === 'DELETE') {

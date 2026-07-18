@@ -1441,6 +1441,11 @@ export interface ChatRoom {
 	/** Unread bot/system messages on the web surface (server-computed; excludes
 	 * the user's own turns). Absent on older backends → treat as 0. */
 	unread_count?: number;
+	/** Standing per-room model default (canonical model id), shared across Talk
+	 * and web. null / absent → inherit the instance default. */
+	model?: string | null;
+	/** Standing per-room effort level (low/medium/high/xhigh/max). */
+	effort?: string | null;
 }
 
 export interface ChatConfig {
@@ -1555,7 +1560,7 @@ export function createChatRoom(name: string): Promise<ChatRoom> {
 
 export function updateChatRoom(
 	id: number,
-	patch: { name?: string; archived?: boolean },
+	patch: { name?: string; archived?: boolean; model?: string | null; effort?: string | null },
 ): Promise<ChatRoom> {
 	return apiFetch<ChatRoom>(`/chat/rooms/${id}`, {
 		method: 'PATCH',

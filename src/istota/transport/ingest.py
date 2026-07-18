@@ -50,6 +50,7 @@ def record_inbound(
     output_target: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    apply_room_default: bool = True,
     priority: int = 5,
     external_id: str | None = None,
 ) -> tuple[str, int | None]:
@@ -115,6 +116,22 @@ def record_inbound(
                 surface, room_token, external_id,
             )
             return room_token, None
+
+        # Per-room model/effort default. It lives on the shared rooms registry,
+        # so this single choke point applies it uniformly to every surface
+        # (Talk, web, future Matrix). An inline `!model` prefix wins: the room
+        # default only fills a message that carried none. `apply_room_default`
+        # is False whenever the message had an explicit `!model` prefix (set by
+        # the caller from `prefix.matched`) — this covers `!model default`,
+        # which resolves to no override (`model=None`) yet must still escape the
+        # room default back to the instance default. When it's a real inline
+        # model, `model` is already set so the fill is skipped anyway; effort
+        # follows model as a unit. `existing` is None only on a room's
+        # first-ever message, which has no stored default yet.
+        if apply_room_default and model is None and existing is not None:
+            model = existing.model
+            if effort is None:
+                effort = existing.effort
 
     # 3. Create the task.
     task_id = db.create_task(
@@ -188,6 +205,7 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         output_target=msg.output_target,
         model=msg.model,
         effort=msg.effort,
+        apply_room_default=not msg.model_prefix_used,
         external_id=str(msg.platform_message_id)
         if msg.platform_message_id is not None
         else None,

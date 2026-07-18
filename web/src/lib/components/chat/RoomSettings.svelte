@@ -1,18 +1,49 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { ChatRoom } from '$lib/api';
-	import { Modal, Button } from '$lib/components/ui';
+	import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
+	import { getModelAliases } from '$lib/components/chat/autocomplete/providers';
 
 	interface Props {
 		open?: boolean;
 		room: ChatRoom;
-		onSave: (name: string) => void;
+		onSave: (patch: { name?: string; model?: string | null; effort?: string | null }) => void;
 		onDelete: () => void;
 		onPromote?: () => void;
 		onClose: () => void;
 	}
 
 	let { open = $bindable(true), room, onSave, onDelete, onPromote, onClose }: Props = $props();
+
+	// Model + effort defaults for this room (canonical values, shared Talk+web).
+	// "" is the "instance default" sentinel (cleared on the backend as null).
+	const EFFORT_OPTIONS: SelectOption[] = [
+		{ value: '', label: 'Default effort' },
+		{ value: 'low', label: 'low' },
+		{ value: 'medium', label: 'medium' },
+		{ value: 'high', label: 'high' },
+		{ value: 'xhigh', label: 'xhigh' },
+		{ value: 'max', label: 'max' },
+	];
+	let modelOptions = $state<SelectOption[]>([{ value: '', label: 'Default model' }]);
+	let modelValue = $state(untrack(() => room.model ?? ''));
+	let effortValue = $state(untrack(() => room.effort ?? ''));
+
+	// Base model choices = aliases with no baked-in effort (effort is its own
+	// control). Dedup by canonical target; the alias name is the label.
+	$effect(() => {
+		getModelAliases().then((aliases) => {
+			const seen = new Set<string>();
+			const opts: SelectOption[] = [{ value: '', label: 'Default model' }];
+			for (const a of aliases) {
+				if (a.target && a.effort === null && !seen.has(a.target)) {
+					seen.add(a.target);
+					opts.push({ value: a.target, label: a.alias });
+				}
+			}
+			modelOptions = opts;
+		});
+	});
 
 	// A room is on Talk when it originated there or has been promoted.
 	const onTalk = $derived(room.origin === 'talk' || !!room.talk_token);
@@ -46,6 +77,8 @@
 		if (room.id !== lastRoomId) {
 			lastRoomId = room.id;
 			name = room.name;
+			modelValue = room.model ?? '';
+			effortValue = room.effort ?? '';
 			confirmText = '';
 			showDanger = false;
 			copied = false;
@@ -54,7 +87,13 @@
 	});
 
 	const trimmed = $derived(name.trim());
-	const canSave = $derived(trimmed.length > 0 && trimmed !== room.name);
+	const nameChanged = $derived(trimmed.length > 0 && trimmed !== room.name);
+	const modelChanged = $derived(modelValue !== (room.model ?? ''));
+	const effortChanged = $derived(effortValue !== (room.effort ?? ''));
+	// Saveable when anything changed, and the name is never blanked.
+	const canSave = $derived(
+		trimmed.length > 0 && (nameChanged || modelChanged || effortChanged),
+	);
 	// Exact, case-sensitive match against the *saved* name (what the sidebar
 	// still shows), not any unsaved edit in the Name field above.
 	const canDelete = $derived(confirmText === room.name);
@@ -74,7 +113,15 @@
 
 	function handleSave() {
 		if (!canSave) return;
-		onSave(trimmed);
+		// Send only what changed. A name-only rename must not re-send a model
+		// the backend might now reject (e.g. one retired from the alias table),
+		// which would 400 the whole PATCH; the backend leaves absent fields
+		// untouched.
+		const patch: { name?: string; model?: string | null; effort?: string | null } = {};
+		if (nameChanged) patch.name = trimmed;
+		if (modelChanged) patch.model = modelValue || null;
+		if (effortChanged) patch.effort = effortValue || null;
+		onSave(patch);
 	}
 
 	function handleDelete() {
@@ -98,6 +145,32 @@
 			onkeydown={(e) => { if (e.key === 'Enter') handleSave(); }}
 		/>
 	</label>
+
+	<div class="field">
+		<span>Model</span>
+		<Select
+			value={modelValue}
+			options={modelOptions}
+			onValueChange={(v) => (modelValue = v)}
+			ariaLabel="Room model default"
+			fullWidth
+		/>
+		<p class="hint">
+			Applies to every message in this room, on both web and Nextcloud Talk. A
+			<code>!model</code> prefix still overrides it for a single message.
+		</p>
+	</div>
+
+	<div class="field">
+		<span>Effort</span>
+		<Select
+			value={effortValue}
+			options={EFFORT_OPTIONS}
+			onValueChange={(v) => (effortValue = v)}
+			ariaLabel="Room effort default"
+			fullWidth
+		/>
+	</div>
 
 	<div class="field">
 		<span>Room token</span>

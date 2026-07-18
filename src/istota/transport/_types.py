@@ -58,6 +58,11 @@ class IncomingMessage:
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None
+    # True when the message carried an explicit `!model` prefix (any alias,
+    # including `!model default` which resolves to no override). Suppresses the
+    # per-room model default in record_inbound so an explicit per-message choice
+    # — including an explicit "use the instance default" — always wins.
+    model_prefix_used: bool = False
     raw: dict[str, Any] = field(default_factory=dict)  # original payload
 
 

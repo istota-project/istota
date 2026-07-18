@@ -209,9 +209,9 @@
 		sidebarOpen = false;
 	}
 
-	async function saveRoomName(name: string) {
+	async function saveRoomSettings(patch: { name?: string; model?: string | null; effort?: string | null }) {
 		if (!settingsRoom) return;
-		await session.renameRoom(settingsRoom.id, name);
+		await session.updateRoomSettings(settingsRoom.id, patch);
 		settingsRoom = null;
 	}
 
@@ -424,7 +424,7 @@
 	{#if settingsRoom}
 		<RoomSettings
 			room={settingsRoom}
-			onSave={saveRoomName}
+			onSave={saveRoomSettings}
 			onDelete={deleteRoom}
 			onPromote={promoteRoom}
 			onClose={() => (settingsRoom = null)}

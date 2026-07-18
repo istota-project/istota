@@ -619,7 +619,13 @@ CREATE TABLE IF NOT EXISTS rooms (
     name        TEXT,                       -- display name (room title)
     origin      TEXT NOT NULL,              -- 'talk' | 'web' — surface created on
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    archived    INTEGER NOT NULL DEFAULT 0
+    archived    INTEGER NOT NULL DEFAULT 0,
+    -- Standing per-room model/effort default (canonical model id + effort
+    -- level). Applied to every message in the room, on any surface, by
+    -- record_inbound when the message carries no inline `!model` override.
+    -- NULL = inherit the instance default.
+    model       TEXT,
+    effort      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
 

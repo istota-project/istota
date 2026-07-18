@@ -478,6 +478,93 @@ class TestChatRoomsApi:
         )
         assert resp.status_code == 404
 
+    async def test_set_room_model_default(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        created = (await chat_client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )).json()
+        resp = await chat_client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"model": "claude-opus-4-8", "effort": "high"},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["model"] == "claude-opus-4-8"
+        assert body["effort"] == "high"
+        # Surfaced in the room listing too.
+        rooms = (await chat_client.get(
+            "/istota/api/chat/rooms", cookies=cookies,
+        )).json()["rooms"]
+        room = next(r for r in rooms if r["id"] == created["id"])
+        assert room["model"] == "claude-opus-4-8"
+        assert room["effort"] == "high"
+
+    async def test_clear_room_model_default(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        created = (await chat_client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )).json()
+        await chat_client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"model": "claude-opus-4-8"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        resp = await chat_client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"model": "", "effort": ""}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["model"] is None
+        assert resp.json()["effort"] is None
+
+    async def test_rename_preserves_model_default(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        created = (await chat_client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )).json()
+        await chat_client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"model": "claude-opus-4-8"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        # A name-only edit must not clobber the model default.
+        resp = await chat_client.patch(
+            f"/istota/api/chat/rooms/{created['id']}", json={"name": "renamed"},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.json()["model"] == "claude-opus-4-8"
+
+    async def test_unknown_model_rejected(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        created = (await chat_client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )).json()
+        resp = await chat_client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"model": "gpt-9"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_invalid_effort_rejected(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        created = (await chat_client.post(
+            "/istota/api/chat/rooms", json={"name": "r"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )).json()
+        resp = await chat_client.patch(
+            f"/istota/api/chat/rooms/{created['id']}",
+            json={"effort": "turbo"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
 
 @_needs_web_deps
 class TestChatMessagesApi:

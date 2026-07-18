@@ -631,6 +631,7 @@ async def poll_talk_conversations(config: Config) -> list[int]:
                     reply_to_content=reply_to_content,
                     model=model_override,
                     effort=effort_override,
+                    model_prefix_used=prefix.matched,
                 ))
                 if task_id is not None:
                     created.append(task_id)
