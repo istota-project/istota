@@ -525,6 +525,18 @@ class NativeBrainConfig:
     context_window: int = 0  # 0 = resolve from istota.llm.catalog
     max_turns: int = 100
     max_tokens: int = 16384
+    # Per-model capability/window overrides ([brain.native.model_overrides]).
+    # Maps a model id to a partial ModelInfo (context_window, supports_thinking,
+    # supports_vision, max_output_tokens, prices). Lets a non-Anthropic
+    # reasoning/vision model or a small-window local model the bundled catalog
+    # doesn't know declare its real capabilities instead of being degraded to
+    # the conservative default (NB-4).
+    model_overrides: dict = field(default_factory=dict)
+    # Compaction sizing. 0 = derive from the model's context window (so a small-
+    # window local model compacts sensibly instead of using the Anthropic-sized
+    # 16k/20k constants). See istota.session.compaction (NB-14).
+    compaction_reserve_tokens: int = 0
+    compaction_keep_recent_tokens: int = 0
     # Opt-in cache_control breakpoints (Anthropic/OpenRouter). Tri-state: ``None``
     # (the operator set no explicit value) derives the default from base_url in
     # make_provider — on for api.anthropic.com, off elsewhere. An explicit
@@ -1327,6 +1339,11 @@ def load_config(config_path: Path | None = None) -> Config:
             context_window=int(native_raw.get("context_window", 0)),
             max_turns=int(native_raw.get("max_turns", 100)),
             max_tokens=int(native_raw.get("max_tokens", 16384)),
+            model_overrides=dict(native_raw.get("model_overrides", {}) or {}),
+            compaction_reserve_tokens=int(native_raw.get("compaction_reserve_tokens", 0)),
+            compaction_keep_recent_tokens=int(
+                native_raw.get("compaction_keep_recent_tokens", 0)
+            ),
             # Absent key → None (derive from base_url); present → explicit bool.
             prompt_caching=(
                 bool(native_raw["prompt_caching"])
@@ -1678,6 +1695,17 @@ def load_config(config_path: Path | None = None) -> Config:
             for _msg in _brain.validate_role_override(_role, _target):
                 _logger.warning("[models.roles] %s", _msg)
     set_role_overrides(config.models.roles)
+
+    # Per-model capability/window overrides for the native brain (NB-4). Global
+    # like the role overrides — every get_model_info consumer (compaction sizing,
+    # capability gates, usage pricing) picks them up.
+    try:
+        from .llm.catalog import set_model_overrides
+        set_model_overrides(config.brain.native.model_overrides)
+    except Exception:  # pragma: no cover - defensive; never fail config load
+        logging.getLogger("istota.config").warning(
+            "failed to apply [brain.native.model_overrides]", exc_info=True
+        )
 
     return config
 

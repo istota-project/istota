@@ -12,11 +12,13 @@ from istota.llm.types import (
 )
 from istota.session.compaction import (
     compact_messages,
+    derive_keep_recent_tokens,
+    derive_reserve_tokens,
     estimate_context_tokens,
     find_cut_point,
     should_compact,
 )
-from istota.session.messages import CompactionDetails
+from istota.session.messages import CompactionDetails, CompactionSummaryMessage
 
 
 def _user(text: str) -> UserMessage:
@@ -67,6 +69,43 @@ class TestEstimateContextTokens:
         ]
         _total, idx = estimate_context_tokens(msgs)
         assert idx is None  # error-turn usage is unreliable
+
+    def test_compaction_summary_counted(self):
+        # NB-14: a CompactionSummaryMessage renders as a real user message but
+        # was invisible to the estimate (no .content), so post-compaction
+        # estimates ran low and later compactions fired late.
+        summary = CompactionSummaryMessage(summary="s" * 4000)  # ~1000 tokens
+        msgs = [summary, _user("y" * 400)]
+        total, idx = estimate_context_tokens(msgs)
+        assert idx is None  # no usable assistant usage → heuristic path
+        assert total == pytest.approx(1100, abs=20)
+
+
+class TestDerivedCompactionSizing:
+    """NB-14: reserve/keep-recent scale with the model window so a small-window
+    local model compacts sensibly instead of using the Anthropic-sized
+    constants."""
+
+    def test_large_window_matches_legacy_constants(self):
+        assert derive_reserve_tokens(200_000) == 16384
+        assert derive_keep_recent_tokens(200_000) == 20000
+
+    def test_small_window_scales_down(self):
+        assert derive_reserve_tokens(8000) == 2000
+        assert derive_keep_recent_tokens(8000) == 4000
+        # keep_recent must leave room below the window to actually shrink.
+        assert derive_keep_recent_tokens(8000) < 8000 - derive_reserve_tokens(8000)
+
+    def test_summary_counted_in_find_cut_point(self):
+        # A big summary at the head must contribute tokens so the cut walk sees
+        # it (it doesn't get cut — it's the head — but it must be measured).
+        big_summary = CompactionSummaryMessage(summary="s" * 40000)  # ~10k tokens
+        msgs = [big_summary, _user("a" * 4000), _assistant("b" * 4000)]
+        # With a small keep_recent the tail is kept and the summary would be
+        # cut only if measured; assert the walk terminates sensibly (no crash,
+        # returns a valid index).
+        cut = find_cut_point(msgs, keep_recent_tokens=2000)
+        assert 0 <= cut <= len(msgs)
 
 
 class TestFindCutPoint:

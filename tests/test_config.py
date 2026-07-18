@@ -683,6 +683,38 @@ lookback_hours = 36
         assert cfg.sleep_cycle.memory_retention_days == 60
         assert cfg.sleep_cycle.lookback_hours == 36
 
+    def test_load_native_brain_overrides_and_compaction_knobs(self, tmp_path):
+        # NB-4 / NB-14: [brain.native] model overrides + compaction sizing knobs.
+        from istota.llm.catalog import get_model_info, set_model_overrides
+
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[brain]
+kind = "native"
+
+[brain.native]
+model = "qwen/qwen3-thinking"
+compaction_reserve_tokens = 1000
+compaction_keep_recent_tokens = 3000
+
+[brain.native.model_overrides."qwen/qwen3-thinking"]
+supports_thinking = true
+context_window = 32000
+""")
+        try:
+            cfg = load_config(config_file)
+            assert cfg.brain.native.compaction_reserve_tokens == 1000
+            assert cfg.brain.native.compaction_keep_recent_tokens == 3000
+            assert cfg.brain.native.model_overrides["qwen/qwen3-thinking"][
+                "supports_thinking"
+            ] is True
+            # Applied globally to the catalog at load time.
+            info = get_model_info("qwen/qwen3-thinking")
+            assert info.supports_thinking is True
+            assert info.context_window == 32000
+        finally:
+            set_model_overrides({})
+
     def test_load_without_sleep_cycle(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("""

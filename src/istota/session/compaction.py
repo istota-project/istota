@@ -32,9 +32,48 @@ from istota.llm.types import (
     UserMessage,
 )
 
-from .messages import CompactionDetails
+from .messages import CompactionDetails, CompactionSummaryMessage
 
 logger = logging.getLogger("istota.session.compaction")
+
+# Legacy Anthropic-sized constants, kept as the ceiling for the window-relative
+# derivation so a 200k-window model behaves exactly as before.
+_RESERVE_CEILING = 16384
+_KEEP_RECENT_CEILING = 20000
+
+
+def derive_reserve_tokens(context_window: int) -> int:
+    """Reserve headroom scaled to the window (NB-14).
+
+    A 200k model keeps the legacy 16384; an 8k local model reserves ~2k instead
+    of an impossible 16k. Capped at the legacy ceiling, floored at 1.
+    """
+    return max(1, min(_RESERVE_CEILING, context_window // 4))
+
+
+def derive_keep_recent_tokens(context_window: int) -> int:
+    """Recent-tail budget scaled to the window (NB-14).
+
+    Half the window, capped at the legacy 20000. Always leaves room below the
+    window (half < three-quarters) so compaction can actually shrink the context
+    on a small-window model.
+    """
+    return max(1, min(_KEEP_RECENT_CEILING, context_window // 2))
+
+
+def _msg_tokens(m) -> int:
+    """Estimate one message's tokens, including a CompactionSummaryMessage.
+
+    The bundled ``estimate_tokens`` only counts messages with ``.content``; a
+    ``CompactionSummaryMessage`` (which renders as a real user-role message)
+    has ``.summary`` instead, so without this it estimated 0 tokens and later
+    compactions fired late (NB-14).
+    """
+    if isinstance(m, CompactionSummaryMessage):
+        return max(1, len(m.summary) // 4)
+    if hasattr(m, "content"):
+        return estimate_tokens(m)
+    return 0
 
 
 def should_compact(
@@ -66,14 +105,10 @@ def estimate_context_tokens(messages: list) -> tuple[int, int | None]:
                 break
 
     if last_usage_idx is None:
-        total = sum(estimate_tokens(m) for m in messages if hasattr(m, "content"))
+        total = sum(_msg_tokens(m) for m in messages)
         return total, None
 
-    trailing = sum(
-        estimate_tokens(m)
-        for m in messages[last_usage_idx + 1 :]
-        if hasattr(m, "content")
-    )
+    trailing = sum(_msg_tokens(m) for m in messages[last_usage_idx + 1 :])
     return last_usage_tokens + trailing, last_usage_idx
 
 
@@ -96,8 +131,7 @@ def find_cut_point(messages: list, keep_recent_tokens: int = 20000) -> int:
     cut_idx = 0
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
-        if hasattr(msg, "content"):
-            accumulated += estimate_tokens(msg)
+        accumulated += _msg_tokens(msg)
         if accumulated >= keep_recent_tokens:
             # Keep message ``i`` and everything newer; compact the rest.
             cut_idx = i
