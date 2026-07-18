@@ -15,6 +15,19 @@ class TestClassifyError:
         assert c.retryable is False
         assert c.category == "overflow"
 
+    def test_non_anthropic_overflow_phrasings(self):
+        # NB-13(c): common non-Anthropic overflow phrasings must route to
+        # compaction/recovery, not be treated as a permanent error.
+        for msg in [
+            "the request exceeds the available context size",
+            "input exceeds the model's context window",
+            "please reduce the length of the messages",
+            "n_tokens exceeds context size",
+        ]:
+            c = classify_error(msg)
+            assert c.is_context_overflow is True, msg
+            assert c.category == "overflow", msg
+
     def test_auth_error(self):
         c = classify_error("forbidden", status_code=403)
         assert c.is_auth_error is True

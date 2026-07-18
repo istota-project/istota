@@ -62,6 +62,8 @@ from istota.llm.types import (
 )
 from istota.session.compaction import (
     compact_messages,
+    derive_keep_recent_tokens,
+    derive_reserve_tokens,
     estimate_context_tokens,
     find_cut_point,
     should_compact,
@@ -413,10 +415,14 @@ class NativeBrain:
         async def prepare_next_turn(ctx: AgentContext, new_messages):
             info = get_model_info(model)
             window = self._config.context_window or info.context_window
+            reserve = self._config.compaction_reserve_tokens or derive_reserve_tokens(window)
+            keep_recent = (
+                self._config.compaction_keep_recent_tokens or derive_keep_recent_tokens(window)
+            )
             tokens, _ = estimate_context_tokens(ctx.messages)
-            if not should_compact(tokens, window):
+            if not should_compact(tokens, window, reserve_tokens=reserve):
                 return None
-            cut = find_cut_point(ctx.messages)
+            cut = find_cut_point(ctx.messages, keep_recent_tokens=keep_recent)
             if cut == 0:
                 return None
             to_compact = ctx.messages[:cut]
@@ -552,6 +558,7 @@ class NativeBrain:
                     recoveries,
                     _MAX_OVERFLOW_RECOVERIES,
                 )
+                _rec_window = self._config.context_window or get_model_info(model).context_window
                 recovery_ctx, summary, details = await _build_recovery_context(
                     transcript,
                     context.system_prompt,
@@ -561,6 +568,10 @@ class NativeBrain:
                     self._provider,
                     model,
                     self._convert_to_llm,
+                    keep_recent_tokens=(
+                        self._config.compaction_keep_recent_tokens
+                        or derive_keep_recent_tokens(_rec_window)
+                    ),
                 )
                 compaction_state["summary"] = summary
                 compaction_state["details"] = details
@@ -811,6 +822,7 @@ async def _build_recovery_context(
     provider,
     model: str,
     convert_to_llm,
+    keep_recent_tokens: int = 20000,
 ) -> tuple[AgentContext, str, object]:
     """Force-compact ``transcript`` and return a context ready for continue.
 
@@ -820,7 +832,7 @@ async def _build_recovery_context(
     the compacted tail ends on an assistant message, because
     ``run_agent_loop_continue`` refuses to continue from one.
     """
-    cut = find_cut_point(transcript)
+    cut = find_cut_point(transcript, keep_recent_tokens=keep_recent_tokens)
     if cut == 0:
         cut = _aggressive_cut(transcript)
     to_compact = transcript[:cut]
