@@ -331,3 +331,61 @@ class TestConfinement:
         result = await _run(make_glob_tool(_confined_env(ws)), {"pattern": "*.py", "path": str(secret_dir)})
         assert "s.py" not in _text(result)
         assert "outside" in _text(result).lower() or "workspace" in _text(result).lower()
+
+
+class TestFileToolQuality:
+    """NB-19: is_error propagation, bounded reads, path-globs, safe glob sort."""
+
+    async def test_missing_file_is_error(self, tmp_path):
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(tmp_path / "nope")})
+        assert result.is_error is True
+
+    async def test_successful_read_not_error(self, tmp_path):
+        (tmp_path / "a.txt").write_text("hi\n")
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(tmp_path / "a.txt")})
+        assert result.is_error is False
+
+    async def test_edit_missing_old_string_is_error(self, tmp_path):
+        f = tmp_path / "a.txt"
+        f.write_text("alpha")
+        result = await _run(
+            make_edit_tool(_env(tmp_path)),
+            {"file_path": str(f), "old_string": "zzz", "new_string": "x"},
+        )
+        assert result.is_error is True
+
+    async def test_read_bounded_by_max_bytes(self, tmp_path):
+        f = tmp_path / "big.txt"
+        f.write_text("\n".join("line" + str(i) for i in range(10000)))
+        env = _env(tmp_path)
+        env.max_read_bytes = 200
+        result = await _run(make_read_tool(env), {"file_path": str(f)})
+        assert "truncated" in _text(result).lower()
+
+    async def test_grep_path_glob_matches_nested(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "pkg").mkdir()
+        (tmp_path / "src" / "pkg" / "mod.py").write_text("needle here\n")
+        (tmp_path / "other.py").write_text("needle here\n")
+        result = await _run(
+            make_grep_tool(_env(tmp_path)),
+            {"pattern": "needle", "glob": "src/**/*.py"},
+        )
+        text = _text(result)
+        assert "mod.py" in text
+        assert "other.py" not in text
+
+    async def test_grep_bare_glob_still_matches_basename(self, tmp_path):
+        (tmp_path / "a.py").write_text("needle\n")
+        (tmp_path / "a.txt").write_text("needle\n")
+        result = await _run(make_grep_tool(_env(tmp_path)), {"pattern": "needle", "glob": "*.py"})
+        text = _text(result)
+        assert "a.py" in text
+        assert "a.txt" not in text
+
+    async def test_glob_sort_survives_broken_symlink(self, tmp_path):
+        (tmp_path / "real.py").write_text("")
+        # A broken symlink that resolves to nothing must not crash the mtime sort.
+        (tmp_path / "dangling.py").symlink_to(tmp_path / "gone")
+        result = await _run(make_glob_tool(_env(tmp_path)), {"pattern": "*.py"})
+        assert "real.py" in _text(result)

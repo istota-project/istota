@@ -668,7 +668,9 @@ async def _execute_prepared(
         result = await prepared.tool.execute(
             prepared.tool_call.id, prepared.args, on_update, abort
         )
-        return _Executed(result=result, is_error=False)
+        # A tool can self-report a non-fatal failure via result.is_error without
+        # raising (NB-19), so ToolEndEvent.success reflects it.
+        return _Executed(result=result, is_error=bool(getattr(result, "is_error", False)))
     except Exception as exc:  # noqa: BLE001 — tools must not crash the loop
         logger.warning(
             "tool_execute_error tool=%s id=%s: %s",
