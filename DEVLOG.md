@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-18: Room model badge + canonical model names in the UI
+
+Follow-on UI work on the per-room model default (below). Added a badge beside the room title in the web chat header showing the room's standing default, and made the model/alias displays name the actual canonical model everywhere.
+
+**Header badge.** A compact pill next to the room title shows the room's default — the canonical model name plus effort (e.g. `claude-opus-4-8 · high`) — and only appears when the room has a default set. It's a button: clicking it opens the room-settings modal, so it doubles as a quick way to change the model. Lives in `ShellHeader`'s `nav` snippet (rendered right after the title).
+
+**Canonical names beside aliases.** The recurring confusion is that role aliases (`smart`, `fast`, `general`) don't tell you what model they resolve to. So wherever the UI shows an alias, it now shows the canonical model it points to:
+- The `!model` autocomplete rows show the resolved model (and effort) in parens next to the alias — `smart (claude-opus-4-8)`.
+- The room-settings Model dropdown labels read `opus (claude-opus-4-8)`, `sonnet (claude-sonnet-4-6)`, etc.
+- The header badge shows the canonical name outright rather than an alias.
+
+**One label helper, so surfaces never disagree.** While building this, a first cut had the badge reading `smart` while the settings dropdown read the same model differently — because each built its label independently. Consolidated into a single `getBaseModelChoices()` in the autocomplete providers module: it dedups aliases by canonical target and prefers a *provider* alias (whose name appears in the canonical id, e.g. `opus` in `claude-opus-4-8`) over a *role* alias (`smart`). The badge and the dropdown both consume it, so they can't drift.
+
+**Verified in a real browser** (mock dev server, `VITE_MOCK_API=1`): the badge renders and is clickable, the `!model` popover shows `smart (claude-opus-4-8)`, and the settings dropdown shows the parenthesized canonical for each model. `svelte-check` clean; web vitest green (updated the one provider test asserting the old bare-target description).
+
+**Files added/modified:**
+- `web/src/routes/chat/+page.svelte` — header badge (derived label + `nav` snippet + styling).
+- `web/src/lib/components/ui/ShellHeader.svelte` — already had a `nav` snippet slot; used as-is.
+- `web/src/lib/components/chat/RoomSettings.svelte` — Model dropdown labels carry the canonical in parens.
+- `web/src/lib/components/chat/autocomplete/providers.ts` — `getBaseModelChoices` (shared label helper); `!model` suggestion description → parenthesized canonical + effort.
+- `web/src/lib/components/chat/autocomplete/providers.test.ts` — updated description assertion.
+- `web/vite-mock-api.ts` — seed the mock `general` room with a default so the badge shows in the dev preview.
+
 ## 2026-07-17: Per-room model / effort default (cross-surface)
 
 A chat room can now carry a standing default model + effort that applies to every message in it, on **both** Nextcloud Talk and web chat. Precedence: an inline `!model <alias>` on a message > the room default > the instance default.
