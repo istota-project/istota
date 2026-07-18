@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Per-room model default: a chat room can carry a standing model and effort that applies to every message in it, on both web chat and Nextcloud Talk. Set it in the web room settings, or with `!room model <alias>` / `!room effort <level>` from either surface. An inline `!model` on a single message still overrides it, and `!model default` falls back to the instance default for that one message.
+- Per-room model default: a chat room can carry a standing model and effort that applies to every message in it, on both web chat and Nextcloud Talk. Set it in the web room settings, or with `!room model <alias>` / `!room effort <level>` from either surface. An inline `!model` on a single message still overrides it, and `!model default` falls back to the instance default for that one message. The room's default shows as a badge next to the room title in web chat, which you can click to change it.
 - Web chat command autocomplete: type `!` in the composer to get a live-filtered dropdown of available commands, navigate with the arrow keys, and accept with Tab or Enter. Typing `!model ` completes model aliases the same way.
 - The assistant can now read your mailbox, not just send. New email commands list, search, read, thread, and fetch attachments, batch-fetch mail from named senders for digests, and reply / reply-all in-thread, with cc, bcc, and attachments on outbound mail.
 - Read scoping: you see your own mail plus the shared pool (anything sent to the bare bot address), and never another user's. Mail meant for one person goes to their `bot+<you>@…` plus-address.
@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Push notifications can target a specific ntfy topic per send. Your configured topic stays the default; pass a topic to route a single push elsewhere, so you can subscribe selectively per device or per category (alerts vs briefings vs newsletters) on one server.
 
 ### Changed
+- Model pickers and the `!model` autocomplete now show the actual model an alias resolves to in parentheses (e.g. `smart (claude-opus-4-8)`), so it's clear which model you're choosing.
 - Marking or deleting mail now requires an explicit confirmation flag, so a stray or content-driven request can't quietly change or destroy your mailbox.
 - Email connections use an explicit socket timeout, so an unreachable mail server fails fast instead of hanging the poll.
 - The cross-room chat views (All, Unread, Starred) are quieter: the room label drops its hash, and hovering a message shows only its task number and star instead of the model and timings. Room views are unchanged.
