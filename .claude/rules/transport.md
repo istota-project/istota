@@ -189,6 +189,18 @@ use across its own boundary. `record_inbound` stamps the surface-native message
 id into the canonical user row's `external_ids` (Talk ids at ingest) — feeding
 both the echo ledger and the Talk→web read-sync cursor cap.
 
+**Per-room model/effort default.** Because `record_inbound` is the single
+inbound choke point, it is also where a room's standing model default is
+applied — uniformly across every surface. The default lives on the shared
+`rooms` registry (`rooms.model` / `rooms.effort`, canonical values), so a Talk
+message and a web message in the same room resolve the same default. After
+resolving the canonical room token, when the incoming `model` is None (no inline
+`!model` override — those are parsed upstream in the Talk poller / web POST),
+`record_inbound` fills `model`/`effort` from the registry room; the inline
+override wins as a unit (effort follows model). Set via the `!room` command
+(surface-agnostic, through `commands.dispatch`) or the web room-settings PATCH
+(`db.set_room_model_effort` / `db.set_room_effort`).
+
 ## Post-as-user mirroring + echo prevention (user-scoped OAuth)
 
 When `[web] token_storage = "encrypted"` and `ISTOTA_WEB_TOKEN_KEY` are set

@@ -365,6 +365,99 @@ async def cmd_models(ctx: CommandContext):
     return "\n".join(lines)
 
 
+# Effort levels the CLI brains accept. `!room effort <level>` validates against
+# this set; the brain silently drops effort for models that don't support it.
+_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _room_effort_usage() -> str:
+    levels = ", ".join(f"`{lvl}`" for lvl in _EFFORT_LEVELS)
+    return f"Usage: `!room effort <level>` (or `default` to clear). Levels: {levels}."
+
+
+def _describe_room_default(model: str | None, effort: str | None) -> str:
+    if not model and not effort:
+        return "This room uses the instance default model."
+    parts = []
+    if model:
+        parts.append(f"model `{model}`")
+    if effort:
+        parts.append(f"effort `{effort}`")
+    return "Room default: " + " + ".join(parts) + "."
+
+
+@command(
+    "room",
+    "Show or set this room's standing model/effort default: "
+    "`!room`, `!room model <alias>`, `!room effort <level>` "
+    "(applies to every message here, on Talk and web; `default` clears)",
+)
+async def cmd_room(ctx: CommandContext):
+    config, conn, args = ctx.config, ctx.conn, ctx.args
+    # Resolve the canonical room token — the default lives on the shared rooms
+    # registry, keyed by canonical token, so a per-surface ref must be mapped.
+    token = db.resolve_room_token(conn, ctx.surface, ctx.conversation_token) \
+        or ctx.conversation_token
+    room = db.get_room(conn, token)
+    if room is None:
+        return "This room isn't registered yet — send a message first, then set its default."
+
+    parts = args.strip().split(maxsplit=1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if not sub:
+        return _describe_room_default(room.model, room.effort)
+
+    if sub == "model":
+        alias = rest.lower()
+        aliases = [a for a, _m, _e in make_brain(config.brain).list_aliases()]
+        if not alias:
+            return (
+                "Usage: `!room model <alias>` (or `default` to clear). "
+                f"Aliases: {', '.join(f'`{a}`' for a in aliases)}."
+            )
+        resolved = make_brain(config.brain).resolve_alias(alias)
+        if resolved is None:
+            return (
+                f"Unknown model alias `{alias}`. "
+                f"Aliases: {', '.join(f'`{a}`' for a in aliases)}."
+            )
+        model, effort = resolved
+        if model is None:
+            # `!room model default` — a full reset of the model dimension,
+            # effort included.
+            db.set_room_model_effort(conn, token, None, None)
+            return "Room model reset — this room now uses the instance default."
+        if effort is not None:
+            # An effort-bearing alias (e.g. `opus-high`) is an explicit
+            # both-pick, so it sets effort too.
+            db.set_room_model_effort(conn, token, model, effort)
+        else:
+            # A plain model alias leaves any separately-set `!room effort` intact
+            # (the two knobs are orthogonal).
+            db.set_room_model(conn, token, model)
+            effort = db.get_room(conn, token).effort
+        return _describe_room_default(model, effort)
+
+    if sub == "effort":
+        level = rest.lower()
+        if not level:
+            return _room_effort_usage()
+        if level == "default":
+            db.set_room_effort(conn, token, None)
+            return "Room effort reset."
+        if level not in _EFFORT_LEVELS:
+            return _room_effort_usage()
+        db.set_room_effort(conn, token, level)
+        return f"Room effort set to `{level}`."
+
+    return (
+        "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`. "
+        "Use `default` to clear."
+    )
+
+
 @command("status", "Show your running/pending tasks and system status")
 async def cmd_status(ctx: CommandContext):
     config, conn, user_id = ctx.config, ctx.conn, ctx.user_id

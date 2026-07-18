@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Per-room model default: a chat room can carry a standing model and effort that applies to every message in it, on both web chat and Nextcloud Talk. Set it in the web room settings, or with `!room model <alias>` / `!room effort <level>` from either surface. An inline `!model` on a single message still overrides it, and `!model default` falls back to the instance default for that one message.
 - Web chat command autocomplete: type `!` in the composer to get a live-filtered dropdown of available commands, navigate with the arrow keys, and accept with Tab or Enter. Typing `!model ` completes model aliases the same way.
 - The assistant can now read your mailbox, not just send. New email commands list, search, read, thread, and fetch attachments, batch-fetch mail from named senders for digests, and reply / reply-all in-thread, with cc, bcc, and attachments on outbound mail.
 - Read scoping: you see your own mail plus the shared pool (anything sent to the bare bot address), and never another user's. Mail meant for one person goes to their `bot+<you>@…` plus-address.

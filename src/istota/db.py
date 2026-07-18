@@ -433,10 +433,20 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 name        TEXT,
                 origin      TEXT NOT NULL,
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-                archived    INTEGER NOT NULL DEFAULT 0
+                archived    INTEGER NOT NULL DEFAULT 0,
+                model       TEXT,
+                effort      TEXT
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived)")
+        # Backfill the per-room model/effort columns on an existing rooms table
+        # (created by an earlier build without them). Placed here, after the
+        # CREATE, so the table exists before the ALTER.
+        for _room_col in ("model", "effort"):
+            try:
+                conn.execute(f"ALTER TABLE rooms ADD COLUMN {_room_col} TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         # Per-user room membership (ISSUE-134). A room is shared (one token, one
         # transcript) but each participant has a membership row; web visibility is
         # resolved through this, not the single-owner `rooms.user_id`.
@@ -2392,6 +2402,8 @@ class Room:
     origin: str
     created_at: str
     archived: bool
+    model: str | None = None
+    effort: str | None = None
 
 
 @dataclass
@@ -2420,6 +2432,7 @@ class Message:
 
 
 def _row_to_room(row: sqlite3.Row) -> Room:
+    keys = row.keys()
     return Room(
         token=row["token"],
         user_id=row["user_id"],
@@ -2427,6 +2440,9 @@ def _row_to_room(row: sqlite3.Row) -> Room:
         origin=row["origin"],
         created_at=row["created_at"],
         archived=bool(row["archived"]),
+        # Older DBs mid-migration may lack these columns; default to None.
+        model=row["model"] if "model" in keys else None,
+        effort=row["effort"] if "effort" in keys else None,
     )
 
 
@@ -2623,6 +2639,39 @@ def archive_orphaned_talk_rooms(
 
 def rename_room(conn: sqlite3.Connection, token: str, name: str) -> None:
     conn.execute("UPDATE rooms SET name = ? WHERE token = ?", (name, token))
+
+
+def set_room_model_effort(
+    conn: sqlite3.Connection,
+    token: str,
+    model: str | None,
+    effort: str | None,
+) -> None:
+    """Set the room's standing model + effort as a pair (both canonical values,
+    or None to clear). This is the `!room model <alias>` / room-settings write —
+    an alias resolves to a (model, effort) pair, so both columns move together."""
+    conn.execute(
+        "UPDATE rooms SET model = ?, effort = ? WHERE token = ?",
+        (model, effort, token),
+    )
+
+
+def set_room_effort(conn: sqlite3.Connection, token: str, effort: str | None) -> None:
+    """Set only the room's effort level (None clears it), leaving the model
+    default untouched — the `!room effort <level>` convenience knob."""
+    conn.execute(
+        "UPDATE rooms SET effort = ? WHERE token = ?", (effort, token)
+    )
+
+
+def set_room_model(conn: sqlite3.Connection, token: str, model: str | None) -> None:
+    """Set only the room's model default (None clears it), leaving the effort
+    level untouched — so `!room model <alias>` and `!room effort <level>` are
+    orthogonal knobs. (An effort-bearing alias like `opus-high` still sets both
+    via set_room_model_effort — that's the caller's explicit both-pick.)"""
+    conn.execute(
+        "UPDATE rooms SET model = ? WHERE token = ?", (model, token)
+    )
 
 
 def add_room_binding(

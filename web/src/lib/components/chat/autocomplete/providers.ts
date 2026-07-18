@@ -27,6 +27,12 @@ export function resetCommandCatalogue(): void {
 	cataloguePromise = null;
 }
 
+/** The active brain's model aliases (shared cache with the autocomplete), for
+ *  the room-settings model picker. Degrades to [] on a failed fetch. */
+export async function getModelAliases() {
+	return (await loadCatalogue()).model_aliases;
+}
+
 /** Prefix matches first, then substring matches; input order preserved within
  *  each group (the catalogue is already sorted server-side). */
 function rank<T>(items: T[], query: string, keyOf: (item: T) => string): T[] {

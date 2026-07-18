@@ -53,6 +53,10 @@ _config = None
 _oauth = None
 _WEB_START_TIME = time.time()
 
+# Sentinel for "key absent from the PATCH body" — distinguishes "clear this
+# field" (explicit null) from "leave it untouched" in _chat_update_room.
+_UNSET = object()
+
 # Resolve static build directory. Default walks up from this module's path,
 # which works for editable installs from the repo root. For non-editable installs
 # (Docker runtime), the operator sets ISTOTA_WEB_STATIC_DIR explicitly.
@@ -1366,6 +1370,19 @@ def _room_to_dict(room) -> dict:
     }
 
 
+def _known_room_models() -> set[str]:
+    """Canonical model ids a room default may be set to — the distinct targets
+    the active brain exposes via its alias table. Used to validate the PATCH."""
+    try:
+        return {
+            model for _alias, model, _effort in make_brain(_config.brain).list_aliases()
+            if model
+        }
+    except Exception:  # noqa: BLE001 — validation degrades to "reject all" safely
+        logger.warning("known_room_models: brain aliases unavailable", exc_info=True)
+        return set()
+
+
 def _chat_list_rooms(username: str) -> list[dict]:
     """The user's non-archived rooms from the unified registry — both web- and
     Talk-origin. A Talk room the bot joined surfaces here automatically (it was
@@ -1393,6 +1410,10 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d = _room_to_dict(handle)
             d["name"] = r.name or handle.name
             d["origin"] = r.origin
+            # Standing per-room model/effort default lives on the shared registry
+            # room (canonical), not the per-user web handle.
+            d["model"] = r.model
+            d["effort"] = r.effort
             # Unread badge. Seed the web read cursor on first surface so a
             # pre-existing backlog doesn't read as unread, then count messages
             # past it. Per-room try/except so one bad count can't abort the
@@ -1447,6 +1468,7 @@ def _chat_mark_room_read(username: str, room_id: int) -> dict | None:
 
 def _chat_update_room(
     username: str, room_id: int, name: str | None, archived: bool | None,
+    model=_UNSET, effort=_UNSET,
 ) -> dict | None:
     from . import db
     with db.get_db(_config.db_path) as conn:
@@ -1459,6 +1481,14 @@ def _chat_update_room(
         # Keep the unified room registry in sync (the cross-surface room list /
         # future sidebar reads it, not web_chat_rooms).
         if updated is not None:
+            # Per-room model/effort default (canonical). Only touch a column
+            # when its key was present in the request, so a name-only edit
+            # doesn't clobber the model default. Merge against current state.
+            if model is not _UNSET or effort is not _UNSET:
+                reg = db.get_room(conn, updated.token)
+                new_model = model if model is not _UNSET else (reg.model if reg else None)
+                new_effort = effort if effort is not _UNSET else (reg.effort if reg else None)
+                db.set_room_model_effort(conn, updated.token, new_model, new_effort)
             if name is not None:
                 db.rename_room(conn, updated.token, updated.name)
             if archived is not None:
@@ -1478,7 +1508,13 @@ def _chat_update_room(
                         db.undismiss_room(conn, updated.token, username)
                 else:
                     db.set_room_archived(conn, updated.token, bool(archived))
-    return _room_to_dict(updated) if updated else None
+        if updated is None:
+            return None
+        d = _room_to_dict(updated)
+        reg = db.get_room(conn, updated.token)
+        d["model"] = reg.model if reg else None
+        d["effort"] = reg.effort if reg else None
+    return d
 
 
 def _chat_delete_room(username: str, room_id: int) -> str:
@@ -2060,6 +2096,7 @@ def _chat_create_web_task(
     attachments: list[str] | None = None,
     model: str | None = None,
     effort: str | None = None,
+    apply_room_default: bool = True,
 ) -> tuple[str, int]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)`` or
     ``("rate_limited", window_seconds)``."""
@@ -2086,6 +2123,7 @@ def _chat_create_web_task(
             conn, _config, surface="web", surface_ref=token, user_id=username,
             text=text, source_type="web", output_target="room", priority=5,
             attachments=attachments or None, model=model, effort=effort,
+            apply_room_default=apply_room_default,
         )
     return ("ok", task_id)
 
@@ -2416,8 +2454,21 @@ async def chat_update_room(
         name = str(name).strip()[:80] or None
     if archived is not None:
         archived = bool(archived)
+    # Per-room model/effort default (canonical model id + effort level). A key's
+    # presence signals intent: absent → leave untouched, "" / null → clear.
+    model = _UNSET
+    if "model" in data:
+        model = str(data["model"] or "").strip() or None
+        if model is not None and model not in _known_room_models():
+            return JSONResponse({"error": "unknown model"}, status_code=400)
+    effort = _UNSET
+    if "effort" in data:
+        from .commands import _EFFORT_LEVELS
+        effort = str(data["effort"] or "").strip().lower() or None
+        if effort is not None and effort not in _EFFORT_LEVELS:
+            return JSONResponse({"error": "invalid effort"}, status_code=400)
     updated = await asyncio.to_thread(
-        _chat_update_room, user["username"], room_id, name, archived,
+        _chat_update_room, user["username"], room_id, name, archived, model, effort,
     )
     if updated is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
@@ -2699,6 +2750,9 @@ async def chat_send_message(
     # across surfaces.
     model_override: str | None = None
     effort_override: str | None = None
+    # An explicit `!model` prefix (any alias, incl. `default`) suppresses the
+    # per-room model default so a per-message choice always wins.
+    model_prefix_used = False
     if text.startswith("!"):
         from . import commands
         from .async_runtime import run_coro
@@ -2712,6 +2766,7 @@ async def chat_send_message(
         if prefix.usage is not None:
             return {"task_id": None, "inline_result": prefix.usage}
         if prefix.matched:
+            model_prefix_used = True
             model_override = prefix.model
             effort_override = prefix.effort
             text = prefix.content
@@ -2731,7 +2786,7 @@ async def chat_send_message(
 
     outcome, value = await asyncio.to_thread(
         _chat_create_web_task, username, room.token, text, attachments,
-        model_override, effort_override,
+        model_override, effort_override, not model_prefix_used,
     )
     if outcome == "rate_limited":
         return JSONResponse(

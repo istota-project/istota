@@ -127,6 +127,10 @@ export interface ChatSession {
 	selectRoomByToken: (token: string) => Promise<boolean>;
 	newRoom: (name: string) => Promise<void>;
 	renameRoom: (id: number, name: string) => Promise<void>;
+	updateRoomSettings: (
+		id: number,
+		patch: { name?: string; model?: string | null; effort?: string | null },
+	) => Promise<void>;
 	promoteRoom: (id: number) => Promise<void>;
 	archiveRoom: (id: number) => Promise<void>;
 	deleteRoom: (id: number) => Promise<void>;
@@ -777,6 +781,14 @@ function createSession(): ChatSession {
 		rooms.update((r) => r.map((x) => (x.id === id ? updated : x)));
 	}
 
+	async function updateRoomSettings(
+		id: number,
+		patch: { name?: string; model?: string | null; effort?: string | null },
+	) {
+		const updated = await updateChatRoom(id, patch);
+		rooms.update((r) => r.map((x) => (x.id === id ? updated : x)));
+	}
+
 	async function promoteRoom(id: number) {
 		try {
 			const updated = await promoteChatRoom(id);
@@ -943,7 +955,8 @@ function createSession(): ChatSession {
 		rooms, activeRoomId, messages, status, activeTaskId, loaded, error,
 		view, selectView, toggleStar, markAllRead,
 		hasMore, loadingOlder, loadOlder,
-		init, selectRoom, selectRoomByToken, newRoom, renameRoom, promoteRoom, archiveRoom,
+		init, selectRoom, selectRoomByToken, newRoom, renameRoom, updateRoomSettings,
+		promoteRoom, archiveRoom,
 		deleteRoom, send, cancel, confirm, reject, teardown,
 	};
 }
