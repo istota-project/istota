@@ -63,3 +63,42 @@ class TestCachingDefaultResolution:
             prompt_caching=True,
         )
         assert make_provider(cfg)._prompt_caching is True
+
+
+class TestOpenRouterAppAttribution:
+    def test_openrouter_injects_attribution_headers(self):
+        cfg = SimpleNamespace(
+            api_key="k",
+            base_url="https://openrouter.ai/api/v1",
+            extra_headers={},
+        )
+        headers = make_provider(cfg)._client.headers
+        assert headers["HTTP-Referer"] == "https://istota.cynium.com"
+        assert headers["X-Title"] == "Istota"
+
+    def test_non_openrouter_endpoint_gets_no_attribution(self):
+        cfg = SimpleNamespace(
+            api_key="k",
+            base_url="https://api.anthropic.com/v1",
+            extra_headers={},
+        )
+        headers = make_provider(cfg)._client.headers
+        assert "HTTP-Referer" not in headers
+        assert "X-Title" not in headers
+
+    def test_operator_extra_headers_override_attribution(self):
+        cfg = SimpleNamespace(
+            api_key="k",
+            base_url="https://openrouter.ai/api/v1",
+            # Case-insensitive: operator's own casing wins, defaults not added.
+            extra_headers={"http-referer": "https://example.com", "X-Title": "Custom"},
+        )
+        headers = make_provider(cfg)._client.headers
+        assert headers["HTTP-Referer"] == "https://example.com"
+        assert headers["X-Title"] == "Custom"
+
+    def test_missing_extra_headers_attr_still_attributes(self):
+        # A config that never set extra_headers behaves like {}.
+        cfg = SimpleNamespace(api_key="k", base_url="https://openrouter.ai/api/v1")
+        headers = make_provider(cfg)._client.headers
+        assert headers["X-Title"] == "Istota"

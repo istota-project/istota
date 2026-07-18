@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read scoping: you see your own mail plus the shared pool (anything sent to the bare bot address), and never another user's. Mail meant for one person goes to their `bot+<you>@…` plus-address.
 - Quiet senders: name senders (fnmatch patterns) whose mail should be filed silently — no task, no assistant session. Their mail waits in the inbox for a briefing or scheduled job to read back on demand. Set it per user on the Settings → Preferences card or with `istota user ensure --quiet-sender`.
 - Push notifications can target a specific ntfy topic per send. Your configured topic stays the default; pass a topic to route a single push elsewhere, so you can subscribe selectively per device or per category (alerts vs briefings vs newsletters) on one server.
+- Native brain requests to OpenRouter now identify Istota as the calling app, so they're attributed on the OpenRouter dashboard and rankings. Other endpoints are unaffected, and a deployment can override or clear the attribution via `extra_headers`.
 
 ### Changed
 - Model pickers and the `!model` autocomplete now show the actual model an alias resolves to in parentheses (e.g. `smart (claude-opus-4-8)`), so it's clear which model you're choosing.
