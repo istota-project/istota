@@ -17,9 +17,14 @@ loop detection + a max-turns cap as composable stop conditions, transient-error
 retry at the provider boundary, orphan tool-pair repair at the converter
 boundary, and per-task cost/token telemetry attached to ``BrainResult.usage``.
 
-Model-namespace resolution (``resolve_alias`` etc.) delegates to a
-``ClaudeCodeBrain`` instance: the native brain targets Anthropic models, so it
-shares the same alias table rather than maintaining a parallel one.
+Model-namespace resolution (``resolve_alias`` etc.) is deliberately minimal: the
+sole provider (``openai_compat``) may point at *any* endpoint, so Anthropic
+provider aliases (``opus``/``sonnet``/``haiku``) are never translated — an
+explicit model id passes through untouched. The three built-in *role* aliases
+(``fast``/``general``/``smart``) resolve to the single configured native model
+unless the operator remapped them via ``[models.roles]``, so stock config's
+``extraction_model``/``curation_model = "general"`` never reaches the wire as a
+literal alias string (NB-3).
 """
 
 from __future__ import annotations
@@ -74,6 +79,14 @@ logger = logging.getLogger("istota.brain.native")
 _API_RETRY_MAX_ATTEMPTS = 3
 _API_RETRY_BASE_DELAY = 5.0
 _API_RETRY_MAX_DELAY = 120.0
+
+# Built-in role aliases (provider-agnostic convention, mirrors claude_code's
+# DEFAULT_ROLE_TARGETS keys). On the native brain these all resolve to the one
+# configured endpoint model unless the operator remapped them via [models.roles]
+# — so stock config's extraction_model/curation_model="general" never reaches
+# the wire as the literal string "general" (NB-3). Ordered for a stable
+# list_aliases() table.
+_BUILTIN_ROLE_NAMES = ("fast", "general", "smart")
 
 # Reactive overflow recovery: how many force-compact + continue attempts a single
 # task may make before giving up and returning the overflow error. Bounded so a
@@ -195,8 +208,20 @@ class NativeBrain:
     # resolve.
 
     def resolve_alias(self, alias):
-        target = get_role_override(alias) if alias else None
-        return (target, None) if target else None
+        if not alias:
+            return None
+        target = get_role_override(alias)
+        if target:
+            return (target, None)
+        # A built-in role alias with no operator override resolves to the single
+        # model this endpoint is configured for (NB-3). The native brain speaks
+        # to one endpoint with one model, so fast/general/smart all mean "the
+        # configured model" unless the operator remapped them via [models.roles].
+        # Provider aliases (opus/sonnet/haiku) are NOT roles and still pass
+        # through untranslated.
+        if alias.lower() in _BUILTIN_ROLE_NAMES and self._config.model:
+            return (self._config.model, None)
+        return None
 
     def resolve_model_name(self, name):
         if not name:
@@ -204,12 +229,27 @@ class NativeBrain:
         resolved = self.resolve_alias(name)
         if resolved is not None and resolved[0]:
             return resolved[0]
+        # An unoverridden role with an empty native model must still not reach
+        # the wire as the literal "general"/"fast"/"smart" — collapse to the
+        # (empty) configured model, which downstream treats as "brain default".
+        if name.lower() in _BUILTIN_ROLE_NAMES:
+            return self._config.model
         return name  # explicit id pass-through; no Anthropic translation
 
     def list_aliases(self):
-        return [
-            (role, target, None) for role, target in get_role_overrides().items()
-        ]
+        overrides = get_role_overrides()
+        listed: list[tuple[str, str | None, str | None]] = []
+        seen: set[str] = set()
+        # Built-in roles first: operator override if present, else the native
+        # model. So `!models` shows the truthful resolved table on native.
+        for role in _BUILTIN_ROLE_NAMES:
+            listed.append((role, overrides.get(role) or self._config.model, None))
+            seen.add(role)
+        # Any custom operator role names beyond the three defaults.
+        for role, target in overrides.items():
+            if role not in seen:
+                listed.append((role, target, None))
+        return listed
 
     def validate_role_override(self, role, target):
         # No alias table to validate against for an arbitrary endpoint.
