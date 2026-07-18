@@ -618,7 +618,14 @@ class NativeBrain:
         try:
             while not abort.is_set():
                 try:
-                    if cancel_check():
+                    # cancel_check is a *synchronous* DB read (open + query with a
+                    # 30s busy timeout). Run it off the event loop so SQLite lock
+                    # contention can't freeze the whole loop — streaming, tool
+                    # execution, progress emission, and the wall-clock deadline
+                    # timer all share it (NB-9; same off-loop discipline as
+                    # _emit_progress's run_in_executor hop).
+                    cancelled = await asyncio.to_thread(cancel_check)
+                    if cancelled:
                         abort.set()
                         return
                 except Exception:  # noqa: BLE001
