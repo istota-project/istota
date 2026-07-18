@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Web chat search results are now clickable cards: a conversation result has a "Jump to reply" button that opens the right room and scrolls to the exact message with a brief highlight; memory results show their source and a preview. Share or bookmark `/chat?room=<token>&task=<id>` to link straight to a reply.
 - Per-room model default: a chat room can carry a standing model and effort that applies to every message in it, on both web chat and Nextcloud Talk. Set it in the web room settings, or with `!room model <alias>` / `!room effort <level>` from either surface. An inline `!model` on a single message still overrides it, and `!model default` falls back to the instance default for that one message. The room's default shows as a badge next to the room title in web chat, which you can click to change it.
 - Web chat command autocomplete: type `!` in the composer to get a live-filtered dropdown of available commands, navigate with the arrow keys, and accept with Tab or Enter. Typing `!model ` completes model aliases the same way.
 - The assistant can now read your mailbox, not just send. New email commands list, search, read, thread, and fetch attachments, batch-fetch mail from named senders for digests, and reply / reply-all in-thread, with cc, bcc, and attachments on outbound mail.
@@ -24,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Nextcloud connection card moved under Connected services, above Google Workspace, and reads like the other service cards — a status pill beside the title. Connect and Disconnect are now the same button in two colours.
 
 ### Fixed
+- `!search <query>` in a room now finds what's actually there. It previously returned almost nothing without `--all` — it missed the room's own conversation history, the channel's notes, and your personal memory, and dropped older conversations once they aged out. It now searches all of them, `--memories` returns your memory notes in-room, and near-miss queries (a partial or slightly-off term) still return results instead of nothing.
 - A reply that continued an email thread from a web chat room rendered as a grey command-output note instead of a normal assistant message. It now appears as a proper chat bubble; genuine alerts and logs routed to a room still show as notes.
 
 ### Removed

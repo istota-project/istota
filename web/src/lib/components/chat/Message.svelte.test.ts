@@ -264,3 +264,59 @@ describe('hover metadata', () => {
 		expect(container.querySelector('.meta-footer')?.textContent?.trim()).toBe('#7');
 	});
 });
+
+describe('search results + anchors', () => {
+	function systemSearch(over: Partial<ChatMessage> = {}): ChatMessage {
+		return {
+			cid: 9, role: 'system', text: 'fallback text', streaming: false,
+			segments: [],
+			searchResults: {
+				kind: 'search_results', query: 'falcon', text: 'fallback text',
+				results: [
+					{
+						source_type: 'conversation', summary: 'falcon migration timeline',
+						date: '2026-07-15', room_token: 'room1', room_name: 'Falcon planning',
+						task_id: 42, talk_message_id: null, talk_link: null,
+					},
+				],
+			},
+			...over,
+		};
+	}
+
+	it('renders SearchResults cards when a system row carries search_results data', () => {
+		const { container } = render(Message, {
+			message: systemSearch(), onConfirm: noop, onReject: noop, onJump: noop,
+		});
+		expect(container.querySelector('.search-results')).not.toBeNull();
+		expect(container.textContent).toContain('falcon migration timeline');
+		// The markdown fallback body is not rendered when cards are shown.
+		expect(container.querySelector('.cmd-output')).toBeNull();
+	});
+
+	it('renders markdown for a system row without search_results data', () => {
+		const { container } = render(Message, {
+			message: { cid: 3, role: 'system', text: '**hi there**', streaming: false, segments: [] },
+			onConfirm: noop, onReject: noop,
+		});
+		expect(container.querySelector('.search-results')).toBeNull();
+		expect(container.querySelector('.cmd-output')).not.toBeNull();
+		expect(container.textContent).toContain('hi there');
+	});
+
+	it('exposes a data-cid anchor on the assistant message root', () => {
+		const { container } = render(Message, {
+			message: finished({ cid: 77, taskId: 55 }), onConfirm: noop, onReject: noop,
+		});
+		const el = container.querySelector('[data-cid="77"]');
+		expect(el).not.toBeNull();
+		expect(el?.getAttribute('data-task-id')).toBe('55');
+	});
+
+	it('exposes a data-cid anchor on the system row root', () => {
+		const { container } = render(Message, {
+			message: systemSearch({ cid: 88 }), onConfirm: noop, onReject: noop, onJump: noop,
+		});
+		expect(container.querySelector('[data-cid="88"]')).not.toBeNull();
+	});
+});

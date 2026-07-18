@@ -1510,6 +1510,9 @@ export interface SendResult {
 	retry_after?: number;
 	task_id?: number | null;
 	inline_result?: string;
+	// Structured payload from an inline !command (e.g. !search result cards);
+	// null/absent for plain-text commands. Rendered as a dedicated component.
+	command_data?: Record<string, unknown> | null;
 	stream_url?: string;
 	error?: string;
 }

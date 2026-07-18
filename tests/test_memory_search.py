@@ -114,6 +114,18 @@ class TestEscapeFTS5Query:
     def test_single_term(self):
         assert _escape_fts5_query("hello") == '"hello"'
 
+    def test_prefix_appends_star(self):
+        assert _escape_fts5_query("falcon timeline", prefix=True) == '"falcon"* "timeline"*'
+
+    def test_or_mode_joins_with_or(self):
+        assert _escape_fts5_query("falcon timeline", match_mode="or") == '"falcon" OR "timeline"'
+
+    def test_prefix_and_or_combined(self):
+        assert _escape_fts5_query("a b", prefix=True, match_mode="or") == '"a"* OR "b"*'
+
+    def test_prefix_empty_query(self):
+        assert _escape_fts5_query("", prefix=True) == '""'
+
 
 class TestSerializeEmbedding:
     def test_roundtrip(self):
@@ -229,6 +241,67 @@ class TestInsertAndSearch:
 
         count = conn.execute("SELECT COUNT(*) FROM memory_chunks WHERE user_id = 'alice'").fetchone()[0]
         assert count == 0
+        conn.close()
+
+
+class TestSearchForgiveness:
+    """Prefix matching + gated AND→OR fallback (interactive-search forgiveness)."""
+
+    def _no_vec(self):
+        # Force BM25-only so the FTS behaviour is what's under test.
+        return patch("istota.memory.search.enable_vec_extension", return_value=False)
+
+    def test_prefix_matches_longer_word(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1", ["the falcons are migrating"], {"task_id": "1"})
+
+        with self._no_vec():
+            # Bare term (no prefix) misses the plural.
+            strict = search(conn, "alice", "falcon")
+            assert strict == []
+            # Prefix query matches "falcons".
+            loose = search(conn, "alice", "falcon", prefix=True)
+        assert len(loose) == 1
+        conn.close()
+
+    def test_or_fallback_returns_partial_matches(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1", ["falcon nesting habits"], {"task_id": "1"})
+
+        with self._no_vec():
+            # Only "falcon" matches; "helicopter" doesn't. Strict AND → zero.
+            strict = search(conn, "alice", "falcon helicopter", allow_or_fallback=False)
+            assert strict == []
+            # OR fallback recovers the partial match.
+            loose = search(conn, "alice", "falcon helicopter", allow_or_fallback=True)
+        assert len(loose) == 1
+        conn.close()
+
+    def test_or_fallback_off_by_default(self, tmp_path):
+        """The recall path default (no fallback) keeps precision — a partial
+        multi-term query returns nothing rather than flooding recall."""
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1", ["falcon nesting habits"], {"task_id": "1"})
+
+        with self._no_vec():
+            default = search(conn, "alice", "falcon helicopter")
+        assert default == []
+        conn.close()
+
+    def test_strict_and_still_ands_when_both_present(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1", ["falcon and heron nesting"], {"task_id": "1"})
+            _insert_chunks(conn, "alice", "conversation", "2", ["only a falcon here"], {"task_id": "2"})
+
+        with self._no_vec():
+            # Strict AND: both terms must appear — only chunk 1 qualifies.
+            strict = search(conn, "alice", "falcon heron")
+        assert len(strict) == 1
+        assert "heron" in strict[0].content
         conn.close()
 
 

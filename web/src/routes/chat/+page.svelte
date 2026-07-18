@@ -15,7 +15,7 @@
 	import { getMe, type ChatRoom, type ChatView } from '$lib/api';
 
 	const session = getChatSession();
-	const { rooms, activeRoomId, messages, status, loaded, hasMore, loadingOlder, view } = session;
+	const { rooms, activeRoomId, messages, status, loaded, hasMore, loadingOlder, view, scrollTarget } = session;
 
 	// Cross-room views: the transcript pane renders either the active room
 	// ('room') or a read-only aggregate stream (all/unread/starred).
@@ -123,8 +123,16 @@
 			// unknown value falls back silently, same as an unknown room token.
 			const token = page.url.searchParams.get('room');
 			const v = page.url.searchParams.get('view');
-			if (token) session.selectRoomByToken(token);
-			else if (v === 'all' || v === 'unread' || v === 'starred') session.selectView(v);
+			const taskParam = page.url.searchParams.get('task');
+			if (token) {
+				// /chat?room=<token>&task=<id>: after selecting the room, jump to
+				// the referenced turn (paging older history if needed). A bare
+				// ?room= just selects the room. jumpToTask itself selects the room,
+				// so a valid &task supersedes the plain select.
+				const taskId = taskParam ? Number(taskParam) : NaN;
+				if (Number.isFinite(taskId)) session.jumpToTask(token, taskId);
+				else session.selectRoomByToken(token);
+			} else if (v === 'all' || v === 'unread' || v === 'starred') session.selectView(v);
 		});
 		getMe()
 			.then((me) => {
@@ -136,7 +144,10 @@
 
 	// Stop the active stream when leaving /chat so the EventSource / poll timer
 	// doesn't linger; remounting re-subscribes from persisted events.
-	onDestroy(() => session.teardown());
+	onDestroy(() => {
+		if (highlightTimer) clearTimeout(highlightTimer);
+		session.teardown();
+	});
 
 	// Stick-to-bottom only when the user is already at the bottom (B1). A plain
 	// (non-reactive) latch sampled by the scroll handler *before* the store grows
@@ -189,6 +200,29 @@
 		if (!atBottom) return;
 		tick().then(() => {
 			if (listEl) listEl.scrollTop = listEl.scrollHeight;
+		});
+	});
+
+	// Jump-to-response: the store resolves a search result to a transcript cid
+	// and bumps `scrollTarget`; here we do the DOM scroll + a transient highlight
+	// pulse. The nonce makes a repeated jump to the same row re-fire.
+	let highlightTimer: ReturnType<typeof setTimeout> | undefined;
+	$effect(() => {
+		const t = $scrollTarget;
+		if (!t) return;
+		tick().then(() => {
+			const el = listEl?.querySelector(`[data-cid="${t.cid}"]`) as HTMLElement | null;
+			if (!el) return;
+			// The row just paged in / room just switched — don't let the
+			// stick-to-bottom effect fight the jump. The jump target is centered
+			// (off the bottom), so reveal the jump-to-latest affordance; a real
+			// scroll event re-samples if it happens to land at the bottom.
+			atBottom = false;
+			showJumpToLatest = true;
+			el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+			el.classList.add('jump-highlight');
+			if (highlightTimer) clearTimeout(highlightTimer);
+			highlightTimer = setTimeout(() => el.classList.remove('jump-highlight'), 2000);
 		});
 	});
 
@@ -422,6 +456,7 @@
 						onReject={session.reject}
 						onToggleStar={session.toggleStar}
 						onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
+						onJump={(token, taskId) => session.jumpToTask(token, taskId)}
 						aggregate={inViewMode}
 					/>
 				{/each}
@@ -699,4 +734,19 @@
 		color: var(--text-dim);
 	}
 	.room-origin.talk { color: var(--accent-amber); }
+
+	/* Jump-to-response: a brief pulse on the row a search result jumps to. The
+	   class is toggled on the Message component's root (data-cid anchor), so the
+	   rule is :global; it fades a soft accent wash under the row for ~2s. */
+	:global(.jump-highlight) {
+		animation: jump-pulse 2s ease-out;
+		border-radius: var(--radius-card);
+	}
+	@keyframes jump-pulse {
+		0% { background: color-mix(in srgb, var(--accent-amber) 26%, transparent); }
+		100% { background: transparent; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		:global(.jump-highlight) { animation-duration: 0.01ms; }
+	}
 </style>

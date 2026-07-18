@@ -5,6 +5,7 @@
 	import { renderGroups } from '$lib/stores/segments';
 	import ActivityTrace from './ActivityTrace.svelte';
 	import ConfirmationCard from './ConfirmationCard.svelte';
+	import SearchResults from './SearchResults.svelte';
 
 	let {
 		message,
@@ -15,6 +16,7 @@
 		onReject,
 		onToggleStar,
 		onRoomClick,
+		onJump,
 		aggregate = false,
 	}: {
 		message: ChatMessage;
@@ -31,6 +33,9 @@
 		// Aggregate views: click the message's room label to jump into that room.
 		// Only rendered when both the handler and message.roomName are present.
 		onRoomClick?: (token: string) => void;
+		// Jump to a search result's conversation turn (room token + task id).
+		// Passed to a search_results system row's cards; absent elsewhere.
+		onJump?: (roomToken: string, taskId: number) => void;
 		// True in the cross-room views (All messages / Unread / Starred), where
 		// the hover bar carries only the task number — model and timings are
 		// room-level detail that belongs in the room view.
@@ -105,13 +110,17 @@
 	<!-- Command (!…) output / delivered notifications. Left-aligned block, not a
 	     centered notice: it carries lists / code / tables that must read
 	     left-to-right. Durable system rows (msgId) are starrable too. -->
-	<div class="cmd-row">
+	<div class="cmd-row" data-cid={message.cid} data-task-id={message.taskId ?? undefined}>
 		{#if showRoomChip}
 			<button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
 				{message.roomName}
 			</button>
 		{/if}
-		<div class="cmd-output markdown" class:error={message.error}>{@html bodyHtml}</div>
+		{#if message.searchResults}
+			<SearchResults data={message.searchResults} {onJump} />
+		{:else}
+			<div class="cmd-output markdown" class:error={message.error}>{@html bodyHtml}</div>
+		{/if}
 		{#if starrable}
 			<div class="msg-actions cmd-actions">
 				{@render starButton()}
@@ -119,7 +128,7 @@
 		{/if}
 	</div>
 {:else}
-	<div class="msg" class:continuation class:error={message.error}>
+	<div class="msg" class:continuation class:error={message.error} data-cid={message.cid} data-task-id={message.taskId ?? undefined}>
 		<div class="gutter">
 			{#if continuation}
 				<time class="hover-time">{time}</time>
