@@ -2,7 +2,7 @@
 	import { untrack } from 'svelte';
 	import type { ChatRoom } from '$lib/api';
 	import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
-	import { getModelAliases } from '$lib/components/chat/autocomplete/providers';
+	import { getBaseModelChoices } from '$lib/components/chat/autocomplete/providers';
 
 	interface Props {
 		open?: boolean;
@@ -29,19 +29,11 @@
 	let modelValue = $state(untrack(() => room.model ?? ''));
 	let effortValue = $state(untrack(() => room.effort ?? ''));
 
-	// Base model choices = aliases with no baked-in effort (effort is its own
-	// control). Dedup by canonical target; the alias name is the label.
+	// Base model choices (dedup + provider-alias-preferred labels) shared with
+	// the room header badge, so the dropdown and the badge name a model the same.
 	$effect(() => {
-		getModelAliases().then((aliases) => {
-			const seen = new Set<string>();
-			const opts: SelectOption[] = [{ value: '', label: 'Default model' }];
-			for (const a of aliases) {
-				if (a.target && a.effort === null && !seen.has(a.target)) {
-					seen.add(a.target);
-					opts.push({ value: a.target, label: a.alias });
-				}
-			}
-			modelOptions = opts;
+		getBaseModelChoices().then((choices) => {
+			modelOptions = [{ value: '', label: 'Default model' }, ...choices];
 		});
 	});
 

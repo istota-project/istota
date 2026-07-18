@@ -11,6 +11,7 @@
 	import Message from '$lib/components/chat/Message.svelte';
 	import Composer from '$lib/components/chat/Composer.svelte';
 	import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
+	import { getBaseModelChoices } from '$lib/components/chat/autocomplete/providers';
 	import { getChatSession } from '$lib/stores/chat';
 	import { getMe, type ChatRoom, type ChatView } from '$lib/api';
 
@@ -41,6 +42,26 @@
 
 	const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
 	const busy = $derived($status === 'sending' || $status === 'streaming');
+
+	// Reverse-map canonical model id → its base alias for a compact header badge
+	// (e.g. `claude-opus-4-8` → `opus`). Cached per session with the composer's
+	// autocomplete catalogue.
+	let aliasByModel = $state<Record<string, string>>({});
+	$effect(() => {
+		getBaseModelChoices().then((choices) => {
+			aliasByModel = Object.fromEntries(choices.map((c) => [c.value, c.label]));
+		});
+	});
+	// The room's standing model default, as a short label for the header badge.
+	// null when the room has no default (or in a cross-room view).
+	const modelBadge = $derived.by(() => {
+		if (inViewMode || !activeRoom) return null;
+		const { model, effort } = activeRoom;
+		if (!model && !effort) return null;
+		let label = model ? (aliasByModel[model] ?? model.replace(/^claude-/, '')) : 'default';
+		if (effort) label += ` · ${effort}`;
+		return label;
+	});
 
 	// Discord/Slack-style grouping: a message continues the previous author's
 	// run (collapsing its avatar + header) when it's the same non-system author
@@ -234,6 +255,18 @@
 <AppShell>
 	{#snippet header()}
 		<ShellHeader title={inViewMode ? VIEW_LABELS[$view as ChatView] : (activeRoom ? activeRoom.name : 'Chat')}>
+			{#snippet nav()}
+				{#if modelBadge}
+					<button
+						class="model-badge"
+						type="button"
+						title="Room model default — click to change"
+						onclick={() => activeRoom && (settingsRoom = activeRoom)}
+					>
+						{modelBadge}
+					</button>
+				{/if}
+			{/snippet}
 			{#snippet tools()}
 				<Chip icon onclick={handleMarkAllRead} title="Mark all rooms as read">
 					<CheckCheck size={14} />
@@ -433,6 +466,28 @@
 </AppShell>
 
 <style>
+	/* Room model-default badge beside the header title. Clickable → opens the
+	   room-settings modal. Only shown when the room has a standing default. */
+	.model-badge {
+		display: inline-flex;
+		align-items: center;
+		font: inherit;
+		font-size: var(--text-xs);
+		line-height: 1;
+		color: var(--text-muted);
+		background: var(--surface-base);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-pill);
+		padding: 0.2rem 0.5rem;
+		cursor: pointer;
+		white-space: nowrap;
+		transition: color var(--transition-fast), border-color var(--transition-fast);
+	}
+	.model-badge:hover {
+		color: var(--text-primary);
+		border-color: var(--border-strong, var(--border-default));
+	}
+
 	.chat-pane {
 		flex: 1;
 		min-height: 0;

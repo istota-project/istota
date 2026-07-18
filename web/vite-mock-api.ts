@@ -122,7 +122,7 @@ const user = {
 interface MockChatRoom { id: number; token: string; name: string; archived: boolean; created_at: string; updated_at: string; model?: string | null; effort?: string | null; }
 interface MockChatTask { id: number; roomToken: string; prompt: string; createdAt: number; variant?: 'simple' | 'multiround'; }
 const mockChatRooms: MockChatRoom[] = [
-	{ id: 1, token: 'web-stefan-general', name: 'general', archived: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+	{ id: 1, token: 'web-stefan-general', name: 'general', archived: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), model: 'claude-opus-4-8', effort: 'high' },
 ];
 const mockChatTasks = new Map<number, MockChatTask>();
 let mockChatRoomSeq = 1;
