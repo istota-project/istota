@@ -171,6 +171,49 @@ class TestToolUse:
         assert tool_names == {"Read"}
 
 
+class TestFsConfinement:
+    """NB-1: fs_read_roots/fs_write_roots thread into the file tools' ToolEnv."""
+
+    def _tool(self, brain, req, name):
+        return next(t for t in brain._build_tools(req) if t.schema.name == name)
+
+    def test_roots_confine_read_tool(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "in.txt").write_text("inside\n")
+        secret = tmp_path / "secret.txt"
+        secret.write_text("classified\n")
+
+        req = _req("hi", tmp_path, tools=["Read"])
+        req.fs_read_roots = [ws]
+        req.fs_write_roots = [ws]
+        read = self._tool(_brain(MockProvider([])), req, "Read")
+
+        ok = asyncio.run(read.execute("c", {"file_path": str(ws / "in.txt")}, None, None))
+        assert "inside" in ok.content[0].text
+        blocked = asyncio.run(read.execute("c", {"file_path": str(secret)}, None, None))
+        assert "classified" not in blocked.content[0].text
+        assert "workspace" in blocked.content[0].text.lower()
+
+    def test_no_roots_means_unconfined(self, tmp_path):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("readable\n")
+        req = _req("hi", tmp_path, tools=["Read"])  # no fs roots
+        read = self._tool(_brain(MockProvider([])), req, "Read")
+        out = asyncio.run(read.execute("c", {"file_path": str(secret)}, None, None))
+        assert "readable" in out.content[0].text
+
+    def test_relative_paths_resolve_under_write_root(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        req = _req("hi", tmp_path, tools=["Write"])
+        req.fs_read_roots = [ws]
+        req.fs_write_roots = [ws]
+        write = self._tool(_brain(MockProvider([])), req, "Write")
+        asyncio.run(write.execute("c", {"file_path": "rel.txt", "content": "x"}, None, None))
+        assert (ws / "rel.txt").read_text() == "x"
+
+
 class TestErrorAndStops:
     def test_error_stop(self, tmp_path):
         provider = MockProvider(

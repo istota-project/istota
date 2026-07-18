@@ -1114,6 +1114,101 @@ def build_bwrap_cmd(
     return args
 
 
+def native_fs_confinement_active(config: Config) -> bool:
+    """Whether NativeBrain's in-process file tools should be path-confined.
+
+    Keyed off *effective* sandboxing, exactly like the executor's cwd choice:
+    on a real multi-user deployment (Linux + bwrap) the claude_code path
+    confines the filesystem via bwrap, so the native file tools — which run
+    in-process, outside any bwrap — must confine themselves to the same roots
+    (NB-1). Where bwrap is unavailable (Mac / dev), claude_code runs unconfined
+    too, so native stays unconfined for parity rather than surprising the
+    developer with a boundary the CLI path doesn't have.
+    """
+    return bool(config.security.sandbox_enabled and _bwrap_available())
+
+
+def native_fs_roots(
+    config: Config,
+    task: db.Task,
+    is_admin: bool,
+    user_resources: list[db.UserResource],
+    user_temp_dir: Path,
+    workspace_dir: Path | None = None,
+) -> tuple[list[Path], list[Path]]:
+    """The file-access roots for a native-brain task: ``(read_roots, write_roots)``.
+
+    Mirrors ``build_bwrap_cmd``'s user-data binds (not the system/venv binds,
+    which are irrelevant to the file tools) so the native file tools reach
+    exactly what the claude_code path's bwrap would allow — no more, no less.
+    Writable roots are the RW binds; read roots additionally include the RO
+    binds (Talk attachments, read-only resources, the admin DB when RO).
+    """
+    write: list[Path] = []
+    read_only: list[Path] = []
+
+    def _add(target: list[Path], p: Path | None) -> None:
+        if p is None:
+            return
+        rp = p.resolve()
+        if rp.exists() and rp not in target:
+            target.append(rp)
+
+    # User workspace (RW) — always present (mkdir'd by the caller).
+    _add(write, user_temp_dir)
+
+    # REPL workspace (RW), validated against the protected-path blocklist.
+    if workspace_dir is not None:
+        try:
+            _add(write, _validate_workspace_dir(config, workspace_dir))
+        except ValueError:
+            logger.warning("native_fs_roots: workspace %s rejected by blocklist", workspace_dir)
+
+    mount = config.nextcloud_mount_path
+    user_dir = None
+    if mount:
+        mount = mount.resolve()
+        user_dir = mount / "Users" / task.user_id
+        _add(write, user_dir)
+        _add(read_only, mount / "Talk")  # attachments, RO
+        if task.conversation_token:
+            _add(write, mount / "Channels" / task.conversation_token)
+
+    # Admin DB (RW or RO, matching sandbox_admin_db_write).
+    if is_admin:
+        if config.security.sandbox_admin_db_write:
+            _add(write, config.db_path)
+        else:
+            _add(read_only, config.db_path)
+
+    # Developer repos (RW, admin only).
+    if is_admin and config.developer.enabled and config.developer.repos_dir:
+        _add(write, Path(config.developer.repos_dir))
+
+    # Per-resource mounts (RW/RO) not already covered by the user dir.
+    if mount:
+        for r in user_resources:
+            if not r.resource_path:
+                continue
+            rpath = (mount / r.resource_path.lstrip("/")).resolve()
+            if not rpath.exists():
+                continue
+            if user_dir is not None:
+                try:
+                    rpath.relative_to(user_dir.resolve())
+                    continue  # already inside the user dir
+                except ValueError:
+                    pass
+            _add(write if r.permissions == "readwrite" else read_only, rpath)
+
+    # Instance web root (RW).
+    if config.site.enabled and config.site.base_path:
+        _add(write, Path(config.site.base_path))
+
+    read_roots = list(dict.fromkeys(write + read_only))
+    return read_roots, write
+
+
 def _allowlist_pattern_to_case(pattern: str) -> str:
     """Convert an allowlist pattern like 'GET /api/v4/projects/*' to a shell case glob.
 
@@ -3121,6 +3216,22 @@ def execute_task(
                 ),
             )
         brain = make_brain(_brain_config)
+
+        # Filesystem confinement roots for NativeBrain's in-process file tools
+        # (NB-1). Only when effective sandboxing is active — same predicate the
+        # cwd choice below uses. Other brains ignore these fields.
+        _fs_read_roots: "list[Path] | None" = None
+        _fs_write_roots: "list[Path] | None" = None
+        if native_fs_confinement_active(config):
+            _fs_read_roots, _fs_write_roots = native_fs_roots(
+                config,
+                task,
+                is_admin,
+                user_resources,
+                Path(user_temp_dir),
+                workspace_dir,
+            )
+
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller
         # tasks already arrive resolved via the !model prefix path; cron jobs,
         # briefings, email, and operator istota_model defaults can still carry
@@ -3153,6 +3264,11 @@ def execute_task(
             cancel_check=_cancel_check,
             on_pid=_on_pid,
             sandbox_wrap=_sandbox_wrap,
+            # Filesystem confinement for NativeBrain's in-process file tools
+            # (NB-1). Populated only when effective sandboxing is on; other
+            # brains ignore these (bwrap already confines their tools).
+            fs_read_roots=_fs_read_roots,
+            fs_write_roots=_fs_write_roots,
             result_file=result_file,
             # Task-derived tmux session label (no-op for other brains): threads
             # the task id into the session name, structured log line, and
