@@ -95,6 +95,7 @@ overrides plug in for free via `_roles.py`.
 | `cancel_check: Callable[[], bool] \| None` | Polled between events; True → kill subprocess, return `cancelled` |
 | `on_pid: Callable[[int], None] \| None` | Called once with subprocess PID after spawn |
 | `sandbox_wrap: Callable[[list[str]], list[str]] \| None` | Wraps raw cmd (e.g. with bwrap); no-op if not provided |
+| `fs_read_roots: list[Path] \| None` / `fs_write_roots: list[Path] \| None` | NativeBrain-only file-tool path allowlist (NB-1). Populated by the executor (`native_fs_roots`) only under effective sandboxing; other brains ignore them (bwrap already confines their tools). `None` = unconfined (dev / no bwrap). |
 | `result_file: Path \| None` | claude_code-specific fallback file path |
 
 ## BrainResult fields
@@ -224,6 +225,35 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
   doesn't need to reason over. Failure markers (`[exit code: N]` /
   `[command aborted]` / `[command timed out …]`) are appended to the stub so a
   failure still surfaces even when the body is omitted.
+
+NativeBrain hardening (2026-07-18 audit, NB-1…NB-24 — see the audit doc in the
+project notes for the full list):
+- **File-tool confinement (NB-1).** The in-process file tools run outside bwrap,
+  so `ToolEnv` enforces a symlink-resolved read/write path allowlist. The
+  executor computes the same user-data roots bwrap would bind
+  (`executor.native_fs_roots`) and passes them via `BrainRequest.fs_read_roots`/
+  `fs_write_roots`, active only when `native_fs_confinement_active(config)`
+  (`sandbox_enabled` + bwrap available) — matching the claude_code boundary.
+  Other brains ignore the fields (bwrap already confines their tools).
+- **Model resolution (NB-3).** Built-in role aliases (`fast`/`general`/`smart`)
+  resolve to `native.model` unless remapped via `[models.roles]`; provider
+  aliases (`opus`/`sonnet`/`haiku`) pass through untranslated. Per-model
+  capability/window overrides via `[brain.native.model_overrides]` (NB-4).
+- **Wire integrity (NB-2/15).** The `openai_compat` SSE parser surfaces
+  mid-stream `{"error":…}` frames and EOF-without-`[DONE]`/`finish_reason` as
+  `StreamError` (not a false clean `StreamDone`); `content_filter` is preserved
+  and a `max_tokens`/`content_filter` final answer gets a visible marker. OpenAI's
+  own o-series/gpt-5 use `max_completion_tokens` (NB-12).
+- **`stop_reason` vocabulary (NB-18).** `BrainResult.stop_reason` is normalized
+  to the documented set (`completed`/`cancelled`/`timeout`/`oom`/
+  `transient_api_error`/`error`/`not_found`); the loop's raw `max_turns`/
+  `loop_detected` map to `completed` with an informative message (no empty
+  success). The agent loop's own `agent_end.stop_reason` is unchanged.
+- **Robustness.** Adjacency-based loop-pair detection (NB-5), hook-exception
+  containment in both execution modes (NB-8), off-loop cancel poll (NB-9), Bash
+  process-group kill + chunked reads + `try/finally` reap (NB-6/7/11), overflow-
+  recovery input bounding + retrying-provider + empty-summary fail (NB-10),
+  window-relative compaction sizing (NB-14), per-task httpx client close (NB-17).
 
 `Config.brain: BrainConfig` follows the dataclass-with-defaults convention.
 `source_type_overrides` maps a task's `source_type` to a brain kind, overriding

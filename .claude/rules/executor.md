@@ -227,6 +227,8 @@ Every proxy rejection emits a structured WARNING — `proxy_rejected task_id=…
 | `_split_credential_env()` | Split env dict into credential vars and clean vars (for proxy) |
 | `_build_network_allowlist()` | Build host:port allowlist for CONNECT proxy |
 | `build_bwrap_cmd()` | Build bubblewrap sandbox command wrapper. Binds the per-user Docker-API allowlist proxy socket at `/var/run/docker.sock` (unconditionally when `config.devbox.enabled and config.devbox.api_proxy_enabled` and the socket exists; no selection gate, raw socket never bound) + ro-binds `docker_cli`. |
+| `native_fs_confinement_active(config)` | Whether NativeBrain's in-process file tools should be path-confined — `sandbox_enabled and _bwrap_available()`, the same predicate the `cwd` choice uses (NB-1). |
+| `native_fs_roots(config, task, is_admin, user_resources, user_temp_dir, workspace_dir=None)` | The `(read_roots, write_roots)` for a native-brain task — mirrors `build_bwrap_cmd`'s user-data binds (user temp dir, mount user/channel dirs RW, Talk RO, admin DB, developer repos, per-resource, site). Threaded into `BrainRequest.fs_read_roots`/`fs_write_roots` when confinement is active. |
 | `_execute_simple()` | subprocess.run mode |
 | `_execute_streaming()` | Retry wrapper for streaming |
 | `execute_task_interactive()` | CLI interactive mode |
