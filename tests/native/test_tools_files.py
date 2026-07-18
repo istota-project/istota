@@ -211,3 +211,123 @@ class TestGrep:
             (tmp_path / f"f{i}.txt").write_text("hit\n")
         result = await _run(make_grep_tool(_env(tmp_path)), {"pattern": "hit", "head_limit": 2})
         assert "more)" in _text(result)
+
+
+# --------------------------------------------------------------------------- #
+# Confinement (NB-1) — file tools must not escape the allowed roots
+# --------------------------------------------------------------------------- #
+
+
+def _confined_env(workspace, *, read_extra=(), write_roots=None):
+    """A ToolEnv confined to ``workspace`` (writable) plus optional read roots."""
+    write = (workspace,) if write_roots is None else tuple(write_roots)
+    reads = (workspace, *read_extra)
+    return ToolEnv(cwd=workspace, read_roots=reads, write_roots=write)
+
+
+class TestConfinement:
+    async def test_unconfined_env_is_not_confined(self, tmp_path):
+        env = ToolEnv(cwd=tmp_path)
+        assert env.confined is False
+
+    async def test_confined_env_reports_confined(self, tmp_path):
+        env = _confined_env(tmp_path)
+        assert env.confined is True
+
+    async def test_read_inside_root_allowed(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "a.txt").write_text("hello\n")
+        result = await _run(make_read_tool(_confined_env(ws)), {"file_path": str(ws / "a.txt")})
+        assert "hello" in _text(result)
+
+    async def test_read_outside_root_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        secret = tmp_path / "secret.txt"
+        secret.write_text("classified\n")
+        result = await _run(make_read_tool(_confined_env(ws)), {"file_path": str(secret)})
+        text = _text(result).lower()
+        assert "classified" not in text
+        assert "outside" in text or "not allowed" in text or "workspace" in text
+
+    async def test_read_traversal_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (tmp_path / "secret.txt").write_text("classified\n")
+        result = await _run(make_read_tool(_confined_env(ws)), {"file_path": str(ws / ".." / "secret.txt")})
+        assert "classified" not in _text(result)
+
+    async def test_symlink_escape_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("classified\n")
+        link = ws / "link.txt"
+        link.symlink_to(outside)
+        result = await _run(make_read_tool(_confined_env(ws)), {"file_path": str(link)})
+        assert "classified" not in _text(result)
+
+    async def test_write_inside_root_allowed(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        target = ws / "out.txt"
+        result = await _run(make_write_tool(_confined_env(ws)), {"file_path": str(target), "content": "hi\n"})
+        assert target.read_text() == "hi\n"
+        assert "Created" in _text(result)
+
+    async def test_write_outside_root_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        target = tmp_path / "escape.txt"
+        result = await _run(make_write_tool(_confined_env(ws)), {"file_path": str(target), "content": "x"})
+        assert not target.exists()
+        assert "outside" in _text(result).lower() or "workspace" in _text(result).lower()
+
+    async def test_write_denied_in_read_only_root(self, tmp_path):
+        # A root that is readable but not writable rejects writes but allows reads.
+        readonly = tmp_path / "ro"
+        readonly.mkdir()
+        (readonly / "doc.txt").write_text("readable\n")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        env = _confined_env(ws, read_extra=(readonly,))
+        # read from the read-only root works
+        read_result = await _run(make_read_tool(env), {"file_path": str(readonly / "doc.txt")})
+        assert "readable" in _text(read_result)
+        # write into the read-only root is rejected
+        write_result = await _run(make_write_tool(env), {"file_path": str(readonly / "new.txt"), "content": "x"})
+        assert not (readonly / "new.txt").exists()
+        assert "outside" in _text(write_result).lower() or "workspace" in _text(write_result).lower()
+
+    async def test_edit_outside_root_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        target = tmp_path / "outside.txt"
+        target.write_text("alpha beta\n")
+        result = await _run(
+            make_edit_tool(_confined_env(ws)),
+            {"file_path": str(target), "old_string": "beta", "new_string": "BETA"},
+        )
+        assert target.read_text() == "alpha beta\n"  # unchanged
+        assert "outside" in _text(result).lower() or "workspace" in _text(result).lower()
+
+    async def test_grep_path_outside_root_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        secret_dir = tmp_path / "secrets"
+        secret_dir.mkdir()
+        (secret_dir / "s.txt").write_text("classified needle\n")
+        result = await _run(make_grep_tool(_confined_env(ws)), {"pattern": "needle", "path": str(secret_dir)})
+        assert "classified" not in _text(result)
+        assert "outside" in _text(result).lower() or "workspace" in _text(result).lower()
+
+    async def test_glob_path_outside_root_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        secret_dir = tmp_path / "secrets"
+        secret_dir.mkdir()
+        (secret_dir / "s.py").write_text("")
+        result = await _run(make_glob_tool(_confined_env(ws)), {"pattern": "*.py", "path": str(secret_dir)})
+        assert "s.py" not in _text(result)
+        assert "outside" in _text(result).lower() or "workspace" in _text(result).lower()

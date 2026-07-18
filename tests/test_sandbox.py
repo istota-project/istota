@@ -11,6 +11,8 @@ from istota.config import Config, DevboxConfig, DeveloperConfig, NetworkConfig, 
 from istota.executor import (
     _build_network_allowlist,
     build_bwrap_cmd,
+    native_fs_confinement_active,
+    native_fs_roots,
 )
 
 
@@ -754,3 +756,74 @@ sandbox_enabled = true
         config = load_config(config_file)
         assert config.security.network.enabled is True
         assert config.security.network.allow_pypi is True
+
+
+class TestNativeFsRoots:
+    """NB-1: NativeBrain's in-process file tools confine to the same user-data
+    roots that build_bwrap_cmd would bind for the claude_code path."""
+
+    def test_confinement_active_only_with_bwrap(self, sandbox_config):
+        with patch("istota.executor._bwrap_available", return_value=True):
+            assert native_fs_confinement_active(sandbox_config) is True
+        with patch("istota.executor._bwrap_available", return_value=False):
+            assert native_fs_confinement_active(sandbox_config) is False
+
+    def test_confinement_inactive_when_sandbox_disabled(self, sandbox_config):
+        sandbox_config.security.sandbox_enabled = False
+        with patch("istota.executor._bwrap_available", return_value=True):
+            assert native_fs_confinement_active(sandbox_config) is False
+
+    def _roots(self, config, task, is_admin, resources=None, user_temp=None):
+        if user_temp is None:
+            user_temp = config.temp_dir / task.user_id
+            user_temp.mkdir(parents=True, exist_ok=True)
+        return native_fs_roots(config, task, is_admin, resources or [], user_temp)
+
+    def test_user_temp_dir_is_writable(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+        read, write = self._roots(sandbox_config, task, False, user_temp=user_temp)
+        assert user_temp.resolve() in write
+        assert user_temp.resolve() in read
+
+    def test_user_mount_and_channel_writable(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        _, write = self._roots(sandbox_config, task, False)
+        mount = sandbox_config.nextcloud_mount_path.resolve()
+        assert (mount / "Users" / "alice").resolve() in write
+        assert (mount / "Channels" / "room123").resolve() in write
+
+    def test_talk_is_read_only(self, sandbox_config, make_sandbox_task):
+        (sandbox_config.nextcloud_mount_path / "Talk").mkdir()
+        task = make_sandbox_task()
+        read, write = self._roots(sandbox_config, task, False)
+        talk = (sandbox_config.nextcloud_mount_path / "Talk").resolve()
+        assert talk in read
+        assert talk not in write
+
+    def test_db_read_only_for_admin_by_default(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        read, write = self._roots(sandbox_config, task, True)
+        db_path = sandbox_config.db_path.resolve()
+        assert db_path in read
+        assert db_path not in write
+
+    def test_db_absent_for_non_admin(self, sandbox_config, make_sandbox_task):
+        task = make_sandbox_task()
+        read, write = self._roots(sandbox_config, task, False)
+        db_path = sandbox_config.db_path.resolve()
+        assert db_path not in read
+        assert db_path not in write
+
+    def test_db_writable_when_admin_db_write_enabled(self, sandbox_config, make_sandbox_task):
+        sandbox_config.security.sandbox_admin_db_write = True
+        task = make_sandbox_task()
+        _, write = self._roots(sandbox_config, task, True)
+        assert sandbox_config.db_path.resolve() in write
+
+    def test_temp_dir_parent_not_a_root(self, sandbox_config, make_sandbox_task):
+        # The shared temp_dir parent must NOT be a root — only the per-user dir.
+        task = make_sandbox_task()
+        read, _ = self._roots(sandbox_config, task, False)
+        assert sandbox_config.temp_dir.resolve() not in read

@@ -578,11 +578,21 @@ class NativeBrain:
             return []
         from istota.session.tools import ToolEnv, build_default_tools
 
+        # Filesystem confinement (NB-1): when the executor supplies file-access
+        # roots, the in-process file tools are confined to them (the native
+        # stand-in for bwrap's filesystem isolation). Relative paths then resolve
+        # under the user's own writable dir rather than the shared temp root.
+        read_roots = tuple(req.fs_read_roots) if req.fs_read_roots else None
+        write_roots = tuple(req.fs_write_roots) if req.fs_write_roots else None
+        cwd = write_roots[0] if write_roots else Path(req.cwd)
+
         env = ToolEnv(
-            cwd=Path(req.cwd),
+            cwd=cwd,
             sandbox_wrap=req.sandbox_wrap,
             subprocess_env=req.env or None,
             bash_timeout_seconds=max(1, req.timeout_seconds),
+            read_roots=read_roots,
+            write_roots=write_roots,
         )
         allowed = set(req.allowed_tools)
         return [t for t in build_default_tools(env) if t.schema.name in allowed]

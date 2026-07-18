@@ -58,6 +58,16 @@ class BrainRequest:
     # if provided. Returning the cmd unchanged is the no-op default.
     sandbox_wrap: Callable[[list[str]], list[str]] | None = None
 
+    # Filesystem confinement for in-process file tools (NativeBrain only; NB-1).
+    # ClaudeCodeBrain / TmuxClaudeBrain ignore these — their tools run inside
+    # bwrap, which already confines the filesystem. NativeBrain's Read/Write/
+    # Edit/Grep/Glob run in the daemon process (no bwrap), so the executor
+    # passes the same user-data roots bwrap would bind and the file tools
+    # enforce them. ``None`` = unconfined (dev / unsandboxed), matching the
+    # claude_code path's own posture where bwrap is unavailable.
+    fs_read_roots: list[Path] | None = None
+    fs_write_roots: list[Path] | None = None
+
     # ClaudeCodeBrain-specific: optional fallback file the model writes its
     # final result to when stream parsing fails. Other brains may ignore.
     result_file: Path | None = None

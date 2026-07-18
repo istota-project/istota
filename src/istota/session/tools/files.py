@@ -20,7 +20,7 @@ from pathlib import Path
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
 
-from .env import ToolEnv
+from .env import ToolEnv, ToolPathError
 
 _BINARY_SNIFF_BYTES = 8192
 _MAX_LINE_CHARS = 2000
@@ -65,7 +65,10 @@ def make_read_tool(env: ToolEnv) -> AgentTool:
     )
 
     def _read(args: dict) -> ToolResult:
-        path = env.resolve(args["file_path"])
+        try:
+            path = env.resolve(args["file_path"])
+        except ToolPathError as exc:
+            return _err(str(exc))
         if not path.exists():
             return _err(f"File not found: {path}")
         if path.is_dir():
@@ -116,7 +119,10 @@ def make_write_tool(env: ToolEnv) -> AgentTool:
     )
 
     def _write(args: dict) -> ToolResult:
-        path = env.resolve(args["file_path"])
+        try:
+            path = env.resolve(args["file_path"], write=True)
+        except ToolPathError as exc:
+            return _err(str(exc))
         content = args.get("content", "")
         path.parent.mkdir(parents=True, exist_ok=True)
         existed = path.exists()
@@ -157,7 +163,10 @@ def make_edit_tool(env: ToolEnv) -> AgentTool:
     )
 
     def _edit(args: dict) -> ToolResult:
-        path = env.resolve(args["file_path"])
+        try:
+            path = env.resolve(args["file_path"], write=True)
+        except ToolPathError as exc:
+            return _err(str(exc))
         old = args["old_string"]
         new = args["new_string"]
         replace_all = bool(args.get("replace_all", False))
@@ -207,11 +216,14 @@ def make_glob_tool(env: ToolEnv) -> AgentTool:
     )
 
     def _glob(args: dict) -> ToolResult:
-        root = env.resolve(args["path"]) if args.get("path") else env.cwd
+        try:
+            root = env.resolve(args["path"]) if args.get("path") else env.cwd
+        except ToolPathError as exc:
+            return _err(str(exc))
         if not root.exists():
             return _err(f"Search path not found: {root}")
         pattern = args["pattern"]
-        matches = [p for p in root.glob(pattern) if p.is_file()]
+        matches = [p for p in root.glob(pattern) if p.is_file() and env.contains(p)]
         matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         if not matches:
             return _ok(f"No files match {pattern!r} under {root}.")
@@ -268,7 +280,10 @@ def make_grep_tool(env: ToolEnv) -> AgentTool:
                 yield Path(dirpath) / name
 
     def _grep(args: dict) -> ToolResult:
-        root = env.resolve(args["path"]) if args.get("path") else env.cwd
+        try:
+            root = env.resolve(args["path"]) if args.get("path") else env.cwd
+        except ToolPathError as exc:
+            return _err(str(exc))
         if not root.exists():
             return _err(f"Search path not found: {root}")
         flags = re.IGNORECASE if args.get("-i") else 0
@@ -286,6 +301,8 @@ def make_grep_tool(env: ToolEnv) -> AgentTool:
         per_file_counts: dict[str, int] = {}
 
         for fpath in _iter_files(root, glob_filter):
+            if not env.contains(fpath):
+                continue
             try:
                 raw = fpath.read_bytes()
             except OSError:
