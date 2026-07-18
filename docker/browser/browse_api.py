@@ -36,6 +36,22 @@ MAX_SESSIONS = int(os.environ.get("MAX_BROWSER_SESSIONS", "2"))
 MEMORY_REJECT_PCT = 85  # reject new sessions above this
 MEMORY_EVICT_PCT = 80   # evict oldest idle session above this
 
+# Browse watchdog — self-heals a renderer/session wedge the container health
+# check is structurally blind to. Chrome's DevTools endpoint keeps answering
+# during a per-page freeze, so /live?deep=1 stays green and the container
+# watchdog never restarts (ISSUE-149's documented boundary, hit in prod as
+# ISSUE-173). A wedged /browse then blocks the single Flask thread forever,
+# burning the caller's whole timeout with no signal. This request-level
+# watchdog kills+relaunches Chrome once any request outlives a hard deadline:
+# the kill makes the wedged in-flight CDP call raise (fail fast) AND heals the
+# browser for the next caller. Deadline must sit above the slowest legitimate
+# browse (navigate + Cloudflare challenge + settle) to avoid killing a slow-
+# but-live session; tune per deployment via the env var. 0 disables.
+BROWSE_WATCHDOG_DEADLINE_S = int(os.environ.get("BROWSE_WATCHDOG_DEADLINE_S", "90"))
+BROWSE_WATCHDOG_POLL_S = int(os.environ.get("BROWSE_WATCHDOG_POLL_S", "5"))
+_inflight = None  # {"path", "url", "started"} for the one in-flight Flask request
+_inflight_lock = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Session helpers
@@ -620,8 +636,25 @@ def _cleanup_expired():
 
 @app.before_request
 def _log_request_start():
+    global _inflight
     request._start_time = time.time()
     if request.path != "/health":
+        # Arm the watchdog for this request. Single-threaded Flask means at most
+        # one request executes at a time, so one slot is enough. Grab the URL for
+        # the wedge log; get_json caches, so the handler still reads it fine.
+        url = ""
+        try:
+            body = request.get_json(silent=True)
+            if isinstance(body, dict):
+                url = body.get("url", "") or ""
+        except Exception:
+            url = ""
+        with _inflight_lock:
+            _inflight = {
+                "path": request.path,
+                "url": url,
+                "started": request._start_time,
+            }
         try:
             chrome.ensure_chrome()
         except Exception as e:
@@ -630,6 +663,16 @@ def _log_request_start():
                 "status": "error",
                 "error": f"Chrome unavailable: {e}",
             }), 503
+
+
+@app.teardown_request
+def _clear_inflight(_exc=None):
+    # Runs after every request, including on exception — so a wedge that unwinds
+    # (once the watchdog kills Chrome and the CDP call raises) always clears the
+    # slot, and the next request gets a fresh start timestamp.
+    global _inflight
+    with _inflight_lock:
+        _inflight = None
 
 
 @app.after_request
@@ -791,6 +834,61 @@ def _start_liveness_server():
 
 
 # ---------------------------------------------------------------------------
+# Browse watchdog (separate thread)
+# ---------------------------------------------------------------------------
+
+
+def _start_browse_watchdog():
+    """Kill+relaunch Chrome when a request outlives the hard deadline.
+
+    Catches the renderer/session-level wedge the liveness probe can't see
+    (ISSUE-149 / ISSUE-173): DevTools keeps answering so /live?deep=1 stays
+    green, but the in-flight /browse never returns and the container is never
+    restarted. Runs on its own thread and only ever touches the Chrome OS
+    process via recover_wedged_chrome() — never Patchright's thread-bound sync
+    objects — so it is safe to fire while the Flask thread is blocked inside a
+    CDP call. The kill unblocks that call, so the wedged request fails fast and
+    the browser is healed for the next caller.
+    """
+    if BROWSE_WATCHDOG_DEADLINE_S <= 0:
+        log.info("Browse watchdog disabled (BROWSE_WATCHDOG_DEADLINE_S<=0)")
+        return
+
+    def _loop():
+        last_recovered = 0.0  # start ts of the request we last killed for
+        while True:
+            time.sleep(BROWSE_WATCHDOG_POLL_S)
+            try:
+                with _inflight_lock:
+                    req = dict(_inflight) if _inflight else None
+                if not req:
+                    continue
+                started = req["started"]
+                elapsed = time.time() - started
+                if elapsed < BROWSE_WATCHDOG_DEADLINE_S:
+                    continue
+                if started == last_recovered:
+                    continue  # already fired for this request — let it unwind
+                last_recovered = started
+                log.error(
+                    "Browse watchdog: %s %s wedged for %.0fs (deadline %ds) "
+                    "— killing+relaunching Chrome",
+                    req["path"], req.get("url") or "<no-url>",
+                    elapsed, BROWSE_WATCHDOG_DEADLINE_S,
+                )
+                chrome.recover_wedged_chrome()
+                log.info("Browse watchdog: Chrome relaunched after wedge")
+            except Exception:
+                log.exception("Browse watchdog loop error")
+
+    threading.Thread(target=_loop, daemon=True, name="browse-watchdog").start()
+    log.info(
+        "Browse watchdog armed (deadline=%ds poll=%ds)",
+        BROWSE_WATCHDOG_DEADLINE_S, BROWSE_WATCHDOG_POLL_S,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 
@@ -802,6 +900,7 @@ if __name__ == "__main__":
     mon = threading.Thread(target=_resource_monitor, daemon=True)
     mon.start()
     _start_liveness_server()
+    _start_browse_watchdog()
     # threaded=False: Playwright sync API uses greenlets that can't
     # switch threads. All requests run on the main thread.
     app.run(host="0.0.0.0", port=9223, threaded=False)
