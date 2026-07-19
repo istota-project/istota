@@ -417,6 +417,12 @@ class WebConfig:
     """
     enabled: bool = False
     port: int = 8766
+    # Authentication mode. "nextcloud" (default) uses the NC OAuth2 flow below.
+    # "none" bypasses auth entirely for a single-user local install — every
+    # request is the one configured local user, who is always admin. no-auth
+    # is only permitted on a loopback bind (the web app refuses to start
+    # otherwise). Overridable by ISTOTA_WEB_AUTH.
+    auth: str = "nextcloud"
     # `oauth2_provider` is the user-facing NC URL — what the browser hits to
     # authorize. `oauth2_token_endpoint` and `oauth2_userinfo_endpoint` are
     # server-to-server; in Docker they typically point at the internal
@@ -448,6 +454,21 @@ class SiteConfig:
     enabled: bool = False
     hostname: str = ""        # e.g. "istota.example.com"
     base_path: str = ""       # e.g. "/srv/app/istota/html"
+
+
+@dataclass
+class CaldavConfig:
+    """Explicit CalDAV override (``[caldav]``).
+
+    When any field is set, it overrides the value derived from ``[nextcloud]``
+    (see ``Config.caldav_*`` properties). Lets a local install point calendar
+    at an external CalDAV server (Radicale, Fastmail, Google) without a
+    Nextcloud. All-blank (default) → fall back to the NC derivation, so server
+    deployments are unaffected.
+    """
+    url: str = ""
+    username: str = ""
+    password: str = ""
 
 
 @dataclass
@@ -667,6 +688,7 @@ class Config:
     developer: DeveloperConfig = field(default_factory=DeveloperConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     site: SiteConfig = field(default_factory=SiteConfig)
+    caldav: CaldavConfig = field(default_factory=CaldavConfig)
     location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
     moneyman: MoneymanConfig = field(default_factory=MoneymanConfig)
     google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
@@ -852,7 +874,14 @@ class Config:
 
     @property
     def caldav_url(self) -> str:
-        """CalDAV base URL derived from Nextcloud URL."""
+        """CalDAV base URL.
+
+        An explicit ``[caldav] url`` wins (external CalDAV server); otherwise
+        derived from the Nextcloud URL. Empty when neither is configured, which
+        makes the calendar gate a no-op (graceful).
+        """
+        if self.caldav.url:
+            return self.caldav.url.rstrip("/")
         if not self.nextcloud.url:
             return ""
         base = self.nextcloud.url.rstrip("/")
@@ -860,13 +889,44 @@ class Config:
 
     @property
     def caldav_username(self) -> str:
-        """CalDAV username (same as Nextcloud username)."""
+        """CalDAV username — explicit ``[caldav]`` override else the NC username."""
+        if self.caldav.username:
+            return self.caldav.username
         return self.nextcloud.username
 
     @property
     def caldav_password(self) -> str:
-        """CalDAV password (same as Nextcloud app password)."""
+        """CalDAV password — explicit ``[caldav]`` override else the NC app password."""
+        if self.caldav.password:
+            return self.caldav.password
         return self.nextcloud.app_password
+
+    @property
+    def is_standalone(self) -> bool:
+        """Whether this instance is running the slimmed-down local single-user shape.
+
+        Config-derived (no stored flag): blank ``[nextcloud] url`` AND
+        ``[web] auth == "none"``. This is the single home for the rule so the
+        admin standalone-mode notice and any other caveat surface agree.
+        """
+        return (not self.nextcloud.url) and self.web.auth == "none"
+
+    @property
+    def local_user_id(self) -> str:
+        """The single local user id for the no-auth (standalone) shape.
+
+        Prefers the sole configured user, else the sole admin user, else
+        ``"local"``. Only meaningful in no-auth mode where there is exactly one
+        user by construction.
+        """
+        if len(self.users) == 1:
+            return next(iter(self.users))
+        if self.users:
+            # Deterministic pick if somehow multiple are configured.
+            return sorted(self.users)[0]
+        if self.admin_users:
+            return sorted(self.admin_users)[0]
+        return "local"
 
     def effective_user_max_fg_workers(self, user_id: str) -> int:
         """Effective max fg workers for a user (per-user override > global default)."""
@@ -1491,6 +1551,14 @@ def load_config(config_path: Path | None = None) -> Config:
             base_path=s.get("base_path", ""),
         )
 
+    if "caldav" in data:
+        cd = data["caldav"]
+        config.caldav = CaldavConfig(
+            url=cd.get("url", ""),
+            username=cd.get("username", ""),
+            password=cd.get("password", ""),
+        )
+
     if "location" in data:
         loc = data["location"]
         config.location = LocationReceiverConfig(
@@ -1554,9 +1622,18 @@ def load_config(config_path: Path | None = None) -> Config:
                 _token_storage,
             )
             _token_storage = "ephemeral"
+        _auth = w.get("auth", "nextcloud")
+        if _auth not in ("nextcloud", "none"):
+            logger.warning(
+                "[web] auth=%r is not a known value (expected 'nextcloud' or "
+                "'none'); using 'nextcloud'",
+                _auth,
+            )
+            _auth = "nextcloud"
         config.web = WebConfig(
             enabled=w.get("enabled", False),
             port=w.get("port", 8766),
+            auth=_auth,
             oauth2_provider=w.get("oauth2_provider", ""),
             oauth2_client_id=w.get("oauth2_client_id", ""),
             oauth2_client_secret=w.get("oauth2_client_secret", ""),
@@ -1646,6 +1723,19 @@ def load_config(config_path: Path | None = None) -> Config:
             logger.warning(
                 "ISTOTA_WEB_TOKEN_STORAGE=%r is not a known value; ignoring",
                 _token_storage_env,
+            )
+
+    # Web auth-mode override (local single-user installs set ISTOTA_WEB_AUTH=none
+    # instead of templating TOML). Same validation as the TOML parse.
+    _web_auth_env = os.environ.get("ISTOTA_WEB_AUTH", "").strip()
+    if _web_auth_env:
+        if _web_auth_env in ("nextcloud", "none"):
+            config.web.auth = _web_auth_env
+        else:
+            logger.warning(
+                "ISTOTA_WEB_AUTH=%r is not a known value (expected 'nextcloud' "
+                "or 'none'); ignoring",
+                _web_auth_env,
             )
 
     # Native-brain API key lives two levels deep (brain.native.api_key), so it

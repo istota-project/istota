@@ -90,10 +90,19 @@ reconcile_min_pings: int = 3             # walk-by filter
 reconcile_min_dwell_sec: int = 60
 ```
 
-### `WebConfig` (`[web]`) — token retention fields
+### `WebConfig` (`[web]`) — auth mode + token retention
 ```
+auth: str = "nextcloud"            # "nextcloud" | "none"; env ISTOTA_WEB_AUTH; unknown → warning + "nextcloud"
+port: int = 8766
 token_storage: str = "ephemeral"   # "ephemeral" | "encrypted"; anything else → warning + ephemeral
 ```
+`auth = "none"` is the local single-user no-auth mode: `web_app._require_api_auth`
+early-returns the fixed local user (`Config.local_user_id`), `_user_is_web_admin`
+is True for that user, `_verify_origin` no-ops, and `_resolve_session_secret`
+generates a random per-process key instead of crashing import. `serve` refuses to
+bind no-auth to a non-loopback host (`web_app.assert_no_auth_bind_safe`). Default
+`"nextcloud"` = unchanged server behaviour. See AGENTS.md "Local single-user
+install".
 `"encrypted"` retains the login's user-scoped Nextcloud OAuth pair in the
 `web_user_tokens` framework table, encrypted with the **web-only**
 `ISTOTA_WEB_TOKEN_KEY` env var (≥32 chars; distinct scrypt salt from the
@@ -108,6 +117,18 @@ at web startup and behaves as ephemeral. Docker-path override:
 ```
 talk_read_sync_interval: int = 60   # Talk→web read pull cadence (s); 0 disables the pull
 ```
+
+### `CaldavConfig` (`[caldav]`)
+```
+url: str = ""    username: str = ""    password: str = ""
+```
+Explicit CalDAV override. When any field is set it overrides the value the
+`Config.caldav_url` / `caldav_username` / `caldav_password` properties otherwise
+derive from `[nextcloud]` — so a local install can point calendar at an external
+CalDAV server (Radicale, Fastmail, Google) with no Nextcloud. All-blank (default)
+= NC derivation, so server deployments are unchanged. Related: `Config.is_standalone`
+(blank `nextcloud.url` + `web.auth == "none"`) and `Config.local_user_id` (the
+sole configured user, for no-auth mode).
 
 ### `SiteConfig`
 ```

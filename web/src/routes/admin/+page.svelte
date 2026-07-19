@@ -7,6 +7,7 @@
 	let error = $state('');
 	let expandedJobs: Record<number, boolean> = $state({});
 	let modulesExpanded = $state(false);
+	let standaloneCollapsed = $state(false);
 
 	const REFRESH_MS = 60_000;
 	let timer: ReturnType<typeof setInterval> | null = null;
@@ -207,6 +208,33 @@
 	{:else if error}
 		<div class="banner error">{error}</div>
 	{:else if stats}
+		{#if stats.runtime?.mode === 'standalone'}
+			<section class="card standalone-notice">
+				<button
+					type="button"
+					class="standalone-head"
+					onclick={() => (standaloneCollapsed = !standaloneCollapsed)}
+					aria-expanded={!standaloneCollapsed}
+				>
+					<span class="standalone-title">Running in standalone (local single-user) mode</span>
+					<span class="standalone-toggle">{standaloneCollapsed ? '▸' : '▾'}</span>
+				</button>
+				{#if !standaloneCollapsed}
+					<p class="standalone-lead">
+						This instance runs the slimmed-down local shape. What that means here:
+					</p>
+					<ul class="standalone-caveats">
+						{#each stats.runtime.caveats as caveat}
+							<li>
+								<span class="caveat-title">{caveat.title}</span>
+								<span class="caveat-detail">{caveat.detail}</span>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</section>
+		{/if}
+
 		<!-- System banner -->
 		<section class="card system-banner card-grid">
 			<div class="banner-cell">
@@ -516,6 +544,66 @@
 
 	.admin-page .hint {
 		margin: 0;
+	}
+
+	/* Standalone-mode notice: informational banner, read-only, collapsible. */
+	.standalone-notice {
+		border-left: 3px solid var(--accent, #c9a227);
+	}
+
+	.standalone-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		width: 100%;
+		background: none;
+		border: none;
+		padding: 0;
+		margin: 0;
+		cursor: pointer;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+	}
+
+	.standalone-title {
+		font-weight: 600;
+	}
+
+	.standalone-toggle {
+		opacity: 0.6;
+		font-size: 0.85rem;
+	}
+
+	.standalone-lead {
+		margin: 0.6rem 0 0.4rem;
+		opacity: 0.85;
+		font-size: 0.9rem;
+	}
+
+	.standalone-caveats {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.standalone-caveats li {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+	}
+
+	.caveat-title {
+		font-weight: 600;
+		font-size: 0.9rem;
+	}
+
+	.caveat-detail {
+		opacity: 0.8;
+		font-size: 0.85rem;
 	}
 
 	/* `.settings .card` (from settings.css) sets `display: flex; flex-direction:

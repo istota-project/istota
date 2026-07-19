@@ -890,9 +890,12 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             (examples_dir / filename).write_text(content)
         logger.debug("Updated %s examples for %s", bot_dir, user_id)
 
-        # Auto-share bot dir back to the user
-        bot_path = get_user_bot_path(user_id, bot_dir)
-        share_folder_with_user(config, bot_path, user_id)
+        # Auto-share bot dir back to the user (OCS). Skipped entirely when
+        # Nextcloud is unconfigured (local install) — the OCS call is a no-op
+        # there and would only log a spurious "Cannot share folder" warning.
+        if config.nextcloud.url:
+            bot_path = get_user_bot_path(user_id, bot_dir)
+            share_folder_with_user(config, bot_path, user_id)
 
         return True
     else:
@@ -947,6 +950,20 @@ def init_user_memory_v2(config: "Config", user_id: str) -> bool:
         return True
     else:
         return init_user_memory(config.rclone_remote, user_id, config.bot_dir_name)
+
+
+def ensure_workspace_for_user(config: "Config", user_id: str) -> bool:
+    """Seed a user's full workspace (directories + memory template).
+
+    Shared by ``istota setup`` (first-run) and the daemon startup path so both
+    guarantee the same layout. Directory creation is idempotent; the USER.md
+    memory template is written only when absent (never clobbers existing
+    memory on a re-run). Returns True on success.
+    """
+    ok = ensure_user_directories_v2(config, user_id)
+    if get_memory_line_count_v2(config, user_id) is None:
+        init_user_memory_v2(config, user_id)
+    return ok
 
 
 def get_memory_line_count_v2(config: "Config", user_id: str) -> int | None:

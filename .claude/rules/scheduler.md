@@ -4,10 +4,24 @@
 
 ### `run_daemon()`
 ```python
-def run_daemon(config: Config) -> None
+def run_daemon(config: Config, *, install_signal_handlers: bool = True,
+               ready_event: threading.Event | None = None) -> None
 ```
-1. Acquire flock on `/tmp/istota-scheduler-daemon.lock`
-2. Set SIGTERM/SIGINT handlers
+The `install_signal_handlers` / `ready_event` kwargs support the combined
+`istota serve` launcher (local install — see AGENTS.md "Local single-user
+install"). Defaults reproduce the standalone-daemon behaviour exactly. `serve`
+runs this on a worker thread with `install_signal_handlers=False` (signal
+handlers are main-thread-only) and owns SIGINT/SIGTERM via uvicorn; it drives
+shutdown through `scheduler.request_shutdown()` (sets the shared
+`_shutdown_requested` flag). `run_daemon` clears that flag at start, sets
+`ready_event` once the pool + pollers are up (right before the loop), and on
+flock contention raises `_DaemonAlreadyRunning` (not `return`) so `serve` can
+report "already running" — the standalone `main()` catches it → clean `SystemExit(1)`.
+The lock path is the module constant `DAEMON_LOCK_PATH` (default
+`/tmp/istota-scheduler-daemon.lock`; overridable, notably in tests).
+
+1. Acquire flock on `DAEMON_LOCK_PATH`
+2. Set SIGTERM/SIGINT handlers (skipped when `install_signal_handlers=False`)
 3. Hydrate user configs from Nextcloud API
 4. Ensure user directories
 4a. `recover_orphaned_tasks_on_startup(config)` — reclaim tasks left `running`/`locked` by a dead prior instance (see "Startup orphan recovery" below)
