@@ -8,7 +8,7 @@ env: [{"var":"FEEDS_USER","from":"user_id"},{"var":"TUMBLR_API_KEY","from":"secr
 ---
 # Feeds (native)
 
-Manage RSS/Atom/Tumblr/Are.na feed subscriptions through the in-tree feeds module. Per-user SQLite under `{workspace}/feeds/data/feeds.db` — subscriptions, categories, entries, and read state all live there.
+Manage RSS/Atom/Tumblr/Are.na feed subscriptions through the in-tree feeds module. Per-user SQLite under `{workspace}/{BOT_DIR}/feeds/data/feeds.db` — subscriptions, categories, entries, and read state all live there.
 
 ## CLI
 

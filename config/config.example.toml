@@ -195,7 +195,9 @@ features = []
 # extra_hosts = []                 # operator-specific additions (e.g. ["registry.example.com:443"])
 
 [nextcloud]
-# Nextcloud server URL
+# Nextcloud server URL. This also drives storage vocabulary: when set, the bot
+# describes files as Nextcloud (mount/rclone); when blank (the local/standalone
+# shape), it describes "your workspace" as a plain local folder instead.
 url = "https://nextcloud.example.com"
 # Bot's Nextcloud username
 username = "istota"

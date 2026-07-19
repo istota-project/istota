@@ -781,6 +781,44 @@ class Config:
         """Whether to use local mount instead of rclone CLI."""
         return self.nextcloud_mount_path is not None
 
+    @property
+    def storage_is_nextcloud(self) -> bool:
+        """Whether a Nextcloud server backs the file workspace.
+
+        Keyed on the presence of a Nextcloud URL — deliberately NOT
+        ``is_standalone`` (which folds in web auth, an axis orthogonal to file
+        storage). A URL means the files are Nextcloud whether reached via mount
+        or rclone; no URL means a plain local folder.
+        """
+        return bool(self.nextcloud.url)
+
+    @property
+    def storage_backend(self) -> str:
+        """Canonical storage backend label: ``"nextcloud"`` | ``"local"``.
+
+        Single source of truth for prompt/skill storage vocabulary.
+        """
+        return "nextcloud" if self.storage_is_nextcloud else "local"
+
+    @property
+    def storage_label(self) -> str:
+        """Short noun for prose. ``"Nextcloud"`` when Nextcloud-backed, else
+        ``"your workspace"`` (a mid-sentence noun phrase, not a proper noun)."""
+        return "Nextcloud" if self.storage_is_nextcloud else "your workspace"
+
+    def workspace_root(self, user_id: str | None = None) -> Path | None:
+        """On-disk root of the workspace (mount mode only; ``None`` under rclone).
+
+        Scoped to the user's ``/Users/{user_id}`` subtree when ``user_id`` is
+        given, else the bare mount root. A de-duplication of the
+        ``mount / "Users" / uid`` idiom inlined across the codebase — not a
+        storage abstraction (no I/O, no backend switch).
+        """
+        if self.nextcloud_mount_path is None:
+            return None
+        root = self.nextcloud_mount_path
+        return root / "Users" / user_id if user_id else root
+
     def module_db_path(self, user_id: str, module: str) -> Path:
         """Local-disk path for a user's per-module SQLite DB.
 

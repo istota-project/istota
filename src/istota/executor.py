@@ -2076,7 +2076,8 @@ def build_prompt(
             f"  - {r.display_name or r.resource_path}: {r.resource_path} ({r.permissions})"
             for r in folders
         )
-        resource_sections.append(f"Nextcloud Folders:\n{folder_list}")
+        folders_header = "Nextcloud Folders:" if config.storage_is_nextcloud else "Folders:"
+        resource_sections.append(f"{folders_header}\n{folder_list}")
 
     if "todo_file" in resources_by_type:
         todos = resources_by_type["todo_file"]
@@ -2144,11 +2145,12 @@ def build_prompt(
     attachments_text = ""
     if task.attachments:
         att_list = "\n".join(f"  - {att}" for att in task.attachments)
-        # Check if paths are local (absolute) or remote (Nextcloud)
+        # Check if paths are local (absolute) or workspace-relative
         if any(att.startswith("/") for att in task.attachments):
             attachments_text = f"\n\nAttached files (local paths):\n{att_list}"
         else:
-            attachments_text = f"\n\nAttached files (in Nextcloud, access via rclone):\n{att_list}"
+            where = "in Nextcloud, access via rclone" if config.storage_is_nextcloud else "workspace-relative"
+            attachments_text = f"\n\nAttached files ({where}):\n{att_list}"
 
     # Build user memory section
     memory_section = ""
@@ -2247,9 +2249,15 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
 """
 
-    # Build file access tools section based on mount mode
-    # Non-admin users get a scoped mount path restricted to their own directory
-    if config.use_mount:
+    # Build file access tools section based on the storage backend. Three modes:
+    # local folder, Nextcloud via mount, Nextcloud via rclone. Non-admin users
+    # get a scoped path restricted to their own directory (server shape only).
+    if config.storage_backend == "local":
+        ws_root = config.workspace_root(task.user_id) or config.nextcloud_mount_path
+        file_tools = f"""- Your files live in your workspace at '{ws_root}'. Use standard file tools (Read, Write, Edit, ls, cat).
+  - The workspace is the area you manage for the user (memory, notes, inbox, shared files). It is a normal local folder.
+  - This install runs locally without a sandbox, so you also have ordinary access to the rest of the machine's filesystem (the user's home, Downloads, etc.). The workspace is your managed area, not the limit of what you can read — stay within what the user asked for."""
+    elif config.use_mount:
         if is_admin:
             mount_display = str(config.nextcloud_mount_path)
         else:
@@ -2633,6 +2641,11 @@ def execute_task(
             scripts_dir = f"{config.rclone_remote}:{scripts_nc_path}"
         skills_doc = skills_doc.replace("{scripts_dir}", scripts_dir)
         skills_doc = skills_doc.replace("{user_id}", task.user_id)
+        # Storage-neutral workspace root + product noun (backend-derived).
+        ws_root = config.workspace_root(task.user_id)
+        workspace_dir = str(ws_root) if ws_root is not None else f"{config.rclone_remote}:/Users/{task.user_id}"
+        skills_doc = skills_doc.replace("{workspace}", workspace_dir)
+        skills_doc = skills_doc.replace("{storage}", config.storage_label)
     if selected_skills:
         logger.debug("Selected skills: %s", ", ".join(selected_skills))
 
