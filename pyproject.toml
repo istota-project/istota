@@ -128,6 +128,13 @@ packages = ["src/istota"]
 # falls back to the packaged dir. Absent (dev build without the copy) → no error.
 artifacts = ["src/istota/web_static/**"]
 
+# schema.sql lives at the repo root (outside the package dir) but db.init_db
+# needs it at runtime, including from a non-editable install with no checkout.
+# Force it into the wheel as istota/schema.sql; _resolve_schema_path() reads it
+# from there when the source-tree copy is absent.
+[tool.hatch.build.targets.wheel.force-include]
+"schema.sql" = "istota/schema.sql"
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
