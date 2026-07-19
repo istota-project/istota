@@ -97,8 +97,11 @@ disabled / admin-gated / experimental-gated / missing-deps). The executor logs
 
 The on-demand loader is the `skills` core skill (`always_include`, `cli: true`):
 `istota-skill skills show <name>` renders a skill's full body (same frontmatter
-strip + `{BOT_NAME}`/`{BOT_DIR}`/`{scripts_dir}`/`{user_id}` substitution as
-`load_skills`), re-applying the disabled / `admin_only` / experimental /
+strip + `{BOT_NAME}`/`{BOT_DIR}`/`{scripts_dir}`/`{user_id}`/`{workspace}`/`{storage}`
+substitution as `load_skills`; `{workspace}` resolves to the base user root
+(`/Users/{user}`) and `{storage}` to `config.storage_label` — storage-neutral
+prose so a pulled body doesn't hardcode Nextcloud framing, via a `_workspace_dir`
+helper), re-applying the disabled / `admin_only` / experimental /
 missing-deps guards from the loaded config + `ISTOTA_USER_ID` so a pulled body
 can't bypass them; unknown / disallowed → `{"status":"error",...}` + exit 1.
 `istota-skill skills list` enumerates the loadable (guard-filtered) skills. (No
