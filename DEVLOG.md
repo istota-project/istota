@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Bare port redirects to the app; standalone reinstall picks up fresh code
+
+`istota serve` printed `Uvicorn running on http://127.0.0.1:8766` (uvicorn's own line, after our own message), but the whole UI lives under `/istota`, so opening the bare port 404'd — confusing for a local user who just wants to open the port. Truly dropping the `/istota` base is a large, risky change (the base is baked into the SvelteKit `adapter-static` build and hardcoded across ~all FastAPI routers, redirects, and the OAuth callback URL; nginx also routes `/istota/` → web on the server), so the pragmatic fix: a root route (`@app.get("/")`) that 307-redirects `/` → `/istota/`. On the server nginx owns `/` (→ Nextcloud), so the app-level `/` handler is only reached on direct/standalone access — safe. `serve`'s printed URL now shows the bare port (which redirects) to match uvicorn's line and the user's expectation.
+
+Also found (while verifying) that `uv tool install --force` reused a **cached wheel keyed on the package version**: my edits didn't land until `--reinstall`. Since we ship to `main` between version bumps and `install.sh --standalone` installs from a clone, a same-version reinstall could silently install stale bits — so `run_standalone` now passes `--reinstall` (implies `--refresh`) to force a fresh build.
+
+Verified with a fresh isolated install: bare `/` → 307 → `/istota/`; the static mount serves the SPA at `/istota/` (`html=True`) when `web_static` is built; `serve` message updated. Added a `TestRootRedirect` unit test (307 → `/istota/`); the 201-test web suite stays green.
+
+**Files added/modified:**
+- `src/istota/web_app.py` - `_root_redirect` (`@app.get("/")` → 307 `/istota/`).
+- `src/istota/serve.py` - Printed/logged URL shows the bare port (redirects to `/istota`).
+- `install.sh` - `run_standalone` uses `uv tool install --force --reinstall` so a same-version reinstall rebuilds.
+- `tests/test_web_app.py` - `TestRootRedirect`.
+
 ## 2026-07-19: Fix schema.sql missing from installed wheel (standalone setup crash)
 
 `istota setup` crashed at `db.init_db` on a `uv tool install`'d (non-editable) standalone install: `FileNotFoundError: …/site-packages/schema.sql`. `init_db` resolved the schema as `Path(__file__).parent.parent.parent / "schema.sql"`, which lands on the repo root in a source checkout (`<repo>/schema.sql`) but on `…/lib/python3.12/schema.sql` in an installed wheel — and `schema.sql` lives at the repo root, outside the `src/istota` package, so the wheel never shipped it at all (only `web_static` was force-included).

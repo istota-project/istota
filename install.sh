@@ -289,8 +289,12 @@ run_standalone() {
 
     maybe_build_web_static "$REPO_ROOT"
 
+    # --reinstall (implies --refresh) forces a fresh build. Without it, uv can
+    # reuse a cached wheel keyed on the package version — and this project ships
+    # code to `main` between version bumps, so a same-version reinstall would
+    # silently install stale bits from a prior run.
     info "Installing istota[local] from $REPO_ROOT"
-    uv tool install --force "${REPO_ROOT}[local]"
+    uv tool install --force --reinstall "${REPO_ROOT}[local]"
     export PATH="$HOME/.local/bin:$PATH"
     command -v istota >/dev/null 2>&1 \
         || die "istota installed but not on PATH. Run 'uv tool update-shell' (or add ~/.local/bin to PATH), open a new shell, then: istota setup"

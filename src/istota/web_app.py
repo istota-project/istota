@@ -225,6 +225,19 @@ app.add_middleware(
 )
 
 
+@app.get("/", include_in_schema=False)
+async def _root_redirect() -> RedirectResponse:
+    """Send the bare root to the app.
+
+    The whole UI lives under ``/istota`` (the base path is baked into the
+    SvelteKit build and shared with the server deployment, where nginx routes
+    ``/istota/`` to this service). In a standalone / direct-uvicorn run there is
+    no nginx in front, so opening ``http://host:port/`` would otherwise 404 —
+    redirect it so the printed bare-port URL just works.
+    """
+    return RedirectResponse(url="/istota/", status_code=307)
+
+
 # ============================================================================
 # Auth helpers
 # ============================================================================
