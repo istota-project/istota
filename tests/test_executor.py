@@ -3944,3 +3944,73 @@ class TestReplInteractiveGate:
         assert "repl" in _INTERACTIVE_SOURCE_TYPES
         assert "talk" in _INTERACTIVE_SOURCE_TYPES
         assert "email" in _INTERACTIVE_SOURCE_TYPES
+
+
+class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
+    """Regression: the {workspace} display string must not clobber the
+    execute_task `workspace_dir` parameter (the REPL --workspace bind path,
+    blocklist-validated by build_bwrap_cmd).
+
+    Commit f3ab4b6 ("Storage-agnostic prompt/skill vocabulary") reassigned the
+    `workspace_dir` parameter to the user's on-mount workspace root just to fill
+    the {workspace} placeholder. That value flowed into build_bwrap_cmd, where
+    _validate_workspace_dir rejects anything under the Nextcloud mount root — so
+    every sandboxed LLM task on the server failed with
+    "workspace ... overlaps a protected path". The fix uses a separate local for
+    the display string; the parameter stays None for a normal task.
+    """
+
+    def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        mount = tmp_path / "mount"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        # An eager skill whose body references the {workspace} placeholder, so
+        # the substitution block that clobbered the variable actually runs.
+        (skills_dir / "_index.toml").write_text(
+            '[files]\ndescription = "File ops"\nalways_include = true\n'
+        )
+        (skills_dir / "files.md").write_text("Your files live in {workspace}.")
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            temp_dir=tmp_path / "temp",
+            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
+            nextcloud_mount_path=mount,
+            security=SecurityConfig(sandbox_enabled=True, skill_proxy_enabled=False),
+        )
+
+    @patch("istota.executor.build_bwrap_cmd")
+    @patch("istota.executor.subprocess.run")
+    def test_normal_task_passes_none_workspace_dir_to_sandbox(
+        self, mock_run, mock_bwrap, tmp_path
+    ):
+        config = self._make_config(tmp_path)
+        (tmp_path / "temp" / "alice").mkdir(parents=True)
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        # build_bwrap_cmd is a no-op wrapper here; we only inspect its kwargs.
+        mock_bwrap.side_effect = lambda raw_cmd, *a, **k: raw_cmd
+
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="hi", user_id="alice", source_type="talk"
+            )
+            task = db.get_task(conn, task_id)
+            from istota.executor import execute_task
+
+            success, _result, _actions, _trace = execute_task(
+                task, config, [], conn=conn
+            )
+
+        # The sandbox wrapper must have been invoked, and with workspace_dir=None
+        # (the mount-subdir value belongs in the {workspace} display string, not
+        # the REPL bind path).
+        assert mock_bwrap.called
+        assert mock_bwrap.call_args.kwargs["workspace_dir"] is None
+        # And the {workspace} placeholder still resolved in the prompt.
+        prompt_text = mock_run.call_args.kwargs["input"]
+        assert "{workspace}" not in prompt_text
+        assert str((config.nextcloud_mount_path / "Users" / "alice")) in prompt_text
