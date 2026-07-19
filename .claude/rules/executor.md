@@ -70,7 +70,7 @@ def build_prompt(
 7b. Recalled memories: BM25 search results (when `auto_recall` enabled)
 7c. Learned Playbooks: `_recall_playbooks` BM25/vector hits over `source_type="playbook"` (when `playbooks.enabled`; skipped for automated/`skip_memory` tasks)
 8. Confirmation context: previous bot output for confirmed actions
-9. Tools: file access, browser, CalDAV, sqlite3, email, then `skills_index` ("Available skills (load on demand)" — the menu catalogue) when the menu is non-empty
+9. Tools: file access, browser, CalDAV, sqlite3, email, then `skills_index` ("Available skills (load on demand)" — the menu catalogue) when the menu is non-empty. The **file-access framing is storage-backend-aware** (storage-agnostic-vocabulary spec): it renders in one of three modes keyed on `config.storage_backend` — Nextcloud-via-mount, Nextcloud-via-rclone, or local — and the folders header + attachments prose follow the same switch. Local mode adds a bullet clarifying the workspace is the *managed* area, not the limit of what an unsandboxed local bot can read (fixes the "I can only see the Nextcloud mount" false claim). Server/Nextcloud prompts are byte-unchanged. The executor is the single home of storage framing; skill bodies are storage-neutral and reference paths through the `{workspace}` / `{storage}` placeholders (see below).
 10. Rules: resource restrictions, confirmation, subtasks, output
 11. Context: previous messages
 12. Request: prompt + attachments
@@ -234,7 +234,7 @@ remains in the source as a dead helper but is no longer called.
 ## Security Functions
 | Function | Purpose |
 |---|---|
-| `build_clean_env(config)` | Minimal env for Claude subprocess (PATH, HOME, PYTHONUNBUFFERED + passthrough vars) |
+| `build_clean_env(config)` | Minimal env for Claude subprocess (PATH, HOME, PYTHONUNBUFFERED + `USER`/`LOGNAME` + passthrough vars). `USER`/`LOGNAME` are process-identity basics (not secrets) that the macOS Keychain lookup needs — without them the `claude` CLI's login-Keychain OAuth read fails and every task reports "Not logged in" on a standalone mac; harmless on Linux where the credential is a file under `HOME`. |
 | `build_stripped_env()` | os.environ minus credential vars (PASSWORD/TOKEN/SECRET/API_KEY/NC_PASS/PRIVATE_KEY/APP_PASSWORD). For heartbeat/cron commands. Always-on. |
 | `build_allowed_tools(is_admin, skill_names)` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"]`. For ClaudeCodeBrain / TmuxClaudeBrain the *list contents* no longer reach the CLI — both run with `--dangerously-skip-permissions` (no `--allowedTools` allowlist), so the model gets its full default toolset and the bwrap sandbox + network proxy + clean env are the boundary. The list survives as (a) NativeBrain's in-process tool filter and (b) the non-empty/empty signal distinguishing a tool-bearing task from a text-only one. `Agent` + `Workflow` (the harness's multi-agent fan-out) stay denied via `--disallowedTools`. |
 | `_PROXY_CREDENTIAL_VARS` | Frozenset of specific env vars stripped when proxy enabled (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, MONARCH_SESSION_ID, MONARCH_CSRFTOKEN, GOOGLE_WORKSPACE_CLI_TOKEN) |
