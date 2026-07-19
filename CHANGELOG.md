@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-07-19
+
 ### Added
 - Brain fallback: when the primary model backend becomes unavailable — a subscription usage limit, a missing binary, or a tmux launch failure — a task can automatically run on a configured fallback backend instead of failing. A portable role tier (fast/general/smart) carries across to the fallback; a backend-specific model pin falls back to the fallback's own default, and the reply notes the substitution. Once a backend reports a persistent limit, later tasks skip it for a cooldown and probe it again after. Configure it with `fallback` under `[brain]`; the existing tmux-to-headless failover now runs through the same mechanism.
 - Native brain: a built-in WebFetch tool that retrieves a public web page and returns its readable text, so the in-process agent can read a URL directly instead of being limited to the sandboxed shell. It runs credential-free and hardened against reaching private or internal addresses (validated on every redirect, with the connection pinned to the checked address), fetches HTTPS only by default, and caps response size and time. Fetched content is wrapped as untrusted input. Configurable and on by default under `[brain.native.web_fetch]`; set `enabled = false` to remove it, or `require_url_provenance = true` to only fetch URLs that appeared in the task.
@@ -894,7 +896,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.30.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.31.0...main
+[0.31.0]: https://gitlab.com/cynium/istota/-/releases/v0.31.0
 [0.30.0]: https://gitlab.com/cynium/istota/-/releases/v0.30.0
 [0.29.0]: https://gitlab.com/cynium/istota/-/releases/v0.29.0
 [0.28.0]: https://gitlab.com/cynium/istota/-/releases/v0.28.0
