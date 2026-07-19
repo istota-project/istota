@@ -54,7 +54,7 @@ ln -s /path/to/istota/deploy/ansible /path/to/roles/istota
 | Sleep cycle | `istota_sleep_cycle_enabled` | `true` |
 | Channel sleep cycle | `istota_channel_sleep_cycle_enabled` | `true` |
 | Whisper transcription | `istota_whisper_enabled` | `false` |
-| Nginx site hosting | `istota_site_enabled` | `false` |
+| Bot web root (nginx) | `istota_site_enabled` | `false` |
 | Node.js | `istota_nodejs_enabled` | `false` |
 | Developer/GitLab | `istota_developer_enabled` | `false` |
 | Database backups | `istota_backup_enabled` | `true` |
@@ -79,7 +79,7 @@ External role dependencies are inlined as tasks:
 - **Docker**: `apt-get install docker.io docker-compose-plugin` (when browser enabled)
 - **rclone**: install + config (when rclone configured)
 - **rclone mount**: systemd unit for FUSE mount (when mount enabled)
-- **nginx**: install + config (when site enabled)
+- **nginx**: install + config (when `istota_site_enabled`, location, or web enabled)
 - **Node.js**: NodeSource 20.x (when Node.js enabled)
 
 ## Update mode
