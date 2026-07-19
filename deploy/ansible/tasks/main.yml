@@ -199,6 +199,11 @@
         path: "/etc/apt/sources.list.d/download_docker_com_linux_{{ ansible_facts['distribution'] | lower }}.list"
         state: absent
 
+    - name: Determine dpkg architecture
+      ansible.builtin.command: dpkg --print-architecture
+      register: dpkg_arch
+      changed_when: false
+
     - name: Add Docker apt repository
       ansible.builtin.deb822_repository:
         name: docker
@@ -206,7 +211,7 @@
         uris: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}"
         suites: "{{ ansible_facts['distribution_release'] }}"
         components: stable
-        architectures: "{{ ansible_facts['dpkg_architecture'] }}"
+        architectures: "{{ dpkg_arch.stdout }}"
         signed_by: /etc/apt/trusted.gpg.d/docker.asc
         enabled: true
         state: present
