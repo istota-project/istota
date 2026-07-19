@@ -518,6 +518,29 @@ class MoneymanConfig:
 
 
 @dataclass
+class WebFetchConfig:
+    """Native-brain daemon-side WebFetch tool ([brain.native.web_fetch]).
+
+    All fields defaulted to safe values, so an absent block enables the tool
+    with HTTPS-only, size/time-capped, SSRF-hardened behaviour. Maps 1:1 onto
+    ``session.tools.WebFetchPolicy``. See ``.claude/rules/brain.md``.
+    """
+
+    enabled: bool = True
+    timeout_seconds: float = 20.0
+    max_bytes: int = 5_000_000
+    max_content_chars: int = 100_000
+    max_redirects: int = 5
+    allow_http: bool = False
+    allowed_ports: list[int] = field(default_factory=lambda: [80, 443])
+    user_agent: str = "IstotaBot/1.0"
+    allow_hosts: list[str] = field(default_factory=list)
+    block_hosts: list[str] = field(default_factory=list)
+    extra_blocked_cidrs: list[str] = field(default_factory=list)
+    require_url_provenance: bool = False
+
+
+@dataclass
 class NativeBrainConfig:
     """Settings for the native harness (``brain.kind = "native"``).
 
@@ -564,6 +587,9 @@ class NativeBrainConfig:
     # ``True``/``False`` always wins, whether it came from the TOML or was set
     # directly on the dataclass.
     prompt_caching: bool | None = None
+    # Daemon-side WebFetch tool ([brain.native.web_fetch]). Enabled by default
+    # with safe caps; the tool is native-only (added to build_default_tools).
+    web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
 
 
 @dataclass
@@ -1389,6 +1415,44 @@ def load_config(config_path: Path | None = None) -> Config:
         native_raw = br.get("native", {})
         if not isinstance(native_raw, dict):
             native_raw = {}
+        wf_raw = native_raw.get("web_fetch", {})
+        if not isinstance(wf_raw, dict):
+            wf_raw = {}
+        _wf_defaults = WebFetchConfig()
+        web_fetch_cfg = WebFetchConfig(
+            enabled=bool(wf_raw.get("enabled", _wf_defaults.enabled)),
+            timeout_seconds=float(wf_raw.get("timeout_seconds", _wf_defaults.timeout_seconds)),
+            max_bytes=int(wf_raw.get("max_bytes", _wf_defaults.max_bytes)),
+            max_content_chars=int(
+                wf_raw.get("max_content_chars", _wf_defaults.max_content_chars)
+            ),
+            max_redirects=int(wf_raw.get("max_redirects", _wf_defaults.max_redirects)),
+            allow_http=bool(wf_raw.get("allow_http", _wf_defaults.allow_http)),
+            allowed_ports=(
+                [int(p) for p in wf_raw["allowed_ports"]]
+                if isinstance(wf_raw.get("allowed_ports"), list)
+                else list(_wf_defaults.allowed_ports)
+            ),
+            user_agent=str(wf_raw.get("user_agent", _wf_defaults.user_agent)),
+            allow_hosts=(
+                [str(h) for h in wf_raw["allow_hosts"]]
+                if isinstance(wf_raw.get("allow_hosts"), list)
+                else []
+            ),
+            block_hosts=(
+                [str(h) for h in wf_raw["block_hosts"]]
+                if isinstance(wf_raw.get("block_hosts"), list)
+                else []
+            ),
+            extra_blocked_cidrs=(
+                [str(c) for c in wf_raw["extra_blocked_cidrs"]]
+                if isinstance(wf_raw.get("extra_blocked_cidrs"), list)
+                else []
+            ),
+            require_url_provenance=bool(
+                wf_raw.get("require_url_provenance", _wf_defaults.require_url_provenance)
+            ),
+        )
         native = NativeBrainConfig(
             provider=native_raw.get("provider", "openai_compat"),
             model=native_raw.get("model", ""),
@@ -1410,6 +1474,7 @@ def load_config(config_path: Path | None = None) -> Config:
                 if "prompt_caching" in native_raw
                 else None
             ),
+            web_fetch=web_fetch_cfg,
         )
         overrides_raw = br.get("source_type_overrides", {})
         if not isinstance(overrides_raw, dict):

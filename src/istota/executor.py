@@ -417,6 +417,26 @@ def _build_native_completer(native_config, timeout: float):
     return _classify
 
 
+def _native_web_fetch_enabled(task: "db.Task", config: Config) -> bool:
+    """True when this task routes to the native brain with WebFetch enabled.
+
+    Used to fold `untrusted_input` into the eager skill set — the native
+    WebFetch tool ingests untrusted web content but, as a core tool, doesn't
+    trigger the companion-skill machinery that surfaces that guidance for
+    ingest *skills*.
+    """
+    from .brain import resolve_brain_kind
+
+    try:
+        routed = resolve_brain_kind(task.source_type, config.brain)
+    except Exception:  # noqa: BLE001 — never let routing lookup fail selection
+        return False
+    if routed.kind != "native":
+        return False
+    wf = getattr(routed.native, "web_fetch", None)
+    return bool(wf and wf.enabled)
+
+
 def _build_triage_completer(task: "db.Task", config: Config):
     """Conversation-context triage completer, routed through the task's brain.
 
@@ -2426,6 +2446,18 @@ def execute_task(
         sticky_skills=sticky_skills or None,
         enabled_experimental_features=frozenset(config.experimental.features),
     )
+
+    # The native WebFetch tool ingests untrusted external content, but as a
+    # *core tool* it doesn't drive companion-skill selection the way ingest
+    # *skills* do. So when this task routes to the native brain with WebFetch
+    # enabled, fold `untrusted_input` into the eager set explicitly — mirroring
+    # how the ingest skills pull it in via companion expansion — so its
+    # inbound-handling guardrails reach the prompt whenever the tool is present.
+    if _native_web_fetch_enabled(task, config) and "untrusted_input" in skill_index:
+        if "untrusted_input" not in selected_skills and (
+            not _disabled or "untrusted_input" not in _disabled
+        ):
+            selected_skills = [*selected_skills, "untrusted_input"]
 
     # Persist selected skills for conversation stickiness
     if task.id and selected_skills:

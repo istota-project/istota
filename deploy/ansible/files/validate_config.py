@@ -98,6 +98,30 @@ def main() -> int:
                 )
                 return 1
 
+    # Validate [brain.native.web_fetch] shape: reject unknown keys (a typo would
+    # template cleanly and silently fall back to the safe default).
+    native = brain.get("native", {})
+    web_fetch = native.get("web_fetch", {}) if isinstance(native, dict) else {}
+    if web_fetch:
+        if not isinstance(web_fetch, dict):
+            print("validate_config: [brain.native.web_fetch] must be a table", file=sys.stderr)
+            return 1
+        wf_allowlist = {
+            "enabled", "timeout_seconds", "max_bytes", "max_content_chars",
+            "max_redirects", "allow_http", "allowed_ports", "user_agent",
+            "allow_hosts", "block_hosts", "extra_blocked_cidrs",
+            "require_url_provenance",
+        }
+        wf_bad = sorted(k for k in web_fetch if k not in wf_allowlist)
+        if wf_bad:
+            print(
+                "validate_config: unknown keys under [brain.native.web_fetch]: "
+                + ", ".join(wf_bad)
+                + f" — expected one of {sorted(wf_allowlist)}",
+                file=sys.stderr,
+            )
+            return 1
+
     # [web] token_storage: a typo'd value would template cleanly and the
     # loader would silently fall back to "ephemeral" — the operator thinks
     # token retention is on, but it isn't. Fail the play instead.

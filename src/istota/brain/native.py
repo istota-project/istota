@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -89,6 +90,16 @@ _API_RETRY_MAX_DELAY = 120.0
 # the wire as the literal string "general" (NB-3). Ordered for a stable
 # list_aliases() table.
 _BUILTIN_ROLE_NAMES = ("fast", "general", "smart")
+
+# URL harvester for require_url_provenance (Stage 3b). Matches http(s) URLs in
+# free text; trailing punctuation the wrapping prose contributes is trimmed.
+_URL_RE = re.compile(r"https?://[^\s<>\"'`\])}]+", re.IGNORECASE)
+
+
+def _extract_urls(text: str) -> frozenset[str]:
+    if not text:
+        return frozenset()
+    return frozenset(m.rstrip(".,;:!?") for m in _URL_RE.findall(text))
 
 # The BrainResult.stop_reason vocabulary the executor documents. The loop's raw
 # agent_end reasons (max_turns / loop_detected / "") are normalized into this
@@ -731,6 +742,15 @@ class NativeBrain:
         write_roots = tuple(req.fs_write_roots) if req.fs_write_roots else None
         cwd = write_roots[0] if write_roots else Path(req.cwd)
 
+        policy = self._web_fetch_policy()
+        # Provenance corpus (Stage 3b): only assembled when the knob is on, so
+        # the default path threads nothing new. v1 corpus = URLs present in the
+        # task prompt (task text + prior conversation context already folded into
+        # req.prompt by the executor).
+        corpus = None
+        if policy is not None and policy.require_url_provenance:
+            corpus = _extract_urls(req.prompt)
+
         env = ToolEnv(
             cwd=cwd,
             sandbox_wrap=req.sandbox_wrap,
@@ -738,9 +758,38 @@ class NativeBrain:
             bash_timeout_seconds=max(1, req.timeout_seconds),
             read_roots=read_roots,
             write_roots=write_roots,
+            web_fetch=policy,
+            web_fetch_url_corpus=corpus,
         )
         allowed = set(req.allowed_tools)
         return [t for t in build_default_tools(env) if t.schema.name in allowed]
+
+    def _web_fetch_policy(self):
+        """Map the configured ``WebFetchConfig`` → the tool's ``WebFetchPolicy``.
+
+        Returns ``None`` (tool omitted) when the config is absent or disabled.
+        The native harness has no other web-reaching tool once Bash is confined
+        behind the CONNECT allowlist, so this is the daemon-side fetch path.
+        """
+        from istota.session.tools import WebFetchPolicy
+
+        cfg = getattr(self._config, "web_fetch", None)
+        if cfg is None or not cfg.enabled:
+            return None
+        return WebFetchPolicy(
+            enabled=True,
+            timeout_seconds=cfg.timeout_seconds,
+            max_bytes=cfg.max_bytes,
+            max_content_chars=cfg.max_content_chars,
+            max_redirects=cfg.max_redirects,
+            allow_http=cfg.allow_http,
+            allowed_ports=tuple(cfg.allowed_ports),
+            user_agent=cfg.user_agent,
+            allow_hosts=tuple(cfg.allow_hosts),
+            block_hosts=tuple(cfg.block_hosts),
+            extra_blocked_cidrs=tuple(cfg.extra_blocked_cidrs),
+            require_url_provenance=cfg.require_url_provenance,
+        )
 
     def _convert_to_llm(self, messages: list[AgentMessage]) -> list[Message]:
         """Render AgentMessages to provider wire format, then repair tool pairs.

@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Native-brain daemon-side WebFetch tool
+
+Gave the NativeBrain harness a way to fetch an arbitrary public web page. The native agent loop runs in the daemon process (host netns), but its only web-reaching tool was Bash, which runs sandboxed behind bwrap `--unshare-net` + the tight CONNECT-proxy allowlist — so `curl` hit the allowlist wall and the harness was more web-blind than ClaudeCodeBrain (which ships the CLI's own WebFetch). Widening the CONNECT allowlist was the wrong lever (it hands the secret-adjacent sandboxed Bash arbitrary egress). Instead, a new `WebFetch` core tool runs **in the daemon** — credential-free and SSRF-hardened — so its broad reachability creates no new secret-exfil or internal-network path. It does not eliminate model-driven exfil (a GET query string is a canonical exfil channel), but that residual already exists via the `browse` skill and is bounded the same way.
+
+**Design.** Resolve the host → validate every candidate IP against a private/loopback/link-local/CGNAT/benchmarking/reserved/multicast blocklist (IPv4 + IPv6, IPv4-mapped-IPv6 unwrapped) → **pin the connection to the validated IP** (URL host rewritten to the IP, `Host` header + TLS `sni_hostname` kept on the hostname, so cert verification still binds to the hostname and there's no getaddrinfo→connect DNS-rebinding TOCTOU) → manual per-hop redirect handling that re-validates each hop and refuses an https→http downgrade → streamed body with a size cap that stops without buffering the whole response, a total wall-clock deadline, and abort support. Content typing: HTML→text via a stdlib `html.parser` extractor (no new dependency), text/JSON/XML returned as-is, binary content returns a short note. Output is wrapped in an `[UNTRUSTED WEB CONTENT …]` delimiter with a `Fetched: …` provenance header. The client is credential-free (`trust_env=False`, cookies cleared per hop, fixed User-Agent).
+
+**Wiring.** The tool is native-only (added to `build_default_tools`, which only NativeBrain calls) and appears only when `env.web_fetch` is set and enabled; it passes the `allowed_tools` filter because `build_allowed_tools` already lists `WebFetch`. `NativeBrain._build_tools` maps `[brain.native.web_fetch]` (`WebFetchConfig`) → `WebFetchPolicy` onto `ToolEnv`. Because a core tool doesn't drive companion-skill selection the way ingest *skills* do, the executor folds `untrusted_input` into the eager skill set when a task routes to the native brain with WebFetch enabled, so its inbound-handling guidance reaches the prompt. `require_url_provenance` (default off) locks fetches to URLs seen in the task, threaded as a prompt-derived corpus onto `ToolEnv`.
+
+**Security review + fixes.** A post-implementation review verified the pinning / redirect / cert-verification wiring against httpx/httpcore source and turned up three issues, all fixed: `fec0::/10` (deprecated IPv6 site-local) was reachable because Python's `ipaddress` doesn't flag it — added to the blocklist, with explicit NAT64/6to4/IPv4-compatible entries so coverage doesn't depend on `is_reserved` version drift; a non-string `url` arg (an LLM sometimes emits a number/array) raised into the loop — now returns a clean error; and provenance was made fail-closed via an explicit per-hop `enforce_provenance` flag instead of overloading `corpus is None`. 72 new tests (no real network — httpx `MockTransport` + stubbed resolver), full suite green.
+
+**Files added/modified:**
+- `src/istota/session/tools/web_fetch.py` - New. The tool: `_ip_is_public`, `_validate_url`, `_extract_text`/`_html_to_text`, pinned-IP fetch, `make_web_fetch_tool`.
+- `src/istota/session/tools/env.py` - `WebFetchPolicy` dataclass + `ToolEnv.web_fetch` / `web_fetch_url_corpus`.
+- `src/istota/session/tools/__init__.py` - `build_default_tools` appends `WebFetch` when policy set + enabled.
+- `src/istota/brain/native.py` - `_build_tools` sets the policy; `_web_fetch_policy()`, `_extract_urls()`.
+- `src/istota/config.py` - `WebFetchConfig` + `[brain.native.web_fetch]` parsing.
+- `src/istota/executor.py` - `_native_web_fetch_enabled()` + eager `untrusted_input` injection.
+- `deploy/ansible/{defaults/main.yml,templates/config.toml.j2,files/validate_config.py}` - defaults, template block, unknown-key guard.
+- `.claude/rules/brain.md`, `.claude/rules/config.md`, `AGENTS.md` - docs.
+- `tests/test_native_web_fetch.py` - New. 72 tests.
+
 ## 2026-07-18: Native brain harness audit — reliability, security, model-agnosticism fixes
 
 Ran a thorough audit of the native brain harness (the in-process agent loop behind `brain.kind = "native"`) against the design docs, then worked down the fix-priority list. The harness faithfully implements the committed design; the defects clustered in three areas — wire-level robustness on generic OpenAI-compatible endpoints, the file-tool sandbox story, and degraded behavior on non-Anthropic models. Ten commits, ~all findings addressed, +33 tests, full suite green (7085 passed). Findings are tracked as NB-1…NB-24 in the audit doc (kept in the project notes, not the repo).

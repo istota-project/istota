@@ -17,6 +17,38 @@ class ToolPathError(Exception):
     """
 
 
+@dataclass(frozen=True)
+class WebFetchPolicy:
+    """Resolved fetch policy the native WebFetch tool closes over.
+
+    Threaded onto ``ToolEnv`` (like ``read_roots``) rather than passed to the
+    tool factory, matching the existing pattern. ``None`` on ``ToolEnv`` means
+    the tool is omitted from ``build_default_tools`` entirely.
+
+    Safe defaults: HTTPS-only, no credentials, size/time capped, private/
+    reserved IP destinations refused (SSRF), redirects re-validated per hop.
+    """
+
+    enabled: bool = True
+    timeout_seconds: float = 20.0
+    max_bytes: int = 5_000_000  # response body cap (streamed)
+    max_content_chars: int = 100_000  # extracted-text cap returned to the model
+    max_redirects: int = 5
+    allow_http: bool = False  # http:// (cleartext) — off by default (CONNECT-only posture)
+    allowed_ports: tuple[int, ...] = (80, 443)
+    user_agent: str = "IstotaBot/1.0"
+    # If non-empty, an allowlist: only these hosts (suffix match) may be fetched.
+    allow_hosts: tuple[str, ...] = ()
+    # Always-denied hosts (suffix match), applied after allow_hosts.
+    block_hosts: tuple[str, ...] = ()
+    # Operator additions to the built-in private/reserved IP blocklist (CIDRs).
+    extra_blocked_cidrs: tuple[str, ...] = ()
+    # If true, only fetch URLs seen in the task or prior tool output (blocks
+    # model-fabricated URLs). Requires the in-context URL corpus threaded onto
+    # ToolEnv (``web_fetch_url_corpus``); default-off threads nothing new.
+    require_url_provenance: bool = False
+
+
 def _realpath(p: Path) -> Path:
     """Resolve symlinks and normalize. Works for non-existent paths too — the
     existing prefix's symlinks are resolved, the rest is normalized — so a file
@@ -58,6 +90,14 @@ class ToolEnv:
     max_read_bytes: int = 25_000_000
     read_roots: tuple[Path, ...] | None = None
     write_roots: tuple[Path, ...] | None = None
+
+    # Native WebFetch policy. ``None`` → the tool is omitted from
+    # ``build_default_tools`` (the model never sees it). See WebFetchPolicy.
+    web_fetch: WebFetchPolicy | None = None
+    # In-context URL corpus for ``require_url_provenance`` enforcement — URLs
+    # present in the task prompt + prior tool output. ``None``/empty when the
+    # provenance knob is off (the default path threads nothing new).
+    web_fetch_url_corpus: frozenset[str] | None = None
 
     # Resolved (symlink-free) roots, populated in __post_init__. Not init args.
     _read_real: list[Path] | None = field(default=None, init=False, repr=False, compare=False)
