@@ -99,6 +99,16 @@ def _login_cookies(client, app):
 
 
 @_needs_web_deps
+class TestRootRedirect:
+    async def test_bare_root_redirects_to_app(self, client):
+        # The UI lives under /istota; opening the bare port must land in the app
+        # (matters for standalone / direct-uvicorn where no nginx rewrites /).
+        resp = await client.get("/", follow_redirects=False)
+        assert resp.status_code == 307
+        assert resp.headers["location"] == "/istota/"
+
+
+@_needs_web_deps
 class TestLoginRoute:
     async def test_login_shows_landing_page(self, client, app):
         resp = await client.get("/istota/login")

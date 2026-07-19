@@ -259,10 +259,10 @@ def run_serve(
     supervisor.start()
 
     logger.info(
-        "istota serve: web UI on http://%s:%d/istota (auth=%s)",
+        "istota serve: web UI on http://%s:%d/ (redirects to /istota, auth=%s)",
         host, bind_port, config.web.auth,
     )
-    print(f"istota serve — open http://{host}:{bind_port}/istota  (Ctrl-C to stop)")
+    print(f"istota serve — open http://{host}:{bind_port}  (Ctrl-C to stop)")
 
     try:
         # uvicorn installs its own SIGINT/SIGTERM handlers and blocks here.
