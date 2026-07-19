@@ -40,6 +40,13 @@
 # The bare-metal and docker paths default to running an interactive wizard
 # (skip with --headless / --force). Standalone always runs `istota setup`.
 #
+# Standalone with a non-Anthropic (native) brain: `istota setup` prompts for the
+# API base URL, model id, and key interactively, or take them non-interactively:
+#   ... --standalone --brain native --native-model <id> --native-api-key <key>
+#   ... --standalone --brain native --native-model <id>   # or export the key:
+#       ISTOTA_BRAIN_NATIVE_API_KEY=<key>
+# The key is written to ~/.config/istota/istota.env, never to config.toml.
+#
 # Environment overrides (curl-pipe path):
 #   ISTOTA_REPO_URL     Repo to clone (default: https://github.com/istota-project/istota.git)
 #   ISTOTA_REPO_BRANCH  Branch / tag to clone (default: main)
