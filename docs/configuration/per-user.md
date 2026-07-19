@@ -43,9 +43,6 @@ alerts_channel = "room789"
 # Trusted email senders (bypass confirmation gate, supports fnmatch patterns)
 trusted_email_senders = ["*@company.com", "boss@other.com"]
 
-# Static website at /~alice/
-site_enabled = true
-
 # Modules to opt out of (default-on otherwise)
 disabled_modules = ["money"]
 
