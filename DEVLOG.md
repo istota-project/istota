@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Standalone — claude auth (macOS keychain) + beancount ledger core
+
+Two standalone-install breakages, both found on a real mac run.
+
+**`claude` reported "Not logged in" despite a logged-in CLI.** That string isn't ours — it's the `claude` CLI printed as the task result. Reproduced by spawning `claude -p` with exactly the env `executor.build_clean_env` produces (PATH/HOME/PYTHONUNBUFFERED + a few passthroughs): rc=1, "Not logged in · Please run /login". Adding `USER` + `LOGNAME` back → rc=0. On macOS the CLI's OAuth credential lives in the login Keychain, and the Keychain lookup needs `USER`/`LOGNAME`; the multi-user env-stripping dropped them. Fix: `build_clean_env` passes `USER`/`LOGNAME` through (process-identity basics, not secrets; harmless on Linux where the credential is a file under `HOME`). This is why the ClaudeCodeBrain default brain was dead on a standalone mac even with `claude` authenticated.
+
+**money crashed on missing `beancount`.** The `money` module is on by default, so its init (`ensure_initialised` → `backfill_transaction_ids` → `from beancount.core.data import Transaction`) ran on every standalone boot — but `beancount` isn't in the lean `local` extra, so it raised `ModuleNotFoundError`. Rather than half-ship money (a first cut added a `money-core` extra to `local`, but a partly-functional money tab — ledger but no invoicing/Monarch — is confusing), money stays a full opt-in extra and the module hides itself when its deps aren't installed:
+
+- **Availability gate.** `modules.MODULE_DEPENDENCIES` maps a module to the import names its extra provides (`money → beancount`); `module_available()` probes them with `importlib.util.find_spec` (cached). `Config.is_module_enabled` returns False for an unavailable module — before the DB read, mirroring the experimental gate. Because `is_module_enabled` is the single gate, this hides money everywhere at once: the scheduler's `_sync_module_jobs` skips it (no `resolve_for_user`, no crash), `/api/me` reports `money: False`, and the web nav drops the tab. In a dev/CI env (beancount installed) money stays available, so nothing changes there.
+- **Install gate.** `install.sh --standalone` now asks "Install the money module?" (`_prompt_yes_no`, default no, same tty-safe read as the mode prompt). Yes → installs `istota[local,money]` (full: beancount + beanquery + weasyprint + aiohttp); no → `istota[local]`, money hidden. Re-running with the extra later lights the tab up. The extra choice is at install time, so it's an installer question, not a `setup` one.
+
+Verified: `istota[local]` (no money) → `beancount` not importable, `serve` logs no money lines, `/api/me` → `money: False`; `istota[local,money]` → `beancount==3.2.3` installs; the install prompt selects `local,money` on yes and `local` on no (pty test). `build_clean_env` now carries USER/LOGNAME. Unit tests for both the identity vars and the availability gate.
+
+**Files added/modified:**
+- `src/istota/executor.py` - `build_clean_env` passes `USER`/`LOGNAME`.
+- `src/istota/modules.py` - `MODULE_DEPENDENCIES` + `module_available()` (dep-availability probe).
+- `src/istota/config.py` - `is_module_enabled` returns False for a dep-unavailable module.
+- `install.sh` - `run_standalone` asks whether to install the money extra; `_prompt_yes_no` helper.
+- `tests/test_security.py`, `tests/test_config.py` - USER/LOGNAME passthrough + availability-gate tests.
+- `docs/LOCAL_INSTALL.md` - money is opt-in and self-hides when its extra is absent.
+
 ## 2026-07-19: Bare port redirects to the app; standalone reinstall picks up fresh code
 
 `istota serve` printed `Uvicorn running on http://127.0.0.1:8766` (uvicorn's own line, after our own message), but the whole UI lives under `/istota`, so opening the bare port 404'd — confusing for a local user who just wants to open the port. Truly dropping the `/istota` base is a large, risky change (the base is baked into the SvelteKit `adapter-static` build and hardcoded across ~all FastAPI routers, redirects, and the OAuth callback URL; nginx also routes `/istota/` → web on the server), so the pragmatic fix: a root route (`@app.get("/")`) that 307-redirects `/` → `/istota/`. On the server nginx owns `/` (→ Nextcloud), so the app-level `/` handler is only reached on direct/standalone access — safe. `serve`'s printed URL now shows the bare port (which redirects) to match uvicorn's line and the user's expectation.

@@ -24,11 +24,13 @@ If you need isolation between untrusted content and your host, use the server de
 uv tool install 'istota[local]'
 ```
 
-The `local` extra is the lean footprint: the core agent, the web UI, and the light pure-Python modules (feeds, calendar, email, markets). Heavy modules stay opt-in — add them explicitly if you want them:
+The `local` extra is the lean footprint: the core agent, the web UI, and the light pure-Python modules (feeds, calendar, email, markets). Heavier modules stay opt-in — add them explicitly if you want them:
 
 ```bash
 uv tool install 'istota[local,money,health,location,memory-search,whisper,transcribe]'
 ```
+
+A module whose extra isn't installed hides itself: the app skips it and its web UI tab doesn't appear, rather than showing a broken tab. So `money` (double-entry accounting via beancount; also pulls weasyprint for invoice PDFs) is absent unless you add its extra — the guided `install.sh --standalone` asks whether you want it (the extra is chosen at install time, so it's an installer question, not a `setup` one). Add it later at any time by re-running `uv tool install` with `money` in the extras, and the Money tab appears on the next `serve`.
 
 ## Set up
 

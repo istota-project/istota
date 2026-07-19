@@ -89,6 +89,28 @@ class TestBuildCleanEnv:
         assert venv_bin in env["PATH"]
 
 
+    def test_passes_user_identity_vars(self):
+        """USER/LOGNAME reach the subprocess so the macOS Keychain lookup the
+        `claude` CLI uses to find its OAuth credential works (the standalone
+        install's default brain reported 'Not logged in' without them)."""
+        config = Config()
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "HOME": "/home/test",
+            "USER": "alice",
+            "LOGNAME": "alice",
+        }, clear=True):
+            env = build_clean_env(config)
+        assert env["USER"] == "alice"
+        assert env["LOGNAME"] == "alice"
+
+    def test_omits_user_identity_vars_when_unset(self):
+        config = Config()
+        with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}, clear=True):
+            env = build_clean_env(config)
+        assert "USER" not in env
+        assert "LOGNAME" not in env
+
     def test_includes_oauth_token(self):
         """CLAUDE_CODE_OAUTH_TOKEN is passed through for auth."""
         config = Config()

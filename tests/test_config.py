@@ -1669,6 +1669,28 @@ class TestDisabledModules:
         assert cfg.is_module_enabled("alice", "feeds") is False
         assert cfg.is_module_enabled("alice", "money") is True
 
+    def test_is_module_enabled_false_when_dependency_missing(self, monkeypatch):
+        """A module whose optional install extra is absent is unavailable —
+        hidden from the web UI and skipped by the scheduler — so a lean install
+        (e.g. `local` without the money extra) shows no broken Money tab."""
+        from istota import modules
+
+        monkeypatch.setitem(
+            modules.MODULE_DEPENDENCIES, "money", ("a_pkg_not_installed_zzz",),
+        )
+        monkeypatch.setattr(modules, "_AVAILABILITY_CACHE", {})
+        cfg = Config()
+        cfg.users["alice"] = UserConfig()
+        assert cfg.is_module_enabled("alice", "money") is False
+        # A module with its deps present is unaffected.
+        assert cfg.is_module_enabled("alice", "feeds") is True
+
+    def test_module_available_true_when_no_deps_declared(self, monkeypatch):
+        from istota import modules
+
+        monkeypatch.setattr(modules, "_AVAILABILITY_CACHE", {})
+        assert modules.module_available("feeds") is True
+
     def test_is_module_enabled_unknown_module(self):
         # Unknown module names are never "enabled" — guard against typos
         # leaking into user-supplied data.
