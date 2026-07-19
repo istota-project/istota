@@ -96,8 +96,12 @@ class BrainResult:
     actions_taken: str | None = None
     execution_trace: str | None = None
     # completed/cancelled/timeout/oom/transient_api_error/error/not_found,
-    # plus "fallback" (TmuxClaudeBrain: this attempt couldn't be driven via tmux —
-    # the executor reruns it once through claude_code within the same attempt).
+    # plus "usage_limit" (the brain hit a subscription/quota/billing limit — a
+    # persistent "brain unavailable" condition the executor reroutes to the
+    # configured fallback brain and which opens the availability breaker) and
+    # "fallback" (TmuxClaudeBrain: this attempt couldn't be driven via tmux —
+    # the executor reruns it once through the fallback brain within the same
+    # attempt).
     stop_reason: str = "completed"
 
     # Native-brain only: per-task token + cost telemetry. ClaudeCodeBrain leaves

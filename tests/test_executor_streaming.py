@@ -1673,6 +1673,12 @@ class TestTmuxFallback:
     def _run(self, tmp_path, monkeypatch, tmux_result):
         from istota.config import BrainConfig
         from istota.brain._types import BrainResult
+        from istota.brain._fallback import reset_availability_breaker
+
+        # The generalized fallback path routes not_found/usage_limit through the
+        # process-global availability breaker; reset it so tests don't pollute
+        # each other via a lingering open primary.
+        reset_availability_breaker()
 
         config = _make_config(tmp_path)
         config.brain = BrainConfig(kind="tmux_claude")
@@ -1689,6 +1695,9 @@ class TestTmuxFallback:
 
         patches = _patch_executor() + [
             patch("istota.executor.make_brain", side_effect=fake_make_brain),
+            # not_found opens the availability breaker → one operator alert; stub
+            # it so the test doesn't touch the notification stack.
+            patch("istota.notifications.send_notification", return_value=None),
         ]
         with contextmanager_chain(patches):
             success, result, _actions, _trace = execute_task(task, config, [])

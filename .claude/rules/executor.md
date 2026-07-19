@@ -141,9 +141,54 @@ After `brain.execute()` returns, the executor:
 1. Calls `_compose_full_result(result_text, trace)` on success to reconcile
    the final ResultEvent text against substantial intermediate text blocks
    (CM-aware + terse-result recovery — same logic both brains will need).
-2. Updates the user skills fingerprint when interactive task succeeded.
-3. Returns `(success, result, actions_taken_json, execution_trace_json)` —
+2. On a dropped-pin fallback (see below), appends the visible model note
+   **after** composition.
+3. Updates the user skills fingerprint when interactive task succeeded.
+4. Returns `(success, result, actions_taken_json, execution_trace_json)` —
    shape unchanged from before the refactor.
+
+## Brain fallback (availability failover)
+Generalizes the old hardcoded tmux→claude_code in-attempt rerun. The
+`brain.execute(req)` call is wrapped in a routing block (replacing the tmux-only
+`if _brain_config.kind == "tmux_claude"` block) that reruns the *same attempt*
+(no new DB row, no `attempt_count` increment) through a configured fallback
+brain when the primary is unavailable. Kept executor-level: brains have no
+`Config` for the operator alert, and the rerun/breaker already live here.
+
+- `_fallback_kind = effective_fallback_kind(_brain_config)` (`brain/_fallback.py`);
+  `_cooldown = config.brain.fallback_cooldown_seconds`; `_breaker =
+  get_availability_breaker()` (process-global `PrimaryAvailabilityBreaker`).
+- **Stickiness:** when the breaker `should_skip(primary_kind, cooldown)`, the
+  primary is skipped entirely and the task goes straight to the fallback.
+- **Trigger set** `{usage_limit, not_found, fallback}` (+ `transient_api_error`
+  iff `fallback_on_transient`): on a matching `brain_result.stop_reason` with a
+  fallback configured, the executor reruns via `_run_fallback`. **Cooldown set**
+  `{usage_limit, not_found}` opens the breaker (`open()` returns True once →
+  `_fire_fallback_alert`, one operator alert). `fallback` is excluded from the
+  cooldown set (tmux keeps being probed per-task); the tmux launch alert
+  (`consume_circuit_open_alert`) is still fired for a `tmux_claude` primary.
+  A successful primary run (breaker armed) calls `record_success` to close it.
+- `_run_fallback(config, brain_config, fallback_kind, task, req)` →
+  `(BrainResult | None, dropped_pin)`. Builds the fallback brain
+  (`dataclasses.replace(brain_config, kind=fallback_kind)`, overlaying the
+  per-user native key when `native`), resolves model/effort via
+  `_resolve_fallback_model_effort`, and reruns `dataclasses.replace(req,
+  model=…, effort=…)`. A construction failure returns `None` (keep the primary
+  result); an unexpected `execute` exception becomes a failed `BrainResult`.
+- `_resolve_fallback_model_effort(task, config, fallback_brain, effort)` →
+  `(model, effort, dropped_pin)`. Empty requested model → fallback's own default
+  (no note). `is_portable_alias(raw, config.models.roles)` → re-resolve the
+  intent in the fallback namespace (no note). Non-portable pin → fallback default
+  + `dropped_pin = raw` (INFO log + visible note).
+- `_append_model_note(result_text, dropped_pin, primary_kind, actual_model)` —
+  pure string→string, appended after `_compose_full_result` and only on success;
+  a single italic line naming the dropped pin and the model actually used
+  (`actual_model` = the persisted `model_used`). Delivers uniformly across
+  surfaces (it's part of `result_text`).
+
+No fallback configured (`fallback = ""`, non-tmux primary) collapses the whole
+block to the plain `brain.execute(req)` call. See `.claude/rules/brain.md`
+"Brain fallback" for the classification + portable-alias contract.
 
 ## Result composition (`_compose_full_result`)
 Stays in the executor (not the brain) because it operates on the

@@ -187,13 +187,27 @@ kind: str = "claude_code"                       # "claude_code" | "native" | "tm
 native: NativeBrainConfig                       # [brain.native] block (native harness)
 tmux: TmuxBrainConfig                           # [brain.tmux] block (tmux-driven interactive TUI)
 source_type_overrides: dict[str, str] = {}      # [brain.source_type_overrides] — per-source-type routing
+fallback: str = ""                              # brain kind to fall back to when primary unavailable
+fallback_on_transient: bool = False             # also reroute a persistent transient_api_error
+fallback_cooldown_seconds: int = 900            # skip an unavailable primary this long; 0 disables stickiness
 ```
+`fallback` / `fallback_on_transient` / `fallback_cooldown_seconds` drive
+availability failover (brain-fallback spec). When the primary brain is
+unavailable (usage limit / missing binary / tmux launch failure) the executor
+reruns the attempt through the fallback brain with that brain's own settings.
+`""` = no fallback (a `tmux_claude` primary still defaults to `claude_code` via
+`brain._fallback.effective_fallback_kind`). `_validate_brain_fallback` (config
+load) neutralizes an unknown kind or a self-fallback with one WARNING. See
+`.claude/rules/brain.md` "Brain fallback" + `.claude/rules/executor.md`.
+
 `TmuxBrainConfig` (`[brain.tmux]`): `fallback_trip_threshold` (5),
 `fallback_cooldown_seconds` (300), `ready_timeout_seconds` (30),
 `tmux_command_timeout` (10), `cli_version_pin` ("2.1.168"), plus the readiness /
-dialog / error marker lists (`ready_markers`, `trust_markers`, `theme_markers`,
-`bypass_warning_marker`, `bypass_accept_marker`, `error_markers`). All defaulted
-to the prototype's hardcoded values; see `.claude/rules/brain.md` "TmuxClaudeBrain".
+dialog / error / usage-limit marker lists (`ready_markers`, `trust_markers`,
+`theme_markers`, `bypass_warning_marker`, `bypass_accept_marker`, `error_markers`,
+`usage_limit_markers` — pane substrings → `stop_reason=usage_limit` → fallback,
+checked before `error_markers`). All defaulted to the prototype's hardcoded
+values; see `.claude/rules/brain.md` "TmuxClaudeBrain".
 Selects which `Brain` implementation handles model invocation. `source_type_overrides`
 maps a task `source_type` to a brain kind, overriding `kind` for matching tasks
 (gradual rollout: cron/heartbeat on native, interactive on claude_code). The

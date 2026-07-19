@@ -42,7 +42,14 @@ from .brain import (
     ToolEndEvent,
     ToolProgressEvent,
     ToolUseEvent,
+    is_portable_alias,
     make_brain,
+)
+from .brain._fallback import (
+    COOLDOWN_STOP_REASONS,
+    TRIGGER_STOP_REASONS,
+    effective_fallback_kind,
+    get_availability_breaker,
 )
 from .events import EventWriter, random_progress_message
 from .skills.calendar import get_caldav_client, get_calendars_for_user
@@ -85,6 +92,7 @@ from .brain.claude_code import (  # noqa: E402  (kept after module docstring)
     API_RETRY_MAX_ATTEMPTS,
     TRANSIENT_STATUS_CODES,
     is_transient_api_error,
+    is_usage_limit_error,
     parse_api_error,
 )
 
@@ -384,6 +392,109 @@ def _native_with_user_key(native_config, config: Config, user_id: str):
     if key:
         return dataclasses.replace(native_config, api_key=key)
     return native_config
+
+
+# --- Brain fallback (availability failover) --------------------------------
+# Generalizes the old tmux→claude_code in-attempt fallback so an operator can
+# configure any brain as a fallback for any primary, triggered when the primary
+# is unavailable (usage limit / missing binary / tmux launch failure). Stays at
+# the executor level: brains have no Config (needed for the operator alert), and
+# the same-attempt/no-increment rerun already lives here.
+
+
+def _resolve_fallback_model_effort(task, config, fallback_brain, effort):
+    """Resolve (model, effort, dropped_pin) for a fallback brain run.
+
+    A portable role tier (fast/general/smart + operator custom roles) is
+    re-resolved in the fallback brain's namespace — the *intent* crosses the
+    provider boundary. A non-portable pin (provider alias / canonical ID) can't
+    cross, so the fallback uses its own default and the requested name is
+    returned as ``dropped_pin`` (for the visible note + the INFO log). An empty
+    requested model → the fallback's own default, no note.
+    """
+    raw = (task.model or "").strip() or config.model
+    if not raw:
+        return ("", effort, None)
+    if is_portable_alias(raw, config.models.roles):
+        return (fallback_brain.resolve_model_name(raw), effort, None)
+    logger.info(
+        "fallback_model: non-portable %r dropped; using fallback brain default", raw
+    )
+    return ("", effort, raw)
+
+
+def _run_fallback(config, brain_config, fallback_kind, task, req):
+    """Construct the fallback brain and run the same attempt through it.
+
+    Returns ``(BrainResult | None, dropped_pin)``. A ``None`` result means the
+    fallback brain couldn't be constructed (misconfig) — the caller keeps the
+    primary's result and flows through the normal path. Never raises: an
+    unexpected exception in the fallback brain becomes a failed BrainResult.
+    """
+    import dataclasses as _dc
+
+    from .brain import BrainResult
+
+    try:
+        fb_config = _dc.replace(brain_config, kind=fallback_kind)
+        if fallback_kind == "native":
+            fb_config = _dc.replace(
+                fb_config,
+                native=_native_with_user_key(fb_config.native, config, task.user_id),
+            )
+        fb_brain = make_brain(fb_config)
+    except Exception as e:  # noqa: BLE001 — misconfigured nested block
+        logger.warning("brain fallback: could not construct %s: %s", fallback_kind, e)
+        return None, None
+
+    fb_model, fb_effort, dropped_pin = _resolve_fallback_model_effort(
+        task, config, fb_brain, req.effort
+    )
+    fb_req = _dc.replace(req, model=fb_model, effort=fb_effort)
+    try:
+        return fb_brain.execute(fb_req), dropped_pin
+    except Exception as e:  # noqa: BLE001 — brains shouldn't raise, but be safe
+        logger.exception("brain fallback: fallback brain %s raised", fallback_kind)
+        return (
+            BrainResult(
+                success=False,
+                result_text=f"Fallback execution error: {e}",
+                stop_reason="error",
+            ),
+            dropped_pin,
+        )
+
+
+def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason):
+    """One operator alert when the availability breaker opens for a primary."""
+    try:
+        from . import notifications
+
+        notifications.send_notification(
+            config,
+            task.user_id,
+            f"⚠️ {primary_kind} brain unavailable ({reason}) — falling back to "
+            f"{fallback_kind} for {config.brain.fallback_cooldown_seconds}s. "
+            f"The primary will be probed again after the cooldown.",
+            purpose="alert",
+        )
+    except Exception:
+        logger.debug("brain fallback alert failed", exc_info=True)
+
+
+def _append_model_note(result_text, dropped_pin, primary_kind, actual_model):
+    """Append a single italic note when a non-portable pin was dropped on a
+    successful fallback, so the user isn't silently given a different model.
+
+    Pure string→string (no I/O); part of ``result_text`` so it delivers
+    uniformly across every surface and persists with the result.
+    """
+    model_str = actual_model or "a different model"
+    note = (
+        f"_⚠️ Model note: `{dropped_pin}` isn't available on the fallback brain "
+        f"({primary_kind} unavailable), so this ran on `{model_str}` instead._"
+    )
+    return f"{result_text}\n\n{note}"
 
 
 def _build_native_completer(native_config, timeout: float):
@@ -3318,48 +3429,99 @@ def execute_task(
             session_label=f"istota-{task.id}-{task.attempt_count}",
         )
 
+        # Availability failover (brain-fallback spec). Generalizes the old
+        # tmux→claude_code in-attempt fallback: when the primary brain is
+        # unavailable (usage limit / missing binary / tmux launch failure) and a
+        # fallback is configured, re-run this same attempt through the fallback
+        # brain — no new DB row, no attempt increment. Stickiness: once the
+        # primary reports a persistent unavailability, subsequent tasks skip it
+        # for a cooldown. All of it collapses to the plain primary call when no
+        # fallback is configured.
+        _primary_kind = _brain_config.kind
+        _fallback_kind = effective_fallback_kind(_brain_config)
+        _cooldown = config.brain.fallback_cooldown_seconds
+        _breaker = get_availability_breaker()
+        _dropped_pin = None
+        _skip_primary = (
+            _fallback_kind is not None
+            and _cooldown > 0
+            and _breaker.should_skip(_primary_kind, _cooldown)
+        )
         try:
             with contextlib.ExitStack() as stack:
                 if _proxy_ctx is not None:
                     stack.enter_context(_proxy_ctx)
                 if _net_proxy_ctx is not None:
                     stack.enter_context(_net_proxy_ctx)
-                brain_result = brain.execute(req)
-                # Automatic headless fallback (tmux-production spec §4): when the
-                # tmux brain can't drive a usable session it returns
-                # stop_reason="fallback" (or "not_found" for a missing-tmux host
-                # on a full switch). Re-run this same attempt once through
-                # claude_code — no new DB row, no attempt increment — so the
-                # instance keeps completing (at Agent-SDK credit cost) instead of
-                # failing en masse. Loud in the logs; the circuit breaker turns a
-                # systemic break into one operator alert.
-                if (
-                    _brain_config.kind == "tmux_claude"
-                    and brain_result.stop_reason in ("fallback", "not_found")
-                ):
-                    logger.error(
-                        "tmux_brain in-attempt fallback to claude_code: "
-                        "task=%d reason=%s",
-                        task.id, brain_result.stop_reason,
+
+                if _skip_primary:
+                    # Cooling down — go straight to the fallback, no primary call.
+                    logger.info(
+                        "brain fallback: skipping primary %s (cooling down) "
+                        "-> %s task=%d",
+                        _primary_kind, _fallback_kind, task.id,
                     )
-                    try:
-                        from .brain.tmux_claude import consume_circuit_open_alert
-                        if consume_circuit_open_alert():
-                            from . import notifications
-                            notifications.send_notification(
-                                config, task.user_id,
-                                "⚠️ tmux_claude brain circuit opened — falling "
-                                "back to claude_code (headless, metered). Check "
-                                "the claude CLI version / readiness markers.",
-                                purpose="alert",
+                    _fb, _dropped_pin = _run_fallback(
+                        config, _brain_config, _fallback_kind, task, req
+                    )
+                    brain_result = _fb if _fb is not None else brain.execute(req)
+                else:
+                    brain_result = brain.execute(req)
+                    _triggers = set(TRIGGER_STOP_REASONS)
+                    if config.brain.fallback_on_transient:
+                        _triggers.add("transient_api_error")
+                    if (
+                        _fallback_kind is not None
+                        and brain_result.stop_reason in _triggers
+                    ):
+                        # Open the availability breaker only for persistent
+                        # conditions (usage_limit / not_found). "fallback" is
+                        # excluded so tmux keeps being probed per-task (its own
+                        # launch _CircuitBreaker governs when to stop).
+                        if (
+                            _cooldown > 0
+                            and brain_result.stop_reason in COOLDOWN_STOP_REASONS
+                            and _breaker.open(_primary_kind, _cooldown)
+                        ):
+                            _fire_fallback_alert(
+                                config, task, _primary_kind, _fallback_kind,
+                                brain_result.stop_reason,
                             )
-                    except Exception:
-                        logger.debug("circuit-open alert failed", exc_info=True)
-                    import dataclasses as _dc
-                    _fallback_brain = make_brain(
-                        _dc.replace(_brain_config, kind="claude_code")
-                    )
-                    brain_result = _fallback_brain.execute(req)
+                        logger.error(
+                            "brain fallback: task=%d primary=%s reason=%s -> %s",
+                            task.id, _primary_kind, brain_result.stop_reason,
+                            _fallback_kind,
+                        )
+                        # Preserve tmux's own launch alert: its _CircuitBreaker
+                        # governs fallback/not_found (which are NOT in the
+                        # availability breaker's cooldown set), so its
+                        # 5-consecutive-launch-failure alert still routes here.
+                        if _primary_kind == "tmux_claude":
+                            try:
+                                from .brain.tmux_claude import (
+                                    consume_circuit_open_alert,
+                                )
+                                if consume_circuit_open_alert():
+                                    from . import notifications
+                                    notifications.send_notification(
+                                        config, task.user_id,
+                                        "⚠️ tmux_claude brain circuit opened — "
+                                        "falling back. Check the claude CLI "
+                                        "version / readiness markers.",
+                                        purpose="alert",
+                                    )
+                            except Exception:
+                                logger.debug(
+                                    "tmux circuit-open alert failed", exc_info=True
+                                )
+                        _fb, _dropped_pin = _run_fallback(
+                            config, _brain_config, _fallback_kind, task, req
+                        )
+                        if _fb is not None:
+                            brain_result = _fb
+                    elif brain_result.success and _cooldown > 0:
+                        # Primary healthy again → close the breaker.
+                        _breaker.record_success(_primary_kind)
         finally:
             # Final flush: emit any buffered streamed thinking + text before the
             # scheduler emits the terminal event. Thinking first so its rows keep
@@ -3405,6 +3567,16 @@ def execute_task(
                 result = _compose_full_result(result, trace_list, task=task)
             except (json.JSONDecodeError, TypeError):
                 pass
+
+        # Visible fallback note: a non-portable model pin that couldn't cross the
+        # provider boundary was dropped, so the fallback ran on its own default.
+        # Append the note *after* composition (so composition operates on the real
+        # answer) and only on success — a failed fallback flows through the normal
+        # error path with no cosmetic note.
+        if success and _dropped_pin:
+            result = _append_model_note(
+                result, _dropped_pin, _primary_kind, actual_model
+            )
 
         # Update skills fingerprint after successful interactive execution
         if success and _is_interactive:

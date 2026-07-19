@@ -104,6 +104,21 @@ features = []
 # [brain]
 # kind = "claude_code"
 #
+# Availability failover: when the primary brain is unavailable (subscription
+# usage limit / missing binary / tmux launch failure), run the task on the
+# fallback brain with that brain's own [brain.native] / [brain.tmux] settings.
+# Motivating case: a claude_code subscription hitting its usage limit, failing
+# over to a metered native endpoint. A portable role tier (fast/general/smart)
+# carries across the provider boundary; a provider-specific model pin drops to
+# the fallback brain's own default (logged + a visible note in the reply).
+# Single level only. "" = no fallback (a tmux_claude primary still defaults to
+# claude_code). Once the primary reports a persistent unavailability, subsequent
+# tasks skip it for fallback_cooldown_seconds; a successful primary probe closes
+# the cooldown early.
+# fallback = ""                       # "" | "claude_code" | "native" | "tmux_claude"
+# fallback_on_transient = false       # also reroute a persistent transient_api_error
+# fallback_cooldown_seconds = 900     # skip an unavailable primary this long; 0 disables stickiness
+#
 # Native-brain settings (only used when kind = "native", or via a routing
 # override below). The API key stays out of this file — set it via the
 # ISTOTA_BRAIN_NATIVE_API_KEY env override.
@@ -144,6 +159,8 @@ features = []
 # bypass_warning_marker = "Bypass Permissions mode"
 # bypass_accept_marker = "Yes, I accept"
 # error_markers = ["API Error", "session limit reached", "Context low"]
+# usage_limit_markers = ["session limit reached", "usage limit reached", "Claude usage limit"]
+#                                   # pane substrings → stop_reason=usage_limit → fallback brain
 #
 # Per-source-type brain routing (gradual rollout): map a task's source_type to
 # a brain kind, overriding `kind` for matching tasks. Lets cron/heartbeat run on

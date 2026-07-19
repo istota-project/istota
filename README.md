@@ -35,7 +35,7 @@ Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file w
 | **Monitoring** | Heartbeat checks — file age, shell commands, URL health, calendar conflicts, task deadlines, self-checks — with cooldowns, quiet hours, and per-check intervals. |
 | **Multi-user** | Per-user config, resource permissions, worker pools, and admin/non-admin isolation. Multiple bot instances can share one Nextcloud and interact with each other through Talk rooms. |
 | **Security** | Bubblewrap sandbox per task, credential stripping from subprocess environments, network isolation via a CONNECT proxy, and deferred DB writes for sandboxed operations. |
-| **Pluggable brain** | Swap the model backend behind one protocol: the Claude Code CLI, Istota's own in-process agentic loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, Ollama, LM Studio, vLLM), or the Claude TUI over tmux. Route whole instances or specific task types to either. |
+| **Pluggable brain** | Swap the model backend behind one protocol: the Claude Code CLI, Istota's own in-process agentic loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, Ollama, LM Studio, vLLM), or the Claude TUI over tmux. Route whole instances or specific task types to either, and configure a fallback backend so a task keeps running when the primary hits a usage limit or goes unavailable. |
 | **Constitution** | An [Emissaries](https://github.com/istota-project/emissaries) layer defines how the agent handles data, the boundary between private and public action, and what it owes to people beyond its operator. |
 
 ## Install

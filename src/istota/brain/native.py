@@ -74,8 +74,10 @@ from istota.session.messages import CompactionSummaryMessage
 from istota.session.retry import classify_error
 from istota.session.usage import TaskUsage
 
+from ._aliases import CANONICAL_ROLES
 from ._roles import get_role_override, get_role_overrides
 from ._types import BrainRequest, BrainResult
+from .claude_code import is_usage_limit_error
 
 logger = logging.getLogger("istota.brain.native")
 
@@ -83,13 +85,13 @@ _API_RETRY_MAX_ATTEMPTS = 3
 _API_RETRY_BASE_DELAY = 5.0
 _API_RETRY_MAX_DELAY = 120.0
 
-# Built-in role aliases (provider-agnostic convention, mirrors claude_code's
-# DEFAULT_ROLE_TARGETS keys). On the native brain these all resolve to the one
-# configured endpoint model unless the operator remapped them via [models.roles]
-# — so stock config's extraction_model/curation_model="general" never reaches
-# the wire as the literal string "general" (NB-3). Ordered for a stable
-# list_aliases() table.
-_BUILTIN_ROLE_NAMES = ("fast", "general", "smart")
+# Built-in role aliases — the portable CANONICAL_ROLES (single source of truth,
+# shared with claude_code's DEFAULT_ROLE_TARGETS keys). On the native brain these
+# all resolve to the one configured endpoint model unless the operator remapped
+# them via [models.roles] — so stock config's extraction_model/curation_model=
+# "general" never reaches the wire as the literal string "general" (NB-3), and a
+# portable role survives a cross-provider fallback.
+_BUILTIN_ROLE_NAMES = CANONICAL_ROLES
 
 # URL harvester for require_url_provenance (Stage 3b). Matches http(s) URLs in
 # free text; trailing punctuation the wrapping prose contributes is trimmed.
@@ -105,8 +107,35 @@ def _extract_urls(text: str) -> frozenset[str]:
 # agent_end reasons (max_turns / loop_detected / "") are normalized into this
 # set so a future stop_reason-keyed dispatch can't be surprised (NB-18).
 _DOCUMENTED_STOP_REASONS = frozenset(
-    {"completed", "cancelled", "timeout", "oom", "transient_api_error", "error", "not_found"}
+    {
+        "completed", "cancelled", "timeout", "oom", "transient_api_error",
+        "usage_limit", "error", "not_found",
+    }
 )
+
+# Best-effort transient signal for arbitrary OpenAI-compatible error bodies
+# (native talks to any endpoint, so there is no ``API Error: NNN`` shape to
+# parse). Matches the HTTP status the provider layer stamps into its
+# ``StreamError`` text (``HTTP 429: …`` / ``HTTP 503: …``).
+_NATIVE_TRANSIENT_STATUS_RE = re.compile(r"HTTP (429|5\d\d)\b")
+
+
+def _classify_native_error(text: str) -> str:
+    """Classify a native error body into ``usage_limit`` / ``transient_api_error``
+    / ``error``.
+
+    A quota/billing/subscription exhaustion → ``usage_limit`` (reroutes to the
+    fallback brain). A plain transient overload/rate-limit 429 or 5xx →
+    ``transient_api_error``. Anything else stays a generic ``error``. Usage-limit
+    is checked first so a quota 429 doesn't read as a plain transient. Best-effort
+    and tunable against the operator's actual endpoint.
+    """
+    if is_usage_limit_error(text):
+        return "usage_limit"
+    low = (text or "").lower()
+    if _NATIVE_TRANSIENT_STATUS_RE.search(text or "") or "overloaded" in low or "rate limit" in low:
+        return "transient_api_error"
+    return "error"
 
 
 def _compaction_input_chars(window: int) -> int:
@@ -846,12 +875,16 @@ class NativeBrain:
                 model_used=model,
             )
         if stop_reason == "error":
+            # Classify the provider error body: a quota/billing exhaustion becomes
+            # ``usage_limit`` (reroutes to the fallback brain); a transient
+            # overload/rate-limit stays retryable; else a generic error.
+            classified = _classify_native_error(error_message or text)
             return BrainResult(
                 success=False,
                 result_text=error_message or text or "Native brain execution error",
                 actions_taken=actions_json,
                 execution_trace=trace_json,
-                stop_reason="error",
+                stop_reason=classified,
                 usage=usage,
                 model_used=model,
             )

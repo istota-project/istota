@@ -55,6 +55,7 @@ from .claude_code import (
     _is_root,
     build_claude_cli_flags,
     is_transient_api_error,
+    is_usage_limit_error,
 )
 
 logger = logging.getLogger("istota.brain.tmux_claude")
@@ -116,6 +117,11 @@ _BYPASS_WARNING_MARKER = "Bypass Permissions mode"
 _BYPASS_ACCEPT_MARKER = "Yes, I accept"
 # Pane substrings that mean the turn cannot make progress (fail fast, §3).
 _ERROR_MARKERS = ("API Error", "session limit reached", "Context low")
+_USAGE_LIMIT_MARKERS = (
+    "session limit reached",
+    "usage limit reached",
+    "Claude usage limit",
+)
 
 # Flags the interactive TUI rejects vs the headless `-p` path. Stage 1 verifies
 # this against the pinned CLI; the prototype passed --effort and
@@ -402,6 +408,7 @@ class _Params:
         self.bypass_warning_marker = str(g("bypass_warning_marker", _BYPASS_WARNING_MARKER))
         self.bypass_accept_marker = str(g("bypass_accept_marker", _BYPASS_ACCEPT_MARKER))
         self.error_markers = tuple(g("error_markers", _ERROR_MARKERS))
+        self.usage_limit_markers = tuple(g("usage_limit_markers", _USAGE_LIMIT_MARKERS))
 
 
 class _TranscriptTailer(threading.Thread):
@@ -692,6 +699,24 @@ class TmuxClaudeBrain:
                     ),
                     False,
                 )
+            if status == "usage_limit":
+                # A subscription/quota limit is persistent — not retryable, not a
+                # launch failure. Return it up to the executor, which reroutes to
+                # the configured fallback brain. Guarded here so it never feeds the
+                # launch _CircuitBreaker (only stop_reason="fallback" does).
+                logger.warning(
+                    "tmux_brain usage_limit session=%s pane=%r",
+                    session, pane[:_PANE_LOG_CHARS],
+                )
+                outcome = "usage_limit"
+                return (
+                    BrainResult(
+                        success=False,
+                        result_text="claude reported a usage/quota limit",
+                        stop_reason="usage_limit",
+                    ),
+                    False,
+                )
             if status == "error":
                 # Classify against the same rule ClaudeCodeBrain uses. A transient
                 # API error is retryable (fresh session); anything else fails to
@@ -855,6 +880,21 @@ class TmuxClaudeBrain:
         model_used = ""
         if transcript_path:
             model_used = _model_from_transcript(Path(transcript_path))
+
+        # A limit that lands as the final assistant message (the Stop hook still
+        # fired) reads as a usage_limit, not a completed turn — reroutes to the
+        # fallback brain. tmux is the subscription-billing brain, so this is the
+        # exact case a fallback exists to cover. Not a launch failure, so it never
+        # feeds the launch _CircuitBreaker (execute only records that on
+        # stop_reason="fallback").
+        if is_usage_limit_error(result_text):
+            logger.warning("tmux_brain usage_limit (transcript body)")
+            return BrainResult(
+                success=False,
+                result_text=result_text,
+                stop_reason="usage_limit",
+                model_used=model_used or req.model,
+            )
 
         return BrainResult(
             success=True,
@@ -1120,8 +1160,14 @@ class TmuxClaudeBrain:
         log), empty otherwise.
 
         Each tick, in order: sentinel exists → done; cancel_check → cancelled;
+        usage-limit marker → usage_limit (fail fast, reroutes to fallback);
         error marker in the pane → error (fail fast); pane/session dead → error;
-        else continue, logging a one-shot stall warning at the halfway mark."""
+        else continue, logging a one-shot stall warning at the halfway mark.
+
+        The usage-limit check precedes the error check because a limit substring
+        ("session limit reached") also appears in error_markers — classifying it
+        as the distinct usage_limit outcome (a persistent condition) rather than a
+        generic error is what lets the executor reroute to the fallback brain."""
         start = time.monotonic()
         total = max(deadline - start, 0.0)
         warned_stall = False
@@ -1136,6 +1182,8 @@ class TmuxClaudeBrain:
                     logger.debug("cancel_check raised", exc_info=True)
 
             pane = self._capture(name)
+            if any(m in pane for m in self._p.usage_limit_markers):
+                return ("usage_limit", pane)
             if any(m in pane for m in self._p.error_markers):
                 return ("error", pane)
             if not self._pane_alive(name):

@@ -58,6 +58,17 @@ features = {{ istota_experimental_features | to_json }}
 #                           (needs tmux on the host).
 # Operator runbook: docs/configuration/native-brain.md.
 kind = "{{ istota_brain_kind | default('claude_code', true) }}"
+{% if istota_brain_fallback %}
+# Availability failover: when the primary brain above is unavailable (subscription
+# usage limit / missing binary / tmux launch failure), run the task on this brain
+# with its own configured [brain.native] / [brain.tmux] settings. A portable role
+# tier (fast/general/smart) carries across; a provider-specific model pin drops to
+# the fallback brain's own default (logged + noted in the reply). "" = no fallback
+# (a tmux_claude primary still defaults to claude_code).
+fallback = "{{ istota_brain_fallback }}"
+{% endif %}
+fallback_on_transient = {{ istota_brain_fallback_on_transient | default(false, true) | lower }}
+fallback_cooldown_seconds = {{ istota_brain_fallback_cooldown_seconds | default(900, true) }}
 {% if istota_brain_kind == 'native' or istota_brain_source_type_overrides %}
 
 [brain.native]
@@ -142,6 +153,9 @@ theme_markers = {{ istota_brain_tmux_theme_markers | to_json }}
 {% endif %}
 {% if istota_brain_tmux_error_markers %}
 error_markers = {{ istota_brain_tmux_error_markers | to_json }}
+{% endif %}
+{% if istota_brain_tmux_usage_limit_markers %}
+usage_limit_markers = {{ istota_brain_tmux_usage_limit_markers | to_json }}
 {% endif %}
 {% if istota_brain_tmux_bypass_warning_marker %}
 bypass_warning_marker = "{{ istota_brain_tmux_bypass_warning_marker }}"
