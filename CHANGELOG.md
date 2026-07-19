@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.1] - 2026-07-19
+
 ### Fixed
 - Sandboxed tasks failed with a "workspace overlaps a protected path" error on Nextcloud-backed servers: the placeholder that fills in your workspace path in skill instructions was mistakenly reused as the sandbox working directory, which the path guard then rejected. Every assistant reply was affected while scheduled command jobs kept running normally. The two uses are separated again.
 
@@ -899,7 +901,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.31.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.31.1...main
+[0.31.1]: https://gitlab.com/cynium/istota/-/releases/v0.31.1
 [0.31.0]: https://gitlab.com/cynium/istota/-/releases/v0.31.0
 [0.30.0]: https://gitlab.com/cynium/istota/-/releases/v0.30.0
 [0.29.0]: https://gitlab.com/cynium/istota/-/releases/v0.29.0
