@@ -254,26 +254,6 @@ maybe_build_web_static() {
     fi
 }
 
-# Ask a yes/no question on the terminal (default no). Returns 0 for yes.
-# Like prompt_install_mode, it reads via a redirect on the `read` command and
-# never `exec < /dev/tty` (that would swallow the rest of a curl-piped script).
-# No terminal available → treated as "no".
-_prompt_yes_no() {
-    local question="$1" tty_src answer=""
-    if [ -t 0 ]; then
-        tty_src="/dev/stdin"
-    elif [ -e /dev/tty ] && (exec < /dev/tty) 2>/dev/null; then
-        tty_src="/dev/tty"
-    else
-        return 1
-    fi
-    read -rp "  ${question} [y/N]: " answer < "$tty_src" || true
-    case "$answer" in
-        [yY] | [yY][eE][sS]) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 run_standalone() {
     # Root check FIRST — before touching the terminal or anything else. Standalone
     # installs into your own user account (uv tool + ~/.config/istota); running it
@@ -309,19 +289,13 @@ run_standalone() {
 
     maybe_build_web_static "$REPO_ROOT"
 
-    # Optional modules that carry heavier dependencies are opt-in. The money
-    # module (double-entry accounting via beancount) also pulls native-lib deps
-    # (weasyprint for invoice PDFs), so it's off unless asked for. When it isn't
-    # installed the app hides the Money tab automatically — no half-working
-    # module. It can be added later by re-running with the money extra.
-    local extras="local"
-    if _prompt_yes_no "Install the money module? (double-entry accounting, powered by beancount)"; then
-        extras="local,money"
-        ok "Money module selected."
-    else
-        info "Skipping the money module (the Money tab stays hidden). Add it later with:"
-        info "  uv tool install --force --reinstall \"${REPO_ROOT}[local,money]\""
-    fi
+    # Install every module the local shape ships. These are all light on disk —
+    # money adds beancount/beanquery/weasyprint, location adds geopy — so there's
+    # nothing to gate at install time. What's actually *enabled* is a config
+    # choice made in `istota setup` below, not a packaging one. (weasyprint's
+    # native libs are only needed for invoice-PDF rendering, and only then; on
+    # macOS that one command needs `brew install pango`.)
+    local extras="local,money,location"
 
     # --reinstall (implies --refresh) forces a fresh build. Without it, uv can
     # reuse a cached wheel keyed on the package version — and this project ships

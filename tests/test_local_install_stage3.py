@@ -17,8 +17,8 @@ def _args(**kw):
     base = dict(
         config=None, workspace=None, brain=None, native_base_url=None,
         native_model=None, native_api_key=None, user=None, display_name=None,
-        timezone=None, port=None, email=False, location=False, yes=False,
-        force=False,
+        timezone=None, port=None, email=False, location=False, no_money=False,
+        yes=False, force=False,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -79,6 +79,16 @@ class TestRenderers:
         env = render_env_file(a)
         assert "ISTOTA_BRAIN_NATIVE_API_KEY" not in env
 
+    def test_money_on_by_default_no_disabled_modules(self, tmp_path):
+        a = Answers(workspace=tmp_path / "ws", user_id="stefan")
+        toml = render_config_toml(a)
+        assert "disabled_modules" not in toml
+
+    def test_money_off_writes_disabled_modules(self, tmp_path):
+        a = Answers(workspace=tmp_path / "ws", user_id="stefan", money_enabled=False)
+        toml = render_config_toml(a)
+        assert 'disabled_modules = ["money"]' in toml
+
 
 # ---------------------------------------------------------------------------
 # Wizard branches
@@ -129,8 +139,9 @@ class TestWizardBranches:
             "stefan",               # display name
             "UTC",                  # timezone
             "8766",                 # port
-            "n",                    # email
             "n",                    # location
+            "y",                    # money
+            "n",                    # email
         ]
         rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude", inputs=inputs)
         assert rc == 0
@@ -168,6 +179,21 @@ class TestWizardBranches:
         # User profile row exists.
         from istota import user_profiles
         assert user_profiles.get_profile(db_path, "stefan") is not None
+
+    def test_no_money_disables_module_end_to_end(self, tmp_path):
+        args = _args(
+            yes=True, workspace=str(tmp_path / "ws"), user="stefan", no_money=True,
+        )
+        rc, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        assert rc == 0
+        from istota import user_profiles
+        from istota.config import load_config
+        db_path = tmp_path / "ws" / "istota.db"
+        prof = user_profiles.get_profile(db_path, "stefan")
+        assert prof is not None and "money" in prof.disabled_modules
+        cfg = load_config(config_path)
+        assert cfg.is_module_enabled("stefan", "money") is False
+        assert cfg.is_module_enabled("stefan", "feeds") is True
 
     def test_env_file_is_chmod_600(self, tmp_path):
         args = _args(yes=True, workspace=str(tmp_path / "ws"), user="stefan")
