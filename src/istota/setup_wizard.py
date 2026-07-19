@@ -46,7 +46,17 @@ class Answers:
     imap_password: str = ""
     smtp_host: str = ""
     location_enabled: bool = False
+    money_enabled: bool = True               # module, on by default (opt-out)
     session_secret: str = ""                 # generated; written to the env file
+
+    @property
+    def disabled_modules(self) -> list[str]:
+        """Modules turned off in setup. Everything ships installed; a module is
+        on unless listed here (mirrors the server's ``disabled_modules`` model)."""
+        off: list[str] = []
+        if not self.money_enabled:
+            off.append("money")
+        return off
 
     @property
     def db_path(self) -> Path:
@@ -136,8 +146,11 @@ def render_config_toml(a: Answers) -> str:
         f"[users.{a.user_id}]",
         f"display_name = {_toml_str(a.display_name or a.user_id)}",
         f"timezone = {_toml_str(a.timezone)}",
-        "",
     ]
+    if a.disabled_modules:
+        rendered = ", ".join(_toml_str(m) for m in a.disabled_modules)
+        lines.append(f"disabled_modules = [{rendered}]")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -225,7 +238,29 @@ def collect_answers(args, *, input_fn, which_fn, out) -> Answers:
         port = int(_ask(input_fn, "Web port", str(DEFAULT_PORT)) or DEFAULT_PORT)
     a.web_port = int(port or DEFAULT_PORT)
 
-    # 5. Optional surfaces
+    # 5. Modules & surfaces. Everything ships installed; here we only choose
+    # what's *enabled*. The default follows a simple rule: on when a module works
+    # with no extra setup (money), off when it needs external configuration
+    # (location webhooks, email credentials). Grouped so the "which pieces"
+    # decisions live in one place instead of being split across the installer.
+
+    # Location (GPS tracking) — off unless asked; it needs an Overland ingest
+    # token to actually receive pings, so an enabled-but-unconfigured tab is empty.
+    if getattr(args, "location", False):
+        a.location_enabled = True
+    elif interactive:
+        a.location_enabled = _ask_yes_no(input_fn, "Enable GPS/location tracking?", False)
+
+    # Money (double-entry accounting) — installed and works out of the box, so
+    # on by default; opt-out mirrors the server's module model.
+    if getattr(args, "no_money", False):
+        a.money_enabled = False
+    elif interactive:
+        a.money_enabled = _ask_yes_no(
+            input_fn, "Enable the money module (double-entry accounting)?", True,
+        )
+
+    # Email (IMAP/SMTP) — off unless asked; needs credentials to do anything.
     if getattr(args, "email", False):
         a.email_enabled = True
     elif interactive:
@@ -237,11 +272,6 @@ def collect_answers(args, *, input_fn, which_fn, out) -> Answers:
             input_fn("IMAP password: ").strip() if interactive else a.imap_password
         )
         a.smtp_host = a.imap_host
-
-    if getattr(args, "location", False):
-        a.location_enabled = True
-    elif interactive:
-        a.location_enabled = _ask_yes_no(input_fn, "Enable GPS/location webhooks?", False)
 
     # Stable session secret so restarts don't invalidate cookies (unused in
     # no-auth but written for cleanliness / any residual cookie use).
@@ -386,8 +416,11 @@ def _bootstrap(a: Answers, config_path: Path) -> None:
     user_profiles.ensure_profile(
         a.db_path, a.user_id, display_name=a.display_name, timezone=a.timezone,
     )
+    # disabled_modules must land on the profile row too: is_module_enabled reads
+    # the DB row before the TOML [users.X] block, so the row is the effective one.
     user_profiles.update_profile(
         a.db_path, a.user_id, display_name=a.display_name, timezone=a.timezone,
+        disabled_modules=a.disabled_modules,
     )
 
     # Load the freshly-written config so the workspace seeder sees the real

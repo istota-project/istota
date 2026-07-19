@@ -1349,7 +1349,11 @@ def main():
     setup_parser.add_argument("--timezone", help="Timezone (default from system)")
     setup_parser.add_argument("--port", type=int, help="Web port (default 8766)")
     setup_parser.add_argument("--email", action="store_true", help="Enable email surface")
-    setup_parser.add_argument("--location", action="store_true", help="Enable GPS/location webhooks")
+    setup_parser.add_argument("--location", action="store_true", help="Enable GPS/location tracking")
+    setup_parser.add_argument(
+        "--no-money", action="store_true",
+        help="Disable the money module (double-entry accounting; on by default)",
+    )
     setup_parser.add_argument("--yes", action="store_true", help="Non-interactive; take defaults + flags")
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing config")
 

@@ -24,13 +24,21 @@ If you need isolation between untrusted content and your host, use the server de
 uv tool install 'istota[local]'
 ```
 
-The `local` extra is the lean footprint: the core agent, the web UI, and the light pure-Python modules (feeds, calendar, email, markets). Heavier modules stay opt-in — add them explicitly if you want them:
+The `local` extra is the lean footprint: the core agent, the web UI, and the light pure-Python modules (feeds, calendar, email, markets). The guided `install.sh --standalone` installs `local` plus `money` and `location` — both are light on disk, so there's nothing to gate at install time. Which modules are actually *enabled* is a choice made in `istota setup`, not a packaging one. If you install by hand, add the same extras:
 
 ```bash
-uv tool install 'istota[local,money,health,location,memory-search,whisper,transcribe]'
+uv tool install 'istota[local,money,location]'
 ```
 
-A module whose extra isn't installed hides itself: the app skips it and its web UI tab doesn't appear, rather than showing a broken tab. So `money` (double-entry accounting via beancount; also pulls weasyprint for invoice PDFs) is absent unless you add its extra — the guided `install.sh --standalone` asks whether you want it (the extra is chosen at install time, so it's an installer question, not a `setup` one). Add it later at any time by re-running `uv tool install` with `money` in the extras, and the Money tab appears on the next `serve`.
+Heavier, genuinely optional extras (`memory-search`, `whisper`, `transcribe`, `health`, `garmin`) stay off unless you name them:
+
+```bash
+uv tool install 'istota[local,money,location,memory-search,whisper,transcribe]'
+```
+
+A module whose extra isn't installed hides itself — the app skips it and its web UI tab doesn't appear rather than showing a broken tab.
+
+> **weasyprint (invoice PDFs).** The `money` extra pulls weasyprint, whose native libs (pango/cairo) are only touched when you *render an invoice PDF*. Everything else in the money module — the ledger, queries, balances, the Money tab — works without them. On macOS that one path needs `brew install pango`; until then invoice-PDF generation is the only thing that errors.
 
 ## Set up
 
@@ -44,7 +52,7 @@ The interactive wizard:
 2. **Model backend** — if the `claude` CLI is detected it offers to use it (no extra keys). Otherwise it asks for an OpenAI-compatible base URL, model, and API key.
 3. **Identity** — a user id (default your OS username), display name, timezone.
 4. **Web port** — default `8766`.
-5. **Optional surfaces** — email (IMAP/SMTP) and GPS/location webhooks, both off by default.
+5. **Modules & surfaces** — everything ships installed, so this only chooses what's *enabled*: GPS/location tracking (off by default — it needs an Overland ingest token to receive pings), the money module (on by default; opt out here or later via `disabled_modules`), and email (off by default — needs IMAP/SMTP credentials).
 
 It writes `~/.config/istota/config.toml` and a sibling `~/.config/istota/istota.env` (secrets — API key, session key; `chmod 600`), initializes the database, and seeds your workspace.
 
