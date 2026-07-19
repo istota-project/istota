@@ -627,6 +627,17 @@ class TmuxBrainConfig:
     error_markers: list[str] = field(
         default_factory=lambda: ["API Error", "session limit reached", "Context low"]
     )
+    # Pane substrings that mark a subscription/quota usage limit (checked before
+    # error_markers so a limit hit that aborts the turn before a transcript is
+    # written classifies as stop_reason="usage_limit" — reroutes to the fallback
+    # brain — rather than a generic error). CLI-version-pinned like the others.
+    usage_limit_markers: list[str] = field(
+        default_factory=lambda: [
+            "session limit reached",
+            "usage limit reached",
+            "Claude usage limit",
+        ]
+    )
 
 
 @dataclass
@@ -649,6 +660,18 @@ class BrainConfig:
     native: NativeBrainConfig = field(default_factory=NativeBrainConfig)
     tmux: TmuxBrainConfig = field(default_factory=TmuxBrainConfig)
     source_type_overrides: dict[str, str] = field(default_factory=dict)
+    # Availability failover (brain-fallback spec). When the primary brain is
+    # unavailable (usage limit / not_found / tmux launch failure), the task runs
+    # on ``fallback`` with that brain's own configured settings. "" = no fallback
+    # (a tmux_claude primary still defaults to claude_code — see
+    # brain._fallback.effective_fallback_kind).
+    fallback: str = ""
+    # Include a persistent transient_api_error in the reroute trigger set.
+    fallback_on_transient: bool = False
+    # Availability-breaker cooldown: once the primary reports a persistent
+    # unavailability, subsequent tasks skip it for this long. 0 disables
+    # stickiness (every task probes the primary first).
+    fallback_cooldown_seconds: int = 900
 
 
 @dataclass
@@ -1522,6 +1545,7 @@ def load_config(config_path: Path | None = None) -> Config:
                 tmux_raw.get("bypass_accept_marker", _tmux_defaults.bypass_accept_marker)
             ),
             error_markers=_str_list("error_markers"),
+            usage_limit_markers=_str_list("usage_limit_markers"),
         )
         config.brain = BrainConfig(
             kind=br.get("kind", "claude_code"),
@@ -1530,6 +1554,9 @@ def load_config(config_path: Path | None = None) -> Config:
             source_type_overrides={
                 str(k): str(v) for k, v in overrides_raw.items()
             },
+            fallback=str(br.get("fallback", "")).strip(),
+            fallback_on_transient=bool(br.get("fallback_on_transient", False)),
+            fallback_cooldown_seconds=int(br.get("fallback_cooldown_seconds", 900)),
         )
 
     # [models] table — operator-controlled role aliases. The mapping is
@@ -1870,7 +1897,40 @@ def load_config(config_path: Path | None = None) -> Config:
             "failed to apply [brain.native.model_overrides]", exc_info=True
         )
 
+    _validate_brain_fallback(config)
+
     return config
+
+
+def _validate_brain_fallback(config: "Config") -> None:
+    """Neutralize a misconfigured ``[brain] fallback`` so it can't wedge tasks.
+
+    Two guards, each logs one WARNING and blanks ``fallback`` (falling back to no
+    fallback, or the tmux back-compat default):
+    1. Unknown kind — ``fallback`` not in ``KNOWN_BRAIN_KINDS``.
+    2. Self-fallback — the configured fallback equals the primary kind (it can't
+       help).
+    """
+    from .brain import KNOWN_BRAIN_KINDS
+
+    fb = (config.brain.fallback or "").strip()
+    if not fb:
+        return
+    _logger = logging.getLogger("istota.config")
+    if fb not in KNOWN_BRAIN_KINDS:
+        _logger.warning(
+            "[brain] fallback=%r is not a known brain kind %s; disabling fallback",
+            fb, sorted(KNOWN_BRAIN_KINDS),
+        )
+        config.brain.fallback = ""
+        return
+    if fb == config.brain.kind:
+        _logger.warning(
+            "[brain] fallback=%r equals the primary brain kind; a self-fallback "
+            "can't help — disabling it",
+            fb,
+        )
+        config.brain.fallback = ""
 
 
 def _apply_user_profiles(config: "Config") -> None:

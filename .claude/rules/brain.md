@@ -105,7 +105,7 @@ overrides plug in for free via `_roles.py`.
 | `result_text: str` | Final response text |
 | `actions_taken: str \| None` | JSON-encoded list of tool-use descriptions |
 | `execution_trace: str \| None` | JSON-encoded `[{type:"tool"\|"text"\|"cm_boundary", ...}]` |
-| `stop_reason: str` | `completed` / `cancelled` / `timeout` / `oom` / `transient_api_error` / `error` / `not_found` |
+| `stop_reason: str` | `completed` / `cancelled` / `timeout` / `oom` / `transient_api_error` / `usage_limit` / `error` / `not_found` / `fallback`. `usage_limit` = a subscription/quota/billing limit (a persistent "brain unavailable" condition the executor reroutes to the configured fallback brain — see "Brain fallback" below). |
 
 ## ClaudeCodeBrain
 Wraps the `claude` CLI subprocess. Owns:
@@ -163,16 +163,21 @@ produce `(result_text, execution_trace)` and the executor reconciles them.
 |---|---|
 | `parse_api_error(text) -> dict \| None` | Match `API Error: (\d{3}) (\{...\})` and parse status_code/message/request_id |
 | `is_transient_api_error(text) -> bool` | True if status_code in `TRANSIENT_STATUS_CODES \| {429}` |
+| `is_usage_limit_error(text) -> bool` | True if the text carries a subscription/quota/billing usage-limit signal (keyword set + an "exceeded…limit" regex). Provider-agnostic (works on CLI output, tmux transcript/pane text, and native error bodies). Checked *before* the transient predicate at every call site so a quota 429 classifies as `usage_limit`, not a retry. |
 
-Both are re-exported from `executor` for `scheduler.py` and tests; canonical
+All three are re-exported from `executor` for `scheduler.py` and tests; canonical
 home is `brain/claude_code.py`.
 
 ## Configuration
 ```toml
 [brain]
 kind = "claude_code"  # "claude_code" | "native" | "tmux_claude"
+# Availability failover (see "Brain fallback" below). "" = none.
+fallback = "native"               # brain kind to fall back to when primary unavailable
+fallback_on_transient = false     # also reroute a persistent transient_api_error
+fallback_cooldown_seconds = 900   # skip an unavailable primary this long; 0 disables stickiness
 
-[brain.native]         # only used when kind = "native" (or routed-to below)
+[brain.native]         # only used when kind = "native" (or routed-to/fallen-back-to below)
 provider = "openai_compat"
 model = "claude-sonnet-4-6"
 effort = ""            # default reasoning effort; capability-gated on supports_thinking
@@ -201,13 +206,61 @@ ready_timeout_seconds = 30        # REPL-ready deadline
 tmux_command_timeout = 10         # per-tmux-subprocess timeout
 cli_version_pin = "2.1.168"       # supported claude CLI; mismatch logs a WARNING
 # ready_markers / trust_markers / theme_markers / bypass_warning_marker /
-# bypass_accept_marker / error_markers — pane-substring heuristics; override on a
-# CLI reword.
+# bypass_accept_marker / error_markers / usage_limit_markers — pane-substring
+# heuristics; override on a CLI reword. usage_limit_markers (checked before
+# error_markers) classify a pane limit hit as stop_reason=usage_limit → fallback.
 
 [brain.source_type_overrides]   # per-source-type routing (gradual rollout)
 scheduled = "native"
 heartbeat = "native"
 ```
+
+## Brain fallback (availability failover)
+
+When the primary brain is **unavailable**, the executor reruns the same attempt
+(no new DB row, no `attempt_count` increment) through a configured fallback
+brain. Generalizes the old hardcoded tmux→claude_code rerun; wired at the
+executor level (brains have no `Config` for the operator alert; the
+same-attempt rerun already lives there). Three cooperating pieces:
+
+- **Unavailability classification.** Each brain classifies "I am unavailable"
+  into a `stop_reason`. `usage_limit` (new, shared `is_usage_limit_error`
+  detector) covers subscription/quota/billing exhaustion on all three brains:
+  ClaudeCodeBrain wires it into both exec paths (before the transient check —
+  a quota 429 is not retried); NativeBrain's `_classify_native_error` maps a
+  quota/billing error body → `usage_limit`, a plain overload/rate-limit →
+  `transient_api_error`; TmuxClaudeBrain detects it in the transcript/Stop-payload
+  body (`_build_result`) and via `usage_limit_markers` pane match in
+  `_wait_for_completion`, guarded so it never feeds the launch `_CircuitBreaker`
+  or tmux's own headless fallback.
+
+- **Portable alias layer** (`brain/_aliases.py`). `CANONICAL_ROLES =
+  ("fast","general","smart")` is the single source of truth (both brains' role
+  tables import it); a contract test asserts every brain resolves every canonical
+  role. `is_portable_alias(name, role_overrides)` decides whether a requested
+  model name is a portable *intent* (a role tier + operator `[models.roles]`
+  custom roles) that re-resolves in the fallback namespace, or a non-portable
+  provider pin (`opus-high`, `claude-opus-4-8`) that can't cross the boundary.
+
+- **Availability breaker + routing** (`brain/_fallback.py`, wired in
+  `executor.py`). See the trigger/cooldown sets and the executor path in
+  `.claude/rules/executor.md` "Brain fallback". `PrimaryAvailabilityBreaker` is a
+  process-global, thread-safe breaker keyed by primary kind — distinct from
+  `tmux_claude._BREAKER` (which governs tmux launch fast-fail); the two compose.
+  `effective_fallback_kind(brain_config)` encodes the tmux back-compat default
+  (a `tmux_claude` primary falls back to `claude_code` unless `fallback` is set).
+
+**Trigger set** (reroute this attempt): `{usage_limit, not_found, fallback}` +
+`transient_api_error` iff `fallback_on_transient`. **Cooldown set** (open the
+breaker → skip the primary on subsequent tasks for `fallback_cooldown_seconds`):
+`{usage_limit, not_found}` only — `fallback` is excluded so tmux keeps being
+probed per-task (its own breaker decides when to stop). **Never fallback:**
+`oom` / `timeout` / `cancelled` / `error` (task-level outcomes, flow through the
+normal path). Config keys: `[brain] fallback` / `fallback_on_transient` /
+`fallback_cooldown_seconds`; `_validate_brain_fallback` (config load) neutralizes
+an unknown kind or a self-fallback with one WARNING. Single fallback level only;
+if the fallback is also unavailable the task fails/retries normally. On a dropped
+non-portable pin the successful reply gets a one-line italic model note.
 
 NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
 - **Reasoning effort.** `req.effort or native.effort` → the OpenAI-compat
@@ -386,7 +439,14 @@ image installs it.
   one operator alert (the executor fires it via `consume_circuit_open_alert()` →
   `notifications.send_notification(purpose="alert")`, since the brain has no
   `Config`). Any tmux success resets it; per-process state, reset on daemon
-  restart (also when a fixed CLI version lands).
+  restart (also when a fixed CLI version lands). This tmux launch alert is
+  **preserved** by the generalized fallback path (see "Brain fallback" above +
+  `.claude/rules/executor.md`): `fallback`/`not_found` are in the general trigger
+  set (so the executor reruns through the effective fallback = `claude_code`), but
+  `fallback` is *not* in the availability-breaker cooldown set, so tmux keeps being
+  probed per-task and its own `_CircuitBreaker` (+ this alert) still governs the
+  eventual skip. A tmux `usage_limit` (see the classification bullet above) routes
+  through the *configured* fallback instead and never feeds this launch breaker.
 - **Live streaming recovery (§10).** On stream-eligible tasks
   (`req.streaming and req.on_progress`) a background `_TranscriptTailer` tails the
   transcript JSONL *during* the turn and forwards each new `tool_use`/`text`/

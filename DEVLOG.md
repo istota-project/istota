@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Brain fallback (availability failover)
+
+Generalized the one hardcoded fallback path (tmux→claude_code) into an operator-configurable "when the primary brain is unavailable, run the task on a fallback brain" mechanism. Motivating case: a `claude_code` subscription hitting its usage limit failing over to a metered native endpoint. Spec in `Specs/Done/brain-fallback.md`; five stages, TDD throughout.
+
+The design is deliberately executor-level, not a composing `FallbackBrain` wrapper: brains have no `Config` (needed for the operator alert), the same-attempt/no-increment rerun already lives in the executor, and a wrapper's `resolve_*` methods would have to pick one brain's namespace — exactly the cross-provider seam we're standardizing.
+
+**Three cooperating pieces:**
+
+1. **Usage-limit detection.** A subscription/quota limit was landing as generic `error` (or `transient_api_error` on a 429) with nothing distinguishing it. New shared `is_usage_limit_error(text)` (keyword set + an "exceeded…limit" regex) classifies it as a new `stop_reason="usage_limit"` on all three brains. It's checked *before* the transient predicate at every call site, because a quota 429 also matches `is_transient_api_error` — so without the ordering it'd be retried against the exhausted primary. ClaudeCodeBrain wires it into both exec paths + the retry short-circuit; NativeBrain's `_classify_native_error` splits a quota/billing body (usage_limit) from a plain overload 429 (transient); TmuxClaudeBrain detects it in the transcript/Stop-payload body and via a new `usage_limit_markers` pane list (checked before `error_markers`, since "session limit reached" is in both), guarded so a usage_limit never feeds tmux's launch `_CircuitBreaker` or its own headless fallback.
+
+2. **Portable alias layer.** The problem: `req.model` reaching the fallback is a *primary-namespace* canonical ID (`claude-opus-4-8`), meaningless to a different-provider fallback. Rather than a provider-translation table (unbounded, always stale), lean on the role tiers, which are already provider-agnostic intents. New `brain/_aliases.py`: `CANONICAL_ROLES` (single source of truth — both brains' role tables now import it) + `is_portable_alias`. A contract test asserts every registered brain resolves every canonical role. On fallback: a portable role re-resolves the *intent* in the fallback namespace; a non-portable pin drops to the fallback's own default (logged + a visible italic note appended to the successful reply so the user isn't silently downgraded).
+
+3. **Availability breaker + routing.** New `brain/_fallback.py`: `PrimaryAvailabilityBreaker` (process-global, thread-safe, keyed by primary kind — distinct from `tmux_claude._BREAKER`, which governs launch fast-fail; the two compose) + `effective_fallback_kind` (encodes the tmux→claude_code default). Trigger set `{usage_limit, not_found, fallback}` (+ `transient_api_error` iff `fallback_on_transient`) reroutes the attempt; cooldown set `{usage_limit, not_found}` opens the breaker so subsequent tasks skip the primary for `fallback_cooldown_seconds`. `fallback` is excluded from the cooldown set on purpose — tmux keeps being probed per-task, its own breaker decides when to stop. `oom`/`timeout`/`cancelled`/`error` never fall back (task-level outcomes, not "brain unavailable").
+
+The executor block that used to be `if _brain_config.kind == "tmux_claude" and stop_reason in ("fallback","not_found")` is now the general path: stickiness skip → primary call → trigger-set reroute via `_run_fallback` → breaker open + one operator alert → `record_success` on a healthy primary. The tmux launch alert (`consume_circuit_open_alert`) is preserved for the tmux-primary case. `_resolve_fallback_model_effort` returns a `dropped_pin` that flows out to `_append_model_note`, appended after `_compose_full_result` (so composition operates on the real answer, not the note) and only on success. When no fallback is configured the whole block collapses to the plain `brain.execute(req)` call — server path unchanged.
+
+**Config:** three new `[brain]` keys (`fallback` / `fallback_on_transient` / `fallback_cooldown_seconds`) + `usage_limit_markers` under `[brain.tmux]`. `_validate_brain_fallback` (config load) neutralizes an unknown-kind or self-fallback with one WARNING. No DB/schema change — the fallback runs within the existing attempt and reuses `model_used`. Ansible defaults + template + `validate_config.py` allowlists updated; a rendered config passes validation.
+
+**Test note:** the generalized path routes tmux `not_found` through the availability breaker (it's persistent), which opens the breaker + fires one alert — so the existing `TestTmuxFallback` regression tests needed a `reset_availability_breaker()` + a stubbed `send_notification` to stay isolated (the process-global breaker would otherwise leak an open primary across tests). No behavioural change to their assertions.
+
+**Files added/modified:**
+- `src/istota/brain/_aliases.py` - new: `CANONICAL_ROLES`, `is_portable_alias`.
+- `src/istota/brain/_fallback.py` - new: `PrimaryAvailabilityBreaker`, `effective_fallback_kind`, trigger/cooldown sets.
+- `src/istota/brain/claude_code.py` - `is_usage_limit_error` + `_failure_stop_reason`; wired into both exec paths; role table imports `CANONICAL_ROLES`.
+- `src/istota/brain/native.py` - `_classify_native_error`; `_BUILTIN_ROLE_NAMES = CANONICAL_ROLES`; `usage_limit` in the documented stop-reason set.
+- `src/istota/brain/tmux_claude.py` - `usage_limit_markers` detection in `_wait_for_completion` + `_build_result`; guarded against the launch breaker.
+- `src/istota/brain/_types.py` - `usage_limit` in the `stop_reason` docstring.
+- `src/istota/brain/__init__.py` - export `CANONICAL_ROLES` / `is_portable_alias` / `is_usage_limit_error`.
+- `src/istota/config.py` - `BrainConfig` fallback fields + parse; `TmuxBrainConfig.usage_limit_markers`; `_validate_brain_fallback`.
+- `src/istota/executor.py` - general fallback path replacing the tmux-only block; `_run_fallback` / `_resolve_fallback_model_effort` / `_fire_fallback_alert` / `_append_model_note`; re-export `is_usage_limit_error`.
+- `deploy/ansible/{defaults/main.yml,templates/config.toml.j2,files/validate_config.py}` - new keys + allowlists.
+- `config/config.example.toml`, `.claude/rules/{brain,config,executor}.md`, `AGENTS.md` - docs.
+- `tests/test_{brain_aliases,brain_role_contract,claude_code_usage_limit,native_usage_limit,tmux_usage_limit,config_brain_fallback,brain_fallback_breaker,executor_fallback}.py` - new (101 tests).
+- `tests/test_executor_streaming.py` - `TestTmuxFallback` isolation for the generalized path.
+
 ## 2026-07-19: Standalone — claude auth (macOS keychain) + beancount ledger core
 
 Two standalone-install breakages, both found on a real mac run.

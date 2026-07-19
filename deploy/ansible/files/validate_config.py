@@ -56,7 +56,10 @@ def main() -> int:
     # "source_type_overrides" are legitimate sub-tables ([brain.native],
     # [brain.tmux], [brain.source_type_overrides]); without them the
     # native/tmux brain config would trip the leaked-keys guard.
-    brain_allowlist = {"kind", "native", "tmux", "source_type_overrides"}
+    brain_allowlist = {
+        "kind", "native", "tmux", "source_type_overrides",
+        "fallback", "fallback_on_transient", "fallback_cooldown_seconds",
+    }
     brain = raw.get("brain", {})
     leaked = sorted(k for k in brain if k not in brain_allowlist)
     if leaked:
@@ -80,6 +83,7 @@ def main() -> int:
             "ready_timeout_seconds", "tmux_command_timeout", "cli_version_pin",
             "ready_markers", "trust_markers", "theme_markers",
             "bypass_warning_marker", "bypass_accept_marker", "error_markers",
+            "usage_limit_markers",
         }
         bad_keys = sorted(k for k in tmux if k not in tmux_allowlist)
         if bad_keys:
@@ -90,7 +94,10 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        for list_key in ("ready_markers", "trust_markers", "theme_markers", "error_markers"):
+        for list_key in (
+            "ready_markers", "trust_markers", "theme_markers", "error_markers",
+            "usage_limit_markers",
+        ):
             if list_key in tmux and not isinstance(tmux[list_key], list):
                 print(
                     f"validate_config: [brain.tmux] {list_key} must be a list",

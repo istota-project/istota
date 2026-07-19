@@ -32,6 +32,7 @@ from ._events import (
     ToolUseEvent,
     make_stream_parser,
 )
+from ._aliases import CANONICAL_ROLES
 from ._roles import get_role_overrides
 from ._types import BrainRequest, BrainResult
 
@@ -70,11 +71,69 @@ def parse_api_error(text: str) -> dict | None:
 
 
 def is_transient_api_error(text: str) -> bool:
-    """Check if the error text represents a transient API error worth retrying."""
+    """Check if the error text represents a transient API error worth retrying.
+
+    A 429 whose body signals *quota/subscription exhaustion* is NOT transient —
+    ``is_usage_limit_error`` catches that case first at every call site, so a
+    usage limit reroutes to the configured fallback brain instead of being
+    retried against the same exhausted primary.
+    """
     parsed = parse_api_error(text)
     if not parsed:
         return False
     return parsed["status_code"] in TRANSIENT_STATUS_CODES or parsed["status_code"] == 429
+
+
+# Substrings (case-insensitive) that mark a subscription/quota/billing limit —
+# a *persistent* "brain unavailable until the window resets" condition, distinct
+# from a transient overload 429. Kept as a plain keyword set rather than tied to
+# the ``API Error: NNN`` shape so the same detector works on ClaudeCodeBrain's
+# CLI output, the tmux TUI transcript/pane text, and NativeBrain's arbitrary
+# OpenAI-compatible error bodies. Best-effort and tunable against real output
+# (see the spec's "Real usage-limit output samples" open question).
+_USAGE_LIMIT_KEYWORDS: tuple[str, ...] = (
+    "usage limit",
+    "session limit",
+    "limit reached",
+    "quota",
+    "insufficient_quota",
+    "credit balance",
+    "out of credit",
+    "billing",
+    "plan limit",
+    "monthly limit",
+    "usage cap",
+    "spending limit",
+)
+
+# "...exceeded ... limit" where the two words are close together (an explicit
+# limit-exceeded phrasing). Requires "exceeded" to precede "limit" so a plain
+# "rate limit exceeded" (transient) does NOT match.
+_EXCEEDED_LIMIT_RE = re.compile(r"exceeded[^.]{0,40}?\blimit\b", re.IGNORECASE)
+
+
+def is_usage_limit_error(text: str) -> bool:
+    """True if ``text`` indicates a subscription/quota/billing usage limit.
+
+    Shared by all three brains to classify a persistent "primary unavailable"
+    condition as ``stop_reason="usage_limit"`` (which reroutes to the configured
+    fallback brain) rather than a transient retry or a generic error.
+    """
+    if not text:
+        return False
+    low = text.lower()
+    if any(keyword in low for keyword in _USAGE_LIMIT_KEYWORDS):
+        return True
+    return bool(_EXCEEDED_LIMIT_RE.search(text))
+
+
+def _failure_stop_reason(text: str) -> str:
+    """Classify a failure's text into ``usage_limit`` (persistent) or ``error``.
+
+    Used at ClaudeCodeBrain's error-return points so a usage-limit body carries
+    the distinct stop_reason before the generic ``error`` path swallows it.
+    """
+    return "usage_limit" if is_usage_limit_error(text) else "error"
 
 
 def _is_root() -> bool:
@@ -200,11 +259,17 @@ MODEL_ALIASES: dict[str, tuple[str | None, str | None]] = {
 # target via [models.roles] TOML; the override RHS is resolved through
 # MODEL_ALIASES so they can write provider-aware shortcuts like
 # ``smart = "opus-46-high"`` without having to type the canonical ID.
+# The keys are the portable CANONICAL_ROLES (single source of truth) — every
+# brain must map every canonical role to a real model (enforced by the
+# role-contract test), so a portable intent survives the cross-provider fallback.
 DEFAULT_ROLE_TARGETS: dict[str, str] = {
     "fast":    HAIKU,
     "general": SONNET,
     "smart":   OPUS,
 }
+assert set(DEFAULT_ROLE_TARGETS) == set(CANONICAL_ROLES), (
+    "ClaudeCodeBrain must map every canonical role tier"
+)
 
 
 def _resolve_target(target: str) -> str:
@@ -377,6 +442,13 @@ class ClaudeCodeBrain:
             if result.success:
                 return result
 
+            # A usage/quota limit is persistent — do NOT retry it against the
+            # same exhausted primary (a quota 429 matches is_transient_api_error,
+            # so this short-circuit must precede that check). It reroutes to the
+            # configured fallback brain at the executor level.
+            if result.stop_reason == "usage_limit":
+                return result
+
             if not is_transient_api_error(result.result_text):
                 return result
 
@@ -428,9 +500,16 @@ class ClaudeCodeBrain:
         if result.returncode == 0 and req.result_file and req.result_file.exists():
             return BrainResult(success=True, result_text=req.result_file.read_text().strip())
         if output:
-            return BrainResult(success=False, result_text=output, stop_reason="error")
+            return BrainResult(
+                success=False, result_text=output,
+                stop_reason=_failure_stop_reason(output),
+            )
         if result.stderr.strip():
-            return BrainResult(success=False, result_text=result.stderr.strip(), stop_reason="error")
+            stderr = result.stderr.strip()
+            return BrainResult(
+                success=False, result_text=stderr,
+                stop_reason=_failure_stop_reason(stderr),
+            )
         return BrainResult(
             success=False,
             result_text=f"Claude Code produced no output (rc={result.returncode})",
@@ -451,6 +530,11 @@ class ClaudeCodeBrain:
                 return result
 
             last_trace = result.execution_trace
+
+            # Persistent usage/quota limit — reroute (not retry). Precedes the
+            # transient check because a quota 429 also matches it.
+            if result.stop_reason == "usage_limit":
+                return result
 
             if not is_transient_api_error(result.result_text):
                 return result
@@ -661,11 +745,12 @@ class ClaudeCodeBrain:
                     execution_trace=trace_json,
                     model_used=model_seen or req.model,
                 )
+            failure_text = result_text or stderr_output or "Unknown error"
             return BrainResult(
                 success=False,
-                result_text=result_text or stderr_output or "Unknown error",
+                result_text=failure_text,
                 execution_trace=trace_json,
-                stop_reason="error",
+                stop_reason=_failure_stop_reason(failure_text),
                 model_used=model_seen or req.model,
             )
 
@@ -696,7 +781,8 @@ class ClaudeCodeBrain:
         if stderr_output:
             return BrainResult(
                 success=False, result_text=stderr_output,
-                execution_trace=trace_json, stop_reason="error",
+                execution_trace=trace_json,
+                stop_reason=_failure_stop_reason(stderr_output),
             )
         if raw_stdout_lines:
             return BrainResult(

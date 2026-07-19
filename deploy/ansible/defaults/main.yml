@@ -116,6 +116,20 @@ istota_custom_system_prompt: true
 # overrides map below.
 istota_brain_kind: "claude_code"
 
+# --- Brain fallback (availability failover, [brain] fallback_*) ---------------
+# When the primary brain (istota_brain_kind) is unavailable — subscription usage
+# limit, missing binary, or tmux launch failure — run the task on the fallback
+# brain with that brain's own configured settings. The motivating case: a
+# claude_code subscription hitting its usage limit, failing over to a metered
+# native endpoint. A portable role tier (fast/general/smart) carries across the
+# provider boundary; a provider-specific model pin drops to the fallback's own
+# default (logged + a visible note appended to the reply). "" = no fallback (a
+# tmux_claude primary still falls back to claude_code by default). Single level
+# only — if the fallback is also down, the task fails/retries normally.
+istota_brain_fallback: ""                       # "" | "claude_code" | "native" | "tmux_claude"
+istota_brain_fallback_on_transient: false       # also reroute a persistent transient_api_error
+istota_brain_fallback_cooldown_seconds: 900     # skip an unavailable primary this long; 0 disables stickiness
+
 # --- Native brain ([brain.native]) -------------------------------------------
 # Only emitted to config.toml when istota_brain_kind == "native" OR a
 # source_type_overrides entry routes some task type to "native". Defaults match
@@ -200,6 +214,7 @@ istota_brain_tmux_ready_markers: []                # [] → code defaults
 istota_brain_tmux_trust_markers: []                # [] → code defaults
 istota_brain_tmux_theme_markers: []                # [] → code defaults (first-run theme picker)
 istota_brain_tmux_error_markers: []                # [] → code defaults
+istota_brain_tmux_usage_limit_markers: []          # [] → code defaults (pane substrings → stop_reason=usage_limit → fallback)
 istota_brain_tmux_bypass_warning_marker: ""        # "" → code default
 istota_brain_tmux_bypass_accept_marker: ""         # "" → code default
 

@@ -35,9 +35,10 @@ from ._events import (
 import dataclasses
 import logging
 
+from ._aliases import CANONICAL_ROLES, is_portable_alias
 from ._roles import get_role_override, get_role_overrides, set_role_overrides
 from ._types import Brain, BrainConfig, BrainRequest, BrainResult
-from .claude_code import ClaudeCodeBrain
+from .claude_code import ClaudeCodeBrain, is_usage_limit_error
 from .native import NativeBrain
 
 logger = logging.getLogger(__name__)
@@ -101,10 +102,13 @@ __all__ = [
     "BrainConfig",
     "BrainRequest",
     "BrainResult",
+    "CANONICAL_ROLES",
     "ClaudeCodeBrain",
     "ContextManagementEvent",
     "KNOWN_BRAIN_KINDS",
     "NativeBrain",
+    "is_portable_alias",
+    "is_usage_limit_error",
     "ResultEvent",
     "StreamEvent",
     "TextDeltaEvent",
