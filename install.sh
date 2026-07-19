@@ -147,13 +147,13 @@ run_bare() {
     if [ "$(id -u)" -ne 0 ]; then
         if command -v sudo >/dev/null 2>&1; then
             info "Bare-metal install requires root — re-executing deploy/install.sh under sudo"
-            exec sudo -E bash "$target" "${FORWARD_ARGS[@]}"
+            exec sudo -E bash "$target" "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
         else
             die "Bare-metal install requires root. Re-run as root or install sudo."
         fi
     fi
 
-    exec bash "$target" "${FORWARD_ARGS[@]}"
+    exec bash "$target" "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
 }
 
 run_docker() {
@@ -169,7 +169,7 @@ run_docker() {
     reattach_tty_if_needed
     local target="$REPO_ROOT/docker/init.sh"
     [ -f "$target" ] || die "docker/init.sh not found at $target"
-    exec bash "$target" "${FORWARD_ARGS[@]}"
+    exec bash "$target" "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
 }
 
 case "$MODE" in
