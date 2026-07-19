@@ -29,7 +29,7 @@ istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
 istota user show --name USER_ID              # Dump the stored profile row as JSON
 istota user remove --name USER_ID            # Delete a user_profiles row (no other tables touched)
-istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--site-enabled|--no-site] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--email-reply-routing origin+thread|origin|thread]
+istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--email-reply-routing origin+thread|origin|thread]
 ```
 
 `istota user ensure` has no `-u`/`--user` flag — the user id comes from `--name` (required). `--tz` and `--timezone` are aliases. `--email` takes a bare address and is repeatable (each pass replaces the stored list). Worker caps are `--max-foreground-workers` / `--max-background-workers`.
@@ -157,6 +157,18 @@ istota repl [-u USER] [-t TOKEN] [--workspace cwd|standard|PATH] [--model ALIAS]
 ```
 
 A streamed, full-stack terminal assistant. Each line becomes a `source_type="repl"` task with `output_target="stream"`, run inline (no daemon needed); `task_events` stream back to the terminal. `--workspace` selects the working directory: `cwd` (default), `standard` (the per-user temp dir the daemon sandboxes), or an explicit path.
+
+### Local single-user install
+
+```bash
+istota setup [--yes] [--workspace DIR] [--brain claude_code|native] \
+    [--native-base-url URL] [--native-model ID] [--native-api-key KEY] \
+    [--user ID] [--display-name NAME] [--timezone TZ] [--port N] \
+    [--email] [--location] [--force]        # Interactive first-run installer
+istota serve [--host HOST] [--port N] [--env-file PATH]   # Scheduler loop + web server in one process
+```
+
+`istota setup` writes a local workspace (default `~/.istota`) and configures a single user; `--yes` runs non-interactively from flags and defaults. `istota serve` is the combined local launcher — it runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). See [Local install](../LOCAL_INSTALL.md) for the full walkthrough.
 
 ### Database
 

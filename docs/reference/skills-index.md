@@ -105,12 +105,6 @@ Codifies a spec-driven development workflow. Specs live in `{notes_folder}/Specs
 |---|---|---|
 | `heartbeat` | heartbeat, monitoring, health check, alert | doc-only |
 
-## Web
-
-| Skill | Keywords | CLI |
-|---|---|---|
-| `website` | website, site, publish, blog | doc-only |
-
 ## Safety
 
 | Skill | Keywords | CLI |
