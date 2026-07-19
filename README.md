@@ -50,13 +50,13 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
 ```
 
-Both run the same interactive wizard (Nextcloud connection, users, optional features). Glance at [`install.sh`](install.sh) before you pipe it into a shell.
+Run from a terminal with no flag, `install.sh` first asks whether you want a **Server** install (the multi-user, Nextcloud-backed, sandboxed deployment above) or a **Standalone** single-user install (below); pass `--bare`, `--docker`, or `--standalone` to skip the prompt. The server paths then run the same interactive wizard (Nextcloud connection, users, optional features). Glance at [`install.sh`](install.sh) before you pipe it into a shell.
 
 To update: `sudo bash install.sh --update` (bare metal) or `cd ~/istota && git pull && docker compose -f docker/docker-compose.yml up -d --build` (Docker). An Ansible role is available at `deploy/ansible/`.
 
 ### Local single-user install
 
-Want to run Istota on your own machine without a server, Nextcloud, or login? There is a slimmed-down local shape — one `uv tool install`, an interactive `istota setup`, then `istota serve` brings up the web UI and worker in one process on `http://localhost:8766/istota` with no auth. It is single-user, unsandboxed, and trusted by construction. See **[docs/LOCAL_INSTALL.md](docs/LOCAL_INSTALL.md)**.
+Want to run Istota on your own machine without a server, Nextcloud, or login? There is a slimmed-down local shape — one `uv tool install`, an interactive `istota setup`, then `istota serve` brings up the web UI and worker in one process on `http://localhost:8766/istota` with no auth. It is single-user, unsandboxed, and trusted by construction. Pick **Standalone** at the `install.sh` prompt (or `install.sh --standalone`, run **without** sudo) to do this in one step. See **[docs/LOCAL_INSTALL.md](docs/LOCAL_INSTALL.md)**.
 
 Full walkthroughs, optional services, and configuration: **[Docker quickstart](https://istota.cynium.com/docs/getting-started/quickstart-docker/)** · **[Bare metal quickstart](https://istota.cynium.com/docs/getting-started/quickstart-bare-metal/)**.
 

@@ -1,30 +1,52 @@
 #!/bin/bash
 # Istota installer dispatcher
 #
-# Bare metal (default) — installs natively via Ansible (Debian/Ubuntu, requires root):
+# Run interactively (from a terminal) it asks which install mode you want:
+#
+#   Server      Multi-user deployment on a Debian/Ubuntu server, backed by
+#               Nextcloud (files, Talk chat, CalDAV, web login) with per-user
+#               bubblewrap isolation. Installs system-wide via Ansible and
+#               needs root. This is the full Istota.
+#
+#   Standalone  Single-user install on your own machine (macOS or Linux). No
+#               server, no Nextcloud, no login, no sandbox. You chat through
+#               the local web UI and the REPL; everything runs as your user in
+#               one process (istota serve). Lighter and quick to start, but
+#               unsandboxed — only give it content and instructions you trust.
+#
+# Server, interactive (curl-pipe): pick from the menu, or force it with --bare
 #   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash
 #
-# Docker — brings up the full-stack compose file:
+# Standalone, interactive (run WITHOUT sudo — it installs into your user):
+#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --standalone
+#
+# Server via Docker — brings up the full-stack compose file:
 #   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
 #
 # Usage:
-#   install.sh [--docker] [other flags...]
-#     --docker        Use the Docker path (docker/init.sh) instead of bare metal
+#   install.sh [--bare | --docker | --standalone] [other flags...]
+#     --bare          Server install, native via Ansible (needs root)
+#     --docker        Server install, Docker path (docker/init.sh)
+#     --standalone    Local single-user install (uv tool install + istota setup)
 #     --help          Show this help
+#   With no mode flag on a terminal you are asked to choose; with no mode flag
+#   and no terminal, the historical default (--bare) is used.
 #
 # All other flags pass through to the chosen subscript:
 #   bare metal: --headless, --update, --dry-run, --settings PATH
 #   docker:     --minimal, --force, --start, --no-start
+#   standalone: any `istota setup` flag (--yes, --force, --workspace, --port, …)
 #
-# Both paths default to running an interactive wizard. Pass --headless
-# (bare metal) or use --force / a pre-existing .env (docker) to skip it.
+# The bare-metal and docker paths default to running an interactive wizard
+# (skip with --headless / --force). Standalone always runs `istota setup`.
 #
 # Environment overrides (curl-pipe path):
 #   ISTOTA_REPO_URL     Repo to clone (default: https://github.com/istota-project/istota.git)
 #   ISTOTA_REPO_BRANCH  Branch / tag to clone (default: main)
 #   ISTOTA_CLONE_DIR    Where to clone the repo. Defaults to /tmp/istota-install
-#                       for bare metal (the Ansible deploy lands in
-#                       /srv/app/istota regardless) and ~/istota for docker
+#                       for bare metal and standalone (the Ansible deploy lands
+#                       in /srv/app/istota, and standalone installs a wheel via
+#                       uv, so the clone is throwaway) and ~/istota for docker
 #                       (so you can come back for `docker compose` ops).
 
 set -euo pipefail
@@ -38,23 +60,28 @@ CLONE_DIR="${ISTOTA_CLONE_DIR:-}"
 
 _BOLD="\033[1m"; _BLUE="\033[1;34m"; _GREEN="\033[1;32m"
 _YELLOW="\033[1;33m"; _RED="\033[1;31m"; _DIM="\033[2m"; _RESET="\033[0m"
-info()  { echo -e "${_BLUE}==>${_RESET} $*"; }
-ok()    { echo -e "${_GREEN}  ✓${_RESET} $*"; }
-warn()  { echo -e "${_YELLOW}  !${_RESET} $*"; }
-error() { echo -e "${_RED}ERROR:${_RESET} $*" >&2; }
-die()   { error "$@"; exit 1; }
+info()    { echo -e "${_BLUE}==>${_RESET} $*"; }
+ok()      { echo -e "${_GREEN}  ✓${_RESET} $*"; }
+warn()    { echo -e "${_YELLOW}  !${_RESET} $*"; }
+error()   { echo -e "${_RED}ERROR:${_RESET} $*" >&2; }
+die()     { error "$@"; exit 1; }
+section() { echo; echo -e "${_BOLD}━━━ $* ━━━${_RESET}"; echo; }
 
 show_help() {
     sed -n '2,/^$/s/^# \?//p' "$0"
 }
 
 # Parse only the flags this dispatcher cares about; everything else forwards.
+# MODE_EXPLICIT tracks whether the user chose a mode via a flag — if not, and
+# we're interactive, we prompt for one before dispatching.
 MODE="bare"
+MODE_EXPLICIT=false
 FORWARD_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --docker) MODE="docker"; shift ;;
-        --bare)   MODE="bare"; shift ;;
+        --docker)     MODE="docker";     MODE_EXPLICIT=true; shift ;;
+        --bare)       MODE="bare";       MODE_EXPLICIT=true; shift ;;
+        --standalone) MODE="standalone"; MODE_EXPLICIT=true; shift ;;
         --help|-h) show_help; exit 0 ;;
         *) FORWARD_ARGS+=("$1"); shift ;;
     esac
@@ -100,7 +127,13 @@ REPO_ROOT="$(repo_root_or_empty "$SCRIPT_DIR")"
 # /dev/tty isn't available (true non-interactive run), leave stdin alone and
 # let the subscript decide whether it can proceed.
 reattach_tty_if_needed() {
-    if [ ! -t 0 ] && [ -e /dev/tty ]; then
+    # Already interactive — nothing to do.
+    [ -t 0 ] && return 0
+    # /dev/tty can exist as a device node yet be unopenable when there's no
+    # controlling terminal (cron, CI, a detached pipe). Probe in a subshell so a
+    # failed open doesn't abort the script under `set -e`; only reattach for real
+    # once we know it opens.
+    if [ -e /dev/tty ] && (exec < /dev/tty) 2>/dev/null; then
         exec < /dev/tty
     fi
 }
@@ -172,8 +205,153 @@ run_docker() {
     exec bash "$target" "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
 }
 
+# --- Standalone (local single-user) helpers --------------------------------
+
+ensure_uv() {
+    if command -v uv >/dev/null 2>&1; then
+        ok "uv available ($(uv --version 2>/dev/null))"
+        return 0
+    fi
+    info "Installing uv (Python package/tool manager)"
+    if command -v curl >/dev/null 2>&1; then
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- https://astral.sh/uv/install.sh | sh
+    else
+        die "uv is required but not installed, and neither curl nor wget is available to fetch it.
+  Install uv manually (https://docs.astral.sh/uv/) and re-run."
+    fi
+    # uv's installer drops the binary in ~/.local/bin by default.
+    export PATH="$HOME/.local/bin:$PATH"
+    command -v uv >/dev/null 2>&1 \
+        || die "uv installed but not on PATH. Open a new shell (or run '. ~/.local/bin/env') and re-run."
+    ok "uv installed"
+}
+
+# A source-clone install has no pre-built web UI assets; the wheel only ships
+# them when src/istota/web_static exists (a PyPI/wheel install would already
+# carry them). Best-effort build so the web UI isn't blank. The REPL works
+# regardless.
+maybe_build_web_static() {
+    local root="$1"
+    if [ -d "$root/src/istota/web_static" ] && [ -n "$(ls -A "$root/src/istota/web_static" 2>/dev/null)" ]; then
+        return 0
+    fi
+    if [ ! -f "$root/scripts/build-web-static.sh" ]; then
+        return 0
+    fi
+    if command -v npm >/dev/null 2>&1; then
+        info "Building the web UI assets (npm — this can take a minute)"
+        if bash "$root/scripts/build-web-static.sh"; then
+            ok "Web UI assets built"
+        else
+            warn "Web UI asset build failed — the web UI may be blank."
+            warn "The REPL ('istota repl') still works. Re-run scripts/build-web-static.sh later, then re-install."
+        fi
+    else
+        warn "npm not found — skipping web UI asset build; the web UI will have no assets."
+        warn "Use 'istota repl', or install Node.js, run scripts/build-web-static.sh, and re-install."
+    fi
+}
+
+run_standalone() {
+    reattach_tty_if_needed
+
+    # Standalone installs into your own user account (uv tool + ~/.config/istota).
+    # Running it as root would install into root's home and is almost never what
+    # the user wants — refuse with a clear pointer.
+    if [ "$(id -u)" -eq 0 ]; then
+        local hint=""
+        if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+            hint="
+  You ran this with sudo — re-run it as ${SUDO_USER}, without sudo."
+        fi
+        die "Standalone mode installs into your own user account and must not run as root.${hint}
+  (Only the Server install needs root.)  Re-run without sudo:  bash install.sh --standalone"
+    fi
+
+    section "Standalone install"
+    ensure_uv
+
+    # No PyPI release yet, so install from the repo: use the local checkout if
+    # we're already in one, otherwise clone it (ensure_repo sets REPO_ROOT).
+    : "${CLONE_DIR:=/tmp/istota-install}"
+    ensure_repo
+    { [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/pyproject.toml" ]; } \
+        || die "Could not locate the istota source (looked at '$REPO_ROOT')."
+
+    maybe_build_web_static "$REPO_ROOT"
+
+    info "Installing istota[local] from $REPO_ROOT"
+    uv tool install --force "${REPO_ROOT}[local]"
+    export PATH="$HOME/.local/bin:$PATH"
+    command -v istota >/dev/null 2>&1 \
+        || die "istota installed but not on PATH. Run 'uv tool update-shell' (or add ~/.local/bin to PATH), open a new shell, then: istota setup"
+    ok "istota installed"
+
+    section "Running setup"
+    istota setup "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
+
+    section "Done"
+    ok "Standalone install complete"
+    echo
+    echo -e "  ${_BOLD}Start it:${_RESET}  istota serve"
+    echo -e "             ${_DIM}then open the printed http://127.0.0.1:<port>/istota URL (no login)${_RESET}"
+    echo -e "  ${_BOLD}REPL:${_RESET}      istota repl"
+    echo -e "  ${_BOLD}Docs:${_RESET}      docs/LOCAL_INSTALL.md"
+    echo
+    echo -e "  ${_DIM}Standalone runs unsandboxed as your user — only give it content you trust.${_RESET}"
+    echo
+}
+
+# --- Interactive mode selection --------------------------------------------
+
+# When no mode flag was given and we have a terminal, ask which install shape
+# the user wants. Sets $MODE. With no terminal, leaves the historical default
+# (--bare) untouched so non-interactive `curl | sudo bash` still works.
+prompt_install_mode() {
+    reattach_tty_if_needed
+    [ -t 0 ] || return 0
+
+    local root_note=""
+    if [ "$(id -u)" -eq 0 ]; then
+        root_note="  ${_DIM}(run without sudo for this option)${_RESET}"
+    fi
+
+    echo
+    echo -e "${_BOLD}How do you want to install Istota?${_RESET}"
+    echo
+    echo -e "  ${_BOLD}1) Server${_RESET} ${_DIM}(default)${_RESET}"
+    echo "     Multi-user deployment on a Debian/Ubuntu server. Backed by"
+    echo "     Nextcloud (files, Talk chat, CalDAV, web login) with per-user"
+    echo "     bubblewrap isolation. Installs system-wide via Ansible and needs"
+    echo "     root. This is the full Istota."
+    echo
+    echo -e "  ${_BOLD}2) Standalone${_RESET}${root_note}"
+    echo "     Single-user install on your own machine (macOS or Linux). No"
+    echo "     server, no Nextcloud, no login, no sandbox. You chat through the"
+    echo "     local web UI and the REPL; everything runs as you in one process."
+    echo "     Lighter and quick to start, but unsandboxed — only give it"
+    echo "     content and instructions you trust."
+    echo
+    echo -e "  ${_DIM}Tip: the Server path can also run as Docker — re-run with --docker.${_RESET}"
+    echo
+    local choice
+    read -rp "  Choose [1/2, default 1]: " choice
+    case "$choice" in
+        2|s|S|standalone|Standalone) MODE="standalone" ;;
+        ""|1|server|Server)          MODE="bare" ;;
+        *) warn "Unrecognized choice '$choice' — defaulting to Server."; MODE="bare" ;;
+    esac
+}
+
+if [ "$MODE_EXPLICIT" = false ]; then
+    prompt_install_mode
+fi
+
 case "$MODE" in
-    bare)   run_bare ;;
-    docker) run_docker ;;
-    *)      die "Unknown mode: $MODE" ;;
+    bare)       run_bare ;;
+    docker)     run_docker ;;
+    standalone) run_standalone ;;
+    *)          die "Unknown mode: $MODE" ;;
 esac

@@ -2,6 +2,20 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: install.sh asks Server vs Standalone
+
+The top-level `install.sh` dispatcher only knew two paths — bare metal (default) and `--docker` — both server-shaped. Now that the local single-user shape exists (`uv tool install 'istota[local]'` → `istota setup` → `istota serve`), the installer should offer it too. Run from a terminal with no mode flag, `install.sh` now prints a two-option menu (Server / Standalone) with a short explanation of each, and dispatches accordingly. Existing behaviour is preserved: an explicit `--bare` / `--docker` / `--standalone` skips the prompt, and a non-interactive run (no controlling terminal) keeps the historical `--bare` default so `curl … | sudo bash` is unchanged.
+
+**Standalone dispatch.** New `run_standalone` refuses to run as root (it installs into your own user account; the hint names `$SUDO_USER` when you piped through sudo), ensures `uv` (installing it via the astral.sh script if absent), and installs the package from source. Since there is no PyPI release, it installs from the local checkout — or clones first when curl-piped — via `uv tool install "$REPO_ROOT[local]"` (uv parses `path[extra]` as a local directory with the `local` extra; verified). A source install has no pre-built web UI assets, so it best-effort runs `scripts/build-web-static.sh` when `npm` is present, warning clearly (REPL still works) when it isn't. Then it runs `istota setup` (forwarding any extra flags like `--yes` / `--workspace`) and prints `istota serve` next-steps.
+
+**Incidental hardening.** `reattach_tty_if_needed` did a bare `exec < /dev/tty` whenever the node existed, which aborts under `set -e` when `/dev/tty` exists but has no controlling terminal (cron / CI / detached pipe). It now probes openability in a subshell first and only reattaches when it'll succeed — so a genuinely non-interactive run falls back to the default instead of dying. Also added the `section()` helper (previously only in `deploy/install.sh`) since `run_standalone` uses it.
+
+Verified: `bash -n` + shellcheck clean; drove the menu through a pty (2→standalone, 1→bare, empty→bare); flag dispatch correct; no-terminal path falls back to bare with no error; standalone root-refusal fires.
+
+**Files added/modified:**
+- `install.sh` - Added `--standalone` flag + `MODE_EXPLICIT` tracking, `prompt_install_mode`, `run_standalone`, `ensure_uv`, `maybe_build_web_static`, `section()`; hardened `reattach_tty_if_needed`; updated header/`--help`.
+- `README.md` - Install section notes the Server/Standalone prompt and the `--standalone` route.
+
 ## 2026-07-19: Native-brain daemon-side WebFetch tool
 
 Gave the NativeBrain harness a way to fetch an arbitrary public web page. The native agent loop runs in the daemon process (host netns), but its only web-reaching tool was Bash, which runs sandboxed behind bwrap `--unshare-net` + the tight CONNECT-proxy allowlist — so `curl` hit the allowlist wall and the harness was more web-blind than ClaudeCodeBrain (which ships the CLI's own WebFetch). Widening the CONNECT allowlist was the wrong lever (it hands the secret-adjacent sandboxed Bash arbitrary egress). Instead, a new `WebFetch` core tool runs **in the daemon** — credential-free and SSRF-hardened — so its broad reachability creates no new secret-exfil or internal-network path. It does not eliminate model-driven exfil (a GET query string is a canonical exfil channel), but that residual already exists via the `browse` skill and is bounded the same way.
