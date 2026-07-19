@@ -1009,7 +1009,13 @@ base_path = "/srv/app/istota/html"
         """If ISTOTA_CONFIG_PATH points at a missing file, search continues."""
         monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "no_admins"))
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(tmp_path / "does_not_exist.toml"))
-        # No other config in any candidate path either, so we get a default Config.
+        # Isolate the search order from the developer/CI home: two candidates are
+        # ~/src/config/config.toml and ~/.config/istota/config.toml (via
+        # Path.home() → $HOME). Point HOME at the empty tmp dir so a real local
+        # config (e.g. from a standalone `istota setup`) doesn't get picked up and
+        # break the "nothing found" assertion. chdir handles the relative
+        # config/config.toml candidate.
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.chdir(tmp_path)
         cfg = load_config()
         # Default Config — config_path stays None because nothing was loaded.
