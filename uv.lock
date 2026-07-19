@@ -1358,6 +1358,20 @@ feeds = [
 garmin = [
     { name = "garminconnect", marker = "python_full_version >= '3.12'" },
 ]
+local = [
+    { name = "authlib" },
+    { name = "bleach" },
+    { name = "caldav" },
+    { name = "click" },
+    { name = "fastapi" },
+    { name = "feedparser" },
+    { name = "icalendar" },
+    { name = "imap-tools" },
+    { name = "itsdangerous" },
+    { name = "python-multipart" },
+    { name = "uvicorn" },
+    { name = "yfinance" },
+]
 location = [
     { name = "fastapi" },
     { name = "geopy" },
@@ -1425,15 +1439,20 @@ requires-dist = [
     { name = "icalendar", marker = "extra == 'calendar'", specifier = ">=5.0.0" },
     { name = "imap-tools", marker = "extra == 'email'", specifier = ">=1.0.0" },
     { name = "istota", extras = ["calendar"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["calendar"], marker = "extra == 'local'" },
     { name = "istota", extras = ["email"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["email"], marker = "extra == 'local'" },
     { name = "istota", extras = ["feeds"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["feeds"], marker = "extra == 'local'" },
     { name = "istota", extras = ["garmin"], marker = "extra == 'all'" },
     { name = "istota", extras = ["location"], marker = "extra == 'all'" },
     { name = "istota", extras = ["markets"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["markets"], marker = "extra == 'local'" },
     { name = "istota", extras = ["memory-search"], marker = "extra == 'all'" },
     { name = "istota", extras = ["money"], marker = "extra == 'all'" },
     { name = "istota", extras = ["transcribe"], marker = "extra == 'all'" },
     { name = "istota", extras = ["web"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["web"], marker = "extra == 'local'" },
     { name = "istota", extras = ["whisper"], marker = "extra == 'all'" },
     { name = "itsdangerous", marker = "extra == 'web'", specifier = ">=2.1.0" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.6.0" },
@@ -1456,7 +1475,7 @@ requires-dist = [
     { name = "weasyprint", marker = "extra == 'money'", specifier = ">=62.0" },
     { name = "yfinance", marker = "extra == 'markets'", specifier = ">=0.2.0" },
 ]
-provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-search", "whisper", "location", "web", "money", "feeds", "garmin", "docs", "all"]
+provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-search", "whisper", "location", "web", "money", "feeds", "garmin", "docs", "local", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -82,6 +82,17 @@ docs = [
     "mkdocs>=1.6.0",
     "mkdocs-material>=9.5.0",
 ]
+# Lean footprint for a local single-user install (`uv tool install 'istota[local]'`):
+# core agent + web UI + light pure-Python modules. Heavy modules (money, health,
+# location, memory-search/torch, whisper, transcribe) stay opt-in. See
+# docs/LOCAL_INSTALL.md. The `claude` CLI is an external prereq for the default brain.
+local = [
+    "istota[web]",
+    "istota[feeds]",
+    "istota[calendar]",
+    "istota[email]",
+    "istota[markets]",
+]
 all = [
     "istota[calendar]",
     "istota[email]",
@@ -110,6 +121,12 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/istota"]
+# Ship the built SvelteKit frontend as package data so the web UI works from a
+# non-editable install (no repo checkout). The release build copies web/build →
+# src/istota/web_static (gitignored) before `hatch build`; `artifacts` forces
+# those otherwise-VCS-excluded files into the wheel. web_app._resolve_static_dir
+# falls back to the packaged dir. Absent (dev build without the copy) → no error.
+artifacts = ["src/istota/web_static/**"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

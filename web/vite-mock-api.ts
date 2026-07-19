@@ -781,6 +781,25 @@ const mockAdminStats = {
 		last_backup: new Date(Date.now() - 18 * 3600_000).toISOString(),
 		nextcloud_mount_healthy: true,
 	},
+	runtime: {
+		mode: 'standalone',
+		caveats: [
+			{
+				title: 'No sandbox isolation',
+				detail:
+					"The agent runs with your user account's full privileges. Only give this instance content and instructions you trust.",
+			},
+			{
+				title: 'No Nextcloud',
+				detail:
+					'The workspace is a local folder (~/.istota); file sharing and CalDAV-from-Nextcloud are unavailable.',
+			},
+			{
+				title: 'Email polling is off',
+				detail: 'Inbound/outbound email is disabled.',
+			},
+		],
+	},
 };
 
 // Mock reader dataset — populated below so the dev UI has scrollable content.

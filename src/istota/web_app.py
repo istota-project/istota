@@ -57,15 +57,37 @@ _WEB_START_TIME = time.time()
 # field" (explicit null) from "leave it untouched" in _chat_update_room.
 _UNSET = object()
 
-# Resolve static build directory. Default walks up from this module's path,
-# which works for editable installs from the repo root. For non-editable installs
-# (Docker runtime), the operator sets ISTOTA_WEB_STATIC_DIR explicitly.
-_STATIC_DIR = Path(
-    os.environ.get(
-        "ISTOTA_WEB_STATIC_DIR",
-        str(Path(__file__).resolve().parent.parent.parent / "web" / "build"),
+# Resolve static build directory. Precedence:
+#   1. ISTOTA_WEB_STATIC_DIR env override (Docker runtime / explicit).
+#   2. Repo-relative web/build (editable installs from the repo root).
+#   3. Packaged static tree at istota/web_static (non-editable wheel installs —
+#      the release build copies web/build there; see pyproject packaging).
+def _pick_static_dir(env_dir: str, repo_build: Path, packaged: Path) -> Path:
+    """Pick the static dir from candidates (pure — unit-testable).
+
+    Precedence: env override > repo-relative build > packaged. Falls back to
+    the repo-relative path when neither build exists, preserving the existing
+    "missing build" behaviour (StaticFiles mount is guarded on ``.is_dir()``).
+    """
+    if env_dir.strip():
+        return Path(env_dir.strip())
+    if repo_build.is_dir():
+        return repo_build
+    if packaged.is_dir():
+        return packaged
+    return repo_build
+
+
+def _resolve_static_dir() -> Path:
+    here = Path(__file__).resolve()
+    return _pick_static_dir(
+        os.environ.get("ISTOTA_WEB_STATIC_DIR", ""),
+        here.parent.parent.parent / "web" / "build",
+        here.parent / "web_static",
     )
-)
+
+
+_STATIC_DIR = _resolve_static_dir()
 
 
 def _reload_config():
@@ -151,11 +173,19 @@ def _resolve_session_secret() -> str:
     # config.toml (Docker-persisted) secret. Best-effort: a missing or
     # unreadable config must not crash import — it just means none was found.
     try:
-        config_secret = (load_config().web.session_secret_key or "").strip()
+        _cfg = load_config()
+        config_secret = (_cfg.web.session_secret_key or "").strip()
     except Exception:  # pragma: no cover - defensive
+        _cfg = None
         config_secret = ""
     if config_secret:
         return config_secret
+
+    # No-auth (standalone local) mode never reads the session — the middleware
+    # is still constructed, so it needs *a* key, but a random per-process one is
+    # fine (there is nothing to forge without an auth flow). Do not crash import.
+    if _cfg is not None and getattr(_cfg.web, "auth", "nextcloud") == "none":
+        return secrets.token_hex(32)
 
     if os.environ.get(_ALLOW_INSECURE_SESSION_ENV, "").strip().lower() in ("1", "true", "yes"):
         logger.warning(
@@ -199,13 +229,73 @@ app.add_middleware(
 # Auth helpers
 # ============================================================================
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0"})
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether a bind host is loopback-only (safe for no-auth).
+
+    ``0.0.0.0`` is deliberately NOT loopback — it binds all interfaces. Only
+    ``127.0.0.1`` / ``::1`` / ``localhost`` count. (Listed here for clarity;
+    the guard below rejects everything not in the accept set.)
+    """
+    return host.strip().lower() in ("127.0.0.1", "::1", "localhost")
+
+
+def assert_no_auth_bind_safe(auth: str, host: str) -> None:
+    """Refuse to serve no-auth on a non-loopback bind.
+
+    Raises ``RuntimeError`` when ``auth == "none"`` and ``host`` is not a
+    loopback address — structurally prevents an unauthenticated instance from
+    being exposed on the network. A no-op for ``auth == "nextcloud"``.
+    """
+    if auth != "none":
+        return
+    if not is_loopback_host(host):
+        raise RuntimeError(
+            f"[web] auth = \"none\" (no authentication) refuses to bind to a "
+            f"non-loopback host {host!r}. no-auth mode is only safe on "
+            f"127.0.0.1/::1/localhost. Either bind loopback-only or set "
+            f"[web] auth = \"nextcloud\"."
+        )
+
+
+def _no_auth_mode() -> bool:
+    """Whether the web app is running with authentication bypassed.
+
+    Single-user local (standalone) shape: ``[web] auth = "none"``. Server
+    deployments leave the default ``"nextcloud"`` and this is always False.
+    """
+    return bool(_config) and getattr(_config.web, "auth", "nextcloud") == "none"
+
+
+def _local_user() -> dict:
+    """The fixed local user dict for no-auth mode.
+
+    Shape mirrors the session user (``{"username", "display_name"}``). The id
+    is the single configured local user; the display name comes from its
+    profile when present.
+    """
+    uid = _config.local_user_id if _config else "local"
+    uc = _config.users.get(uid) if _config else None
+    display = (uc.display_name if uc and uc.display_name else uid)
+    return {"username": uid, "display_name": display}
+
+
 def _get_session_user(request: Request) -> dict | None:
     """Get user from session, or None."""
     return request.session.get("user")
 
 
 def _require_api_auth(request: Request) -> dict:
-    """Dependency for API routes: returns user or 401."""
+    """Dependency for API routes: returns user or 401.
+
+    In no-auth mode (``[web] auth = "none"``) every request is the fixed local
+    user — an early return before any session read, so it holds for every route
+    without override wiring and survives a SIGHUP config reload.
+    """
+    if _no_auth_mode():
+        return _local_user()
     user = _get_session_user(request)
     if not user:
         raise _UnauthorizedException()
@@ -219,7 +309,13 @@ def _user_is_web_admin(username: str) -> bool:
     set as "all users are admin" for sandbox/skill/command back-compat. The
     web admin dashboard requires an explicit allowlist: a missing or empty
     ``/etc/istota/admins`` means no admin access via the web UI.
+
+    Exception: in no-auth mode the single local user is always admin (the
+    install is single-user and trusted by construction), so a local instance
+    doesn't need an ``/etc/istota/admins`` entry.
     """
+    if _no_auth_mode() and _config and username == _config.local_user_id:
+        return True
     if not _config or not _config.admin_users:
         return False
     return username in _config.admin_users
@@ -233,7 +329,14 @@ def _require_admin(user: dict = Depends(_require_api_auth)) -> dict:
 
 
 def _verify_origin(request: Request) -> None:
-    """Check Origin/Referer header against configured hostname for CSRF protection."""
+    """Check Origin/Referer header against configured hostname for CSRF protection.
+
+    No-op in no-auth mode: the loopback-only bind (enforced at startup) means
+    there is no cross-site attacker, and requiring an Origin header would 403
+    tools/curl calls with none.
+    """
+    if _no_auth_mode():
+        return
     origin = request.headers.get("origin") or request.headers.get("referer")
     if not origin:
         raise _ForbiddenException("missing origin")
@@ -693,7 +796,67 @@ def _gather_admin_stats() -> dict:
         payload["error"] = str(exc)
 
     payload["modules"] = _admin_modules_section()
+    payload["runtime"] = _admin_runtime_section()
     return payload
+
+
+def _admin_runtime_section() -> dict:
+    """Runtime posture block for the admin dashboard.
+
+    ``mode`` is config-derived (``Config.is_standalone``). ``caveats`` is
+    derived from what is *actually* disabled, so it stays accurate as the user
+    opts features back in — a caveat whose feature is enabled is omitted. Each
+    caveat is ``{"title", "detail"}``. In server mode the block is minimal
+    (``mode == "server"``, empty caveats) so the frontend renders nothing.
+    """
+    if not _config or not _config.is_standalone:
+        return {"mode": "server", "caveats": []}
+
+    caveats: list[dict] = []
+
+    # Security caveat is always present in standalone mode. Standalone is a
+    # trusted single-user posture without bwrap isolation, so the agent runs
+    # with the user's full privileges regardless of the sandbox_enabled flag.
+    caveats.append({
+        "title": "No sandbox isolation",
+        "detail": (
+            "The agent runs with your user account's full privileges. Only "
+            "give this instance content and instructions you trust."
+        ),
+    })
+
+    if not _config.nextcloud.url:
+        workspace = str(_config.nextcloud_mount_path or "a local folder")
+        caveats.append({
+            "title": "No Nextcloud",
+            "detail": (
+                f"The workspace is a local folder ({workspace}); file sharing "
+                "and CalDAV-from-Nextcloud are unavailable."
+            ),
+        })
+
+    if not _config.location.enabled:
+        caveats.append({
+            "title": "GPS location tracking is off",
+            "detail": (
+                "The Overland webhook receiver isn't running under `istota "
+                "serve` by default."
+            ),
+        })
+
+    if not _config.talk.enabled:
+        caveats.append({
+            "title": "Nextcloud Talk is disabled",
+            "detail": "Chat is the web UI and REPL only.",
+        })
+
+    if not _config.email.enabled:
+        caveats.append({
+            "title": "Email polling is off",
+            "detail": "Inbound/outbound email is disabled.",
+        })
+
+    return {"mode": "standalone", "caveats": caveats}
 
 
 def _admin_system_section(version: str, db_path: Path) -> dict:

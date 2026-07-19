@@ -124,11 +124,36 @@ def _is_stale_fire(
 # Graceful shutdown flag
 _shutdown_requested = False
 
+# Singleton daemon lock. A module constant (not hardcoded inline) so the
+# combined ``istota serve`` launcher and tests can point it elsewhere; the
+# default matches the systemd/server deployment.
+DAEMON_LOCK_PATH = Path("/tmp/istota-scheduler-daemon.lock")
+
+
+class _DaemonAlreadyRunning(RuntimeError):
+    """Raised by ``run_daemon`` when the singleton flock is already held.
+
+    Lets the combined ``istota serve`` launcher report "already running" and
+    exit non-zero. The standalone ``main()`` path catches it and exits cleanly
+    (preserving the old "log + return" behaviour without a traceback).
+    """
+
 
 def _signal_handler(signum, frame):
     """Handle shutdown signals."""
     global _shutdown_requested
     logger.info("Received signal %d, shutting down gracefully...", signum)
+    _shutdown_requested = True
+
+
+def request_shutdown() -> None:
+    """Request a graceful shutdown of the daemon loop.
+
+    Sets the same flag the SIGTERM/SIGINT handler sets. Used by the combined
+    ``istota serve`` launcher, which owns process signal handling itself and
+    runs ``run_daemon(install_signal_handlers=False)`` on a worker thread.
+    """
+    global _shutdown_requested
     _shutdown_requested = True
 
 # Pattern to detect confirmation requests in Claude's output
@@ -3758,30 +3783,54 @@ def _dispatch_sleep(
             logger.error("Error dispatching workers: %s", e)
 
 
-def run_daemon(config: Config) -> None:
+def run_daemon(
+    config: Config,
+    *,
+    install_signal_handlers: bool = True,
+    ready_event: "threading.Event | None" = None,
+) -> None:
     """
     Run the scheduler as a daemon (continuous loop).
     Handles graceful shutdown via SIGTERM/SIGINT.
+
+    ``install_signal_handlers`` (default True) preserves the standalone-daemon
+    behaviour. The combined ``istota serve`` launcher runs this on a worker
+    thread with ``install_signal_handlers=False`` and owns SIGINT/SIGTERM
+    itself (signal handlers can only be installed from the main thread), driving
+    shutdown via ``request_shutdown()``.
+
+    ``ready_event`` (when supplied) is set once the worker pool and pollers are
+    initialized and the loop is about to start — the launcher waits on it before
+    starting uvicorn so the two subsystems come up in order. On an early return
+    (lock contention) the event is still set so a waiter isn't left blocked.
     """
     global _shutdown_requested
+    # Clear any stale flag from a prior in-process run (serve restart / tests).
+    _shutdown_requested = False
 
     # Acquire exclusive lock to prevent multiple daemon instances
-    lock_path = Path("/tmp/istota-scheduler-daemon.lock")
+    lock_path = DAEMON_LOCK_PATH
     lock_file = open(lock_path, "w")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         logger.error("Another scheduler daemon is already running. Exiting.")
         lock_file.close()
-        return
+        if ready_event is not None:
+            ready_event.set()
+        raise _DaemonAlreadyRunning(
+            "Another istota scheduler is already running (lock held at "
+            f"{lock_path})."
+        )
 
     # Write PID to lock file for debugging
     lock_file.write(str(os.getpid()))
     lock_file.flush()
 
-    # Set up signal handlers
-    signal.signal(signal.SIGTERM, _signal_handler)
-    signal.signal(signal.SIGINT, _signal_handler)
+    # Set up signal handlers (main-thread only; the serve launcher opts out).
+    if install_signal_handlers:
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
 
     logger.info("STARTUP Scheduler daemon starting (pid: %d)", os.getpid())
     logger.info("STARTUP Task poll interval: %ds", config.scheduler.poll_interval)
@@ -3827,6 +3876,15 @@ def run_daemon(config: Config) -> None:
                 "SECURITY UNSUPPORTED CONFIGURATION: sandbox_enabled=false with %d users configured — "
                 "no isolation between users. Linux + bubblewrap is the only supported multi-user deployment.",
                 len(config.users),
+            )
+        elif config.is_standalone:
+            # Intended single-user local posture (istota serve / setup), not a
+            # misconfiguration. Still visible so the trust model isn't hidden.
+            logger.info(
+                "SECURITY Standalone local install — no sandbox isolation. The "
+                "agent runs with your user account's full privileges (trusted "
+                "single-user posture). Only give it content and instructions you "
+                "trust."
             )
         else:
             logger.warning(
@@ -3964,6 +4022,11 @@ def run_daemon(config: Config) -> None:
     # Init to "now" (not 0.0) so the first stats line fires after one full
     # interval — avoids a noisy emit during startup while state is hydrating.
     last_stats_check = time.time()
+
+    # Signal the launcher (if any) that the pool + pollers are up and the loop
+    # is about to start — it starts uvicorn only after this fires.
+    if ready_event is not None:
+        ready_event.set()
 
     while not _shutdown_requested:
         # Mark the loop alive for the stall watchdog before doing any work.
@@ -4210,7 +4273,11 @@ def main():
     if args.daemon:
         if args.dry_run:
             logger.warning("--dry-run is ignored in daemon mode")
-        run_daemon(config)
+        try:
+            run_daemon(config)
+        except _DaemonAlreadyRunning:
+            # Already logged an error inside run_daemon; exit cleanly.
+            raise SystemExit(1)
     else:
         processed = run_scheduler(config, max_tasks=args.max_tasks, dry_run=args.dry_run)
         logger.info("Processed %d task(s)", processed)

@@ -81,3 +81,6 @@ tests/fixtures/cm_traces/*.jsonl
 
 # Local dev feed preview data (seeded by scripts/dev/seed_feed_preview.py)
 web/dev-feed-data.json
+
+# Built SvelteKit frontend copied in for wheel packaging (release build step)
+src/istota/web_static/

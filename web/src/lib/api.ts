@@ -115,6 +115,10 @@ export interface AdminStats {
 		last_backup: string | null;
 		nextcloud_mount_healthy: boolean;
 	};
+	runtime?: {
+		mode: 'standalone' | 'server';
+		caveats: { title: string; detail: string }[];
+	};
 	error?: string;
 }
 

@@ -133,6 +133,63 @@ def cmd_repl(args):
     )
 
 
+def _default_env_file(args) -> Path:
+    """Where ``serve``/``setup`` read/write the secrets env file.
+
+    Sibling to an explicit ``-c`` config file, else the standard
+    ``~/.config/istota/istota.env`` (where ``istota setup`` writes it).
+    """
+    if getattr(args, "config", None):
+        return Path(args.config).expanduser().parent / "istota.env"
+    return Path.home() / ".config" / "istota" / "istota.env"
+
+
+def cmd_setup(args):
+    """Interactive first-run installer for the local single-user shape."""
+    from . import setup_wizard
+
+    try:
+        rc = setup_wizard.run_setup(args)
+    except setup_wizard.SetupError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        print("\nSetup cancelled.", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(rc)
+
+
+def cmd_serve(args):
+    """Combined local launcher: scheduler loop + web server in one process."""
+    from . import serve
+
+    # Propagate an explicit -c path to the web app, which loads its own config
+    # via load_config() (no arg) in its lifespan — ISTOTA_CONFIG_PATH is the
+    # documented way to point it at a non-standard config location.
+    import os
+    if args.config:
+        os.environ["ISTOTA_CONFIG_PATH"] = str(Path(args.config).expanduser())
+
+    # Source the secrets env file (native API key, session secret, …) BEFORE
+    # load_config so its env overrides apply. Non-clobbering.
+    env_file = Path(args.env_file).expanduser() if args.env_file else _default_env_file(args)
+    n = serve.load_env_file(env_file)
+    config = load_config(Path(args.config) if args.config else None)
+    setup_logging(config, verbose=args.verbose, daemon_mode=True)
+    if n:
+        print(f"Loaded {n} value(s) from {env_file}")
+
+    host = args.host or "127.0.0.1"
+    port = args.port  # None → serve uses config.web.port
+    try:
+        serve.run_serve(config, host=host, port=port)
+    except serve.ServeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        sys.exit(0)
+
+
 def cmd_run(args):
     """Run the scheduler once (process pending tasks)."""
     config = load_config(Path(args.config) if args.config else None)
@@ -1276,6 +1333,36 @@ def main():
     run_parser.add_argument("--briefings", action="store_true", help="Check and queue briefings first")
     run_parser.add_argument("--dry-run", action="store_true", help="Don't actually execute tasks")
 
+    # setup (interactive first-run installer for the local single-user shape)
+    setup_parser = subparsers.add_parser(
+        "setup", help="Interactive first-run installer (local single-user install)",
+    )
+    setup_parser.add_argument("--workspace", help="Workspace directory (default ~/.istota)")
+    setup_parser.add_argument(
+        "--brain", choices=["claude_code", "native"], help="Model backend (skip detection)",
+    )
+    setup_parser.add_argument("--native-base-url", help="Native brain API base URL")
+    setup_parser.add_argument("--native-model", help="Native brain model id")
+    setup_parser.add_argument("--native-api-key", help="Native brain API key (written to istota.env)")
+    setup_parser.add_argument("--user", help="User id (default OS username)")
+    setup_parser.add_argument("--display-name", help="Display name")
+    setup_parser.add_argument("--timezone", help="Timezone (default from system)")
+    setup_parser.add_argument("--port", type=int, help="Web port (default 8766)")
+    setup_parser.add_argument("--email", action="store_true", help="Enable email surface")
+    setup_parser.add_argument("--location", action="store_true", help="Enable GPS/location webhooks")
+    setup_parser.add_argument("--yes", action="store_true", help="Non-interactive; take defaults + flags")
+    setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing config")
+
+    # serve (combined local launcher: scheduler + web in one process)
+    serve_parser = subparsers.add_parser(
+        "serve", help="Run the scheduler loop and web server in one process (local install)",
+    )
+    serve_parser.add_argument("--host", help="Web bind host (default 127.0.0.1)")
+    serve_parser.add_argument("--port", type=int, help="Web port (default from [web] port)")
+    serve_parser.add_argument(
+        "--env-file", help="Path to a KEY=VALUE secrets env file to source before start",
+    )
+
     # repl
     repl_parser = subparsers.add_parser(
         "repl", help="Interactive terminal assistant (full-stack, streamed)",
@@ -1549,8 +1636,9 @@ def main():
 
     args = parser.parse_args()
 
-    # Load config and setup logging (except for init which doesn't need full config)
-    if args.command != "init":
+    # Load config and setup logging (except for init/setup which don't need — or
+    # may pre-date — a config file).
+    if args.command not in ("init", "setup"):
         config = load_config(Path(args.config) if args.config else None)
         setup_logging(config, verbose=args.verbose)
 
@@ -1565,6 +1653,8 @@ def main():
         "secret": cmd_secret,
         "email": cmd_email,
         "repl": cmd_repl,
+        "serve": cmd_serve,
+        "setup": cmd_setup,
     }
 
     if args.command == "user":
