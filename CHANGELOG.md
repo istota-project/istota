@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Sandboxed tasks failed with a "workspace overlaps a protected path" error on Nextcloud-backed servers: the placeholder that fills in your workspace path in skill instructions was mistakenly reused as the sandbox working directory, which the path guard then rejected. Every assistant reply was affected while scheduled command jobs kept running normally. The two uses are separated again.
+
 ## [0.31.0] - 2026-07-19
 
 ### Added
