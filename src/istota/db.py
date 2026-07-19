@@ -586,9 +586,31 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_google_oauth_encryption(conn)
 
 
+def _resolve_schema_path() -> Path:
+    """Locate schema.sql for both a source checkout and an installed wheel.
+
+    In a source checkout db.py lives at ``<repo>/src/istota/db.py`` and the
+    schema is ``<repo>/schema.sql`` (``parent.parent.parent``). In a non-editable
+    install (``uv tool install`` / pip wheel) there is no repo root — the schema
+    is force-included into the package as ``istota/schema.sql`` (``parent``).
+    Prefer the packaged copy, fall back to the source-tree copy.
+    """
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "schema.sql",              # packaged wheel (force-include)
+        here.parent.parent / "schema.sql",  # source checkout: <repo>/schema.sql
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    # Nothing found — return the packaged path so the FileNotFoundError names the
+    # location an installed user would expect.
+    return candidates[0]
+
+
 def init_db(db_path: Path) -> None:
     """Initialize database with schema."""
-    schema_path = Path(__file__).parent.parent.parent / "schema.sql"
+    schema_path = _resolve_schema_path()
     with sqlite3.connect(db_path) as conn:
         # WAL is set ONCE here, not on every get_db open. journal_mode is
         # persistent in the SQLite file header, so re-issuing it per

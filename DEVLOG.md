@@ -2,6 +2,16 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Fix schema.sql missing from installed wheel (standalone setup crash)
+
+`istota setup` crashed at `db.init_db` on a `uv tool install`'d (non-editable) standalone install: `FileNotFoundError: …/site-packages/schema.sql`. `init_db` resolved the schema as `Path(__file__).parent.parent.parent / "schema.sql"`, which lands on the repo root in a source checkout (`<repo>/schema.sql`) but on `…/lib/python3.12/schema.sql` in an installed wheel — and `schema.sql` lives at the repo root, outside the `src/istota` package, so the wheel never shipped it at all (only `web_static` was force-included).
+
+Fix is two parts: force-include `schema.sql` into the wheel as `istota/schema.sql` (same mechanism as `web_static`), and add `_resolve_schema_path()` which prefers the packaged copy (`Path(__file__).parent / "schema.sql"`) and falls back to the source-tree copy (`…/parent.parent / "schema.sql"`), so both a checkout and an installed wheel work. Verified by building the wheel (schema.sql present at `istota/schema.sql`), installing `istota[local]` into an isolated uv tool dir, running `istota setup --yes` to completion (config + env written, `istota.db` created with schema), and starting `istota serve` — web UI returns HTTP 200. Other repo-root data (`config/` emissaries/persona/guidelines) is loaded with graceful `.exists()` fallbacks, so its absence in an installed wheel degrades rather than crashes; the `money` module logs a benign "No module named 'beancount'" when its heavy extra isn't installed.
+
+**Files added/modified:**
+- `src/istota/db.py` - `_resolve_schema_path()`; `init_db` uses it instead of the hardcoded `parent.parent.parent` path.
+- `pyproject.toml` - `[tool.hatch.build.targets.wheel.force-include]` ships `schema.sql` → `istota/schema.sql`.
+
 ## 2026-07-19: install.sh asks Server vs Standalone
 
 The top-level `install.sh` dispatcher only knew two paths — bare metal (default) and `--docker` — both server-shaped. Now that the local single-user shape exists (`uv tool install 'istota[local]'` → `istota setup` → `istota serve`), the installer should offer it too. Run from a terminal with no mode flag, `install.sh` now prints a two-option menu (Server / Standalone) with a short explanation of each, and dispatches accordingly. Existing behaviour is preserved: an explicit `--bare` / `--docker` / `--standalone` skips the prompt, and a non-interactive run (no controlling terminal) keeps the historical `--bare` default so `curl … | sudo bash` is unchanged.
