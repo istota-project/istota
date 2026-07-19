@@ -302,6 +302,9 @@ run_standalone() {
     echo
     echo -e "  ${_DIM}Standalone runs unsandboxed as your user — only give it content you trust.${_RESET}"
     echo
+    # Explicit: run_standalone reattached stdin to /dev/tty (for `istota setup`),
+    # so exit rather than let bash try to read another command from the terminal.
+    exit 0
 }
 
 # --- Interactive mode selection --------------------------------------------
@@ -309,9 +312,21 @@ run_standalone() {
 # When no mode flag was given and we have a terminal, ask which install shape
 # the user wants. Sets $MODE. With no terminal, leaves the historical default
 # (--bare) untouched so non-interactive `curl | sudo bash` still works.
+#
+# IMPORTANT: we must NOT `exec < /dev/tty` here. Under `curl | bash`, the shell
+# is still reading the rest of this script (the dispatch `case` below) from the
+# pipe on stdin; swapping stdin to the terminal mid-script makes bash try to
+# read the remaining script from the keyboard, which hangs. So we read the
+# choice with a redirect on the `read` command alone and leave stdin untouched.
 prompt_install_mode() {
-    reattach_tty_if_needed
-    [ -t 0 ] || return 0
+    local tty_src
+    if [ -t 0 ]; then
+        tty_src="/dev/stdin"                                   # already interactive
+    elif [ -e /dev/tty ] && (exec < /dev/tty) 2>/dev/null; then
+        tty_src="/dev/tty"                                     # curl-pipe: prompt on the terminal
+    else
+        return 0                                               # no terminal — keep the default
+    fi
 
     local root_note=""
     if [ "$(id -u)" -eq 0 ]; then
@@ -336,8 +351,8 @@ prompt_install_mode() {
     echo
     echo -e "  ${_DIM}Tip: the Server path can also run as Docker — re-run with --docker.${_RESET}"
     echo
-    local choice
-    read -rp "  Choose [1/2, default 1]: " choice
+    local choice=""
+    read -rp "  Choose [1/2, default 1]: " choice < "$tty_src" || true
     case "$choice" in
         2|s|S|standalone|Standalone) MODE="standalone" ;;
         ""|1|server|Server)          MODE="bare" ;;
