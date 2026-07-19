@@ -58,7 +58,7 @@ When transcribing images:
 
 Extract text from a screenshot:
 ```bash
-istota-skill transcribe ocr /srv/mount/nextcloud/content/Users/alice/inbox/screenshot.png
+istota-skill transcribe ocr {workspace}/inbox/screenshot.png
 ```
 
 Process a handwritten note with preprocessing:

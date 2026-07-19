@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native brain requests to OpenRouter now identify Istota as the calling app, so they're attributed on the OpenRouter dashboard and rankings. Other endpoints are unaffected, and a deployment can override or clear the attribution via `extra_headers`.
 
 ### Changed
+- Storage vocabulary now follows the deployment. On a local/standalone install (no Nextcloud configured), the assistant describes your files as "your workspace" — a plain local folder — instead of a Nextcloud mount, and knows it also has ordinary access to the rest of the machine's filesystem rather than claiming it can only see the mount. A Nextcloud-backed install is unchanged. Skill instructions no longer hardcode a Nextcloud mount path.
 - The installer now asks which shape you want when run interactively: a Server install (multi-user, Nextcloud-backed, sandboxed) or a Standalone single-user install on your own machine. Pass `--bare`, `--docker`, or `--standalone` to skip the prompt; a non-interactive run still defaults to the server (bare-metal) path. `--standalone` sets up the local single-user install end to end (run it without sudo).
 - Model pickers and the `!model` autocomplete now show the actual model an alias resolves to in parentheses (e.g. `smart (claude-opus-4-8)`), so it's clear which model you're choosing.
 - Marking or deleting mail now requires an explicit confirmation flag, so a stray or content-driven request can't quietly change or destroy your mailbox.

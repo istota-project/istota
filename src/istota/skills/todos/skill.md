@@ -12,14 +12,14 @@ TODO files are plain text with a simple format. Each line is a task:
 - [ ] Task with @priority(high)
 ```
 
-When reading/updating TODO files, use standard file operations on the mount:
+When reading/updating TODO files, use standard file operations:
 
 ```bash
 # Read the TODO file
-cat /srv/mount/nextcloud/content/path/to/TODO.txt
+cat {workspace}/path/to/TODO.txt
 
 # Add a task
-echo "- [ ] New task" >> /srv/mount/nextcloud/content/path/to/TODO.txt
+echo "- [ ] New task" >> {workspace}/path/to/TODO.txt
 
-# Edit in place (changes save directly to Nextcloud)
+# Edit in place (changes save directly to your workspace)
 ```

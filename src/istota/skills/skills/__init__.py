@@ -101,6 +101,15 @@ def _scripts_dir(config, user_id: str) -> str:
     return f"{config.rclone_remote}:{scripts_nc_path}"
 
 
+def _workspace_dir(config, user_id: str) -> str:
+    from istota.storage import get_user_base_path
+
+    base = get_user_base_path(user_id)
+    if config.use_mount and config.nextcloud_mount_path is not None:
+        return str(config.nextcloud_mount_path / base.lstrip("/"))
+    return f"{config.rclone_remote}:{base}"
+
+
 def _render_companion_body(config, name: str, meta) -> str | None:
     """Render one companion skill's body (frontmatter stripped, placeholders
     substituted) WITHOUT the ``## Skills Reference`` wrapper — it rides under a
@@ -175,6 +184,8 @@ def cmd_show(args) -> None:
 
     out = "".join(parts)
     out = out.replace("{scripts_dir}", _scripts_dir(config, ctx["user_id"]))
+    out = out.replace("{workspace}", _workspace_dir(config, ctx["user_id"]))
+    out = out.replace("{storage}", config.storage_label)
     out = out.replace("{user_id}", ctx["user_id"])
     print(out)
 

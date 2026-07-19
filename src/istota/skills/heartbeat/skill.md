@@ -44,7 +44,7 @@ timeout = 10
 
 ### file-watch
 Check file age or existence.
-- `path`: Nextcloud path to the file
+- `path`: workspace-relative path to the file
 - `max_age_hours`: Maximum file age in hours (optional)
 
 ### shell-command

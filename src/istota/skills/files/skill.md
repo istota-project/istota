@@ -1,32 +1,32 @@
 ---
 name: files
-description: File operations with rclone
+description: File operations in your workspace
 always_include: true
 env: [{"var":"NC_URL","from":"config","config_path":"nextcloud.url"},{"var":"NC_USER","from":"config","config_path":"nextcloud.username"},{"var":"NC_PASS","from":"config","config_path":"nextcloud.app_password","sensitive":true}]
 ---
-Nextcloud files are mounted at `/srv/mount/nextcloud/content`. Use standard filesystem operations:
+Your workspace files live under `{workspace}`. Use standard filesystem operations:
 
 ```bash
 # List files
-ls /srv/mount/nextcloud/content/path/to/folder/
+ls {workspace}/path/to/folder/
 
 # Read a file
-cat /srv/mount/nextcloud/content/path/to/file.txt
+cat {workspace}/path/to/file.txt
 
 # Write to a file
-echo "content" > /srv/mount/nextcloud/content/path/to/file.txt
+echo "content" > {workspace}/path/to/file.txt
 
 # Create a directory
-mkdir -p /srv/mount/nextcloud/content/path/to/newfolder/
+mkdir -p {workspace}/path/to/newfolder/
 
-# Copy/move files within Nextcloud
-cp /srv/mount/nextcloud/content/source.txt /srv/mount/nextcloud/content/dest.txt
-mv /srv/mount/nextcloud/content/old.txt /srv/mount/nextcloud/content/new.txt
+# Copy/move files within your workspace
+cp {workspace}/source.txt {workspace}/dest.txt
+mv {workspace}/old.txt {workspace}/new.txt
 
 # Delete a file (use with caution!)
-rm /srv/mount/nextcloud/content/path/to/file.txt
+rm {workspace}/path/to/file.txt
 ```
 
-All changes are saved directly to Nextcloud via the mount. No need to download files to a temp directory first.
+Changes are saved directly to your workspace. No need to download files to a temp directory first.
 
-**Attachment troubleshooting:** If a user shares a file via Talk but you can't find it at the expected path, it's likely because the user hasn't shared their Nextcloud Talk folder (e.g. `Talk/` or `Talk (2)/`) with the bot user. Let them know: "I can't access your Talk attachments. Please share your Talk folder with me in Nextcloud — otherwise files shared via chat won't be visible to me." There may also be a short delay (~2 minutes) after sharing before files become accessible.
+**Attachment troubleshooting:** If a shared file isn't at the expected path, it may not have reached your workspace inbox yet. On a Nextcloud-backed deployment this usually means the user hasn't shared their Talk attachments folder (e.g. `Talk/` or `Talk (2)/`) with the bot user, or there's a short delay (~2 minutes) after sharing before files become accessible — let them know so they can share the folder.

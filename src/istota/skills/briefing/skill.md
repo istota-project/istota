@@ -1,6 +1,6 @@
 ---
 name: briefing
-description: Briefing formatting guidelines for Nextcloud Talk
+description: Briefing formatting guidelines for chat messages
 exclude_memory: true
 exclude_persona: true
 source_types: [briefing]
@@ -9,7 +9,7 @@ exclude_resources: [reminders_file]
 ---
 Briefings must be returned as a JSON object: `{"subject": "Morning Briefing", "body": "<content>"}`. The body contains the full briefing text with emoji section headers, using `\n` for newlines. Do not output anything outside the JSON object. Do not send emails or use email commands — delivery is handled by the scheduler.
 
-The body is formatted for Nextcloud Talk chat messages. Use emoji-prefixed labels as section headers. Only include sections that have data.
+The body is formatted for chat messages (markdown). Use emoji-prefixed labels as section headers. Only include sections that have data.
 
 ## Allowed Markdown
 

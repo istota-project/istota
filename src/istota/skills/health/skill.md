@@ -8,7 +8,7 @@ env: [{"var":"HEALTH_DB_PATH","from":"setup_env"}]
 
 # Health Skill
 
-Body-stats time series, bloodwork panels, biomarker trends, and lab result tracking. Per-user SQLite at `{workspace}/health/data/health.db`. All values stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
+Body-stats time series, bloodwork panels, biomarker trends, and lab result tracking. Per-user SQLite at `{workspace}/{BOT_DIR}/health/data/health.db`. All values stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
 
 ## When to use
 

@@ -1424,6 +1424,9 @@ class TestAdminPromptIsolation:
         mount_path.mkdir(parents=True)
         return Config(
             db_path=tmp_path / "test.db",
+            # Admin vs non-admin mount-path scoping is a Nextcloud multi-user
+            # feature — the "mounted at" wording requires a Nextcloud backend.
+            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
             nextcloud_mount_path=mount_path,
             admin_users=admin_users or set(),
         )

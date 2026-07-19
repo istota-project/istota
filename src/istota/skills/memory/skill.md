@@ -97,7 +97,7 @@ The `--channel` flag must match the active conversation token. Cross-channel wri
 
 ### Bot-managed directory layout
 
-Each user has a bot-managed area under their Nextcloud:
+Each user has a bot-managed workspace area:
 
 ```
 /Users/{user_id}/

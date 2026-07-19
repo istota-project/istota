@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Storage-agnostic vocabulary
+
+Standalone Istota still talked about the user's files as a Nextcloud mount even when the workspace is a plain local folder — a local session answered "what's in my Downloads folder" with "There's no Downloads folder in your Nextcloud space" and then "I only have access to your Nextcloud mount, not your Mac's filesystem." The model wasn't confused about how to read files; it was faithfully repeating a prompt that hardcodes Nextcloud framing. Spec in `Specs/Done/storage-agnostic-vocabulary.md`; five stages, TDD throughout.
+
+The storage I/O was already backend-agnostic — the earlier local-install work deliberately declined a `Storage` abstraction because the `use_mount` branch is plain POSIX and standalone just points the mount path at a local dir. So this pass is purely vocabulary: a config-derived notion of what backs storage, plus prompt/skill prose that adapts.
+
+**Key design decisions:**
+- The predicate is `bool(nextcloud.url)`, deliberately **not** `is_standalone` (which folds in web auth, an axis orthogonal to file storage). A URL means the files are Nextcloud whether reached via mount or rclone; no URL means a plain local folder.
+- The executor's file-access section is the single home of storage framing. Skill bodies duplicated it (that's why `files/skill.md` hardcoded a specific Nextcloud mount path, wrong on many servers too), so they were made storage-neutral and reference paths through a new `{workspace}` placeholder — no templating engine, matching the "no decoder-ring DSLs" convention.
+- Local mode gets an extra prompt bullet: the workspace is the *managed* area, not the limit of what an unsandboxed local bot can read — the direct fix for the transcript's "I can only see the Nextcloud mount" false claim.
+
+**Subtleties hit during implementation:**
+- `money`/`feeds`/`health` skill docs already used `{workspace}` as an unsubstituted conceptual token meaning the *bot-dir-rooted* module subtree, while `files`/`todos`/`transcribe`/inbox live under the *base* user root. One placeholder can't mean both. Resolved `{workspace}` to the base user root (`/Users/{user}`) and rewrote the three module docs to `{workspace}/{BOT_DIR}/…` — verified against `get_user_bot_path` so the substituted paths stay correct.
+- `TestAdminPromptIsolation` set a mount path but no URL, so it fell into the new "local" branch. Admin/non-admin mount scoping is inherently a Nextcloud multi-user feature, so the test config was given a Nextcloud URL rather than loosening the assertion.
+
+New config: `Config.storage_is_nextcloud` / `storage_backend` / `storage_label` + a `workspace_root(user_id)` choke-point helper (de-dups the `mount / "Users" / uid` idiom; used by the new local-mode branch and the `{workspace}` resolution). `{workspace}` + `{storage}` substitution wired into the executor's `{scripts_dir}` site, `load_skills`, and `skills show` (new `_workspace_dir` helper). Server/Nextcloud prompts are byte-unchanged; full suite green (7365 passed, 7 skipped).
+
+**Files added/modified:**
+- `src/istota/config.py` — `storage_is_nextcloud` / `storage_backend` / `storage_label` properties + `workspace_root(user_id)` helper
+- `src/istota/executor.py` — three-mode file-access block (nextcloud-mount / nextcloud-rclone / local + wider-FS bullet), backend-conditional folders header + attachments prose, `{workspace}` / `{storage}` substitution
+- `src/istota/skills/skills/__init__.py` — `_workspace_dir` helper + `{workspace}` / `{storage}` substitution in `skills show`
+- `src/istota/skills/{files,todos,transcribe,memory,scripts,money,feeds,health,briefing,heartbeat,schedules,reminders,devbox}/skill.md` — storage-neutral prose; hardcoded mount paths removed
+- `docs/LOCAL_INSTALL.md`, `config/config.example.toml` — note that storage vocabulary follows `nextcloud.url`
+- `tests/test_storage_identity.py` — new; config identity, prompt framing, skill placeholder/prose tests
+- `tests/test_executor.py` — admin-isolation config declares a Nextcloud URL
+
 ## 2026-07-19: Brain fallback (availability failover)
 
 Generalized the one hardcoded fallback path (tmux→claude_code) into an operator-configurable "when the primary brain is unavailable, run the task on a fallback brain" mechanism. Motivating case: a `claude_code` subscription hitting its usage limit failing over to a metered native endpoint. Spec in `Specs/Done/brain-fallback.md`; five stages, TDD throughout.

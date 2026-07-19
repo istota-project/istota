@@ -141,4 +141,4 @@ A wash sale occurs when you sell a security at a loss and buy substantially iden
 
 Money is a default-on module — no per-user resource declaration is needed. Opt out via the user's `disabled_modules` profile field.
 
-The skill resolves `{nextcloud_mount}/Users/{user}/{bot_dir}` as the workspace and synthesizes a `UserContext` rooted there. The user's config lives under `{workspace}/money/config/` as `INVOICING.md` / `TAX.md` / `MONARCH.md` (each with a fenced ```toml block). Ledger files are auto-discovered from `{workspace}/money/ledgers/*.beancount` (top-level only). Monarch credentials live in the encrypted `secrets` table.
+The skill resolves `{workspace}/{BOT_DIR}` as the money workspace and synthesizes a `UserContext` rooted there. The user's config lives under `{workspace}/{BOT_DIR}/money/config/` as `INVOICING.md` / `TAX.md` / `MONARCH.md` (each with a fenced ```toml block). Ledger files are auto-discovered from `{workspace}/{BOT_DIR}/money/ledgers/*.beancount` (top-level only). Monarch credentials live in the encrypted `secrets` table.
