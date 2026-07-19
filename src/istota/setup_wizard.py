@@ -192,6 +192,46 @@ def _ask_yes_no(input_fn, prompt: str, default: bool) -> bool:
     return raw in ("y", "yes")
 
 
+def _flush_terminal_input() -> None:
+    """Discard any pending terminal input before a secret prompt.
+
+    A pasted value (e.g. the model id) can leave stray newlines queued in the
+    terminal's input buffer; without this they auto-answer the next prompt with
+    an empty line. Best-effort — a no-op on a non-tty / non-POSIX stdin.
+    """
+    try:
+        import sys
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:  # pragma: no cover - platform / non-tty dependent
+        pass
+
+
+def _read_secret(getpass_fn, label: str, out, *, attempts: int = 3) -> str:
+    """Read a required secret from the terminal (no echo), re-prompting if empty.
+
+    Flushes buffered terminal input first so a stray newline can't silently
+    accept an empty value, and reads via ``getpass_fn`` so the secret isn't
+    echoed. Returns "" only if the user gives up (empty every attempt / EOF);
+    the caller's validation then surfaces the clear "no API key" error.
+    """
+    _flush_terminal_input()
+    for attempt in range(attempts):
+        try:
+            value = getpass_fn(f"{label}: ").strip()
+        except (EOFError, KeyboardInterrupt):  # pragma: no cover - interactive
+            return ""
+        if value:
+            return value
+        if attempt < attempts - 1:
+            out(
+                f"{label} is required for the native brain — please enter it "
+                "(or Ctrl-C and re-run with --native-api-key)."
+            )
+    return ""
+
+
 def _default_timezone() -> str:
     try:
         from datetime import datetime
@@ -202,7 +242,7 @@ def _default_timezone() -> str:
         return "UTC"
 
 
-def collect_answers(args, *, input_fn, which_fn, out) -> Answers:
+def collect_answers(args, *, input_fn, which_fn, out, getpass_fn) -> Answers:
     """Build an ``Answers`` from flags + (unless ``--yes``) interactive prompts."""
     interactive = not getattr(args, "yes", False)
     a = Answers()
@@ -214,7 +254,10 @@ def collect_answers(args, *, input_fn, which_fn, out) -> Answers:
     a.workspace = Path(ws or DEFAULT_WORKSPACE).expanduser().resolve()
 
     # 2. Brain
-    _collect_brain(a, args, interactive=interactive, input_fn=input_fn, which_fn=which_fn, out=out)
+    _collect_brain(
+        a, args, interactive=interactive, input_fn=input_fn,
+        which_fn=which_fn, out=out, getpass_fn=getpass_fn,
+    )
 
     # 3. User identity
     os_user = getpass.getuser() or "local"
@@ -279,13 +322,16 @@ def collect_answers(args, *, input_fn, which_fn, out) -> Answers:
     return a
 
 
-def _collect_brain(a: Answers, args, *, interactive, input_fn, which_fn, out) -> None:
+def _collect_brain(a: Answers, args, *, interactive, input_fn, which_fn, out, getpass_fn) -> None:
     """Pick the model backend. Flags win; else detect ``claude`` and offer it."""
     forced = getattr(args, "brain", None)
     if forced in ("claude_code", "native"):
         a.brain_kind = forced
         if forced == "native":
-            _collect_native(a, args, interactive=interactive, input_fn=input_fn)
+            _collect_native(
+                a, args, interactive=interactive, input_fn=input_fn,
+                getpass_fn=getpass_fn, out=out,
+            )
         return
 
     claude_path = which_fn("claude")
@@ -295,7 +341,10 @@ def _collect_brain(a: Answers, args, *, interactive, input_fn, which_fn, out) ->
             a.brain_kind = "claude_code"
         else:
             a.brain_kind = "native"
-            _collect_native(a, args, interactive=False, input_fn=input_fn)
+            _collect_native(
+                a, args, interactive=False, input_fn=input_fn,
+                getpass_fn=getpass_fn, out=out,
+            )
         return
 
     if claude_path:
@@ -317,10 +366,13 @@ def _collect_brain(a: Answers, args, *, interactive, input_fn, which_fn, out) ->
 
     # Fall to native.
     a.brain_kind = "native"
-    _collect_native(a, args, interactive=interactive, input_fn=input_fn)
+    _collect_native(
+        a, args, interactive=interactive, input_fn=input_fn,
+        getpass_fn=getpass_fn, out=out,
+    )
 
 
-def _collect_native(a: Answers, args, *, interactive, input_fn) -> None:
+def _collect_native(a: Answers, args, *, interactive, input_fn, getpass_fn, out) -> None:
     base = getattr(args, "native_base_url", None)
     model = getattr(args, "native_model", None)
     key = getattr(args, "native_api_key", None) or os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY", "")
@@ -328,7 +380,9 @@ def _collect_native(a: Answers, args, *, interactive, input_fn) -> None:
         base = base or _ask(input_fn, "API base URL", DEFAULT_ANTHROPIC_BASE_URL)
         model = model or _ask(input_fn, "Model id", "claude-sonnet-4-6")
         if not key:
-            key = input_fn("API key: ").strip()
+            # Read as a secret (no echo) and re-prompt on empty — a stray newline
+            # from the pasted model id must not silently leave the key blank.
+            key = _read_secret(getpass_fn, "API key", out)
     a.native_base_url = base or DEFAULT_ANTHROPIC_BASE_URL
     a.native_model = model or ""
     a.native_api_key = key or ""
@@ -357,12 +411,16 @@ def _validate(a: Answers) -> None:
             )
 
 
-def run_setup(args, *, input_fn=input, which_fn=None, out=print) -> int:
+def run_setup(args, *, input_fn=input, which_fn=None, out=print, getpass_fn=None) -> int:
     """Run the setup wizard. Returns a process exit code (0 = success)."""
     import shutil as _shutil
 
     if which_fn is None:
         which_fn = _shutil.which
+    if getpass_fn is None:
+        # getpass reads from /dev/tty with echo off — the right way to collect a
+        # secret, and robust in the curl-pipe / reattached-stdin install path.
+        getpass_fn = getpass.getpass
 
     config_path = Path(args.config).expanduser() if getattr(args, "config", None) else DEFAULT_CONFIG_PATH
     env_path = config_path.parent / "istota.env"
@@ -381,7 +439,9 @@ def run_setup(args, *, input_fn=input, which_fn=None, out=print) -> int:
             out("Setup aborted; existing config left untouched.")
             return 1
 
-    a = collect_answers(args, input_fn=input_fn, which_fn=which_fn, out=out)
+    a = collect_answers(
+        args, input_fn=input_fn, which_fn=which_fn, out=out, getpass_fn=getpass_fn,
+    )
     _validate(a)
 
     # Create workspace + config dirs.

@@ -114,6 +114,9 @@ def _run(args, tmp_path, which_result, inputs=None):
     out_lines: list[str] = []
     rc = setup_wizard.run_setup(
         args, input_fn=fake_input, which_fn=fake_which, out=out_lines.append,
+        # The API key is read via getpass; share the same input iterator so the
+        # flat `inputs` list keeps working in order.
+        getpass_fn=fake_input,
     )
     return rc, config_path, out_lines
 
@@ -166,6 +169,60 @@ class TestWizardBranches:
         args = _args(yes=True, workspace=str(tmp_path / "ws"), user="stefan", brain="native", native_model="m")
         with pytest.raises(setup_wizard.SetupError, match="API key"):
             _run(args, tmp_path, which_result=None)
+
+    def test_native_empty_key_reprompts(self, tmp_path):
+        # A stray blank line before the key (paste artifact) must not silently
+        # leave it empty — the secret reader re-prompts until a real value.
+        args = _args(workspace=str(tmp_path / "ws"), user="stefan")
+        inputs = [
+            "n",                    # decline claude
+            "https://api.x/v1",     # base url
+            "my-model",             # model
+            "",                     # API key: stray empty line (re-prompts)
+            "sk-real",              # API key: real value
+            "stefan",               # display name
+            "UTC",                  # timezone
+            "8766",                 # port
+            "n",                    # location
+            "y",                    # money
+            "n",                    # email
+        ]
+        rc, config_path, out = _run(
+            args, tmp_path, which_result="/usr/bin/claude", inputs=inputs,
+        )
+        assert rc == 0
+        env = (config_path.parent / "istota.env").read_text()
+        assert "ISTOTA_BRAIN_NATIVE_API_KEY=sk-real" in env
+        assert any("API key is required" in line for line in out)
+
+    def test_native_interactive_key_not_echoed_via_input(self, tmp_path):
+        # The key must come from getpass_fn, not input_fn — assert input_fn is
+        # never handed the raw key value.
+        args = _args(workspace=str(tmp_path / "ws"), user="stefan")
+        seen_input_prompts: list[str] = []
+
+        config_path = tmp_path / "cfg" / "config.toml"
+        args.config = str(config_path)
+        answers = iter([
+            "n", "https://api.x/v1", "my-model",  # brain
+            "SECRET-KEY",                           # getpass reads this
+            "stefan", "UTC", "8766", "n", "y", "n",
+        ])
+
+        def fake_input(prompt):
+            seen_input_prompts.append(prompt)
+            return next(answers)
+
+        def fake_getpass(prompt):
+            assert "API key" in prompt
+            return next(answers)
+
+        rc = setup_wizard.run_setup(
+            args, input_fn=fake_input, which_fn=lambda _n: "/usr/bin/claude",
+            out=lambda _l: None, getpass_fn=fake_getpass,
+        )
+        assert rc == 0
+        assert not any("API key" in p for p in seen_input_prompts)
 
     def test_bootstrap_inits_db_and_workspace(self, tmp_path):
         args = _args(yes=True, workspace=str(tmp_path / "ws"), user="stefan")
