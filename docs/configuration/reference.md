@@ -299,11 +299,13 @@ See [Google Workspace](../features/google-workspace.md) for setup instructions.
 
 ## `[site]`
 
+Instance-wide web root and public hostname (not per-user).
+
 | Setting | Default | Description |
 |---|---|---|
-| `enabled` | `false` | Enable static site hosting |
-| `hostname` | `""` | Public hostname |
-| `base_path` | `""` | Local directory for site files |
+| `enabled` | `false` | Serve the bot's own instance web root via nginx |
+| `hostname` | `""` | Public DNS name; used by the web app for OAuth2 redirect derivation, origin/CSRF checks, and webhook URLs — load-bearing independent of `enabled` |
+| `base_path` | `""` | The bot's own static web root the agent may edit |
 
 ## `[web]`
 
