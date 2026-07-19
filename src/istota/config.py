@@ -993,9 +993,17 @@ class Config:
         otherwise open a fresh sqlite connection per call (the FD churn
         that produced "unable to open database file" / EMFILE).
         """
-        from .modules import EXPERIMENTAL_MODULES, MODULE_NAMES
+        from .modules import EXPERIMENTAL_MODULES, MODULE_NAMES, module_available
         if module not in MODULE_NAMES:
             logger.debug("is_module_enabled: unknown module %r", module)
+            return False
+
+        # Dependency gate: a module whose optional extra isn't installed (e.g.
+        # `money` without beancount) is unavailable — hidden from the web UI and
+        # skipped by the scheduler — so a lean install that omits the extra
+        # doesn't show a broken tab or crash on first use. Runs before the DB
+        # read so a missing extra short-circuits without a lookup.
+        if not module_available(module):
             return False
 
         # Experimental modules stay dark until the operator opts in via

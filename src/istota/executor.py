@@ -529,6 +529,16 @@ def build_clean_env(config: Config) -> dict[str, str]:
         "HOME": os.environ.get("HOME", "/tmp"),
         "PYTHONUNBUFFERED": "1",
     }
+    # USER/LOGNAME are process-identity basics, not secrets. The macOS login
+    # Keychain lookup the `claude` CLI uses to find its OAuth credential needs
+    # them — without them a stripped-env `claude -p` reports "Not logged in"
+    # even though the interactive CLI is authenticated (the standalone/local
+    # install's default brain). Harmless on Linux, where the credential is a
+    # file under HOME.
+    for identity_key in ("USER", "LOGNAME"):
+        identity_val = os.environ.get(identity_key)
+        if identity_val is not None:
+            env[identity_key] = identity_val
     for key in config.security.passthrough_env_vars:
         val = os.environ.get(key)
         if val is not None:
