@@ -255,11 +255,12 @@ maybe_build_web_static() {
 }
 
 run_standalone() {
-    reattach_tty_if_needed
-
-    # Standalone installs into your own user account (uv tool + ~/.config/istota).
-    # Running it as root would install into root's home and is almost never what
-    # the user wants — refuse with a clear pointer.
+    # Root check FIRST — before touching the terminal or anything else. Standalone
+    # installs into your own user account (uv tool + ~/.config/istota); running it
+    # as root would install into root's home and is almost never what the user
+    # wants. This must error+exit immediately (it needs no terminal), so a user who
+    # piped the Server command through sudo and picked Standalone gets a clear
+    # message instead of proceeding wrong (or, historically, hanging).
     if [ "$(id -u)" -eq 0 ]; then
         local hint=""
         if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
@@ -267,8 +268,14 @@ run_standalone() {
   You ran this with sudo — re-run it as ${SUDO_USER}, without sudo."
         fi
         die "Standalone mode installs into your own user account and must not run as root.${hint}
-  (Only the Server install needs root.)  Re-run without sudo:  bash install.sh --standalone"
+  Re-run WITHOUT sudo:  curl -fsSL <install-url> | bash -s -- --standalone
+  (Only the Server install needs root.)"
     fi
+
+    # Non-root: give `istota setup` a real terminal in the curl-pipe case. Safe
+    # here (the dispatch case above is already fully read) and paired with the
+    # explicit exit at the end so bash doesn't read on from the swapped-in tty.
+    reattach_tty_if_needed
 
     section "Standalone install"
     ensure_uv
