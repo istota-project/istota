@@ -2642,9 +2642,16 @@ def execute_task(
         skills_doc = skills_doc.replace("{scripts_dir}", scripts_dir)
         skills_doc = skills_doc.replace("{user_id}", task.user_id)
         # Storage-neutral workspace root + product noun (backend-derived).
+        # NOTE: this is a *display string* for the {workspace} placeholder only.
+        # It must NOT clobber the `workspace_dir` parameter — that one is the
+        # REPL `--workspace cwd` bind path (None for normal tasks) and gets
+        # blocklist-validated by build_bwrap_cmd (`_validate_workspace_dir`),
+        # which forbids anything under the Nextcloud mount root. The per-user
+        # workspace lives under the mount, so reusing the variable made every
+        # sandboxed task fail with "overlaps a protected path".
         ws_root = config.workspace_root(task.user_id)
-        workspace_dir = str(ws_root) if ws_root is not None else f"{config.rclone_remote}:/Users/{task.user_id}"
-        skills_doc = skills_doc.replace("{workspace}", workspace_dir)
+        workspace_display = str(ws_root) if ws_root is not None else f"{config.rclone_remote}:/Users/{task.user_id}"
+        skills_doc = skills_doc.replace("{workspace}", workspace_display)
         skills_doc = skills_doc.replace("{storage}", config.storage_label)
     if selected_skills:
         logger.debug("Selected skills: %s", ", ".join(selected_skills))
