@@ -94,6 +94,29 @@ api_key = "{{ istota_brain_native_api_key }}"
 "{{ header }}" = "{{ value }}"
 {% endfor %}
 {% endif %}
+
+[brain.native.web_fetch]
+# Daemon-side WebFetch tool for the native harness. Runs in the daemon (host
+# netns), so it is NOT gated by the bwrap CONNECT allowlist — instead it is
+# credential-free and SSRF-hardened (private/reserved destinations refused on
+# every hop, connection pinned to the validated IP). Safe defaults; the whole
+# block is optional.
+enabled = {{ istota_brain_native_web_fetch_enabled | default(true, true) | lower }}
+allow_http = {{ istota_brain_native_web_fetch_allow_http | default(false, true) | lower }}
+timeout_seconds = {{ istota_brain_native_web_fetch_timeout_seconds | default(20, true) }}
+max_bytes = {{ istota_brain_native_web_fetch_max_bytes | default(5000000, true) }}
+max_content_chars = {{ istota_brain_native_web_fetch_max_content_chars | default(100000, true) }}
+max_redirects = {{ istota_brain_native_web_fetch_max_redirects | default(5, true) }}
+require_url_provenance = {{ istota_brain_native_web_fetch_require_url_provenance | default(false, true) | lower }}
+{% if istota_brain_native_web_fetch_allow_hosts %}
+allow_hosts = {{ istota_brain_native_web_fetch_allow_hosts | to_json }}
+{% endif %}
+{% if istota_brain_native_web_fetch_block_hosts %}
+block_hosts = {{ istota_brain_native_web_fetch_block_hosts | to_json }}
+{% endif %}
+{% if istota_brain_native_web_fetch_extra_blocked_cidrs %}
+extra_blocked_cidrs = {{ istota_brain_native_web_fetch_extra_blocked_cidrs | to_json }}
+{% endif %}
 {% endif %}
 {% set _tmux_routed = istota_brain_source_type_overrides.values() | select('equalto', 'tmux_claude') | list | length > 0 %}
 {% if istota_brain_kind == 'tmux_claude' or _tmux_routed %}

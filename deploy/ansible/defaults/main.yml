@@ -134,6 +134,19 @@ istota_brain_native_max_tokens: 16384             # per-completion output cap
 istota_brain_native_prompt_caching: ""            # cache_control breakpoints. "" = derive from base_url
                                                   #   (ON for api.anthropic.com, OFF otherwise). Set true/false
                                                   #   to force; a plain-OpenAI / local endpoint needs false.
+# Native-brain daemon-side WebFetch tool ([brain.native.web_fetch]). Runs in the
+# daemon (host netns), credential-free and SSRF-hardened — not gated by the bwrap
+# CONNECT allowlist. Safe defaults; only enabled/allow_http commonly change.
+istota_brain_native_web_fetch_enabled: true       # master switch; false omits the tool
+istota_brain_native_web_fetch_allow_http: false   # permit cleartext http:// (off = HTTPS only)
+istota_brain_native_web_fetch_timeout_seconds: 20 # total wall-clock per fetch
+istota_brain_native_web_fetch_max_bytes: 5000000  # response body byte cap (streamed)
+istota_brain_native_web_fetch_max_content_chars: 100000  # extracted-text cap returned to the model
+istota_brain_native_web_fetch_max_redirects: 5    # redirect hops before giving up
+istota_brain_native_web_fetch_require_url_provenance: false  # only fetch URLs seen in the task (sensitive deployments)
+istota_brain_native_web_fetch_allow_hosts: []     # if non-empty, a host allowlist (suffix match)
+istota_brain_native_web_fetch_block_hosts: []     # always-denied hosts (suffix match)
+istota_brain_native_web_fetch_extra_blocked_cidrs: []  # operator additions to the private/reserved IP blocklist
 # Per-role model overrides for the native brain. Internal subsystems request
 # models by role (fast = conversation selection / routing; general = sleep-cycle
 # extraction, OCR; smart = !model smart / heavy work). Each defaults to

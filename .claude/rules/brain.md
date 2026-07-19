@@ -180,6 +180,19 @@ base_url = "https://api.anthropic.com/v1"
 # prompt_caching       # omit to derive from base_url (on for api.anthropic.com); set true/false to force
 # api_key via ISTOTA_BRAIN_NATIVE_API_KEY env override (kept out of TOML)
 
+[brain.native.web_fetch]  # daemon-side WebFetch tool (native-only). Safe defaults.
+enabled = true            # false omits the tool entirely
+allow_http = false        # permit cleartext http:// (off = HTTPS-only, matches CONNECT-only posture)
+timeout_seconds = 20.0    # total wall-clock per fetch
+max_bytes = 5_000_000     # response body byte cap (streamed)
+max_content_chars = 100_000  # extracted-text cap returned to the model
+max_redirects = 5
+allowed_ports = [80, 443]
+# allow_hosts = []        # if non-empty, a suffix-match allowlist (default-open by design)
+# block_hosts = []        # always-denied hosts (suffix match)
+# extra_blocked_cidrs = []  # operator additions to the private/reserved IP blocklist
+require_url_provenance = false  # only fetch URLs seen in the task (blocks model-fabricated URLs)
+
 [brain.tmux]           # only used when kind = "tmux_claude". All defaulted —
                        # an empty/absent block reproduces the prototype exactly.
 fallback_trip_threshold = 5       # consecutive launch failures before the circuit opens
@@ -254,6 +267,50 @@ project notes for the full list):
   process-group kill + chunked reads + `try/finally` reap (NB-6/7/11), overflow-
   recovery input bounding + retrying-provider + empty-summary fail (NB-10),
   window-relative compaction sizing (NB-14), per-task httpx client close (NB-17).
+
+### Native WebFetch tool (daemon-side, SSRF-hardened)
+
+The native harness's only web-reaching tool is Bash, which runs sandboxed behind
+`--unshare-net` + the tight CONNECT-proxy allowlist — so it can't fetch an
+arbitrary page. `session/tools/web_fetch.py` (`make_web_fetch_tool`) adds a
+`WebFetch` tool that runs **in the daemon process** (host netns), so it is not
+gated by the CONNECT allowlist. It is `build_default_tools`-registered
+(native-only) iff `env.web_fetch` is set and enabled; `NativeBrain._build_tools`
+maps `[brain.native.web_fetch]` (`WebFetchConfig`) → `session.tools.WebFetchPolicy`
+onto `ToolEnv.web_fetch` (`_web_fetch_policy()`), and the tool passes the
+`allowed_tools` filter because `executor.build_allowed_tools` already lists
+`WebFetch`. Empty `allowed_tools` (text-only, e.g. sleep cycle) still yields no
+tools.
+
+Because it runs in the daemon netns (bypassing the CONNECT boundary), its
+hardening carries the whole load:
+- **Credential-free**: own `httpx.AsyncClient` with `trust_env=False` (no ambient
+  proxy/auth), no cookies (cleared per hop), fixed User-Agent; never sees secret
+  env. GET-only, text-only.
+- **SSRF-hardened** (`_ip_is_public`): every resolved destination IP is validated
+  against a private/loopback/link-local/CGNAT/benchmarking/reserved/multicast
+  blocklist (IPv4 + IPv6, with IPv4-mapped-IPv6 unwrapping) on the initial request
+  **and every redirect hop**, failing closed if *any* resolved IP is non-public.
+  The connection is **pinned to the validated IP** (custom Host header + TLS SNI
+  extension) so there's no getaddrinfo→connect DNS-rebinding TOCTOU. Manual
+  redirect handling (`follow_redirects=False`) re-validates each hop, and refuses
+  an https→http downgrade when `allow_http` is off.
+- **Capped**: streamed body cap (`max_bytes`), extracted-text cap
+  (`max_content_chars`), redirect cap, total wall-clock `timeout_seconds`, honors
+  the `abort` event. HTML→text via a stdlib `html.parser` extractor (no new dep);
+  text/JSON/XML returned as-is; binary content returns a short `[non-text …]` note.
+- **Untrusted framing**: content is wrapped in `[UNTRUSTED WEB CONTENT …]` with a
+  `Fetched: <final-url> (HTTP <status>, <mime>)` provenance header. Because a core
+  tool doesn't drive `companion_skills`, the executor folds `untrusted_input` into
+  the **eager** skill set when a task routes to the native brain with WebFetch
+  enabled (`_native_web_fetch_enabled`), so its inbound-handling guidance reaches
+  the prompt.
+- **Residual**: model-driven exfiltration via a GET query string is not
+  eliminated (a GET is a canonical exfil channel), but it's the same bounded
+  residual the `browse` skill already carries. `require_url_provenance` (default
+  off) tightens it — only URLs present in the task/prior tool output may be
+  fetched — for sensitive deployments; the corpus is threaded onto
+  `ToolEnv.web_fetch_url_corpus` only when the knob is on.
 
 `Config.brain: BrainConfig` follows the dataclass-with-defaults convention.
 `source_type_overrides` maps a task's `source_type` to a brain kind, overriding

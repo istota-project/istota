@@ -27,7 +27,7 @@ what ``NativeBrain`` calls in Phase 3.
 """
 
 from .bash import make_bash_tool
-from .env import ToolEnv, ToolPathError
+from .env import ToolEnv, ToolPathError, WebFetchPolicy
 from .files import (
     make_edit_tool,
     make_glob_tool,
@@ -35,16 +35,21 @@ from .files import (
     make_read_tool,
     make_write_tool,
 )
+from .web_fetch import make_web_fetch_tool
 from istota.agent.tools import AgentTool
 
 
 def build_default_tools(env: ToolEnv) -> list[AgentTool]:
-    """All six core tools bound to one ``ToolEnv``.
+    """The core tools bound to one ``ToolEnv``.
 
-    Execution modes: Read / Grep / Glob are read-only and parallel-safe;
-    Write / Edit / Bash mutate state and run sequentially.
+    Execution modes: Read / Grep / Glob / WebFetch are read-only and
+    parallel-safe; Write / Edit / Bash mutate state and run sequentially.
+
+    ``WebFetch`` is appended only when ``env.web_fetch`` is set and enabled; when
+    omitted the model never sees it (and ``NativeBrain._build_tools``'
+    allowed-tools filter is a no-op on an absent tool).
     """
-    return [
+    tools = [
         make_read_tool(env),
         make_write_tool(env),
         make_edit_tool(env),
@@ -52,11 +57,15 @@ def build_default_tools(env: ToolEnv) -> list[AgentTool]:
         make_glob_tool(env),
         make_bash_tool(env),
     ]
+    if env.web_fetch is not None and env.web_fetch.enabled:
+        tools.append(make_web_fetch_tool(env))
+    return tools
 
 
 __all__ = [
     "ToolEnv",
     "ToolPathError",
+    "WebFetchPolicy",
     "build_default_tools",
     "make_read_tool",
     "make_write_tool",
@@ -64,4 +73,5 @@ __all__ = [
     "make_grep_tool",
     "make_glob_tool",
     "make_bash_tool",
+    "make_web_fetch_tool",
 ]
