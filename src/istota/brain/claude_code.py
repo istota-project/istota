@@ -298,6 +298,11 @@ def _resolve_target(target: str) -> str:
 class ClaudeCodeBrain:
     """Brain that delegates to the `claude` CLI as a subprocess."""
 
+    # The headless `claude -p` subprocess reads its whole prompt on stdin, then
+    # stdin closes — there is no open channel to the running model, so mid-flight
+    # steering is impossible by construction (see the !steer spec).
+    supports_steering = False
+
     # --- Model resolution (Brain Protocol) ---------------------------------
 
     def resolve_alias(

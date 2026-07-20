@@ -161,6 +161,33 @@ _TRUNCATION_MARKERS = {
     "content_filter": "[note: the response was cut short by the model provider's content filter]",
 }
 
+# How a mid-flight steer (`!steer`) is framed when injected as a user turn. The
+# explicit wording tells the model the message is *additive* — a live nudge, not
+# a correction that invalidates work already in progress — so it adjusts course
+# without discarding what it has done or losing the thread.
+_STEER_FRAME = (
+    "[The user sent this while you were working. Adjust course as needed; "
+    "you don't have to abandon work already in progress.] {text}"
+)
+
+# How often the background steer poller reads the control channel, matching the
+# cancel-poll cadence.
+_STEER_POLL_INTERVAL_SECONDS = 2.0
+
+
+def _drain_one_steer(buffer: list) -> list:
+    """Pop one buffered steer text and return it framed as a user turn.
+
+    One-per-call so a burst of steers becomes successive user turns
+    (steering_queue_mode="one_at_a_time") rather than one concatenated blob, and
+    self-clearing (the agent loop re-polls each turn; a source that re-returned
+    the same message would loop forever). Empty buffer → ``[]``.
+    """
+    if not buffer:
+        return []
+    text = buffer.pop(0)
+    return [UserMessage(content=[TextContent(text=_STEER_FRAME.format(text=text))])]
+
 
 class _RetryingProvider:
     """Wrap a provider with turn-level retry on *immediate* transient errors.
@@ -250,6 +277,11 @@ class _RetryingProvider:
 
 class NativeBrain:
     """Istota-owned agent loop, provider-agnostic, behind the Brain protocol."""
+
+    # The in-process agent loop already polls ``get_steering_messages`` at every
+    # boundary, so mid-flight steering (`!steer`) is first-class here — the
+    # executor wires ``req.poll_steers`` into that callback.
+    supports_steering = True
 
     def __init__(self, config, provider=None):
         self._config = config
@@ -372,6 +404,23 @@ class NativeBrain:
                 abort.set()
             else:
                 cancel_task = asyncio.create_task(self._poll_cancel(req.cancel_check, abort))
+
+        # Mid-flight steering (`!steer`). A background poller reads the control
+        # channel off the loop (same off-loop DB discipline as _poll_cancel) and
+        # buffers raw steer texts; the synchronous get_steering_messages callback
+        # the loop polls at each boundary drains one from the buffer and frames
+        # it as a user turn. Wired only when the executor supplied a channel
+        # (steering-capable brain); otherwise the callback is None and behaviour
+        # is byte-identical to before.
+        steer_buffer: list[str] = []
+        steer_task: asyncio.Task | None = None
+        if req.poll_steers is not None:
+            steer_task = asyncio.create_task(
+                self._poll_steers(req.poll_steers, steer_buffer, abort)
+            )
+
+        def _get_steering_messages() -> list:
+            return _drain_one_steer(steer_buffer)
 
         model = req.model or self._config.model
         provider = _RetryingProvider(self._provider, abort)
@@ -561,6 +610,10 @@ class NativeBrain:
             reasoning_effort=reasoning_effort,
             render_tool_images=get_model_info(model).supports_vision,
             abort=abort,
+            get_steering_messages=(
+                _get_steering_messages if req.poll_steers is not None else None
+            ),
+            steering_queue_mode="one_at_a_time",
         )
 
         context = AgentContext(
@@ -696,14 +749,15 @@ class NativeBrain:
                 transcript = recovery_ctx.messages
         finally:
             abort.set()
-            if cancel_task is not None:
-                cancel_task.cancel()
-                # Await the cancellation so the loop doesn't log a
-                # "Task was destroyed but it is pending" warning on teardown.
-                try:
-                    await cancel_task
-                except asyncio.CancelledError:
-                    pass
+            for _bg in (cancel_task, steer_task):
+                if _bg is not None:
+                    _bg.cancel()
+                    # Await the cancellation so the loop doesn't log a
+                    # "Task was destroyed but it is pending" warning on teardown.
+                    try:
+                        await _bg
+                    except asyncio.CancelledError:
+                        pass
             # In ``finally`` so the per-task cache footer is logged at task end
             # even if the recovery body raises a non-overflow exception.
             _log_cache_telemetry(usage)
@@ -758,6 +812,30 @@ class NativeBrain:
                     # keep polling.
                     logger.debug("cancel_check raised; will retry", exc_info=True)
                 await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            return
+
+    @staticmethod
+    async def _poll_steers(poll_steers, buffer: list, abort: asyncio.Event) -> None:
+        """Read the steer control channel off the loop and buffer raw texts.
+
+        ``poll_steers`` is a *synchronous* DB read+write (claim pending → mark
+        consumed), so it runs via ``to_thread`` — SQLite lock contention can't
+        freeze the loop (same discipline as ``_poll_cancel``). New texts are
+        appended to ``buffer``, which the synchronous ``get_steering_messages``
+        callback drains one-per-turn on the loop thread (no lock needed: both run
+        on the single asyncio thread). A transient read failure is logged and
+        retried, never fatal — a wedged poll must not silently disable steering.
+        """
+        try:
+            while not abort.is_set():
+                try:
+                    new = await asyncio.to_thread(poll_steers)
+                    if new:
+                        buffer.extend(new)
+                except Exception:  # noqa: BLE001 — see _poll_cancel
+                    logger.debug("poll_steers raised; will retry", exc_info=True)
+                await asyncio.sleep(_STEER_POLL_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             return
 

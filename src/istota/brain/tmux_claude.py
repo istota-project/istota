@@ -533,6 +533,13 @@ class TmuxClaudeBrain:
     drift. Only ``execute`` is genuinely new.
     """
 
+    # The interactive TUI queues text typed during a running turn, so a
+    # paste-into-the-live-pane steer is mechanically possible (the pane's own
+    # steering behaviour). The signal is truthful now; the paste wiring lands
+    # post-v1, so the command layer's `_STEERABLE_KINDS` allowlist still refuses
+    # a tmux task until then (see the !steer spec, Stage 6).
+    supports_steering = True
+
     def __init__(self, config=None) -> None:
         # Composed, not inherited: we forward the four resolution methods and
         # own execute. The CLI brain holds no per-instance state, so a fresh
