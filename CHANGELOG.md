@@ -8,7 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Config validation now fails the deploy when the native model backend is used (as primary, fallback, or a per-source-type override) with no model configured, instead of letting a broken failover ship silently. A misspelled fallback backend name is rejected at deploy time too.
 - `istota update`: a one-command self-update for the local (standalone) install. It pulls the latest code, reinstalls, and runs migrations, then tells you to restart `istota serve`. Only applies to a local install — a server deploy keeps its own auto-update and `istota update` declines to run there. Requires having installed via `install.sh --standalone` (which now records where it installed from). By default it follows tagged releases; `istota update --channel main` rides the development branch instead, and the choice is remembered.
+
+### Fixed
+- Deploying with a configured brain fallback (`fallback` under `[brain]`) no longer ships a non-working failover. The deploy now renders the fallback backend's settings block even when that backend is only the fallback and not the primary, so a native fallback actually has its model available; previously the block was omitted and the first failover would fail.
 
 ## [0.32.0] - 2026-07-19
 

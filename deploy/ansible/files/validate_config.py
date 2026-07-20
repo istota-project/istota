@@ -182,6 +182,49 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
+        # A typo'd fallback ("natve") templates cleanly and load_config only
+        # downgrades it to a WARNING — the play stays green while the failover
+        # is silently disabled. Fail here instead. "" = no fallback, allowed.
+        fallback_kind = brain.get("fallback")
+        if fallback_kind and fallback_kind not in known_kinds:
+            print(
+                f"validate_config: unknown [brain] fallback={fallback_kind!r}; "
+                f"expected one of {sorted(known_kinds)} (or \"\" for none)",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Native brain needs an explicit model — it has no built-in role table, so
+    # every request (including a claude_code→native failover) resolves to
+    # [brain.native].model. An empty model templates cleanly but sends an empty
+    # model id to the endpoint (400) at first use. This is exactly the
+    # "paper fallback" class: native declared as primary OR fallback OR a
+    # source-type override target, with no model pinned. Fail the play so it
+    # surfaces at deploy time, not at the first failover.
+    kind = brain.get("kind")
+    fallback_kind = brain.get("fallback")
+    override_targets = set((brain.get("source_type_overrides", {}) or {}).values())
+    native_active = (
+        kind == "native"
+        or fallback_kind == "native"
+        or "native" in override_targets
+    )
+    native_model = (native.get("model") if isinstance(native, dict) else "") or ""
+    if native_active and not native_model.strip():
+        if kind == "native":
+            reason = "kind"
+        elif fallback_kind == "native":
+            reason = "fallback"
+        else:
+            reason = "source_type_overrides target"
+        print(
+            f"validate_config: native brain is active ({reason}=\"native\") but "
+            "[brain.native].model is empty — set istota_brain_native_model. An "
+            "empty model id fails at the endpoint (400). "
+            "(The API key lives in the EnvironmentFile and is not checked here.)",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         c = load_config(cfg_path)
