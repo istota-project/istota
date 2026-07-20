@@ -78,6 +78,18 @@ class TestRequestBuilding:
         assert body["max_tokens"] == 100
         assert "max_completion_tokens" not in body
 
+    def test_openrouter_requests_cost_accounting(self):
+        # OpenRouter returns real charged cost only when asked via usage.include.
+        p = OpenAICompatibleProvider(api_key="k", base_url="https://openrouter.ai/api/v1")
+        body = p._build_chat_completion_request("", [], [], "m", 100)
+        assert body["usage"] == {"include": True}
+
+    def test_non_openrouter_endpoint_omits_cost_accounting(self):
+        # Other endpoints may 400 on the unknown body field — scope it out.
+        p = OpenAICompatibleProvider(api_key="k", base_url="https://api.openai.com/v1")
+        body = p._build_chat_completion_request("", [], [], "gpt-4o", 100)
+        assert "usage" not in body
+
     def test_assistant_tool_call_converted(self):
         msg = AssistantMessage(
             content=[
@@ -213,6 +225,50 @@ class TestSSEParsing:
         ]
         done = (await self._collect(lines))[-1]
         assert done.message.usage.cache_read_tokens == 40
+
+    async def _cost_from(self, usage_json):
+        lines = [
+            'data: {"choices":[{"delta":{"content":"x"}}]}',
+            f'data: {{"choices":[{{"delta":{{}},"finish_reason":"stop"}}],"usage":{usage_json}}}',
+            "data: [DONE]",
+        ]
+        done = (await self._collect(lines))[-1]
+        return done.message.usage.cost_usd
+
+    async def test_openrouter_reported_cost_captured(self):
+        cost = await self._cost_from(
+            '{"prompt_tokens":100,"completion_tokens":2,"cost":0.00042}'
+        )
+        assert cost == 0.00042
+
+    async def test_reported_zero_cost_kept_distinct_from_none(self):
+        # A genuine free turn: 0.0 must survive as 0.0 (respected), not None.
+        cost = await self._cost_from(
+            '{"prompt_tokens":100,"completion_tokens":2,"cost":0.0}'
+        )
+        assert cost == 0.0
+
+    async def test_absent_cost_leaves_cost_usd_none(self):
+        # Every non-OpenRouter endpoint: no cost field → None, so telemetry
+        # falls back to catalog pricing rather than reporting a wrong 0.0.
+        cost = await self._cost_from('{"prompt_tokens":100,"completion_tokens":2}')
+        assert cost is None
+
+    async def test_non_finite_cost_rejected(self):
+        # json.loads accepts bare NaN/Infinity; a nan would poison the whole
+        # task's running cost total and serialize as invalid JSON. Drop it.
+        for token in ("NaN", "Infinity", "-Infinity"):
+            cost = await self._cost_from(
+                f'{{"prompt_tokens":100,"completion_tokens":2,"cost":{token}}}'
+            )
+            assert cost is None, token
+
+    async def test_negative_and_bool_and_string_cost_rejected(self):
+        for literal in ("-0.5", "true", '"0.0004"'):
+            cost = await self._cost_from(
+                f'{{"prompt_tokens":100,"completion_tokens":2,"cost":{literal}}}'
+            )
+            assert cost is None, literal
 
 
 class TestWireIntegrity:

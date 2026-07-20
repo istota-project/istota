@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Native brain cost telemetry over OpenRouter now reports the real charged cost (markup included) instead of always logging `$0.00`. The cost comes straight from OpenRouter's own per-request accounting; other endpoints keep estimating from the built-in price catalog. Malformed or non-finite cost values from a misbehaving gateway are ignored so they can't corrupt a task's cost total.
+
 ## [0.33.0] - 2026-07-19
 
 ### Added

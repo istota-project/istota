@@ -10,6 +10,7 @@ errors and connection errors are encoded as a single ``StreamError`` event.
 
 import json
 import logging
+import math
 from collections.abc import AsyncIterator
 
 import httpx
@@ -66,6 +67,39 @@ def _uses_max_completion_tokens(base_url: str, model: str) -> bool:
     if "api.openai.com" not in (base_url or ""):
         return False
     return model.lower().startswith(_OPENAI_REASONING_PREFIXES)
+
+
+def _supports_cost_accounting(base_url: str) -> bool:
+    """Whether the endpoint returns real per-request cost in its usage object.
+
+    OpenRouter does when the request carries ``"usage": {"include": true}``;
+    other OpenAI-compatible endpoints (OpenAI, vLLM, LM Studio, local servers)
+    don't, and some 400 on the unknown body field — so the request param is
+    scoped to OpenRouter. Parsing of ``usage.cost`` stays unconditional and
+    degrades gracefully (absent → catalog pricing)."""
+    return "openrouter.ai" in (base_url or "")
+
+
+def _parse_reported_cost(usage_raw: dict) -> float | None:
+    """Extract a provider-reported per-request cost (USD) from a usage object.
+
+    OpenRouter reports the real charged cost (markup included) at the top-level
+    ``cost`` field. Returns a finite, non-negative float, or ``None`` when the
+    field is absent or unusable — in which case cost telemetry falls back to
+    catalog pricing. Rejections that matter:
+    - ``bool`` (an ``int`` subclass, so ``True`` would otherwise become ``1.0``);
+    - non-numeric (a string like ``"0.0004"`` from a re-serializing proxy);
+    - non-finite / negative: ``json.loads`` accepts bare ``NaN``/``Infinity``, and
+      a single ``nan`` would propagate through every subsequent ``+=`` and poison
+      the whole task's running total (and serialize as invalid JSON in task_logs).
+    A genuine ``0.0`` (free turn) is kept — distinct from ``None`` (unreported)."""
+    raw = usage_raw.get("cost")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
 
 
 def _tool_delta_index(tc: dict, tool_acc: dict, id_to_index: dict) -> int:
@@ -197,6 +231,11 @@ class OpenAICompatibleProvider:
             # no token usage in streaming mode and cost telemetry stays zero.
             "stream_options": {"include_usage": True},
         }
+        # OpenRouter returns the actual charged cost (markup included) in the
+        # trailing usage chunk's ``cost`` field, but only when asked. Scoped to
+        # OpenRouter because other endpoints may 400 on the unknown field.
+        if _supports_cost_accounting(self._base_url):
+            body["usage"] = {"include": True}
         # NB-12: OpenAI's own o-series / gpt-5 reasoning models 400 on
         # ``max_tokens`` and require ``max_completion_tokens``. Only the direct
         # OpenAI endpoint is affected — OpenRouter and others normalize — so the
@@ -550,6 +589,9 @@ class OpenAICompatibleProvider:
                 output_tokens=usage_raw.get("completion_tokens", 0),
                 cache_read_tokens=cached,
                 cache_write_tokens=cache_write,
+                # OpenRouter's real charged cost (top-level ``cost``, USD, markup
+                # included); None on every other endpoint → catalog pricing.
+                cost_usd=_parse_reported_cost(usage_raw),
             )
 
         stop_reason = _FINISH_REASON_MAP.get(finish_reason or "", "end_turn")

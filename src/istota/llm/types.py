@@ -45,6 +45,11 @@ class Usage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # Provider-reported cost in USD for this turn, when the endpoint returns it
+    # (OpenRouter's ``usage.cost``). ``None`` means the provider reported no
+    # cost, so telemetry falls back to catalog-price computation. Distinct from
+    # ``0.0`` (a genuine free turn) — see ``session.usage.TaskUsage.add``.
+    cost_usd: float | None = None
 
     @property
     def total_tokens(self) -> int:
