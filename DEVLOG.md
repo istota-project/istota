@@ -22,6 +22,12 @@ A new "Models" card in the web admin dashboard, rendered directly below the syst
 - `web/vite-mock-api.ts` — `models` fixture in `mockAdminStats`
 - `tests/test_local_install_stage1.py` — `TestAdminModelsSection` (claude_code default, native with endpoint + role collapse + overrides, native empty-model fallback)
 
+**Follow-up — hide Nextcloud mount status on standalone installs:** the Storage card's "Nextcloud mount" row and the system-banner's "mount ✓/✗" indicator were showing on local (no-Nextcloud) installs, where a mount is a meaningless concept. `_admin_storage_section` now emits `nextcloud_configured = bool(_config.storage_is_nextcloud)` (the same `bool(nextcloud.url)` predicate as the storage-vocabulary work), and both frontend spots gate on it. On a Nextcloud-backed server the flag is true, so nothing changes there. Added `TestAdminStorageSection`; the mock fixture declares `nextcloud_configured: false` to match its standalone posture.
+- `src/istota/web_app.py` — `nextcloud_configured` in the storage payload
+- `web/src/lib/api.ts` — field on `AdminStats.storage`
+- `web/src/routes/admin/+page.svelte` — gate the mount row + banner indicator
+- `web/vite-mock-api.ts`, `tests/test_local_install_stage1.py` — fixture + `TestAdminStorageSection`
+
 ## 2026-07-19: Storage-agnostic vocabulary
 
 Standalone Istota still talked about the user's files as a Nextcloud mount even when the workspace is a plain local folder — a local session answered "what's in my Downloads folder" with "There's no Downloads folder in your Nextcloud space" and then "I only have access to your Nextcloud mount, not your Mac's filesystem." The model wasn't confused about how to read files; it was faithfully repeating a prompt that hardcodes Nextcloud framing. Spec in `Specs/Done/storage-agnostic-vocabulary.md`; five stages, TDD throughout.

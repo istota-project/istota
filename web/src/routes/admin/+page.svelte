@@ -267,7 +267,9 @@
 			<div class="banner-cell">
 				<div class="cell-label">Database</div>
 				<div class="cell-value">{formatBytes(stats.system.db_size_bytes)}</div>
-				<div class="cell-sub">mount {stats.storage.nextcloud_mount_healthy ? '✓' : '✗'}</div>
+				{#if stats.storage.nextcloud_configured}
+					<div class="cell-sub">mount {stats.storage.nextcloud_mount_healthy ? '✓' : '✗'}</div>
+				{/if}
 			</div>
 		</section>
 
@@ -573,11 +575,13 @@
 				<dd>{stats.storage.backups_count}</dd>
 				<dt>Last backup</dt>
 				<dd>{formatTimestamp(stats.storage.last_backup)}</dd>
-				<dt>Nextcloud mount</dt>
-				<dd>
-					<span class="dot" class:dot-ok={stats.storage.nextcloud_mount_healthy} class:dot-bad={!stats.storage.nextcloud_mount_healthy}></span>
-					{stats.storage.nextcloud_mount_healthy ? 'healthy' : 'unavailable'}
-				</dd>
+				{#if stats.storage.nextcloud_configured}
+					<dt>Nextcloud mount</dt>
+					<dd>
+						<span class="dot" class:dot-ok={stats.storage.nextcloud_mount_healthy} class:dot-bad={!stats.storage.nextcloud_mount_healthy}></span>
+						{stats.storage.nextcloud_mount_healthy ? 'healthy' : 'unavailable'}
+					</dd>
+				{/if}
 			</dl>
 		</section>
 

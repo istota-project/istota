@@ -963,6 +963,9 @@ def _admin_storage_section(db_path: Path) -> dict:
         "db_size_bytes": db_size,
         "backups_count": backups_count,
         "last_backup": last_backup,
+        # Only meaningful when a Nextcloud server backs the workspace; a local
+        # (standalone) install has no mount, so the frontend hides the row.
+        "nextcloud_configured": bool(_config and _config.storage_is_nextcloud),
         "nextcloud_mount_healthy": mount_healthy,
     }
 
