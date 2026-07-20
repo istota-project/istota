@@ -191,6 +191,16 @@
 		}
 		return { failures, lastRun };
 	}
+
+	const BRAIN_LABELS: Record<string, string> = {
+		claude_code: 'Claude Code',
+		native: 'Native',
+		tmux_claude: 'Tmux Claude',
+	};
+
+	function brainLabel(kind: string): string {
+		return BRAIN_LABELS[kind] ?? kind;
+	}
 </script>
 
 <div class="settings admin-page">
@@ -260,6 +270,50 @@
 				<div class="cell-sub">mount {stats.storage.nextcloud_mount_healthy ? '✓' : '✗'}</div>
 			</div>
 		</section>
+
+		<!-- Models / brain backend -->
+		{#if stats.models && !stats.models.error}
+			{@const m = stats.models}
+			<section class="card">
+				<header class="section-header">
+					<h2>Models</h2>
+				</header>
+				<dl class="kv model-kv">
+					<dt>Brain</dt>
+					<dd>{brainLabel(m.brain_kind)}</dd>
+					{#if m.endpoint}
+						<dt>Endpoint</dt>
+						<dd class="endpoint">
+							<span class="endpoint-url">{m.endpoint}</span>{#if m.provider}<span class="endpoint-provider">· {m.provider}</span>{/if}
+						</dd>
+					{/if}
+				</dl>
+
+				<dl class="kv model-kv role-kv">
+					<dt>Default</dt>
+					<dd class="model-value">
+						<code>{m.default_model}</code>
+						{#if m.default_effort}<span class="effort-chip">{m.default_effort}</span>{/if}
+					</dd>
+					{#each m.roles as r (r.role)}
+						<dt>{r.role}</dt>
+						<dd class="model-value"><code>{r.resolved}</code></dd>
+					{/each}
+				</dl>
+
+				{#if m.source_type_overrides && Object.keys(m.source_type_overrides).length > 0}
+					<div class="overrides">
+						<div class="cell-label">Source-type routing</div>
+						<dl class="kv model-kv">
+							{#each Object.entries(m.source_type_overrides) as [src, kind] (src)}
+								<dt>{src}</dt>
+								<dd>{brainLabel(kind)}</dd>
+							{/each}
+						</dl>
+					</div>
+				{/if}
+			</section>
+		{/if}
 
 		<!-- Users -->
 		<section class="card">
@@ -942,6 +996,65 @@
 
 	.kv dd {
 		margin: 0;
+	}
+
+	/* Models / brain backend */
+	.model-kv {
+		gap: 0.35rem 1.25rem;
+		align-items: baseline;
+	}
+
+	.model-value {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	/* Separate the config block (Brain/Endpoint) from the resolution list. */
+	.role-kv {
+		margin-top: 0.6rem;
+		padding-top: 0.6rem;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.role-kv dt {
+		text-transform: capitalize;
+	}
+
+	.endpoint {
+		font-family: var(--font-mono, monospace);
+		font-size: var(--text-sm);
+		font-weight: 400;
+		color: var(--text-secondary);
+	}
+
+	.endpoint-url {
+		word-break: break-all;
+	}
+
+	.endpoint-provider {
+		margin-left: 0.5rem;
+		color: var(--text-dim);
+		white-space: nowrap;
+	}
+
+	.effort-chip {
+		display: inline-block;
+		padding: 0.05rem 0.4rem;
+		font-size: 0.55rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		border-radius: var(--radius-pill);
+		background: #6c8ebf;
+		color: #000;
+	}
+
+	.overrides {
+		margin-top: 0.75rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
 	}
 
 	/* Mobile: drop low-priority columns and tighten the source cell.

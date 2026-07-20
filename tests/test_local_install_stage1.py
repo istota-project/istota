@@ -342,3 +342,63 @@ class TestAdminRuntimeSection:
         # gated on the real value — assert the derived behaviour.
         out = self._run(cfg)
         assert any(c["title"] == "No sandbox isolation" for c in out["caveats"])
+
+
+class TestAdminModelsSection:
+    def _run(self, cfg):
+        import istota.web_app as mod
+        mod._config = cfg
+        return mod._admin_models_section()
+
+    def test_claude_code_default(self, tmp_path):
+        cfg = Config(db_path=tmp_path / "istota.db")
+        out = self._run(cfg)
+        assert out["brain_kind"] == "claude_code"
+        # No configured top-level model → CLI default sentinel.
+        assert out["default_model"] == "CLI default"
+        assert out["default_effort"] is None
+        roles = {r["role"]: r["resolved"] for r in out["roles"]}
+        assert set(roles) == {"fast", "general", "smart"}
+        # Every role resolves to a canonical claude-* id, none left as an alias.
+        assert all(v.startswith("claude-") for v in roles.values())
+        # Endpoint/provider are native-only.
+        assert "endpoint" not in out
+        assert "provider" not in out
+
+    def test_native_shows_endpoint_and_resolves_roles(self, tmp_path):
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            brain=BrainConfig(
+                kind="native",
+                native=NativeBrainConfig(
+                    model="claude-sonnet-4-6",
+                    base_url="https://openrouter.ai/api/v1",
+                ),
+                source_type_overrides={"scheduled": "native"},
+            ),
+            model="general",
+            effort="high",
+        )
+        out = self._run(cfg)
+        assert out["brain_kind"] == "native"
+        assert out["default_model"] == "claude-sonnet-4-6"
+        assert out["default_effort"] == "high"
+        assert out["endpoint"] == "https://openrouter.ai/api/v1"
+        assert out["provider"] == "openai_compat"
+        # On the native brain every role collapses to the single configured model.
+        assert all(r["resolved"] == "claude-sonnet-4-6" for r in out["roles"])
+        assert out["source_type_overrides"] == {"scheduled": "native"}
+
+    def test_native_empty_model_falls_back_to_endpoint_default(self, tmp_path):
+        from istota.config import BrainConfig, NativeBrainConfig
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            brain=BrainConfig(
+                kind="native", native=NativeBrainConfig(model="")
+            ),
+        )
+        out = self._run(cfg)
+        assert out["default_model"] == "endpoint default"

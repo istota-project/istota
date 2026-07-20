@@ -800,6 +800,19 @@ const mockAdminStats = {
 			},
 		],
 	},
+	models: {
+		brain_kind: 'native',
+		default_model: 'claude-sonnet-4-6',
+		default_effort: 'high',
+		roles: [
+			{ role: 'fast', resolved: 'claude-haiku-4-5' },
+			{ role: 'general', resolved: 'claude-sonnet-4-6' },
+			{ role: 'smart', resolved: 'claude-opus-4-8' },
+		],
+		endpoint: 'https://api.anthropic.com/v1',
+		provider: 'openai_compat',
+		source_type_overrides: { scheduled: 'native', heartbeat: 'native' },
+	},
 };
 
 // Mock reader dataset — populated below so the dev UI has scrollable content.

@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Admin dashboard Models pane
+
+A new "Models" card in the web admin dashboard, rendered directly below the system-banner. It surfaces the active model backend so an operator can confirm what a deployment is actually configured to run without reading the TOML — useful when role aliases or a fallback backend are in play.
+
+**Key changes:**
+- Backend `_admin_models_section()` builds the active brain via `make_brain(config.brain)` and reports: the brain kind, the effective default model (top-level `config.model` resolved to a canonical id, with a "CLI default" / "endpoint default" sentinel when unset) and effort, and how the portable roles `fast`/`general`/`smart` resolve *right now* (so operator `[models.roles]` overrides show through). `endpoint` + `provider` are populated only for the native brain (which talks to a configurable OpenAI-compatible endpoint); `source_type_overrides` only when configured. Best-effort like the sibling sections — a failure returns an `error` string instead of aborting the whole stats payload.
+- Frontend card reuses the existing `.card` / `.section-header` / `.kv` primitives so it matches the other panes. "Brain: Native" as an explicit labeled row, the endpoint on its own row (native only, provider inline), then a unified label-left / value-right list with **Default** at the top (model + an inline effort chip) followed by the three role resolutions. Values are left-aligned in a tight column. The effort chip is a small uppercase blue pill (`#6c8ebf`, the page's existing `talk`-source blue).
+- Role resolution goes through each brain's own `resolve_alias` / `resolve_model_name`, so the pane reflects the real namespace: on the native brain all three roles collapse to the single configured endpoint model, while claude_code shows the three distinct Anthropic tiers.
+
+**Subtleties:**
+- `make_brain` is safe to call here — construction only stores config (no API key needed, no I/O), and the resolve methods just read config.
+- The mock API (`vite-mock-api.ts`) gained a `models` block so the pane renders under `VITE_MOCK_API=1 npm run dev` for local preview; it's a dev-only fixture, consistent with the other mocked admin sections.
+
+**Files added/modified:**
+- `src/istota/web_app.py` — `_admin_models_section()` + wired into `_gather_admin_stats` as `payload["models"]`
+- `web/src/lib/api.ts` — optional `models` field on `AdminStats`
+- `web/src/routes/admin/+page.svelte` — Models card + `brainLabel()` helper + scoped styles
+- `web/vite-mock-api.ts` — `models` fixture in `mockAdminStats`
+- `tests/test_local_install_stage1.py` — `TestAdminModelsSection` (claude_code default, native with endpoint + role collapse + overrides, native empty-model fallback)
+
 ## 2026-07-19: Storage-agnostic vocabulary
 
 Standalone Istota still talked about the user's files as a Nextcloud mount even when the workspace is a plain local folder — a local session answered "what's in my Downloads folder" with "There's no Downloads folder in your Nextcloud space" and then "I only have access to your Nextcloud mount, not your Mac's filesystem." The model wasn't confused about how to read files; it was faithfully repeating a prompt that hardcodes Nextcloud framing. Spec in `Specs/Done/storage-agnostic-vocabulary.md`; five stages, TDD throughout.

@@ -810,7 +810,63 @@ def _gather_admin_stats() -> dict:
 
     payload["modules"] = _admin_modules_section()
     payload["runtime"] = _admin_runtime_section()
+    payload["models"] = _admin_models_section()
     return payload
+
+
+def _admin_models_section() -> dict:
+    """Configured model + brain-backend block for the admin dashboard.
+
+    Shows the active brain kind, the effective default model/effort, and how the
+    portable role aliases (``fast``/``general``/``smart``) resolve right now
+    (reflecting any operator ``[models.roles]`` overrides). ``endpoint`` /
+    ``provider`` are only populated for the native brain, which talks to a
+    configurable OpenAI-compatible endpoint. Best-effort: any failure returns an
+    ``error`` string rather than aborting the whole stats payload.
+    """
+    if not _config:
+        return {}
+
+    from .brain import CANONICAL_ROLES, make_brain
+
+    try:
+        brain_config = _config.brain
+        brain = make_brain(brain_config)
+
+        # Effective default model: resolve the top-level `model` (may be an
+        # alias) to a canonical id. Empty = the brain's own default, which for
+        # the native brain is the endpoint's configured model.
+        default_model = brain.resolve_model_name(_config.model)
+        if not default_model:
+            if brain_config.kind == "native":
+                default_model = brain_config.native.model or "endpoint default"
+            else:
+                default_model = "CLI default"
+
+        roles: list[dict] = []
+        for role in CANONICAL_ROLES:
+            resolved = brain.resolve_alias(role)
+            target = resolved[0] if resolved and resolved[0] else None
+            roles.append({"role": role, "resolved": target or "brain default"})
+
+        section: dict = {
+            "brain_kind": brain_config.kind,
+            "default_model": default_model,
+            "default_effort": _config.effort or None,
+            "roles": roles,
+        }
+
+        if brain_config.kind == "native":
+            section["endpoint"] = brain_config.native.base_url
+            section["provider"] = brain_config.native.provider
+
+        if brain_config.source_type_overrides:
+            section["source_type_overrides"] = dict(brain_config.source_type_overrides)
+
+        return section
+    except Exception as exc:  # noqa: BLE001 — never fail the stats payload
+        logger.exception("admin models section failed")
+        return {"error": str(exc)}
 
 
 def _admin_runtime_section() -> dict:
