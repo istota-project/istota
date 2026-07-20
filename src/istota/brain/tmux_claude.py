@@ -39,7 +39,7 @@ import threading
 import time
 from pathlib import Path
 
-from ..agent.events import _describe_tool_use
+from ..agent.events import _describe_tool_use, _tool_invocation
 from ._events import (
     ResultEvent,
     StreamEvent,
@@ -188,9 +188,13 @@ def parse_transcript(path: Path) -> list[StreamEvent]:
                 if block_id:
                     seen_tool_ids.add(block_id)
                 name = block.get("name", "")
-                desc = _describe_tool_use(name, block.get("input", {}))
+                block_input = block.get("input", {})
+                desc = _describe_tool_use(name, block_input)
                 events.append(
-                    ToolUseEvent(tool_name=name, description=desc, tool_call_id=block_id)
+                    ToolUseEvent(
+                        tool_name=name, description=desc, tool_call_id=block_id,
+                        invocation=_tool_invocation(name, block_input) or "",
+                    )
                 )
             elif btype == "text":
                 text = (block.get("text") or "").strip()
@@ -481,8 +485,12 @@ class _TranscriptTailer(threading.Thread):
             if block_id:
                 self._seen_tool_ids.add(block_id)
             name = block.get("name", "")
-            desc = _describe_tool_use(name, block.get("input", {}))
-            ev = ToolUseEvent(tool_name=name, description=desc, tool_call_id=block_id)
+            block_input = block.get("input", {})
+            desc = _describe_tool_use(name, block_input)
+            ev = ToolUseEvent(
+                tool_name=name, description=desc, tool_call_id=block_id,
+                invocation=_tool_invocation(name, block_input) or "",
+            )
         elif btype == "text":
             key = (rec_idx, blk_idx)
             if key in self._seen_blocks:
@@ -864,7 +872,10 @@ class TmuxClaudeBrain:
         for ev in events:
             if isinstance(ev, ToolUseEvent):
                 actions.append(ev.description)
-                trace.append({"type": "tool", "text": ev.description})
+                tool_entry = {"type": "tool", "text": ev.description}
+                if ev.invocation:
+                    tool_entry["raw"] = ev.invocation
+                trace.append(tool_entry)
             elif isinstance(ev, TextEvent):
                 trace.append({"type": "text", "text": ev.text})
             elif isinstance(ev, ResultEvent):

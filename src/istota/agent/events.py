@@ -72,6 +72,24 @@ def _describe_tool_use(name: str, input_data: dict) -> str:
     return f"{emoji} Using {name}"
 
 
+def _tool_invocation(name: str, input_data: dict) -> str | None:
+    """The literal, untruncated command a tool call ran, or None.
+
+    Distinct from ``_describe_tool_use`` (a human-readable label — for Bash it
+    returns the model's *description* paraphrase, not the command). This returns
+    the verbatim command string so the sleep cycle can distil playbooks that
+    quote the actual verified invocation instead of a reconstruction
+    (ISSUE-174 fix 1). Only Bash carries a meaningful command; other tools
+    return None and callers fall back to the description label.
+    """
+    if not isinstance(input_data, dict):
+        return None
+    if name == "Bash":
+        cmd = str(input_data.get("command", "")).strip()
+        return cmd or None
+    return None
+
+
 @dataclass
 class AgentEvent:
     """Lifecycle events emitted by the agent loop.

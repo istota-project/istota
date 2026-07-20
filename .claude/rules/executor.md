@@ -10,7 +10,7 @@ def execute_task(
 ) -> tuple[bool, str, str | None, str | None]:
 ```
 The old `on_progress: Callable[[str], None]` parameter is gone (task-event-streaming spec). The scheduler builds an `EventWriter`, subscribes consumers, and passes it; the executor emits `task_started` then adapts the brain's widened `StreamEvent` stream to `TaskEvent`s via `_on_brain_event` → `event_writer.emit(...)`. `None` on dry-run / CLI paths.
-Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `actions_taken` is a JSON array of tool use descriptions from streaming execution, or `None` for simple/dry-run/error paths. `execution_trace` is a JSON array of interleaved `{"type": "tool", "text": "..."}` and `{"type": "text", "text": "..."}` events, or `None`.
+Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `actions_taken` is a JSON array of tool use descriptions from streaming execution, or `None` for simple/dry-run/error paths. `execution_trace` is a JSON array of interleaved `{"type": "tool", "text": "..."}` and `{"type": "text", "text": "..."}` events, or `None`. A `tool` entry additionally carries `"raw": "<verbatim command>"` for Bash calls (the literal command, untruncated; `_tool_invocation` in `agent/events.py`) so the sleep cycle can distil playbooks that quote the real invocation rather than the paraphrased description (ISSUE-174 fix 1). Additive — consumers that read `text`/`type` are unaffected.
 
 ### Flow
 1. **Setup temp dir**: `config.temp_dir / task.user_id`
@@ -25,7 +25,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 8b. **Dated memories**: `read_dated_memories()`, skip for briefings, controlled by `auto_load_dated_days`
 8c. **Memory recall**: `_recall_memories()`, BM25 search using task prompt, skip for briefings
 8d. **Knowledge facts**: load from `knowledge_graph`, relevance-filtered by prompt, capped by `max_knowledge_facts`
-8d2. **Playbook recall**: `_recall_playbooks()`, BM25/vector over `source_type="playbook"`, gated on `playbooks.enabled`, skipped for automated/`skip_memory` tasks (Part B)
+8d2. **Playbook recall**: `_recall_playbooks()`, BM25/vector over `source_type="playbook"`, gated on `playbooks.enabled`, skipped for automated/`skip_memory` tasks (Part B). On a hit it `os.utime`s each recalled playbook file so retention keys on last-*use*, not last-write (ISSUE-174 Concern 3)
 8e. **Memory cap**: `_apply_memory_cap()`, truncates recalled → knowledge facts → dated → playbooks if `max_memory_chars` exceeded (playbooks truncated last — most protected; returns a 6-tuple)
 9. **Confirmation context**: load from `task.confirmation_prompt` if confirmed task
 10. **Build prompt**: includes `confirmation_context` when set

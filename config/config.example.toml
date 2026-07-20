@@ -444,7 +444,7 @@ sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
 # enabled = false                      # master gate
 # recall_limit = 3                     # top-K playbooks injected per task
 # min_tool_calls = 4                   # a task must use >= this many tools to qualify
-# retention_days = 0                   # 0 = keep forever; >0 = age-prune
+# retention_days = 90                  # 0 = keep forever; >0 = age-prune by last-use (recall refreshes it)
 # max_chars = 0                        # 0 = share the global max_memory_chars budget
 
 # ============================================================================

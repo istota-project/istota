@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Learned-playbook lifecycle — verified commands, pin corrections, use-based retention (ISSUE-174)
+
+The nightly playbook loop (generate → index → recall) worked end to end, but the maintenance side was thin. Audit found four gaps: the generator hallucinated commands (a script-invocation playbook instructed a `python -m some.module.path` that didn't exist, invented instead of recording the real `python scripts/foo.py`); a bad playbook had no correction path; retention keyed on last-*write* not last-*use*; and single-script tasks got re-narrated into lossy prose. We took fixes 1, 3, and part of 1's root cause now; slug-only semantic dedup (concern 2) is deferred.
+
+Two review passes (Mulder + Scully, run in parallel then re-run after rework) surfaced the load-bearing fact the first cut missed: **recall serves `memory_chunks`, not the file**, and that chunk store is only written by the generation path. So the initial pin (skip re-index) and prune (unlink file only) both missed the surface the model actually reads — a pinned correction never reached recall, and a pruned playbook kept being recalled from orphaned chunks. They also proved the "copy the command verbatim from the Tools line" prompt rule rested on a false premise: the trace's tool label is `_describe_tool_use` output — a Bash *description* paraphrase, a 77-char truncation, or a bare basename — not the literal command, which wasn't persisted anywhere the sleep cycle could reach.
+
+Reworked against those findings. The real fix for command capture is at the trace layer: a new `_tool_invocation()` pulls the verbatim Bash command, threaded as an additive `raw` field on the tool trace entry by all three brains (claude_code via a new `ToolUseEvent.invocation`, native, tmux), and `tool_summary` prefers `raw` (200-char budget) so the extraction prompt sees the real invocation. Pin now keeps the file but re-indexes its (frontmatter-stripped) content so the correction reaches recall. Retention prunes on last-use mtime (stamped by `_recall_playbooks` on hit), deletes the pruned file's chunks, skips pinned files, and grandfathers existing files on the first post-upgrade run (a `.retention_initialized` sentinel refreshes mtimes so nothing dies on stale write-mtime before recall history exists). Default `retention_days` flipped 0→90. All three fixes re-verified CONFIRMED end-to-end through `memory_chunks`.
+
+**Key changes:**
+- Verbatim-command capture: `_tool_invocation()` + `raw` trace field across all three brains; `tool_summary` prefers it. The extraction prompt now instructs "quote the verified command from the Tools line" and "thin router, don't re-narrate a script."
+- Pin correction path: `pinned: true` frontmatter survives re-derivation and is re-indexed (not skipped), so the human fix reaches recall. Hardened frontmatter parsing (BOM, quoted value, inline comment, no-closing-fence false positive).
+- Use-based retention: recall stamps file mtime; `cleanup_old_playbooks` prunes on it, deletes orphaned chunks, never prunes pinned files, and grandfathers on first run. Default 90 days.
+- Trace `raw` field is additive — no `execution_trace` consumer (web ActivityTrace, history reconstruction, result composition) reads it, verified across the suite.
+
+**Files added/modified:**
+- `src/istota/agent/events.py` — `_tool_invocation()` (verbatim Bash command extractor)
+- `src/istota/brain/_events.py` — `ToolUseEvent.invocation` field + parser wiring
+- `src/istota/brain/{claude_code,native,tmux_claude}.py` — thread `raw` into the execution trace
+- `src/istota/memory/sleep_cycle.py` — prompt hardening, `raw`-preferring `tool_summary`, pin re-index, `_playbook_is_pinned` hardening, `_playbook_searchable_body`, `cleanup_old_playbooks` (conn + chunk-delete + pin-guard + grandfather)
+- `src/istota/executor.py` — `_recall_playbooks` stamps last-use mtime (debug-logs a FUSE utime failure)
+- `src/istota/config.py`, `config/config.example.toml`, `deploy/ansible/defaults/main.yml` — `retention_days` default 90
+- `.claude/rules/{brain,executor,scheduler,config}.md`, `AGENTS.md` — docs
+- `tests/test_sleep_cycle_playbooks.py`, `tests/test_executor_playbook_recall.py`, `tests/test_stream_parser.py` — 17 new tests
+
 ## 2026-07-19: Native brain — capture OpenRouter's real per-request cost
 
 The native brain over an OpenAI-compatible endpoint (OpenRouter) was logging `cost_usd=0.0` on every task despite full token counts. Not a token-capture bug: cost is computed as tokens × per-model prices from the bundled catalog, and every catalog entry ships with price fields at their `0.0` default (plus an OpenRouter model id isn't even a catalog key, so it falls to the zero-priced `_DEFAULT`). So the number was "unknown", not "free". Catalog prices also can't reflect OpenRouter's markup or per-route price variance, so for accurate billing the right source is OpenRouter itself — it returns the real charged cost in the streaming usage chunk when asked.

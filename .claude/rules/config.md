@@ -172,7 +172,7 @@ See `.claude/rules/skills.md` for the single-axis model.
 enabled: bool = False        # Part B master gate (learned playbooks / procedural memory)
 recall_limit: int = 3        # top-K playbooks injected per task
 min_tool_calls: int = 4      # a task must use >= this many tools to qualify (LLM-judged in the extraction prompt)
-retention_days: int = 0      # 0 = keep forever; >0 = age-prune by file mtime
+retention_days: int = 90     # 0 = keep forever; >0 = age-prune by last-use mtime (recall stamps it)
 max_chars: int = 0           # 0 = share the global max_memory_chars budget
 ```
 Parsed from `[playbooks]`. A playbook is a per-user markdown procedure distilled

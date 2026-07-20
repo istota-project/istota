@@ -70,6 +70,29 @@ class TestRecallPlaybooks:
         with patch("istota.memory.search.search", return_value=[]):
             assert _recall_playbooks(config, object(), _task()) is None
 
+    def test_touches_recalled_playbook_mtime(self, tmp_path):
+        """ISSUE-174 Concern 3: recall stamps use-recency onto the file so the
+        retention prune keys on last-use, not last-write."""
+        import os
+        import time
+
+        config = self._config(tmp_path)
+        pb_file = tmp_path / "open-a-pr.md"
+        pb_file.write_text("# Open a PR\n1. gh pr create\n")
+        past = time.time() - 40 * 86400
+        os.utime(pb_file, (past, past))
+
+        class _R:
+            content = "# Open a PR\n1. gh pr create"
+            source_type = "playbook"
+            source_id = str(pb_file)
+
+        with patch("istota.memory.search.search", return_value=[_R()]):
+            out = _recall_playbooks(config, object(), _task())
+
+        assert "Open a PR" in out
+        assert pb_file.stat().st_mtime > past + 86400  # mtime advanced to ~now
+
 
 class TestMemoryCapWithPlaybooks:
     def test_playbooks_truncated_last(self, tmp_path):

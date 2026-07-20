@@ -1930,6 +1930,22 @@ def _recall_playbooks(
     if not results:
         return None
 
+    # Stamp use-recency onto each recalled playbook file so the sleep cycle's
+    # retention prune keys on last-use, not last-write (ISSUE-174 Concern 3).
+    now = time.time()
+    for r in results:
+        source_id = getattr(r, "source_id", None)
+        if not source_id:
+            continue
+        try:
+            os.utime(source_id, (now, now))
+        except OSError as e:
+            # A no-op utime (e.g. an rclone FUSE mount that rejects utimens)
+            # silently reverts Concern 3 to write-based aging — log it so the
+            # degradation is visible rather than invisible.
+            logger.debug("playbook mtime stamp failed for %s: %s", source_id, e)
+            continue
+
     parts = []
     for r in results:
         snippet = r.content.strip()
