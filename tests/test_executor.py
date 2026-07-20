@@ -436,6 +436,29 @@ class TestResolveUserTz:
         tz, tz_str = _resolve_user_tz(config, "alice")
         assert tz_str == "UTC"
 
+    def test_invalid_timezone_warns_once(self, tmp_path, caplog):
+        import logging
+
+        from istota import executor as _executor
+        from istota import user_profiles
+
+        config = self._make_config(tmp_path)
+        # "PDT" is an abbreviation, not an IANA name — the real-world bug.
+        user_profiles.ensure_profile(config.db_path, "alice", timezone="PDT")
+        _executor._INVALID_TZ_WARNED.discard(("alice", "PDT"))
+
+        with caplog.at_level(logging.WARNING, logger="istota.executor"):
+            _resolve_user_tz(config, "alice")
+            _resolve_user_tz(config, "alice")  # second call must not re-warn
+
+        warnings = [
+            r for r in caplog.records if "Invalid timezone" in r.getMessage()
+        ]
+        # Deduped: exactly one WARNING for the (user, tz) pair.
+        assert len(warnings) == 1
+        assert "PDT" in warnings[0].getMessage()
+        assert "America/Los_Angeles" in warnings[0].getMessage()
+
     def test_no_db_path_uses_in_memory_config(self, tmp_path):
         # DB-less contexts (init/tests) must still resolve via UserConfig.
         config = Config(

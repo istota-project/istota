@@ -232,14 +232,59 @@ def _read_secret(getpass_fn, label: str, out, *, attempts: int = 3) -> str:
     return ""
 
 
+def _is_valid_timezone(name: str) -> bool:
+    """True if ``name`` is a zone ``ZoneInfo`` accepts (a real IANA name).
+
+    Abbreviations like ``PDT`` / ``EST`` are NOT valid — ``ZoneInfo`` only
+    knows names like ``America/Los_Angeles``. Storing an abbreviation makes
+    the executor's ``_resolve_user_tz`` silently fall back to UTC.
+    """
+    if not name:
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(name)
+        return True
+    except Exception:
+        return False
+
+
 def _default_timezone() -> str:
+    """Best-effort IANA zone name for the host.
+
+    ``datetime.now().astimezone().tzinfo`` is a fixed-offset ``datetime.timezone``
+    on many systems (notably macOS), whose ``str()`` is an abbreviation like
+    ``PDT`` — not a name ``ZoneInfo`` accepts. Resolve the real IANA name from
+    ``TZ`` or the ``/etc/localtime`` symlink (which points into the zoneinfo
+    tree on both Linux and macOS), validating every candidate before returning.
+    """
+    # 1. TZ env var, if it names a real zone.
+    tz_env = os.environ.get("TZ", "").strip()
+    if _is_valid_timezone(tz_env):
+        return tz_env
+
+    # 2. /etc/localtime symlink → .../zoneinfo/<Area>/<Location>.
+    try:
+        real = os.path.realpath("/etc/localtime")
+        if "zoneinfo/" in real:
+            name = real.split("zoneinfo/", 1)[1]
+            if _is_valid_timezone(name):
+                return name
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    # 3. A ZoneInfo-backed local tzinfo (Linux where astimezone yields one).
     try:
         from datetime import datetime
-        tz = datetime.now().astimezone().tzinfo
-        name = getattr(tz, "key", None) or str(tz)
-        return name or "UTC"
+
+        key = getattr(datetime.now().astimezone().tzinfo, "key", None)
+        if key and _is_valid_timezone(key):
+            return key
     except Exception:  # pragma: no cover - defensive
-        return "UTC"
+        pass
+
+    return "UTC"
 
 
 def collect_answers(args, *, input_fn, which_fn, out, getpass_fn) -> Answers:
@@ -273,7 +318,16 @@ def collect_answers(args, *, input_fn, which_fn, out, getpass_fn) -> Answers:
     tz = getattr(args, "timezone", None)
     if not tz and interactive:
         tz = _ask(input_fn, "Timezone", tz_default)
-    a.timezone = tz or tz_default
+    tz = tz or tz_default
+    # An abbreviation ("PDT") or typo isn't a name ZoneInfo accepts; storing it
+    # makes every task's clock silently fall back to UTC. Reject it up front.
+    if not _is_valid_timezone(tz):
+        out(
+            f"  '{tz}' is not a valid IANA timezone (use e.g. America/Los_Angeles);"
+            f" falling back to {tz_default if _is_valid_timezone(tz_default) else 'UTC'}."
+        )
+        tz = tz_default if _is_valid_timezone(tz_default) else "UTC"
+    a.timezone = tz
 
     # 4. Web port
     port = getattr(args, "port", None)

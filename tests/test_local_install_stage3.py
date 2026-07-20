@@ -91,6 +91,54 @@ class TestRenderers:
 
 
 # ---------------------------------------------------------------------------
+# Timezone resolution (a "PDT" abbreviation must never be stored)
+# ---------------------------------------------------------------------------
+
+
+class TestTimezone:
+    def test_is_valid_timezone(self):
+        assert setup_wizard._is_valid_timezone("America/Los_Angeles")
+        assert setup_wizard._is_valid_timezone("UTC")
+        # Abbreviations are NOT valid IANA names.
+        assert not setup_wizard._is_valid_timezone("PDT")
+        assert not setup_wizard._is_valid_timezone("PST")
+        assert not setup_wizard._is_valid_timezone("")
+
+    def test_default_timezone_from_tz_env(self, monkeypatch):
+        monkeypatch.setenv("TZ", "America/New_York")
+        assert setup_wizard._default_timezone() == "America/New_York"
+
+    def test_default_timezone_ignores_abbreviation_tz_env(self, monkeypatch):
+        # A bogus TZ shouldn't win; fall through to /etc/localtime or UTC.
+        monkeypatch.setenv("TZ", "PDT")
+        assert setup_wizard._default_timezone() != "PDT"
+
+    def test_default_timezone_is_always_a_valid_zone(self):
+        # Whatever the host, the derived default must be ZoneInfo-loadable.
+        assert setup_wizard._is_valid_timezone(setup_wizard._default_timezone())
+
+    def test_collect_rejects_abbreviation_flag(self):
+        # --timezone PDT must not be stored verbatim.
+        args = _args(yes=True, timezone="PDT", user="stefan")
+        out_lines: list[str] = []
+        a = setup_wizard.collect_answers(
+            args, input_fn=lambda p: "", which_fn=lambda n: "/usr/bin/claude",
+            out=out_lines.append, getpass_fn=lambda p: "",
+        )
+        assert a.timezone != "PDT"
+        assert setup_wizard._is_valid_timezone(a.timezone)
+        assert any("not a valid IANA timezone" in line for line in out_lines)
+
+    def test_collect_accepts_valid_flag(self):
+        args = _args(yes=True, timezone="Europe/Berlin", user="stefan")
+        a = setup_wizard.collect_answers(
+            args, input_fn=lambda p: "", which_fn=lambda n: "/usr/bin/claude",
+            out=lambda s: None, getpass_fn=lambda p: "",
+        )
+        assert a.timezone == "Europe/Berlin"
+
+
+# ---------------------------------------------------------------------------
 # Wizard branches
 # ---------------------------------------------------------------------------
 
