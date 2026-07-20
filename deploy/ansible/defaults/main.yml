@@ -373,7 +373,7 @@ istota_experimental_features: []
 #
 #   * Profile fields           → user_profiles DB table (`istota user ensure`)
 #   * Resources (paths only)   → user_resources DB table (`istota resource ensure`)
-#   * Briefings                → briefing_configs DB table (`istota briefing ensure`)
+#   * Briefings                → briefing_configs DB table (`istota briefings schedule ensure`)
 #   * Tier-2 credentials       → encrypted secrets table (`istota secret ensure`,
 #                                see `istota_user_secrets` below)
 #   * Module opt-outs          → `disabled_modules:` list

@@ -1028,7 +1028,7 @@
   command: >
     {{ istota_home }}/.venv/bin/{{ istota_package }}
     -c {{ istota_repo_dir }}/config/config.toml
-    briefing ensure
+    briefings schedule ensure
     --user {{ item.user }}
     --name "{{ item.name }}"
     --cron "{{ item.cron }}"
