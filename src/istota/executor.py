@@ -3475,6 +3475,19 @@ def execute_task(
             except Exception:
                 return False
 
+        def _poll_steers() -> "list[str]":
+            # Claim any pending mid-flight steers (`!steer`) for this task,
+            # marking them consumed, and hand the raw texts to the brain. The
+            # brain frames + injects them as user turns. Wired onto the request
+            # only for a steering-capable brain (below). Best-effort — a DB
+            # hiccup returns no steers, never aborts the run.
+            try:
+                with db.get_db(config.db_path) as steer_conn:
+                    steers = db.claim_pending_steers(steer_conn, task.id)
+                return [s.text for s in steers]
+            except Exception:
+                return []
+
         # Custom system prompt path (claude_code-only knob; brain ignores
         # if the file is missing)
         sp_path: Path | None = None
@@ -3548,6 +3561,12 @@ def execute_task(
             streaming=use_streaming,
             on_progress=_on_event if use_streaming else None,
             cancel_check=_cancel_check,
+            # Steering channel — only for a brain that can act on it mid-run
+            # (`!steer`). A non-steerable brain leaves this None (no extra DB
+            # polling) and any steer written to the channel is dropped at
+            # finalization. The command layer refuses to write for such brains
+            # anyway, so this is defense-in-depth.
+            poll_steers=_poll_steers if getattr(brain, "supports_steering", False) else None,
             on_pid=_on_pid,
             sandbox_wrap=_sandbox_wrap,
             # Filesystem confinement for NativeBrain's in-process file tools

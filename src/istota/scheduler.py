@@ -2064,6 +2064,18 @@ def process_one_task(
                 with db.get_db(config.db_path) as _prune_conn:
                     db.delete_task_events_by_kind(_prune_conn, task_id, "text_delta")
                     db.delete_task_events_by_kind(_prune_conn, task_id, "thinking")
+            # Drop any mid-flight steers (`!steer`) that never drained — the task
+            # finished or suspended (pending_confirmation) before its next loop
+            # boundary. Marking them `dropped` (not deleting) keeps them out of a
+            # later execution and visible in audit. Cheap no-op for the common
+            # task with no steers.
+            try:
+                with db.get_db(config.db_path) as _steer_conn:
+                    dropped = db.drop_pending_steers(_steer_conn, task_id)
+                if dropped:
+                    logger.info("Dropped %d undrained steer(s) for task %d", dropped, task_id)
+            except Exception:
+                logger.debug("drop_pending_steers failed for task %d", task_id, exc_info=True)
 
     # Process deferred operations (subtasks, transaction tracking) on success,
     # unless the task is awaiting confirmation (drain after the user confirms).
