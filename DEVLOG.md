@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-20: Canonical room transcript for all source types (ISSUE-176)
+
+A Talk room the bot participates in shows up in web chat, and the promise a user forms is "what the room shows in Talk, it shows in web." The canonical `messages` store was supposed to make that true but only stored *conversational* (`talk`/`web`) turns plus a couple of hand-patched exceptions. Every other bot post to a room fell through. ISSUE-176 was the live symptom: a `newsletter-gate` cron spawns an extraction subtask that posts a finalized block into a Talk room; it appeared in Talk and never in web. The subtask (`source_type="subtask"`, default `output_target="talk"`) missed all three gates at once — not in `_CONVERSATIONAL_SOURCE_TYPES`, the ISSUE-133 scheduled-mirror hard-guarded `!= "scheduled"`, and the render filter only admitted web/talk/scheduled.
+
+The root cause was conflating three axes onto `source_type`: **storage** (should be universal — any bot output into a web-visible room belongs in its transcript), **delivery/mirror** (legitimately asymmetric, untouched), and **LLM context** (legitimately conversational-only). The fix splits storage from rendering: one general producer stores any room-delivered result as an assistant spine row gated on room existence (not source type), and the render filter admits any assistant row while keeping user rows web/talk-only. Adding a new room-posting source type now needs no producer helper and no filter change — the whack-a-mole is gone.
+
+A subtlety that reshaped the plan: the store is not a blank slate. The old `unified_rooms_v1` backfill folded *every* completed task for every registered room into `messages` with no source-type filter, so the filter flip is retroactive — briefing rows would surface as raw JSON and synthetic user rows would re-pair into context. So the change ships with a **required** normalization migration (drop non-conversational user rows, normalize briefing JSON bodies), not an optional backfill.
+
+Implemented via TDD (spec forks all confirmed as recommended: spine-bubble, room-bound gate, leave-unparseable-as-is, accept cross-room/unread expansion). Then ran Mulder + Scully in parallel to verify. Both independently caught one real defect the spec's own safety claim missed: the `_exclude_types` addition only gated `get_conversation_history`, but `_build_db_context` (email / Talk-API-fallback) *also* calls `db.get_previous_tasks`, which reads the `tasks` table regardless of source type to deliberately re-surface recent scheduled/briefing output — and that re-injected a subtask's internal synthetic prompt into context as a "user" turn. Reproduced, then fixed with an `exclude_source_types` param passed `["subtask","heartbeat"]` (scheduled/briefing re-surfacing preserved). Mulder also found a migration import-before-DELETE seam (a mid-migration import failure would half-apply); reordered so the import precedes any mutation. Two lower-severity items flagged and accepted as-is: the migration retroactively reveals backfilled rows for tasks that carried a room token but delivered only to email/ntfy (bounded to historic rows — accepted), and operator `cli`/`--source-type` posts become standalone bubbles (content did post to Talk).
+
+**Key changes:**
+- Replaced `_store_scheduled_room_turn` (ISSUE-133) and `_store_web_room_turn` (ISSUE-164) with one `_store_room_turn(conn, task, body)` — room-existence gate, `origin_surface=source_type`, idempotent. One producer, not one-per-type.
+- Generalized `TRANSCRIPT_SURFACE_FILTER` to assistant-any / user-conversational. `_CONVERSATIONAL_SOURCE_TYPES`, the caught-up dual-read, and re-pairing unchanged.
+- Added `nonconversational_transcript_cleanup_v1` migration: drops synthetic non-conversational user rows (restoring the "user rows conversational-only" invariant) and normalizes backfilled briefing bodies from raw JSON to the delivered body.
+- Closed the `get_previous_tasks` context-leak (new `exclude_source_types` param) and reordered the migration import ahead of its DELETE (review fixes).
+- 24 tests in the new suite; existing scheduled-mirror / web-reply tests re-pointed at the general helper.
+
+**Files added/modified:**
+- `src/istota/scheduler.py` — `_store_room_turn` replacing the two helpers; three delivery call sites routed through it.
+- `src/istota/db.py` — generalized `TRANSCRIPT_SURFACE_FILTER`; `_migrate_nonconversational_transcript_cleanup` (registered in the runner, import-before-mutation); `get_previous_tasks` gains `exclude_source_types`.
+- `src/istota/executor.py` — `subtask`/`heartbeat` added to `_build_db_context`'s history exclude and to the `get_previous_tasks` re-surfacing exclude.
+- `AGENTS.md` — unified-room-sync store framing updated to the single general producer + migration + filter shape.
+- `tests/test_canonical_room_transcript.py` — new (24 tests).
+- `tests/test_scheduled_room_mirror.py`, `tests/test_web_room_reply_bubble.py` — re-pointed at `_store_room_turn`.
+
 ## 2026-07-19: Standalone timezone default produced an abbreviation → silent UTC clock
 
 A standalone install with a Pacific user was rendering every task's clock in UTC despite a timezone being "set" in config. Root cause was the setup wizard's timezone default: it derived the value from `datetime.now().astimezone().tzinfo`, which on macOS (and any fixed-offset host) is a `datetime.timezone`, not a `ZoneInfo` — so it has no `.key` and `str()` yields the abbreviation `PDT`. The wizard offered `PDT` as the default, the user accepted it, and it was written to both `config.toml` and the `user_profiles` DB row. `PDT` isn't a valid IANA name, so at task time `executor._resolve_user_tz` threw `ZoneInfoNotFoundError` and silently fell back to UTC — with no log line, so it looked like the config was set but ignored.

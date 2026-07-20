@@ -573,6 +573,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
     _migrate_unified_rooms(conn)
     _migrate_scheduled_transcript_cleanup(conn)
+    _migrate_nonconversational_transcript_cleanup(conn)
     _migrate_web_chat_rooms_peruser(conn)
     _migrate_room_read_state_peruser(conn)
     _migrate_room_members(conn)
@@ -1918,14 +1919,22 @@ def get_previous_tasks(
     conversation_token: str,
     exclude_task_id: int | None = None,
     limit: int = 3,
+    exclude_source_types: list[str] | None = None,
 ) -> list[ConversationMessage]:
     """
-    Get the most recent completed tasks in a conversation,
-    regardless of source_type.
+    Get the most recent completed tasks in a conversation.
 
-    Used to ensure recent messages are always available in context even
-    when their source_type would normally be excluded (e.g. scheduled,
-    briefing).  Returns up to ``limit`` tasks in oldest-first order.
+    Deliberately re-surfaces recent tasks whose ``source_type`` the primary
+    ``get_conversation_history`` excludes (e.g. ``scheduled`` / ``briefing`` cron
+    output the user may reference), so they stay available in the email /
+    Talk-API-fallback context builder. ``exclude_source_types`` hard-excludes
+    types that must NOT be re-surfaced even here — non-conversational internal
+    artifacts (``subtask``'s synthetic orchestration prompt, throwaway
+    ``heartbeat`` posts) that would otherwise read back as prior user
+    conversation (canonical-room-transcript spec: this is the ``get_previous_tasks``
+    half of the LLM-context isolation invariant, complementing
+    ``get_conversation_history``'s ``exclude_source_types``). Returns up to
+    ``limit`` tasks in oldest-first order.
     """
     query = """
         SELECT id, prompt, result, created_at, actions_taken, source_type, user_id
@@ -1935,6 +1944,11 @@ def get_previous_tasks(
         AND result IS NOT NULL
     """
     params: list = [conversation_token]
+
+    if exclude_source_types:
+        placeholders = ", ".join("?" for _ in exclude_source_types)
+        query += f" AND source_type NOT IN ({placeholders})"
+        params.extend(exclude_source_types)
 
     if exclude_task_id is not None:
         query += " AND id != ?"
@@ -3056,13 +3070,19 @@ def initialize_room_read_state(
 # ---------------------------------------------------------------------------
 
 # Which `messages` rows render as transcript turns. Shared by the per-room
-# spine query (web_app._SPINE_SURFACE) and the cross-room aggregate below:
-# web/talk turns render both halves; scheduled posts render the assistant only
-# (the synthetic cron prompt was never user-authored). Expects the messages
-# table aliased as `m`.
+# spine query (web_app._SPINE_SURFACE) and the cross-room aggregate below.
+#
+# Storage is the real filter now: an assistant row only exists in a room
+# because a task delivered a result into that web-visible room (via
+# scheduler._store_room_turn, for ANY source type — subtask/scheduled/briefing/
+# heartbeat/talk/web), so "render every assistant row" is exactly right. The
+# origin_surface guard is retained only on role='user' rows, whose sole job was
+# to hide the synthetic prompt of a non-conversational post — and since the
+# producer never writes a user row for those, this guard is belt-and-suspenders
+# against any future code that does. Expects the messages table aliased as `m`.
 TRANSCRIPT_SURFACE_FILTER = (
-    "((m.origin_surface IN ('web', 'talk') AND m.role IN ('user', 'assistant')) "
-    "OR (m.origin_surface = 'scheduled' AND m.role = 'assistant'))"
+    "(m.role = 'assistant' "
+    "OR (m.origin_surface IN ('web', 'talk') AND m.role = 'user'))"
 )
 
 
@@ -3497,6 +3517,86 @@ def _migrate_scheduled_transcript_cleanup(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO _migration_state (name) "
         "VALUES ('scheduled_transcript_cleanup_v1')"
+    )
+
+
+def _migrate_nonconversational_transcript_cleanup(conn: sqlite3.Connection) -> None:
+    """Normalize the non-conversational rows the `unified_rooms_v1` blanket
+    backfill folded into the canonical `messages` store (ISSUE-176).
+
+    `_migrate_unified_rooms._backfill_turns` ran with no source-type filter, so
+    it inserted a `user` row (raw synthetic prompt) and an `assistant` row (raw
+    `result`) for every completed task of every registered room — including
+    `subtask` / `briefing` / etc., not just conversational turns. When the
+    generalized `TRANSCRIPT_SURFACE_FILTER` (assistant-any) goes live, those
+    hidden rows would surface at read time: briefing assistant rows as raw
+    `{"subject":…,"body":…}` JSON, and the synthetic user rows would re-pair
+    into LLM context (breaking the "user rows conversational-only" invariant).
+
+    This one-shot generalizes `_migrate_scheduled_transcript_cleanup` from
+    scheduled-only to every non-conversational source type. Over rows whose
+    `origin_surface NOT IN ('web','talk','scheduled')` (scheduled is owned by
+    its own marker, conversational surfaces are real turns), and never touching
+    `role='system'` (the notification/log lane), it:
+
+      * drops the `role='user'` rows — synthetic prompts, never user-authored;
+        this is what restores the invariant for every reader without touching
+        the context builders,
+      * repairs `role='briefing'` assistant bodies that are stored JSON to the
+        delivered body (the same parse live delivery does), leaving anything
+        that doesn't parse — and every other source type's verbatim body — as-is
+        (a plain-text subtask block is already exactly what was delivered).
+
+    Markered (`nonconversational_transcript_cleanup_v1`); idempotent regardless.
+    No-op on fresh installs (nothing matches). Must ship with the filter flip —
+    it is what makes the read-time reveal clean."""
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state "
+            "WHERE name = 'nonconversational_transcript_cleanup_v1'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already:
+        return
+    try:
+        # Resolve the briefing parser BEFORE any mutation: init_db commits this
+        # migration in one transaction, so a mid-migration import failure after
+        # the DELETE would commit a half-applied state (user rows dropped) with
+        # no marker, leaving briefing rows to reveal as raw JSON until a later
+        # deploy re-runs it. Importing first means a failure aborts cleanly with
+        # zero mutation, and the unmarked retry re-applies the whole thing.
+        from .skills.briefing import parse_briefing_json
+
+        # Drop synthetic non-conversational user rows (restore the invariant).
+        conn.execute(
+            "DELETE FROM messages "
+            "WHERE role = 'user' "
+            "AND origin_surface NOT IN ('web', 'talk', 'scheduled')"
+        )
+        # Normalize briefing assistant bodies that were stored as raw JSON.
+        briefing_rows = conn.execute(
+            "SELECT id, body FROM messages "
+            "WHERE role = 'assistant' AND origin_surface = 'briefing'"
+        ).fetchall()
+        for row in briefing_rows:
+            parsed = parse_briefing_json(row["body"] or "")
+            if parsed and parsed.get("body") is not None:
+                conn.execute(
+                    "UPDATE messages SET body = ? WHERE id = ?",
+                    (parsed["body"], row["id"]),
+                )
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return  # fresh install, messages not created yet
+        logger.warning("nonconversational transcript cleanup failed: %s", e)
+        return
+    except Exception as e:  # briefing parser import / edge — don't wedge init
+        logger.warning("nonconversational transcript cleanup failed: %s", e)
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) "
+        "VALUES ('nonconversational_transcript_cleanup_v1')"
     )
 
 

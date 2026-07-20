@@ -1700,8 +1700,12 @@ def _build_db_context(
     set of DB task IDs whose results appear in the returned context — callers
     use it to deduplicate against memory recall.
     """
-    # Exclude background task types from conversation context
-    _exclude_types = ["scheduled", "briefing"]
+    # Exclude background / non-conversational task types from conversation
+    # context. subtask/heartbeat are the forward guard (defense-in-depth on top
+    # of the nonconversational_transcript_cleanup_v1 migration) against any
+    # future path that stores a non-conversational user row — the model must
+    # never read a cron/subtask post back as prior user conversation.
+    _exclude_types = ["scheduled", "briefing", "subtask", "heartbeat"]
 
     if conn is not None:
         history = db.get_conversation_history(
@@ -1717,17 +1721,26 @@ def _build_db_context(
                 exclude_source_types=_exclude_types,
             )
 
-    # Inject recent unfiltered tasks (scheduled/briefing in same channel)
+    # Inject recent scheduled/briefing tasks in the same channel — these are
+    # deliberately re-surfaced (cron/briefing output the user may reference)
+    # even though get_conversation_history excludes them. But subtask/heartbeat
+    # must stay excluded here too: a subtask's synthetic orchestration prompt is
+    # not a user utterance, and re-injecting it would read back as prior user
+    # conversation (the LLM-context isolation invariant — canonical-room-
+    # transcript spec). So hard-exclude them from this re-surfacing path as well.
+    _prev_exclude = ["subtask", "heartbeat"]
     if conn is not None:
         prev_tasks = db.get_previous_tasks(
             conn, task.conversation_token, exclude_task_id=task.id,
             limit=config.conversation.previous_tasks_count,
+            exclude_source_types=_prev_exclude,
         )
     else:
         with db.get_db(config.db_path) as temp_conn:
             prev_tasks = db.get_previous_tasks(
                 temp_conn, task.conversation_token, exclude_task_id=task.id,
                 limit=config.conversation.previous_tasks_count,
+                exclude_source_types=_prev_exclude,
             )
 
     if prev_tasks:

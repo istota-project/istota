@@ -385,58 +385,38 @@ def _strip_action_prefix(result: str) -> tuple[bool, str]:
     return True, body
 
 
-def _store_scheduled_room_turn(conn, task, body: str) -> None:
-    """Mirror a scheduled (cron) job's room post into the canonical messages
-    store so the room's web view renders it (ISSUE-133).
+def _store_room_turn(conn, task, body: str) -> int | None:
+    """Store a task's delivered result as an assistant spine row in a room's
+    canonical transcript — for ANY source type — when the room is web-visible.
 
-    Interactive talk/web turns are stored by the task-success branch directly,
-    but a cron post is ``source_type="scheduled"`` and was excluded — so a bot
-    notice to a Talk room (a location alert, the daily money sync) posted to
-    Talk and never reached the web mirror of that room. The web transcript
-    reader already renders ``origin_surface='scheduled'`` assistant rows (the
-    synthetic cron prompt stays hidden — there is no user-authored turn), so
-    storing the posted body here is the whole producer half of the fix.
+    Any bot output delivered into a real, web-visible room belongs in that
+    room's transcript, whatever ``source_type`` produced it (subtask, scheduled,
+    briefing, heartbeat, an email round-trip continued from a web room, …). The
+    web transcript reader renders every assistant row of a room, so storing the
+    delivered body here is the whole producer half of making "what the room
+    shows in Talk, it shows in web" true (ISSUE-176). This subsumes the former
+    per-source-type helpers ``_store_scheduled_room_turn`` (ISSUE-133) and
+    ``_store_web_room_turn`` (ISSUE-164): one producer, not one-per-type, and
+    adding a new room-posting source type needs no new helper.
 
-    Self-gating: only fires for ``scheduled`` tasks with a conversation token
-    whose room exists in the registry. A token with no room row isn't a
-    web-visible room, so there is nothing to mirror into; briefing / talk / web
-    source types are handled elsewhere and no-op here. Idempotent across retries
-    (``store_turn_message`` dedups on ``(room, role, task_id)``)."""
-    if task.source_type != "scheduled" or not task.conversation_token:
-        return
-    if db.get_room(conn, task.conversation_token) is None:
-        return
-    db.store_turn_message(
-        conn, task.conversation_token, role="assistant",
-        body=body, task_id=task.id, origin_surface="scheduled",
-    )
-
-
-def _store_web_room_turn(conn, task, body: str) -> None:
-    """Store a foreign task's conversational reply into a web room as an
-    assistant turn (ISSUE-164).
-
-    When a non-web/non-talk task (e.g. an email round-trip continued from a web
-    room) fans its result into the web room it is *conversing in* —
-    ``output_target`` names ``web:<its own conversation_token>`` — that result is
-    a real turn, not an out-of-band notice. Storing it as a ``role='assistant'``
-    spine row makes the web transcript render it as a chat bubble, exactly like a
-    native web reply, instead of the ``role='system'`` cmd-output block a
-    ``WebTransport.deliver`` push produces (the notification lane).
-
-    ``origin_surface='web'`` so the row satisfies the shared transcript filter
-    and reads as a turn belonging to the web room. Talk/web-origin tasks are
-    already stored by the task-success branch (their native surface); this covers
-    only the foreign-origin case, and ``store_turn_message`` dedups on
-    ``(room, role, task_id)`` so an overlap is a harmless no-op. Self-gating on
-    room existence; idempotent across retries."""
-    if not task.conversation_token:
-        return
-    if db.get_room(conn, task.conversation_token) is None:
-        return
-    db.store_turn_message(
-        conn, task.conversation_token, role="assistant",
-        body=body, task_id=task.id, origin_surface="web",
+    The gate is **room existence**, not source type: a token with no ``rooms``
+    row isn't a web-visible room (e.g. a synthetic email-thread token), so there
+    is nothing to mirror into and the helper no-ops. ``origin_surface`` records
+    the task's real source type as provenance without gating visibility — the
+    generalized ``TRANSCRIPT_SURFACE_FILTER`` admits any assistant row. Only an
+    assistant row is ever written, never a ``role='user'`` row, so a
+    non-conversational post can't re-pair into LLM context (the load-bearing
+    "user rows are conversational-only" invariant). Idempotent across retries
+    (``store_turn_message`` dedups on ``(room, role, task_id)``); returns the new
+    message id, or None when it no-ops or the row already exists."""
+    token = task.conversation_token
+    if not token:
+        return None
+    if db.get_room(conn, token) is None:
+        return None
+    return db.store_turn_message(
+        conn, token, role="assistant", body=body,
+        task_id=task.id, origin_surface=task.source_type,
     )
 
 
@@ -1891,7 +1871,7 @@ def process_one_task(
                         db.log_task(conn, task_id, "info", "Silent scheduled job: action taken")
                         if talk_token:
                             post_talk_message = result_to_post
-                            _store_scheduled_room_turn(conn, task, result_to_post)
+                            _store_room_turn(conn, task, result_to_post)
                     else:
                         db.log_task(conn, task_id, "info", "Silent scheduled job: no action needed")
 
@@ -1908,7 +1888,7 @@ def process_one_task(
                         delivery_result = result
                     if plan_talk and talk_token:
                         post_talk_message = delivery_result
-                        _store_scheduled_room_turn(conn, task, delivery_result)
+                        _store_room_turn(conn, task, delivery_result)
                     if plan_email:
                         post_email = True
                     if plan_ntfy:
@@ -1916,7 +1896,10 @@ def process_one_task(
                     if web_own_conv_dests:
                         # Conversational reply into its own web room → assistant
                         # bubble, not a system cmd-output push (ISSUE-164).
-                        _store_web_room_turn(conn, task, delivery_result)
+                        # origin_surface becomes the task's real source type
+                        # (e.g. "email"); renders identically under the
+                        # assistant-any filter.
+                        _store_room_turn(conn, task, delivery_result)
                     if web_foreign_dests:
                         post_web = True
                     if plan_file:

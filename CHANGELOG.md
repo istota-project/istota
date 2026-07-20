@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Bot posts to a room from any source (a cron-spawned subtask, a briefing, a scheduled job) now appear in that room's web chat view, not only in Talk. Previously only conversational turns and scheduled posts reached web, so a subtask that posted a block into a Talk room was invisible in the web transcript of the same room.
+- Internal, non-conversational task output (a subtask's synthetic instruction, a heartbeat post) no longer leaks into the model's prior-conversation context on the email/fallback path.
+
+### Changed
+- The canonical room transcript now stores every bot post delivered into a web-visible room, whatever produced it, instead of gating on the source type. Adding a new kind of room-posting job no longer needs special handling to show up in web. A one-time cleanup migration tidies historical rows an earlier backfill left behind (removing synthetic prompts and rendering stored briefings as their delivered text rather than raw JSON).
+
 ## [0.34.0] - 2026-07-19
 
 ### Changed
