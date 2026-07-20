@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-20: Session/usage limit now reroutes to the fallback brain (ISSUE-177)
+
+A subscription session-limit hit on the `claude_code` primary (the prod brain) was being delivered to the user as the task's *answer* — the raw `You've hit your session limit · resets …` string — instead of transparently rerouting to the configured fallback brain. The whole availability-failover machinery (detector, trigger set, breaker, executor reroute) was correct; the one missing link was classification. `claude -p` reports a limit hit as a **successful** completion (rc 0 on the simple path, a stream-json `result` frame with `subtype:"success"` on the streaming path), carrying the limit text as the result. `ClaudeCodeBrain` only ran `is_usage_limit_error` on its *failure* branches, so a limit defaulted to `stop_reason="completed"`, never matched the fallback trigger set `{usage_limit, not_found, fallback}`, and got delivered as the reply. Every subsequent task then hit the same wall until the quota window reset.
+
+Investigated ISSUE-177 first (verified every code-line claim in the writeup against the tree), then shipped "tier 1" after the user confirmed scope. The fix runs the detector on every success return (simple rc-0 stdout + rc-0 result-file; streaming `subtype:"success"` + rc-0 result-file), reclassifying a match to `stop_reason="usage_limit"`; the streaming non-zero-rc result-file branch swapped its hardcoded `"error"` for `_failure_stop_reason`. No executor change needed — a reclassified `usage_limit` flows through the retry-loop short-circuit straight to the reroute check.
+
+The investigation also surfaced a completeness gap the original writeup missed: per the Claude Code docs there are three limit phrasings — session / weekly / Opus — and the old keyword set only matched `"session limit"`, so weekly and Opus would still leak even after the success-branch fix. Added a `hit your <scope> limit` regex that catches all three (and a future scope word) while still not matching a transient `rate limit`. The tmux secondary brain got the analogous treatment: an `is_usage_limit_error(pane)` fallback in `_wait_for_completion` for the weekly/Opus scopes, `usage_limit_markers` aligned to the real TUI text (`session limit`), and the dead `session limit reached` dropped from `error_markers` so a limit can't misroute to the generic-error branch. An Opus-limit-specific optimization (Opus only blocks Opus, so a same-subscription model downgrade beats reaching for the paid fallback) was deliberately deferred as a separate future issue.
+
+Regression tests exercise the exec paths, not the detector in isolation (the detector already matched the text — the bug was that the success branch never called it): rc-0-with-limit-stdout on the simple path, a `subtype:"success"` frame carrying the limit on the streaming path (via a `FakeProc` Popen stand-in), plus the tmux pane cases for all three scopes. 236 brain/tmux/fallback tests green.
+
+**Key changes:**
+- `is_usage_limit_error` now runs on every `claude_code` success return, reclassifying a session/weekly/Opus limit as `stop_reason="usage_limit"` so it reroutes instead of being answered.
+- Broadened the detector with a `hit your <scope> limit` regex covering all three documented phrasings.
+- tmux: pane-detector fallback + marker alignment + dead-marker removal.
+
+**Files added/modified:**
+- `src/istota/brain/claude_code.py` — `_HIT_LIMIT_RE`; usage-limit guard on the simple + streaming success returns; `_failure_stop_reason` on the streaming result-file error branch.
+- `src/istota/brain/tmux_claude.py` — `is_usage_limit_error(pane)` fallback in `_wait_for_completion`; markers realigned.
+- `src/istota/config.py` — `TmuxBrainConfig` marker defaults synced.
+- `tests/test_claude_code_usage_limit.py`, `tests/test_tmux_usage_limit.py` — exec-path regression tests for all three phrasings.
+
 ## 2026-07-20: Briefings source gather — concurrency + hour-accurate email window
 
 The two lower-severity findings from the briefings module review (deferred out of the migration-fix commit) are now fixed. (1) `assemble_briefing_input` gathered a briefing's sources serially, so a slow network source (a 60s browse frontpage fetch, an IMAP round-trip) delayed every source after it — a briefing fanning in several such sources ran their timeouts back to back. It now gathers all enabled sources across a bounded thread pool (≤8). Each worker opens its **own** framework DB connection: SQLite connections aren't thread-safe, so the shared `conn` must never be touched off the calling thread, and the earlier local-disk WAL migration is exactly what makes concurrent framework connections safe. Gathering stays fail-soft (a connection-open failure returns a not-ok source, mirroring the existing `resolve_source` backstop) and per-block output order is unchanged — results are reassembled by `(block, source)` slot, not completion order, so the assembled prompt stays deterministic. Pure latency win; it runs in the background worker (ISSUE-143), never the dispatch thread. (2) The email/newsletter source's IMAP `date_gte` is date-granular, so the server fetch was over-inclusive by up to ~a day while the provenance note claimed "past Nh". Added a client-side hour-level cutoff trim (mirroring the rss resolver's `published_at` window) so the window is honored to the hour and the note is honest; a missing or non-datetime envelope date is kept, never dropped.
