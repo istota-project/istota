@@ -199,7 +199,8 @@ def cmd_update(args):
     record_path = updater.install_record_path(config_path)
     try:
         rc = updater.run_update(
-            config, record_path=record_path, config_path=config_path, force=args.force,
+            config, record_path=record_path, config_path=config_path,
+            force=args.force, channel=args.channel,
         )
     except updater.UpdateError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1391,6 +1392,12 @@ def main():
     update_parser.add_argument(
         "--force", action="store_true",
         help="Update even if the install checkout has uncommitted changes",
+    )
+    update_parser.add_argument(
+        "--channel", choices=["stable", "main"], default=None,
+        help="Update channel: 'stable' tracks the latest release, 'main' tracks "
+             "the development branch. The choice is remembered for future runs "
+             "(default: stable for new installs).",
     )
 
     # repl
