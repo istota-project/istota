@@ -68,18 +68,40 @@ class TestEventWriterSeq:
 
 class TestPayloadTruncation:
     def test_oversized_payload_is_truncated(self, db_path):
+        # A non-deliverable kind (tool/progress output) is still capped so a
+        # runaway tool result can't bloat the event log.
         w = EventWriter(1, str(db_path))
         big = "x" * (PAYLOAD_MAX_BYTES * 2)
-        event = w.emit("result", {"text": big, "truncated": False})
+        event = w.emit("progress_text", {"text": big})
         assert event.payload["_truncated"] is True
         assert event.payload["text"].endswith("… [truncated]")
         assert len(event.payload["text"]) < len(big)
 
     def test_small_payload_untouched(self, db_path):
         w = EventWriter(1, str(db_path))
-        event = w.emit("result", {"text": "short"})
+        event = w.emit("progress_text", {"text": "short"})
         assert "_truncated" not in event.payload
         assert event.payload["text"] == "short"
+
+    def test_result_event_is_never_truncated(self, db_path):
+        # The `result` event carries the user-facing deliverable and must reach
+        # the stream surface whole, however long (ISSUE-178).
+        w = EventWriter(1, str(db_path))
+        big = "x" * (PAYLOAD_MAX_BYTES * 2)
+        event = w.emit("result", {"text": big, "truncated": False})
+        assert "_truncated" not in event.payload
+        assert event.payload["text"] == big
+        # And it round-trips through the DB unclipped.
+        with db.get_db(db_path) as conn:
+            rows = db.get_task_events(conn, 1)
+        assert rows[-1]["payload"]["text"] == big
+
+    def test_confirmation_event_is_never_truncated(self, db_path):
+        w = EventWriter(1, str(db_path))
+        big = "y" * (PAYLOAD_MAX_BYTES * 2)
+        event = w.emit("confirmation", {"prompt": big})
+        assert "_truncated" not in event.payload
+        assert event.payload["prompt"] == big
 
 
 class TestKillSwitch:

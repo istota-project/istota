@@ -1479,9 +1479,9 @@ def run_task_inline(
         if is_cancelled:
             event_writer.emit("cancelled")
         elif success:
-            event_writer.emit("result", {
-                "text": result[:8000], "truncated": len(result) > 8000,
-            })
+            # Full answer — the `result` event is the deliverable to stream
+            # surfaces (web/REPL) and must not be clipped (ISSUE-178).
+            event_writer.emit("result", {"text": result, "truncated": False})
         else:
             event_writer.emit("error", {"message": result[:500], "stop_reason": "error"})
         event_writer.emit("done", {
@@ -2036,11 +2036,11 @@ def process_one_task(
             })
         if not will_retry:
             if is_confirmation_request:
-                event_writer.emit("confirmation", {"prompt": result[:8000]})
+                event_writer.emit("confirmation", {"prompt": result})
             elif success:
-                event_writer.emit("result", {
-                    "text": result[:8000], "truncated": len(result) > 8000,
-                })
+                # Full answer — see ISSUE-178. The canonical body is stored
+                # untruncated in `messages`; the live `result` event must match.
+                event_writer.emit("result", {"text": result, "truncated": False})
             elif is_cancelled:
                 event_writer.emit("cancelled")
             else:

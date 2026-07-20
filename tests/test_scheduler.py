@@ -2006,6 +2006,43 @@ class TestProcessOneTask:
         assert "result" in kinds and "done" in kinds  # lifecycle survives
 
     @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_long_web_result_reaches_result_event_whole(self, mock_arun, db_path, tmp_path):
+        # A several-thousand-word answer must reach the stream surface uncut:
+        # the `result` task event (the web-chat deliverable) carries the full
+        # body, not an 8000-char slice (ISSUE-178).
+        from istota.events import PAYLOAD_MAX_BYTES
+        config = self._make_config(db_path, tmp_path)
+        config.scheduler.event_log_enabled = True
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="write a lot", user_id="testuser", source_type="web",
+                conversation_token="webtok", output_target="web",
+            )
+
+        long_result = "word " * (PAYLOAD_MAX_BYTES // 2)  # well over the old cap
+        assert len(long_result) > 8000
+
+        def fake_exec(task, config, user_resources, *, dry_run=False,
+                      event_writer=None, workspace_dir=None, **kw):
+            return (True, long_result, None, None)
+
+        with patch("istota.scheduler.execute_task", side_effect=fake_exec):
+            result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is True
+
+        with db.get_db(db_path) as conn:
+            events = db.get_task_events(conn, task_id)
+            task = db.get_task(conn, task_id)
+        result_ev = next(e for e in events if e["kind"] == "result")
+        assert result_ev["payload"]["text"] == long_result
+        assert result_ev["payload"].get("truncated") is False
+        assert "_truncated" not in result_ev["payload"]
+        # And the canonical stored body matches the delivered event.
+        assert task.result == long_result
+
+    @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_email_reply_into_own_web_room_renders_as_bubble(self, mock_arun, db_path, tmp_path):
         # ISSUE-164: an email-source task (e.g. a thread-matched reply) fanned
         # into the web room it is *conversing in* (output_target names its own

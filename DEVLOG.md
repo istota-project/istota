@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-20: Web chat no longer truncates long answers (ISSUE-178); Talk splits at the real limit
+
+Long assistant replies were cut off in web chat — a several-thousand-word answer ended mid-content. Two investigation agents traced the whole delivery chain and converged: the truncation was entirely in the live streaming/event-delivery layer. The canonical stores are all clean (`messages.body`, `web_chat_messages.text`, `tasks.result` are unbounded `TEXT`; `store_turn_message` writes the full body; the history-read and SSE-serialization paths never clip a body; the frontend renders the trailing text segment in full). But web chat renders its live answer from the `result` **task event** (text_delta rows are pruned once it lands), and that event was capped at `result[:8000]` at all three emit sites (daemon + inline `result`, plus the confirmation `prompt`), and again by a generic `PAYLOAD_MAX_BYTES = 8192` backstop in `EventWriter.emit` that slashed `text` to 2000 chars — measured on the JSON-*encoded* size, so it fired well before 8000 literal chars on markdown. The synthetic-terminal backstop frame in `web_app` re-clipped at 8000 too. So a long reply arrived truncated live while the durable copy stayed complete (a reload would show it whole).
+
+Fix: exempt the deliverable event kinds (`result`, `confirmation`) from the size cap via `_UNCAPPED_EVENT_KINDS` — the cap still guards tool/progress payloads from bloating the log — and drop the `[:8000]` slices at the three emit sites and the synthetic backstop. No schema or frontend change needed. Following TDD, the new tests were written failing first, then made green.
+
+While confirming the fix, a question about the Talk surface surfaced a separate inefficiency: `TalkTransport.deliver` was splitting at `split_message`'s stale default of 4000 chars, fragmenting long answers into many small Talk messages even though Talk's real per-message limit is 32000. Talk never *truncated* — it splits into complete parts with `(N/N)` indicators, and the `truncate_message` helper is dead code — but the split size was far too conservative. `deliver` now splits at `capabilities.max_message_length`, set to a round **30000** (headroom under 32000 for the page indicator), so a normal long answer posts as one message.
+
+**Key changes:**
+- `result`/`confirmation` task events are no longer size-capped; the generic cap still applies to tool/progress events.
+- Dropped the `[:8000]` truncation at all three `result`/`confirmation` emit sites and the synthetic-terminal backstop frame.
+- Talk delivery splits at 30000 (was an accidental 4000), so long answers post as one message instead of many fragments.
+
+**Files added/modified:**
+- `src/istota/events.py` — `_UNCAPPED_EVENT_KINDS`; skip the payload cap for those kinds.
+- `src/istota/scheduler.py` — full text at the daemon + inline `result` emits and the `confirmation` emit.
+- `src/istota/web_app.py` — full body on the synthetic-terminal `result` frame.
+- `src/istota/transport/talk/__init__.py` — `max_message_length=30000`; `deliver` splits at the capability value.
+- `tests/test_events.py`, `tests/test_scheduler.py`, `tests/test_web_app.py`, `tests/test_transport_talk.py` — regression tests.
+
 ## 2026-07-20: Session/usage limit now reroutes to the fallback brain (ISSUE-177)
 
 A subscription session-limit hit on the `claude_code` primary (the prod brain) was being delivered to the user as the task's *answer* — the raw `You've hit your session limit · resets …` string — instead of transparently rerouting to the configured fallback brain. The whole availability-failover machinery (detector, trigger set, breaker, executor reroute) was correct; the one missing link was classification. `claude -p` reports a limit hit as a **successful** completion (rc 0 on the simple path, a stream-json `result` frame with `subtype:"success"` on the streaming path), carrying the limit text as the result. `ClaudeCodeBrain` only ran `is_usage_limit_error` on its *failure* branches, so a limit defaulted to `stop_reason="completed"`, never matched the fallback trigger set `{usage_limit, not_found, fallback}`, and got delivered as the reply. Every subsequent task then hit the same wall until the quota window reset.

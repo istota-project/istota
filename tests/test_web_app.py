@@ -1003,6 +1003,34 @@ class TestTaskEventEndpoints:
             assert events[0]["payload"]["message"].startswith("Stream parsing failed")
             assert all(e["seq"] > 2 for e in events)
 
+    async def test_snapshot_synthesized_result_is_not_truncated(self, tmp_path):
+        """The synthetic/backstop `result` frame carries the full task body, not
+        an 8000-char slice — the resume path must match what the live path now
+        delivers whole (ISSUE-178)."""
+        from istota import db
+        from istota.events import EventWriter
+        config = self._config_with_admin(tmp_path)
+        long_result = "word " * 4000  # 20000 chars, well over the old 8000 cap
+        with db.get_db(config.db_path) as conn:
+            tid = db.create_task(conn, "write a lot", "alice", source_type="web")
+        w = EventWriter(tid, str(config.db_path))
+        w.emit("task_started")
+        w.emit("tool_start", {"tool_name": "Read", "description": "reading",
+                              "tool_call_id": "t1"})
+        with db.get_db(config.db_path) as conn:
+            db.update_task_status(conn, tid, "completed", result=long_result)
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get(
+                f"/istota/api/chat/tasks/{tid}/events?since_seq=2", cookies=cookies,
+            )
+            assert resp.status_code == 200
+            events = resp.json()["events"]
+            assert [e["kind"] for e in events] == ["result", "done"]
+            assert events[0]["payload"]["text"] == long_result
+
     async def test_snapshot_no_synthesis_while_running(self, tmp_path):
         """A still-running task gets no synthetic terminal frame."""
         from istota import db

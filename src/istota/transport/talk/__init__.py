@@ -45,7 +45,11 @@ class TalkTransport:
         supports_threading=True,
         supports_progress_ack=True,
         supports_typing=True,
-        max_message_length=32000,
+        # Talk's hard per-message limit is 32000 chars; split at a round 30000
+        # so the appended " (N/N)" page indicator (and any counting slack) can't
+        # push a part over. Only messages past this are split at all — a normal
+        # long answer posts as one message instead of many 4000-char fragments.
+        max_message_length=30000,
     )
 
     def __init__(self, config: "Config"):
@@ -85,7 +89,7 @@ class TalkTransport:
 
         try:
             client = get_talk_client(self._config)
-            parts = split_message(text)
+            parts = split_message(text, self.capabilities.max_message_length or 4000)
             msg_id = None
             for i, part in enumerate(parts):
                 # In group chats, reply to the original message and @mention the

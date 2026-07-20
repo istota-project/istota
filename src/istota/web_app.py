@@ -1484,8 +1484,10 @@ def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
     seq = max([after_seq, *(e["seq"] for e in pending)]) + 1
     frames: list[dict] = []
     if task.status == "completed":
+        # Full answer from the durable task row — the resume/backstop frame
+        # must not re-clip what the live path now delivers whole (ISSUE-178).
         frames.append({"seq": seq, "kind": "result",
-                       "payload": {"text": (task.result or "")[:8000]}})
+                       "payload": {"text": task.result or ""}})
     elif task.status == "cancelled":
         frames.append({"seq": seq, "kind": "cancelled", "payload": {}})
     else:  # failed — mirror the live error frame's raw-ish message
