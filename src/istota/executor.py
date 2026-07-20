@@ -2464,6 +2464,15 @@ def build_deferred_briefing_prompt(task: db.Task, config: Config) -> str | None:
     """
     if not task.briefing_name:
         return None
+
+    # Module path (briefings-first-class): if the briefings module is enabled
+    # for the user and the briefing has content blocks, assemble the
+    # block-grouped prompt. Falls through to the legacy builder for any user
+    # with no blocks or the module disabled — the back-compat guarantee.
+    module_prompt = _build_module_briefing_prompt(task, config)
+    if module_prompt is not None:
+        return module_prompt
+
     try:
         from .skills.briefing import build_briefing_prompt, get_briefings_for_user
 
@@ -2486,6 +2495,65 @@ def build_deferred_briefing_prompt(task: db.Task, config: Config) -> str | None:
             task.id, task.briefing_name, e,
         )
         return None
+
+
+def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
+    """Assemble a block-grouped briefing prompt from the briefings module.
+
+    Returns the prompt when the module is enabled and the briefing has blocks;
+    ``None`` to defer to the legacy builder (module disabled / no blocks / any
+    error). Also stashes per-block provenance in a deferred file the scheduler
+    reads when archiving the rendered briefing.
+    """
+    try:
+        from . import briefings as briefings_module
+        from .briefings import ensure_initialised
+        from .briefings.generate import assemble_briefing_input
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        ctx = briefings_module.resolve_for_user(task.user_id, config)
+    except briefings_module.UserNotFoundError:
+        return None  # module disabled → legacy path
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "briefings module resolve failed for task %s: %s", task.id, e,
+        )
+        return None
+
+    try:
+        ensure_initialised(ctx, app_config=config)
+        with db.get_db(config.db_path) as conn:
+            assembled = assemble_briefing_input(
+                ctx, task.briefing_name, config, conn=conn,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "briefings module prompt build failed for task %s (%s): %s; "
+            "falling back to legacy path",
+            task.id, task.briefing_name, e,
+        )
+        return None
+
+    if assembled is None:
+        return None  # no blocks → legacy path
+
+    # Stash per-block provenance for the scheduler's archive write.
+    try:
+        import json as _json
+
+        user_temp_dir = get_user_temp_dir(config, task.user_id)
+        user_temp_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = user_temp_dir / f"task_{task.id}_briefing_meta.json"
+        meta_path.write_text(_json.dumps({
+            "briefing_name": task.briefing_name,
+            "block_meta": assembled.block_meta,
+        }))
+    except Exception:  # noqa: BLE001
+        pass  # best-effort; archive still works with empty block_meta
+
+    return assembled.prompt
 
 
 def execute_task(
