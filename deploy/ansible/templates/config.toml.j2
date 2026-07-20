@@ -217,12 +217,18 @@ bot_email = "{{ istota_email_bot_address }}"
 imap_timeout_seconds = {{ istota_email_imap_timeout_seconds }}
 {% endif %}
 
-{# Role aliases (fast/general/smart) → concrete model ids. The native brain has
-   no built-in role table, so for a native deploy default all three to the
-   configured model, each optionally overridable. istota_models_roles then
-   overlays (operator-explicit wins, and can add custom roles). #}
+{# Role aliases (fast/general/smart) → concrete model ids. When the PRIMARY
+   brain is native, default all three to the configured model (each optionally
+   overridable); istota_models_roles then overlays (operator-explicit wins, and
+   can add custom roles). Do NOT populate this for a native *fallback* under a
+   claude_code primary: [models.roles] is global and provider-agnostic, so
+   writing the native model here would override the claude_code primary's own
+   role targets (Haiku/Sonnet/Opus). Native-as-fallback needs no table anyway —
+   NativeBrain defaults un-overridden roles to its configured model, and the
+   fallback path re-resolves portable role names (fast/general/smart) in the
+   fallback namespace on its own. #}
 {% set _roles = {} %}
-{% if (istota_brain_kind == 'native' or istota_brain_fallback == 'native') and istota_brain_native_model %}
+{% if istota_brain_kind == 'native' and istota_brain_native_model %}
 {% set _ = _roles.update({'fast': istota_brain_native_model_fast | default('', true) or istota_brain_native_model}) %}
 {% set _ = _roles.update({'general': istota_brain_native_model_general | default('', true) or istota_brain_native_model}) %}
 {% set _ = _roles.update({'smart': istota_brain_native_model_smart | default('', true) or istota_brain_native_model}) %}
