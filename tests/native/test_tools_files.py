@@ -56,6 +56,14 @@ class TestRead:
         assert "line5" not in text
         assert "more lines" in text
 
+    async def test_truncation_states_concrete_offset(self, tmp_path):
+        # Stage 5: the tail note names the exact offset to continue from.
+        f = tmp_path / "a.txt"
+        f.write_text("\n".join(f"line{i}" for i in range(1, 11)) + "\n")
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(f), "offset": 3, "limit": 2})
+        # read lines 3-4 → next line is 5.
+        assert "offset=5" in _text(result)
+
     async def test_binary_rejected(self, tmp_path):
         f = tmp_path / "b.bin"
         f.write_bytes(b"\x00\x01\x02binary")
@@ -105,13 +113,13 @@ class TestEdit:
         f = tmp_path / "a.txt"
         f.write_text("alpha")
         result = await _run(make_edit_tool(_env(tmp_path)), {"file_path": str(f), "old_string": "zzz", "new_string": "x"})
-        assert "not found" in _text(result).lower()
+        assert "could not find" in _text(result).lower()
 
     async def test_ambiguous_without_replace_all(self, tmp_path):
         f = tmp_path / "a.txt"
         f.write_text("x x x")
         result = await _run(make_edit_tool(_env(tmp_path)), {"file_path": str(f), "old_string": "x", "new_string": "y"})
-        assert "replace_all" in _text(result)
+        assert "unique" in _text(result)
         assert f.read_text() == "x x x"  # unchanged
 
     async def test_replace_all(self, tmp_path):
@@ -210,7 +218,71 @@ class TestGrep:
         for i in range(5):
             (tmp_path / f"f{i}.txt").write_text("hit\n")
         result = await _run(make_grep_tool(_env(tmp_path)), {"pattern": "hit", "head_limit": 2})
-        assert "more)" in _text(result)
+        assert "more; raise head_limit" in _text(result)
+
+
+class TestGrepContextAndLiteral:
+    """Stage 6 — `-C` context lines and `literal` matching (pure-Python)."""
+
+    async def test_context_lines(self, tmp_path):
+        (tmp_path / "a.txt").write_text("one\ntwo\nNEEDLE\nfour\nfive\n")
+        result = await _run(
+            make_grep_tool(_env(tmp_path)),
+            {"pattern": "NEEDLE", "output_mode": "content", "-C": 1},
+        )
+        text = _text(result)
+        # Match line uses `:lineno:`, context lines use `-lineno-`.
+        assert ":3:NEEDLE" in text
+        assert "-2-two" in text
+        assert "-4-four" in text
+        # Lines outside the context window are absent.
+        assert "one" not in text
+        assert "five" not in text
+
+    async def test_context_group_separator(self, tmp_path):
+        # Two matches far apart → a `--` separator between the two context groups.
+        lines = ["x"] * 20
+        lines[2] = "MATCH"
+        lines[15] = "MATCH"
+        (tmp_path / "a.txt").write_text("\n".join(lines) + "\n")
+        result = await _run(
+            make_grep_tool(_env(tmp_path)),
+            {"pattern": "MATCH", "output_mode": "content", "-C": 1},
+        )
+        text = _text(result)
+        assert "--" in text
+        assert ":3:MATCH" in text
+        assert ":16:MATCH" in text
+
+    async def test_context_alias_key(self, tmp_path):
+        (tmp_path / "a.txt").write_text("a\nHIT\nb\n")
+        result = await _run(
+            make_grep_tool(_env(tmp_path)),
+            {"pattern": "HIT", "output_mode": "content", "context": 1},
+        )
+        text = _text(result)
+        assert "-1-a" in text
+        assert ":2:HIT" in text
+
+    async def test_literal_treats_metacharacters_literally(self, tmp_path):
+        (tmp_path / "a.txt").write_text("value = foo.bar\nvalue = fooXbar\n")
+        # As a literal, `foo.bar` matches only the dotted line (not fooXbar).
+        result = await _run(
+            make_grep_tool(_env(tmp_path)),
+            {"pattern": "foo.bar", "output_mode": "content", "literal": True},
+        )
+        text = _text(result)
+        assert "foo.bar" in text
+        assert "fooXbar" not in text
+
+    async def test_literal_matches_regex_special_string(self, tmp_path):
+        (tmp_path / "a.txt").write_text("cost is $5 (approx)\n")
+        # `$5 (approx)` is not a valid regex, but literal matches it fine.
+        result = await _run(
+            make_grep_tool(_env(tmp_path)),
+            {"pattern": "$5 (approx)", "output_mode": "content", "literal": True},
+        )
+        assert "cost is" in _text(result)
 
 
 # --------------------------------------------------------------------------- #

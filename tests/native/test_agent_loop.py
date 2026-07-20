@@ -221,6 +221,175 @@ class TestBasicLoop:
         assert ends["a"] < ends["b"]
 
 
+class TestParallelExecution:
+    """Stage 3 — parallel tool execution un-gated for the native brain."""
+
+    async def test_parallel_tools_run_concurrently(self):
+        # Both tools must be in-flight at once to pass the barrier. If the loop
+        # serialized them, the first barrier.wait() would block forever and the
+        # run would time out. Reaching both results proves concurrency.
+        barrier = asyncio.Barrier(2)
+
+        async def _sync(call_id, args, on_update, abort):
+            await barrier.wait()
+            return ToolResult(content=[TextContent(text=f"done:{args.get('n')}")])
+
+        tool = AgentTool(
+            schema=ToolSchema(
+                name="sync", description="barrier",
+                parameters=[ToolParameter(name="n", type="string", required=False)],
+            ),
+            execute=_sync,
+            execution_mode="parallel",
+        )
+        provider = MockProvider([
+            AssistantMessage(
+                content=[
+                    ToolCallContent(id="a", name="sync", arguments={"n": "1"}),
+                    ToolCallContent(id="b", name="sync", arguments={"n": "2"}),
+                ],
+                stop_reason="tool_use",
+            ),
+            _text_turn("done"),
+        ])
+        out = await asyncio.wait_for(
+            run_agent_loop(
+                [UserMessage(content=[TextContent(text="go")])],
+                _ctx(tools=[tool]),
+                _config(provider, tool_execution="parallel"),
+                _Sink(),
+            ),
+            timeout=2.0,
+        )
+        results = [m for m in out if isinstance(m, ToolResultMessage)]
+        assert {r.content[0].text for r in results} == {"done:1", "done:2"}
+
+    async def test_mutation_batch_serializes(self):
+        # A batch containing a sequential-mode (mutating) tool must serialize even
+        # under tool_execution="parallel": max concurrency stays 1.
+        state = {"active": 0, "max_active": 0}
+
+        async def _mutate(call_id, args, on_update, abort):
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+            await asyncio.sleep(0.02)
+            state["active"] -= 1
+            return ToolResult(content=[TextContent(text="ok")])
+
+        tool = AgentTool(
+            schema=ToolSchema(name="mut", description="mutate", parameters=[]),
+            execute=_mutate,
+            execution_mode="sequential",
+        )
+        provider = MockProvider([
+            AssistantMessage(
+                content=[
+                    ToolCallContent(id="a", name="mut", arguments={}),
+                    ToolCallContent(id="b", name="mut", arguments={}),
+                ],
+                stop_reason="tool_use",
+            ),
+            _text_turn("done"),
+        ])
+        await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[tool]),
+            _config(provider, tool_execution="parallel"),
+            _Sink(),
+        )
+        assert state["max_active"] == 1
+
+    async def test_results_in_call_order_despite_completion_order(self):
+        # The second tool finishes first; results must still be appended a, b.
+        async def _slow(call_id, args, on_update, abort):
+            await asyncio.sleep(args.get("delay", 0))
+            return ToolResult(content=[TextContent(text=args.get("tag", ""))])
+
+        tool = AgentTool(
+            schema=ToolSchema(
+                name="slow", description="sleep",
+                parameters=[
+                    ToolParameter(name="delay", type="number", required=False),
+                    ToolParameter(name="tag", type="string", required=False),
+                ],
+            ),
+            execute=_slow,
+            execution_mode="parallel",
+        )
+        provider = MockProvider([
+            AssistantMessage(
+                content=[
+                    ToolCallContent(id="a", name="slow", arguments={"delay": 0.1, "tag": "first"}),
+                    ToolCallContent(id="b", name="slow", arguments={"delay": 0.0, "tag": "second"}),
+                ],
+                stop_reason="tool_use",
+            ),
+            _text_turn("done"),
+        ])
+        out = await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[tool]),
+            _config(provider, tool_execution="parallel"),
+            _Sink(),
+        )
+        results = [m for m in out if isinstance(m, ToolResultMessage)]
+        assert [r.content[0].text for r in results] == ["first", "second"]
+
+
+class TestTruncatedToolCallGuard:
+    """Stage 4 — a max_tokens-truncated tool call must not be executed."""
+
+    async def test_truncated_tool_call_not_executed(self):
+        calls: list = []
+        provider = MockProvider([
+            # A tool call cut off at max output — arguments may be incomplete.
+            AssistantMessage(
+                content=[ToolCallContent(id="c1", name="echo", arguments={"value": "x"})],
+                stop_reason="max_tokens",
+            ),
+            _text_turn("recovered"),
+        ])
+        sink = _Sink()
+        out = await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[_echo_tool(calls)]),
+            _config(provider, tool_execution="parallel"),
+            sink,
+        )
+        # The tool never ran…
+        assert calls == []
+        assert "tool_execution_start" not in sink.types()
+        # …but a synthetic error result was appended, keeping the pairing valid…
+        results = [m for m in out if isinstance(m, ToolResultMessage)]
+        assert len(results) == 1
+        assert results[0].is_error
+        assert "truncated" in results[0].content[0].text.lower()
+        # …and the loop requested again (the model recovered).
+        assert len(provider.calls) == 2
+        assert [m for m in out if isinstance(m, AssistantMessage)][-1].text == "recovered"
+
+    async def test_error_result_per_pending_call(self):
+        provider = MockProvider([
+            AssistantMessage(
+                content=[
+                    ToolCallContent(id="a", name="echo", arguments={"value": "1"}),
+                    ToolCallContent(id="b", name="echo", arguments={"value": "2"}),
+                ],
+                stop_reason="max_tokens",
+            ),
+            _text_turn("done"),
+        ])
+        out = await run_agent_loop(
+            [UserMessage(content=[TextContent(text="go")])],
+            _ctx(tools=[_echo_tool([])]),
+            _config(provider, tool_execution="parallel"),
+            _Sink(),
+        )
+        results = [m for m in out if isinstance(m, ToolResultMessage)]
+        assert {r.tool_call_id for r in results} == {"a", "b"}
+        assert all(r.is_error for r in results)
+
+
 # --------------------------------------------------------------------------- #
 # Error / unknown tool / coercion
 # --------------------------------------------------------------------------- #

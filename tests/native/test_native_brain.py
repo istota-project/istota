@@ -133,7 +133,40 @@ class TestTextCompletion:
         req = _req("hi", tmp_path)
         req.custom_system_prompt_path = sysfile
         _brain(provider).execute(req)
+        # Text-only invocation (no tools): no coding block prepended.
         assert provider.calls[0]["system_prompt"] == "You are a test bot."
+
+
+class TestCodingSystemPrompt:
+    """Stage 2 — the native brain's coding-guidance system prompt."""
+
+    def _run(self, tmp_path, req):
+        provider = MockProvider(
+            [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
+        )
+        _brain(provider).execute(req)
+        return provider.calls[0]["system_prompt"]
+
+    def test_tool_bearing_task_gets_coding_block(self, tmp_path):
+        sp = self._run(tmp_path, _req("do a thing", tmp_path, tools=["Read", "Edit"]))
+        assert "coding agent" in sp
+        assert "Read a file before editing" in sp
+        assert "edits[]" in sp
+
+    def test_text_only_task_has_empty_prompt(self, tmp_path):
+        sp = self._run(tmp_path, _req("summarize", tmp_path, tools=[]))
+        assert sp == ""
+
+    def test_custom_prompt_appended_after_coding_block(self, tmp_path):
+        sysfile = tmp_path / "sys.md"
+        sysfile.write_text("Operator override.")
+        req = _req("do a thing", tmp_path, tools=["Read"])
+        req.custom_system_prompt_path = sysfile
+        sp = self._run(tmp_path, req)
+        assert "coding agent" in sp
+        assert sp.rstrip().endswith("Operator override.")
+        # Coding block comes first, custom prompt after.
+        assert sp.index("coding agent") < sp.index("Operator override.")
 
 
 class TestModelUsed:

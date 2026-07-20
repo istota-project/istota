@@ -13,13 +13,24 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json
 import os
 import re
 from pathlib import Path
 
+from istota.agent.coercion import coerce_arguments
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
 
+from .edit_engine import (
+    Edit,
+    EditError,
+    apply_edits_to_normalized_content,
+    detect_line_ending,
+    normalize_to_lf,
+    restore_line_endings,
+    strip_bom,
+)
 from .env import ToolEnv, ToolPathError
 
 _BINARY_SNIFF_BYTES = 8192
@@ -116,7 +127,9 @@ def make_read_tool(env: ToolEnv) -> AgentTool:
             out_lines.append(f"{i:6d}\t{line}")
         body = "\n".join(out_lines)
         if start + limit < len(lines):
-            body += f"\n… ({len(lines) - (start + limit)} more lines; raise `limit` or use `offset`)"
+            remaining = len(lines) - (start + limit)
+            next_offset = offset + limit
+            body += f"\n… ({remaining} more lines; continue with offset={next_offset})"
         return _ok(body)
 
     async def _execute(call_id, args, on_update, abort):
@@ -168,17 +181,30 @@ def make_edit_tool(env: ToolEnv) -> AgentTool:
     schema = ToolSchema(
         name="Edit",
         description=(
-            "Replace an exact string in a file. `old_string` must be unique unless "
-            "`replace_all` is true. Fails if `old_string` is absent or ambiguous."
+            "Replace exact text in a file. Pass a single `old_string`/`new_string` "
+            "(must be unique unless `replace_all` is true), or an `edits` array of "
+            "`{old_string, new_string}` to make several disjoint changes in one "
+            "call. Matching tolerates trailing-whitespace and smart-quote/dash "
+            "drift; it does not tolerate indentation changes."
         ),
         parameters=[
             ToolParameter(name="file_path", type="string", description="Absolute path to edit."),
-            ToolParameter(name="old_string", type="string", description="Exact text to replace."),
-            ToolParameter(name="new_string", type="string", description="Replacement text."),
+            ToolParameter(
+                name="old_string", type="string", description="Exact text to replace.", required=False
+            ),
+            ToolParameter(
+                name="new_string", type="string", description="Replacement text.", required=False
+            ),
+            ToolParameter(
+                name="edits",
+                type="array",
+                description="Array of {old_string, new_string} for multiple disjoint edits.",
+                required=False,
+            ),
             ToolParameter(
                 name="replace_all",
                 type="boolean",
-                description="Replace every occurrence (default false).",
+                description="Replace every occurrence (exact match only; ignored with `edits`).",
                 required=False,
             ),
         ],
@@ -189,34 +215,92 @@ def make_edit_tool(env: ToolEnv) -> AgentTool:
             path = env.resolve(args["file_path"], write=True)
         except ToolPathError as exc:
             return _err(str(exc))
-        old = args["old_string"]
-        new = args["new_string"]
-        replace_all = bool(args.get("replace_all", False))
-
         if not path.exists():
             return _err(f"File not found: {path}")
-        if old == new:
-            return _err("old_string and new_string are identical; nothing to do.")
 
-        text = path.read_text(encoding="utf-8")
-        count = text.count(old)
-        if count == 0:
-            return _err(f"old_string not found in {path}.")
-        if count > 1 and not replace_all:
-            return _err(
-                f"old_string occurs {count} times in {path}; pass replace_all=true "
-                "or include more surrounding context to make it unique."
-            )
+        replace_all = bool(args.get("replace_all", False))
+        edits = args.get("edits")
 
-        updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
-        path.write_text(updated, encoding="utf-8")
-        where = f"{count} occurrences" if replace_all else "1 occurrence"
-        return _ok(f"Edited {path} ({where} replaced).")
+        # replace_all keeps the legacy exact-only semantics (fuzzy + replace_all
+        # is ambiguous — see the spec). The shim never routes a replace_all call
+        # through the batch path, so `edits` is None here when replace_all is set.
+        if replace_all:
+            old = args.get("old_string")
+            new = args.get("new_string")
+            if old is None or new is None:
+                return _err("old_string and new_string are required.")
+            if old == new:
+                return _err("old_string and new_string are identical; nothing to do.")
+            text = path.read_text(encoding="utf-8")
+            count = text.count(old)
+            if count == 0:
+                return _err(f"old_string not found in {path}.")
+            path.write_text(text.replace(old, new), encoding="utf-8")
+            return _ok(f"Edited {path} ({count} occurrences replaced).")
+
+        # Legacy single-edit shape → one-element batch. The prepare shim does
+        # this too; repeating it here keeps _edit correct if called directly
+        # (tests) or if a caller skips the shim.
+        if not edits and args.get("old_string") is not None and args.get("new_string") is not None:
+            edits = [{"old_string": args["old_string"], "new_string": args["new_string"]}]
+        if not edits:
+            return _err("Provide old_string/new_string or a non-empty edits array.")
+        if not isinstance(edits, list):
+            return _err("edits must be an array of {old_string, new_string} objects.")
+        try:
+            edit_objs = [
+                Edit(old_string=e["old_string"], new_string=e["new_string"]) for e in edits
+            ]
+        except (TypeError, KeyError):
+            return _err("Each edit must be an object with old_string and new_string.")
+
+        # Read raw bytes (not read_text) so universal-newline translation can't
+        # strip CRLF before we detect + preserve it.
+        raw = path.read_bytes().decode("utf-8")
+        bom, without_bom = strip_bom(raw)
+        ending = detect_line_ending(without_bom)
+        normalized = normalize_to_lf(without_bom)
+        try:
+            applied = apply_edits_to_normalized_content(normalized, edit_objs, str(path))
+        except EditError as exc:
+            return _err(str(exc))
+
+        out = bom + restore_line_endings(applied.new_content, ending)
+        path.write_bytes(out.encode("utf-8"))
+        n = len(edit_objs)
+        return _ok(f"Edited {path} ({n} block(s) replaced).")
+
+    def _prepare(args: dict) -> dict:
+        """Coerce arg types, then the two shapes weaker models emit for a
+        multi-edit call:
+
+        - ``edits`` sent as a JSON *string* → parsed to a list (coercion does
+          this via the ``array`` param type).
+        - Legacy top-level ``{old_string, new_string}`` with no ``edits`` and no
+          ``replace_all`` → synthesize a one-element ``edits`` batch so a single
+          legacy call flows through the same fuzzy engine as a batch.
+          ``replace_all`` stays on the exact single-edit path (fuzzy +
+          replace_all is disallowed).
+        """
+        out = coerce_arguments(args, schema)
+        if (
+            out.get("edits") is None
+            and not out.get("replace_all")
+            and out.get("old_string") is not None
+            and out.get("new_string") is not None
+        ):
+            out["edits"] = [{"old_string": out["old_string"], "new_string": out["new_string"]}]
+        return out
 
     async def _execute(call_id, args, on_update, abort):
         return await asyncio.to_thread(_edit, args)
 
-    return AgentTool(schema=schema, execute=_execute, execution_mode="sequential")
+    return AgentTool(
+        schema=schema,
+        execute=_execute,
+        execution_mode="sequential",
+        prepare_arguments=_prepare,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -271,7 +355,9 @@ def make_grep_tool(env: ToolEnv) -> AgentTool:
         description=(
             "Search file contents with a regular expression. `output_mode` is "
             "`files_with_matches` (default), `content`, or `count`. Restrict scope "
-            "with `path` and `glob`; `-i` for case-insensitive."
+            "with `path` and `glob`; `-i` for case-insensitive; `-C` for context "
+            "lines around each match (content mode); `literal` to match `pattern` "
+            "as a plain string."
         ),
         parameters=[
             ToolParameter(name="pattern", type="string", description="Regular expression."),
@@ -285,6 +371,18 @@ def make_grep_tool(env: ToolEnv) -> AgentTool:
                 enum=["files_with_matches", "content", "count"],
             ),
             ToolParameter(name="-i", type="boolean", description="Case-insensitive.", required=False),
+            ToolParameter(
+                name="-C",
+                type="integer",
+                description="Lines of context around each match (content mode only).",
+                required=False,
+            ),
+            ToolParameter(
+                name="literal",
+                type="boolean",
+                description="Treat `pattern` as a literal string, not a regex.",
+                required=False,
+            ),
             ToolParameter(name="head_limit", type="integer", description="Cap result lines.", required=False),
         ],
     )
@@ -323,14 +421,19 @@ def make_grep_tool(env: ToolEnv) -> AgentTool:
         if not root.exists():
             return _err(f"Search path not found: {root}")
         flags = re.IGNORECASE if args.get("-i") else 0
+        pattern = args["pattern"]
+        if args.get("literal"):
+            pattern = re.escape(pattern)
         try:
-            rx = re.compile(args["pattern"], flags)
+            rx = re.compile(pattern, flags)
         except re.error as exc:
             return _err(f"Invalid regex: {exc}")
 
         mode = args.get("output_mode") or "files_with_matches"
         head_limit = args.get("head_limit")
         glob_filter = args.get("glob")
+        # -C / context: lines of surrounding context in content mode.
+        context = int(args.get("-C") or args.get("context") or 0)
 
         matched_files: list[str] = []
         content_lines: list[str] = []
@@ -345,16 +448,26 @@ def make_grep_tool(env: ToolEnv) -> AgentTool:
                 continue
             if _looks_binary(raw):
                 continue
-            file_hit = False
-            for lineno, line in enumerate(raw.decode("utf-8", "replace").splitlines(), start=1):
-                if rx.search(line):
-                    file_hit = True
-                    per_file_counts[str(fpath)] = per_file_counts.get(str(fpath), 0) + 1
-                    if mode == "content":
+            file_lines = raw.decode("utf-8", "replace").splitlines()
+            match_linenos = [i for i, line in enumerate(file_lines, start=1) if rx.search(line)]
+            if not match_linenos:
+                continue
+            per_file_counts[str(fpath)] = len(match_linenos)
+            matched_files.append(str(fpath))
+            if mode == "content":
+                if context > 0:
+                    # `--` group separator between files (and, inside the render,
+                    # between non-adjacent hit groups).
+                    if content_lines:
+                        content_lines.append("--")
+                    content_lines.extend(
+                        _render_content_with_context(fpath, file_lines, match_linenos, context)
+                    )
+                else:
+                    for lineno in match_linenos:
+                        line = file_lines[lineno - 1]
                         snippet = line if len(line) <= _MAX_LINE_CHARS else line[:_MAX_LINE_CHARS] + "…"
                         content_lines.append(f"{fpath}:{lineno}:{snippet}")
-            if file_hit:
-                matched_files.append(str(fpath))
 
         if mode == "count":
             if not per_file_counts:
@@ -376,9 +489,38 @@ def make_grep_tool(env: ToolEnv) -> AgentTool:
     return AgentTool(schema=schema, execute=_execute, execution_mode="parallel")
 
 
+def _render_content_with_context(
+    fpath: Path, file_lines: list[str], match_linenos: list[int], context: int
+) -> list[str]:
+    """Render matches with ``context`` surrounding lines (ripgrep convention).
+
+    Match lines use ``path:lineno:text``, context lines ``path-lineno-text``;
+    a ``--`` separator marks a gap between non-adjacent groups of shown lines."""
+    match_set = set(match_linenos)
+    n = len(file_lines)
+    shown: set[int] = set()
+    for m in match_linenos:
+        for ln in range(max(1, m - context), min(n, m + context) + 1):
+            shown.add(ln)
+
+    out: list[str] = []
+    prev: int | None = None
+    for ln in sorted(shown):
+        if prev is not None and ln != prev + 1:
+            out.append("--")
+        line = file_lines[ln - 1]
+        snippet = line if len(line) <= _MAX_LINE_CHARS else line[:_MAX_LINE_CHARS] + "…"
+        sep = ":" if ln in match_set else "-"
+        out.append(f"{fpath}{sep}{ln}{sep}{snippet}")
+        prev = ln
+    return out
+
+
 def _apply_head(lines: list[str], head_limit) -> list[str]:
     if head_limit and len(lines) > int(head_limit):
         kept = lines[: int(head_limit)]
-        kept.append(f"… ({len(lines) - int(head_limit)} more)")
+        kept.append(
+            f"… ({len(lines) - int(head_limit)} more; raise head_limit or narrow path/glob)"
+        )
         return kept
     return lines

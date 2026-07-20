@@ -596,6 +596,11 @@ class NativeBrainConfig:
     # Daemon-side WebFetch tool ([brain.native.web_fetch]). Enabled by default
     # with safe caps; the tool is native-only (added to build_default_tools).
     web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
+    # When Bash output exceeds the per-tool cap, spill the full captured output
+    # to a temp file under ISTOTA_DEFERRED_DIR and name it in the result so the
+    # model can Read it, instead of silently dropping the tail. Default-on;
+    # set false to keep the cap-only truncation behaviour.
+    bash_spill_full_output: bool = True
 
 
 @dataclass
@@ -1597,6 +1602,9 @@ def load_config(config_path: Path | None = None) -> Config:
                 else None
             ),
             web_fetch=web_fetch_cfg,
+            bash_spill_full_output=bool(
+                native_raw.get("bash_spill_full_output", True)
+            ),
         )
         overrides_raw = br.get("source_type_overrides", {})
         if not isinstance(overrides_raw, dict):

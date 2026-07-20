@@ -91,6 +91,13 @@ class ToolEnv:
     read_roots: tuple[Path, ...] | None = None
     write_roots: tuple[Path, ...] | None = None
 
+    # Where Bash spills full over-cap output (task-scoped ISTOTA_DEFERRED_DIR).
+    # ``None`` falls back to the system temp dir. Kept in the write-root set on a
+    # confined env so the model can Read the spill back.
+    deferred_dir: Path | None = None
+    # Whether Bash spills over-cap output to a file (vs. cap-only truncation).
+    bash_spill_full_output: bool = True
+
     # Native WebFetch policy. ``None`` → the tool is omitted from
     # ``build_default_tools`` (the model never sees it). See WebFetchPolicy.
     web_fetch: WebFetchPolicy | None = None
