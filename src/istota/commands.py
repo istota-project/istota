@@ -80,6 +80,16 @@ CommandHandler = Callable[[CommandContext], Awaitable["str | CommandResult"]]
 # Command registry: name -> (handler, help_text)
 COMMANDS: dict[str, tuple[CommandHandler, str]] = {}
 
+# Hidden command aliases: alias -> canonical command name. Resolved in
+# `dispatch` but omitted from `!help` / autocomplete (which read `COMMANDS`).
+_COMMAND_ALIASES: dict[str, str] = {"inject": "steer"}
+
+# Brain kinds that can actually be steered mid-flight today (`!steer`). A brain
+# may *declare* `supports_steering` before its live wiring lands (tmux), so the
+# command layer gates on this explicit v1 allowlist as well: flipping tmux on
+# later is a one-line change once its paste path exists.
+_STEERABLE_KINDS: frozenset[str] = frozenset({"native"})
+
 
 def command(name: str, help_text: str):
     """Decorator to register a command handler."""
@@ -271,6 +281,8 @@ async def dispatch(
         return CommandResult(handled=False)
 
     cmd_name, args_str = parsed
+    # Resolve hidden aliases (e.g. `!inject` -> `steer`) to the canonical name.
+    cmd_name = _COMMAND_ALIASES.get(cmd_name, cmd_name)
     if registry is None:
         from .transport import make_registry
         registry = make_registry(config)
@@ -370,6 +382,115 @@ async def cmd_stop(ctx: CommandContext):
 
     preview = prompt[:80] + "..." if len(prompt) > 80 else prompt
     return f"Cancelling task #{task_id}: {preview}"
+
+
+# Max steers that may sit `pending` (undrained) on one task at once. A steer is
+# cheaper than a task and rate-limiting it defeats rapid course-correction, so
+# we cap *depth* rather than throttle per minute (see the !steer spec).
+_MAX_PENDING_STEERS = 10
+
+
+def _steer_refusal(kind: str) -> str:
+    """The graceful refusal for a task whose brain can't be steered in v1."""
+    if kind == "claude_code":
+        return (
+            "This task is running under the headless Claude Code brain, which "
+            "can't be steered mid-flight. Use `!stop` to cancel, or wait for it "
+            "to finish and reply normally."
+        )
+    if kind == "tmux_claude":
+        return (
+            "This task is running under the tmux brain, which isn't steerable "
+            "yet. Use `!stop` to cancel, or wait for it to finish and reply "
+            "normally."
+        )
+    return (
+        f"This task's brain (`{kind}`) can't be steered mid-flight. Use `!stop` "
+        "to cancel, or wait for it to finish and reply normally."
+    )
+
+
+@command(
+    "steer",
+    "Steer your running task: `!steer <text>` — delivered to the model mid-run "
+    "(doesn't restart it; `!stop` cancels)",
+)
+async def cmd_steer(ctx: CommandContext):
+    config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
+
+    text = args.strip()
+    if not text:
+        return "Usage: `!steer <text>` — send a note to your running task without restarting it."
+
+    # Steering is room-scoped: you steer the task you're watching. Resolve the
+    # canonical room token (a per-surface ref maps to it) so it matches the
+    # task's stored conversation_token.
+    room_token = db.resolve_room_token(conn, ctx.surface, ctx.conversation_token) \
+        or ctx.conversation_token
+
+    # The user's most recent running/locked task in *this* room. pending_confirmation
+    # is excluded — answer those with a normal reply, not a steer.
+    row = conn.execute(
+        """
+        SELECT id, source_type FROM tasks
+        WHERE user_id = ? AND conversation_token = ? AND status IN ('running', 'locked')
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (user_id, room_token),
+    ).fetchone()
+    if not row:
+        return "No running task in this room to steer."
+    task_id, source_type = row["id"], row["source_type"]
+
+    # Steerability. Resolve the brain this task actually runs under (respecting
+    # source_type_overrides), then gate on the v1 allowlist — a brain may declare
+    # `supports_steering` before its live wiring exists (tmux). Nothing is written
+    # on refusal.
+    from .brain import resolve_brain_kind
+    resolved_kind = resolve_brain_kind(source_type, config.brain).kind
+    if resolved_kind not in _STEERABLE_KINDS:
+        return _steer_refusal(resolved_kind)
+
+    # Depth cap (not a rate limit).
+    pending = db.count_pending_steers(conn, task_id)
+    if pending >= _MAX_PENDING_STEERS:
+        return (
+            f"Too many pending steers ({pending}) on task #{task_id} — let it "
+            "catch up before sending more."
+        )
+
+    # Write the steer (its own committed transaction, like `!stop`'s flag flip).
+    db.add_task_steer(conn, task_id, text, user_id, ctx.surface)
+
+    # Record the steer durably in the room transcript so it shows in time order
+    # (between the prompt and the eventual result) after a reload. task_id is
+    # left NULL: the unique (room, role, task_id) index reserves the per-task user
+    # slot for the original prompt, and LLM-context reconstruction joins on
+    # task_id — so a NULL-task_id row is display-only, never re-paired as a
+    # phantom turn. Room surfaces only; best-effort.
+    if ctx.surface in ("talk", "web"):
+        try:
+            if db.get_room(conn, room_token) is not None:
+                db.add_message(
+                    conn, room_token, role="user", body=text,
+                    origin_surface=ctx.surface, task_id=None,
+                )
+                conn.commit()
+        except Exception:
+            logger.debug("steer transcript write failed", exc_info=True)
+
+    # Surface the steer on the running task's live event log so a reconnecting
+    # SSE client replays it and the live view shows it landed before the model
+    # reacts. Best-effort — the real feedback is the model shifting in the stream.
+    try:
+        preview = text if len(text) <= 120 else text[:117] + "…"
+        db.append_task_event(
+            conn, task_id, "progress_text", {"text": f"↪️ Steering: {preview}"},
+        )
+    except Exception:
+        logger.debug("steer event frame failed", exc_info=True)
+
+    return f"Steering task #{task_id} — your note will reach the model at its next step."
 
 
 @command("models", "List available model aliases (and what they resolve to)")
