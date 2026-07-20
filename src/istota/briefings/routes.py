@@ -127,12 +127,37 @@ def _map_archive(row: ArchivedBriefing, *, with_body: bool = True) -> dict:
 
 
 def _schedule_names(cfg, username: str) -> list[str]:
-    """The user's briefing names from the framework schedule (for the editor)."""
+    """The user's briefing names from the framework schedule (for the editor).
+
+    Unions the in-memory config snapshot (``get_briefings_for_user`` — refreshed
+    only at config load / SIGHUP) with the live ``briefing_configs`` DB rows, so
+    a briefing just added through ``POST /settings/briefings`` shows up in the
+    content-block editor's dropdown without waiting for a server reload.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+
     try:
         from istota.skills.briefing import get_briefings_for_user
-        return [b.name for b in get_briefings_for_user(cfg, username)]
+        for b in get_briefings_for_user(cfg, username):
+            _add(b.name)
     except Exception:  # noqa: BLE001
-        return []
+        pass
+
+    try:
+        from istota.user_briefings import list_briefings
+        for b in list_briefings(cfg.db_path, username):
+            if b.enabled:
+                _add(b.name)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return names
 
 
 # ---------------------------------------------------------------------------
