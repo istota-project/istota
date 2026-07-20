@@ -2,6 +2,24 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Standalone timezone default produced an abbreviation → silent UTC clock
+
+A standalone install with a Pacific user was rendering every task's clock in UTC despite a timezone being "set" in config. Root cause was the setup wizard's timezone default: it derived the value from `datetime.now().astimezone().tzinfo`, which on macOS (and any fixed-offset host) is a `datetime.timezone`, not a `ZoneInfo` — so it has no `.key` and `str()` yields the abbreviation `PDT`. The wizard offered `PDT` as the default, the user accepted it, and it was written to both `config.toml` and the `user_profiles` DB row. `PDT` isn't a valid IANA name, so at task time `executor._resolve_user_tz` threw `ZoneInfoNotFoundError` and silently fell back to UTC — with no log line, so it looked like the config was set but ignored.
+
+Fixed at three layers: the wizard now derives a real IANA name (`TZ` env → `/etc/localtime` symlink target → a `ZoneInfo`-backed local tzinfo, validating every candidate) and validates the collected answer so a typed or `--timezone` abbreviation is rejected and swapped for the valid default; the executor logs one deduped WARNING per `(user, name)` when a stored timezone isn't loadable, so the class of problem is self-diagnosing instead of a mystery UTC clock. Also compounding but pre-existing: the `user_profiles` DB row wins over `config.toml` (ISSUE-099 design), so editing the TOML alone wouldn't have helped — the stale row had to be corrected too.
+
+**Key changes:**
+- `setup_wizard._default_timezone()` resolves a valid IANA name from `TZ` / `/etc/localtime` / local tzinfo instead of stringifying a fixed-offset tzinfo into an abbreviation.
+- New `setup_wizard._is_valid_timezone()` helper; `collect_answers` rejects an invalid prompt/flag value (message + fall back to the valid default).
+- `executor._resolve_user_tz` logs a deduped WARNING (module-level `_INVALID_TZ_WARNED` set) naming the bad value and the correct format, once per process per pair.
+- Tests: 6 for the wizard (validity helper, default-derivation, flag rejection/acceptance) + 1 for the executor warning dedup.
+
+**Files added/modified:**
+- `src/istota/setup_wizard.py` — `_is_valid_timezone()`, rewritten `_default_timezone()`, answer validation in `collect_answers`.
+- `src/istota/executor.py` — deduped invalid-timezone WARNING in `_resolve_user_tz`.
+- `tests/test_local_install_stage3.py` — `TestTimezone` (6 tests).
+- `tests/test_executor.py` — `test_invalid_timezone_warns_once`.
+
 ## 2026-07-19: Learned-playbook lifecycle — verified commands, pin corrections, use-based retention (ISSUE-174)
 
 The nightly playbook loop (generate → index → recall) worked end to end, but the maintenance side was thin. Audit found four gaps: the generator hallucinated commands (a script-invocation playbook instructed a `python -m some.module.path` that didn't exist, invented instead of recording the real `python scripts/foo.py`); a bad playbook had no correction path; retention keyed on last-*write* not last-*use*; and single-script tasks got re-narrated into lossy prose. We took fixes 1, 3, and part of 1's root cause now; slug-only semantic dedup (concern 2) is deferred.

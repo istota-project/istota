@@ -63,6 +63,11 @@ logger = logging.getLogger("istota.executor")
 _INTERACTIVE_SOURCE_TYPES = ("talk", "email", "repl", "web")
 
 
+# Distinct (user_id, tz_str) pairs already warned about, so a persistently
+# invalid timezone config warns once per process rather than on every task.
+_INVALID_TZ_WARNED: set[tuple[str, str]] = set()
+
+
 def _resolve_user_tz(
     config: Config,
     user_id: str,
@@ -76,11 +81,25 @@ def _resolve_user_tz(
     scheduler restart — ISSUE-099) and wraps the result in a ``ZoneInfo``,
     falling back to UTC if the resolved name is not a valid zone. Pass
     ``conn`` to reuse an existing framework-DB connection on the hot path.
+
+    An invalid zone name (e.g. the abbreviation ``PDT`` instead of the IANA
+    name ``America/Los_Angeles``) logs one WARNING per distinct
+    ``(user_id, name)`` so a misconfigured timezone is self-diagnosing rather
+    than silently rendering every clock in UTC.
     """
     tz_str = config.resolve_user_timezone(user_id, conn=conn)
     try:
         return ZoneInfo(tz_str), tz_str
     except Exception:
+        key = (user_id, tz_str)
+        if key not in _INVALID_TZ_WARNED:
+            _INVALID_TZ_WARNED.add(key)
+            logger.warning(
+                "Invalid timezone %r for user %s — falling back to UTC. Use an "
+                "IANA name like 'America/Los_Angeles' (abbreviations such as "
+                "'PDT'/'PST' are not valid).",
+                tz_str, user_id,
+            )
         return ZoneInfo("UTC"), "UTC"
 
 # API error detection / retry policy moved into brain.claude_code; re-exported
