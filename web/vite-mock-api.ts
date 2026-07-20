@@ -779,7 +779,10 @@ const mockAdminStats = {
 		db_size_bytes: 119447552,
 		backups_count: 14,
 		last_backup: new Date(Date.now() - 18 * 3600_000).toISOString(),
-		nextcloud_mount_healthy: true,
+		// Mock represents a standalone (local) install — no Nextcloud, so the
+		// mount row is hidden in the UI.
+		nextcloud_configured: false,
+		nextcloud_mount_healthy: false,
 	},
 	runtime: {
 		mode: 'standalone',

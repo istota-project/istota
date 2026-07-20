@@ -402,3 +402,25 @@ class TestAdminModelsSection:
         )
         out = self._run(cfg)
         assert out["default_model"] == "endpoint default"
+
+
+class TestAdminStorageSection:
+    def _run(self, cfg):
+        import istota.web_app as mod
+        mod._config = cfg
+        return mod._admin_storage_section(cfg.db_path)
+
+    def test_standalone_reports_nextcloud_not_configured(self, tmp_path):
+        # No nextcloud.url → the mount status is meaningless; the frontend
+        # hides the row on this flag.
+        out = self._run(_standalone_config(tmp_path))
+        assert out["nextcloud_configured"] is False
+
+    def test_server_reports_nextcloud_configured(self, tmp_path):
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
+            nextcloud_mount_path=tmp_path / "mount",
+        )
+        out = self._run(cfg)
+        assert out["nextcloud_configured"] is True

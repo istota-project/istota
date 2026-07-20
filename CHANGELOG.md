@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Admin dashboard now shows a Models card: the active model backend, the default model and effort, the endpoint (for the native backend), and what the fast/general/smart roles currently resolve to — so you can confirm what a deployment is configured to run without reading the config file.
 
+### Changed
+- Admin dashboard hides the Nextcloud mount status on local (no-Nextcloud) installs, where it doesn't apply.
+
 ## [0.31.1] - 2026-07-19
 
 ### Fixed

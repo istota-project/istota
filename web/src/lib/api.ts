@@ -113,6 +113,7 @@ export interface AdminStats {
 		db_size_bytes: number;
 		backups_count: number;
 		last_backup: string | null;
+		nextcloud_configured: boolean;
 		nextcloud_mount_healthy: boolean;
 	};
 	runtime?: {
