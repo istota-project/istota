@@ -119,6 +119,16 @@ export interface AdminStats {
 		mode: 'standalone' | 'server';
 		caveats: { title: string; detail: string }[];
 	};
+	models?: {
+		brain_kind: string;
+		default_model: string;
+		default_effort: string | null;
+		roles: { role: string; resolved: string }[];
+		endpoint?: string;
+		provider?: string;
+		source_type_overrides?: Record<string, string>;
+		error?: string;
+	};
 	error?: string;
 }
 
