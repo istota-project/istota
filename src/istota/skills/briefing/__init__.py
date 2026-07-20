@@ -1035,6 +1035,7 @@ def get_briefings_for_user(config: Config, user_id: str) -> list[BriefingConfig]
                 conversation_token=b.conversation_token,
                 output=b.output,
                 components=new_components,
+                blocks=b.blocks,
             )
         expanded.append(b)
 

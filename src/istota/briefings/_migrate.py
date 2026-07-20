@@ -1,14 +1,18 @@
 """Initialisation + one-time legacy migration for the briefings module.
 
 ``ensure_initialised(ctx, app_config=...)`` runs on first touch (route dependency,
-executor, scheduler): it inits the DB (WAL + schema) and, guarded by a DB-wide
-``schema_meta`` sentinel, translates each of the user's existing
-``briefing_configs.components`` blobs into equivalent content blocks + sources.
+executor, scheduler): it inits the DB (WAL + schema) and, guarded by a
+per-briefing ``schema_meta`` sentinel, seeds each of the user's briefings into
+the module DB as editable content blocks + sources. A briefing is seeded from
+one of two sources, config-authored blocks taking precedence: config-authored
+rich ``[[briefings.blocks]]`` (:func:`normalize_block_specs`) when present, else
+the legacy ``briefing_configs.components`` translation
+(:func:`blocks_from_components`).
 
-The translation is a pure function (:func:`blocks_from_components`) so it is
-unit-testable without a DB. The migration never mutates the framework
-``briefing_configs`` row — it only seeds the module DB — and is idempotent: the
-sentinel makes a re-run a no-op, and it skips a briefing that already has blocks.
+Both translations are pure functions so they are unit-testable without a DB. The
+seeder never mutates the framework ``briefing_configs`` row — it only seeds the
+module DB — and is idempotent: the sentinel makes a re-run a no-op, and it skips
+a briefing that already has blocks.
 """
 
 from __future__ import annotations
@@ -16,7 +20,12 @@ from __future__ import annotations
 import logging
 
 from istota.briefings import db as briefings_db
-from istota.briefings.models import BriefingsContext
+from istota.briefings.models import (
+    RENDER_MODES,
+    SOURCE_KINDS,
+    STRUCTURED_KINDS,
+    BriefingsContext,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -171,6 +180,113 @@ def blocks_from_components(components: dict) -> list[dict]:
     return specs
 
 
+def _normalize_source(raw, *, briefing_name: str) -> dict | None:
+    """Coerce one config-authored source to ``{"kind", "config"}`` or drop it.
+
+    Returns ``None`` (and logs a WARNING) for a non-dict entry or an unknown
+    ``kind``. ``config`` defaults to ``{}`` when missing or non-dict.
+    """
+    if not isinstance(raw, dict):
+        logger.warning(
+            "briefings config blocks: source is not a table in %r; skipping",
+            briefing_name,
+        )
+        return None
+    kind = raw.get("kind")
+    if not isinstance(kind, str) or kind not in SOURCE_KINDS:
+        logger.warning(
+            "briefings config blocks: unknown source kind %r in %r; skipping",
+            kind, briefing_name,
+        )
+        return None
+    cfg = raw.get("config")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return {"kind": kind, "config": cfg}
+
+
+def normalize_block_specs(raw, *, briefing_name: str = "?") -> list[dict]:
+    """Coerce config-authored ``blocks`` into seeder spec dicts (total, fail-soft).
+
+    Produces the same ``{"title", "directive", "render_mode", "options",
+    "sources": [{"kind", "config"}]}`` shape :func:`blocks_from_components`
+    emits, so ``_seed_blocks`` consumes it unchanged. Pure and unit-testable.
+
+    Best-effort throughout: a non-list input, a non-dict block, a titleless
+    block, an unknown source kind, or a block that ends up with zero valid
+    sources is skipped with a WARNING — this never raises. ``render_mode``
+    defaults by the first source kind (``structured`` for
+    :data:`STRUCTURED_KINDS`, else ``synthesis``) when omitted, mirroring the
+    legacy components translation.
+    """
+    if not isinstance(raw, list):
+        return []
+
+    specs: list[dict] = []
+    for entry in raw:
+        try:
+            if not isinstance(entry, dict):
+                logger.warning(
+                    "briefings config blocks: block is not a table in %r; skipping",
+                    briefing_name,
+                )
+                continue
+
+            title = entry.get("title")
+            if not isinstance(title, str) or not title.strip():
+                logger.warning(
+                    "briefings config blocks: block missing title in %r; skipping",
+                    briefing_name,
+                )
+                continue
+
+            sources: list[dict] = []
+            for raw_src in entry.get("sources") or []:
+                src = _normalize_source(raw_src, briefing_name=briefing_name)
+                if src is not None:
+                    sources.append(src)
+            if not sources:
+                logger.warning(
+                    "briefings config blocks: block %r in %r has no valid "
+                    "sources; skipping", title, briefing_name,
+                )
+                continue
+
+            directive = entry.get("directive")
+            directive = directive if isinstance(directive, str) and directive else None
+
+            render_mode = entry.get("render_mode")
+            if render_mode is None:
+                first_kind = sources[0]["kind"]
+                render_mode = "structured" if first_kind in STRUCTURED_KINDS else "synthesis"
+            elif render_mode not in RENDER_MODES:
+                logger.warning(
+                    "briefings config blocks: unknown render_mode %r for block "
+                    "%r in %r; defaulting to synthesis",
+                    render_mode, title, briefing_name,
+                )
+                render_mode = "synthesis"
+
+            options = entry.get("options")
+            if not isinstance(options, dict):
+                options = {}
+
+            specs.append({
+                "title": title,
+                "directive": directive,
+                "render_mode": render_mode,
+                "options": options,
+                "sources": sources,
+            })
+        except Exception as e:  # noqa: BLE001 — never fail init on a bad block
+            logger.warning(
+                "briefings config blocks: failed to normalize a block in %r: %s",
+                briefing_name, e,
+            )
+
+    return specs
+
+
 def _seed_blocks(conn, briefing_name: str, specs: list[dict]) -> None:
     """Write the translated block specs for a briefing (skip if it has any)."""
     existing = briefings_db.list_blocks(conn, briefing_name, with_sources=False)
@@ -201,11 +317,12 @@ def _briefing_sentinel(name: str) -> str:
 
 
 def _migrate_components(ctx: BriefingsContext, app_config) -> None:
-    """One-time components → blocks migration, tracked **per briefing**.
+    """One-time seed of each briefing's content blocks, tracked **per briefing**.
 
     Reads the same briefing set that ``check_briefings`` schedules
-    (``get_briefings_for_user``) and migrates each briefing exactly once,
-    guarded by its own sentinel. A per-briefing (not DB-wide) sentinel is
+    (``get_briefings_for_user``) and seeds each briefing exactly once, guarded by
+    its own sentinel. Content comes from the briefing's config-authored rich
+    ``blocks`` when present, else the legacy ``components`` translation. A per-briefing (not DB-wide) sentinel is
     required so that a briefing created *after* the module DB's first touch is
     still migrated on a later init — a DB-wide sentinel set on an empty first
     touch (e.g. opening the on-by-default Briefings tab before configuring
@@ -237,7 +354,14 @@ def _migrate_components(ctx: BriefingsContext, app_config) -> None:
             if briefings_db.meta_get(conn, sentinel) == "1":
                 continue
             try:
-                specs = blocks_from_components(briefing.components or {})
+                raw_blocks = getattr(briefing, "blocks", None)
+                if isinstance(raw_blocks, list) and raw_blocks:
+                    # Config-authored rich blocks win over legacy components.
+                    specs = normalize_block_specs(
+                        raw_blocks, briefing_name=briefing.name,
+                    )
+                else:
+                    specs = blocks_from_components(briefing.components or {})
                 if specs:
                     _seed_blocks(conn, briefing.name, specs)
                 briefings_db.meta_set(conn, sentinel, "1")

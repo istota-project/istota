@@ -17,7 +17,11 @@ from istota.briefings._loader import (
     list_users,
     resolve_for_user,
 )
-from istota.briefings._migrate import blocks_from_components, ensure_initialised
+from istota.briefings._migrate import (
+    blocks_from_components,
+    ensure_initialised,
+    normalize_block_specs,
+)
 
 
 __version__ = "0.1.0"
@@ -27,5 +31,6 @@ __all__ = [
     "blocks_from_components",
     "ensure_initialised",
     "list_users",
+    "normalize_block_specs",
     "resolve_for_user",
 ]

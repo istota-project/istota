@@ -695,6 +695,41 @@ calendar = true
 todos = true
 markets = true    # morning → futures, evening → indices (automatic)
 
+# Rich config-authored blocks (alternative to `components`). When a briefing
+# declares `blocks`, they are seeded ONCE into the user's briefings module DB as
+# an editable baseline — `blocks` win over `components` for seeding. After the
+# first materialisation the briefing is an ordinary editable per-user briefing;
+# the user reorders/edits it in the web editor and operator re-runs never
+# re-clobber it (seed-once). `blocks` are never stored in the framework DB — they
+# live only in this config and are consumed by the module-DB seeder. See the
+# per-kind config reference below.
+[[users.alice.briefings]]
+name = "world"
+cron = "0 7 * * *"
+output = "email"
+
+  [[users.alice.briefings.blocks]]
+  title = "World News"
+  directive = "3–5 stories, neutral tone, no markets."
+  render_mode = "synthesis"          # synthesis | structured (omit to infer)
+  options = { story_count = 5 }
+
+    [[users.alice.briefings.blocks.sources]]
+    kind = "rss"                     # a Feeds subscription or category
+    config = { feed_ref = { kind = "category", value = 4 }, lookback_hours = 24, limit = 10 }
+
+    [[users.alice.briefings.blocks.sources]]
+    kind = "browse"                  # a bundled preset or arbitrary URL frontpage
+    config = { preset = "ap" }
+
+  [[users.alice.briefings.blocks]]
+  title = "Markets"
+  render_mode = "structured"
+
+    [[users.alice.briefings.blocks.sources]]
+    kind = "markets"
+    config = {}
+
 
 [users.bob]
 display_name = "Bob"
@@ -737,6 +772,39 @@ timezone = "America/Los_Angeles"
 # News sources support:
 #   - { type = "email", value = "newsletter@example.com" } - exact sender
 #   - { type = "domain", value = "example.com" } - sender domain match
+#
+# ----------------------------------------------------------------------------
+# Rich config-authored blocks ([[users.NAME.briefings.blocks]])
+# ----------------------------------------------------------------------------
+#
+# An alternative to `components` that exposes the full block/source model. A
+# briefing may carry `components`, `blocks`, both, or neither; when `blocks` is
+# present and non-empty it wins for seeding. Blocks seed ONCE into the user's
+# module DB (per-briefing, seed-once) and are then user-editable in the web UI.
+#
+# Each block:
+#   - title: required, non-empty (section header; a titleless block is skipped)
+#   - directive: optional synthesis instruction (free text)
+#   - render_mode: "synthesis" (LLM writes prose) | "structured" (near-verbatim).
+#       Omit to infer: "structured" when the first source kind is markets or
+#       calendar, else "synthesis".
+#   - options: optional dict passed verbatim to the block (e.g. story_count)
+#   - sources: ordered list of 1..N sources, each { kind, config }
+#
+# Source kinds (kind = ...) and typical config:
+#   - rss:      { feed_ref = { kind = "category"|"subscription", value = <id> },
+#                 lookback_hours = <int>, limit = <int> }   (needs the Feeds module)
+#   - email:    { mode = "shared"|"senders", senders = ["*@x.com"], lookback_hours = <int> }
+#   - browse:   { preset = "ap" } or { url = "https://…" }  (needs the browser)
+#   - markets:  { futures = [...], indices = [...] } or {}
+#   - calendar: {}
+#   - todos:    {}
+#   - reminders:{}
+#   - notes:    {}
+# An unknown kind or a block with zero valid sources is skipped with a warning.
+#
+# To apply one block definition across many users, loop it over `istota_users`
+# in the Ansible playbook — there is no instance-wide/subscription model.
 
 # ============================================================================
 # TASKS.md File Monitoring (Auto-Discovery)

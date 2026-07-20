@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.briefings import blocks_from_components
+from istota.briefings import blocks_from_components, normalize_block_specs
 from istota.briefings import db as bdb
 from istota.briefings._migrate import ensure_initialised
 from istota.briefings.workspace import synthesize_briefings_context
@@ -98,6 +98,126 @@ class TestBlocksFromComponents:
 
     def test_non_dict_input(self):
         assert blocks_from_components(None) == []  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# normalize_block_specs — pure config-authored block coercion
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeBlockSpecs:
+    def test_full_rich_block(self):
+        specs = normalize_block_specs([
+            {
+                "title": "World News",
+                "directive": "3-5 stories, neutral.",
+                "render_mode": "synthesis",
+                "options": {"story_count": 5},
+                "sources": [
+                    {"kind": "rss", "config": {"feed_ref": {"kind": "category", "value": 4}}},
+                    {"kind": "browse", "config": {"preset": "ap"}},
+                ],
+            },
+        ])
+        assert specs == [
+            {
+                "title": "World News",
+                "directive": "3-5 stories, neutral.",
+                "render_mode": "synthesis",
+                "options": {"story_count": 5},
+                "sources": [
+                    {"kind": "rss", "config": {"feed_ref": {"kind": "category", "value": 4}}},
+                    {"kind": "browse", "config": {"preset": "ap"}},
+                ],
+            }
+        ]
+
+    def test_missing_title_dropped(self):
+        specs = normalize_block_specs([
+            {"sources": [{"kind": "markets", "config": {}}]},
+            {"title": "  ", "sources": [{"kind": "markets", "config": {}}]},
+            {"title": "Keep", "sources": [{"kind": "markets", "config": {}}]},
+        ])
+        assert [s["title"] for s in specs] == ["Keep"]
+
+    def test_unknown_source_kind_dropped(self):
+        specs = normalize_block_specs([
+            {
+                "title": "Mixed",
+                "sources": [
+                    {"kind": "bogus", "config": {}},
+                    {"kind": "markets", "config": {}},
+                ],
+            },
+        ])
+        assert len(specs) == 1
+        assert [s["kind"] for s in specs[0]["sources"]] == ["markets"]
+
+    def test_block_with_only_unknown_sources_dropped(self):
+        specs = normalize_block_specs([
+            {"title": "AllBad", "sources": [{"kind": "bogus", "config": {}}]},
+        ])
+        assert specs == []
+
+    def test_block_with_no_sources_dropped(self):
+        specs = normalize_block_specs([{"title": "Empty", "sources": []}])
+        assert specs == []
+
+    def test_unknown_render_mode_defaults_synthesis(self):
+        specs = normalize_block_specs([
+            {"title": "T", "render_mode": "wild",
+             "sources": [{"kind": "rss", "config": {}}]},
+        ])
+        assert specs[0]["render_mode"] == "synthesis"
+
+    def test_omitted_render_mode_structured_for_markets(self):
+        specs = normalize_block_specs([
+            {"title": "M", "sources": [{"kind": "markets", "config": {}}]},
+        ])
+        assert specs[0]["render_mode"] == "structured"
+
+    def test_omitted_render_mode_synthesis_for_rss(self):
+        specs = normalize_block_specs([
+            {"title": "N", "sources": [{"kind": "rss", "config": {}}]},
+        ])
+        assert specs[0]["render_mode"] == "synthesis"
+
+    def test_non_list_input(self):
+        assert normalize_block_specs(None) == []
+        assert normalize_block_specs({"title": "x"}) == []
+        assert normalize_block_specs("nope") == []
+
+    def test_non_dict_block_skipped(self):
+        specs = normalize_block_specs([
+            "not a table",
+            {"title": "Good", "sources": [{"kind": "notes", "config": {}}]},
+        ])
+        assert [s["title"] for s in specs] == ["Good"]
+
+    def test_options_missing_defaults_empty(self):
+        specs = normalize_block_specs([
+            {"title": "T", "sources": [{"kind": "todos", "config": {}}]},
+        ])
+        assert specs[0]["options"] == {}
+
+    def test_source_config_missing_defaults_empty(self):
+        specs = normalize_block_specs([
+            {"title": "T", "sources": [{"kind": "todos"}]},
+        ])
+        assert specs[0]["sources"][0]["config"] == {}
+
+    def test_non_dict_source_skipped(self):
+        specs = normalize_block_specs([
+            {"title": "T", "sources": ["not a table", {"kind": "notes", "config": {}}]},
+        ])
+        assert [s["kind"] for s in specs[0]["sources"]] == ["notes"]
+
+    def test_directive_non_str_coerced_none(self):
+        specs = normalize_block_specs([
+            {"title": "T", "directive": 123,
+             "sources": [{"kind": "notes", "config": {}}]},
+        ])
+        assert specs[0]["directive"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -215,3 +335,150 @@ class TestEnsureInitialised:
         ensure_initialised(ctx, app_config=cfg)
         # The framework-side components blob is untouched.
         assert briefing.components == original
+
+
+class TestConfigAuthoredBlocksSeeding:
+    def test_seeds_rich_blocks_in_order(self, tmp_path):
+        cfg = _config(
+            tmp_path,
+            [BriefingConfig(
+                name="Morning", cron="0 7 * * *",
+                blocks=[
+                    {
+                        "title": "World News",
+                        "directive": "neutral tone",
+                        "render_mode": "synthesis",
+                        "options": {"story_count": 5},
+                        "sources": [
+                            {"kind": "rss", "config": {"feed_ref": {"kind": "category", "value": 4}}},
+                            {"kind": "browse", "config": {"preset": "ap"}},
+                        ],
+                    },
+                    {
+                        "title": "Markets",
+                        "render_mode": "structured",
+                        "sources": [{"kind": "markets", "config": {}}],
+                    },
+                ],
+            )],
+        )
+        ctx = synthesize_briefings_context(
+            "stefan", tmp_path / "mount", db_path=cfg.module_db_path("stefan", "briefings"),
+        )
+        ensure_initialised(ctx, app_config=cfg)
+
+        with bdb.connect(ctx.db_path) as conn:
+            blocks = bdb.list_blocks(conn, "Morning")
+        assert [b.title for b in blocks] == ["World News", "Markets"]
+        assert blocks[0].directive == "neutral tone"
+        assert blocks[0].options == {"story_count": 5}
+        assert [s.kind for s in blocks[0].sources] == ["rss", "browse"]
+        assert blocks[0].sources[0].config == {"feed_ref": {"kind": "category", "value": 4}}
+        assert blocks[1].render_mode == "structured"
+
+    def test_blocks_win_over_components(self, tmp_path):
+        cfg = _config(
+            tmp_path,
+            [BriefingConfig(
+                name="Morning", cron="0 7 * * *",
+                components={"news": True, "markets": True},
+                blocks=[{
+                    "title": "Only Block",
+                    "sources": [{"kind": "notes", "config": {}}],
+                }],
+            )],
+        )
+        ctx = synthesize_briefings_context(
+            "stefan", tmp_path / "mount", db_path=cfg.module_db_path("stefan", "briefings"),
+        )
+        ensure_initialised(ctx, app_config=cfg)
+
+        with bdb.connect(ctx.db_path) as conn:
+            blocks = bdb.list_blocks(conn, "Morning")
+        # Components content ("News", "Markets") absent — blocks won.
+        assert [b.title for b in blocks] == ["Only Block"]
+
+    def test_empty_blocks_falls_through_to_components(self, tmp_path):
+        cfg = _config(
+            tmp_path,
+            [BriefingConfig(
+                name="Morning", cron="0 7 * * *",
+                components={"news": True}, blocks=[],
+            )],
+        )
+        ctx = synthesize_briefings_context(
+            "stefan", tmp_path / "mount", db_path=cfg.module_db_path("stefan", "briefings"),
+        )
+        ensure_initialised(ctx, app_config=cfg)
+
+        with bdb.connect(ctx.db_path) as conn:
+            blocks = bdb.list_blocks(conn, "Morning")
+        assert [b.title for b in blocks] == ["News"]
+
+    def test_end_to_end_from_loaded_config(self, tmp_path, monkeypatch):
+        # Load a real config.toml carrying a rich-block briefing, then seed via
+        # the module resolver, exactly as first-touch does in production.
+        from istota.briefings import resolve_for_user
+        from istota.config import load_config
+
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            f'db_path = "{tmp_path / "istota.db"}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            f'nextcloud_mount_path = "{tmp_path / "mount"}"\n'
+            "\n[users.dana]\n"
+            'display_name = "Dana"\n'
+            "\n[[users.dana.briefings]]\n"
+            'name = "world"\n'
+            'cron = "0 7 * * *"\n'
+            'output = "email"\n'
+            "\n[[users.dana.briefings.blocks]]\n"
+            'title = "World News"\n'
+            'render_mode = "synthesis"\n'
+            "options = { story_count = 5 }\n"
+            "\n[[users.dana.briefings.blocks.sources]]\n"
+            'kind = "rss"\n'
+            "config = { feed_ref = { kind = \"category\", value = 4 } }\n"
+            "\n[[users.dana.briefings.blocks.sources]]\n"
+            'kind = "browse"\n'
+            'config = { preset = "ap" }\n'
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        cfg = load_config(cfg_path)
+
+        ctx = resolve_for_user("dana", cfg)
+        ensure_initialised(ctx, app_config=cfg)
+
+        with bdb.connect(ctx.db_path) as conn:
+            blocks = bdb.list_blocks(conn, "world")
+        assert [b.title for b in blocks] == ["World News"]
+        assert blocks[0].options == {"story_count": 5}
+        assert [s.kind for s in blocks[0].sources] == ["rss", "browse"]
+
+    def test_idempotent_and_resurrection_protection(self, tmp_path):
+        cfg = _config(
+            tmp_path,
+            [BriefingConfig(
+                name="Morning", cron="0 7 * * *",
+                blocks=[
+                    {"title": "A", "sources": [{"kind": "notes", "config": {}}]},
+                    {"title": "B", "sources": [{"kind": "todos", "config": {}}]},
+                ],
+            )],
+        )
+        ctx = synthesize_briefings_context(
+            "stefan", tmp_path / "mount", db_path=cfg.module_db_path("stefan", "briefings"),
+        )
+        ensure_initialised(ctx, app_config=cfg)
+
+        # User deletes a block, then a re-init runs.
+        with bdb.connect(ctx.db_path) as conn:
+            blocks = bdb.list_blocks(conn, "Morning", with_sources=False)
+            bdb.delete_block(conn, blocks[0].id)
+            conn.commit()
+        ensure_initialised(ctx, app_config=cfg)
+
+        with bdb.connect(ctx.db_path) as conn:
+            titles = [b.title for b in bdb.list_blocks(conn, "Morning")]
+        # Sentinel already set → deleted block not resurrected, no dupes.
+        assert titles == ["B"]
