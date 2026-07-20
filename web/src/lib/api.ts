@@ -1740,4 +1740,107 @@ export async function uploadChatAttachment(file: File): Promise<ChatAttachment> 
 	return data as ChatAttachment;
 }
 
+// ---------------------------------------------------------------------------
+// Briefings module
+// ---------------------------------------------------------------------------
+
+export interface BriefingArchiveItem {
+	id: number;
+	briefing_name: string;
+	subject: string;
+	generated_at: string;
+	task_id: number | null;
+	delivered_to: string[];
+	body_md?: string;
+}
+
+export interface BriefingArchiveResponse {
+	items: BriefingArchiveItem[];
+	total: number;
+	briefing_names: string[];
+}
+
+export interface BriefingSource {
+	id: number;
+	position: number;
+	kind: string;
+	config: Record<string, unknown>;
+	enabled: boolean;
+}
+
+export interface BriefingBlock {
+	id: number;
+	briefing_name: string;
+	position: number;
+	title: string;
+	directive: string;
+	render_mode: string;
+	options: Record<string, unknown>;
+	sources: BriefingSource[];
+}
+
+export interface BriefingConfigResponse {
+	briefings: { name: string; blocks: BriefingBlock[] }[];
+	schedule_names: string[];
+	source_kinds: string[];
+	structured_kinds: string[];
+}
+
+export interface BrowsePreset {
+	key: string;
+	name: string;
+	url: string;
+}
+
+export interface FeedOptions {
+	available: boolean;
+	subscriptions: { kind: string; value: number; label: string }[];
+	categories: { kind: string; value: number; label: string }[];
+}
+
+export async function getBriefingArchive(params?: Record<string, string>): Promise<BriefingArchiveResponse> {
+	const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+	return apiFetch<BriefingArchiveResponse>(`/briefings/archive${qs}`);
+}
+
+export async function getBriefingArchiveItem(id: number): Promise<BriefingArchiveItem> {
+	return apiFetch<BriefingArchiveItem>(`/briefings/archive/${id}`);
+}
+
+export async function getBriefingConfig(): Promise<BriefingConfigResponse> {
+	return apiFetch<BriefingConfigResponse>('/briefings/config');
+}
+
+export async function putBriefingBlock(payload: Record<string, unknown>): Promise<{ status: string; block?: BriefingBlock }> {
+	return apiFetch('/briefings/blocks', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload),
+	});
+}
+
+export async function deleteBriefingBlock(id: number): Promise<void> {
+	await apiFetch(`/briefings/blocks/${id}`, { method: 'DELETE' });
+}
+
+export async function putBriefingSource(payload: Record<string, unknown>): Promise<{ status: string; id?: number }> {
+	return apiFetch('/briefings/sources', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload),
+	});
+}
+
+export async function deleteBriefingSource(id: number): Promise<void> {
+	await apiFetch(`/briefings/sources/${id}`, { method: 'DELETE' });
+}
+
+export async function getBrowsePresets(): Promise<{ presets: BrowsePreset[] }> {
+	return apiFetch('/briefings/browse-presets');
+}
+
+export async function getFeedOptions(): Promise<FeedOptions> {
+	return apiFetch('/briefings/feed-options');
+}
+
 export { AuthError };

@@ -4871,6 +4871,15 @@ app.include_router(_feeds_router, prefix="/istota/api/feeds", tags=["feeds"])
 app.dependency_overrides[_feeds_require_auth] = _require_api_auth
 app.dependency_overrides[_feeds_verify_origin] = _verify_origin
 
+# Briefings web API — native, in-process module backed by per-user SQLite.
+from istota.briefings.routes import require_auth as _briefings_require_auth
+from istota.briefings.routes import router as _briefings_router
+from istota.briefings.routes import verify_origin as _briefings_verify_origin
+
+app.include_router(_briefings_router, prefix="/istota/api/briefings", tags=["briefings"])
+app.dependency_overrides[_briefings_require_auth] = _require_api_auth
+app.dependency_overrides[_briefings_verify_origin] = _verify_origin
+
 # Money web API — mounted when the optional ``money`` extra is installed.
 try:
     from istota.money.routes import require_auth as _money_require_auth
