@@ -34,6 +34,27 @@ def _since_date(lookback_hours: float, now: datetime | None):
     return (now - timedelta(hours=lookback_hours)).date()
 
 
+def _cutoff_dt(lookback_hours: float, now: datetime | None) -> datetime:
+    now = now or datetime.now(timezone.utc)
+    return now - timedelta(hours=lookback_hours)
+
+
+def _env_before_cutoff(env, cutoff: datetime) -> bool:
+    """Whether an envelope predates the exact hour-level cutoff.
+
+    IMAP ``date_gte`` is date-granular, so the server fetch is over-inclusive
+    (up to ~a day wider than ``lookback_hours``). This trims the surplus to the
+    exact window client-side so the ``past Nh`` provenance stays honest. A
+    missing or non-datetime date is kept — never drop on absent metadata.
+    """
+    d = getattr(env, "date", None)
+    if not isinstance(d, datetime):
+        return False
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d < cutoff
+
+
 def _sender_matches(sender: str, patterns: list[str]) -> bool:
     lo = (sender or "").lower()
     return any(fnmatch(lo, p.lower()) for p in patterns)
@@ -79,6 +100,7 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
 
     folder = getattr(ctx.app_config.email, "poll_folder", "INBOX") or "INBOX"
     since = _since_date(lookback_hours, ctx.now)
+    cutoff = _cutoff_dt(lookback_hours, ctx.now)
 
     # Pass 1: windowed envelope fetch (envelopes carry to/cc/references so
     # ownership resolution is complete — an Email lacks to/cc). limit=None so
@@ -101,6 +123,8 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
             continue  # owned by a configured user — never in the shared pool
         if mode == "senders" and not _sender_matches(env.sender, senders):
             continue
+        if _env_before_cutoff(env, cutoff):
+            continue  # trim the day-granular server surplus to the exact window
         kept.append(env)
 
     if not kept:
