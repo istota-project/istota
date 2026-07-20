@@ -452,6 +452,33 @@ istota_experimental_features: []
 #             enabled: true
 #           reminders:
 #             enabled: true
+#       # Rich config-authored blocks (alternative to `components:`). When a
+#       # briefing declares `blocks:`, they are seeded ONCE into the user's
+#       # module DB as an editable baseline (blocks win over components for
+#       # seeding; the user then edits them in the web editor and operator
+#       # re-runs never re-clobber). Schedule/delivery still come from
+#       # name/cron/output above via the CLI/DB path. Source `kind` is one of
+#       # rss / email / browse / markets / calendar / todos / reminders / notes;
+#       # `render_mode` is synthesis | structured (omit to infer). Loop over
+#       # `istota_users` in the playbook to apply one definition to many users.
+#       - name: "world"
+#         cron: "0 7 * * *"
+#         output: "email"
+#         blocks:
+#           - title: "World News"
+#             directive: "3-5 stories, neutral tone, no markets."
+#             render_mode: "synthesis"
+#             options: { story_count: 5 }
+#             sources:
+#               - kind: "rss"
+#                 config: { feed_ref: { kind: "category", value: 4 }, lookback_hours: 24 }
+#               - kind: "browse"
+#                 config: { preset: "ap" }
+#           - title: "Markets"
+#             render_mode: "structured"
+#             sources:
+#               - kind: "markets"
+#                 config: {}
 istota_users: {}
 
 # Per-user encrypted secrets (Karakeep, Monarch, Tumblr API key, Overland

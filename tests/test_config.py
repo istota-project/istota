@@ -1640,6 +1640,132 @@ class TestApplyUserBriefings:
         assert "alice" in config.users
 
 
+class TestConfigAuthoredBriefingBlocks:
+    """Config-authored rich ``[[briefings.blocks]]`` thread through config load.
+
+    ``blocks`` is an in-memory-only field: parsed from TOML, re-attached to the
+    surviving (DB-shadowed) entry in ``_apply_user_briefings``, and never
+    persisted to ``briefing_configs``.
+    """
+
+    _BLOCKS_TOML = (
+        "\n[[users.alice.briefings]]\n"
+        'name = "morning"\n'
+        'cron = "0 7 * * *"\n'
+        'output = "email"\n'
+        "\n[[users.alice.briefings.blocks]]\n"
+        'title = "World News"\n'
+        'directive = "neutral"\n'
+        'render_mode = "synthesis"\n'
+        "options = { story_count = 5 }\n"
+        "\n[[users.alice.briefings.blocks.sources]]\n"
+        'kind = "rss"\n'
+        "config = { lookback_hours = 24 }\n"
+        "\n[[users.alice.briefings.blocks.sources]]\n"
+        'kind = "browse"\n'
+        'config = { preset = "ap" }\n'
+    )
+
+    def test_parse_user_data_populates_blocks(self, tmp_path, monkeypatch):
+        # No DB row → the TOML briefing survives natively, blocks intact.
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{tmp_path / "does-not-exist.db"}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+            + self._BLOCKS_TOML
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        briefings = config.users["alice"].briefings
+        assert len(briefings) == 1
+        blocks = briefings[0].blocks
+        assert len(blocks) == 1
+        assert blocks[0]["title"] == "World News"
+        assert blocks[0]["options"] == {"story_count": 5}
+        kinds = [s["kind"] for s in blocks[0]["sources"]]
+        assert kinds == ["rss", "browse"]
+
+    def test_blocks_reattached_to_db_shadowed_entry(self, tmp_path, monkeypatch):
+        from istota import db, user_briefings
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        # A briefing_configs row (as import_from_user_configs would seed) claims
+        # the name — the TOML briefing is dropped, but its blocks must ride on
+        # the surviving DB-sourced entry.
+        user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning",
+            cron="0 7 * * *", conversation_token="", output="email",
+        )
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{db_path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+            + self._BLOCKS_TOML
+        )
+        monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+        config = load_config(cfg)
+        briefings = config.users["alice"].briefings
+        assert len(briefings) == 1
+        assert briefings[0].from_db is True
+        assert [b["title"] for b in briefings[0].blocks] == ["World News"]
+
+    def test_blocks_not_persisted_to_framework_db(self, tmp_path, monkeypatch):
+        # The framework briefing_configs row is byte-unchanged by blocks —
+        # ensure_briefing equality is a no-op regardless of blocks.
+        from istota import db, user_briefings
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning",
+            cron="0 7 * * *", conversation_token="", output="email",
+        )
+        # Re-run with the same schedule/delivery → noop; blocks live only in
+        # config, never reach the row.
+        _, state2 = user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning",
+            cron="0 7 * * *", conversation_token="", output="email",
+        )
+        assert state2 == "noop"
+        row = user_briefings.list_briefings(db_path)[0]
+        assert "__blocks__" not in row.components
+        assert "blocks" not in row.components
+
+    def test_blocks_survive_get_briefings_for_user_expansion(self, tmp_path):
+        # A component that triggers _expand_boolean_components reconstruction
+        # must not drop blocks off the rebuilt BriefingConfig.
+        from istota.config import (
+            BriefingConfig,
+            BriefingDefaultsConfig,
+            Config,
+            UserConfig,
+        )
+        from istota.skills.briefing import get_briefings_for_user
+
+        briefing = BriefingConfig(
+            name="morning", cron="0 7 * * *",
+            components={"markets": True},  # expands via defaults
+            blocks=[{"title": "News", "sources": [{"kind": "rss", "config": {}}]}],
+        )
+        config = Config(
+            db_path=tmp_path / "istota.db",
+            nextcloud_mount_path=tmp_path / "mount",
+            users={"alice": UserConfig(briefings=[briefing])},
+            briefing_defaults=BriefingDefaultsConfig(markets={"futures": ["ES=F"]}),
+        )
+        result = get_briefings_for_user(config, "alice")
+        assert len(result) == 1
+        # Reconstruction happened (components expanded) …
+        assert result[0].components != briefing.components
+        # … and blocks survived it.
+        assert [b["title"] for b in result[0].blocks] == ["News"]
+
+
 class TestDisabledModules:
     """Phase 1 of the modules / connected services refactor."""
 

@@ -218,6 +218,12 @@ class BriefingConfig:
     conversation_token: str = ""  # Talk room to post to
     output: str = "talk"  # delivery surface(s): talk / email / ntfy or a comma list
     components: dict = field(default_factory=dict)
+    # Config-authored rich block/source shape (``[[users.X.briefings.blocks]]``).
+    # In-memory only — never persisted to ``briefing_configs``; consumed once by
+    # the module-DB seeder (``briefings/_migrate``) as an editable baseline.
+    # ``compare=False`` keeps it out of ``ensure_briefing`` no-op equality (block
+    # edits must not perturb the framework row); ``repr=False`` keeps it terse.
+    blocks: list[dict] = field(default_factory=list, repr=False, compare=False)
     # Marks entries appended by ``_apply_user_briefings`` from the DB. The
     # web listing endpoint skips these so post-delete in-memory staleness
     # cannot resurface a removed briefing as "managed=config".
@@ -1234,12 +1240,16 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     # Parse briefings
     briefings = []
     for b in user_data.get("briefings", []):
+        raw_blocks = b.get("blocks", [])
         briefings.append(BriefingConfig(
             name=b.get("name", ""),
             cron=b.get("cron", ""),
             conversation_token=b.get("conversation_token", ""),
             output=b.get("output", "talk"),
             components=b.get("components", {}),
+            # Raw parsed dict passthrough — normalisation is the seeder's job so
+            # the config layer stays decoupled from module internals.
+            blocks=list(raw_blocks) if isinstance(raw_blocks, list) else [],
         ))
 
     # Parse resources
@@ -2207,6 +2217,12 @@ def _apply_user_briefings(config: "Config") -> None:
             config.users[user_id] = user_config
 
         db_names = {r.name for r in db_rows}
+        # Config-authored blocks live only in TOML (never in the DB row). Capture
+        # them before the drop so they can ride on the surviving DB-sourced entry;
+        # otherwise the module-DB seeder would never see them.
+        blocks_by_name = {
+            b.name: b.blocks for b in user_config.briefings if b.blocks
+        }
         # Drop TOML briefings whose names are claimed by DB rows.
         user_config.briefings = [
             b for b in user_config.briefings if b.name not in db_names
@@ -2221,6 +2237,7 @@ def _apply_user_briefings(config: "Config") -> None:
                 conversation_token=r.conversation_token,
                 output=r.output,
                 components=dict(r.components),
+                blocks=blocks_by_name.get(r.name, []),
             )
             bc.from_db = True
             user_config.briefings.append(bc)

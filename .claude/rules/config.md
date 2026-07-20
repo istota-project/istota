@@ -259,7 +259,18 @@ See `docs/EXPERIMENTAL.md` for the registry and graduation policy.
 ```
 name: str                    cron: str                   conversation_token: str = ""
 output: str = "talk"         components: dict = {}
+blocks: list[dict] = []      # config-authored rich blocks; in-memory only
 ```
+`blocks` (config-authored-rich-briefing-blocks spec) is the full block/source
+authoring shape (`[[users.X.briefings.blocks]]` + `[[...blocks.sources]]`): a raw
+dict passthrough parsed in `_parse_user_data`, threaded through
+`_apply_user_briefings` (re-attached to the DB-shadowed entry by name) and
+`get_briefings_for_user` (carried through the `_expand_boolean_components`
+rebuild), and read **once** by the module-DB seeder (`briefings/_migrate.normalize_block_specs`
+→ `_seed_blocks`) as an editable baseline. `compare=False`/`repr=False`; it is
+**never persisted to `briefing_configs`** (content is module-DB territory, so the
+framework row stays byte-unchanged). `blocks` present and non-empty wins over
+`components` for seeding; seed-once via the same per-briefing sentinel.
 
 ### `ResourceConfig`
 ```
@@ -377,7 +388,7 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 7. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
 8. **Phase 7a**: `_apply_user_resources(config)` overlays the `user_resources` DB table onto `config.users[*].resources`. Each row becomes a `ResourceConfig` entry with extras decoded from JSON. Dedup is keyed on `(type, path)` — DB wins. Distinct paths coexist.
 9. **Modules refactor (between 7a and 7b)**: `_migrate_obsolete_resources(config)` first calls `secrets_store.import_from_user_configs` (idempotent — extends `_IMPORT_MAP` to absorb karakeep `base_url`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources(db_path)` deletes `user_resources` rows whose type is in the retired set (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`), then filters those types out of `uc.resources` in memory so the rest of the load cycle sees post-cleanup state.
-10. **Phase 7b**: `_apply_user_briefings(config)` overlays the `briefing_configs` DB table onto `config.users[*].briefings`. Each row becomes a `BriefingConfig` entry. Dedup is keyed on `name` — DB wins. Disabled DB rows (`enabled=0`) drop the matching TOML name without scheduling, so the web UI can mute a TOML-templated briefing without re-templating.
+10. **Phase 7b**: `_apply_user_briefings(config)` overlays the `briefing_configs` DB table onto `config.users[*].briefings`. Each row becomes a `BriefingConfig` entry. Dedup is keyed on `name` — DB wins. Disabled DB rows (`enabled=0`) drop the matching TOML name without scheduling, so the web UI can mute a TOML-templated briefing without re-templating. **Config-authored `blocks` re-attach**: before dropping TOML briefings claimed by a DB name, it captures `{name: blocks}` from the TOML entries and re-attaches `blocks` onto the appended DB-sourced entry when the name matches (DB rows never carry `blocks`; the field lives only in TOML/`Config`). Without this the module-DB seeder would never see config-authored blocks on a briefing that already has a `briefing_configs` row (every imported TOML briefing gets one after first startup).
 11. Return `Config`
 
 **Modules vs resources vs connected services.** Three distinct concepts that used to be conflated under `[[resources]]`:

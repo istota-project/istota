@@ -516,7 +516,21 @@ devbox_proxy_socket_dir = "{{ istota_devbox_proxy_socket_dir }}"
 devbox_proxy_audit_log = "{{ istota_devbox_proxy_audit_log }}"
 {% endif %}
 
-# User profiles, resources, and briefings live in the DB (user_profiles,
-# user_resources, briefing_configs tables). They are populated by
+# User profiles, resources, and briefing schedule/delivery live in the DB
+# (user_profiles, user_resources, briefing_configs tables). They are populated by
 # `istota user/resource/briefings schedule ensure` invocations in the playbook —
-# config.toml does not render any per-user data.
+# config.toml does not render that per-user data.
+#
+# The one exception: config-authored briefing *content blocks* are an
+# in-memory-only Config field (never stored in briefing_configs), so they must be
+# rendered into config.toml to reach the module-DB seeder. Only a content-only
+# `[[users.X.briefings]]` stub (name + cron + nested blocks/sources) is emitted,
+# and only for briefings that declare a `blocks:` list; schedule/delivery still
+# flow through the CLI/DB path above, and `_apply_user_briefings` re-attaches
+# these blocks onto the DB-sourced entry by name. To apply one definition across
+# users, loop it over `istota_users` in the playbook.
+{% set _briefing_blocks_toml = istota_users | istota_briefing_blocks_toml %}
+{% if _briefing_blocks_toml %}
+
+{{ _briefing_blocks_toml }}
+{% endif %}
