@@ -9,16 +9,12 @@
 		getResources,
 		addResource,
 		deleteResource,
-		getBriefings,
-		upsertBriefing,
-		deleteBriefing,
 		getMe,
 		disconnectNextcloudToken,
 		type ServiceCard as ServiceCardData,
 		type UserProfile,
 		type UserResourceRow,
 		type ResourceTypeSchema,
-		type UserBriefingRow,
 		type NextcloudTokenStatus,
 	} from '$lib/api';
 	import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
@@ -69,19 +65,6 @@
 	let resourceError = $state('');
 	let resourceSaving = $state(false);
 
-	let briefings: UserBriefingRow[] = $state([]);
-	let briefingOutputs: string[] = $state(['talk', 'email', 'ntfy', 'web']);
-	let newBriefing = $state({
-		name: '',
-		cron: '0 7 * * *',
-		conversation_token: '',
-		output: 'talk' as string,
-		componentsJson: '{"calendar": true, "todos": true, "email": true}',
-		enabled: true,
-	});
-	let briefingError = $state('');
-	let briefingSaving = $state(false);
-
 	const resourceTypeOptions: SelectOption[] = $derived([
 		{ value: '', label: 'Type…' },
 		...resourceTypes.map((rt) => ({ value: rt.type, label: rt.label })),
@@ -90,23 +73,17 @@
 		{ value: 'read', label: 'read' },
 		{ value: 'readwrite', label: 'readwrite' },
 	];
-	const briefingOutputOptions: SelectOption[] = $derived(
-		briefingOutputs.map((o) => ({ value: o, label: o })),
-	);
 
-	type ConfirmKind =
-		| { kind: 'resource'; id: number; label: string }
-		| { kind: 'briefing'; id: number; label: string };
+	type ConfirmKind = { kind: 'resource'; id: number; label: string };
 	let confirmDelete: ConfirmKind | null = $state(null);
 
 	async function refresh() {
 		loading = true;
 		try {
-			const [svcResp, profResp, resResp, briefResp, modResp, meResp] = await Promise.all([
+			const [svcResp, profResp, resResp, modResp, meResp] = await Promise.all([
 				getSettingsServices(),
 				getProfile(),
 				getResources(),
-				getBriefings(),
 				getModules(),
 				getMe(),
 			]);
@@ -121,10 +98,6 @@
 			initialProfileJson = profile ? JSON.stringify(profile) : '';
 			resourceTypes = resResp.types;
 			resources = resResp.resources;
-			briefings = briefResp.briefings;
-			briefingOutputs = briefResp.outputs?.length
-				? briefResp.outputs
-				: ['talk', 'email', 'ntfy', 'web'];
 			allModules = modResp.modules;
 			error = '';
 		} catch (e) {
@@ -338,86 +311,6 @@
 		};
 	}
 
-	function askRemoveBriefing(b: UserBriefingRow) {
-		if (b.id === undefined) return;
-		confirmDelete = {
-			kind: 'briefing',
-			id: b.id,
-			label: b.name,
-		};
-	}
-
-	async function submitBriefing(e: SubmitEvent) {
-		e.preventDefault();
-		briefingError = '';
-		const name = newBriefing.name.trim();
-		const cron = newBriefing.cron.trim();
-		if (!name || !cron) {
-			briefingError = 'Name and cron are required.';
-			return;
-		}
-		if (newBriefing.output === 'talk' && !newBriefing.conversation_token.trim()) {
-			briefingError = `Conversation token is required when output is "${newBriefing.output}".`;
-			return;
-		}
-		let components: Record<string, unknown> | undefined;
-		const raw = newBriefing.componentsJson.trim();
-		if (raw) {
-			try {
-				const parsed = JSON.parse(raw);
-				if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-					briefingError = 'Components must be a JSON object.';
-					return;
-				}
-				components = parsed as Record<string, unknown>;
-			} catch (err) {
-				briefingError = `Components JSON parse error: ${(err as Error).message}`;
-				return;
-			}
-		}
-		briefingSaving = true;
-		try {
-			await upsertBriefing({
-				name,
-				cron,
-				conversation_token: newBriefing.conversation_token.trim() || undefined,
-				output: newBriefing.output,
-				components,
-				enabled: newBriefing.enabled,
-			});
-			newBriefing = {
-				name: '',
-				cron: '0 7 * * *',
-				conversation_token: '',
-				output: 'talk',
-				componentsJson: '{"calendar": true, "todos": true, "email": true}',
-				enabled: true,
-			};
-			await refresh();
-		} catch (e) {
-			briefingError = (e as Error).message || 'Save failed';
-		} finally {
-			briefingSaving = false;
-		}
-	}
-
-	function componentsSummary(components: Record<string, unknown>): string {
-		const parts: string[] = [];
-		for (const [key, value] of Object.entries(components)) {
-			if (key === '__output__') continue;
-			if (value === true) parts.push(key);
-			else if (
-				typeof value === 'object' &&
-				value !== null &&
-				!Array.isArray(value) &&
-				(value as Record<string, unknown>).enabled === true
-			) {
-				parts.push(key);
-			}
-		}
-		return parts.join(', ');
-	}
-
 	async function performDelete() {
 		if (!confirmDelete) return;
 		const target = confirmDelete;
@@ -425,9 +318,6 @@
 		try {
 			if (target.kind === 'resource') {
 				await deleteResource(target.id);
-				await refresh();
-			} else if (target.kind === 'briefing') {
-				await deleteBriefing(target.id);
 				await refresh();
 			}
 		} catch (e) {
@@ -727,118 +617,12 @@
 			</form>
 		</SettingsCard>
 
-		<SettingsCard title="Briefings ({briefings.length})">
+		<SettingsCard title="Briefings">
 			<p class="hint">
-				Cron-scheduled summaries posted to a Talk room or sent by email.
-				Operator-managed entries (from <code>config.toml</code>) are
-				read-only here.
+				Cron-scheduled summaries with their own schedule, delivery, and
+				content-block editor. Manage them on the
+				<a href="{base}/briefings/settings">Briefings settings</a> page.
 			</p>
-
-			{#if briefings.length === 0}
-				<p class="empty">No briefings configured yet.</p>
-			{:else}
-				<div class="table-scroll">
-					<table class="grid">
-						<thead>
-							<tr>
-								<th class="col-name">Name</th>
-								<th>Cron</th>
-								<th>Output</th>
-								<th>Components</th>
-								<th>Token</th>
-								<th class="col-source">Source</th>
-								<th class="actions"></th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each briefings as b (`${b.managed}-${b.id ?? b.name}`)}
-								<tr>
-									<td class="col-name">
-										{b.name}
-										{#if !b.enabled}<span class="muted"> (disabled)</span>{/if}
-									</td>
-									<td><code>{b.cron}</code></td>
-									<td>{b.output}</td>
-									<td class="muted">{componentsSummary(b.components) || '—'}</td>
-									<td class="muted"><code>{b.conversation_token || '—'}</code></td>
-									<td class="col-source muted">
-										{b.managed === 'config' ? 'config.toml' : 'user'}
-									</td>
-									<td class="actions">
-										{#if b.managed === 'db' && b.id !== undefined}
-											<button
-												class="icon-btn danger"
-												title="Remove"
-												type="button"
-												onclick={() => askRemoveBriefing(b)}>×</button
-											>
-										{/if}
-									</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			{/if}
-
-			<form class="add-resource no-top-border" onsubmit={submitBriefing}>
-				<h3>Add briefing</h3>
-				<div class="add-grid">
-					<SettingsField label="Name">
-						<input
-							type="text"
-							placeholder="morning"
-							bind:value={newBriefing.name}
-						/>
-					</SettingsField>
-					<SettingsField label="Cron (user TZ)">
-						<input
-							type="text"
-							placeholder="0 7 * * 1-5"
-							bind:value={newBriefing.cron}
-						/>
-					</SettingsField>
-					<SettingsField label="Output">
-						<Select
-							value={newBriefing.output}
-							options={briefingOutputOptions}
-							onValueChange={(v) => (newBriefing.output = v)}
-							ariaLabel="Output"
-							fullWidth
-						/>
-					</SettingsField>
-					<SettingsField label="Conversation token">
-						<input
-							type="text"
-							placeholder="Talk room token"
-							bind:value={newBriefing.conversation_token}
-						/>
-					</SettingsField>
-					<SettingsField label="Components (JSON)" wide>
-						<textarea
-							rows="2"
-							placeholder={'e.g. {"calendar": true, "email": true, "markets": true}'}
-							bind:value={newBriefing.componentsJson}
-						></textarea>
-					</SettingsField>
-					<SettingsField label="Enabled" checkbox>
-						<input type="checkbox" bind:checked={newBriefing.enabled} />
-					</SettingsField>
-				</div>
-				<div class="add-actions">
-					<Button
-						variant="primary"
-						size="sm"
-						type="submit"
-						disabled={briefingSaving}
-					>
-						{briefingSaving ? 'Saving…' : 'Add briefing'}
-					</Button>
-				</div>
-				{#if briefingError}
-					<div class="banner error">{briefingError}</div>
-				{/if}
-			</form>
 		</SettingsCard>
 
 		{#if activeServices.length > 0 || ncToken}
@@ -905,7 +689,7 @@
 {#if confirmDelete}
 	<Modal
 		open={true}
-		title={confirmDelete.kind === 'resource' ? 'Remove resource?' : 'Remove briefing?'}
+		title="Remove resource?"
 		onOpenChange={(o) => {
 			if (!o) confirmDelete = null;
 		}}
@@ -955,11 +739,6 @@
 		gap: 0.6rem;
 		padding-top: 0.4rem;
 		border-top: 1px solid var(--border-subtle);
-	}
-
-	.add-resource.no-top-border {
-		border-top: none;
-		padding-top: 0;
 	}
 
 	.add-grid {
