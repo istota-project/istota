@@ -497,15 +497,30 @@ def _parse_components_arg(args) -> "dict[str, object] | None":
     return result
 
 
-def cmd_briefing(args):
-    """Manage briefing configurations."""
-    config = load_config(Path(args.config) if args.config else None)
+def run_briefing_schedule(
+    config,
+    action,
+    *,
+    user=None,
+    name=None,
+    cron=None,
+    conversation_token=None,
+    output="talk",
+    components=None,
+    disabled=False,
+):
+    """Core of ``istota briefings schedule`` (framework ``briefing_configs``).
 
-    if args.action == "list":
-        from . import user_briefings as _ub
+    Shared by the deprecated ``istota briefing`` shim (``cmd_briefing``) and the
+    unified ``istota briefings schedule`` command (``cli_briefings``). Manages
+    *schedule + delivery* only — content blocks live in the module DB.
+    """
+    from . import user_briefings as _ub
+
+    if action == "list":
         found = False
         for user_id, user_config in config.users.items():
-            if args.user and user_id != args.user:
+            if user and user_id != user:
                 continue
             if not user_config.briefings:
                 continue
@@ -513,7 +528,6 @@ def cmd_briefing(args):
             for b in user_config.briefings:
                 print(f"{user_id:15} {b.name:10} {b.cron:15} -> {b.conversation_token}")
                 if b.components:
-                    # Show enabled components
                     enabled = []
                     for k, v in b.components.items():
                         if isinstance(v, bool) and v:
@@ -522,13 +536,10 @@ def cmd_briefing(args):
                             enabled.append(k)
                     if enabled:
                         print(f"{'':15} components: {', '.join(enabled)}")
-        # Also show DB-only rows that aren't represented in user_config.briefings
-        # (typically: disabled rows, which the overlay drops). Operators want to
-        # see them so they can re-enable.
         db_rows = _ub.list_briefings(config.db_path)
         disabled_rows = [r for r in db_rows if not r.enabled]
-        if args.user:
-            disabled_rows = [r for r in disabled_rows if r.user_id == args.user]
+        if user:
+            disabled_rows = [r for r in disabled_rows if r.user_id == user]
         if disabled_rows:
             print("\nDisabled briefings (DB):")
             for r in disabled_rows:
@@ -537,60 +548,74 @@ def cmd_briefing(args):
             print("No briefings configured")
         return
 
-    if args.action == "ensure":
-        from . import user_briefings as _ub
-
-        if not args.user or not args.name or not args.cron:
+    if action == "ensure":
+        if not user or not name or not cron:
             print("Error: --user, --name, and --cron are required for ensure", file=sys.stderr)
             sys.exit(1)
 
-        output = args.output or "talk"
+        output = output or "talk"
         from .transport import parse_output_target
         talk_leaf = any(d.surface == "talk" for d in parse_output_target(output))
-        if talk_leaf and not args.conversation_token:
+        if talk_leaf and not conversation_token:
             print(
                 f"Error: --conversation-token is required when --output is {output!r}",
                 file=sys.stderr,
             )
             sys.exit(1)
 
-        components = _parse_components_arg(args) or {}
-
         try:
             briefing, state = _ub.ensure_briefing(
                 config.db_path,
-                user_id=args.user,
-                name=args.name,
-                cron=args.cron,
-                conversation_token=args.conversation_token or "",
+                user_id=user,
+                name=name,
+                cron=cron,
+                conversation_token=conversation_token or "",
                 output=output,
-                components=components,
-                enabled=not args.disabled,
+                components=components or {},
+                enabled=not disabled,
             )
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
 
         print(
-            f"Briefing ensured for {args.user!r}: name={briefing.name} cron={briefing.cron!r} "
+            f"Briefing ensured for {user!r}: name={briefing.name} cron={briefing.cron!r} "
             f"output={briefing.output} enabled={briefing.enabled}"
         )
         print(f"STATE: {state}")
         return
 
-    if args.action == "delete":
-        from . import user_briefings as _ub
-
-        if not args.user or not args.name:
+    if action == "delete":
+        if not user or not name:
             print("Error: --user and --name are required for delete", file=sys.stderr)
             sys.exit(1)
-        removed = _ub.delete_briefing(config.db_path, args.user, args.name)
+        removed = _ub.delete_briefing(config.db_path, user, name)
         if removed:
-            print(f"Briefing deleted: user={args.user} name={args.name}")
+            print(f"Briefing deleted: user={user} name={name}")
         else:
-            print(f"No briefing found: user={args.user} name={args.name}")
+            print(f"No briefing found: user={user} name={name}")
             sys.exit(1)
         return
+
+
+def cmd_briefing(args):
+    """Manage briefing configurations (deprecated: use `istota briefings schedule`)."""
+    print(
+        "Note: `istota briefing` is deprecated; use `istota briefings schedule` instead.",
+        file=sys.stderr,
+    )
+    config = load_config(Path(args.config) if args.config else None)
+    run_briefing_schedule(
+        config,
+        args.action,
+        user=args.user,
+        name=args.name,
+        cron=args.cron,
+        conversation_token=args.conversation_token,
+        output=args.output or "talk",
+        components=_parse_components_arg(args),
+        disabled=args.disabled,
+    )
 
 
 def cmd_secret(args):
@@ -1321,6 +1346,16 @@ def main():
         config = load_config(Path(_known.config) if _known.config else None)
         setup_logging(config, verbose=_known.verbose)
         rc = cli_money.dispatch_operational(_rest[1], _rest[2:], config)
+        sys.exit(rc or 0)
+
+    # `istota briefings <group> …` — the unified briefings tree (schedule +
+    # blocks/sources/archive). Peeled here (like `money`) so cli_briefings owns
+    # the whole subtree with its own nested argparse.
+    if len(_rest) >= 1 and _rest[0] == "briefings":
+        from istota import cli_briefings
+        config = load_config(Path(_known.config) if _known.config else None)
+        setup_logging(config, verbose=_known.verbose)
+        rc = cli_briefings.dispatch(_rest[1:], config)
         sys.exit(rc or 0)
 
     parser = argparse.ArgumentParser(description="Istota CLI")
