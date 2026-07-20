@@ -2,6 +2,33 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-20: Config-authored rich briefing blocks
+
+Operators could already define per-user briefings in config (name/cron/output/components), and those land as editable blocks/sources via the existing one-time components→blocks migration. But the authoring surface was stuck in the *legacy components shape*: the fixed component set, fixed order, no custom titles, no synthesis directives, no `rss`/`browse` sources, no per-block options, no mixed-source blocks. The module's rich model could only be reached via the web editor after the fact. This spec (`Specs/Done/config-authored-rich-briefing-blocks.md`) widens the authoring surface so an operator can express the full block/source model in `[[users.X.briefings.blocks]]` + `[[...blocks.sources]]` TOML, materialised once into the user's `briefings.db` as an editable baseline. No new tables, no new sync path, no generation change — a widening of authoring plus threading one config-only field through two reconstruction points.
+
+`blocks` is an **in-memory-only** `Config` field: it is parsed as a raw dict passthrough in `_parse_user_data`, threaded through `_apply_user_briefings` (re-attached to the DB-shadowed entry by name — every imported TOML briefing gets a `briefing_configs` row after first startup, so without the re-attach the seeder would never see the blocks) and `get_briefings_for_user` (carried through the `_expand_boolean_components` rebuild), and read once by the module-DB seeder. It is **never** persisted to `briefing_configs` — content is module-DB territory, so the framework row stays byte-unchanged (`compare=False`/`repr=False` keep it out of `ensure_briefing` no-op equality). The seeder (`_migrate._migrate_components`) prefers a briefing's config `blocks` (via the new pure, total, fail-soft `normalize_block_specs`) over the legacy `components` translation, reusing the same per-briefing seed-once sentinel — so blocks win over components, seed exactly once, and operator re-runs never re-clobber a user's edits.
+
+The one wrinkle the spec under-specified: the Ansible deploy path provisions briefing schedule/delivery via `istota briefings schedule ensure` (CLI → `briefing_configs` DB) and renders **no** per-user TOML at all (that rendering was removed long ago), so config-authored blocks — which only reach the seeder via in-memory `Config` populated from config.toml — would never appear on that path. Fixed by rendering a **content-only** `[[users.X.briefings]]` stub (name + cron + nested blocks/sources) into config.toml for blocks-bearing briefings via a new `istota_briefing_blocks_toml` Ansible filter plugin; schedule/delivery still flow through the CLI/DB, and the re-attach step reunites the blocks with the DB row. Only leaf dicts (options / source config) render as inline tables; blocks/sources render as array-of-tables so the shape mirrors the authoring example exactly.
+
+Built TDD across three stages (config threading, seeder, docs+Ansible). Full suite green apart from two failures confirmed to pre-exist the change (a stale Talk `max_message_length` assertion and an xdist ordering flake). Spec moved to Done.
+
+**Key changes:**
+- `BriefingConfig.blocks` — in-memory-only rich block/source authoring field, never persisted to the framework DB.
+- `normalize_block_specs` — pure, total coercion to the seeder's spec shape; titleless blocks, unknown source kinds/render modes, and zero-source blocks are skipped with a warning, never raised. `render_mode` inferred by first source kind when omitted.
+- `_migrate_components` prefers config `blocks` over the legacy `components` translation; same per-briefing seed-once sentinel, blocks win.
+- New `istota_briefing_blocks_toml` Ansible filter renders a content-only briefing stub so the server deploy path can carry config-authored blocks.
+
+**Files added/modified:**
+- `src/istota/config.py` — `BriefingConfig.blocks`; parse in `_parse_user_data`; capture + re-attach in `_apply_user_briefings`.
+- `src/istota/skills/briefing/__init__.py` — carry `blocks` through the `get_briefings_for_user` reconstruction.
+- `src/istota/briefings/_migrate.py` — `normalize_block_specs` + the `blocks`-preferred seeding branch; docstrings.
+- `src/istota/briefings/__init__.py` — export `normalize_block_specs`.
+- `deploy/ansible/filter_plugins/istota_toml.py` — new filter plugin (TOML value serializer + block-stub renderer).
+- `deploy/ansible/templates/config.toml.j2`, `deploy/ansible/defaults/main.yml` — render + document the blocks stub.
+- `config/config.example.toml` — worked example + per-kind config reference.
+- `AGENTS.md`, `.claude/rules/config.md` — documented the field, threading, seeding precedence, and Ansible stub.
+- `tests/test_briefings_migrate.py`, `tests/test_config.py`, `tests/test_ansible_briefing_blocks_toml.py` — pure + threading + seeding + end-to-end + filter round-trip tests.
+
 ## 2026-07-20: Web chat no longer truncates long answers (ISSUE-178); Talk splits at the real limit
 
 Long assistant replies were cut off in web chat — a several-thousand-word answer ended mid-content. Two investigation agents traced the whole delivery chain and converged: the truncation was entirely in the live streaming/event-delivery layer. The canonical stores are all clean (`messages.body`, `web_chat_messages.text`, `tasks.result` are unbounded `TEXT`; `store_turn_message` writes the full body; the history-read and SSE-serialization paths never clip a body; the frontend renders the trailing text segment in full). But web chat renders its live answer from the `result` **task event** (text_delta rows are pruned once it lands), and that event was capped at `result[:8000]` at all three emit sites (daemon + inline `result`, plus the confirmation `prompt`), and again by a generic `PAYLOAD_MAX_BYTES = 8192` backstop in `EventWriter.emit` that slashed `text` to 2000 chars — measured on the JSON-*encoded* size, so it fired well before 8000 literal chars on markdown. The synthetic-terminal backstop frame in `web_app` re-clipped at 8000 too. So a long reply arrived truncated live while the durable copy stayed complete (a reload would show it whole).

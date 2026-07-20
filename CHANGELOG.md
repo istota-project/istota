@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Briefings are now built from reorderable content **blocks**, each gathering one or more **sources** — newsletters, an RSS feed or category, a browsed news frontpage, markets, calendar, todos, reminders, or notes — that the assistant synthesizes into a single section. A new Briefings tab shows a reader with an archive of past briefings and a settings editor for arranging blocks and sources; you can also manage them from chat or with the `istota briefings` command. Existing component-based briefings are migrated automatically, and scheduling/delivery are unchanged.
+- Operators can now author a briefing's full block/source shape directly in config — per-block title, synthesis directive, render mode, and options, plus an ordered list of sources of any kind with their own config. These seed once into the user's briefings as an editable baseline (config blocks take precedence over the legacy component set), after which the user edits them freely in the web editor and re-running the deploy never overwrites their changes.
 
 ### Changed
 - A briefing now fetches its sources in parallel instead of one after another, so a slow source (a news frontpage or a mailbox round-trip) no longer holds up the rest — briefings that pull in several live sources assemble faster.
