@@ -2,6 +2,29 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: `istota update` self-update command (standalone/local)
+
+A first-class update path for the local single-user install shape (`uv tool install`), which previously had none — you had to re-run install.sh or hand-run `uv tool install --force --reinstall`. The server/Ansible/Docker shape is unchanged: it keeps its auto-update cron, and `istota update` refuses to run there so it can't contend with it.
+
+The design hinges on install provenance: a `uv tool`-installed package retains no pointer back to the checkout it was built from, so `install.sh` now records `{method, source, extras, ref}` into `~/.config/istota/install.json`. `istota update` reads it, then (checkout method) does dirty-gate → `git fetch origin <ref>` → compare HEAD vs `FETCH_HEAD` → if changed, `git reset --hard`, rebuild web assets, `uv tool install --force --reinstall "<source>[<extras>]"`, run migrations, print a restart nudge. Every external effect is injected, so the orchestration unit-tests without a real git/uv/npm.
+
+**Key changes:**
+- New `updater.py` module + `cmd_update` CLI subcommand + `update` subparser. Guarded on `Config.is_standalone`.
+- `install.sh` `run_standalone` writes the provenance file (new `write_install_record` helper) after a successful install.
+- `FETCH_HEAD`, not `origin/<ref>`, is the compare/reset target — a shallow single-branch clone (what install.sh creates) doesn't reliably update the remote-tracking ref, but an explicit fetch always writes FETCH_HEAD.
+
+**Mulder/Scully review — three real bugs the stubbed tests hid, all fixed:**
+- **Throwaway `/tmp` clone (critical):** standalone cloned to `/tmp/istota-install` and recorded that as the update source; `/tmp` is wiped on reboot, so the first update after a reboot would break. The standalone clone now lands in a durable `${XDG_DATA_HOME:-$HOME/.local/share}/istota/src`.
+- **Stale-code migrations (high):** the in-process `db.init_db` was imported before the reinstall swapped the package on disk, so a migration shipped *in the update* would silently not apply (confirmed no daemon/serve/web startup path runs framework migrations either). Migrations now shell out to the freshly-installed `istota init`, mirroring the server script.
+- **Failed-reinstall wedge (high):** after `git reset`, a failed `uv install` left the checkout advanced, so the next run reported "already up to date" while pinned to the old wheel. On install/migrate failure the checkout is now rolled back to the pre-update commit so a retry re-detects it.
+- Plus MEDIUM/LOW: the provenance file path now matches where `setup`/`load_config`/the updater look (`$HOME/.config`, not XDG); the recorded `ref` is the checkout's actual branch, not the clone-time default; the dirty-gate uses `--untracked-files=no` so untracked scratch files don't force `--force`.
+
+**Files added/modified:**
+- `src/istota/updater.py` — new; `run_update`, provenance load, fresh-migration + web-build + daemon-probe helpers
+- `src/istota/cli.py` — `cmd_update` + `update` subparser + dispatch entry
+- `install.sh` — `write_install_record`; durable standalone clone dir
+- `tests/test_updater.py` — new; 22 tests (guards, checkout flow, rollback, fresh-migration, error branches)
+
 ## 2026-07-19: Admin dashboard Models pane
 
 A new "Models" card in the web admin dashboard, rendered directly below the system-banner. It surfaces the active model backend so an operator can confirm what a deployment is actually configured to run without reading the TOML — useful when role aliases or a fallback backend are in play.

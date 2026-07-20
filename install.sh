@@ -239,6 +239,36 @@ ensure_uv() {
 # them when src/istota/web_static exists (a PyPI/wheel install would already
 # carry them). Best-effort build so the web UI isn't blank. The REPL works
 # regardless.
+write_install_record() {
+    # Record install provenance for `istota update` (standalone only). JSON with
+    # the source checkout, the extras string, the git ref, and the method — the
+    # updater re-runs `git fetch/reset` here + `uv tool install --reinstall`.
+    #
+    # Path matches where `istota setup` writes config.toml and where load_config /
+    # the updater look ($HOME/.config/istota — the codebase hardcodes ~/.config,
+    # so do NOT honor XDG_CONFIG_HOME here or the updater won't find this file).
+    local source="$1" extras="$2" ref="$3"
+    # Prefer the checkout's actual branch over the clone-time default, so an
+    # install from a local checkout on a feature branch doesn't get yanked onto
+    # main on the first update. Detached HEAD / failure falls back to the arg.
+    local actual_ref
+    actual_ref="$(git -C "$source" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [ -n "$actual_ref" ] && [ "$actual_ref" != "HEAD" ]; then
+        ref="$actual_ref"
+    fi
+    local config_dir="$HOME/.config/istota"
+    mkdir -p "$config_dir"
+    cat > "$config_dir/install.json" <<EOF
+{
+  "method": "checkout",
+  "source": "$source",
+  "extras": "$extras",
+  "ref": "$ref"
+}
+EOF
+    ok "Recorded install provenance at $config_dir/install.json"
+}
+
 maybe_build_web_static() {
     local root="$1"
     if [ -d "$root/src/istota/web_static" ] && [ -n "$(ls -A "$root/src/istota/web_static" 2>/dev/null)" ]; then
@@ -289,7 +319,10 @@ run_standalone() {
 
     # No PyPI release yet, so install from the repo: use the local checkout if
     # we're already in one, otherwise clone it (ensure_repo sets REPO_ROOT).
-    : "${CLONE_DIR:=/tmp/istota-install}"
+    # The clone must be DURABLE, not /tmp: `istota update` re-fetches + reinstalls
+    # from this exact directory, and a /tmp clone is wiped on reboot (which would
+    # break every update after the first). Land it under XDG data home.
+    : "${CLONE_DIR:=${XDG_DATA_HOME:-$HOME/.local/share}/istota/src}"
     ensure_repo
     { [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/pyproject.toml" ]; } \
         || die "Could not locate the istota source (looked at '$REPO_ROOT')."
@@ -317,6 +350,10 @@ run_standalone() {
 
     section "Running setup"
     istota setup "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
+
+    # Record install provenance so `istota update` knows where to pull from — a
+    # uv-tool-installed package retains no pointer back to its source checkout.
+    write_install_record "$REPO_ROOT" "$extras" "$REPO_BRANCH"
 
     section "Done"
     ok "Standalone install complete"
