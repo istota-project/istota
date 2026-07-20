@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: `istota update` release channels (stable by default)
+
+`istota update` (added earlier the same day) tracked the tip of a git branch — `install.json`'s `ref`, which install.sh only ever set to `main`. So every standalone user rode the latest `main` commit, including between-version WIP. Releases (`v*` tags from `scripts/release.sh`) existed but the updater ignored them. A local single-user install is exactly the audience that wants tagged-release stability, so the default was wrong.
+
+Added an update **channel** to the provenance: `install.json` gains a `channel` field (`stable` | `main`), and `install.sh` writes `stable` for fresh installs. `istota update --channel stable|main` overrides and **persists** the choice back to the record, so it's a set-once decision. Stable resolves the newest `v*` tag (`git fetch --tags` → `tag --list --sort=-version:refname` → `reset --hard <tag>`); main keeps the existing `FETCH_HEAD` branch-tracking.
+
+The one non-obvious call: a record **without** a `channel` key falls back to `main`, not `stable`. Inferring stable for a legacy main-tip install would silently `git reset --hard` it *backwards* onto an older release tag — a real code downgrade nobody asked for. So fresh installs get stable via install.sh; existing users opt in with one `--channel stable`. A checkout on a non-`main` feature branch installs as `main` (track that branch) so releases don't yank a developer off their work.
+
+**Key changes:**
+- `updater.py`: `_resolve_channel` (override > record > legacy `main` fallback), `_resolve_target` (stable/main split), `_latest_release_tag` (version-sorted `v*`), `_persist_channel`. `run_update` gains `channel=None`.
+- `cli.py`: `--channel {stable,main}` flag on the `update` subparser, threaded to `run_update`.
+- `install.sh` `write_install_record` writes `channel` (default `stable`; `main` for a non-`main` feature-branch checkout; env override `ISTOTA_UPDATE_CHANNEL`).
+- 8 new channel tests; existing 22 unchanged and green (legacy no-channel records still exercise the `main` path).
+
+**Files modified:**
+- `src/istota/updater.py` - channel resolution + stable/main target resolver + persistence
+- `src/istota/cli.py` - `--channel` flag
+- `install.sh` - `channel` field in the install record
+- `tests/test_updater.py` - channel test coverage
+- `AGENTS.md`, `docs/LOCAL_INSTALL.md`, `CHANGELOG.md` - docs
+
 ## 2026-07-19: `istota update` self-update command (standalone/local)
 
 A first-class update path for the local single-user install shape (`uv tool install`), which previously had none — you had to re-run install.sh or hand-run `uv tool install --force --reinstall`. The server/Ansible/Docker shape is unchanged: it keeps its auto-update cron, and `istota update` refuses to run there so it can't contend with it.

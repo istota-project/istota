@@ -256,6 +256,14 @@ write_install_record() {
     if [ -n "$actual_ref" ] && [ "$actual_ref" != "HEAD" ]; then
         ref="$actual_ref"
     fi
+    # Update channel: track tagged releases by default. A checkout on a non-main
+    # feature branch is a developer install — track that branch instead so
+    # `istota update` doesn't reset it onto an unrelated release tag. Override
+    # with ISTOTA_UPDATE_CHANNEL=main|stable.
+    local channel="${ISTOTA_UPDATE_CHANNEL:-stable}"
+    if [ -z "${ISTOTA_UPDATE_CHANNEL:-}" ] && [ "$ref" != "main" ]; then
+        channel="main"
+    fi
     local config_dir="$HOME/.config/istota"
     mkdir -p "$config_dir"
     cat > "$config_dir/install.json" <<EOF
@@ -263,10 +271,11 @@ write_install_record() {
   "method": "checkout",
   "source": "$source",
   "extras": "$extras",
-  "ref": "$ref"
+  "ref": "$ref",
+  "channel": "$channel"
 }
 EOF
-    ok "Recorded install provenance at $config_dir/install.json"
+    ok "Recorded install provenance at $config_dir/install.json (channel: $channel)"
 }
 
 maybe_build_web_static() {

@@ -58,14 +58,17 @@ def _make_source(tmp_path) -> Path:
 
 
 def _write_record(tmp_path, source: Path, *, method="checkout",
-                  extras="local,money,location", ref="main") -> Path:
+                  extras="local,money,location", ref="main", channel=None) -> Path:
     path = tmp_path / "install.json"
-    path.write_text(json.dumps({
+    rec = {
         "method": method,
         "source": str(source),
         "extras": extras,
         "ref": ref,
-    }))
+    }
+    if channel is not None:
+        rec["channel"] = channel
+    path.write_text(json.dumps(rec))
     return path
 
 
@@ -77,7 +80,7 @@ class FakeRun:
     """
 
     def __init__(self, *, head="oldsha", remote="newsha", dirty="", install_rc=0,
-                 fetch_rc=0, reset_rc=0, status_rc=0):
+                 fetch_rc=0, reset_rc=0, status_rc=0, tags="v0.32.0\n"):
         self.calls: list[tuple[list[str], Path | None]] = []
         self.head = head
         self.remote = remote
@@ -86,13 +89,17 @@ class FakeRun:
         self.fetch_rc = fetch_rc
         self.reset_rc = reset_rc
         self.status_rc = status_rc
+        self.tags = tags
 
     def __call__(self, cmd, *, cwd=None):
         self.calls.append((list(cmd), cwd))
         if "status" in cmd:
             return subprocess.CompletedProcess(cmd, self.status_rc, self.dirty, "")
+        if "tag" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, self.tags, "")
         if "rev-parse" in cmd:
-            val = self.head if "HEAD" in cmd else self.remote
+            # bare HEAD → local sha; FETCH_HEAD or a tag ref → the remote (target) sha.
+            val = self.head if cmd[-1] == "HEAD" else self.remote
             return subprocess.CompletedProcess(cmd, 0, val + "\n", "")
         if "fetch" in cmd:
             return subprocess.CompletedProcess(cmd, self.fetch_rc, "", "")
@@ -371,3 +378,113 @@ class TestCheckoutFlow:
         rc = updater.run_update(cfg, record_path=rec, run=run, **kwargs)
         assert rc == 0
         assert "restart" in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# release channel
+# ---------------------------------------------------------------------------
+
+
+class TestChannel:
+    def test_legacy_record_without_channel_tracks_main(self, tmp_path):
+        # A record predating the channel field keeps the old branch-tracking
+        # behavior — never a silent reset backwards onto an older release tag.
+        cfg = _standalone_config(tmp_path)
+        src = _make_source(tmp_path)
+        rec = _write_record(tmp_path, src, ref="main")  # no channel key
+        run = FakeRun(head="old", remote="new")
+        kwargs, _, _ = _run_kwargs()
+        rc = updater.run_update(cfg, record_path=rec, run=run, **kwargs)
+        assert rc == 0
+        assert run.ran("fetch")
+        # main channel resets to FETCH_HEAD (branch tip), never to a tag
+        assert run.reset_targets() == ["FETCH_HEAD"]
+        assert not run.ran("tag")
+
+    def test_stable_channel_updates_to_latest_release_tag(self, tmp_path):
+        cfg = _standalone_config(tmp_path)
+        src = _make_source(tmp_path)
+        rec = _write_record(tmp_path, src, channel="stable")
+        run = FakeRun(head="old", remote="new", tags="v0.32.0\nv0.31.1\n")
+        kwargs, migrated, _ = _run_kwargs()
+        rc = updater.run_update(cfg, record_path=rec, run=run, **kwargs)
+        assert rc == 0
+        # fetched tags, listed them, reset to the highest release tag
+        assert run.ran("tag")
+        assert run.reset_targets() == ["v0.32.0"]
+        assert run.ran("install")
+        assert migrated == [cfg.db_path]
+
+    def test_stable_channel_already_on_latest_tag_skips_reinstall(self, tmp_path):
+        cfg = _standalone_config(tmp_path)
+        src = _make_source(tmp_path)
+        rec = _write_record(tmp_path, src, channel="stable")
+        run = FakeRun(head="same", remote="same")  # HEAD == tag commit
+        kwargs, migrated, _ = _run_kwargs()
+        rc = updater.run_update(cfg, record_path=rec, run=run, **kwargs)
+        assert rc == 0
+        assert not run.ran("reset")
+        assert not run.ran("install")
+        assert migrated == []
+
+    def test_stable_channel_no_release_tags_raises(self, tmp_path):
+        cfg = _standalone_config(tmp_path)
+        src = _make_source(tmp_path)
+        rec = _write_record(tmp_path, src, channel="stable")
+        run = FakeRun(head="old", remote="new", tags="")  # no v* tags
+        kwargs, _, _ = _run_kwargs()
+        with pytest.raises(updater.UpdateError) as exc:
+            updater.run_update(cfg, record_path=rec, run=run, **kwargs)
+        assert "release" in str(exc.value).lower()
+        assert "--channel main" in str(exc.value)
+        assert not run.ran("install")
+
+    def test_unknown_channel_in_record_raises(self, tmp_path):
+        cfg = _standalone_config(tmp_path)
+        src = _make_source(tmp_path)
+        rec = _write_record(tmp_path, src, channel="nightly")
+        run = FakeRun()
+        kwargs, _, _ = _run_kwargs()
+        with pytest.raises(updater.UpdateError) as exc:
+            updater.run_update(cfg, record_path=rec, run=run, **kwargs)
+        assert "channel" in str(exc.value).lower()
+        assert not run.ran("install")
+
+    def test_channel_override_persisted_to_record(self, tmp_path):
+        # Passing --channel main against a stable record switches AND persists,
+        # so future runs stay on main without repeating the flag.
+        cfg = _standalone_config(tmp_path)
+        src = _make_source(tmp_path)
+        rec = _write_record(tmp_path, src, channel="stable")
+        run = FakeRun(head="old", remote="new")
+        kwargs, _, _ = _run_kwargs()
+        rc = updater.run_update(cfg, record_path=rec, run=run, channel="main", **kwargs)
+        assert rc == 0
+        # tracked main (FETCH_HEAD), not the release tag
+        assert run.reset_targets() == ["FETCH_HEAD"]
+        persisted = json.loads(rec.read_text())
+        assert persisted["channel"] == "main"
+        # other fields preserved
+        assert persisted["source"] == str(src)
+        assert persisted["extras"] == "local,money,location"
+
+    def test_channel_override_to_stable_persisted(self, tmp_path):
+        cfg = _standalone_config(tmp_path)
+        src = _make_source(tmp_path)
+        rec = _write_record(tmp_path, src)  # legacy, no channel
+        run = FakeRun(head="old", remote="new", tags="v0.32.0\n")
+        kwargs, _, _ = _run_kwargs()
+        rc = updater.run_update(cfg, record_path=rec, run=run, channel="stable", **kwargs)
+        assert rc == 0
+        assert run.reset_targets() == ["v0.32.0"]
+        assert json.loads(rec.read_text())["channel"] == "stable"
+
+    def test_invalid_channel_override_raises(self, tmp_path):
+        cfg = _standalone_config(tmp_path)
+        src = _make_source(tmp_path)
+        rec = _write_record(tmp_path, src, channel="stable")
+        run = FakeRun()
+        kwargs, _, _ = _run_kwargs()
+        with pytest.raises(updater.UpdateError) as exc:
+            updater.run_update(cfg, record_path=rec, run=run, channel="bogus", **kwargs)
+        assert "channel" in str(exc.value).lower()
