@@ -12,8 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - A briefing now fetches its sources in parallel instead of one after another, so a slow source (a news frontpage or a mailbox round-trip) no longer holds up the rest — briefings that pull in several live sources assemble faster.
+- Talk replies are now split closer to Nextcloud Talk's real per-message limit, so a long answer arrives as one message (or a couple) instead of being chopped into many small fragments.
 
 ### Fixed
+- Long assistant replies are no longer truncated in web chat. A several-thousand-word answer was being clipped in the live view (to as little as 2000 characters) because the streamed result event was size-capped, even though the full text was stored. The complete answer now reaches the room.
 - Hitting a Claude subscription usage limit (session, weekly, or Opus) now transparently reroutes the task to the configured fallback brain instead of delivering the raw "You've hit your … limit" message as the bot's reply. Previously the limit text was returned as a successful answer, so no failover happened and every task kept hitting the same wall until the quota window reset.
 - Briefing content migration is now tracked per briefing instead of with a single database-wide flag. Opening the (on-by-default) Briefings tab before configuring any briefing no longer permanently disables block-seeding for briefings created afterward — a briefing added later still migrates, and existing installs heal themselves on the next run.
 - The newsletter/email briefing source now honors its lookback window to the hour. Because the mail server can only filter by date, it previously pulled in up to a day of extra mail beyond the stated window; that surplus is trimmed so "past N hours" means what it says.

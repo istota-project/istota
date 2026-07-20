@@ -74,6 +74,38 @@ class TestDeliver:
         assert calls[1].kwargs == {"reply_to": None, "reference_id": None}
 
     @pytest.mark.asyncio
+    async def test_long_message_under_talk_limit_not_split(self):
+        # A message that fits Talk's real per-message limit is posted whole,
+        # not chopped into many 4000-char parts (splitting used the wrong,
+        # far-too-small default before).
+        t = TalkTransport(_config())
+        assert t.capabilities.max_message_length == 30000
+        task = _task(is_group_chat=False)
+        long_text = "x" * 20000  # over the old 4000 default, under Talk's limit
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
+            inst = MockClient.return_value
+            inst.send_message = AsyncMock(return_value={"ocs": {"data": {"id": 7}}})
+            await t.deliver("room123", long_text, task=task, threaded=True)
+        inst.send_message.assert_called_once_with(
+            "room123", long_text, reply_to=None, reference_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_over_limit_splits_at_talk_limit(self):
+        # Beyond the limit it still splits — but at ~30000, so a 50000-char
+        # answer is two messages, not thirteen.
+        t = TalkTransport(_config())
+        task = _task(is_group_chat=False)
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
+            inst = MockClient.return_value
+            inst.send_message = AsyncMock(return_value={"ocs": {"data": {"id": 8}}})
+            await t.deliver("room123", "y" * 50000, task=task, threaded=True)
+        calls = inst.send_message.call_args_list
+        assert len(calls) == 2
+        for c in calls:
+            assert len(c.args[1]) <= 30000
+
+    @pytest.mark.asyncio
     async def test_no_threading_for_progress(self):
         t = TalkTransport(_config())
         task = _task(is_group_chat=True, talk_message_id=42, user_id="eve")

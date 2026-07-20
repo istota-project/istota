@@ -35,6 +35,13 @@ logger = logging.getLogger("istota.events")
 
 PAYLOAD_MAX_BYTES = 8192
 
+# Event kinds whose text is the user-facing deliverable and must reach the
+# stream surface (web chat / REPL) whole, however long — a several-thousand-word
+# answer or a long confirmation prompt cannot be clipped (ISSUE-178). The size
+# cap still guards every other kind (tool output, progress narration) so a
+# runaway tool result can't bloat the event log.
+_UNCAPPED_EVENT_KINDS = frozenset({"result", "confirmation"})
+
 # Generic "working on it" progress verbs, surface-agnostic (no markup) so every
 # output surface draws from one list. The executor stamps one onto the
 # ``task_started`` event so a stream surface (web chat) shows a real verb instead
@@ -210,9 +217,9 @@ class EventWriter:
         self._seq += 1
         payload = dict(payload) if payload else {}
 
-        # Enforce payload size cap.
+        # Enforce payload size cap (deliverable kinds are exempt — see above).
         payload_json = json.dumps(payload, default=str)
-        if len(payload_json.encode()) > PAYLOAD_MAX_BYTES:
+        if kind not in _UNCAPPED_EVENT_KINDS and len(payload_json.encode()) > PAYLOAD_MAX_BYTES:
             payload["_truncated"] = True
             for key in ("text", "summary", "prompt", "message", "description"):
                 if key in payload and isinstance(payload[key], str):
