@@ -108,6 +108,7 @@ const user = {
 	} as { connected: boolean; expires_at: string | null } | null,
 	features: {
 		chat: true,
+		briefings: true,
 		feeds: true,
 		location: true,
 		money: true,
@@ -1259,7 +1260,7 @@ const _MODULE_SCHEMAS: Record<string, ServiceSchema[]> = {
 	],
 };
 
-const MODULE_NAMES = ['feeds', 'money', 'location'];
+const MODULE_NAMES = ['feeds', 'money', 'location', 'health', 'briefings'];
 
 function buildServiceCard(s: ServiceSchema) {
 	const stored = mockSecrets[s.service] || {};
@@ -1513,6 +1514,247 @@ const handlers: MockHandler[] = [
 				const idx = mockDbBriefings.findIndex((b) => b.id === id);
 				if (idx >= 0) mockDbBriefings.splice(idx, 1);
 				return { ok: true, deleted: idx >= 0 };
+			}
+			return undefined;
+		};
+	})(),
+
+	// Briefings module (Stage 4/5): reader archive + block/source editor.
+	// Mirrors istota.briefings.routes mounted at /istota/api/briefings.
+	(() => {
+		const SOURCE_KINDS = [
+			'rss',
+			'email',
+			'browse',
+			'markets',
+			'calendar',
+			'todos',
+			'reminders',
+			'notes',
+		];
+		const STRUCTURED_KINDS = ['markets', 'calendar'];
+		const BROWSE_PRESETS = [
+			{ key: 'ap', name: 'AP News', url: 'https://apnews.com' },
+			{ key: 'reuters', name: 'Reuters', url: 'https://www.reuters.com' },
+			{ key: 'guardian', name: 'The Guardian', url: 'https://www.theguardian.com/world' },
+			{ key: 'ft', name: 'Financial Times', url: 'https://www.ft.com' },
+			{ key: 'aljazeera', name: 'Al Jazeera', url: 'https://www.aljazeera.com' },
+			{ key: 'lemonde', name: 'Le Monde', url: 'https://www.lemonde.fr/en/' },
+			{ key: 'spiegel', name: 'Der Spiegel', url: 'https://www.spiegel.de/international/' },
+		];
+
+		interface Src {
+			id: number;
+			position: number;
+			kind: string;
+			config: Record<string, unknown>;
+			enabled: boolean;
+		}
+		interface Block {
+			id: number;
+			briefing_name: string;
+			position: number;
+			title: string;
+			directive: string;
+			render_mode: string;
+			options: Record<string, unknown>;
+			sources: Src[];
+		}
+		let nextBlockId = 500;
+		let nextSourceId = 900;
+		const blocks: Block[] = [
+			{
+				id: 401,
+				briefing_name: 'morning',
+				position: 0,
+				title: 'World news',
+				directive: 'Summarize the top world stories in 4-5 bullet points.',
+				render_mode: 'synthesis',
+				options: {},
+				sources: [
+					{ id: 801, position: 0, kind: 'browse', config: { preset: 'ap' }, enabled: true },
+					{
+						id: 802,
+						position: 1,
+						kind: 'rss',
+						config: { feed_ref: { kind: 'subscription', value: 12 }, limit: 8 },
+						enabled: true,
+					},
+				],
+			},
+			{
+				id: 402,
+				briefing_name: 'morning',
+				position: 1,
+				title: 'Markets',
+				directive: 'Overnight index moves and notable movers.',
+				render_mode: 'structured',
+				options: {},
+				sources: [
+					{ id: 803, position: 0, kind: 'markets', config: {}, enabled: true },
+				],
+			},
+		];
+
+		const archive = [
+			{
+				id: 1,
+				briefing_name: 'morning',
+				subject: 'Morning briefing — Mon Jul 20',
+				generated_at: new Date(Date.now() - 3600_000).toISOString(),
+				task_id: 4201,
+				delivered_to: ['talk'],
+				body_md:
+					'# Morning briefing\n\n## World news\n\n- Mock story one about global affairs.\n- Mock story two about the economy.\n\n## Markets\n\n| Index | Level | Change |\n| --- | --- | --- |\n| S&P 500 | 5,432 | +0.4% |\n| Nasdaq | 17,800 | +0.7% |\n',
+			},
+			{
+				id: 2,
+				briefing_name: 'morning',
+				subject: 'Morning briefing — Fri Jul 17',
+				generated_at: new Date(Date.now() - 3 * 86400_000).toISOString(),
+				task_id: 4198,
+				delivered_to: ['talk', 'email'],
+				body_md:
+					'# Morning briefing\n\n## World news\n\n- An older mock story.\n- Another older mock story.\n',
+			},
+		];
+		const briefingNames = [...new Set(archive.map((a) => a.briefing_name))];
+
+		const configResponse = () => ({
+			briefings: [{ name: 'morning', blocks }],
+			schedule_names: ['morning'],
+			source_kinds: SOURCE_KINDS,
+			structured_kinds: STRUCTURED_KINDS,
+		});
+
+		return ({
+			url,
+			method,
+			body,
+		}: {
+			url: string;
+			method: string;
+			body?: unknown;
+		}) => {
+			const p = (url.split('?')[0] || '').replace('/istota/api/briefings', '');
+
+			// Archive list (paged, optional ?name= filter)
+			if (p === '/archive' && method === 'GET') {
+				const qs = new URLSearchParams(url.split('?')[1] || '');
+				const name = qs.get('name');
+				const items = (name
+					? archive.filter((a) => a.briefing_name === name)
+					: archive
+				).map(({ body_md, ...rest }) => rest);
+				return { items, total: items.length, briefing_names: briefingNames };
+			}
+			const am = p.match(/^\/archive\/(\d+)$/);
+			if (am && method === 'GET') {
+				const item = archive.find((a) => a.id === Number(am[1]));
+				return item ?? { error: 'not found' };
+			}
+
+			if (p === '/config' && method === 'GET') return configResponse();
+
+			// Block upsert / reorder / delete
+			if (p === '/blocks' && method === 'PUT') {
+				const b = (body ?? {}) as Record<string, unknown>;
+				const reorder = b.reorder as { ordered_ids?: number[] } | undefined;
+				if (reorder?.ordered_ids) {
+					const order = reorder.ordered_ids;
+					blocks.sort((x, y) => order.indexOf(x.id) - order.indexOf(y.id));
+					blocks.forEach((blk, i) => (blk.position = i));
+					return { status: 'ok' };
+				}
+				const id = Number(b.id) || 0;
+				if (id) {
+					const blk = blocks.find((x) => x.id === id);
+					if (blk) {
+						if (b.title !== undefined) blk.title = String(b.title);
+						if (b.directive !== undefined) blk.directive = String(b.directive);
+						if (b.render_mode !== undefined) blk.render_mode = String(b.render_mode);
+						if (b.position !== undefined) blk.position = Number(b.position);
+						return { status: 'ok', block: blk };
+					}
+				}
+				const blk: Block = {
+					id: nextBlockId++,
+					briefing_name: String(b.briefing_name ?? 'morning'),
+					position: Number(b.position ?? blocks.length),
+					title: String(b.title ?? 'New block'),
+					directive: String(b.directive ?? ''),
+					render_mode: String(b.render_mode ?? 'synthesis'),
+					options: {},
+					sources: [],
+				};
+				blocks.push(blk);
+				return { status: 'ok', block: blk };
+			}
+			const bm = p.match(/^\/blocks\/(\d+)$/);
+			if (bm && method === 'DELETE') {
+				const idx = blocks.findIndex((x) => x.id === Number(bm[1]));
+				if (idx >= 0) blocks.splice(idx, 1);
+				return { status: 'ok' };
+			}
+
+			// Source upsert / delete
+			if (p === '/sources' && method === 'PUT') {
+				const s = (body ?? {}) as Record<string, unknown>;
+				const sid = Number(s.id) || 0;
+				// Update-by-id: the real route locates the source by id alone
+				// (no block_id needed), so search across every block.
+				if (sid) {
+					for (const b of blocks) {
+						const src = b.sources.find((x) => x.id === sid);
+						if (src) {
+							if (s.kind !== undefined) src.kind = String(s.kind);
+							if (s.config !== undefined) src.config = s.config as Record<string, unknown>;
+							if (s.enabled !== undefined) src.enabled = Boolean(s.enabled);
+							return { status: 'ok', id: src.id };
+						}
+					}
+					return { error: 'unknown source' };
+				}
+				const blk = blocks.find((x) => x.id === Number(s.block_id));
+				if (!blk) return { error: 'unknown block' };
+				const src: Src = {
+					id: nextSourceId++,
+					position: blk.sources.length,
+					kind: String(s.kind ?? 'rss'),
+					config: (s.config as Record<string, unknown>) ?? {},
+					enabled: s.enabled !== false,
+				};
+				blk.sources.push(src);
+				return { status: 'ok', id: src.id };
+			}
+			const sm = p.match(/^\/sources\/(\d+)$/);
+			if (sm && method === 'DELETE') {
+				const id = Number(sm[1]);
+				for (const blk of blocks) {
+					const idx = blk.sources.findIndex((x) => x.id === id);
+					if (idx >= 0) {
+						blk.sources.splice(idx, 1);
+						break;
+					}
+				}
+				return { status: 'ok' };
+			}
+
+			if (p === '/browse-presets' && method === 'GET') {
+				return { presets: BROWSE_PRESETS };
+			}
+			if (p === '/feed-options' && method === 'GET') {
+				return {
+					available: true,
+					subscriptions: [
+						{ kind: 'subscription', value: 12, label: 'Hacker News' },
+						{ kind: 'subscription', value: 13, label: 'Ars Technica' },
+					],
+					categories: [
+						{ kind: 'category', value: 1, label: 'Tech' },
+						{ kind: 'category', value: 2, label: 'News' },
+					],
+				};
 			}
 			return undefined;
 		};

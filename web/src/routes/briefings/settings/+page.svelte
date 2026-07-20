@@ -3,6 +3,9 @@
 	import { base } from '$app/paths';
 	import {
 		getMe,
+		getBriefings,
+		upsertBriefing,
+		deleteBriefing,
 		getBriefingConfig,
 		putBriefingBlock,
 		deleteBriefingBlock,
@@ -10,23 +13,86 @@
 		deleteBriefingSource,
 		getBrowsePresets,
 		getFeedOptions,
+		type UserBriefingRow,
 		type BriefingBlock,
+		type BriefingSource,
 		type BriefingConfigResponse,
 		type BrowsePreset,
-		type FeedOptions
+		type FeedOptions,
 	} from '$lib/api';
+	import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
+	import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+	import { briefingsRefreshNonce } from '$lib/stores/briefings';
 
 	let loading = $state(true);
-	let error = $state<string | null>(null);
+	let error = $state('');
 	let moduleEnabled = $state(true);
+
+	// --- Schedule & delivery ---
+	let briefings: UserBriefingRow[] = $state([]);
+	let briefingOutputs: string[] = $state(['talk', 'email', 'ntfy', 'web']);
+	let newBriefing = $state({
+		name: '',
+		cron: '0 7 * * *',
+		conversation_token: '',
+		output: 'talk' as string,
+		enabled: true,
+	});
+	let briefingError = $state('');
+	let briefingSaving = $state(false);
+
+	const briefingOutputOptions: SelectOption[] = $derived(
+		briefingOutputs.map((o) => ({ value: o, label: o })),
+	);
+
+	// --- Content blocks ---
 	let config = $state<BriefingConfigResponse | null>(null);
 	let presets = $state<BrowsePreset[]>([]);
 	let feedOptions = $state<FeedOptions | null>(null);
-
 	let selectedName = $state<string>('');
 	let newBlockTitle = $state('');
+	let expandedId = $state<number | null>(null);
+	let addingSaving = $state(false);
 
-	const KINDS = ['email', 'rss', 'browse', 'markets', 'calendar', 'todos', 'reminders', 'notes'];
+	// The source currently open in the inline config editor (a draft copy — only
+	// committed to the backend on Save).
+	let sourceDraft = $state<{ id: number; kind: string; config: Record<string, unknown> } | null>(
+		null,
+	);
+	let newSender = $state('');
+
+	// A unified delete confirmation across briefings / blocks / sources.
+	let confirmDelete = $state<{
+		kind: 'briefing' | 'block' | 'source';
+		id: number;
+		label: string;
+	} | null>(null);
+
+	const KIND_LABELS: Record<string, string> = {
+		rss: 'RSS feed',
+		email: 'Newsletters',
+		browse: 'Web page',
+		markets: 'Markets',
+		calendar: 'Calendar',
+		todos: 'Todos',
+		reminders: 'Reminders',
+		notes: 'Notes',
+	};
+	const DEFAULT_FILE: Record<string, string> = {
+		todos: 'TODO.md',
+		reminders: 'reminders.md',
+		notes: 'NOTES.md',
+	};
+	const RENDER_OPTIONS: SelectOption[] = [
+		{ value: 'synthesis', label: 'Synthesis (summarize)' },
+		{ value: 'structured', label: 'Structured (verbatim)' },
+	];
+	const EMAIL_MODE_OPTIONS: SelectOption[] = [
+		{ value: 'shared', label: 'Shared newsletter pool' },
+		{ value: 'senders', label: 'Selected senders' },
+	];
+
+	const sourceKinds = $derived(config?.source_kinds ?? Object.keys(KIND_LABELS));
 
 	const allNames = $derived.by(() => {
 		if (!config) return [] as string[];
@@ -41,63 +107,120 @@
 		return config.briefings.find((b) => b.name === selectedName)?.blocks ?? [];
 	});
 
-	async function reload() {
-		error = null;
-		try {
-			config = await getBriefingConfig();
-			if (!selectedName && allNames.length) selectedName = allNames[0];
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load';
-		}
+	const rssOptions: SelectOption[] = $derived([
+		...(feedOptions?.categories ?? []).map((c) => ({
+			value: `category:${c.value}`,
+			label: `Category: ${c.label}`,
+		})),
+		...(feedOptions?.subscriptions ?? []).map((s) => ({
+			value: `subscription:${s.value}`,
+			label: `Feed: ${s.label}`,
+		})),
+	]);
+	const browseOptions: SelectOption[] = $derived([
+		{ value: '__custom__', label: 'Custom URL…' },
+		...presets.map((p) => ({ value: `preset:${p.key}`, label: p.name })),
+	]);
+
+	async function reloadSchedule() {
+		const resp = await getBriefings();
+		briefings = resp.briefings;
+		briefingOutputs = resp.outputs?.length ? resp.outputs : ['talk', 'email', 'ntfy', 'web'];
+	}
+
+	async function reloadContent() {
+		config = await getBriefingConfig();
+		if (!selectedName && allNames.length) selectedName = allNames[0];
 	}
 
 	onMount(async () => {
 		try {
 			const me = await getMe();
 			moduleEnabled = me.features.briefings;
-			if (!moduleEnabled) {
-				loading = false;
-				return;
-			}
-			[presets, feedOptions] = await Promise.all([
-				getBrowsePresets().then((r) => r.presets),
-				getFeedOptions()
+			if (!moduleEnabled) return;
+			await Promise.all([
+				reloadSchedule(),
+				(async () => {
+					[presets, feedOptions] = await Promise.all([
+						getBrowsePresets().then((r) => r.presets),
+						getFeedOptions(),
+					]);
+					await reloadContent();
+				})(),
 			]);
-			await reload();
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load';
+			error = e instanceof Error ? e.message : 'Failed to load settings';
 		} finally {
 			loading = false;
 		}
 	});
 
+	// ---- Schedule handlers ----
+	async function submitBriefing(e: SubmitEvent) {
+		e.preventDefault();
+		briefingError = '';
+		const name = newBriefing.name.trim();
+		const cron = newBriefing.cron.trim();
+		if (!name || !cron) {
+			briefingError = 'Name and cron are required.';
+			return;
+		}
+		if (newBriefing.output === 'talk' && !newBriefing.conversation_token.trim()) {
+			briefingError = `Conversation token is required when output is "${newBriefing.output}".`;
+			return;
+		}
+		briefingSaving = true;
+		try {
+			await upsertBriefing({
+				name,
+				cron,
+				conversation_token: newBriefing.conversation_token.trim() || undefined,
+				output: newBriefing.output,
+				enabled: newBriefing.enabled,
+			});
+			newBriefing = {
+				name: '',
+				cron: '0 7 * * *',
+				conversation_token: '',
+				output: 'talk',
+				enabled: true,
+			};
+			await Promise.all([reloadSchedule(), reloadContent()]);
+			briefingsRefreshNonce.update((n) => n + 1);
+		} catch (e) {
+			briefingError = (e as Error).message || 'Save failed';
+		} finally {
+			briefingSaving = false;
+		}
+	}
+
+	// ---- Block handlers ----
 	async function addBlock() {
 		const title = newBlockTitle.trim();
 		if (!title || !selectedName) return;
-		await putBriefingBlock({ briefing_name: selectedName, title });
-		newBlockTitle = '';
-		await reload();
+		addingSaving = true;
+		try {
+			const resp = await putBriefingBlock({ briefing_name: selectedName, title });
+			newBlockTitle = '';
+			await reloadContent();
+			if (resp.block?.id) expandedId = resp.block.id;
+		} finally {
+			addingSaving = false;
+		}
 	}
 
-	async function renameBlock(block: BriefingBlock, title: string) {
-		await putBriefingBlock({ id: block.id, title });
-		await reload();
+	function toggleExpand(block: BriefingBlock) {
+		expandedId = expandedId === block.id ? null : block.id;
+		sourceDraft = null;
 	}
 
-	async function setRenderMode(block: BriefingBlock, render_mode: string) {
-		await putBriefingBlock({ id: block.id, render_mode });
-		await reload();
+	async function updateBlock(block: BriefingBlock, patch: Record<string, unknown>) {
+		await putBriefingBlock({ id: block.id, ...patch });
+		await reloadContent();
 	}
 
-	async function setDirective(block: BriefingBlock, directive: string) {
-		await putBriefingBlock({ id: block.id, directive });
-		await reload();
-	}
-
-	async function removeBlock(block: BriefingBlock) {
-		if (!confirm(`Delete block "${block.title}"?`)) return;
-		await deleteBriefingBlock(block.id);
-		await reload();
+	function askRemoveBlock(block: BriefingBlock) {
+		confirmDelete = { kind: 'block', id: block.id, label: block.title };
 	}
 
 	async function move(block: BriefingBlock, dir: -1 | 1) {
@@ -107,363 +230,1105 @@
 		if (swap < 0 || swap >= ids.length) return;
 		[ids[idx], ids[swap]] = [ids[swap], ids[idx]];
 		await putBriefingBlock({ reorder: { briefing_name: selectedName, ordered_ids: ids } });
-		await reload();
+		await reloadContent();
 	}
 
+	// ---- Source handlers ----
 	async function addSource(block: BriefingBlock, kind: string) {
-		const config: Record<string, unknown> = {};
-		if (kind === 'email') config.mode = 'shared';
-		await putBriefingSource({ block_id: block.id, kind, config });
-		await reload();
+		const cfg: Record<string, unknown> = kind === 'email' ? { mode: 'shared' } : {};
+		const resp = await putBriefingSource({ block_id: block.id, kind, config: cfg });
+		await reloadContent();
+		newSender = '';
+		if (resp.id) sourceDraft = { id: resp.id, kind, config: cfg };
 	}
 
-	async function removeSource(id: number) {
-		await deleteBriefingSource(id);
-		await reload();
+	function startEditSource(source: BriefingSource) {
+		sourceDraft = {
+			id: source.id,
+			kind: source.kind,
+			// JSON round-trip deep-clones and strips the reactive $state proxy
+			// (structuredClone rejects proxies); source config is plain JSON.
+			config: JSON.parse(JSON.stringify(source.config ?? {})),
+		};
+		newSender = '';
 	}
 
-	async function updateSourceConfig(id: number, cfg: Record<string, unknown>) {
-		await putBriefingSource({ id, config: cfg });
-		await reload();
+	function cancelSource() {
+		sourceDraft = null;
+		newSender = '';
 	}
 
-	async function toggleSource(id: number, enabled: boolean) {
-		await putBriefingSource({ id, enabled });
-		await reload();
+	async function saveSource() {
+		if (!sourceDraft) return;
+		await putBriefingSource({ id: sourceDraft.id, config: sourceDraft.config });
+		sourceDraft = null;
+		newSender = '';
+		await reloadContent();
 	}
+
+	async function toggleSource(source: BriefingSource, enabled: boolean) {
+		await putBriefingSource({ id: source.id, enabled });
+		await reloadContent();
+	}
+
+	function askRemoveSource(source: BriefingSource) {
+		confirmDelete = { kind: 'source', id: source.id, label: KIND_LABELS[source.kind] ?? source.kind };
+	}
+
+	async function performDelete() {
+		if (!confirmDelete) return;
+		const target = confirmDelete;
+		confirmDelete = null;
+		try {
+			if (target.kind === 'briefing') {
+				await deleteBriefing(target.id);
+				await Promise.all([reloadSchedule(), reloadContent()]);
+				briefingsRefreshNonce.update((n) => n + 1);
+			} else if (target.kind === 'block') {
+				await deleteBriefingBlock(target.id);
+				if (expandedId === target.id) expandedId = null;
+				await reloadContent();
+			} else {
+				await deleteBriefingSource(target.id);
+				if (sourceDraft?.id === target.id) sourceDraft = null;
+				await reloadContent();
+			}
+		} catch (e) {
+			error = (e as Error).message || 'Delete failed';
+		}
+	}
+
+	// ---- Draft config helpers ----
+	function setDraftConfig(patch: Record<string, unknown>) {
+		if (!sourceDraft) return;
+		const next = { ...sourceDraft.config, ...patch };
+		for (const [k, v] of Object.entries(patch)) {
+			if (v === undefined || v === null) delete next[k];
+		}
+		sourceDraft = { ...sourceDraft, config: next };
+	}
+
+	function setDraftNumber(field: string, raw: string) {
+		const t = raw.trim();
+		if (t === '') {
+			setDraftConfig({ [field]: undefined });
+			return;
+		}
+		const n = Number(t);
+		if (Number.isFinite(n)) setDraftConfig({ [field]: n });
+	}
+
+	function draftSenders(): string[] {
+		return (sourceDraft?.config.senders as string[]) ?? [];
+	}
+
+	function addSender() {
+		const v = newSender.trim();
+		if (!v) return;
+		const cur = draftSenders();
+		if (!cur.includes(v)) setDraftConfig({ senders: [...cur, v] });
+		newSender = '';
+	}
+
+	function removeSender(v: string) {
+		setDraftConfig({ senders: draftSenders().filter((s) => s !== v) });
+	}
+
+	// ---- Summaries / labels ----
+	function feedRefLabel(ref: { kind: string; value: number }): string {
+		const list = ref.kind === 'category' ? feedOptions?.categories : feedOptions?.subscriptions;
+		const hit = list?.find((o) => o.value === ref.value);
+		const prefix = ref.kind === 'category' ? 'Category' : 'Feed';
+		return hit ? `${prefix}: ${hit.label}` : `${prefix} #${ref.value}`;
+	}
+
+	function rssDraftValue(): string {
+		const ref = sourceDraft?.config.feed_ref as { kind: string; value: number } | undefined;
+		return ref ? `${ref.kind}:${ref.value}` : '';
+	}
+
+	function browseDraftValue(): string {
+		const preset = sourceDraft?.config.preset;
+		return preset ? `preset:${preset}` : '__custom__';
+	}
+
+	function sourceSummary(s: BriefingSource): string {
+		const c = s.config ?? {};
+		switch (s.kind) {
+			case 'email':
+				return c.mode === 'senders'
+					? `Senders: ${((c.senders as string[]) ?? []).join(', ') || '(none set)'}`
+					: 'Shared newsletter pool';
+			case 'rss': {
+				const ref = c.feed_ref as { kind: string; value: number } | undefined;
+				return ref ? feedRefLabel(ref) : 'No feed selected';
+			}
+			case 'browse':
+				if (c.preset) return presets.find((p) => p.key === c.preset)?.name ?? String(c.preset);
+				if (c.url) return String(c.url);
+				return 'No page set';
+			case 'markets': {
+				const parts = [c.indices, c.futures].filter((x) => Array.isArray(x) && x.length);
+				return parts.length ? 'Custom tickers' : 'Default indices & futures';
+			}
+			case 'calendar':
+				return 'Your connected calendars';
+			case 'todos':
+			case 'reminders':
+			case 'notes':
+				return c.path ? String(c.path) : `${DEFAULT_FILE[s.kind]} (default)`;
+			default:
+				return '';
+		}
+	}
+
+	const addSourceOptions: SelectOption[] = $derived(
+		sourceKinds.map((k) => ({ value: k, label: KIND_LABELS[k] ?? k })),
+	);
 </script>
 
 <svelte:head>
 	<title>Briefings settings</title>
 </svelte:head>
 
-<div class="settings">
-	<h1>Briefings settings</h1>
-
-	{#if loading}
-		<p class="status">Loading…</p>
-	{:else if !moduleEnabled}
-		<div class="banner">
-			Module disabled — enable it in <a href="{base}/settings">Settings → Preferences</a>.
+<SettingsLayout
+	title="Briefings settings"
+	description="Schedule and deliver briefings, and shape their content blocks. A briefing runs on its cron in your timezone and is synthesized from the blocks below."
+	{loading}
+	{error}
+>
+	{#if !moduleEnabled}
+		<div class="banner info">
+			Briefings module is disabled. Enable it in
+			<a href="{base}/settings">Settings → Preferences</a> to manage schedules and content.
 		</div>
-	{:else if error}
-		<p class="status error">{error}</p>
-	{:else if config}
-		<p class="muted">
-			Content blocks are synthesized into your briefing sections. Schedule and delivery
-			are set on the <a href="{base}/settings">Settings</a> page.
-		</p>
-
-		<div class="briefing-pick">
-			<label>
-				Briefing:
-				<select bind:value={selectedName}>
-					{#each allNames as n (n)}
-						<option value={n}>{n}</option>
-					{/each}
-				</select>
-			</label>
-			{#if allNames.length === 0}
-				<span class="muted">No briefings scheduled yet — create one in Settings first.</span>
-			{/if}
-		</div>
-
-		{#if selectedName}
-			<div class="blocks">
-				{#each currentBlocks as block (block.id)}
-					<div class="block-card">
-						<div class="block-head">
-							<input
-								class="block-title"
-								value={block.title}
-								onchange={(e) => renameBlock(block, (e.target as HTMLInputElement).value)}
-							/>
-							<div class="block-actions">
-								<button title="Move up" onclick={() => move(block, -1)}>↑</button>
-								<button title="Move down" onclick={() => move(block, 1)}>↓</button>
-								<button class="danger" title="Delete" onclick={() => removeBlock(block)}>✕</button>
-							</div>
-						</div>
-
-						<label class="row">
-							Directive:
-							<input
-								class="directive"
-								value={block.directive}
-								placeholder="e.g. 3–5 stories, neutral tone"
-								onchange={(e) => setDirective(block, (e.target as HTMLInputElement).value)}
-							/>
-						</label>
-
-						<label class="row">
-							Render:
-							<select
-								value={block.render_mode}
-								onchange={(e) => setRenderMode(block, (e.target as HTMLSelectElement).value)}
-							>
-								<option value="synthesis">Synthesis (summarize)</option>
-								<option value="structured">Structured (verbatim)</option>
-							</select>
-						</label>
-
-						<div class="sources">
-							<h4>Sources</h4>
-							{#each block.sources as source (source.id)}
-								<div class="source-row">
-									<span class="source-kind">{source.kind}</span>
-									{#if source.kind === 'email'}
-										<select
-											value={(source.config.mode as string) ?? 'shared'}
-											onchange={(e) =>
-												updateSourceConfig(source.id, {
-													...source.config,
-													mode: (e.target as HTMLSelectElement).value
-												})}
-										>
-											<option value="shared">Shared pool</option>
-											<option value="senders">Selected senders</option>
-										</select>
-										{#if source.config.mode === 'senders'}
-											<input
-												class="grow"
-												placeholder="*@semafor.com, news@axios.com"
-												value={((source.config.senders as string[]) ?? []).join(', ')}
-												onchange={(e) =>
-													updateSourceConfig(source.id, {
-														...source.config,
-														senders: (e.target as HTMLInputElement).value
-															.split(',')
-															.map((s) => s.trim())
-															.filter(Boolean)
-													})}
-											/>
-										{/if}
-									{:else if source.kind === 'browse'}
-										<select
-											value={(source.config.preset as string) ?? ''}
-											onchange={(e) =>
-												updateSourceConfig(source.id, {
-													preset: (e.target as HTMLSelectElement).value || null,
-													url: null
-												})}
-										>
-											<option value="">Custom URL…</option>
-											{#each presets as p (p.key)}
-												<option value={p.key}>{p.name}</option>
-											{/each}
-										</select>
-										{#if !source.config.preset}
-											<input
-												class="grow"
-												placeholder="https://…"
-												value={(source.config.url as string) ?? ''}
-												onchange={(e) =>
-													updateSourceConfig(source.id, {
-														url: (e.target as HTMLInputElement).value
-													})}
-											/>
-										{/if}
-									{:else if source.kind === 'rss'}
-										<select
-											onchange={(e) => {
-												const v = (e.target as HTMLSelectElement).value;
-												if (!v) return;
-												const [kind, value] = v.split(':');
-												updateSourceConfig(source.id, {
-													...source.config,
-													feed_ref: { kind, value: Number(value) }
-												});
-											}}
-										>
-											<option value="">Pick a feed / category…</option>
-											{#each feedOptions?.categories ?? [] as c (c.value)}
-												<option value={`category:${c.value}`}>Category: {c.label}</option>
-											{/each}
-											{#each feedOptions?.subscriptions ?? [] as s (s.value)}
-												<option value={`subscription:${s.value}`}>Feed: {s.label}</option>
-											{/each}
-										</select>
-										{#if source.config.feed_ref}
-											<span class="muted"
-												>{(source.config.feed_ref as { kind: string }).kind}</span
+	{:else}
+		<SettingsCard
+			title="Schedule &amp; delivery ({briefings.length})"
+			description="Cron-scheduled summaries posted to a Talk room or sent by email. Operator-managed entries (from config.toml) are read-only here."
+		>
+			{#if briefings.length === 0}
+				<p class="empty">No briefings scheduled yet.</p>
+			{:else}
+				<div class="table-scroll">
+					<table class="grid">
+						<thead>
+							<tr>
+								<th class="col-name">Name</th>
+								<th>Cron</th>
+								<th>Output</th>
+								<th>Token</th>
+								<th class="col-source">Source</th>
+								<th class="actions"></th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each briefings as b (`${b.managed}-${b.id ?? b.name}`)}
+								<tr>
+									<td class="col-name">
+										{b.name}
+										{#if !b.enabled}<span class="muted"> (disabled)</span>{/if}
+									</td>
+									<td><code>{b.cron}</code></td>
+									<td>{b.output}</td>
+									<td class="muted"><code>{b.conversation_token || '—'}</code></td>
+									<td class="col-source muted">
+										{b.managed === 'config' ? 'config.toml' : 'user'}
+									</td>
+									<td class="actions">
+										{#if b.managed === 'db' && b.id !== undefined}
+											<button
+												class="icon-btn danger"
+												title="Remove"
+												type="button"
+												onclick={() =>
+													(confirmDelete = { kind: 'briefing', id: b.id!, label: b.name })}>×</button
 											>
 										{/if}
-									{/if}
-									<label class="toggle">
-										<input
-											type="checkbox"
-											checked={source.enabled}
-											onchange={(e) =>
-												toggleSource(source.id, (e.target as HTMLInputElement).checked)}
-										/>
-										on
-									</label>
-									<button class="danger" onclick={() => removeSource(source.id)}>✕</button>
-								</div>
+									</td>
+								</tr>
 							{/each}
-
-							<div class="add-source">
-								<select
-									onchange={(e) => {
-										const v = (e.target as HTMLSelectElement).value;
-										if (v) {
-											addSource(block, v);
-											(e.target as HTMLSelectElement).value = '';
-										}
-									}}
-								>
-									<option value="">+ Add source…</option>
-									{#each KINDS as k (k)}
-										<option value={k}>{k}</option>
-									{/each}
-								</select>
-							</div>
-						</div>
-					</div>
-				{/each}
-
-				<div class="add-block">
-					<input placeholder="New block title (e.g. World News)" bind:value={newBlockTitle} />
-					<button onclick={addBlock} disabled={!newBlockTitle.trim()}>Add block</button>
+						</tbody>
+					</table>
 				</div>
-			</div>
-		{/if}
+			{/if}
+
+			<form class="add-form" onsubmit={submitBriefing}>
+				<h3>Add briefing</h3>
+				<div class="add-grid">
+					<SettingsField label="Name">
+						<input type="text" placeholder="morning" bind:value={newBriefing.name} />
+					</SettingsField>
+					<SettingsField label="Cron (user TZ)">
+						<input type="text" placeholder="0 7 * * 1-5" bind:value={newBriefing.cron} />
+					</SettingsField>
+					<SettingsField label="Output">
+						<Select
+							value={newBriefing.output}
+							options={briefingOutputOptions}
+							onValueChange={(v) => (newBriefing.output = v)}
+							ariaLabel="Output"
+							fullWidth
+						/>
+					</SettingsField>
+					<SettingsField label="Conversation token">
+						<input
+							type="text"
+							placeholder="Talk room token"
+							bind:value={newBriefing.conversation_token}
+						/>
+					</SettingsField>
+					<SettingsField label="Enabled" checkbox>
+						<input type="checkbox" bind:checked={newBriefing.enabled} />
+					</SettingsField>
+				</div>
+				<div class="add-actions">
+					<Button variant="primary" size="sm" type="submit" disabled={briefingSaving}>
+						{briefingSaving ? 'Saving…' : 'Add briefing'}
+					</Button>
+				</div>
+				{#if briefingError}
+					<div class="banner error">{briefingError}</div>
+				{/if}
+			</form>
+		</SettingsCard>
+
+		<SettingsCard
+			title="Content blocks"
+			description="Blocks become the sections of your briefing, in order. Each block has a directive and one or more sources. Click a block to edit it."
+		>
+			{#if config}
+				<div class="briefing-pick">
+					<SettingsField label="Briefing">
+						<Select
+							value={selectedName}
+							options={allNames.map((n) => ({ value: n, label: n }))}
+							onValueChange={(v) => {
+								selectedName = v;
+								expandedId = null;
+								sourceDraft = null;
+							}}
+							ariaLabel="Briefing"
+						/>
+					</SettingsField>
+					{#if allNames.length === 0}
+						<span class="muted">No briefings scheduled yet — add one above first.</span>
+					{/if}
+				</div>
+
+				{#if selectedName}
+					{#if currentBlocks.length === 0}
+						<p class="empty">No blocks yet. Add one below to start shaping this briefing.</p>
+					{:else}
+						<div class="table-scroll">
+							<table class="grid">
+								<thead>
+									<tr>
+										<th class="col-order">Order</th>
+										<th>Block</th>
+										<th class="col-render">Render</th>
+										<th class="col-src">Sources</th>
+										<th class="actions"></th>
+									</tr>
+								</thead>
+								<tbody>
+									{#each currentBlocks as block, idx (block.id)}
+										<tr class:expanded={expandedId === block.id}>
+											<td class="col-order actions">
+												<button
+													class="icon-btn"
+													title="Move up"
+													type="button"
+													disabled={idx === 0}
+													onclick={() => move(block, -1)}>↑</button
+												>
+												<button
+													class="icon-btn"
+													title="Move down"
+													type="button"
+													disabled={idx === currentBlocks.length - 1}
+													onclick={() => move(block, 1)}>↓</button
+												>
+											</td>
+											<td>
+												<button class="block-name" type="button" onclick={() => toggleExpand(block)}>
+													<span class="chevron">{expandedId === block.id ? '▾' : '▸'}</span>
+													<span class="block-title-text">{block.title}</span>
+												</button>
+												{#if block.directive}
+													<div class="block-directive muted">{block.directive}</div>
+												{/if}
+											</td>
+											<td class="col-render">
+												<span class="render-pill">{block.render_mode}</span>
+											</td>
+											<td class="col-src">
+												{#if block.sources.length}
+													<div class="kind-pills">
+														{#each block.sources as s (s.id)}
+															<span class="kind-pill" class:off={!s.enabled}>{s.kind}</span>
+														{/each}
+													</div>
+												{:else}
+													<span class="muted">none</span>
+												{/if}
+											</td>
+											<td class="actions">
+												<button
+													class="icon-btn"
+													title={expandedId === block.id ? 'Collapse' : 'Edit'}
+													type="button"
+													onclick={() => toggleExpand(block)}>✎</button
+												>
+												<button
+													class="icon-btn danger"
+													title="Delete block"
+													type="button"
+													onclick={() => askRemoveBlock(block)}>×</button
+												>
+											</td>
+										</tr>
+										{#if expandedId === block.id}
+											<tr class="detail-row">
+												<td colspan="5">
+													<div class="block-detail">
+														<div class="detail-grid">
+															<SettingsField label="Title">
+																<input
+																	type="text"
+																	value={block.title}
+																	onchange={(e) =>
+																		updateBlock(block, {
+																			title: (e.target as HTMLInputElement).value,
+																		})}
+																/>
+															</SettingsField>
+															<SettingsField label="Render mode">
+																<Select
+																	value={block.render_mode}
+																	options={RENDER_OPTIONS}
+																	onValueChange={(v) => updateBlock(block, { render_mode: v })}
+																	ariaLabel="Render mode"
+																	fullWidth
+																/>
+															</SettingsField>
+															<SettingsField
+																label="Directive"
+																wide
+																hint="How the model should treat this block's sources."
+															>
+																<textarea
+																	rows="2"
+																	value={block.directive}
+																	placeholder="e.g. 3–5 stories, neutral tone"
+																	onchange={(e) =>
+																		updateBlock(block, {
+																			directive: (e.target as HTMLTextAreaElement).value,
+																		})}
+																></textarea>
+															</SettingsField>
+														</div>
+
+														<div class="sources-block">
+															<div class="sources-head">
+																<h4>Sources</h4>
+																<Select
+																	value=""
+																	options={addSourceOptions}
+																	placeholder="+ Add source…"
+																	onValueChange={(v) => {
+																		if (v) addSource(block, v);
+																	}}
+																	ariaLabel="Add source"
+																/>
+															</div>
+
+															{#if block.sources.length === 0}
+																<p class="empty small">No sources yet — add one above.</p>
+															{:else}
+																<table class="grid sub">
+																	<tbody>
+																		{#each block.sources as source (source.id)}
+																			{#if sourceDraft?.id === source.id}
+																				<tr class="src-form-row">
+																					<td colspan="4">
+																						<div class="source-form">
+																							<div class="source-form-head">
+																								<span class="kind-pill">{source.kind}</span>
+																								<span class="kind-name"
+																									>{KIND_LABELS[source.kind] ?? source.kind}</span
+																								>
+																							</div>
+
+																							{#if source.kind === 'email'}
+																								<SettingsField label="Mode">
+																									<Select
+																										value={(sourceDraft.config.mode as string) ??
+																											'shared'}
+																										options={EMAIL_MODE_OPTIONS}
+																										onValueChange={(v) => setDraftConfig({ mode: v })}
+																										ariaLabel="Email mode"
+																										fullWidth
+																									/>
+																								</SettingsField>
+																								{#if sourceDraft.config.mode === 'senders'}
+																									<SettingsField
+																										label="Sender filters"
+																										hint="fnmatch patterns, e.g. *@semafor.com or news@axios.com"
+																									>
+																										<div class="chip-list">
+																											{#each draftSenders() as s (s)}
+																												<span class="chip">
+																													{s}
+																													<button
+																														type="button"
+																														title="Remove"
+																														onclick={() => removeSender(s)}>×</button
+																													>
+																												</span>
+																											{/each}
+																											{#if draftSenders().length === 0}
+																												<span class="muted small">No senders yet.</span>
+																											{/if}
+																										</div>
+																										<div class="chip-add">
+																											<input
+																												type="text"
+																												placeholder="*@example.com"
+																												bind:value={newSender}
+																												onkeydown={(e) => {
+																													if (e.key === 'Enter') {
+																														e.preventDefault();
+																														addSender();
+																													}
+																												}}
+																											/>
+																											<Button
+																												variant="secondary"
+																												size="sm"
+																												onclick={addSender}
+																												disabled={!newSender.trim()}>Add</Button
+																											>
+																										</div>
+																									</SettingsField>
+																								{/if}
+																								<SettingsField
+																									label="Lookback (hours)"
+																									hint="Leave blank to use the briefing default."
+																								>
+																									<input
+																										type="number"
+																										min="1"
+																										value={(sourceDraft.config.lookback_hours as number) ??
+																											''}
+																										placeholder="default"
+																										oninput={(e) =>
+																											setDraftNumber(
+																												'lookback_hours',
+																												(e.target as HTMLInputElement).value,
+																											)}
+																									/>
+																								</SettingsField>
+																							{:else if source.kind === 'rss'}
+																								<SettingsField label="Feed or category">
+																									<Select
+																										value={rssDraftValue()}
+																										options={rssOptions}
+																										placeholder="Pick a feed / category…"
+																										onValueChange={(v) => {
+																											const [kind, value] = v.split(':');
+																											setDraftConfig({
+																												feed_ref: { kind, value: Number(value) },
+																											});
+																										}}
+																										ariaLabel="Feed or category"
+																										fullWidth
+																									/>
+																								</SettingsField>
+																								{#if rssOptions.length === 0}
+																									<p class="muted small">
+																										No feeds available — subscribe in the Feeds module first.
+																									</p>
+																								{/if}
+																								<div class="inline-fields">
+																									<SettingsField label="Max entries">
+																										<input
+																											type="number"
+																											min="1"
+																											value={(sourceDraft.config.limit as number) ?? ''}
+																											placeholder="10"
+																											oninput={(e) =>
+																												setDraftNumber(
+																													'limit',
+																													(e.target as HTMLInputElement).value,
+																												)}
+																										/>
+																									</SettingsField>
+																									<SettingsField label="Unread only" checkbox>
+																										<input
+																											type="checkbox"
+																											checked={!!sourceDraft.config.unread_only}
+																											onchange={(e) =>
+																												setDraftConfig({
+																													unread_only: (e.target as HTMLInputElement)
+																														.checked,
+																												})}
+																										/>
+																									</SettingsField>
+																								</div>
+																							{:else if source.kind === 'browse'}
+																								<SettingsField label="Source">
+																									<Select
+																										value={browseDraftValue()}
+																										options={browseOptions}
+																										onValueChange={(v) => {
+																											if (v === '__custom__') {
+																												setDraftConfig({
+																													preset: undefined,
+																													url:
+																														(sourceDraft?.config.url as string) ?? '',
+																												});
+																											} else {
+																												setDraftConfig({
+																													preset: v.split(':')[1],
+																													url: undefined,
+																												});
+																											}
+																										}}
+																										ariaLabel="Browse source"
+																										fullWidth
+																									/>
+																								</SettingsField>
+																								{#if !sourceDraft.config.preset}
+																									<SettingsField label="URL">
+																										<input
+																											type="text"
+																											placeholder="https://…"
+																											value={(sourceDraft.config.url as string) ?? ''}
+																											oninput={(e) =>
+																												setDraftConfig({
+																													url: (e.target as HTMLInputElement).value,
+																												})}
+																										/>
+																									</SettingsField>
+																								{/if}
+																							{:else if source.kind === 'markets'}
+																								<p class="muted small">
+																									Leave blank for the default index & futures set.
+																								</p>
+																								<SettingsField
+																									label="Indices"
+																									hint="Comma-separated symbols, e.g. ^GSPC, ^IXIC"
+																								>
+																									<input
+																										type="text"
+																										value={((sourceDraft.config.indices as string[]) ??
+																											[]).join(', ')}
+																										placeholder="default"
+																										oninput={(e) =>
+																											setDraftConfig({
+																												indices: (e.target as HTMLInputElement).value
+																													.split(',')
+																													.map((x) => x.trim())
+																													.filter(Boolean),
+																											})}
+																									/>
+																								</SettingsField>
+																								<SettingsField
+																									label="Futures"
+																									hint="Comma-separated symbols."
+																								>
+																									<input
+																										type="text"
+																										value={((sourceDraft.config.futures as string[]) ??
+																											[]).join(', ')}
+																										placeholder="default"
+																										oninput={(e) =>
+																											setDraftConfig({
+																												futures: (e.target as HTMLInputElement).value
+																													.split(',')
+																													.map((x) => x.trim())
+																													.filter(Boolean),
+																											})}
+																									/>
+																								</SettingsField>
+																							{:else if source.kind === 'calendar'}
+																								<p class="muted small">
+																									Pulls from your connected calendars. No configuration
+																									needed.
+																								</p>
+																							{:else if source.kind === 'todos' || source.kind === 'reminders' || source.kind === 'notes'}
+																								<SettingsField
+																									label="File path"
+																									hint={`Leave blank to use the default (${DEFAULT_FILE[source.kind]}).`}
+																								>
+																									<input
+																										type="text"
+																										value={(sourceDraft.config.path as string) ?? ''}
+																										placeholder={DEFAULT_FILE[source.kind]}
+																										oninput={(e) =>
+																											setDraftConfig({
+																												path:
+																													(e.target as HTMLInputElement).value.trim() ||
+																													undefined,
+																											})}
+																									/>
+																								</SettingsField>
+																							{/if}
+
+																							<div class="source-form-actions">
+																								<Button variant="ghost" size="sm" onclick={cancelSource}
+																									>Cancel</Button
+																								>
+																								<Button variant="primary" size="sm" onclick={saveSource}
+																									>Save source</Button
+																								>
+																							</div>
+																						</div>
+																					</td>
+																				</tr>
+																			{:else}
+																				<tr>
+																					<td class="col-kind">
+																						<span class="kind-pill" class:off={!source.enabled}
+																							>{source.kind}</span
+																						>
+																					</td>
+																					<td class="src-summary muted">{sourceSummary(source)}</td>
+																					<td class="col-toggle">
+																						<label class="toggle">
+																							<input
+																								type="checkbox"
+																								checked={source.enabled}
+																								onchange={(e) =>
+																									toggleSource(
+																										source,
+																										(e.target as HTMLInputElement).checked,
+																									)}
+																							/>
+																							on
+																						</label>
+																					</td>
+																					<td class="actions">
+																						<button
+																							class="icon-btn"
+																							title="Edit source"
+																							type="button"
+																							onclick={() => startEditSource(source)}>✎</button
+																						>
+																						<button
+																							class="icon-btn danger"
+																							title="Remove source"
+																							type="button"
+																							onclick={() => askRemoveSource(source)}>×</button
+																						>
+																					</td>
+																				</tr>
+																			{/if}
+																		{/each}
+																	</tbody>
+																</table>
+															{/if}
+														</div>
+													</div>
+												</td>
+											</tr>
+										{/if}
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					{/if}
+
+					<div class="add-block">
+						<input
+							placeholder="New block title (e.g. World News)"
+							bind:value={newBlockTitle}
+							onkeydown={(e) => {
+								if (e.key === 'Enter') {
+									e.preventDefault();
+									addBlock();
+								}
+							}}
+						/>
+						<Button
+							variant="secondary"
+							size="sm"
+							onclick={addBlock}
+							disabled={!newBlockTitle.trim() || addingSaving}
+						>
+							{addingSaving ? 'Adding…' : 'Add block'}
+						</Button>
+					</div>
+				{/if}
+			{/if}
+		</SettingsCard>
 	{/if}
-</div>
+</SettingsLayout>
+
+{#if confirmDelete}
+	<Modal
+		open={true}
+		title={confirmDelete.kind === 'briefing'
+			? 'Remove briefing?'
+			: confirmDelete.kind === 'block'
+				? 'Delete block?'
+				: 'Remove source?'}
+		onOpenChange={(o) => {
+			if (!o) confirmDelete = null;
+		}}
+	>
+		<p>Remove <strong>{confirmDelete.label}</strong>?</p>
+		{#snippet footer()}
+			<Button variant="ghost" onclick={() => (confirmDelete = null)}>Cancel</Button>
+			<Button variant="primary" onclick={performDelete}>Remove</Button>
+		{/snippet}
+	</Modal>
+{/if}
 
 <style>
-	.settings {
-		max-width: 44rem;
-		margin: 0 auto;
-		padding: 1.5rem;
+	/* Shared .settings/.card/.field/.grid/.banner/.icon-btn/.empty/.muted
+	   primitives live in web/src/lib/styles/settings.css. Only page-specific
+	   layout stays here. */
+
+	.col-name {
+		width: auto;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
-	.banner {
-		background: var(--surface-warning, rgba(234, 179, 8, 0.15));
-		border: 1px solid var(--warning, #eab308);
-		border-radius: 0.5rem;
-		padding: 0.75rem 1rem;
+	.col-source {
+		width: 6rem;
 	}
-	.muted {
-		color: var(--text-muted, #888);
+
+	.add-form {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+		padding-top: 0.6rem;
+		margin-top: 0.6rem;
+		border-top: 1px solid var(--border-subtle);
 	}
-	.status.error {
-		color: var(--danger, #ef4444);
+
+	.add-form h3 {
+		margin: 0;
+		font-size: var(--text-sm);
+		color: var(--text-muted);
 	}
+
+	.add-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
+		gap: 0.6rem;
+		/* Bottom-align so the Enabled checkbox row lines up with the other
+		   fields' inputs (which sit below their labels), not their labels. */
+		align-items: end;
+	}
+
+	/* Nudge the checkbox down so it visually rests on the inputs' baseline
+	   row rather than floating a touch high in its bottom-aligned cell. */
+	.add-grid :global(.field.checkbox) {
+		padding-bottom: 0.35rem;
+	}
+
+	.add-actions {
+		display: flex;
+		justify-content: flex-end;
+	}
+
 	.briefing-pick {
-		margin: 1rem 0;
 		display: flex;
 		gap: 0.75rem;
-		align-items: center;
+		align-items: flex-end;
+		margin-bottom: 1rem;
 	}
-	.block-card {
-		border: 1px solid var(--border, #333);
-		border-radius: 0.6rem;
-		padding: 0.85rem 1rem;
-		margin-bottom: 0.85rem;
+
+	/* ---- Blocks table ---- */
+	.col-order {
+		width: 4.5rem;
 	}
-	.block-head {
-		display: flex;
-		gap: 0.5rem;
-		align-items: center;
+	.col-render {
+		width: 7rem;
 	}
-	.block-title {
-		flex: 1;
+	.col-src {
+		width: 10rem;
+	}
+
+	.grid td.col-order.actions {
+		text-align: left;
+		white-space: nowrap;
+	}
+
+	.grid td.actions,
+	.grid th.actions {
+		width: 4.5rem;
+	}
+
+	.block-name {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 0.4rem;
+		background: none;
+		border: none;
+		padding: 0;
+		font: inherit;
+		font-size: var(--text-sm);
 		font-weight: 600;
-		font-size: 1rem;
-		background: transparent;
-		border: 1px solid transparent;
-		border-radius: 0.3rem;
-		padding: 0.25rem 0.4rem;
-		color: inherit;
-	}
-	.block-title:focus {
-		border-color: var(--border, #444);
-		outline: none;
-	}
-	.block-actions button,
-	.source-row button,
-	.add-block button {
-		background: transparent;
-		border: 1px solid var(--border, #333);
-		border-radius: 0.35rem;
-		color: inherit;
+		color: var(--text-primary);
 		cursor: pointer;
-		padding: 0.2rem 0.5rem;
+		text-align: left;
 	}
-	.danger {
-		color: var(--danger, #ef4444);
+
+	.block-name:hover .block-title-text {
+		text-decoration: underline;
 	}
-	.row {
+
+	.chevron {
+		color: var(--text-dim);
+		font-size: var(--text-xs);
+	}
+
+	.block-directive {
+		font-size: var(--text-xs);
+		margin-top: 0.15rem;
+		max-width: 40ch;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.render-pill {
+		display: inline-block;
+		font-size: var(--text-xs);
+		padding: 0.05rem 0.45rem;
+		border-radius: var(--radius-pill);
+		background: var(--surface-raised);
+		color: var(--text-muted);
+	}
+
+	.kind-pills {
 		display: flex;
-		gap: 0.5rem;
+		flex-wrap: wrap;
+		gap: 0.25rem;
+	}
+
+	.kind-pill {
+		display: inline-block;
+		font-family: var(--font-mono, ui-monospace, monospace);
+		font-size: var(--text-xs);
+		padding: 0.05rem 0.4rem;
+		border-radius: var(--radius-pill);
+		background: var(--surface-raised);
+		color: var(--text-secondary);
+	}
+
+	.kind-pill.off {
+		opacity: 0.45;
+		text-decoration: line-through;
+	}
+
+	.expanded > td {
+		border-bottom-color: transparent;
+	}
+
+	/* ---- Block detail (expanded row) ---- */
+	.detail-row > td {
+		padding: 0;
+		background: var(--surface-base);
+	}
+
+	.block-detail {
+		padding: 0.85rem 1rem 1rem;
+		border-left: 2px solid var(--border-default);
+	}
+
+	.detail-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+		gap: 0.6rem 1rem;
+	}
+
+	.sources-block {
+		margin-top: 1rem;
+		padding-top: 0.75rem;
+		border-top: 1px dashed var(--border-subtle);
+	}
+
+	.sources-head {
+		display: flex;
 		align-items: center;
-		margin-top: 0.5rem;
-		font-size: 0.9rem;
+		justify-content: space-between;
+		gap: 0.5rem;
+		margin-bottom: 0.5rem;
 	}
-	.directive {
-		flex: 1;
-		background: transparent;
-		border: 1px solid var(--border, #333);
-		border-radius: 0.3rem;
-		padding: 0.3rem 0.4rem;
-		color: inherit;
-	}
-	.sources {
-		margin-top: 0.75rem;
-		padding-top: 0.5rem;
-		border-top: 1px dashed var(--border, #333);
-	}
-	.sources h4 {
-		margin: 0 0 0.4rem;
-		font-size: 0.8rem;
+
+	.sources-head h4 {
+		margin: 0;
+		font-size: var(--text-xs);
 		text-transform: uppercase;
-		color: var(--text-muted, #888);
+		letter-spacing: 0.04em;
+		color: var(--text-dim);
 	}
-	.source-row {
+
+	/* The nested sources table shares the .grid look but drops the heavy header. */
+	.grid.sub {
+		background: var(--surface-raised);
+		border-radius: var(--radius-card, 0.5rem);
+		overflow: hidden;
+	}
+
+	.grid.sub td {
+		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.grid.sub tr:last-child td {
+		border-bottom: none;
+	}
+
+	.col-kind {
+		width: 6rem;
+	}
+	.col-toggle {
+		width: 4rem;
+	}
+	.grid.sub td.actions {
+		width: 4.5rem;
+	}
+
+	.src-summary {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		max-width: 0;
+	}
+
+	.toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		font-size: var(--text-xs);
+		color: var(--text-muted);
+	}
+
+	.empty.small {
+		font-size: var(--text-sm);
+		padding: 0.5rem 0.25rem;
+	}
+
+	.muted.small,
+	p.muted.small {
+		font-size: var(--text-xs);
+	}
+
+	/* ---- Source config form (inline in the sources table) ---- */
+	.source-form {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+		padding: 0.75rem 0.75rem 0.85rem;
+	}
+
+	.source-form-head {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.kind-name {
+		font-size: var(--text-sm);
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+
+	.inline-fields {
+		display: flex;
+		gap: 1.25rem;
+		align-items: flex-end;
+		flex-wrap: wrap;
+	}
+
+	.source-form-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
+		margin-top: 0.2rem;
+	}
+
+	.chip-list {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
+		margin-bottom: 0.4rem;
+	}
+
+	.chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		font-size: var(--text-xs);
+		padding: 0.1rem 0.2rem 0.1rem 0.5rem;
+		border-radius: var(--radius-pill);
+		background: var(--surface-card);
+		border: 1px solid var(--border-default);
+		color: var(--text-secondary);
+	}
+
+	.chip button {
+		background: none;
+		border: none;
+		color: var(--text-dim);
+		cursor: pointer;
+		font: inherit;
+		font-size: var(--text-sm);
+		line-height: 1;
+		padding: 0 0.15rem;
+	}
+
+	.chip button:hover {
+		color: #e88;
+	}
+
+	.chip-add {
 		display: flex;
 		gap: 0.4rem;
 		align-items: center;
-		margin-bottom: 0.35rem;
-		flex-wrap: wrap;
 	}
-	.source-kind {
-		font-family: monospace;
-		font-size: 0.8rem;
-		min-width: 4.5rem;
-	}
-	.grow {
+
+	.chip-add input {
 		flex: 1;
-		min-width: 8rem;
-		background: transparent;
-		border: 1px solid var(--border, #333);
-		border-radius: 0.3rem;
-		padding: 0.25rem 0.4rem;
-		color: inherit;
+		max-width: 20rem;
 	}
-	.toggle {
-		display: flex;
-		align-items: center;
-		gap: 0.2rem;
-		font-size: 0.8rem;
-	}
+
 	.add-block {
 		display: flex;
 		gap: 0.5rem;
-		margin-top: 0.5rem;
+		align-items: center;
+		margin-top: 0.75rem;
 	}
+
 	.add-block input {
 		flex: 1;
-		background: transparent;
-		border: 1px solid var(--border, #333);
+		background: var(--surface-base);
+		border: 1px solid var(--border-default);
 		border-radius: 0.3rem;
-		padding: 0.4rem;
-		color: inherit;
+		padding: 0.4rem 0.5rem;
+		color: var(--text-primary);
+		font: inherit;
+		font-size: var(--text-sm);
 	}
-	select {
-		background: var(--surface, #1a1a1a);
-		color: inherit;
-		border: 1px solid var(--border, #333);
-		border-radius: 0.3rem;
-		padding: 0.25rem 0.4rem;
+
+	@container settings (max-width: 720px) {
+		.col-src {
+			display: none;
+		}
+	}
+
+	@container settings (max-width: 560px) {
+		.col-render {
+			display: none;
+		}
+		.col-source {
+			display: none;
+		}
 	}
 </style>
