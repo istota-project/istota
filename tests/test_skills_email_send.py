@@ -137,6 +137,16 @@ class TestSend:
         assert kwargs["attachments"] == ["/tmp/x.txt"]
         assert kwargs["reply_to"] == "r@x.com"
 
+    def test_cmd_send_echoes_message_id(self, skill_env):
+        """The ok envelope carries the sent Message-ID so 'sent' is backed by
+        a concrete identifier the agent can quote (ISSUE-175)."""
+        args = MagicMock(to="a@out.com", subject="S", body="hi", body_file=None,
+                         html=False, cc=None, bcc=None, attach=None, reply_to=None)
+        with patch("istota.skills.email.send_email", return_value="<mid@x>"), \
+             patch("istota.skills.email._write_deferred_sent_email"):
+            res = cmd_send(args)
+        assert res["message_id"] == "<mid@x>"
+
 
 # --- reply / reply-all -----------------------------------------------------
 
@@ -153,6 +163,7 @@ class TestReply:
             res = cmd_reply(args)
         assert res["status"] == "ok"
         assert res["to"] == "client@out.com"
+        assert res["message_id"] == "<new@x>"
         _, kwargs = se.call_args
         assert kwargs["in_reply_to"] == "<orig@x>"
         assert "<orig@x>" in kwargs["references"] and "<older@x>" in kwargs["references"]

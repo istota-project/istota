@@ -1288,6 +1288,7 @@ def cmd_send(args):
 
     return {
         "status": "ok",
+        "message_id": message_id,
         "to": args.to,
         "cc": cc,
         "subject": args.subject,
@@ -1355,6 +1356,7 @@ def cmd_reply(args):
     _write_deferred_sent_email(message_id, to_addr, subject)
     return {
         "status": "ok",
+        "message_id": message_id,
         "to": to_addr,
         "cc": cc,
         "subject": subject,
