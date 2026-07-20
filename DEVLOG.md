@@ -2,6 +2,23 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-20: Briefings source gather — concurrency + hour-accurate email window
+
+The two lower-severity findings from the briefings module review (deferred out of the migration-fix commit) are now fixed. (1) `assemble_briefing_input` gathered a briefing's sources serially, so a slow network source (a 60s browse frontpage fetch, an IMAP round-trip) delayed every source after it — a briefing fanning in several such sources ran their timeouts back to back. It now gathers all enabled sources across a bounded thread pool (≤8). Each worker opens its **own** framework DB connection: SQLite connections aren't thread-safe, so the shared `conn` must never be touched off the calling thread, and the earlier local-disk WAL migration is exactly what makes concurrent framework connections safe. Gathering stays fail-soft (a connection-open failure returns a not-ok source, mirroring the existing `resolve_source` backstop) and per-block output order is unchanged — results are reassembled by `(block, source)` slot, not completion order, so the assembled prompt stays deterministic. Pure latency win; it runs in the background worker (ISSUE-143), never the dispatch thread. (2) The email/newsletter source's IMAP `date_gte` is date-granular, so the server fetch was over-inclusive by up to ~a day while the provenance note claimed "past Nh". Added a client-side hour-level cutoff trim (mirroring the rss resolver's `published_at` window) so the window is honored to the hour and the note is honest; a missing or non-datetime envelope date is kept, never dropped.
+
+The new regression test exercises the datetime cutoff path specifically — the existing email test mock uses string dates, so it never hit the new filter, and the filter is deliberately defensive about a non-datetime `.date` (keep, don't drop) so both the mock and real imap_tools envelopes behave correctly.
+
+**Key changes:**
+- Concurrent, fail-soft source gather in the briefings generation pipeline; per-thread framework connections; deterministic per-block reassembly.
+- Client-side hour-level trim on the email source so the day-granular IMAP window matches the stated lookback; provenance note now accurate.
+- Regression test for the datetime cutoff.
+
+**Files added/modified:**
+- `src/istota/briefings/generate.py` — thread-pool gather replacing the serial loop; `_gather_one` opens a per-thread `db.get_db` connection.
+- `src/istota/briefings/sources/email.py` — `_cutoff_dt` / `_env_before_cutoff` hour-level filter.
+- `tests/test_briefings_sources.py` — datetime-window regression test.
+- `AGENTS.md`, `CHANGELOG.md` — note the concurrent gather + honest email window.
+
 ## 2026-07-20: Briefings first-class module — review + per-briefing migration fix
 
 The briefings first-class module (six staged commits) turns a briefing from a fixed component list into a block/source content model: a briefing is an ordered list of **blocks**, each block gathers 1..N **sources** (newsletters, an RSS feed/category, a browsed frontpage, markets/calendar/todos/reminders/notes) that the assistant synthesizes into one section. It ships a per-user SQLite module DB (blocks/sources/archive) on local disk, fail-soft source resolvers, a reader landing page with an archive, a block/source settings editor, a unified `istota briefings` CLI plus a `briefings` skill facade, and a one-time components→blocks migration. Generation runs on the ISSUE-143 deferred-prompt worker, so source fetches never touch the scheduler dispatch thread.

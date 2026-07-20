@@ -10,8 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Briefings are now built from reorderable content **blocks**, each gathering one or more **sources** — newsletters, an RSS feed or category, a browsed news frontpage, markets, calendar, todos, reminders, or notes — that the assistant synthesizes into a single section. A new Briefings tab shows a reader with an archive of past briefings and a settings editor for arranging blocks and sources; you can also manage them from chat or with the `istota briefings` command. Existing component-based briefings are migrated automatically, and scheduling/delivery are unchanged.
 
+### Changed
+- A briefing now fetches its sources in parallel instead of one after another, so a slow source (a news frontpage or a mailbox round-trip) no longer holds up the rest — briefings that pull in several live sources assemble faster.
+
 ### Fixed
 - Briefing content migration is now tracked per briefing instead of with a single database-wide flag. Opening the (on-by-default) Briefings tab before configuring any briefing no longer permanently disables block-seeding for briefings created afterward — a briefing added later still migrates, and existing installs heal themselves on the next run.
+- The newsletter/email briefing source now honors its lookback window to the hour. Because the mail server can only filter by date, it previously pulled in up to a day of extra mail beyond the stated window; that surplus is trimmed so "past N hours" means what it says.
 - Bot posts to a room from any source (a cron-spawned subtask, a briefing, a scheduled job) now appear in that room's web chat view, not only in Talk. Previously only conversational turns and scheduled posts reached web, so a subtask that posted a block into a Talk room was invisible in the web transcript of the same room.
 - Internal, non-conversational task output (a subtask's synthetic instruction, a heartbeat post) no longer leaks into the model's prior-conversation context on the email/fallback path.
 
