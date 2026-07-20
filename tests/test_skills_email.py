@@ -328,7 +328,8 @@ class TestCmdSend:
             reply_to=None,
         )
         assert result == {
-            "status": "ok", "to": "alice@example.com", "cc": [],
+            "status": "ok", "message_id": "<msg-id@test.com>",
+            "to": "alice@example.com", "cc": [],
             "subject": "Hello", "attachments": [],
         }
 
