@@ -5,18 +5,23 @@ exclude_memory: true
 exclude_persona: true
 source_types: [briefing]
 exclude_skills: [email]
-exclude_resources: [reminders_file]
 ---
 Briefings must be returned as a JSON object: `{"subject": "Morning Briefing", "body": "<content>"}`. The body contains the full briefing text with emoji section headers, using `\n` for newlines. Do not output anything outside the JSON object. Do not send emails or use email commands — delivery is handled by the scheduler.
 
 The body is formatted for chat messages (markdown). Use emoji-prefixed labels as section headers. Only include sections that have data.
+
+## Structure — follow the prompt
+
+The prompt presents the briefing's content grouped into **blocks**, each with a title and its gathered source data (tagged by provenance). Produce **one section per block**, titled with the block's title as an emoji-prefixed header, in the exact order the blocks appear. Honor any per-block synthesis directive (story counts, tone, "include verbatim"). Omit a block that has no content — never emit an empty header. Do not reorder sections to match the order data happened to arrive within a block.
+
+A block may fan in several sources of different kinds (newsletters, RSS entries, a browsed frontpage, structured market/calendar data). **Synthesize them into one coherent section**: merge stories that recur across sources into a single entry with combined attribution, rather than stacking each source as its own sub-list. A source marked as pre-formatted / "include as-is" (market quotes, calendar events, a pre-selected reminder) must be reproduced verbatim — do not reword its numbers, quotes, or details.
 
 ## Allowed Markdown
 
 - **bold** for emphasis
 - *italic* for secondary emphasis
 - [links](url) for URLs
-- --- horizontal rule before the reminder section
+- --- horizontal rule before a reminder section
 - Bullet points for lists
 
 ## Forbidden
@@ -27,74 +32,45 @@ The body is formatted for chat messages (markdown). Use emoji-prefixed labels as
 - Nested bullet points
 - Commentary or editorializing on market data
 
-## Section Format
+## Section formatting reference
 
-Sections appear in this order. Omit any section with no data.
+Apply the formatting below by content type — a block's title names the section; its sources' content determines which of these patterns fits.
 
-**📰 NEWS**
+**News** (newsletters + frontpages)
 
-General news — politics, world events, policy, science, tech (non-market). Focus on US and world events and keep a global perspective. Lead with items that recur across multiple sources. Target 5 stories. One short paragraph per story, bold uppercase topic. Keep each paragraph to two or three sentences. Add source attribution at the end of each paragraph in brackets.
-
-Newsletters often mix general and market news. Place each story in the right section by topic — a story about tariff policy goes in NEWS, its market impact goes in MARKETS.
+General news — politics, world events, policy, science, tech (non-market). Keep a global perspective. Lead with items that recur across multiple sources. One short paragraph per story (two or three sentences), bold uppercase topic, source attribution in brackets at the end. Place a story by topic — tariff *policy* is news, its *market impact* is a markets item.
 
 <news_example>
-**IRAN-US TENSIONS ESCALATE:** Iran's foreign minister warned that Tehran's forces have their "fingers on the trigger" as Trump threatened a "massive Armada" heading toward Iran, saying "time is running out" for a nuclear deal. The EU is expected to add Iran's Revolutionary Guard to its terror blacklist. [Semafor, NYT]
+**IRAN-US TENSIONS ESCALATE:** Iran's foreign minister warned that Tehran's forces have their "fingers on the trigger" as Trump threatened a "massive Armada" heading toward Iran. The EU is expected to add Iran's Revolutionary Guard to its terror blacklist. [Semafor, NYT]
 </news_example>
 
-When both headlines (web frontpages) and news (email newsletters) are present, merge stories from both sources. A story that appears in both AP frontpage and a Semafor newsletter should be one entry with combined attribution: `[AP, Semafor]`.
+A story appearing in both a frontpage and a newsletter is one entry with combined attribution: `[AP, Semafor]`.
 
-**📈 MARKETS**
+**Markets**
 
-One line per quote with 🟢/🔴 indicator based on change direction, bold the name:
+One line per quote with a 🟢/🔴/⚪ indicator based on change direction, bold the name:
 🟢 **S&P 500 E-mini**: 6,104.75 (+30.25, +0.50%)
 🔴 **Nasdaq 100 E-mini**: 21,857.50 (-45.00, -0.21%)
-Use 🟢 for positive change, 🔴 for negative, ⚪ for zero. Apply to ALL tickers — futures, indices, commodities. Copy the pre-fetched quote data exactly, preserving all numbers. No commentary — just the data. On weekends, quotes may be omitted.
+Copy the pre-fetched quote data exactly, preserving all numbers. No commentary. On weekends, quotes may be omitted. After quotes, summarize market/economic news (earnings, central-bank moves, sectors, commodities, data) — short paragraphs, bold topic, bracketed attribution. Evening briefings include pre-formatted FinViz sections (headlines, movers, futures, forex/bonds, economic data, earnings) — copy them as-is, in that order, within the markets section.
 
-After quotes, summarize market and economic news from newsletters — earnings, central bank moves, sector performance, commodities, trade flows, economic data. Lead with items that recur across newsletters. Target 3 stories. One short paragraph per story, 1-2 sentences, bold the topic. Add source attribution in brackets.
-
-<markets_news_example>
-**TARIFF UNCERTAINTY:** Markets remain volatile as conflicting signals emerge on new trade measures, with investors closely watching upcoming policy announcements. [WSJ Markets]
-</markets_news_example>
-
-**Evening briefings — FinViz enrichment**
-
-Evening briefings include pre-fetched FinViz data with additional market context. Include the FinViz sections *within* the 📈 MARKETS block, in this order:
-
-1. Market headlines (top 5-6 headlines with timestamps)
-2. yfinance close prices (the standard quote lines above)
-3. Major movers (tickers in the news, sorted by magnitude)
-4. Futures (commodities, index futures — from FinViz, supplements yfinance)
-5. Forex & bonds (currencies, treasuries)
-6. Economic data releases (with beat/miss indicators)
-7. Upcoming earnings calendar
-
-Copy FinViz data as-is — it is pre-formatted with 🟢/🔴 indicators and bold labels. Do not editorialize on the data. Newsletter market stories still go after this block.
-
-## Source Attribution
-
-For **newsletters** (news component), derive source names from the "### From:" headers:
-- Domain senders: use capitalized domain name (e.g., `semafor.com` → `Semafor`)
-- Email senders: use recognizable short name (e.g., `briefing@nytimes.com` → `NYT`, `markets@wsj.com` → `WSJ Markets`)
-
-For **frontpages** (headlines component), use the source name from the "### Source Name" headers (e.g., `AP News` → `AP`, `The Guardian` → `Guardian`, `Financial Times` → `FT`, `Der Spiegel` → `Spiegel`).
-
-If a story appears across both newsletters and frontpages, combine: `[AP, Semafor]`
-Format: `[Source]` or `[Source, Source]` at the end of the paragraph
-
-**📅 CALENDAR**
+**Calendar**
 
 Bullet list of events with times in the user's local timezone. Bold the event name.
 - **10:00 Team standup** (30 min)
 - **14:00 Dentist** (1 hr, Downtown Clinic)
 
-**✅ TODOS**
+**Todos**
 
-Bullet list of pending items, copied verbatim from the TODO file.
+Bullet list of pending items, copied verbatim.
 
-**📝 NOTES**
+**Notes**
 
-Bullet list of relevant agenda items or reminders from shared notes files.
+Bullet list of relevant agenda items or reminders from the notes content.
 
-**💡 REMINDER**
+**Reminder**
 
-Only include this section if the prompt contains a "## Daily Reminder (pre-selected)" section. Copy that pre-selected reminder verbatim — do NOT generate, paraphrase, or replace it with your own text. Use italic for emphasis. If it has an attribution, keep it. If there is no pre-selected reminder in the prompt, omit this section entirely. Never read reminder files yourself.
+Copy any pre-selected reminder in the prompt verbatim — do NOT generate, paraphrase, or replace it. Use italic for emphasis; keep any attribution. Never read reminder files yourself; if no reminder is provided, omit the section.
+
+## Source attribution
+
+Derive source names from the provenance tags / "From:" headers: domain senders use the capitalized domain (`semafor.com` → `Semafor`), email senders a recognizable short name (`briefing@nytimes.com` → `NYT`, `markets@wsj.com` → `WSJ Markets`), frontpages the source name (`AP News` → `AP`, `Financial Times` → `FT`). Format: `[Source]` or `[Source, Source]` at the end of the paragraph.

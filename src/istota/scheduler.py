@@ -2079,6 +2079,8 @@ def process_one_task(
             task.user_id, config, digest_text,
             conversation_token=task.conversation_token,
         )
+        # Archive the rendered briefing for the landing page (module path only).
+        _maybe_archive_briefing(config, task, result, parsed_briefing)
 
     # The ack message is left as-is — it shows the last tool call as a compact
     # execution summary. Error / cancelled status edits are handled live by the
@@ -2321,6 +2323,75 @@ def _deferred_briefing_placeholder(briefing_name: str) -> str:
     can't be resolved or its prompt build fails.
     """
     return f"Generate the '{briefing_name}' briefing."
+
+
+def _maybe_archive_briefing(config: Config, task, result: str, parsed) -> None:
+    """Archive a rendered briefing to the module's ``briefing_archive``.
+
+    Only module-path briefings are archived: the module must be enabled for the
+    user AND the briefing must have content blocks (a legacy no-blocks briefing
+    is not archived — it wouldn't appear on the landing page anyway). Reads the
+    per-block provenance the executor stashed and prunes past retention. Fully
+    best-effort — the task has already delivered, so a failed archive is logged
+    and swallowed.
+    """
+    if not getattr(task, "briefing_name", None):
+        return
+    try:
+        from . import briefings as briefings_module
+        from .briefings import db as bdb
+        from .briefings.generate import archive_briefing
+    except Exception:  # noqa: BLE001
+        return
+
+    try:
+        ctx = briefings_module.resolve_for_user(task.user_id, config)
+    except briefings_module.UserNotFoundError:
+        return  # module disabled
+    except Exception as e:  # noqa: BLE001
+        logger.warning("briefings archive: resolve failed for %s: %s", task.id, e)
+        return
+
+    # Only archive when the briefing actually has blocks (module path).
+    try:
+        with bdb.connect(ctx.db_path) as conn:
+            if not bdb.list_blocks(conn, task.briefing_name, with_sources=False):
+                return
+    except Exception:  # noqa: BLE001
+        return
+
+    subject = parsed.get("subject") if parsed else None
+    body = parsed.get("body") if parsed else strip_briefing_preamble(result)
+    if not body:
+        return
+
+    # Per-block provenance the executor stashed (best-effort).
+    block_meta: dict = {}
+    try:
+        from .executor import get_user_temp_dir
+        user_temp_dir = get_user_temp_dir(config, task.user_id)
+        meta_path = user_temp_dir / f"task_{task.id}_briefing_meta.json"
+        if meta_path.exists():
+            import json as _json
+            block_meta = _json.loads(meta_path.read_text()).get("block_meta", {})
+            meta_path.unlink()
+    except Exception:  # noqa: BLE001
+        block_meta = {}
+
+    delivered_to = [d.surface for d in parse_output_target(task.output_target or "")]
+    try:
+        archive_briefing(
+            ctx,
+            briefing_name=task.briefing_name,
+            subject=subject,
+            body_md=body,
+            task_id=task.id,
+            block_meta=block_meta,
+            delivered_to=delivered_to,
+            retention_days=config.briefings.archive_retention_days,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("briefings archive write failed for %s: %s", task.id, e)
 
 
 def check_briefings(db_path, app_config: Config) -> list[int]:
