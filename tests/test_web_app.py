@@ -1334,7 +1334,7 @@ class TestSettingsEndpoints:
         resp = await client.get("/istota/api/settings/modules", cookies=cookies)
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body["modules"]) == {"feeds", "money", "location", "health"}
+        assert set(body["modules"]) == {"feeds", "money", "location", "health", "briefings"}
         # Alice has no disabled_modules in the fixture.
         assert body["disabled"] == []
         assert body["enabled_for_user"]["feeds"] is True

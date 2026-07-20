@@ -2583,7 +2583,7 @@ def check_db_health(config: Config) -> list[CheckReport]:
     #    missing-mount, and we don't want any of those to skip a *file* that is
     #    actually on disk and might be corrupt.
     for user_id in config.users:
-        for module in ("feeds", "health", "location", "money"):
+        for module in ("feeds", "health", "location", "money", "briefings"):
             try:
                 db_path = config.module_db_path(user_id, module)
             except Exception as exc:  # noqa: BLE001

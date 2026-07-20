@@ -683,6 +683,24 @@ class BriefingDefaultsConfig:
 
 
 @dataclass
+class BriefingsModuleConfig:
+    """Module-level config for the first-class briefings module (``[briefings]``).
+
+    Distinct from ``[briefing_defaults]`` (per-component fetch defaults, retained
+    for the legacy prompt builder). This governs the module's per-user content
+    store + archive.
+
+    ``archive_retention_days`` — prune archived briefings older than this per
+    insert (0 = keep forever). ``default_lookback_hours`` seeds the email/rss
+    source lookback window when a source omits it. ``max_source_chars`` caps a
+    single source's gathered text.
+    """
+    archive_retention_days: int = 90
+    default_lookback_hours: int = 12
+    max_source_chars: int = 5000
+
+
+@dataclass
 class ModelsConfig:
     """Operator-controlled model role aliases.
 
@@ -729,6 +747,7 @@ class Config:
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefing_defaults: BriefingDefaultsConfig = field(default_factory=BriefingDefaultsConfig)
+    briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
@@ -1646,6 +1665,14 @@ def load_config(config_path: Path | None = None) -> Config:
             markets=bd.get("markets", {}),
             news=bd.get("news", {}),
             headlines=bd.get("headlines", {}),
+        )
+
+    if "briefings" in data:
+        br = data["briefings"]
+        config.briefings = BriefingsModuleConfig(
+            archive_retention_days=br.get("archive_retention_days", 90),
+            default_lookback_hours=br.get("default_lookback_hours", 12),
+            max_source_chars=br.get("max_source_chars", 5000),
         )
 
     if "logging" in data:

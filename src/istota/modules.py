@@ -25,7 +25,7 @@ from __future__ import annotations
 import importlib.util
 
 
-MODULE_NAMES: frozenset[str] = frozenset({"feeds", "money", "location", "health"})
+MODULE_NAMES: frozenset[str] = frozenset({"feeds", "money", "location", "health", "briefings"})
 
 EXPERIMENTAL_MODULES: dict[str, str] = {}
 

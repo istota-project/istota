@@ -33,6 +33,7 @@ export interface User {
 		location: boolean;
 		money: boolean;
 		health: boolean;
+		briefings: boolean;
 		google_workspace: boolean;
 		google_workspace_enabled: boolean;
 		admin: boolean;

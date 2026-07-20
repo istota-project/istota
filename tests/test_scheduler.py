@@ -7419,11 +7419,11 @@ class TestCheckDbHealth:
         reports = check_db_health(config)
         labels = {r.label: r for r in reports}
 
-        # Framework + 4 per-user modules per user = 1 + 2*4 = 9 reports.
+        # Framework + 5 per-user modules per user = 1 + 2*5 = 11 reports.
         assert "framework" in labels
         assert labels["framework"].ok
         for user in ("alice", "bob"):
-            for module in ("feeds", "health", "location", "money"):
+            for module in ("feeds", "health", "location", "money", "briefings"):
                 assert f"{module}:{user}" in labels
 
         # A DB we didn't create reports as missing (ok=True, no repair).
@@ -7456,7 +7456,7 @@ class TestCheckDbHealth:
         labels = [r.label for r in reports]
         # Module DBs are local now — they're probed regardless of mount.
         assert "framework" in labels
-        for module in ("feeds", "health", "location", "money"):
+        for module in ("feeds", "health", "location", "money", "briefings"):
             assert f"{module}:alice" in labels
 
 

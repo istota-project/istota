@@ -56,6 +56,9 @@
 		<a href="{base}/" class="app-name">Istota</a>
 		<div class="nav-links">
 			<a href="{base}/chat" class:active={isActive('/chat')}>Chat</a>
+			{#if user.features.briefings}
+				<a href="{base}/briefings" class:active={isActive('/briefings')}>Briefings</a>
+			{/if}
 			{#if user.features.feeds}
 				<a href="{base}/feeds" class:active={isActive('/feeds')}>Feeds</a>
 			{/if}
@@ -117,6 +120,18 @@
 								>
 							{/snippet}
 						</DropdownMenu.Item>
+						{#if user.features.briefings}
+							<DropdownMenu.Item>
+								{#snippet child({ props })}
+									<a
+										href="{base}/briefings"
+										class="app-nav-menu-link"
+										class:active={isActive('/briefings')}
+										{...props}>Briefings</a
+									>
+								{/snippet}
+							</DropdownMenu.Item>
+						{/if}
 						{#if user.features.feeds}
 							<DropdownMenu.Item>
 								{#snippet child({ props })}
@@ -192,7 +207,7 @@
 			</DropdownMenu.Root>
 		</div>
 	</nav>
-	<main class="app-content" class:app-content-fill={isActive('/chat') || isActive('/location') || isActive('/feeds') || isActive('/money') || isActive('/health')}>
+	<main class="app-content" class:app-content-fill={isActive('/chat') || isActive('/location') || isActive('/feeds') || isActive('/money') || isActive('/health') || isActive('/briefings')}>
 		{@render children()}
 	</main>
 {/if}
