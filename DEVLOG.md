@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Ansible role brain-fallback templating fix + deploy-time validation
+
+A configured `fallback = "native"` under `[brain]` was a paper fallback in the server deploy. The role only emitted the `[brain.native]` block when native was the *primary* brain — never when it was only the fallback. So a `claude_code` primary with a native fallback rendered no `[brain.native]` section at all; the model field fell to its blank code default, and the first failover would send an empty model id to the endpoint (a 400). Same latent omission for `[brain.tmux]`. This surfaced from a production report that the failover wouldn't actually run despite `fallback` being set.
+
+Fixed the two Jinja guards to also fire on `istota_brain_fallback == '<kind>'`, so the fallback backend's settings block renders even when it isn't the primary. Added a `validate_config.py` check that fails the play when the native backend is active (primary / fallback / a source-type override target) with no model pinned — turning a silent misconfig into a deploy-time error instead of a first-failover surprise. Also extended the `[models.roles]` auto-derivation to the fallback case, and made a typo'd `[brain] fallback` kind fail the play (previously only a runtime WARNING while the play stayed green).
+
+Mulder/Scully review confirmed the diagnosis by rendering the template pre/post-fix and tracing the empty-model value to the wire request. They also ruled out a suspected network-allowlist problem — the native brain's LLM call runs in-process in the daemon, not through the bwrap CONNECT proxy, so a non-Anthropic fallback base_url isn't gated by the sandbox allowlist — and noted the API key can't be validated from `config.toml` because it lives in the EnvironmentFile, not the rendered config. Blank role defaults for model/key are correct (operator supplies them in host/group vars); the template guard was the only real bug for a deployment that already sets those.
+
+**Key changes:**
+- `config.toml.j2`: `[brain.native]` and `[brain.tmux]` guards now also emit when the block's kind matches the configured `fallback`.
+- `config.toml.j2`: `[models.roles]` native-model derivation extended to `fallback == 'native'`.
+- `validate_config.py`: fail the play when native is primary/fallback/override-target and `[brain.native].model` is empty; fail on an unknown `[brain] fallback` kind.
+- `defaults/main.yml`: comment updates noting the fallback emission case and the empty-model landmine.
+
+**Files modified:**
+- `deploy/ansible/templates/config.toml.j2` - fallback-aware block guards + models.roles derivation
+- `deploy/ansible/files/validate_config.py` - native-model-required + fallback-kind validation
+- `deploy/ansible/defaults/main.yml` - doc comments
+
+Verified: template parses, `validate_config.py` compiles, the guard was exercised across five cases (fires for empty-model native fallback and typo'd kind, silent for a model-set fallback / plain claude_code / native-with-model), and `test_config_brain_fallback.py` stays green (10 passed).
+
 ## 2026-07-19: `istota update` release channels (stable by default)
 
 `istota update` (added earlier the same day) tracked the tip of a git branch — `install.json`'s `ref`, which install.sh only ever set to `main`. So every standalone user rode the latest `main` commit, including between-version WIP. Releases (`v*` tags from `scripts/release.sh`) existed but the updater ignored them. A local single-user install is exactly the audience that wants tagged-release stability, so the default was wrong.

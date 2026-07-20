@@ -69,10 +69,11 @@ fallback = "{{ istota_brain_fallback }}"
 {% endif %}
 fallback_on_transient = {{ istota_brain_fallback_on_transient | default(false, true) | lower }}
 fallback_cooldown_seconds = {{ istota_brain_fallback_cooldown_seconds | default(900, true) }}
-{% if istota_brain_kind == 'native' or istota_brain_source_type_overrides %}
+{% if istota_brain_kind == 'native' or istota_brain_fallback == 'native' or istota_brain_source_type_overrides %}
 
 [brain.native]
-# Used when kind = "native" or a source_type_overrides entry routes to native.
+# Used when kind = "native", istota_brain_fallback = "native", or a
+# source_type_overrides entry routes to native.
 # The API key stays out of this file — see ISTOTA_BRAIN_NATIVE_API_KEY in the
 # EnvironmentFile.
 provider = "{{ istota_brain_native_provider | default('openai_compat', true) }}"
@@ -130,10 +131,11 @@ extra_blocked_cidrs = {{ istota_brain_native_web_fetch_extra_blocked_cidrs | to_
 {% endif %}
 {% endif %}
 {% set _tmux_routed = istota_brain_source_type_overrides.values() | select('equalto', 'tmux_claude') | list | length > 0 %}
-{% if istota_brain_kind == 'tmux_claude' or _tmux_routed %}
+{% if istota_brain_kind == 'tmux_claude' or istota_brain_fallback == 'tmux_claude' or _tmux_routed %}
 
 [brain.tmux]
-# Used when kind = "tmux_claude" (or a source_type_overrides entry routes to it).
+# Used when kind = "tmux_claude", istota_brain_fallback = "tmux_claude", or a
+# source_type_overrides entry routes to it.
 # All fields default in code to the prototype's pinned values; emit only the
 # operability knobs here. Marker lists stay in code unless a CLI reword needs a
 # hotfix (set istota_brain_tmux_ready_markers etc. then).
@@ -220,7 +222,7 @@ imap_timeout_seconds = {{ istota_email_imap_timeout_seconds }}
    configured model, each optionally overridable. istota_models_roles then
    overlays (operator-explicit wins, and can add custom roles). #}
 {% set _roles = {} %}
-{% if istota_brain_kind == 'native' and istota_brain_native_model %}
+{% if (istota_brain_kind == 'native' or istota_brain_fallback == 'native') and istota_brain_native_model %}
 {% set _ = _roles.update({'fast': istota_brain_native_model_fast | default('', true) or istota_brain_native_model}) %}
 {% set _ = _roles.update({'general': istota_brain_native_model_general | default('', true) or istota_brain_native_model}) %}
 {% set _ = _roles.update({'smart': istota_brain_native_model_smart | default('', true) or istota_brain_native_model}) %}

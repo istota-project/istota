@@ -131,10 +131,14 @@ istota_brain_fallback_on_transient: false       # also reroute a persistent tran
 istota_brain_fallback_cooldown_seconds: 900     # skip an unavailable primary this long; 0 disables stickiness
 
 # --- Native brain ([brain.native]) -------------------------------------------
-# Only emitted to config.toml when istota_brain_kind == "native" OR a
+# Only emitted to config.toml when istota_brain_kind == "native", when
+# istota_brain_fallback == "native" (the availability-failover brain), OR a
 # source_type_overrides entry routes some task type to "native". Defaults match
 # the code defaults (NativeBrainConfig), so most operators only set model +
-# base_url + the API key.
+# base_url + the API key. NOTE: istota_brain_native_model defaults to "" — a
+# fallback = "native" with no model set resolves to an empty model id (400 on
+# failover), so pin istota_brain_native_model whenever native is primary OR
+# fallback.
 istota_brain_native_provider: "openai_compat"     # only provider currently
 istota_brain_native_model: ""                     # explicit id (openai_compat has no aliasing)
 istota_brain_native_effort: ""                    # default effort: low/medium/high/xhigh/max ("" = none).
@@ -191,8 +195,9 @@ istota_brain_native_api_key: ""
 istota_brain_source_type_overrides: {}
 
 # --- Tmux-driven interactive-TUI brain ([brain.tmux]) ------------------------
-# Only emitted to config.toml when istota_brain_kind == "tmux_claude" OR a
-# source_type_overrides entry routes to "tmux_claude". Drives the interactive
+# Only emitted to config.toml when istota_brain_kind == "tmux_claude", when
+# istota_brain_fallback == "tmux_claude", OR a source_type_overrides entry
+# routes to "tmux_claude". Drives the interactive
 # `claude` TUI in a detached tmux session to keep traffic on subscription
 # billing (vs the metered Agent-SDK credit headless `claude -p` draws from after
 # 2026-06-15). claude_code stays the automatic fallback (a launch failure reruns
