@@ -5,9 +5,14 @@ it is conversing in must render as an assistant chat bubble, not as a
 An email round-trip continued from a web room (``source_type="email"``,
 ``output_target="web:<own token>,email"``) used to deliver its web leg via
 ``WebTransport.deliver`` → a ``role='system'`` row → the cmd-output block. The
-fix stores it as a ``role='assistant'`` spine row (``scheduler._store_web_room_turn``)
-so the transcript renders it as a normal bubble, and drops the own-conversation
-web dest from the system-push lane. Foreign-room pushes stay ``role='system'``.
+fix stores it as a ``role='assistant'`` spine row (now the general
+``scheduler._store_room_turn``) so the transcript renders it as a normal bubble,
+and drops the own-conversation web dest from the system-push lane. Foreign-room
+pushes stay ``role='system'``.
+
+The general helper records the task's real source type as ``origin_surface``
+(``"email"`` here, not a hardcoded ``"web"``); it renders identically under the
+assistant-any transcript filter.
 """
 
 from types import SimpleNamespace
@@ -16,7 +21,7 @@ import pytest
 
 from istota import db
 from istota.config import Config
-from istota.scheduler import _store_web_room_turn
+from istota.scheduler import _store_room_turn
 
 try:
     import authlib  # noqa: F401
@@ -52,27 +57,27 @@ def _email_task(token, task_id=20):
 class TestStoreWebRoomTurn:
     def test_stores_assistant_turn_with_web_origin(self, conn):
         db.register_room(conn, "cpzpcfx2", "u", origin="web")
-        _store_web_room_turn(conn, _email_task("cpzpcfx2"), "Reply's queued to go back")
+        _store_room_turn(conn, _email_task("cpzpcfx2"), "Reply's queued to go back")
         msgs = db.get_messages(conn, "cpzpcfx2")
         assert [(m.role, m.body, m.origin_surface) for m in msgs] == [
-            ("assistant", "Reply's queued to go back", "web"),
+            ("assistant", "Reply's queued to go back", "email"),
         ]
         # It must NOT be a system (cmd-output) row.
         assert db.list_system_messages(conn, "cpzpcfx2") == []
 
     def test_noop_when_room_not_registered(self, conn):
         # Room token with no registry row → deleted room, nothing to render into.
-        _store_web_room_turn(conn, _email_task("ghosttoken"), "reply")
+        _store_room_turn(conn, _email_task("ghosttoken"), "reply")
         assert db.get_messages(conn, "ghosttoken") == []
 
     def test_noop_when_no_conversation_token(self, conn):
-        _store_web_room_turn(conn, _email_task(None), "x")  # nothing raised/stored
+        _store_room_turn(conn, _email_task(None), "x")  # nothing raised/stored
 
     def test_idempotent_across_retries(self, conn):
         db.register_room(conn, "r", "u", origin="web")
         task = _email_task("r", task_id=42)
-        _store_web_room_turn(conn, task, "reply")
-        _store_web_room_turn(conn, task, "reply")  # retry re-completes
+        _store_room_turn(conn, task, "reply")
+        _store_room_turn(conn, task, "reply")  # retry re-completes
         assert len(db.get_messages(conn, "r")) == 1
 
     def test_does_not_double_store_when_native_assistant_row_exists(self, conn):
@@ -83,7 +88,7 @@ class TestStoreWebRoomTurn:
             conn, "r", role="assistant", body="answer", task_id=7,
             origin_surface="talk",
         )
-        _store_web_room_turn(
+        _store_room_turn(
             conn, SimpleNamespace(source_type="talk", conversation_token="r", id=7),
             "answer",
         )
@@ -101,7 +106,7 @@ class TestWebReaderRendersReplyAsBubble:
         web_app._config.db_path = db_path
         with db.get_db(db_path) as conn:
             db.register_room(conn, "cpzpcfx2", "u", origin="web")
-            _store_web_room_turn(
+            _store_room_turn(
                 conn, _email_task("cpzpcfx2"), "Reply's queued to go back",
             )
         out = web_app._chat_room_messages("u", "cpzpcfx2", 50)
