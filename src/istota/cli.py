@@ -190,6 +190,23 @@ def cmd_serve(args):
         sys.exit(0)
 
 
+def cmd_update(args):
+    """Self-update a standalone (local) install to the latest code."""
+    from . import updater
+
+    config_path = Path(args.config) if args.config else None
+    config = load_config(config_path)
+    record_path = updater.install_record_path(config_path)
+    try:
+        rc = updater.run_update(
+            config, record_path=record_path, config_path=config_path, force=args.force,
+        )
+    except updater.UpdateError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(rc)
+
+
 def cmd_run(args):
     """Run the scheduler once (process pending tasks)."""
     config = load_config(Path(args.config) if args.config else None)
@@ -1367,6 +1384,15 @@ def main():
         "--env-file", help="Path to a KEY=VALUE secrets env file to source before start",
     )
 
+    # update (standalone/local install self-update)
+    update_parser = subparsers.add_parser(
+        "update", help="Update a standalone (local) install to the latest code",
+    )
+    update_parser.add_argument(
+        "--force", action="store_true",
+        help="Update even if the install checkout has uncommitted changes",
+    )
+
     # repl
     repl_parser = subparsers.add_parser(
         "repl", help="Interactive terminal assistant (full-stack, streamed)",
@@ -1659,6 +1685,7 @@ def main():
         "repl": cmd_repl,
         "serve": cmd_serve,
         "setup": cmd_setup,
+        "update": cmd_update,
     }
 
     if args.command == "user":

@@ -56,7 +56,7 @@ To update: `sudo bash install.sh --update` (bare metal) or `cd ~/istota && git p
 
 ### Local single-user install
 
-Want to run Istota on your own machine without a server, Nextcloud, or login? There is a slimmed-down local shape — one `uv tool install`, an interactive `istota setup`, then `istota serve` brings up the web UI and worker in one process on `http://localhost:8766/istota` with no auth. It is single-user, unsandboxed, and trusted by construction. Pick **Standalone** at the `install.sh` prompt (or `install.sh --standalone`, run **without** sudo) to do this in one step. See **[docs/LOCAL_INSTALL.md](docs/LOCAL_INSTALL.md)**.
+Want to run Istota on your own machine without a server, Nextcloud, or login? There is a slimmed-down local shape — one `uv tool install`, an interactive `istota setup`, then `istota serve` brings up the web UI and worker in one process on `http://localhost:8766/istota` with no auth. It is single-user, unsandboxed, and trusted by construction. Pick **Standalone** at the `install.sh` prompt (or `install.sh --standalone`, run **without** sudo) to do this in one step. Update it later with `istota update`. See **[docs/LOCAL_INSTALL.md](docs/LOCAL_INSTALL.md)**.
 
 Full walkthroughs, optional services, and configuration: **[Docker quickstart](https://istota.cynium.com/docs/getting-started/quickstart-docker/)** · **[Bare metal quickstart](https://istota.cynium.com/docs/getting-started/quickstart-bare-metal/)**.
 

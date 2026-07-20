@@ -81,6 +81,16 @@ The **REPL** works too, in a separate terminal, whether or not `serve` is runnin
 istota repl
 ```
 
+## Updating
+
+```bash
+istota update
+```
+
+Pulls the latest code from the checkout `install.sh` recorded (under `~/.local/share/istota/src`), reinstalls, and runs any database migrations. When it finishes, restart `istota serve` to pick up the new code — a running process holds the old code in memory until then. Pass `--force` to update even if that checkout has uncommitted changes (it discards them with `git reset --hard`).
+
+`update` only applies to this standalone shape and needs the install record `install.sh` writes; a hand-run `uv tool install` won't have it, so re-run `install.sh --standalone` once. A server (Nextcloud/auth) deployment is updated separately and `update` declines to run there.
+
 ## What works, what's off
 
 - **Web chat** — the primary surface. Fully local (SQLite + local files).

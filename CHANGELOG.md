@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `istota update`: a one-command self-update for the local (standalone) install. It pulls the latest code, reinstalls, and runs migrations, then tells you to restart `istota serve`. Only applies to a local install — a server deploy keeps its own auto-update and `istota update` declines to run there. Requires having installed via `install.sh --standalone` (which now records where it installed from).
+
 ## [0.32.0] - 2026-07-19
 
 ### Added
