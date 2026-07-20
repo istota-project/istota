@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-20: Briefings first-class module — review + per-briefing migration fix
+
+The briefings first-class module (six staged commits) turns a briefing from a fixed component list into a block/source content model: a briefing is an ordered list of **blocks**, each block gathers 1..N **sources** (newsletters, an RSS feed/category, a browsed frontpage, markets/calendar/todos/reminders/notes) that the assistant synthesizes into one section. It ships a per-user SQLite module DB (blocks/sources/archive) on local disk, fail-soft source resolvers, a reader landing page with an archive, a block/source settings editor, a unified `istota briefings` CLI plus a `briefings` skill facade, and a one-time components→blocks migration. Generation runs on the ISSUE-143 deferred-prompt worker, so source fetches never touch the scheduler dispatch thread.
+
+This session put Mulder and Scully on the whole implementation before pushing. Scully's stage-by-stage conformance came back clean — 619 tests green, no regression to the shared scheduler/executor, ISSUE-143 preserved, module gate respected at every enumeration point — with one real defect. Mulder cleared its assigned surface (the facade's error-envelope exit contract, the `browse` source's arbitrary-URL fetch as the same bounded residual the `browse` skill already carries, and the `briefing` vs `briefings` skill pair as an intentional split rather than a collision) before hitting a session limit, so I finished its remaining targets inline.
+
+The defect: the components→blocks migration was guarded by a single DB-wide sentinel (`migrated_from_components`) set unconditionally on the module DB's first `ensure_initialised`, even with zero briefings present. Because the Briefings nav tab is on by default, merely opening the reader before configuring anything armed the sentinel with nothing migrated — permanently disabling block-seeding for every legacy briefing configured afterward (they still generated via the legacy prompt path, but showed no blocks in the reader). Fixed by switching to a per-briefing sentinel (`migrated_from_components:<name>`): each briefing migrates exactly once, a briefing added after the first touch still migrates on the next init, and resurrection protection is preserved (deleting all of a briefing's blocks won't re-seed them). Existing deploys self-heal — already-migrated briefings keep their blocks via the per-briefing `_seed_blocks` guard, previously-skipped ones finally migrate.
+
+Two lower-severity review items were left as-is, out of scope for the fix: sources gather serially (the `browse` resolver carries a 60s timeout each, but this runs in the background worker and is bounded by the task timeout, not a dispatch-thread concern), and the `email` source's `lookback_hours` is day-granular so its provenance note ("past Nh") is mildly imprecise while never under-inclusive.
+
+**Key changes:**
+- Replaced the DB-wide migration sentinel with a per-briefing one so a briefing configured after the module DB's first touch still migrates; existing installs heal on next init.
+- Added regression tests for the empty-first-touch and second-briefing-added-later cases.
+- The briefings first-class module (`src/istota/briefings/`) lands with this push via the six staged commits.
+
+**Files added/modified:**
+- `src/istota/briefings/_migrate.py` — `_migrate_components` now tracks a per-briefing sentinel; new `_briefing_sentinel` helper.
+- `tests/test_briefings_migrate.py` — two regression tests.
+- `AGENTS.md`, `CHANGELOG.md`, `README.md` — document the new block/source briefings module.
+
 ## 2026-07-20: Canonical room transcript for all source types (ISSUE-176)
 
 A Talk room the bot participates in shows up in web chat, and the promise a user forms is "what the room shows in Talk, it shows in web." The canonical `messages` store was supposed to make that true but only stored *conversational* (`talk`/`web`) turns plus a couple of hand-patched exceptions. Every other bot post to a room fell through. ISSUE-176 was the live symptom: a `newsletter-gate` cron spawns an extraction subtask that posts a finalized block into a Talk room; it appeared in Talk and never in web. The subtask (`source_type="subtask"`, default `output_target="talk"`) missed all three gates at once — not in `_CONVERSATIONAL_SOURCE_TYPES`, the ISSUE-133 scheduled-mirror hard-guarded `!= "scheduled"`, and the render filter only admitted web/talk/scheduled.
