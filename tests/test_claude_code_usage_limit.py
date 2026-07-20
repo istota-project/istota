@@ -6,6 +6,7 @@ and the execution paths carry it as ``stop_reason="usage_limit"`` (not retried
 against the exhausted primary).
 """
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -30,6 +31,11 @@ class TestIsUsageLimitError:
             "billing hard limit has been reached",
             "You've hit your monthly limit",
             "API Error: 429 {\"error\": {\"message\": \"usage limit reached\"}}",
+            # The three real Claude Code subscription-limit messages (per the
+            # docs) — session/weekly/Opus. All three must classify as usage_limit.
+            "You've hit your session limit · resets 3:45pm",
+            "You've hit your weekly limit · resets Mon 12:00am",
+            "You've hit your Opus limit · resets 3:45pm",
         ],
     )
     def test_matches_usage_limit_strings(self, text):
@@ -90,6 +96,67 @@ class TestSimplePathClassification:
     def test_generic_error_stays_error(self):
         result = self._run(1, "some random failure")
         assert result.stop_reason == "error"
+
+    def test_rc0_limit_on_stdout_reclassified(self):
+        # `claude -p` reports a limit as a SUCCESS (rc 0, limit text on stdout).
+        # It must not be delivered as a successful answer.
+        result = self._run(0, "You've hit your weekly limit · resets Mon 12:00am")
+        assert result.success is False
+        assert result.stop_reason == "usage_limit"
+
+    def test_rc0_normal_output_stays_success(self):
+        result = self._run(0, "Here is your completed answer.")
+        assert result.success is True
+        assert result.stop_reason == "completed"
+
+
+class _FakeStdin:
+    def write(self, *_):
+        pass
+
+    def close(self):
+        pass
+
+
+class _FakeProc:
+    """Minimal Popen stand-in for the streaming path: an iterable stdout of
+    stream-json lines, an empty stderr, rc 0."""
+
+    def __init__(self, stdout_lines):
+        self.stdout = iter(stdout_lines)
+        self.stderr = iter([])
+        self.stdin = _FakeStdin()
+        self.returncode = 0
+        self.pid = 4321
+
+    def wait(self):
+        pass
+
+    def kill(self):
+        self.returncode = -9
+
+
+class TestStreamingSuccessBranchClassification:
+    def _run(self, result_text):
+        brain = ClaudeCodeBrain()
+        frame = json.dumps(
+            {"type": "result", "subtype": "success", "result": result_text}
+        ) + "\n"
+        proc = _FakeProc([frame])
+        with patch("istota.brain.claude_code.subprocess.Popen", return_value=proc):
+            return brain._execute_streaming_once(["claude"], _req())
+
+    def test_success_frame_with_limit_reclassified(self):
+        # The CLI emits a session-limit hit as subtype:"success" with the limit
+        # text as `result`. It must classify usage_limit, not completed.
+        result = self._run("You've hit your session limit · resets 9pm (UTC)")
+        assert result.success is False
+        assert result.stop_reason == "usage_limit"
+
+    def test_success_frame_normal_stays_success(self):
+        result = self._run("Here is your completed answer.")
+        assert result.success is True
+        assert result.stop_reason == "completed"
 
 
 class TestSimpleRetryShortCircuit:

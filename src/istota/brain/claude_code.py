@@ -111,6 +111,14 @@ _USAGE_LIMIT_KEYWORDS: tuple[str, ...] = (
 # "rate limit exceeded" (transient) does NOT match.
 _EXCEEDED_LIMIT_RE = re.compile(r"exceeded[^.]{0,40}?\blimit\b", re.IGNORECASE)
 
+# Claude Code's subscription-limit stem: "You've hit your <scope> limit · resets …".
+# The scope varies — session / weekly / Opus (per the Claude Code docs) — and all
+# three are a persistent "brain unavailable until reset" condition. Anchoring on
+# "hit your … limit" catches every current phrasing (and a future scope word)
+# without enumerating each noun, and the "hit your" anchor keeps a transient
+# "rate limit" from matching.
+_HIT_LIMIT_RE = re.compile(r"hit your[^.]{0,40}?\blimit\b", re.IGNORECASE)
+
 
 def is_usage_limit_error(text: str) -> bool:
     """True if ``text`` indicates a subscription/quota/billing usage limit.
@@ -124,7 +132,7 @@ def is_usage_limit_error(text: str) -> bool:
     low = text.lower()
     if any(keyword in low for keyword in _USAGE_LIMIT_KEYWORDS):
         return True
-    return bool(_EXCEEDED_LIMIT_RE.search(text))
+    return bool(_EXCEEDED_LIMIT_RE.search(text)) or bool(_HIT_LIMIT_RE.search(text))
 
 
 def _failure_stop_reason(text: str) -> str:
@@ -495,10 +503,23 @@ class ClaudeCodeBrain:
                 stop_reason="oom",
             )
 
+        # A session/quota limit is reported by `claude -p` as a *successful*
+        # completion (rc 0, the limit text as the answer), so classify it on the
+        # success branch too — otherwise it defaults to stop_reason="completed",
+        # never matches the fallback trigger set, and gets delivered as the reply.
         if result.returncode == 0 and output:
+            if is_usage_limit_error(output):
+                return BrainResult(
+                    success=False, result_text=output, stop_reason="usage_limit",
+                )
             return BrainResult(success=True, result_text=output)
         if result.returncode == 0 and req.result_file and req.result_file.exists():
-            return BrainResult(success=True, result_text=req.result_file.read_text().strip())
+            file_text = req.result_file.read_text().strip()
+            if is_usage_limit_error(file_text):
+                return BrainResult(
+                    success=False, result_text=file_text, stop_reason="usage_limit",
+                )
+            return BrainResult(success=True, result_text=file_text)
         if output:
             return BrainResult(
                 success=False, result_text=output,
@@ -741,6 +762,18 @@ class ClaudeCodeBrain:
         if final_result is not None:
             result_text = final_result.text.strip()
             if final_result.success:
+                # `claude -p` reports a session/quota limit as a success result
+                # frame (subtype:"success", the limit text as `result`). Classify
+                # it here so it reroutes to the fallback brain instead of being
+                # delivered as the answer with the default stop_reason="completed".
+                if is_usage_limit_error(result_text):
+                    return BrainResult(
+                        success=False,
+                        result_text=result_text,
+                        execution_trace=trace_json,
+                        stop_reason="usage_limit",
+                        model_used=model_seen or req.model,
+                    )
                 return BrainResult(
                     success=True,
                     result_text=result_text,
@@ -760,6 +793,14 @@ class ClaudeCodeBrain:
         if req.result_file and req.result_file.exists():
             output = req.result_file.read_text()
             if process.returncode == 0:
+                if is_usage_limit_error(output):
+                    return BrainResult(
+                        success=False,
+                        result_text=output.strip(),
+                        execution_trace=trace_json,
+                        stop_reason="usage_limit",
+                        model_used=model_seen or req.model,
+                    )
                 return BrainResult(
                     success=True,
                     result_text=output.strip(),
@@ -767,11 +808,14 @@ class ClaudeCodeBrain:
                     execution_trace=trace_json,
                     model_used=model_seen or req.model,
                 )
+            # A limit message written to the result file (rather than a
+            # ResultEvent) must still classify as usage_limit, not a generic
+            # error — otherwise it's not a fallback trigger.
             return BrainResult(
                 success=False,
                 result_text=output.strip(),
                 execution_trace=trace_json,
-                stop_reason="error",
+                stop_reason=_failure_stop_reason(output),
             )
 
         logger.warning(

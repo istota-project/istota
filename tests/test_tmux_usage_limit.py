@@ -64,17 +64,42 @@ class TestBuildResultUsageLimit:
 
 
 class TestWaitForCompletionUsageLimit:
-    def test_pane_marker_classified_usage_limit(self, monkeypatch, tmp_path):
+    def _classify(self, monkeypatch, tmp_path, pane_text):
         brain = TmuxClaudeBrain()
-        monkeypatch.setattr(brain, "_capture", lambda name: "session limit reached")
+        monkeypatch.setattr(brain, "_capture", lambda name: pane_text)
         monkeypatch.setattr(brain, "_pane_alive", lambda name: True)
         import istota.brain.tmux_claude as mod
         monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
         s = tmp_path / "stop.json"  # never created
         import time as _t
-        status, pane = brain._wait_for_completion("s", s, _t.monotonic() + 9999, None)
+        return brain._wait_for_completion("s", s, _t.monotonic() + 9999, None)
+
+    def test_pane_marker_classified_usage_limit(self, monkeypatch, tmp_path):
+        status, pane = self._classify(monkeypatch, tmp_path, "session limit reached")
         assert status == "usage_limit"
         assert "session limit reached" in pane
+
+    def test_real_session_limit_text_classified(self, monkeypatch, tmp_path):
+        # The actual interactive-TUI text — matched by the "session limit" marker.
+        status, _ = self._classify(
+            monkeypatch, tmp_path, "You've hit your session limit · resets 3:45pm"
+        )
+        assert status == "usage_limit"
+
+    @pytest.mark.parametrize(
+        "pane_text",
+        [
+            "You've hit your weekly limit · resets Mon 12:00am",
+            "You've hit your Opus limit · resets 3:45pm",
+        ],
+    )
+    def test_weekly_and_opus_limit_caught_by_detector_fallback(
+        self, monkeypatch, tmp_path, pane_text
+    ):
+        # No marker matches these scopes; the is_usage_limit_error(pane) fallback
+        # in _wait_for_completion catches them.
+        status, _ = self._classify(monkeypatch, tmp_path, pane_text)
+        assert status == "usage_limit"
 
 
 class _ExecHarness:

@@ -624,16 +624,21 @@ class TmuxBrainConfig:
     )
     bypass_warning_marker: str = "Bypass Permissions mode"
     bypass_accept_marker: str = "Yes, I accept"
+    # "session limit reached" is intentionally not here — it's a usage-limit
+    # signal handled by usage_limit_markers (checked first), not a generic error.
     error_markers: list[str] = field(
-        default_factory=lambda: ["API Error", "session limit reached", "Context low"]
+        default_factory=lambda: ["API Error", "Context low"]
     )
     # Pane substrings that mark a subscription/quota usage limit (checked before
     # error_markers so a limit hit that aborts the turn before a transcript is
     # written classifies as stop_reason="usage_limit" — reroutes to the fallback
     # brain — rather than a generic error). CLI-version-pinned like the others.
+    # The real TUI text is "You've hit your <scope> limit"; "session limit" is
+    # the stable session substring, and the weekly/Opus scopes are caught by the
+    # is_usage_limit_error(pane) fallback in _wait_for_completion.
     usage_limit_markers: list[str] = field(
         default_factory=lambda: [
-            "session limit reached",
+            "session limit",
             "usage limit reached",
             "Claude usage limit",
         ]
