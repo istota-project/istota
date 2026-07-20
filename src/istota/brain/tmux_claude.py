@@ -116,9 +116,17 @@ _THEME_MARKERS = ("Choose the text style", "run /theme")
 _BYPASS_WARNING_MARKER = "Bypass Permissions mode"
 _BYPASS_ACCEPT_MARKER = "Yes, I accept"
 # Pane substrings that mean the turn cannot make progress (fail fast, §3).
-_ERROR_MARKERS = ("API Error", "session limit reached", "Context low")
+# "session limit reached" is deliberately NOT here: it's a usage-limit signal,
+# not a generic error, and _wait_for_completion checks the usage-limit set first.
+# Leaving it in error_markers would let an older marker ordering misroute a limit
+# hit to the generic-error branch.
+_ERROR_MARKERS = ("API Error", "Context low")
 _USAGE_LIMIT_MARKERS = (
-    "session limit reached",
+    # The real interactive-TUI text is "You've hit your <scope> limit · resets …"
+    # (scope = session / weekly / Opus). "session limit" is the stable substring
+    # for the session case; the weekly/Opus variants are caught by the
+    # is_usage_limit_error(pane) fallback in _wait_for_completion.
+    "session limit",
     "usage limit reached",
     "Claude usage limit",
 )
@@ -1193,7 +1201,10 @@ class TmuxClaudeBrain:
                     logger.debug("cancel_check raised", exc_info=True)
 
             pane = self._capture(name)
-            if any(m in pane for m in self._p.usage_limit_markers):
+            # Marker substrings first (fast, config-tunable); then the shared
+            # keyword detector as a CLI-reword-resilient fallback, so a weekly /
+            # Opus limit (or a future scope word) is caught without a marker edit.
+            if any(m in pane for m in self._p.usage_limit_markers) or is_usage_limit_error(pane):
                 return ("usage_limit", pane)
             if any(m in pane for m in self._p.error_markers):
                 return ("error", pane)
