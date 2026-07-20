@@ -73,8 +73,11 @@ def _parse_frontmatter(md_path: Path) -> dict | None:
     yaml_text = text[3:end].strip()
     try:
         data = {}
-        for line in yaml_text.split("\n"):
-            line = line.strip()
+        lines = yaml_text.split("\n")
+        idx = 0
+        while idx < len(lines):
+            line = lines[idx].strip()
+            idx += 1
             if not line or line.startswith("#"):
                 continue
             colon = line.find(":")
@@ -82,6 +85,20 @@ def _parse_frontmatter(md_path: Path) -> dict | None:
                 continue
             key = line[:colon].strip()
             value = line[colon + 1:].strip()
+            # Block-style list (key: on its own line, then `- item` lines).
+            # The minimal parser otherwise only understands inline [a, b] lists,
+            # so a block list would silently parse to "" and any gate keyed on
+            # it (e.g. requires_capability) would fail OPEN. Consume the block.
+            if value == "":
+                items = []
+                while idx < len(lines) and lines[idx].strip().startswith("- "):
+                    items.append(lines[idx].strip()[2:].strip().strip("'\""))
+                    idx += 1
+                if items:
+                    data[key] = items
+                else:
+                    data[key] = ""  # genuinely empty scalar (prior behavior)
+                continue
             # Parse booleans
             if value.lower() == "true":
                 data[key] = True
@@ -182,6 +199,7 @@ def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
         exclude_skills=_get_list("exclude_skills"),
         env_specs=env_specs,
         dependencies=_get_list("dependencies"),
+        requires_capability=_get_list("requires_capability"),
         exclude_memory=_get_bool("exclude_memory"),
         exclude_persona=_get_bool("exclude_persona"),
         exclude_resources=_get_list("exclude_resources"),
@@ -233,6 +251,7 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
             source_types=meta.get("source_types", []),
             file_types=meta.get("file_types", []),
             companion_skills=meta.get("companion_skills", []),
+            requires_capability=meta.get("requires_capability", []),
             exclude_memory=meta.get("exclude_memory", False),
             exclude_persona=meta.get("exclude_persona", False),
             exclude_resources=meta.get("exclude_resources", []),
@@ -303,6 +322,42 @@ def _check_dependencies(meta: SkillMeta) -> bool:
             logger.debug("Skill %s skipped: dependency %s not installed", meta.name, dep)
             return False
     return True
+
+
+def capability_disabled_skills(
+    skill_index: dict[str, SkillMeta],
+    available_capabilities: "set[str] | frozenset[str]",
+) -> set[str]:
+    """Skills whose declared ``requires_capability`` isn't satisfied.
+
+    A skill is dropped when any capability it declares is absent from
+    ``available_capabilities`` (all declared capabilities must be present).
+    Skills that declare none are never dropped by this gate.
+    """
+    disabled: set[str] = set()
+    for name, meta in skill_index.items():
+        if meta.requires_capability and not set(meta.requires_capability).issubset(
+            available_capabilities
+        ):
+            disabled.add(name)
+    return disabled
+
+
+def effective_disabled_skills(config, user_id: str, skill_index: dict[str, SkillMeta]) -> set[str]:
+    """The full disabled set for a task: instance-wide + per-user + capability gate.
+
+    Unions ``config.disabled_skills``, the user's per-user ``disabled_skills``,
+    and any skill whose ``requires_capability`` isn't in
+    ``config.available_capabilities()``. This is the single place the executor
+    and the ``skills`` CLI both call so their view of "disabled" can't drift.
+    ``config`` is duck-typed (no import) to avoid a config→loader cycle.
+    """
+    disabled = set(config.disabled_skills)
+    user_config = config.get_user(user_id)
+    if user_config:
+        disabled |= set(user_config.disabled_skills)
+    disabled |= capability_disabled_skills(skill_index, config.available_capabilities())
+    return disabled
 
 
 def get_skill_availability(meta: SkillMeta) -> tuple[str, str | None]:

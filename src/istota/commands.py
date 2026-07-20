@@ -674,7 +674,11 @@ async def cmd_cron(ctx: CommandContext):
 @command("skills", "List available skills and their triggers")
 async def cmd_skills(ctx: CommandContext):
     config, user_id, args = ctx.config, ctx.user_id, ctx.args
-    from .skills._loader import get_skill_availability, load_skill_index
+    from .skills._loader import (
+        effective_disabled_skills,
+        get_skill_availability,
+        load_skill_index,
+    )
 
     skills_dir = config.skills_dir
     bundled_dir = getattr(config, "bundled_skills_dir", None)
@@ -682,11 +686,10 @@ async def cmd_skills(ctx: CommandContext):
 
     is_admin = config.is_admin(user_id)
 
-    # Collect disabled skills (instance-wide + per-user)
-    disabled = set(config.disabled_skills)
-    user_config = config.get_user(user_id)
-    if user_config:
-        disabled |= set(user_config.disabled_skills)
+    # Disabled = instance-wide + per-user + the capability gate (a skill whose
+    # requires_capability isn't available, e.g. browse/devbox with the service
+    # undeployed). Shared with the executor + skills CLI so all three agree.
+    disabled = effective_disabled_skills(config, user_id, index)
 
     # Check for detail view: !skills <name>
     skill_arg = args.strip() if args else ""

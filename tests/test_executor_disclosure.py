@@ -75,10 +75,13 @@ def _write_skill(
     bundled: Path, name: str, body: str, *, source_types=None,
     cli=True, exclude_skills=None, always_include=False, admin_only=False,
     experimental=False, dependencies=None, companion_skills=None, file_types=None,
+    requires_capability=None,
 ):
     d = bundled / name
     d.mkdir(parents=True, exist_ok=True)
     fm = ["---", f"name: {name}", "description: the {0} skill".format(name), f"cli: {'true' if cli else 'false'}"]
+    if requires_capability:
+        fm.append(f"requires_capability: [{', '.join(requires_capability)}]")
     if source_types:
         fm.append(f"source_types: [{', '.join(source_types)}]")
     if file_types:
@@ -114,7 +117,7 @@ def _base_config(tmp_path, *, devbox_enabled=True) -> Config:
     )
     _write_skill(bundled, "developer", "DEVELOPER_BODY_MARKER detailed git instructions")
     _write_skill(bundled, "bookmarks", "BOOKMARKS_BODY_MARKER")
-    _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER")
+    _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER", requires_capability=["devbox"])
     skills_dir = tmp_path / "ops_skills"
     skills_dir.mkdir(parents=True)
     db.init_db(tmp_path / "t.db")
@@ -218,7 +221,7 @@ class TestDevboxDisabledGate:
         # the only thing keeping it out of the menu is the devbox-disabled gate.
         bundled = tmp_path / "bundled"
         _write_skill(bundled, "calendar", "CALENDAR_BODY_MARKER", source_types=["talk"])
-        _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER")
+        _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER", requires_capability=["devbox"])
         skills_dir = tmp_path / "ops_skills"
         skills_dir.mkdir(parents=True)
         db.init_db(tmp_path / "t.db")
@@ -237,7 +240,7 @@ class TestDevboxDisabledGate:
     def test_devbox_enabled_appears_in_menu(self, tmp_path):
         bundled = tmp_path / "bundled"
         _write_skill(bundled, "calendar", "CALENDAR_BODY_MARKER", source_types=["talk"])
-        _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER")
+        _write_skill(bundled, "devbox", "DEVBOX_BODY_MARKER", requires_capability=["devbox"])
         skills_dir = tmp_path / "ops_skills"
         skills_dir.mkdir(parents=True)
         db.init_db(tmp_path / "t.db")

@@ -2516,6 +2516,7 @@ def execute_task(
     from .skills._loader import (
         load_skill_index, select_skills, load_skills,
         compute_skills_fingerprint, load_skills_changelog,
+        effective_disabled_skills,
     )
 
     is_admin = config.is_admin(task.user_id)
@@ -2523,16 +2524,12 @@ def execute_task(
     _bundled_dir = config.bundled_skills_dir
     skill_index = load_skill_index(config.skills_dir, bundled_dir=_bundled_dir)
     user_resource_types = {r.resource_type for r in user_resources}
-    # Combine instance-wide and per-user disabled skills. When devbox is off,
-    # fold `devbox` into the disabled set so the existing disabled-gate drops it
-    # from both selection and the on-demand menu (no wasted pull / confusing CLI
-    # failure) — no new exclusion logic in the loader.
-    user_config = config.get_user(task.user_id)
-    _disabled = set(config.disabled_skills)
-    if user_config:
-        _disabled |= set(user_config.disabled_skills)
-    if not config.devbox.enabled:
-        _disabled.add("devbox")
+    # Instance-wide + per-user disabled skills, plus the capability gate: a
+    # skill whose `requires_capability` (e.g. browse→browser, devbox→devbox)
+    # isn't available in this deployment is folded into the disabled set so it
+    # drops from both selection and the on-demand menu (no wasted pull /
+    # confusing CLI failure). See config.available_capabilities().
+    _disabled = effective_disabled_skills(config, task.user_id, skill_index)
 
     # Build sticky skills from recent conversation + explicit reply parent
     sticky_skills: set[str] | None = None

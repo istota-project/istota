@@ -70,6 +70,13 @@ class SkillMeta:
     exclude_skills: list[str] = field(default_factory=list)
     env_specs: list[EnvSpec] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
+    # Backing-service capabilities this skill needs (e.g. "browser", "devbox").
+    # When a required capability isn't available in the loaded config — the
+    # service isn't deployed, the default in the standalone install — the skill
+    # is folded into the effective disabled set (dropped from selection AND the
+    # on-demand menu). Config.available_capabilities() maps names to config
+    # flags; the gate is resolved by effective_disabled_skills().
+    requires_capability: list[str] = field(default_factory=list)
     exclude_memory: bool = False
     exclude_persona: bool = False
     exclude_resources: list[str] = field(default_factory=list)
