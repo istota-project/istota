@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-07-19
+
 ### Changed
 - Learned playbooks (opt-in procedural memory) now age out on last *use* rather than last *write*, and the retention window defaults to 90 days when the feature is enabled. A playbook is kept fresh whenever it's recalled; genuinely idle ones are pruned. Existing playbooks are grandfathered on first upgrade so nothing is deleted unexpectedly.
 
@@ -929,7 +931,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.33.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.34.0...main
+[0.34.0]: https://gitlab.com/cynium/istota/-/releases/v0.34.0
 [0.33.0]: https://gitlab.com/cynium/istota/-/releases/v0.33.0
 [0.32.0]: https://gitlab.com/cynium/istota/-/releases/v0.32.0
 [0.31.1]: https://gitlab.com/cynium/istota/-/releases/v0.31.1
