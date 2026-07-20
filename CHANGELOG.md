@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-07-19
+
 ### Added
 - Admin dashboard now shows a Models card: the active model backend, the default model and effort, the endpoint (for the native backend), and what the fast/general/smart roles currently resolve to — so you can confirm what a deployment is configured to run without reading the config file.
 
@@ -908,7 +910,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.31.1...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.32.0...main
+[0.32.0]: https://gitlab.com/cynium/istota/-/releases/v0.32.0
 [0.31.1]: https://gitlab.com/cynium/istota/-/releases/v0.31.1
 [0.31.0]: https://gitlab.com/cynium/istota/-/releases/v0.31.0
 [0.30.0]: https://gitlab.com/cynium/istota/-/releases/v0.30.0
