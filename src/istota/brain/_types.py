@@ -50,6 +50,15 @@ class BrainRequest:
     # stop_reason="cancelled".
     cancel_check: Callable[[], bool] | None = None
 
+    # Returns any steering messages (raw user text) that have arrived for this
+    # task since the last call, marking them consumed (`!steer`). A
+    # steering-capable brain (NativeBrain) polls this off its event loop and
+    # injects each as a user turn at the next loop boundary; other brains ignore
+    # it. ``None`` = no steering channel wired for this task (the common case for
+    # non-native / non-steerable brains). The executor supplies it only when the
+    # resolved brain ``supports_steering``.
+    poll_steers: Callable[[], list[str]] | None = None
+
     # Called once with the subprocess PID after spawn (for !stop support).
     on_pid: Callable[[int], None] | None = None
 
@@ -128,6 +137,18 @@ class Brain(Protocol):
     """
 
     def execute(self, req: BrainRequest) -> BrainResult: ...
+
+    @property
+    def supports_steering(self) -> bool:
+        """Whether this brain can accept a steering message mid-run (`!steer`).
+
+        A steering-capable brain drains ``req.poll_steers`` at its loop
+        boundaries and injects each as a user turn without restarting the task.
+        The command layer reads this (plus a v1 kind allowlist) to decide whether
+        to accept a steer or refuse gracefully. Defaults ``False`` so a brain
+        that hasn't opted in is never asked to steer.
+        """
+        return False
 
     def resolve_alias(self, alias: str) -> tuple[str | None, str | None] | None:
         """Resolve a ``!model <alias>`` name to ``(model_id, effort)`` or None.

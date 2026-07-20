@@ -727,3 +727,25 @@ CREATE TABLE IF NOT EXISTS web_user_tokens (
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Mid-flight steering messages (`!steer`). A control channel from the poller /
+-- web-POST process into a running worker, like cancellation — but ordered,
+-- multi-valued, and consumable, so it gets a table rather than a boolean column.
+-- The running (steering-capable) brain drains `pending` rows at its next loop
+-- boundary and appends each as a user turn. `dropped` marks steers still pending
+-- when the task terminated/suspended (visible in audit, never leaked to a later
+-- task).
+CREATE TABLE IF NOT EXISTS task_steers (
+    id           INTEGER PRIMARY KEY,
+    task_id      INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,          -- per-task monotonic, ordering
+    text         TEXT NOT NULL,             -- the steering user message
+    user_id      TEXT NOT NULL,             -- who steered (audit)
+    source       TEXT NOT NULL,             -- 'talk' | 'web' | 'cli' (provenance)
+    status       TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'consumed' | 'dropped'
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    consumed_at  TEXT,
+    UNIQUE (task_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_task_steers_pending
+    ON task_steers (task_id, status, seq);

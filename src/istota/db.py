@@ -568,6 +568,27 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        # Mid-flight steering channel (`!steer`). Created here for existing DBs;
+        # schema.sql also has it for fresh installs. The cascade clause is
+        # decorative (PRAGMA foreign_keys unset).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS task_steers (
+                id           INTEGER PRIMARY KEY,
+                task_id      INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                seq          INTEGER NOT NULL,
+                text         TEXT NOT NULL,
+                user_id      TEXT NOT NULL,
+                source       TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                consumed_at  TEXT,
+                UNIQUE (task_id, seq)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_steers_pending "
+            "ON task_steers (task_id, status, seq)"
+        )
     except sqlite3.OperationalError:
         pass
 
@@ -2114,6 +2135,140 @@ def delete_task_events_by_kind(
         "DELETE FROM task_events WHERE task_id = ? AND kind = ?", (task_id, kind),
     )
     return cursor.rowcount
+
+
+def append_task_event(
+    conn: sqlite3.Connection, task_id: int, kind: str, payload: dict | None = None,
+) -> int | None:
+    """Append a single event to a task's log from *outside* the running worker.
+
+    The worker owns an in-memory ``EventWriter`` that increments ``seq`` per
+    emit; a foreign writer (the ``!steer`` command, running in the poller / web
+    process) can't share that counter, so it computes the next ``seq`` atomically
+    as ``MAX(seq)+1`` in one statement and inserts. A rare collision with the
+    live worker's concurrent insert (both picking the same ``seq``) raises
+    ``IntegrityError`` on ``UNIQUE(task_id, seq)``; we retry a few times, then
+    give up (best-effort, exactly like ``EventWriter._write_to_db``). Returns the
+    assigned ``seq`` on success, ``None`` if it couldn't be persisted.
+    """
+    import json as _json
+
+    payload_json = _json.dumps(payload or {}, default=str)
+    for _ in range(5):
+        try:
+            row = conn.execute(
+                "INSERT INTO task_events (task_id, seq, kind, payload) "
+                "VALUES (?, "
+                "  (SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events WHERE task_id = ?), "
+                "  ?, ?) "
+                "RETURNING seq",
+                (task_id, task_id, kind, payload_json),
+            ).fetchone()
+            conn.commit()
+            return int(row[0]) if row else None
+        except sqlite3.IntegrityError:
+            # Seq collided with the live worker's concurrent emit — recompute.
+            continue
+    logger.debug("append_task_event gave up after seq collisions (task=%s)", task_id)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Mid-flight steering (`!steer`)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Steer:
+    id: int
+    task_id: int
+    seq: int
+    text: str
+    user_id: str
+    source: str
+    status: str
+    created_at: str
+    consumed_at: str | None
+
+
+def _row_to_steer(row: sqlite3.Row) -> Steer:
+    return Steer(
+        id=row["id"],
+        task_id=row["task_id"],
+        seq=row["seq"],
+        text=row["text"],
+        user_id=row["user_id"],
+        source=row["source"],
+        status=row["status"],
+        created_at=row["created_at"],
+        consumed_at=row["consumed_at"],
+    )
+
+
+def add_task_steer(
+    conn: sqlite3.Connection, task_id: int, text: str, user_id: str, source: str,
+) -> int:
+    """Insert a ``pending`` steer for a running task. Returns the new row id.
+
+    ``seq`` is per-task monotonic (``MAX(seq)+1``), computed atomically in the
+    INSERT so concurrent steers on the same task can't collide. Commits in its
+    own transaction — the write is a cheap, non-blocking control signal, like
+    ``!stop``'s ``cancel_requested`` flip.
+    """
+    row = conn.execute(
+        "INSERT INTO task_steers (task_id, seq, text, user_id, source) "
+        "VALUES (?, "
+        "  (SELECT COALESCE(MAX(seq), 0) + 1 FROM task_steers WHERE task_id = ?), "
+        "  ?, ?, ?) "
+        "RETURNING id",
+        (task_id, task_id, text, user_id, source),
+    ).fetchone()
+    conn.commit()
+    return int(row["id"])
+
+
+def claim_pending_steers(conn: sqlite3.Connection, task_id: int) -> list[Steer]:
+    """Atomically flip a task's ``pending`` steers to ``consumed`` and return them.
+
+    Ordered by ``seq`` (oldest first). The ``UPDATE ... RETURNING`` makes the
+    claim atomic, so a re-poll can't double-deliver the same steer. Commits its
+    own transaction. Returns ``[]`` when nothing is pending.
+    """
+    rows = conn.execute(
+        "UPDATE task_steers SET status = 'consumed', consumed_at = datetime('now') "
+        "WHERE task_id = ? AND status = 'pending' "
+        "RETURNING id, task_id, seq, text, user_id, source, status, created_at, consumed_at",
+        (task_id,),
+    ).fetchall()
+    conn.commit()
+    steers = [_row_to_steer(r) for r in rows]
+    steers.sort(key=lambda s: s.seq)
+    return steers
+
+
+def drop_pending_steers(conn: sqlite3.Connection, task_id: int) -> int:
+    """Mark a task's still-``pending`` steers as ``dropped``. Returns the count.
+
+    Called at task finalization so a steer that never drained (task finished /
+    suspended before its next boundary) doesn't leak to a later execution and is
+    visible in audit as dropped rather than silently deleted.
+    """
+    cursor = conn.execute(
+        "UPDATE task_steers SET status = 'dropped' "
+        "WHERE task_id = ? AND status = 'pending'",
+        (task_id,),
+    )
+    conn.commit()
+    return cursor.rowcount
+
+
+def count_pending_steers(conn: sqlite3.Connection, task_id: int) -> int:
+    """Number of ``pending`` steers for a task (backs the per-task depth cap)."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM task_steers WHERE task_id = ? AND status = 'pending'",
+        (task_id,),
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 # ---------------------------------------------------------------------------
