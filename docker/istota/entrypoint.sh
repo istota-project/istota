@@ -356,15 +356,37 @@ TOML
         echo "disabled_skills = [$(echo "$ISTOTA_DISABLED_SKILLS" | sed 's/[^,]*/"&"/g')]" >> "$CONFIG_FILE"
     fi
 
+    # Experimental features (operator opt-in for rough, off-by-default work).
+    # Comma-separated, e.g. "money_tax,money_wash_sales". See docs/EXPERIMENTAL.md.
+    cat >> "$CONFIG_FILE" <<TOML
+
+[experimental]
+TOML
+    if [ -n "${ISTOTA_EXPERIMENTAL_FEATURES:-}" ]; then
+        echo "features = [$(echo "$ISTOTA_EXPERIMENTAL_FEATURES" | sed 's/[^,]*/"&"/g')]" >> "$CONFIG_FILE"
+    else
+        echo "features = []" >> "$CONFIG_FILE"
+    fi
+
     # Brain (model backend). kind=claude_code (default) shells out to the
-    # Claude CLI; kind=native runs the in-process agent loop. The provider
-    # API key is read from ISTOTA_BRAIN_NATIVE_API_KEY at load time, so it is
-    # deliberately not written into config.toml.
+    # Claude CLI; kind=native runs the in-process agent loop; kind=tmux_claude
+    # drives the interactive TUI via tmux. The native provider API key is read
+    # from ISTOTA_BRAIN_NATIVE_API_KEY at load time, so it is deliberately not
+    # written into config.toml.
+    #
+    # Brain fallback (availability failover): when the primary brain is
+    # unavailable (usage limit / missing binary / tmux launch failure), rerun the
+    # task on ISTOTA_BRAIN_FALLBACK with that brain's own settings. "" = none.
     cat >> "$CONFIG_FILE" <<TOML
 
 [brain]
 kind = "${ISTOTA_BRAIN_KIND:-claude_code}"
+fallback_on_transient = ${ISTOTA_BRAIN_FALLBACK_ON_TRANSIENT:-false}
+fallback_cooldown_seconds = ${ISTOTA_BRAIN_FALLBACK_COOLDOWN_SECONDS:-900}
 TOML
+    if [ -n "${ISTOTA_BRAIN_FALLBACK:-}" ]; then
+        echo "fallback = \"${ISTOTA_BRAIN_FALLBACK}\"" >> "$CONFIG_FILE"
+    fi
     if [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "native" ]; then
         cat >> "$CONFIG_FILE" <<TOML
 
@@ -376,9 +398,25 @@ max_turns = ${ISTOTA_BRAIN_NATIVE_MAX_TURNS:-100}
 max_tokens = ${ISTOTA_BRAIN_NATIVE_MAX_TOKENS:-16384}
 prompt_caching = ${ISTOTA_BRAIN_NATIVE_PROMPT_CACHING:-false}
 TOML
+        # Scalar [brain.native] keys (effort, model) must precede the
+        # [brain.native.web_fetch] subtable and the [models.roles] table below,
+        # or TOML would attach them to the wrong table.
+        if [ -n "${ISTOTA_BRAIN_NATIVE_EFFORT:-}" ]; then
+            echo "effort = \"${ISTOTA_BRAIN_NATIVE_EFFORT}\"" >> "$CONFIG_FILE"
+        fi
         if [ -n "${ISTOTA_BRAIN_NATIVE_MODEL:-}" ]; then
             echo "model = \"${ISTOTA_BRAIN_NATIVE_MODEL}\"" >> "$CONFIG_FILE"
+        fi
+        # Daemon-side WebFetch tool (native-only, SSRF-hardened). Safe defaults;
+        # only enabled / allow_http commonly change.
+        cat >> "$CONFIG_FILE" <<TOML
 
+[brain.native.web_fetch]
+enabled = ${ISTOTA_BRAIN_NATIVE_WEB_FETCH_ENABLED:-true}
+allow_http = ${ISTOTA_BRAIN_NATIVE_WEB_FETCH_ALLOW_HTTP:-false}
+require_url_provenance = ${ISTOTA_BRAIN_NATIVE_WEB_FETCH_REQUIRE_URL_PROVENANCE:-false}
+TOML
+        if [ -n "${ISTOTA_BRAIN_NATIVE_MODEL:-}" ]; then
             # Internal subsystems (conversation selection, sleep-cycle
             # extraction, OCR, …) request models by ROLE — "fast" / "general" /
             # "smart". The claude_code brain maps those to Haiku/Sonnet/Opus;
@@ -397,10 +435,24 @@ TOML
         fi
     fi
 
+    # Tmux-driven interactive-TUI brain (subscription billing). Only emitted
+    # when selected; all fields default in code to the prototype's pinned values.
+    if [ "${ISTOTA_BRAIN_KIND:-claude_code}" = "tmux_claude" ]; then
+        cat >> "$CONFIG_FILE" <<TOML
+
+[brain.tmux]
+fallback_trip_threshold = ${ISTOTA_BRAIN_TMUX_FALLBACK_TRIP_THRESHOLD:-5}
+fallback_cooldown_seconds = ${ISTOTA_BRAIN_TMUX_FALLBACK_COOLDOWN_SECONDS:-300}
+ready_timeout_seconds = ${ISTOTA_BRAIN_TMUX_READY_TIMEOUT_SECONDS:-30}
+cli_version_pin = "${ISTOTA_BRAIN_TMUX_CLI_VERSION_PIN:-2.1.168}"
+TOML
+    fi
+
     cat >> "$CONFIG_FILE" <<TOML
 
 [security]
 sandbox_enabled = ${ISTOTA_SECURITY_SANDBOX_ENABLED:-true}
+sandbox_admin_db_write = ${ISTOTA_SECURITY_SANDBOX_ADMIN_DB_WRITE:-false}
 skill_proxy_enabled = ${ISTOTA_SECURITY_SKILL_PROXY_ENABLED:-true}
 skill_proxy_timeout = ${ISTOTA_SECURITY_SKILL_PROXY_TIMEOUT:-300}
 
@@ -459,6 +511,7 @@ backup_count = ${ISTOTA_LOGGING_BACKUP_COUNT:-5}
 
 [scheduler]
 poll_interval = ${ISTOTA_SCHEDULER_POLL_INTERVAL:-5}
+dispatch_interval = ${ISTOTA_SCHEDULER_DISPATCH_INTERVAL:-0.5}
 talk_poll_interval = ${ISTOTA_SCHEDULER_TALK_POLL_INTERVAL:-10}
 talk_poll_timeout = ${ISTOTA_SCHEDULER_TALK_POLL_TIMEOUT:-30}
 talk_poll_wait = ${ISTOTA_SCHEDULER_TALK_POLL_WAIT:-2.0}
@@ -471,24 +524,40 @@ progress_updates = ${ISTOTA_SCHEDULER_PROGRESS_UPDATES:-true}
 progress_show_tool_use = ${ISTOTA_SCHEDULER_PROGRESS_SHOW_TOOL_USE:-true}
 progress_show_text = ${ISTOTA_SCHEDULER_PROGRESS_SHOW_TEXT:-false}
 event_log_enabled = ${ISTOTA_SCHEDULER_EVENT_LOG_ENABLED:-true}
+stream_text_gate_chars = ${ISTOTA_SCHEDULER_STREAM_TEXT_GATE_CHARS:-280}
 push_notification_threshold_seconds = ${ISTOTA_SCHEDULER_PUSH_NOTIFICATION_THRESHOLD_SECONDS:-30}
 push_notification_sources = ${ISTOTA_SCHEDULER_PUSH_NOTIFICATION_SOURCES:-[]}
+log_channel_show_skills = ${ISTOTA_SCHEDULER_LOG_CHANNEL_SHOW_SKILLS:-true}
 task_timeout_minutes = ${ISTOTA_SCHEDULER_TASK_TIMEOUT_MINUTES:-30}
 confirmation_timeout_minutes = ${ISTOTA_SCHEDULER_CONFIRMATION_TIMEOUT_MINUTES:-120}
 stale_pending_warn_minutes = ${ISTOTA_SCHEDULER_STALE_PENDING_WARN_MINUTES:-30}
 stale_pending_fail_hours = ${ISTOTA_SCHEDULER_STALE_PENDING_FAIL_HOURS:-2}
 max_retry_age_minutes = ${ISTOTA_SCHEDULER_MAX_RETRY_AGE_MINUTES:-60}
+worker_heartbeat_seconds = ${ISTOTA_SCHEDULER_WORKER_HEARTBEAT_SECONDS:-60}
+worker_stuck_minutes = ${ISTOTA_SCHEDULER_WORKER_STUCK_MINUTES:-10}
 task_retention_days = ${ISTOTA_SCHEDULER_TASK_RETENTION_DAYS:-7}
 email_retention_days = ${ISTOTA_SCHEDULER_EMAIL_RETENTION_DAYS:-7}
 worker_idle_timeout = ${ISTOTA_SCHEDULER_WORKER_IDLE_TIMEOUT:-30}
+worker_idle_poll_interval = ${ISTOTA_SCHEDULER_WORKER_IDLE_POLL_INTERVAL:-0.5}
 max_foreground_workers = ${ISTOTA_SCHEDULER_MAX_FOREGROUND_WORKERS:-3}
 max_background_workers = ${ISTOTA_SCHEDULER_MAX_BACKGROUND_WORKERS:-2}
 user_max_foreground_workers = ${ISTOTA_SCHEDULER_USER_MAX_FOREGROUND_WORKERS:-2}
 user_max_background_workers = ${ISTOTA_SCHEDULER_USER_MAX_BACKGROUND_WORKERS:-1}
 scheduled_job_max_consecutive_failures = ${ISTOTA_SCHEDULER_SCHEDULED_JOB_MAX_CONSECUTIVE_FAILURES:-5}
+cron_max_staleness_minutes = ${ISTOTA_SCHEDULER_CRON_MAX_STALENESS_MINUTES:-60}
+max_subtasks_per_task = ${ISTOTA_SCHEDULER_MAX_SUBTASKS_PER_TASK:-10}
+max_subtask_depth = ${ISTOTA_SCHEDULER_MAX_SUBTASK_DEPTH:-3}
+max_subtask_prompt_chars = ${ISTOTA_SCHEDULER_MAX_SUBTASK_PROMPT_CHARS:-8000}
 talk_cache_max_per_conversation = ${ISTOTA_SCHEDULER_TALK_CACHE_MAX_PER_CONVERSATION:-200}
 temp_file_retention_days = ${ISTOTA_SCHEDULER_TEMP_FILE_RETENTION_DAYS:-7}
 location_ping_retention_days = ${ISTOTA_SCHEDULER_LOCATION_PING_RETENTION_DAYS:-365}
+db_health_check_interval = ${ISTOTA_SCHEDULER_DB_HEALTH_CHECK_INTERVAL:-86400}
+main_loop_read_timeout_ms = ${ISTOTA_SCHEDULER_MAIN_LOOP_READ_TIMEOUT_MS:-2000}
+scheduler_stats_interval = ${ISTOTA_SCHEDULER_STATS_INTERVAL:-60}
+db_backup_enabled = ${ISTOTA_SCHEDULER_DB_BACKUP_ENABLED:-true}
+db_backup_interval = ${ISTOTA_SCHEDULER_DB_BACKUP_INTERVAL:-86400}
+db_backup_dir = "${ISTOTA_SCHEDULER_DB_BACKUP_DIR:-}"
+db_backup_retention = ${ISTOTA_SCHEDULER_DB_BACKUP_RETENTION:-7}
 
 [sleep_cycle]
 enabled = ${ISTOTA_SLEEP_CYCLE_ENABLED:-true}
@@ -497,6 +566,8 @@ lookback_hours = ${ISTOTA_SLEEP_CYCLE_LOOKBACK_HOURS:-24}
 memory_retention_days = ${ISTOTA_SLEEP_CYCLE_MEMORY_RETENTION_DAYS:-0}
 auto_load_dated_days = ${ISTOTA_SLEEP_CYCLE_AUTO_LOAD_DATED_DAYS:-3}
 curate_user_memory = ${ISTOTA_SLEEP_CYCLE_CURATE_USER_MEMORY:-false}
+curation_log_summary = ${ISTOTA_SLEEP_CYCLE_CURATION_LOG_SUMMARY:-true}
+knowledge_graph_audit_retention_days = ${ISTOTA_SLEEP_CYCLE_KG_AUDIT_RETENTION_DAYS:-365}
 
 [channel_sleep_cycle]
 enabled = ${ISTOTA_CHANNEL_SLEEP_CYCLE_ENABLED:-true}
@@ -514,6 +585,20 @@ auto_index_conversations = ${ISTOTA_MEMORY_SEARCH_AUTO_INDEX_CONVERSATIONS:-true
 auto_index_memory_files = ${ISTOTA_MEMORY_SEARCH_AUTO_INDEX_MEMORY_FILES:-true}
 auto_recall = ${ISTOTA_MEMORY_SEARCH_AUTO_RECALL:-false}
 auto_recall_limit = ${ISTOTA_MEMORY_SEARCH_AUTO_RECALL_LIMIT:-5}
+recency_half_life_days = ${ISTOTA_MEMORY_SEARCH_RECENCY_HALF_LIFE_DAYS:-180}
+TOML
+    fi
+
+    # Learned playbooks (procedural memory) — off by default. Distilled by the
+    # sleep cycle from successful multi-step tasks, recalled by relevance.
+    if [ "${ISTOTA_PLAYBOOKS_ENABLED:-false}" = "true" ]; then
+        cat >> "$CONFIG_FILE" <<TOML
+
+[playbooks]
+enabled = true
+recall_limit = ${ISTOTA_PLAYBOOKS_RECALL_LIMIT:-3}
+min_tool_calls = ${ISTOTA_PLAYBOOKS_MIN_TOOL_CALLS:-4}
+retention_days = ${ISTOTA_PLAYBOOKS_RETENTION_DAYS:-0}
 TOML
     fi
 
@@ -604,7 +689,10 @@ oauth2_token_endpoint = "${NC_URL}/index.php/apps/oauth2/api/v1/token"
 oauth2_userinfo_endpoint = "${NC_URL}/ocs/v2.php/cloud/user?format=json"
 oauth2_redirect_uri = "${WEB_REDIRECT_URI}"
 session_secret_key = "${WEB_SESSION_SECRET}"
-token_storage = "ephemeral"
+token_storage = "${ISTOTA_WEB_TOKEN_STORAGE:-encrypted}"
+
+[web.chat]
+talk_read_sync_interval = ${ISTOTA_WEB_CHAT_TALK_READ_SYNC_INTERVAL:-60}
 
 [site]
 hostname = "${WEB_SITE_HOSTNAME}"
@@ -751,7 +839,10 @@ oauth2_token_endpoint = "${NC_URL}/index.php/apps/oauth2/api/v1/token"
 oauth2_userinfo_endpoint = "${NC_URL}/ocs/v2.php/cloud/user?format=json"
 oauth2_redirect_uri = "${WEB_REDIRECT_URI}"
 session_secret_key = "${WEB_SESSION_SECRET}"
-token_storage = "ephemeral"
+token_storage = "${ISTOTA_WEB_TOKEN_STORAGE:-encrypted}"
+
+[web.chat]
+talk_read_sync_interval = ${ISTOTA_WEB_CHAT_TALK_READ_SYNC_INTERVAL:-60}
 
 [site]
 hostname = "${WEB_SITE_HOSTNAME}"
