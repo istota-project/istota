@@ -81,6 +81,29 @@ from .claude_code import is_usage_limit_error
 
 logger = logging.getLogger("istota.brain.native")
 
+# Compact coding-hygiene block prepended to the native brain's system prompt on
+# tool-bearing tasks (empty allowed_tools — e.g. the sleep cycle — gets no
+# coding prompt). Generic hygiene only: project-specific conventions come from
+# the executor's storage framing and the repo's own guidance files, not here.
+# The claude_code/tmux brains take their prompt from the CLI, so this never
+# reaches them — the coding steering is scoped to exactly the native path.
+CODING_SYSTEM_PROMPT = """\
+You are operating as a coding agent. Work carefully and verify your changes.
+
+- Read a file before editing it; base edits on its current contents, not memory.
+- Prefer the `Edit` tool over `Write` for existing files. Use `Write` only for a
+  new file or a full rewrite.
+- To change several separate locations in one file, make a single `Edit` call
+  with multiple entries in `edits[]` rather than many calls.
+- Keep each `old_string` minimal but unique — include just enough surrounding
+  context to be unambiguous; do not pad it with large unchanged regions.
+- After changing code, verify it: run the project's tests or build via `Bash`
+  when feasible.
+- Be concise in your explanations.
+
+Additional tools may be available beyond the ones already described; discover
+them as needed."""
+
 _API_RETRY_MAX_ATTEMPTS = 3
 _API_RETRY_BASE_DELAY = 5.0
 _API_RETRY_MAX_DELAY = 120.0
@@ -605,7 +628,11 @@ class NativeBrain:
             convert_to_llm=self._convert_to_llm,
             prepare_next_turn=prepare_next_turn,
             stop_conditions=[_max_turns_stop, _loop_detect_stop],
-            tool_execution="sequential",
+            # Independent read-only tools (Read/Grep/Glob/WebFetch, all
+            # execution_mode="parallel") run concurrently; any batch containing a
+            # mutation (Write/Edit/Bash are sequential) or two calls to the same
+            # path serializes via _execute_tool_batch's existing guards.
+            tool_execution="parallel",
             max_tokens=self._config.max_tokens,
             reasoning_effort=reasoning_effort,
             render_tool_images=get_model_info(model).supports_vision,
@@ -866,6 +893,7 @@ class NativeBrain:
         if policy is not None and policy.require_url_provenance:
             corpus = _extract_urls(req.prompt)
 
+        deferred = (req.env or {}).get("ISTOTA_DEFERRED_DIR")
         env = ToolEnv(
             cwd=cwd,
             sandbox_wrap=req.sandbox_wrap,
@@ -875,6 +903,8 @@ class NativeBrain:
             write_roots=write_roots,
             web_fetch=policy,
             web_fetch_url_corpus=corpus,
+            deferred_dir=Path(deferred) if deferred else None,
+            bash_spill_full_output=getattr(self._config, "bash_spill_full_output", True),
         )
         allowed = set(req.allowed_tools)
         return [t for t in build_default_tools(env) if t.schema.name in allowed]
@@ -933,10 +963,21 @@ class NativeBrain:
 
     @staticmethod
     def _extract_system_prompt(req: BrainRequest) -> str:
+        """Compose the native brain's system prompt.
+
+        Tool-bearing tasks (non-empty ``allowed_tools``) get the coding-guidance
+        block; a text-only invocation (empty ``allowed_tools``, e.g. the sleep
+        cycle) keeps an empty prompt — no behavioural change to that path. An
+        operator's ``custom_system_prompt_path`` is appended after the base so it
+        still applies.
+        """
+        parts: list[str] = []
+        if req.allowed_tools:
+            parts.append(CODING_SYSTEM_PROMPT)
         path = req.custom_system_prompt_path
         if path is not None and Path(path).exists():
-            return Path(path).read_text()
-        return ""
+            parts.append(Path(path).read_text())
+        return "\n\n".join(parts)
 
     @staticmethod
     def _build_result(

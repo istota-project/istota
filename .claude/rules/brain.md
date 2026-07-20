@@ -334,6 +334,52 @@ project notes for the full list):
   recovery input bounding + retrying-provider + empty-summary fail (NB-10),
   window-relative compaction sizing (NB-14), per-task httpx client close (NB-17).
 
+Native-brain coding enhancements (2026-07-20, `Specs/Done/native-brain-coding-enhancements.md`)
+— native-path-only; the `claude_code`/`tmux_claude` brains take their prompt +
+tools from the CLI and are byte-unchanged:
+- **Fuzzy, multi-edit Edit tool.** `session/tools/edit_engine.py` (pure logic
+  ported from pi's `edit-diff.ts`) backs `make_edit_tool`. Matching is
+  exact-first then a bounded fuzzy fallback (Unicode NFKC, trailing-whitespace
+  strip, smart-quotes/dashes/exotic-spaces → ASCII); it does **not** tolerate
+  indentation/internal-whitespace reflow. An optional `edits[]` array applies
+  several disjoint edits in one call (uniqueness + overlap enforced); the legacy
+  `old_string`/`new_string`/`replace_all` shape is retained (`replace_all` stays
+  exact-only — fuzzy+replace_all is disallowed). A `prepare_arguments` shim
+  coerces `edits`-as-JSON-string and legacy→one-element-`edits`. Reads/writes
+  **raw bytes** (not `read_text`) to preserve CRLF/BOM through the edit. When any
+  edit is fuzzy the batch matches in normalized space but writes via
+  `apply_replacements_preserving_unchanged_lines` so untouched lines keep their
+  exact bytes. Failure messages are actionable (not-found / duplicate / overlap /
+  empty / no-op).
+- **Coding system prompt.** `native._extract_system_prompt` prepends the
+  module-level `CODING_SYSTEM_PROMPT` (generic coding hygiene: read-before-edit,
+  prefer Edit over Write, batch multi-site edits into one `edits[]` call, keep
+  `old_string` minimal-but-unique, verify with tests) **only when
+  `req.allowed_tools` is non-empty** — a text-only invocation (sleep cycle) keeps
+  an empty prompt. An operator `custom_system_prompt_path` is appended after it.
+- **Parallel tool execution.** `native.py` sets `tool_execution="parallel"`, so
+  independent read-only tools (Read/Grep/Glob/WebFetch) run concurrently; the
+  loop's existing guards still serialize any batch containing a mutation
+  (Write/Edit/Bash are `execution_mode="sequential"`) or two calls to the same
+  path (`_has_path_overlap`), and results append in call order.
+- **Truncated-tool-call guard.** In `agent/loop.py`, a tool-call assistant
+  message with `stop_reason == "max_tokens"` (the provider's map of
+  `finish_reason="length"`) is **not executed** — `_truncated_tool_results`
+  synthesizes an is-error result per pending call (keeping tool_call/result
+  pairing valid) and the loop lets the model re-issue. Mirrors pi's guard.
+- **Recovery hints in truncated output.** Read's tail note names the concrete
+  `offset=` to continue from; Grep's head-limit note says how to see more; Bash
+  spills full over-cap output to a task-scoped temp file (lazily, under
+  `ToolEnv.deferred_dir` = `ISTOTA_DEFERRED_DIR`, fallback system temp) and names
+  it in the result (`… [output truncated at N bytes; full output: PATH]`) instead
+  of silently dropping the tail. `_SpillWriter` is best-effort (degrades to
+  cap-only on I/O error) and skipped when `exclude_from_context` is set. Knob:
+  `[brain.native] bash_spill_full_output` (default true).
+- **Grep context + literal.** `-C`/`context` (integer) adds surrounding context
+  lines in `content` mode (ripgrep `path:lineno:` match / `path-lineno-` context
+  rendering, `--` between non-adjacent groups); `literal` (`re.escape`) matches a
+  plain string. Pure-Python, no ripgrep dependency.
+
 ### Native WebFetch tool (daemon-side, SSRF-hardened)
 
 The native harness's only web-reaching tool is Bash, which runs sandboxed behind

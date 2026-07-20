@@ -87,6 +87,9 @@ base_url = "{{ istota_brain_native_base_url | default('https://api.anthropic.com
 context_window = {{ istota_brain_native_context_window | default(0, true) }}
 max_turns = {{ istota_brain_native_max_turns | default(100, true) }}
 max_tokens = {{ istota_brain_native_max_tokens | default(16384, true) }}
+# Spill full over-cap Bash output to a task-scoped temp file (named in the tool
+# result) instead of dropping the tail; default on.
+bash_spill_full_output = {{ istota_brain_native_bash_spill_full_output | default(true, true) | lower }}
 {# prompt_caching: "" (default) → omit so the code derives it from base_url
    (on for Anthropic). Emit when the operator forced a value — accepts a YAML
    boolean or a "true"/"false" string (e.g. passed via -e on the CLI, which

@@ -110,6 +110,63 @@ class TestBash:
         assert "visible" in _text(result)
 
 
+class TestBashOutputSpill:
+    """Stage 5 — over-cap output spills to a temp file named in the result."""
+
+    async def test_spill_file_created_and_named(self, tmp_path):
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = _env(tmp_path, max_output_bytes=50, deferred_dir=deferred)
+        result = await _run(
+            make_bash_tool(env),
+            {"command": "for i in $(seq 1 100); do echo loooong line $i; done"},
+        )
+        text = _text(result)
+        assert "truncated" in text.lower()
+        assert "full output:" in text
+        # The named file exists, lives under the deferred dir, and holds the full
+        # output (more than the in-context cap).
+        spills = list(deferred.glob("bash_output_*.txt"))
+        assert len(spills) == 1
+        contents = spills[0].read_text()
+        assert "loooong line 100" in contents  # the dropped tail is preserved
+        assert str(spills[0]) in text
+
+    async def test_spill_disabled_falls_back_to_cap_only(self, tmp_path):
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = _env(tmp_path, max_output_bytes=50, deferred_dir=deferred, bash_spill_full_output=False)
+        result = await _run(
+            make_bash_tool(env),
+            {"command": "for i in $(seq 1 100); do echo loooong line $i; done"},
+        )
+        text = _text(result)
+        assert "truncated" in text.lower()
+        assert "full output:" not in text
+        assert list(deferred.glob("bash_output_*.txt")) == []
+
+    async def test_under_cap_no_spill(self, tmp_path):
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = _env(tmp_path, max_output_bytes=10_000, deferred_dir=deferred)
+        result = await _run(make_bash_tool(env), {"command": "echo small"})
+        assert "small" in _text(result)
+        assert list(deferred.glob("bash_output_*.txt")) == []
+
+    async def test_exclude_from_context_skips_spill(self, tmp_path):
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = _env(tmp_path, max_output_bytes=50, deferred_dir=deferred)
+        await _run(
+            make_bash_tool(env),
+            {
+                "command": "for i in $(seq 1 100); do echo loooong line $i; done",
+                "exclude_from_context": True,
+            },
+        )
+        assert list(deferred.glob("bash_output_*.txt")) == []
+
+
 class TestBashProcessHandling:
     """NB-6/NB-7/NB-11: long lines must not crash the tool, and timeout/abort/
     cancel must kill the whole process group (no orphaned grandchildren)."""

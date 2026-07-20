@@ -173,7 +173,21 @@ async def _run_loop(
             tool_results: list[ToolResultMessage] = []
             has_more_tool_calls = False
 
-            if tool_calls:
+            if tool_calls and message.stop_reason == "max_tokens":
+                # The completion was cut off at the model's max output, so the
+                # tool-call arguments may parse-and-validate but be silently
+                # incomplete. Do NOT execute them: synthesize an error result for
+                # every pending call (keeping tool_call/tool_result pairing valid
+                # for the next request) and let the model re-issue. Mirrors pi's
+                # agent-loop truncated-tool-call guard.
+                tool_results = _truncated_tool_results(message)
+                has_more_tool_calls = True
+                for result in tool_results:
+                    ctx.messages.append(result)
+                    new_messages.append(result)
+                    await emit(AgentEvent(type="message_start", message=result))
+                    await emit(AgentEvent(type="message_end", message=result))
+            elif tool_calls:
                 batch = await _execute_tool_batch(ctx, message, config, emit)
                 tool_results = batch.messages
                 has_more_tool_calls = not batch.terminate
@@ -757,6 +771,26 @@ async def _maybe_await(value):
 
 def _error_result(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(text=text)])
+
+
+def _truncated_tool_results(message: AssistantMessage) -> list[ToolResultMessage]:
+    """One error ToolResultMessage per pending call in a max_tokens-truncated
+    assistant message. Synthesized for *every* call so the tool_call/tool_result
+    pairing stays valid for the next request (rather than relying on the wire
+    sanitizer to repair orphans)."""
+    text = (
+        "The previous response was truncated before the tool arguments were "
+        "complete; re-issue this tool call."
+    )
+    return [
+        ToolResultMessage(
+            tool_call_id=tc.id,
+            tool_name=tc.name,
+            content=[TextContent(text=text)],
+            is_error=True,
+        )
+        for tc in message.tool_calls
+    ]
 
 
 def _missing_required(args: dict, schema: ToolSchema) -> list[str]:

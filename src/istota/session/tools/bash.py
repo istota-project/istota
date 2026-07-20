@@ -13,7 +13,9 @@ import asyncio
 import contextlib
 import os
 import signal
+import tempfile
 import time
+from pathlib import Path
 
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
@@ -83,6 +85,12 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         deadline = time.monotonic() + timeout_s
         status = "ok"
 
+        # Spill the full output to a task-scoped file when it exceeds the cap, so
+        # the tail isn't silently lost — the model can Read it back. Best-effort:
+        # any spill error degrades to cap-only truncation. Skipped when the caller
+        # already excluded the output from context (they don't want it).
+        spill = _SpillWriter(env) if (env.bash_spill_full_output and not exclude_from_context) else None
+
         # try/finally so *every* exit path — normal, timeout, abort, and a hard
         # task cancellation (CancelledError, a BaseException the loop's
         # `except Exception` won't catch) — kills and reaps the process group
@@ -107,10 +115,18 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
                 if not chunk:
                     break  # EOF
                 total_bytes += len(chunk)
-                if len(out) < env.max_output_bytes:
-                    out.extend(chunk[: env.max_output_bytes - len(out)])
+                room = env.max_output_bytes - len(out)
+                if room > 0:
+                    out.extend(chunk[:room])
                     if len(out) >= env.max_output_bytes:
                         truncated = True
+                        # Seed the spill with the buffered head + this chunk's
+                        # overflow, then subsequent chunks stream straight to it.
+                        if spill is not None:
+                            spill.start(bytes(out))
+                            spill.write(chunk[room:])
+                elif spill is not None:
+                    spill.write(chunk)
                 if on_update is not None:
                     await on_update(chunk.decode("utf-8", "replace"))
 
@@ -119,12 +135,21 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(proc.wait(), timeout=5)
         finally:
+            if spill is not None:
+                spill.close()
             _kill_process_group(proc)
             await _reap(proc)
 
         text = out.decode("utf-8", "replace")
         if truncated:
-            text += f"\n… [output truncated at {env.max_output_bytes} bytes]"
+            spill_path = spill.path if spill is not None else None
+            if spill_path is not None:
+                text += (
+                    f"\n… [output truncated at {env.max_output_bytes} bytes; "
+                    f"full output: {spill_path}]"
+                )
+            else:
+                text += f"\n… [output truncated at {env.max_output_bytes} bytes]"
 
         # Failure markers are kept separate so they can ride along even when the
         # body is excluded from context — a failed/aborted/timed-out command the
@@ -157,6 +182,53 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         return ToolResult(content=[TextContent(text=text)])
 
     return AgentTool(schema=schema, execute=_execute, execution_mode="sequential")
+
+
+class _SpillWriter:
+    """Lazily-opened file for the full over-cap Bash output.
+
+    Best-effort: any open/write failure nulls ``path`` so the caller degrades to
+    cap-only truncation. The file is opened on the first ``start`` (i.e. the
+    first time output crosses the cap), so a small command never touches disk.
+    """
+
+    def __init__(self, env: ToolEnv):
+        self._base = env.deferred_dir or Path(tempfile.gettempdir())
+        self._fh = None
+        self.path: Path | None = None
+
+    def start(self, head: bytes) -> None:
+        if self._fh is not None or self.path is not None:
+            return
+        try:
+            self._base.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(prefix="bash_output_", suffix=".txt", dir=str(self._base))
+            self._fh = os.fdopen(fd, "wb")
+            self.path = Path(name)
+            self._fh.write(head)
+        except OSError:
+            self._fail()
+
+    def write(self, data: bytes) -> None:
+        if self._fh is None:
+            return
+        try:
+            self._fh.write(data)
+        except OSError:
+            self._fail()
+
+    def _fail(self) -> None:
+        if self._fh is not None:
+            with contextlib.suppress(OSError):
+                self._fh.close()
+        self._fh = None
+        self.path = None
+
+    def close(self) -> None:
+        if self._fh is not None:
+            with contextlib.suppress(OSError):
+                self._fh.close()
+            self._fh = None
 
 
 def _kill_process_group(proc) -> None:
