@@ -18,6 +18,7 @@ per-block synthesis directives).
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -128,10 +129,6 @@ def assemble_briefing_input(
     is_morning = resolved.hour < 12
     mode = "morning" if is_morning else "evening"
 
-    src_ctx = SourceContext(
-        app_config=app_config, user_id=ctx.user_id, conn=conn, now=now,
-    )
-
     lines: list[str] = [
         f"Generate a {mode} briefing for user {ctx.user_id}.",
         f"Current time: {time_str} ({tz_str})",
@@ -162,16 +159,58 @@ def assemble_briefing_input(
     except Exception:  # noqa: BLE001
         pass
 
+    # Gather every enabled source concurrently. Resolvers are network-bound
+    # (browse frontpage fetch, IMAP) and fail-soft, so a slow source only
+    # delays its own slot instead of serializing the whole briefing. Each
+    # worker opens its OWN framework connection (SQLite connections aren't
+    # thread-safe; WAL supports concurrent connections), so the caller's shared
+    # `conn` is never touched off the calling thread.
+    enabled_sources = [
+        (bi, si, source)
+        for bi, block in enumerate(blocks)
+        for si, source in enumerate(block.sources)
+        if source.enabled
+    ]
+
+    def _gather_one(kind: str, source_config: dict) -> GatheredSource:
+        try:
+            if conn is None:
+                tctx = SourceContext(
+                    app_config=app_config, user_id=ctx.user_id, conn=None, now=now,
+                )
+                return resolve_source(kind, source_config, tctx)
+            from istota import db as framework_db
+
+            with framework_db.get_db(app_config.db_path) as tconn:
+                tctx = SourceContext(
+                    app_config=app_config, user_id=ctx.user_id, conn=tconn, now=now,
+                )
+                return resolve_source(kind, source_config, tctx)
+        except Exception as e:  # noqa: BLE001 — fail-soft, mirrors resolve_source
+            logger.warning("briefings gather: %s source failed: %s", kind, e)
+            return GatheredSource(
+                kind=kind, title=kind, provenance=f"({kind} source error)", ok=False,
+            )
+
+    gathered_by_slot: dict[tuple[int, int], GatheredSource] = {}
+    if enabled_sources:
+        with ThreadPoolExecutor(max_workers=min(8, len(enabled_sources))) as pool:
+            futures = {
+                pool.submit(_gather_one, source.kind, source.config): (bi, si)
+                for bi, si, source in enabled_sources
+            }
+            for fut in as_completed(futures):
+                gathered_by_slot[futures[fut]] = fut.result()
+
     block_meta: dict = {}
     rendered = 0
 
-    for block in blocks:
-        gathered: list[GatheredSource] = []
-        for source in block.sources:
-            if not source.enabled:
-                continue
-            gs = resolve_source(source.kind, source.config, src_ctx)
-            gathered.append(gs)
+    for bi, block in enumerate(blocks):
+        gathered: list[GatheredSource] = [
+            gathered_by_slot[(bi, si)]
+            for si, source in enumerate(block.sources)
+            if source.enabled
+        ]
 
         non_empty = [g for g in gathered if g.ok and not g.is_empty]
         block_meta[block.title] = {

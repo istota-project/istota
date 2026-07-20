@@ -251,6 +251,45 @@ class TestEmail:
         assert captured["limit"] is None
         assert len(gs.items) == 150
 
+    def test_hour_window_trims_day_granular_surplus(self, tmp_path, monkeypatch):
+        """IMAP date_gte is day-granular, so the server fetch is over-inclusive.
+        A message older than the exact hour cutoff is trimmed client-side so the
+        'past Nh' provenance stays honest (a datetime-dated envelope, unlike the
+        string-dated mock used elsewhere, exercises the filter)."""
+        import istota.briefings.sources.email as email_mod
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            nextcloud_mount_path=tmp_path / "mount",
+            email=EmailConfig(enabled=True, imap_host="imap.x", bot_email="bot@x.com"),
+            users={"stefan": UserConfig()},
+        )
+        now = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+        ctx = SourceContext(app_config=cfg, user_id="stefan", conn=object(), now=now)
+
+        recent = _Env("1", "fresh@x.com")
+        recent.date = datetime(2026, 7, 20, 6, 0, tzinfo=timezone.utc)  # within 12h
+        stale = _Env("2", "stale@x.com")
+        stale.date = datetime(2026, 7, 19, 10, 0, tzinfo=timezone.utc)  # >12h, day surplus
+
+        monkeypatch.setattr("istota.email_support.get_email_config", lambda c: cfg.email)
+        monkeypatch.setattr(
+            "istota.skills.email.list_emails", lambda **kw: [recent, stale]
+        )
+        monkeypatch.setattr(
+            "istota.skills.email.fetch_emails_full",
+            lambda **kw: [_Full("1", "fresh body")],
+        )
+        monkeypatch.setattr(
+            "istota.email_ownership.resolve_email_owner",
+            lambda config, conn, e: None,
+        )
+
+        gs = _call_email(email_mod, {"mode": "shared", "lookback_hours": 12}, ctx)
+        assert gs.ok is True
+        assert [i["sender"] for i in gs.items] == ["fresh@x.com"]  # stale trimmed
+        assert "past 12h" in gs.provenance
+
 
 def _call_email(email_mod, config, ctx):
     """Invoke the email resolver directly (bypassing the lazy dispatcher cache
