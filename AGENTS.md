@@ -251,7 +251,7 @@ uv sync                                            # Install deps
 uv run istota init                                 # Initialize DB
 uv run istota setup [--yes --workspace … --brain …]# Local single-user install wizard
 uv run istota serve [--host … --port …]            # Combined local launcher (scheduler + web)
-uv run istota update [--force]                      # Self-update a standalone install (git pull + reinstall + migrate)
+uv run istota update [--force] [--channel stable|main] # Self-update a standalone install (git pull + reinstall + migrate)
 uv run istota task "prompt" -u USER -x [--dry-run] # Execute task
 uv run istota task "prompt" -u USER -t ROOM -x     # With conversation context
 uv run istota resource ensure|add|list -u USER ... # Resources (DB-backed)
