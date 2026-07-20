@@ -168,7 +168,7 @@ istota setup [--yes] [--workspace DIR] [--brain claude_code|native] \
 istota serve [--host HOST] [--port N] [--env-file PATH]   # Scheduler loop + web server in one process
 ```
 
-`istota setup` writes a local workspace (default `~/.istota`) and configures a single user; `--yes` runs non-interactively from flags and defaults. `istota serve` is the combined local launcher — it runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). See [Local install](../LOCAL_INSTALL.md) for the full walkthrough.
+`istota setup` writes a local workspace (default `~/.istota`) and configures a single user; `--yes` runs non-interactively from flags and defaults. `istota serve` is the combined local launcher — it runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). See [Local install](../getting-started/local-install.md) for the full walkthrough.
 
 ### Database
 

@@ -1,22 +1,23 @@
 # Local single-user install
 
-Istota's default shape is a multi-user server deployment backed by Nextcloud (files, Talk chat, CalDAV, OAuth login), isolated per-user with bubblewrap. This page covers the other shape: a slimmed-down **local, single-user install** you run on your own mac or Linux box, like a locally-installed agent harness. No Nextcloud, no server, no sandbox, no login.
+Istota's default shape is a multi-user server deployment backed by Nextcloud (files, Talk chat, CalDAV, OAuth login), isolated per-user with bubblewrap — see the [bare metal](quickstart-bare-metal.md) and [Docker](quickstart-docker.md) quickstarts. This page covers the other shape: a slimmed-down **local, single-user install** you run on your own mac or Linux box, like a locally-installed agent harness. No Nextcloud, no server, no sandbox, no login.
 
 The workspace is a plain local folder (default `~/.istota`). The web UI runs on loopback with authentication bypassed. It is always single-user and always trusted.
 
 ## Trust model — read this first
 
-A local install runs **unsandboxed**. There is no bubblewrap isolation, no skill proxy, and no network proxy. The agent's subprocesses run with **your user account's full privileges** — full filesystem access and open network. A prompt injection carried in ingested content (an email, a browsed page, a feed item) therefore has real reach.
+!!! warning "A local install runs unsandboxed"
+    There is no bubblewrap isolation, no skill proxy, and no network proxy. The agent's subprocesses run with **your user account's full privileges** — full filesystem access and open network. A prompt injection carried in ingested content (an email, a browsed page, a feed item) therefore has real reach.
 
 Only give a local instance content and instructions you trust. The content-trust guardrails (`untrusted_input` companion on the ingest skills, `sensitive_actions`) stay in place, but they are about content provenance, not process isolation.
 
-If you need isolation between untrusted content and your host, use the server deployment (Linux + bubblewrap), not the local install.
+If you need isolation between untrusted content and your host, use the server deployment (Linux + bubblewrap), not the local install. See [Security](../deployment/security.md) for how the sandboxed shape confines the agent.
 
 ## Requirements
 
 - macOS or Linux (Windows is not supported).
 - Python 3.11+ with [`uv`](https://docs.astral.sh/uv/).
-- For the default model backend: the [`claude` CLI](https://docs.anthropic.com/en/docs/build-with-claude/claude-code), installed and logged in (reuses your existing Claude Code subscription). Alternatively, an API key for any OpenAI-compatible endpoint.
+- For the default model backend: the [`claude` CLI](https://docs.anthropic.com/en/docs/build-with-claude/claude-code), installed and logged in (reuses your existing Claude Code subscription). Alternatively, an API key for any OpenAI-compatible endpoint — see the [native brain runbook](../configuration/native-brain.md).
 
 ## Install
 
@@ -38,7 +39,8 @@ uv tool install 'istota[local,money,location,memory-search,whisper,transcribe]'
 
 A module whose extra isn't installed hides itself — the app skips it and its web UI tab doesn't appear rather than showing a broken tab.
 
-> **weasyprint (invoice PDFs).** The `money` extra pulls weasyprint, whose native libs (pango/cairo) are only touched when you *render an invoice PDF*. Everything else in the money module — the ledger, queries, balances, the Money tab — works without them. On macOS that one path needs `brew install pango`; until then invoice-PDF generation is the only thing that errors.
+!!! note "weasyprint (invoice PDFs)"
+    The `money` extra pulls weasyprint, whose native libs (pango/cairo) are only touched when you *render an invoice PDF*. Everything else in the money module — the ledger, queries, balances, the Money tab — works without them. On macOS that one path needs `brew install pango`; until then invoice-PDF generation is the only thing that errors.
 
 ## Set up
 
@@ -81,6 +83,8 @@ The **REPL** works too, in a separate terminal, whether or not `serve` is runnin
 istota repl
 ```
 
+See the [CLI reference](../reference/cli.md) for the full `setup` / `serve` / `repl` flag lists.
+
 ## Updating
 
 ```bash
@@ -91,7 +95,8 @@ Pulls the latest code from the checkout `install.sh` recorded (under `~/.local/s
 
 By default `update` follows the **stable** channel — the latest tagged release. To ride the development branch instead (newer, less tested), run `istota update --channel main`; switch back with `istota update --channel stable`. The choice is remembered, so you set it once. (An install made before this option existed keeps tracking `main` until you pick a channel.)
 
-`update` only applies to this standalone shape and needs the install record `install.sh` writes; a hand-run `uv tool install` won't have it, so re-run `install.sh --standalone` once. A server (Nextcloud/auth) deployment is updated separately and `update` declines to run there.
+!!! note "Standalone only"
+    `update` applies to this standalone shape and needs the install record `install.sh` writes; a hand-run `uv tool install` won't have it, so re-run `install.sh --standalone` once. A server (Nextcloud/auth) deployment is updated separately and `update` declines to run there.
 
 ## What works, what's off
 
@@ -102,7 +107,7 @@ By default `update` follows the **stable** channel — the latest tagged release
 - **Nextcloud Talk** — off. Chat is the web UI and REPL.
 - **Email / ntfy** — off by default; enable in `setup` or config.
 - **GPS location webhooks** — off by default.
-- **Calendar** — off unless you point the new `[caldav]` fields at an external CalDAV server (Radicale, Fastmail, Google); see below.
+- **Calendar** — off unless you point the `[caldav]` fields at an external CalDAV server (Radicale, Fastmail, Google); see below.
 
 The Admin pane (`/istota/admin`) shows a "Running in standalone mode" notice listing exactly what's off in your install, so a feature that intentionally doesn't work reads as expected, not broken.
 
@@ -120,6 +125,8 @@ password = "app-specific-password"
 **Email.** Set `[email] enabled = true` with your IMAP/SMTP host/user in `config.toml`, and the passwords in `istota.env` (`ISTOTA_EMAIL_IMAP_PASSWORD`, `ISTOTA_EMAIL_SMTP_PASSWORD`). `setup --email` collects these interactively.
 
 **Heavy modules.** Install the matching extra (above), then the module is on by default (opt out per user via `disabled_modules`).
+
+See the [configuration reference](../configuration/reference.md) for every option and [per-user configuration](../configuration/per-user.md) for the workspace files (`USER.md`, `PERSONA.md`, `CRON.md`, and the rest) each user owns.
 
 ## Notes
 

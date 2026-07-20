@@ -62,7 +62,7 @@ nav:
   - Getting started:
     - getting-started/quickstart-docker.md
     - getting-started/quickstart-bare-metal.md
-    - LOCAL_INSTALL.md
+    - getting-started/local-install.md
     - getting-started/post-install.md
   - Architecture:
     - architecture/overview.md
