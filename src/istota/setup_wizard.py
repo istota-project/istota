@@ -119,7 +119,8 @@ def render_config_toml(a: Answers) -> str:
         "[location]",
         f"enabled = {'true' if a.location_enabled else 'false'}",
         "",
-        "# Trusted single-user posture: no sandbox / proxies. See docs/LOCAL_INSTALL.md.",
+        "# Trusted single-user posture: no sandbox / proxies. "
+        "See docs/getting-started/local-install.md.",
         "[security]",
         "sandbox_enabled = false",
         "skill_proxy_enabled = false",
