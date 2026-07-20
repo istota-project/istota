@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-07-19
+
 ### Added
 - Config validation now fails the deploy when the native model backend is used (as primary, fallback, or a per-source-type override) with no model configured, instead of letting a broken failover ship silently. A misspelled fallback backend name is rejected at deploy time too.
 - `istota update`: a one-command self-update for the local (standalone) install. It pulls the latest code, reinstalls, and runs migrations, then tells you to restart `istota serve`. Only applies to a local install — a server deploy keeps its own auto-update and `istota update` declines to run there. Requires having installed via `install.sh --standalone` (which now records where it installed from). By default it follows tagged releases; `istota update --channel main` rides the development branch instead, and the choice is remembered.
@@ -917,7 +919,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.32.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.33.0...main
+[0.33.0]: https://gitlab.com/cynium/istota/-/releases/v0.33.0
 [0.32.0]: https://gitlab.com/cynium/istota/-/releases/v0.32.0
 [0.31.1]: https://gitlab.com/cynium/istota/-/releases/v0.31.1
 [0.31.0]: https://gitlab.com/cynium/istota/-/releases/v0.31.0
