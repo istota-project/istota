@@ -72,7 +72,7 @@ class TestProtocolConformance:
         assert t.name == "talk"
         assert t.capabilities.supports_edit is True
         assert t.capabilities.supports_progress_ack is True
-        assert t.capabilities.max_message_length == 32000
+        assert t.capabilities.max_message_length == 30000
 
     def test_email_transport_is_a_transport(self):
         config = Config()
