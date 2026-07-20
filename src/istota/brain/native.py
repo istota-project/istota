@@ -471,7 +471,11 @@ class NativeBrain:
                     # refusal would be retried instead of failed-fast).
                     if msg.stop_reason == "error" and msg.error_message:
                         last_error_message = msg.error_message
-                    if msg.usage.total_tokens > 0:
+                    # Accumulate on any turn that carries tokens OR a
+                    # provider-reported cost — a costed turn that reports no
+                    # token counts (some OpenRouter free/BYOK responses) would
+                    # otherwise silently drop its charge from the task total.
+                    if msg.usage.total_tokens > 0 or msg.usage.cost_usd is not None:
                         usage.add(msg.usage, get_model_info(model))
                     text = msg.text.strip()
                     if text:

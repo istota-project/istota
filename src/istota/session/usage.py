@@ -2,9 +2,11 @@
 
 ``ClaudeCodeBrain`` leaves cost opaque — the CLI doesn't surface per-call usage.
 The native brain accumulates a ``TaskUsage`` across every turn and attaches it to
-``BrainResult.usage``. Pricing comes from the bundled model catalog (item 1);
-when a model's prices are 0.0 (the default for the pinned Anthropic IDs) cost
-surfaces as 0.0 — unknown rather than wrong.
+``BrainResult.usage``. Cost prefers the provider's own reported figure when the
+endpoint returns one (OpenRouter's ``usage.cost``, real charged cost with markup);
+otherwise it falls back to the bundled model catalog (item 1). When neither is
+available — no reported cost and a catalog price of 0.0 (the default for the
+pinned Anthropic IDs) — cost surfaces as 0.0, unknown rather than wrong.
 
 Distillation sub-agents (item 4, deferred) roll their usage into the parent via
 ``merge``, mirroring Crush's ``updateParentSessionCost()``.
@@ -38,12 +40,21 @@ class TaskUsage:
     turns: int = 0
 
     def add(self, usage: Usage, info: ModelInfo) -> None:
-        """Fold one turn's usage in, pricing it against ``info``."""
+        """Fold one turn's usage in.
+
+        Cost prefers the provider's reported figure (``usage.cost_usd``,
+        e.g. OpenRouter's real charged cost including markup) when present;
+        otherwise it falls back to catalog-price computation against ``info``.
+        ``None`` means the provider reported nothing (compute from catalog);
+        ``0.0`` is a genuine free turn (respected as-is)."""
         self.input_tokens += usage.input_tokens
         self.output_tokens += usage.output_tokens
         self.cache_read_tokens += usage.cache_read_tokens
         self.cache_write_tokens += usage.cache_write_tokens
-        self.cost_usd += price_usage(usage, info)
+        if usage.cost_usd is not None:
+            self.cost_usd += usage.cost_usd
+        else:
+            self.cost_usd += price_usage(usage, info)
         self.turns += 1
 
     def merge(self, other: "TaskUsage") -> None:

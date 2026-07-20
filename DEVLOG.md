@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-19: Native brain — capture OpenRouter's real per-request cost
+
+The native brain over an OpenAI-compatible endpoint (OpenRouter) was logging `cost_usd=0.0` on every task despite full token counts. Not a token-capture bug: cost is computed as tokens × per-model prices from the bundled catalog, and every catalog entry ships with price fields at their `0.0` default (plus an OpenRouter model id isn't even a catalog key, so it falls to the zero-priced `_DEFAULT`). So the number was "unknown", not "free". Catalog prices also can't reflect OpenRouter's markup or per-route price variance, so for accurate billing the right source is OpenRouter itself — it returns the real charged cost in the streaming usage chunk when asked.
+
+Added provider-reported cost as the preferred source, with catalog pricing as graceful fallback. `Usage` gains a `cost_usd: float | None` field (three-state: `None` = provider reported nothing → compute from catalog; a number = use it verbatim; `0.0` = a genuine free turn, respected). The OpenAI-compat provider adds `"usage": {"include": true}` to the request body **only** for OpenRouter base URLs (other endpoints can 400 on the unknown field), and parses the top-level `usage.cost` unconditionally in `_assemble_message`. `TaskUsage.add` prefers `usage.cost_usd` when present, else falls back to `price_usage()`. Non-OpenRouter endpoints are byte-identical in request and keep computing from the catalog exactly as before.
+
+Mulder/Scully reviewed the implementation. Both cleared the core design (wire format verified against OpenRouter docs — top-level `cost`, USD, markup included; no double-counting since provider cost *replaces* the catalog computation; no positional `Usage(...)` construction that the new trailing field would break). Four real robustness findings fixed: (1) `json.loads` accepts bare `NaN`/`Infinity`, which passed the old `isinstance` check, propagated through every `+=` to poison the whole task's running total, and serialized as invalid JSON to `task_logs` — now dropped via `math.isfinite()` (also rejects negatives); (2) a `cost_details.total` fallback targeted a field OpenRouter never sends (its `cost_details` has `upstream_inference_cost`) — dead code, removed; (3) `bool` slipped through as a cost (`int` subclass) — rejected; (4) the loop gated cost accumulation on `total_tokens > 0`, so a costed turn reporting no tokens (some OpenRouter free/BYOK responses) dropped its charge — gate now also accepts a reported cost. All consolidated into one validated `_parse_reported_cost()` extractor.
+
+Deferred: surfacing aggregate cost in the admin dashboard. That needs structured cost on the task row (currently it's an unstructured `task_logs` JSON blob with no model on it), so a real per-model spend aggregate is a separate schema-touching change — noted for later.
+
+**Key changes:**
+- `Usage.cost_usd: float | None` — provider-reported cost, three-state semantics.
+- `_supports_cost_accounting(base_url)` gates the `usage.include` request param to OpenRouter; `_parse_reported_cost(usage_raw)` validates the response cost (finite, non-negative, not bool/string).
+- `TaskUsage.add` prefers reported cost over catalog pricing.
+- Native loop accumulates usage on `total_tokens > 0 or cost_usd is not None`.
+
+**Files modified:**
+- `src/istota/llm/types.py` - `cost_usd` field on `Usage`
+- `src/istota/llm/openai_compat.py` - request param + validated cost parse
+- `src/istota/session/usage.py` - reported-cost-preferred accumulation
+- `src/istota/brain/native.py` - usage gate accepts a costed zero-token turn
+- `tests/native/test_openai_compat.py`, `test_session_usage.py`, `test_native_brain.py` - parse three-state + rejection cases, catalog fallback, costed-zero-token turn
+
+Verified: full native suite green (386 passed).
+
 ## 2026-07-19: Ansible role brain-fallback templating fix + deploy-time validation
 
 A configured `fallback = "native"` under `[brain]` was a paper fallback in the server deploy. The role only emitted the `[brain.native]` block when native was the *primary* brain — never when it was only the fallback. So a `claude_code` primary with a native fallback rendered no `[brain.native]` section at all; the model field fell to its blank code default, and the first failover would send an empty model id to the endpoint (a 400). Same latent omission for `[brain.tmux]`. This surfaced from a production report that the failover wouldn't actually run despite `fallback` being set.

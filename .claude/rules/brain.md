@@ -104,7 +104,7 @@ overrides plug in for free via `_roles.py`.
 | `success: bool` | Final success/failure |
 | `result_text: str` | Final response text |
 | `actions_taken: str \| None` | JSON-encoded list of tool-use descriptions |
-| `execution_trace: str \| None` | JSON-encoded `[{type:"tool"\|"text"\|"cm_boundary", ...}]` |
+| `execution_trace: str \| None` | JSON-encoded `[{type:"tool"\|"text"\|"cm_boundary", ...}]`. A `tool` entry carries an optional `raw` = the verbatim Bash command (`_tool_invocation`), threaded by all three brains for playbook command extraction (ISSUE-174) |
 | `stop_reason: str` | `completed` / `cancelled` / `timeout` / `oom` / `transient_api_error` / `usage_limit` / `error` / `not_found` / `fallback`. `usage_limit` = a subscription/quota/billing limit (a persistent "brain unavailable" condition the executor reroutes to the configured fallback brain — see "Brain fallback" below). |
 
 ## ClaudeCodeBrain
@@ -276,6 +276,19 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
   unless `prompt_caching_explicit` (set when the TOML key is present). Usage
   captures `cache_creation_input_tokens` → `Usage.cache_write_tokens`; a per-task
   `native cache hit_rate=…` line logs at task end.
+- **Cost source.** `TaskUsage.cost_usd` prefers the provider's own reported
+  cost over catalog pricing. OpenRouter returns real per-request cost (markup
+  included) in the trailing usage chunk when the request carries
+  `"usage": {"include": true}` — `openai_compat` sends that param scoped to
+  `openrouter.ai` base URLs (other endpoints may 400 on it) and parses the
+  top-level `usage.cost` via `_parse_reported_cost` (finite / non-negative /
+  not bool-or-string; `NaN`/`Infinity` from `json.loads` are dropped so one bad
+  turn can't poison the task total). `Usage.cost_usd` is three-state: `None` →
+  `TaskUsage.add` computes from the catalog (`price_usage`), a number → used
+  verbatim, `0.0` → a real free turn (respected). The native loop accumulates
+  usage on `total_tokens > 0 or cost_usd is not None`, so a costed zero-token
+  turn isn't dropped. Non-OpenRouter endpoints are unchanged (no request param;
+  catalog pricing).
 - **Overflow recovery.** A mid-task context-length error triggers a bounded
   (≤2) force-compact + `run_agent_loop_continue`, sharing the wall-clock deadline
   via `_run_loop_once`. `_build_recovery_context` force-compacts (aggressive

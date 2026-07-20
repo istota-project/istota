@@ -68,6 +68,24 @@ class TestTextCompletion:
         assert result.usage.output_tokens == 20
         assert result.usage.turns == 1
 
+    def test_reported_cost_captured_when_turn_has_no_tokens(self, tmp_path):
+        # A costed turn that reports zero token counts (some OpenRouter
+        # free/BYOK responses) must still contribute its charge — the usage
+        # gate accepts total_tokens>0 OR a reported cost.
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[TextContent(text="done")],
+                    usage=Usage(cost_usd=0.007),
+                    stop_reason="end_turn",
+                )
+            ]
+        )
+        result = _brain(provider).execute(_req("go", tmp_path))
+        assert result.usage is not None
+        assert result.usage.cost_usd == 0.007
+        assert result.usage.turns == 1
+
     def test_max_tokens_truncation_marker(self, tmp_path):
         # NB-15: a final answer cut off at the output-token cap is delivered with
         # a visible marker, not as a clean completion.
