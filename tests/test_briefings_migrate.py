@@ -148,6 +148,56 @@ class TestEnsureInitialised:
             blocks = bdb.list_blocks(conn, "M")
         assert len(blocks) == 1
 
+    def test_empty_first_touch_then_briefing_added_later_migrates(self, tmp_path):
+        # Regression: an empty first touch (e.g. opening the on-by-default
+        # Briefings tab before configuring anything) must not permanently
+        # disable migration. A briefing added afterward still migrates.
+        empty_cfg = _config(tmp_path, [])
+        ctx = synthesize_briefings_context(
+            "stefan", tmp_path / "mount",
+            db_path=empty_cfg.module_db_path("stefan", "briefings"),
+        )
+        ensure_initialised(ctx, app_config=empty_cfg)  # nothing to migrate yet
+
+        later_cfg = _config(
+            tmp_path,
+            [BriefingConfig(name="Morning", cron="0 7 * * *",
+                            components={"news": True, "markets": True})],
+        )
+        ensure_initialised(ctx, app_config=later_cfg)  # same DB, briefing now present
+
+        with bdb.connect(ctx.db_path) as conn:
+            blocks = bdb.list_blocks(conn, "Morning")
+        assert [b.title for b in blocks] == ["News", "Markets"]
+
+    def test_second_briefing_added_later_also_migrates(self, tmp_path):
+        # A DB-wide sentinel would migrate the first briefing then lock out any
+        # later one; the per-briefing sentinel migrates each independently.
+        cfg_a = _config(
+            tmp_path,
+            [BriefingConfig(name="A", cron="0 7 * * *", components={"news": True})],
+        )
+        ctx = synthesize_briefings_context(
+            "stefan", tmp_path / "mount",
+            db_path=cfg_a.module_db_path("stefan", "briefings"),
+        )
+        ensure_initialised(ctx, app_config=cfg_a)
+
+        cfg_ab = _config(
+            tmp_path,
+            [
+                BriefingConfig(name="A", cron="0 7 * * *", components={"news": True}),
+                BriefingConfig(name="B", cron="0 8 * * *", components={"markets": True}),
+            ],
+        )
+        ensure_initialised(ctx, app_config=cfg_ab)
+
+        with bdb.connect(ctx.db_path) as conn:
+            a_blocks = bdb.list_blocks(conn, "A")
+            b_blocks = bdb.list_blocks(conn, "B")
+        assert [b.title for b in a_blocks] == ["News"]      # migrated once, not duplicated
+        assert [b.title for b in b_blocks] == ["Markets"]   # later briefing migrated too
+
     def test_no_app_config_inits_but_skips_migration(self, tmp_path):
         ctx = synthesize_briefings_context("stefan", tmp_path / "mount")
         ensure_initialised(ctx)  # no app_config

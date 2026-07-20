@@ -195,12 +195,25 @@ def _seed_blocks(conn, briefing_name: str, specs: list[dict]) -> None:
             )
 
 
-def _migrate_components(ctx: BriefingsContext, app_config) -> None:
-    """One-time components → blocks migration for all of the user's briefings.
+def _briefing_sentinel(name: str) -> str:
+    """Per-briefing migration sentinel key."""
+    return f"{_MIGRATION_SENTINEL}:{name}"
 
-    Sentinel-guarded and idempotent. Reads the same briefing set that
-    ``check_briefings`` schedules (``get_briefings_for_user``). Best-effort:
-    any error is logged and swallowed so DB init never fails.
+
+def _migrate_components(ctx: BriefingsContext, app_config) -> None:
+    """One-time components → blocks migration, tracked **per briefing**.
+
+    Reads the same briefing set that ``check_briefings`` schedules
+    (``get_briefings_for_user``) and migrates each briefing exactly once,
+    guarded by its own sentinel. A per-briefing (not DB-wide) sentinel is
+    required so that a briefing created *after* the module DB's first touch is
+    still migrated on a later init — a DB-wide sentinel set on an empty first
+    touch (e.g. opening the on-by-default Briefings tab before configuring
+    anything) would permanently disable migration for every briefing added
+    afterward. The per-briefing sentinel also preserves resurrection
+    protection: once a briefing is migrated, deleting all its blocks won't
+    re-seed them. Best-effort: any error is logged and swallowed so DB init
+    never fails.
     """
     if app_config is None:
         return
@@ -219,19 +232,20 @@ def _migrate_components(ctx: BriefingsContext, app_config) -> None:
         return
 
     with briefings_db.connect(ctx.db_path) as conn:
-        if briefings_db.meta_get(conn, _MIGRATION_SENTINEL) == "1":
-            return
         for briefing in briefings:
+            sentinel = _briefing_sentinel(briefing.name)
+            if briefings_db.meta_get(conn, sentinel) == "1":
+                continue
             try:
                 specs = blocks_from_components(briefing.components or {})
                 if specs:
                     _seed_blocks(conn, briefing.name, specs)
+                briefings_db.meta_set(conn, sentinel, "1")
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "briefings migration: failed for %s/%s: %s",
                     ctx.user_id, getattr(briefing, "name", "?"), e,
                 )
-        briefings_db.meta_set(conn, _MIGRATION_SENTINEL, "1")
         conn.commit()
 
 
