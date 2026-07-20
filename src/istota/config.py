@@ -304,7 +304,7 @@ class PlaybooksConfig:
     enabled: bool = False           # master gate for Part B
     recall_limit: int = 3           # top-K playbooks injected per task
     min_tool_calls: int = 4         # a task must use >= this many tools to qualify
-    retention_days: int = 0         # 0 = keep forever; >0 = age-prune
+    retention_days: int = 90        # 0 = keep forever; >0 = age-prune by last-use
     max_chars: int = 0              # 0 = share the global max_memory_chars budget
 
 

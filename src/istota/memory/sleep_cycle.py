@@ -224,16 +224,25 @@ def _excerpt(text: str, budget: int) -> str:
 _MAX_TOOL_NAMES = 25
 # Leading emoji + whitespace that the trace descriptions are prefixed with.
 _TOOL_DESC_PREFIX = re.compile(r"^[^\w(]+")
+# Per-label truncation. A verbatim command (`raw`) gets a larger budget than a
+# human description so a full script invocation survives whole for the playbook
+# extraction prompt (ISSUE-174 fix 1); the description path keeps the tight cap.
+_MAX_DESC_CHARS = 80
+_MAX_RAW_CHARS = 200
 
 
 def tool_summary(execution_trace_json: str | None) -> tuple[int, list[str]]:
     """Summarize a task's tool usage from its ``execution_trace`` JSON.
 
     Returns ``(count, ordered_labels)`` where ``count`` is the number of tool
-    entries and ``ordered_labels`` are short, emoji-stripped descriptions of
-    each tool call (truncated, capped at ``_MAX_TOOL_NAMES``). Used both to gate
-    playbook-worthiness (``playbooks.min_tool_calls``) and to give the extraction
-    LLM the procedure's shape. Never raises — malformed/empty → ``(0, [])``.
+    entries and ``ordered_labels`` are short descriptions of each tool call,
+    capped at ``_MAX_TOOL_NAMES``. When a tool entry carries a ``raw`` field
+    (the verbatim command a Bash call ran — ISSUE-174 fix 1), that literal
+    invocation is used verbatim (larger truncation budget) so the extraction
+    LLM distils the real command instead of the paraphrased ``text`` label.
+    Used both to gate playbook-worthiness (``playbooks.min_tool_calls``) and to
+    give the extraction LLM the procedure's shape. Never raises — malformed /
+    empty → ``(0, [])``.
     """
     if not execution_trace_json:
         return 0, []
@@ -252,11 +261,16 @@ def tool_summary(execution_trace_json: str | None) -> tuple[int, list[str]]:
         count += 1
         if len(labels) >= _MAX_TOOL_NAMES:
             continue
-        text = str(entry.get("text", "")).strip()
-        text = _TOOL_DESC_PREFIX.sub("", text).strip()
-        if len(text) > 80:
-            text = text[:77] + "..."
-        labels.append(text or "tool")
+        raw = str(entry.get("raw", "")).strip()
+        if raw:
+            label = raw if len(raw) <= _MAX_RAW_CHARS else raw[: _MAX_RAW_CHARS - 3] + "..."
+        else:
+            text = str(entry.get("text", "")).strip()
+            text = _TOOL_DESC_PREFIX.sub("", text).strip()
+            if len(text) > _MAX_DESC_CHARS:
+                text = text[: _MAX_DESC_CHARS - 3] + "..."
+            label = text or "tool"
+        labels.append(label)
     return count, labels
 
 
@@ -446,6 +460,23 @@ Do NOT create a playbook for:
 
 Write the steps as you would teach them to your future self: name the skills
 and CLI subcommands used, the order, and any gotcha hit along the way.
+
+CRITICAL — record verified commands, never reconstructions. Each task's
+"Tools (N): ..." line lists the ACTUAL commands and skill invocations that ran
+and succeeded. When a step names a command, script path, module, or skill CLI,
+copy it VERBATIM from that Tools line — do NOT reconstruct a plausible-looking
+path from memory (e.g. never invent `python -m some.module.path` when the trace
+shows `python scripts/foo.py`). If the exact invocation isn't in the Tools line,
+describe the step without inventing a command string.
+
+Don't re-narrate a script. If a task's work was essentially ONE deterministic
+script or CLI call (the Tools line is dominated by a single invocation), the
+script already captures the procedure — do NOT paraphrase its internal steps
+into prose (that just re-encodes working logic in a lossy format that drifts).
+Either skip it, or write a THIN ROUTER: recognize the trigger, give the exact
+verified command to run (copied from the Tools line), and name the one gotcha —
+then stop. Never expand a single script call into a multi-step narrative of what
+the script does internally.
 
 If no reusable procedures emerged today, output an empty array: []"""
 
@@ -906,9 +937,10 @@ def process_user_sleep_cycle(
     # Clean up old memory files
     cleanup_old_memory_files(config, user_id, sleep_config.memory_retention_days)
 
-    # Clean up old playbooks (age-based; 0 = keep forever)
+    # Clean up old playbooks (use-based age; 0 = keep forever). Pass conn so a
+    # pruned playbook's memory_chunks are deleted with its file (ISSUE-174).
     if config.playbooks.enabled:
-        cleanup_old_playbooks(config, user_id, config.playbooks.retention_days)
+        cleanup_old_playbooks(config, user_id, config.playbooks.retention_days, conn=conn)
 
     # Clean up old ephemeral memory_chunks (conversation, memory_file,
     # channel_memory). Reuses the same retention setting as the file cleanup
@@ -1425,6 +1457,59 @@ def _render_playbook(pb: dict, date_str: str) -> tuple[str, str]:
     return file_text, searchable
 
 
+# Match a top-level `pinned: true` frontmatter line, tolerating an optional
+# quote, a trailing inline comment, and case. Anchored at line start (a nested /
+# indented key is not a top-level flag).
+_PINNED_FM_RE = re.compile(
+    r"^pinned:\s*[\"']?true[\"']?\s*(?:#.*)?$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _playbook_is_pinned(path: Path) -> bool:
+    """True if the playbook file carries ``pinned: true`` in its frontmatter.
+
+    A pinned playbook is a human-corrected version the sleep cycle must not
+    clobber on the next same-slug re-derivation (ISSUE-174 Concern 1). Only the
+    leading frontmatter block (the first complete ``---`` fence pair) is
+    inspected; a match in the body doesn't count, and a file with an opening
+    fence but no closing one has no valid frontmatter (so a body ``pinned: true``
+    can't false-positive). Tolerates a leading BOM / blank lines, quoted value,
+    and an inline comment. Unreadable file → not pinned (fail open to the normal
+    overwrite path).
+    """
+    try:
+        text = path.read_text()
+    except OSError:
+        return False
+    text = text.lstrip("﻿").lstrip()
+    if not text.startswith("---"):
+        return False
+    after_open = text[3:]
+    m = re.search(r"\n---", after_open)
+    if m is None:
+        return False  # no closing fence → no valid frontmatter block
+    front = after_open[: m.start()]
+    return bool(_PINNED_FM_RE.search(front))
+
+
+def _playbook_searchable_body(text: str) -> str:
+    """Strip a leading YAML frontmatter block, returning the body for indexing.
+
+    A pinned file is re-indexed from its own content; stripping the frontmatter
+    keeps the indexed searchable text consistent with the freshly-rendered path
+    (title + steps) instead of polluting the index with `pinned: true` /
+    `source:` / `created:` tokens. No valid frontmatter → return the text as-is.
+    """
+    stripped = text.lstrip("﻿").lstrip()
+    if not stripped.startswith("---"):
+        return text.strip()
+    after_open = stripped[3:]
+    m = re.search(r"\n---[ \t]*(?:\n|$)", after_open)
+    if m is None:
+        return text.strip()
+    return after_open[m.end():].strip()
+
+
 def _process_extracted_playbooks(
     config: Config,
     conn: "db.sqlite3.Connection",
@@ -1437,7 +1522,12 @@ def _process_extracted_playbooks(
 
     Dedup is by slug: re-deriving a playbook with the same title overwrites the
     existing file in place (and ``index_file`` replaces its chunks for that
-    path) rather than proliferating near-duplicates. Requires mount mode.
+    path) rather than proliferating near-duplicates. A file marked
+    ``pinned: true`` in its frontmatter (a human-corrected version) keeps its
+    on-disk content but is re-indexed from that content, so the correction
+    reaches recall (which serves ``memory_chunks``, not the file) without the
+    sleep cycle clobbering the human edit (ISSUE-174 Concern 1). Requires mount
+    mode.
     """
     if not config.use_mount:
         logger.warning("Playbooks require mount mode, skipping writes for %s", user_id)
@@ -1456,6 +1546,20 @@ def _process_extracted_playbooks(
         file_text, searchable = _render_playbook(pb, date_str)
         pb_path = pb_dir / f"{slug}.md"
         existed = pb_path.exists()
+        if existed and _playbook_is_pinned(pb_path):
+            # Keep the human-corrected file, but REFRESH the index from its
+            # current content — recall serves memory_chunks, not the file, so a
+            # correction that isn't re-indexed never reaches the model
+            # (ISSUE-174 fix 2). Skip only the overwrite.
+            logger.info("playbook_pinned_skip slug=%s user=%s", slug, user_id)
+            if index_enabled:
+                try:
+                    from .search import index_file as _index_file
+                    body = _playbook_searchable_body(pb_path.read_text())
+                    _index_file(conn, user_id, str(pb_path), body, "playbook")
+                except Exception as e:
+                    logger.debug("Pinned playbook reindex failed for %s: %s", pb_path.name, e)
+            continue
         pb_path.write_text(file_text)
         logger.info(
             "playbook_written slug=%s ref=%s updated=%s user=%s",
@@ -1470,17 +1574,33 @@ def _process_extracted_playbooks(
                 logger.debug("Playbook indexing failed for %s: %s", pb_path.name, e)
 
 
+_RETENTION_SENTINEL = ".retention_initialized"
+
+
 def cleanup_old_playbooks(
     config: Config,
     user_id: str,
     retention_days: int,
+    conn: "db.sqlite3.Connection | None" = None,
 ) -> int:
     """Delete learned-playbook files older than ``retention_days``.
 
     Returns the number deleted. ``retention_days <= 0`` keeps everything
-    (the default). Age is measured by file mtime — playbooks carry a `created`
-    date in frontmatter, but mtime is refreshed on each re-derivation, which is
-    the behaviour we want (a still-useful, re-distilled playbook stays fresh).
+    (default is 90 days). Age is measured by file mtime, which tracks
+    last-*use*, not just last-write: ``_recall_playbooks`` stamps the file's
+    mtime on every recall hit (ISSUE-174 Concern 3), and re-derivation rewrites
+    it, so the prune targets playbooks that are neither recalled nor
+    re-distilled — genuinely idle guidance — while a still-useful one stays
+    fresh.
+
+    Two guards keep the prune honest (ISSUE-174, Mulder/Scully review):
+    - **Grandfather.** The first run after this use-based clock was introduced
+      refreshes every existing playbook's mtime and writes a sentinel, deleting
+      nothing — otherwise the first post-deploy cycle would prune by stale
+      write-mtime before any recall history exists.
+    - **Pinned files are never pruned**, and when ``conn`` is given the pruned
+      file's ``memory_chunks`` are deleted too (recall reads chunks, so an
+      unlinked-but-unindexed file would otherwise still be served).
     """
     if retention_days <= 0:
         return 0
@@ -1491,18 +1611,49 @@ def cleanup_old_playbooks(
     if not pb_dir.exists():
         return 0
 
-    cutoff = datetime.now(tz=ZoneInfo("UTC")) - timedelta(days=retention_days)
-    cutoff_ts = cutoff.timestamp()
+    now_ts = datetime.now(tz=ZoneInfo("UTC")).timestamp()
+
+    # Grandfather one-shot: give every existing playbook a fresh window keyed
+    # from first upgrade so nothing is deleted on stale write-mtime.
+    sentinel = pb_dir / _RETENTION_SENTINEL
+    if not sentinel.exists():
+        for path in pb_dir.iterdir():
+            if path.is_file() and path.suffix == ".md":
+                try:
+                    os.utime(path, (now_ts, now_ts))
+                except OSError as e:
+                    # If the mount rejects utimens the grandfather can't refresh
+                    # this file's clock — log it, since the next cycle would then
+                    # prune it by stale write-mtime (mirrors the recall-path log).
+                    logger.debug("playbook grandfather mtime refresh failed for %s: %s", path.name, e)
+                    continue
+        try:
+            sentinel.write_text(datetime.now(tz=ZoneInfo("UTC")).date().isoformat())
+        except OSError:
+            pass
+        logger.info("playbook_retention_grandfathered user=%s", user_id)
+        return 0
+
+    cutoff_ts = now_ts - retention_days * 86400
 
     deleted = 0
     for path in pb_dir.iterdir():
-        if path.is_file() and path.suffix == ".md":
-            try:
-                if path.stat().st_mtime < cutoff_ts:
-                    path.unlink()
-                    deleted += 1
-            except OSError:
+        if not (path.is_file() and path.suffix == ".md"):
+            continue
+        try:
+            if _playbook_is_pinned(path):
                 continue
+            if path.stat().st_mtime < cutoff_ts:
+                path.unlink()
+                if conn is not None:
+                    try:
+                        from .search import _delete_source_chunks
+                        _delete_source_chunks(conn, user_id, "playbook", str(path))
+                    except Exception as e:
+                        logger.debug("Playbook chunk cleanup failed for %s: %s", path.name, e)
+                deleted += 1
+        except OSError:
+            continue
 
     if deleted:
         logger.info("Cleaned up %d old playbook(s) for %s", deleted, user_id)

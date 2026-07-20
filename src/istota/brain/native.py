@@ -36,7 +36,7 @@ import re
 import time
 from pathlib import Path
 
-from istota.agent.events import AgentEvent, _describe_tool_use
+from istota.agent.events import AgentEvent, _describe_tool_use, _tool_invocation
 from istota.agent.loop import run_agent_loop, run_agent_loop_continue
 from istota.agent.sanitize import sanitize_tool_pairs
 from istota.agent.types import (
@@ -438,7 +438,11 @@ class NativeBrain:
                     )
             elif event.type == "tool_execution_start":
                 desc = _describe_tool_use(event.tool_name, event.args)
-                trace.append({"type": "tool", "text": desc})
+                entry = {"type": "tool", "text": desc}
+                inv = _tool_invocation(event.tool_name, event.args)
+                if inv:
+                    entry["raw"] = inv
+                trace.append(entry)
                 actions.append(desc)
                 await self._emit_progress(
                     req, _tool_use_event(event.tool_name, desc, event.tool_call_id)

@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Learned playbooks (opt-in procedural memory) now age out on last *use* rather than last *write*, and the retention window defaults to 90 days when the feature is enabled. A playbook is kept fresh whenever it's recalled; genuinely idle ones are pruned. Existing playbooks are grandfathered on first upgrade so nothing is deleted unexpectedly.
+
 ### Fixed
+- Learned playbooks now record the exact command that actually ran (captured from the task's tool trace) instead of a paraphrase, so a distilled playbook no longer invents plausible-but-wrong script or module paths. A task dominated by a single script call is summarized as a short pointer to that script rather than a lossy retelling of its steps.
+- A playbook can be corrected by hand and marked `pinned: true`; the nightly cycle then keeps the human-edited version instead of overwriting it, and the correction is reflected in what the bot recalls. Pinned playbooks are never auto-pruned.
+- Pruning an old playbook now also removes it from the recall index, so retired guidance stops being surfaced (previously the file was deleted but still recalled).
 - Native brain cost telemetry over OpenRouter now reports the real charged cost (markup included) instead of always logging `$0.00`. The cost comes straight from OpenRouter's own per-request accounting; other endpoints keep estimating from the built-in price catalog. Malformed or non-finite cost values from a misbehaving gateway are ignored so they can't corrupt a task's cost total.
 
 ## [0.33.0] - 2026-07-19

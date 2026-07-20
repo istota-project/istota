@@ -2,6 +2,7 @@
 
 import json
 
+from istota.agent.events import _tool_invocation
 from istota.stream_parser import (
     ContextManagementEvent,
     ResultEvent,
@@ -14,6 +15,30 @@ from istota.stream_parser import (
     make_stream_parser,
     parse_stream_line,
 )
+
+
+# --- _tool_invocation tests (ISSUE-174 fix 1: verbatim command capture) ---
+
+
+class TestToolInvocation:
+    def test_bash_returns_full_untruncated_command(self):
+        long_cmd = "python scripts/newsletter_extract.py clean --input " + "x" * 200
+        assert _tool_invocation("Bash", {"command": long_cmd, "description": "extract"}) == long_cmd
+
+    def test_bash_wins_over_description(self):
+        # Even when the model supplied a paraphrasing description, we keep the command.
+        assert _tool_invocation("Bash", {"command": "gh pr create", "description": "open a PR"}) == "gh pr create"
+
+    def test_bash_no_command_returns_none(self):
+        assert _tool_invocation("Bash", {"description": "do a thing"}) is None
+
+    def test_non_command_tools_return_none(self):
+        assert _tool_invocation("Read", {"file_path": "/tmp/x"}) is None
+        assert _tool_invocation("Grep", {"pattern": "TODO"}) is None
+        assert _tool_invocation("WebSearch", {}) is None
+
+    def test_non_dict_input_returns_none(self):
+        assert _tool_invocation("Bash", None) is None
 
 
 # --- _describe_tool_use tests ---
@@ -135,6 +160,27 @@ class TestParseStreamLine:
         assert isinstance(event, ToolUseEvent)
         assert event.tool_name == "Read"
         assert event.description == "📄 Reading data.csv"
+        assert event.invocation == ""  # non-command tool carries no invocation
+
+    def test_assistant_bash_carries_invocation(self):
+        line = self._make_line({
+            "type": "assistant",
+            "message": {
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_9",
+                        "name": "Bash",
+                        "input": {"command": "python scripts/foo.py clean", "description": "run foo"},
+                    }
+                ],
+            },
+        })
+        event = parse_stream_line(line)
+        assert isinstance(event, ToolUseEvent)
+        assert event.description == "⚙️ run foo"
+        assert event.invocation == "python scripts/foo.py clean"
 
     def test_assistant_text(self):
         line = self._make_line({

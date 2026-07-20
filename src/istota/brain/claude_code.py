@@ -655,7 +655,10 @@ class ClaudeCodeBrain:
                     continue  # don't stream CM markers
                 elif isinstance(event, ToolUseEvent):
                     actions_descriptions.append(event.description)
-                    execution_trace.append({"type": "tool", "text": event.description})
+                    tool_entry = {"type": "tool", "text": event.description}
+                    if event.invocation:
+                        tool_entry["raw"] = event.invocation
+                    execution_trace.append(tool_entry)
                 elif isinstance(event, TextEvent):
                     execution_trace.append({"type": "text", "text": event.text})
                 # ThinkingEvent / TextDeltaEvent / ThinkingDeltaEvent are

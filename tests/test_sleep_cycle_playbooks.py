@@ -65,6 +65,27 @@ class TestToolSummary:
         assert count == 1
         assert len(labels[0]) <= 80
 
+    def test_prefers_raw_invocation_over_description(self):
+        """ISSUE-174 fix 1: the verbatim command in `raw` wins over the
+        paraphrased `text` so the extraction LLM sees the real invocation."""
+        tj = json.dumps([{
+            "type": "tool",
+            "text": "Extract the Le Shrub newsletter",
+            "raw": "python scripts/newsletter_extract.py clean --input inbox/x.eml",
+        }])
+        count, labels = tool_summary(tj)
+        assert count == 1
+        assert labels[0] == "python scripts/newsletter_extract.py clean --input inbox/x.eml"
+
+    def test_raw_label_allows_longer_command(self):
+        """Raw commands get a larger truncation budget than descriptions so a
+        full script invocation survives whole."""
+        raw = "python scripts/foo.py " + "--flag value " * 12
+        tj = json.dumps([{"type": "tool", "text": "run foo", "raw": raw.strip()}])
+        _c, labels = tool_summary(tj)
+        assert labels[0].startswith("python scripts/foo.py --flag value")
+        assert len(labels[0]) > 80
+
 
 # --- _parse_structured_extraction (PLAYBOOKS section) -----------------------
 
@@ -116,6 +137,20 @@ class TestExtractionPrompt:
         assert "PLAYBOOKS:" in prompt
         assert "at least 4 tool calls" in prompt
         assert "never ships code to run" in prompt
+
+    def test_prompt_instructs_verified_commands(self):
+        """ISSUE-174 Concern 1/4: prompt must tell the model to quote the exact
+        verified invocation from the Tools line, not paraphrase a script."""
+        prompt = build_memory_extraction_prompt(
+            "alice", "data", None, "2026-06-10",
+            playbooks_enabled=True, min_tool_calls=4,
+        )
+        low = prompt.lower()
+        # Must reference the Tools line as the source of truth for commands.
+        assert "tools (" in low
+        assert "verbatim" in low or "exactly as" in low
+        # Must carry the script-router rule (don't re-narrate a single script).
+        assert "re-narrate" in low or "internal steps" in low
 
     def test_playbooks_section_absent_when_disabled(self):
         prompt = build_memory_extraction_prompt("alice", "data", None, "2026-06-10")
@@ -210,30 +245,212 @@ class TestProcessWritesPlaybooks:
         pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
         assert len(list(pb_dir.glob("*.md"))) == 1
 
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_pinned_playbook_not_overwritten(self, mock_run, pb_config):
+        """ISSUE-174 Concern 1: a hand-corrected `pinned: true` playbook survives
+        the next same-title re-derivation instead of being clobbered."""
+        mock_run.return_value = (True, _PB_OUTPUT)
+        pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
+        pb_dir.mkdir(parents=True)
+        # Slug of the _PB_OUTPUT title.
+        slug = _playbook_slug("Open a GitHub PR via developer skill")
+        pinned = pb_dir / f"{slug}.md"
+        pinned.write_text(
+            "---\ntitle: Open a GitHub PR via developer skill\n"
+            "pinned: true\nsource: human\n---\n\n"
+            "# Open a GitHub PR via developer skill\n\nHUMAN CORRECTED STEP\n"
+        )
+
+        with db.get_db(pb_config.db_path) as conn:
+            t = db.create_task(conn, prompt="open a PR", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(
+                conn, t, "completed", result="PR opened",
+                execution_trace=_trace("⚙️ a", "⚙️ b", "📄 c", "📝 d"),
+            )
+            process_user_sleep_cycle(pb_config, conn, "alice")
+
+        text = pinned.read_text()
+        assert "HUMAN CORRECTED STEP" in text
+        assert "gh pr create" not in text
+
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_pinned_playbook_reindexes_corrected_content(self, mock_run, pb_config):
+        """ISSUE-174 fix 2 (Mulder/Scully): recall reads memory_chunks, so a
+        pinned correction must be RE-INDEXED (not merely left on disk) or the
+        model keeps getting the stale chunk. The pin skips the write but
+        refreshes the index from the human-corrected file."""
+        mock_run.return_value = (True, _PB_OUTPUT)
+        pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
+        pb_dir.mkdir(parents=True)
+        slug = _playbook_slug("Open a GitHub PR via developer skill")
+        pinned = pb_dir / f"{slug}.md"
+        pinned.write_text(
+            "---\ntitle: Open a GitHub PR via developer skill\n"
+            "triggers: [pr]\npinned: true\nsource: human\n---\n\n"
+            "# Open a GitHub PR via developer skill\n\nCORRECTED_INVOCATION_MARKER\n"
+        )
+        with db.get_db(pb_config.db_path) as conn:
+            t = db.create_task(conn, prompt="open a PR", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(
+                conn, t, "completed", result="PR opened",
+                execution_trace=_trace("⚙️ a", "⚙️ b", "📄 c", "📝 d"),
+            )
+            process_user_sleep_cycle(pb_config, conn, "alice")
+
+            rows = conn.execute(
+                "SELECT content FROM memory_chunks WHERE user_id=? AND source_type='playbook'",
+                ("alice",),
+            ).fetchall()
+        blob = "\n".join(r[0] for r in rows)
+        assert "CORRECTED_INVOCATION_MARKER" in blob
+        assert "gh pr create" not in blob
+        # Frontmatter noise must not pollute the searchable index (Scully wart).
+        assert "pinned: true" not in blob
+        assert "source: human" not in blob
+
+
+class TestPlaybookSearchableBody:
+    def test_strips_frontmatter(self):
+        from istota.memory.sleep_cycle import _playbook_searchable_body
+
+        text = "---\ntitle: t\npinned: true\nsource: human\n---\n\n# t\n\nCMD here\n"
+        body = _playbook_searchable_body(text)
+        assert body == "# t\n\nCMD here"
+        assert "pinned" not in body
+
+    def test_no_frontmatter_returns_text(self):
+        from istota.memory.sleep_cycle import _playbook_searchable_body
+
+        assert _playbook_searchable_body("# just a body\n\nsteps") == "# just a body\n\nsteps"
+
+
+class TestPlaybooksConfigDefaults:
+    def test_retention_defaults_to_ninety_days(self):
+        """ISSUE-174 Concern 3: retention window on by default (use-based prune)."""
+        assert PlaybooksConfig().retention_days == 90
+
+
+class TestPinnedFrontmatterParsing:
+    def test_variants(self, tmp_path):
+        from istota.memory.sleep_cycle import _playbook_is_pinned
+
+        def pinned(text):
+            p = tmp_path / "x.md"
+            p.write_text(text)
+            return _playbook_is_pinned(p)
+
+        # Positive variants
+        assert pinned("---\ntitle: t\npinned: true\n---\n\nbody")
+        assert pinned("---\npinned: True\n---\nbody")
+        assert pinned('---\npinned: "true"\n---\nbody')
+        assert pinned("---\npinned: true  # human fix\n---\nbody")
+        assert pinned("﻿---\npinned: true\n---\nbody")  # BOM
+        assert pinned("\n---\npinned: true\n---\nbody")  # leading blank line
+        # Negative variants
+        assert not pinned("---\ntitle: t\npinned: false\n---\nbody")
+        assert not pinned("---\ntitle: t\n---\n\npinned: true in the body")
+        assert not pinned("no frontmatter\npinned: true")
+        # No closing fence → not a valid frontmatter block (was a false positive)
+        assert not pinned("---\npinned: true\nbody with no close fence")
+
 
 # --- cleanup ----------------------------------------------------------------
 
 
+_RETENTION_SENTINEL = ".retention_initialized"
+
+
+def _pb_dir(pb_config):
+    d = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _seed_sentinel(pb_dir):
+    """Bypass the grandfather one-shot so tests exercise the steady-state prune."""
+    (pb_dir / _RETENTION_SENTINEL).write_text("2026-07-19")
+
+
+def _backdate(path, days):
+    import os
+    past = time.time() - days * 86400
+    os.utime(path, (past, past))
+
+
 class TestCleanupPlaybooks:
     def test_retention_zero_keeps_all(self, pb_config):
-        pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
-        pb_dir.mkdir(parents=True)
+        pb_dir = _pb_dir(pb_config)
         (pb_dir / "old.md").write_text("x")
         assert cleanup_old_playbooks(pb_config, "alice", 0) == 0
         assert (pb_dir / "old.md").exists()
 
     def test_prunes_old_files(self, pb_config):
-        pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
-        pb_dir.mkdir(parents=True)
+        pb_dir = _pb_dir(pb_config)
+        _seed_sentinel(pb_dir)
         old = pb_dir / "old.md"
         old.write_text("x")
-        # Backdate mtime well past the retention window.
-        past = time.time() - 40 * 86400
-        import os
-        os.utime(old, (past, past))
+        _backdate(old, 40)
         fresh = pb_dir / "fresh.md"
         fresh.write_text("y")
 
         assert cleanup_old_playbooks(pb_config, "alice", 30) == 1
         assert not old.exists()
         assert fresh.exists()
+
+    def test_grandfather_first_run_deletes_nothing(self, pb_config):
+        """ISSUE-174 (Mulder finding 5): the first prune after upgrade must not
+        delete playbooks by stale write-mtime before any recall history exists.
+        It refreshes mtimes, writes the sentinel, and prunes nothing."""
+        pb_dir = _pb_dir(pb_config)
+        old = pb_dir / "old.md"
+        old.write_text("x")
+        _backdate(old, 400)
+
+        assert cleanup_old_playbooks(pb_config, "alice", 30) == 0
+        assert old.exists()
+        assert (pb_dir / _RETENTION_SENTINEL).exists()
+        # mtime was refreshed to ~now, so the next run won't prune it either.
+        assert old.stat().st_mtime > time.time() - 86400
+
+    def test_pinned_file_never_pruned(self, pb_config):
+        """ISSUE-174 (Mulder finding 4): a pinned human correction must survive
+        the retention clock even when idle."""
+        pb_dir = _pb_dir(pb_config)
+        _seed_sentinel(pb_dir)
+        pinned = pb_dir / "keep.md"
+        pinned.write_text("---\npinned: true\n---\n\nbody")
+        _backdate(pinned, 400)
+
+        assert cleanup_old_playbooks(pb_config, "alice", 30) == 0
+        assert pinned.exists()
+
+    def test_prune_deletes_orphaned_chunks(self, pb_config):
+        """ISSUE-174 (Mulder finding 2): pruning must delete the playbook's
+        memory_chunks too, or recall keeps serving deleted guidance."""
+        from istota.memory.search import index_file
+
+        pb_dir = _pb_dir(pb_config)
+        _seed_sentinel(pb_dir)
+        stale = pb_dir / "stale.md"
+        stale.write_text("# Stale\n\nORPHAN_MARKER content")
+        _backdate(stale, 400)
+
+        with db.get_db(pb_config.db_path) as conn:
+            index_file(conn, "alice", str(stale), "ORPHAN_MARKER content", "playbook")
+            before = conn.execute(
+                "SELECT COUNT(*) FROM memory_chunks WHERE user_id=? AND source_id=?",
+                ("alice", str(stale)),
+            ).fetchone()[0]
+            assert before >= 1
+
+            deleted = cleanup_old_playbooks(pb_config, "alice", 30, conn=conn)
+            assert deleted == 1
+            after = conn.execute(
+                "SELECT COUNT(*) FROM memory_chunks WHERE user_id=? AND source_id=?",
+                ("alice", str(stale)),
+            ).fetchone()[0]
+        assert not stale.exists()
+        assert after == 0

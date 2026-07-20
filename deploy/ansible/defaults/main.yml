@@ -718,7 +718,7 @@ istota_memory_search_recency_half_life_days: 180   # recency decay half-life for
 istota_playbooks_enabled: false
 istota_playbooks_recall_limit: 3      # top-K playbooks injected per task
 istota_playbooks_min_tool_calls: 4    # a task must use >= this many tools to qualify
-istota_playbooks_retention_days: 0    # 0 = keep forever; >0 = age-prune
+istota_playbooks_retention_days: 90   # 0 = keep forever; >0 = age-prune by last-use
 
 # Sleep cycle settings (nightly memory extraction, cron evaluated per-user timezone)
 istota_sleep_cycle_enabled: true

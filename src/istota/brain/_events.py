@@ -17,7 +17,7 @@ from dataclasses import dataclass
 # Tool-use rendering moved to istota.agent.events in Phase 0 of the agent-loop
 # migration (brain-agnostic; reused by the native loop). Re-exported here so
 # the stream_parser shim and existing imports keep working.
-from ..agent.events import _TOOL_EMOJI, _describe_tool_use  # noqa: F401
+from ..agent.events import _TOOL_EMOJI, _describe_tool_use, _tool_invocation  # noqa: F401
 
 logger = logging.getLogger("istota.brain.events")
 
@@ -32,6 +32,11 @@ class ToolUseEvent:
     # shared value to correlate against (every call would collide on ""), so
     # consumers that key chips by id must treat "" as "no correlation".
     tool_call_id: str = ""
+    # The literal, untruncated command this call ran (Bash only; "" otherwise).
+    # Threaded into the execution_trace so the sleep cycle can quote the verified
+    # invocation when distilling a playbook, instead of the paraphrased
+    # `description` (ISSUE-174 fix 1). Empty = no meaningful command string.
+    invocation: str = ""
 
 
 @dataclass
@@ -217,7 +222,10 @@ def parse_stream_line(
                 input_data = block.get("input", {})
                 desc = _describe_tool_use(name, input_data)
                 tool_events.append(
-                    ToolUseEvent(tool_name=name, description=desc, tool_call_id=block_id)
+                    ToolUseEvent(
+                        tool_name=name, description=desc, tool_call_id=block_id,
+                        invocation=_tool_invocation(name, input_data) or "",
+                    )
                 )
 
             elif block_type == "text":
