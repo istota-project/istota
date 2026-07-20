@@ -44,7 +44,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MODULES = ("feeds", "health", "location", "money")
+MODULES = ("feeds", "health", "location", "money", "briefings")
 
 # A dated snapshot directory, e.g. ``2026-07-12``.
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
