@@ -4,6 +4,7 @@ triggers: [browse, website, web page, scrape, screenshot, url, http, visit, open
 description: Web browsing and scraping via headless browser
 cli: true
 companion_skills: [untrusted_input]
+requires_capability: [browser]
 ---
 # Web Browsing
 

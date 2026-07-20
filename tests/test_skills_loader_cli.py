@@ -8,10 +8,12 @@ import pytest
 from istota.config import Config, UserConfig
 
 
-def _write_skill(bundled, name, body, *, admin_only=False, experimental=False, cli=True, dependencies=None, resource_types=None, companion_skills=None):
+def _write_skill(bundled, name, body, *, admin_only=False, experimental=False, cli=True, dependencies=None, resource_types=None, companion_skills=None, requires_capability=None):
     d = bundled / name
     d.mkdir(parents=True, exist_ok=True)
     fm = ["---", f"name: {name}", "description: the {0} skill".format(name), f"cli: {'true' if cli else 'false'}"]
+    if requires_capability:
+        fm.append("requires_capability: [" + ", ".join(requires_capability) + "]")
     if admin_only:
         fm.append("admin_only: true")
     if experimental:
@@ -154,11 +156,15 @@ class TestList:
 
 
 class TestDevboxFold:
-    """devbox must be hidden from this CLI when devbox is disabled, mirroring the
-    executor's disabled-fold so `skills list`/`show` agree with the menu."""
+    """A capability-gated skill (devbox→devbox) must be hidden from this CLI
+    when its capability is unavailable, mirroring the executor's disabled-fold
+    so `skills list`/`show` agree with the menu."""
 
     def _add_devbox(self, ctx, tmp_path):
-        _write_skill(ctx.bundled_skills_dir, "devbox", "# Devbox\n\nRun things.\n")
+        _write_skill(
+            ctx.bundled_skills_dir, "devbox", "# Devbox\n\nRun things.\n",
+            requires_capability=["devbox"],
+        )
 
     def test_devbox_hidden_when_disabled(self, ctx, tmp_path, capsys):
         self._add_devbox(ctx, tmp_path)

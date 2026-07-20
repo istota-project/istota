@@ -33,7 +33,7 @@ def _load_context():
     """
     from istota.config import load_config
     from istota.experimental import enabled_features_from_env
-    from istota.skills._loader import load_skill_index
+    from istota.skills._loader import effective_disabled_skills, load_skill_index
 
     user_id = os.environ.get("ISTOTA_USER_ID", "")
     if not user_id:
@@ -42,15 +42,10 @@ def _load_context():
     config = load_config()
     skill_index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
 
-    disabled = set(config.disabled_skills)
-    user_config = config.get_user(user_id)
-    if user_config:
-        disabled |= set(user_config.disabled_skills)
-    # Mirror the executor's devbox fold: when devbox is off, `devbox` is disabled
-    # for this surface too, so `skills list` / `skills show` agree with the menu
-    # the model was shown (executor.execute_task adds the same entry).
-    if not config.devbox.enabled:
-        disabled.add("devbox")
+    # Instance + per-user disabled, plus the capability gate (browse→browser,
+    # devbox→devbox, …). Shared with the executor so `skills list` / `skills
+    # show` agree with the menu the model was shown.
+    disabled = effective_disabled_skills(config, user_id, skill_index)
 
     is_admin = config.is_admin(user_id)
 

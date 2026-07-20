@@ -1173,6 +1173,32 @@ class TestCmdSkills:
         assert "browse" in result
 
     @pytest.mark.asyncio
+    async def test_capability_gated_skills_disabled_when_service_off(self, make_config):
+        # browser + devbox off by default → the capability gate files browse and
+        # devbox under Disabled (not Available), with no explicit disabled_skills.
+        config = make_config()
+        assert config.available_capabilities() == set()
+        with db.get_db(config.db_path) as conn:
+            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
+        assert "**Disabled**" in result
+        assert "- browse —" in result  # Disabled render (plain name)
+        assert "- devbox —" in result
+        assert "- **browse**:" not in result  # not in the Available (bold) section
+        assert "- **devbox**:" not in result
+
+    @pytest.mark.asyncio
+    async def test_capability_gated_skills_available_when_service_on(self, make_config):
+        from istota.config import BrowserConfig, DevboxConfig
+        config = make_config(
+            browser=BrowserConfig(enabled=True),
+            devbox=DevboxConfig(enabled=True),
+        )
+        with db.get_db(config.db_path) as conn:
+            result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
+        assert "- **browse**:" in result  # Available render (bold name)
+        assert "- **devbox**:" in result
+
+    @pytest.mark.asyncio
     async def test_skill_detail_view(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:

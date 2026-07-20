@@ -1126,6 +1126,25 @@ class Config:
             tz_str = (uc.timezone if uc else "") or "UTC"
         return tz_str
 
+    def available_capabilities(self) -> set[str]:
+        """Backing-service capabilities currently available in this deployment.
+
+        The single map from a capability name to the config flag that enables
+        it. A skill declaring ``requires_capability: [name]`` in its frontmatter
+        is folded into the effective disabled set when its capability isn't
+        listed here (see skills._loader.effective_disabled_skills). These
+        default off — notably in the standalone install, which deploys neither
+        the headless browser nor the devbox container — so their skills drop out
+        of selection and the on-demand menu automatically. Adding a new
+        service-backed skill = declare the capability here + in its frontmatter.
+        """
+        caps: set[str] = set()
+        if self.browser.enabled:
+            caps.add("browser")
+        if self.devbox.enabled:
+            caps.add("devbox")
+        return caps
+
     def is_admin(self, user_id: str) -> bool:
         """Check if user has admin privileges.
 

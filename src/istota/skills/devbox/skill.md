@@ -3,6 +3,7 @@ name: devbox
 triggers: [devbox, install package, pip install, apt install, npm install, cargo install, go install, compile, build, dig, nslookup, traceroute, whois, ping, nmap, tcpdump, openssl, mtr, network diagnostic, port scan, certificate, DNS lookup, reverse DNS]
 description: Persistent Linux container per user with dev tools and network access pre-installed. Escape hatch for tasks the bwrap sandbox can't handle.
 cli: true
+requires_capability: [devbox]
 ---
 
 # Devbox
