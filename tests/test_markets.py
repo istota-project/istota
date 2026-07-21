@@ -189,6 +189,11 @@ class TestFormatMarketSummary:
         ]
         result = format_market_summary(quotes, mode="evening")
         assert "Market Close" in result
+        # Must NOT emit a markdown heading — this text is copied verbatim into
+        # heading-forbidding structured briefing blocks and leaked `## ` into
+        # plain-text email. Bold label instead.
+        assert "## " not in result
+        assert "**Market Close:**" in result
 
     def test_empty_quotes(self):
         result = format_market_summary([], mode="morning")

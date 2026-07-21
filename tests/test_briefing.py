@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 import istota.skills.briefing as briefing_mod
 from istota.skills.briefing import (
     _strip_html,
+    strip_markdown,
     _parse_reminders,
     _fetch_market_data,
     _fetch_finviz_market_data,
@@ -71,6 +72,39 @@ class TestStripHtml:
         # Multiple spaces should be collapsed
         assert "  " not in result
         assert "lots of spaces" in result
+
+
+class TestStripMarkdown:
+    """strip_markdown flattens markdown for plain-text (email) delivery."""
+
+    def test_strips_atx_headings(self):
+        # Regression: structured briefing sources can emit `## ` verbatim; it
+        # must not survive into plain-text email.
+        assert strip_markdown("## Market Close:") == "Market Close:"
+        assert strip_markdown("### Sub") == "Sub"
+        assert strip_markdown("###### Deep") == "Deep"
+
+    def test_strips_heading_only_at_line_start(self):
+        # A `#` mid-line (e.g. "issue #42") is not a heading and stays.
+        assert strip_markdown("see issue #42") == "see issue #42"
+
+    def test_strips_heading_with_leading_indent(self):
+        assert strip_markdown("   ## Indented") == "Indented"
+
+    def test_strips_headings_multiline(self):
+        text = "## Market Close:\n  🔴 S&P 500: 7,443.28\n  As of: 06:08"
+        result = strip_markdown(text)
+        assert "## " not in result
+        assert result.startswith("Market Close:")
+        assert "🔴 S&P 500: 7,443.28" in result
+
+    def test_strips_bold_italic_and_links(self):
+        assert strip_markdown("**bold** and *italic* and _under_") == "bold and italic and under"
+        assert strip_markdown("[text](https://x.com)") == "text"
+
+    def test_bold_market_label_flattens(self):
+        # The new market source label round-trips to a clean plain label.
+        assert strip_markdown("**Market Close:**") == "Market Close:"
 
 
 class TestParseReminders:
@@ -366,6 +400,8 @@ class TestFetchCalendarEvents:
         assert result is not None
         assert "Today" in result
         assert "Standup" in result
+        # Copied verbatim into the heading-forbidding calendar block — no `## `.
+        assert "## " not in result
         # The briefing path uses `with get_caldav_client(...) as client:` so
         # the calendar-event call receives the context-manager-entered client.
         mock_today.assert_called_once_with(
@@ -438,6 +474,8 @@ class TestFetchFinvizMarketData:
         assert result is not None
         assert "FinViz Market Data" in result
         assert "MARKET HEADLINES" in result
+        # Copied verbatim into the heading-forbidding markets block — no `## `.
+        assert "## " not in result
 
     @patch("istota.skills.markets.finviz.fetch_finviz_data")
     def test_returns_none_on_fetch_failure(self, mock_fetch):
