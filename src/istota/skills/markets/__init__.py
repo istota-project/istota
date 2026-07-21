@@ -145,7 +145,11 @@ def format_market_summary(quotes: list[MarketQuote], mode: str = "morning") -> s
         return "Market data unavailable"
 
     header = "Pre-market Futures" if mode == "morning" else "Market Close"
-    lines = [f"## {header}:"]
+    # Bold label, NOT a markdown heading: this text is copied verbatim into
+    # structured briefing blocks (which forbid headings), and a stray `## `
+    # leaks literally into plain-text email. Bold renders in Talk/web and is
+    # flattened cleanly by strip_markdown for email.
+    lines = [f"**{header}:**"]
 
     for quote in quotes:
         lines.append(f"  {format_quote(quote)}")

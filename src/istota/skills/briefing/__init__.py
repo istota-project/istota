@@ -53,7 +53,11 @@ def strip_briefing_preamble(text: str) -> str:
 
 
 def strip_markdown(text: str) -> str:
-    """Strip markdown formatting for plain text output (bold, italic, links)."""
+    """Strip markdown formatting for plain text output (headings, bold, italic, links)."""
+    # ATX headings (## Foo) — strip the leading marker, keep the text. Structured
+    # briefing sources can emit these verbatim; without this they leak literally
+    # into plain-text email (bold/italic get stripped below, headings didn't).
+    text = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text)
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # **bold**
     text = re.sub(r"\*(.+?)\*", r"\1", text)       # *italic*
     text = re.sub(r"_(.+?)_", r"\1", text)          # _italic_
@@ -306,7 +310,9 @@ def _fetch_finviz_market_data() -> str | None:
         if not formatted or "unavailable" in formatted.lower():
             return None
 
-        return f"## FinViz Market Data (pre-fetched)\n\n{formatted}"
+        # Bold label, not a markdown heading — this block is copied verbatim
+        # into the (heading-forbidding) markets section, so `## ` would leak.
+        return f"**FinViz Market Data:**\n\n{formatted}"
     except Exception as e:
         logger.warning("FinViz market data fetch failed: %s", e)
         return None
@@ -519,9 +525,9 @@ def _fetch_calendar_events(
             all_events.sort(key=lambda x: x[1].start)
 
             if not all_events:
-                return f"## {day_label}'s Calendar (pre-fetched)\nNo events scheduled."
+                return f"**{day_label}'s Calendar:**\nNo events scheduled."
 
-            lines = [f"## {day_label}'s Calendar (pre-fetched)"]
+            lines = [f"**{day_label}'s Calendar:**"]
             for cal_name, event in all_events:
                 lines.append(f"- {format_event_for_display(event)} [{cal_name}]")
 
