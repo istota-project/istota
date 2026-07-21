@@ -166,3 +166,78 @@ class TestImportFromUserConfigs:
         rows = user_briefings.list_briefings(db_path, "alice")
         assert len(rows) == 1
         assert rows[0].cron == "0 8 * * *"  # preserved
+
+
+class TestOutputColumn:
+    def test_output_stored_in_column_not_components(self, db_path):
+        """The real ``output`` column carries delivery; components has no __output__."""
+        import sqlite3
+
+        user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="m", cron="0 7 * * *",
+            conversation_token="t", output="email,ntfy",
+            components={"calendar": True},
+        )
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT output, components FROM briefing_configs WHERE name='m'"
+        ).fetchone()
+        conn.close()
+        assert row["output"] == "email,ntfy"
+        assert "__output__" not in row["components"]
+
+    def test_legacy_output_backfilled_by_migration(self, db_path):
+        """A legacy row with __output__ packed in components is migrated to the column."""
+        import json
+        import sqlite3
+
+        from istota import db
+
+        # Simulate a pre-migration row: output smuggled into components JSON.
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            INSERT INTO briefing_configs
+                (user_id, name, cron_expression, conversation_token, components, output, enabled)
+            VALUES ('alice', 'legacy', '0 7 * * *', 't', ?, 'talk', 1)
+            """,
+            (json.dumps({"calendar": True, "__output__": "email"}),),
+        )
+        conn.commit()
+        conn.close()
+
+        # Re-run migrations (idempotent) to trigger the backfill.
+        db.init_db(db_path)
+
+        b = user_briefings.get_briefing(db_path, "alice", "legacy")
+        assert b is not None
+        assert b.output == "email"
+        assert b.components == {"calendar": True}
+        assert "__output__" not in b.components
+
+    def test_backfill_is_idempotent(self, db_path):
+        import json
+        import sqlite3
+
+        from istota import db
+
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            INSERT INTO briefing_configs
+                (user_id, name, cron_expression, conversation_token, components, output, enabled)
+            VALUES ('alice', 'legacy', '0 7 * * *', 't', ?, 'talk', 1)
+            """,
+            (json.dumps({"__output__": "both"}),),
+        )
+        conn.commit()
+        conn.close()
+
+        db.init_db(db_path)
+        db.init_db(db_path)  # second run is a no-op
+
+        b = user_briefings.get_briefing(db_path, "alice", "legacy")
+        assert b is not None
+        assert b.output == "both"
+        assert b.components == {}

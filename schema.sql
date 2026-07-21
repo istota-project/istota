@@ -128,7 +128,8 @@ CREATE TABLE IF NOT EXISTS briefing_configs (
     name TEXT NOT NULL,             -- 'morning', 'evening', etc.
     cron_expression TEXT NOT NULL,  -- '0 7 * * 1-5' for 7am weekdays
     conversation_token TEXT NOT NULL,
-    components TEXT NOT NULL,       -- JSON: {"calendar": true, "email": true, "todos": true, "news": {"senders": ["newsletter@example.com"], "max_age_hours": 6}}
+    components TEXT NOT NULL,       -- JSON: legacy component bag, retained only as a one-time components→blocks migration carrier
+    output TEXT NOT NULL DEFAULT 'talk',  -- delivery descriptor (talk/email/both/all/ntfy/surface:chan/comma lists)
     enabled INTEGER DEFAULT 1,
     last_run_at TEXT,
     created_at TEXT DEFAULT (datetime('now')),
@@ -559,6 +560,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     routing TEXT NOT NULL DEFAULT '{}',                  -- JSON object: purpose -> output_target descriptor
     default_destination TEXT NOT NULL DEFAULT 'talk',    -- fallback delivery descriptor
     email_reply_routing TEXT NOT NULL DEFAULT 'origin+thread', -- email-reply mirror policy: origin+thread | origin | thread
+    default_briefings INTEGER NOT NULL DEFAULT 1,        -- seed the shared [[default_briefings]] set into this user
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
