@@ -2,6 +2,22 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-20: Align money web API to the `/istota/api/<module>` convention
+
+The money module's FastAPI router was mounted at `/istota/money/api`, the lone exception to the `/istota/api/<module>` pattern every other web module follows (`briefings`, `health`, `garmin`). The cause is historical: money is a self-contained/vendored package whose `routes.py` ships with no prefix ("the host application mounts `router` at its chosen prefix"), and istota had mounted it module-first. Nothing structural required it — nginx has a catch-all `location /istota/`, and every money route is relative — so this was a pure mount-point realignment to `/istota/api/money`.
+
+**Key changes:**
+- Backend router prefix `/istota/money/api` → `/istota/api/money`.
+- Frontend money API client's two URL-building strings (`apiFetch` base and the invoice-PDF URL) updated to match. The many `$lib/money/api` *imports* are TypeScript source-file paths, not routes, and were left untouched.
+- Test request paths and the nginx doc comment updated.
+- Deployed builds need a web rebuild (`scripts/build-web-static.sh`) for the frontend change to take effect.
+
+**Files added/modified:**
+- `src/istota/web_app.py` - router mount prefix
+- `web/src/lib/money/api.ts` - `apiFetch` base URL + invoice-PDF URL
+- `tests/test_web_app_money.py` - request paths
+- `deploy/ansible/templates/istota.conf.j2` - doc comment
+
 ## 2026-07-20: Retire legacy briefing components (blocks-only briefings)
 
 Briefings had been running on two parallel content models since the first-class module landed: the legacy boolean-`components` engine (a flat dict expanded against admin `[briefing_defaults]`, consumed by `build_briefing_prompt`) and the native block/source model. The bridge was a per-briefing migration that seeded blocks from either config-authored `blocks` or a components translation; but at generation time the executor still **fell back** to the legacy generator whenever a briefing had no blocks — so "components" wasn't config sugar, it was a live second engine. This spec (`Specs/Done/retire-legacy-briefing-components.md`) collapses everything to one model: blocks. `blocks_from_components` survives only as a one-time migration so existing production briefings convert on first touch. Implemented across all 7 stages, one commit each, full suite green throughout.

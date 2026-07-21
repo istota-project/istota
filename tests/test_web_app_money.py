@@ -115,12 +115,12 @@ async def _login_as(client, username):
 @_needs
 class TestMoneyMount:
     async def test_unauthenticated_returns_401(self, client_with_money):
-        resp = await client_with_money.get("/istota/money/api/me")
+        resp = await client_with_money.get("/istota/api/money/me")
         assert resp.status_code == 401
 
     async def test_authenticated_with_resource_returns_user(self, client_with_money):
         cookies = await _login_as(client_with_money, "alice")
-        resp = await client_with_money.get("/istota/money/api/me", cookies=cookies)
+        resp = await client_with_money.get("/istota/api/money/me", cookies=cookies)
         assert resp.status_code == 200
         assert resp.json()["username"] == "alice"
 
@@ -128,12 +128,12 @@ class TestMoneyMount:
         # bob has the money module disabled; the per-user config resolver
         # raises UserNotFoundError, which the route surfaces as 404.
         cookies = await _login_as(client_with_money, "bob")
-        resp = await client_with_money.get("/istota/money/api/ledgers", cookies=cookies)
+        resp = await client_with_money.get("/istota/api/money/ledgers", cookies=cookies)
         assert resp.status_code == 404
 
     async def test_ledgers_returns_configured_ledgers(self, client_with_money):
         cookies = await _login_as(client_with_money, "alice")
-        resp = await client_with_money.get("/istota/money/api/ledgers", cookies=cookies)
+        resp = await client_with_money.get("/istota/api/money/ledgers", cookies=cookies)
         assert resp.status_code == 200
         body = resp.json()
         assert body == {"ledgers": ["main"]}

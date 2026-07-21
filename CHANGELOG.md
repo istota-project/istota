@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A shared default-briefings set can be defined once and handed to every user. Each user gets it on by default and can opt out; the set seeds into their briefings once, so their later edits stick and re-running the deploy never overwrites them.
 
 ### Changed
+- The money module's web API now lives under `/istota/api/money`, matching the URL convention every other module already used. Deployed installs pick this up on the next web asset rebuild.
 - Briefing content is now blocks-only: the legacy boolean-component model and its admin-level defaults are retired. Existing component-based briefings migrate to blocks automatically on first run; a briefing with no content after migration is treated as a misconfiguration rather than silently rendered the old way. Briefing schedule and delivery are managed in the Briefings tab, no longer on the main Settings page.
 - A briefing now fetches its sources in parallel instead of one after another, so a slow source (a news frontpage or a mailbox round-trip) no longer holds up the rest — briefings that pull in several live sources assemble faster.
 - Talk replies are now split closer to Nextcloud Talk's real per-message limit, so a long answer arrives as one message (or a couple) instead of being chopped into many small fragments.
