@@ -2,7 +2,7 @@
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
@@ -177,7 +177,9 @@ class TestFormatMarketSummary:
             )
         ]
         result = format_market_summary(quotes, mode="morning")
-        assert "Pre-market Futures" in result
+        assert "Pre-market futures" in result
+        # No timezone threaded → no parenthesised query-time label.
+        assert "(**" not in result
 
     def test_evening_header(self):
         quotes = [
@@ -194,21 +196,41 @@ class TestFormatMarketSummary:
         # plain-text email. Bold label instead.
         assert "## " not in result
         assert "**Market Close:**" in result
+        # Semantic fix: close quotes carry no close-time, so a synthetic
+        # "as of" (the fetch instant) would mislabel the data. Header only.
+        assert "As of" not in result
 
     def test_empty_quotes(self):
         result = format_market_summary([], mode="morning")
         assert result == "Market data unavailable"
 
-    def test_includes_timestamp(self):
+    def test_morning_query_time_in_user_tz(self):
+        # Fetched at 14:45 UTC; a PST reader (January = standard time) sees
+        # 6:45am PST. An aware timestamp makes the conversion deterministic
+        # regardless of the test runner's own system timezone.
         quotes = [
             MarketQuote(
                 symbol="ES=F", name="S&P 500 E-mini",
                 price=5000.0, change=50.0, change_percent=1.01,
-                timestamp=datetime(2025, 1, 27, 14, 45),
+                timestamp=datetime(2025, 1, 27, 14, 45, tzinfo=timezone.utc),
             )
         ]
-        result = format_market_summary(quotes)
-        assert "14:45" in result
+        result = format_market_summary(
+            quotes, mode="morning", tz_str="America/Los_Angeles",
+        )
+        assert "**Pre-market futures (6:45am PST):**" in result
+
+    def test_morning_invalid_tz_omits_label(self):
+        quotes = [
+            MarketQuote(
+                symbol="ES=F", name="S&P 500 E-mini",
+                price=5000.0, change=50.0, change_percent=1.01,
+                timestamp=datetime(2025, 1, 27, 14, 45, tzinfo=timezone.utc),
+            )
+        ]
+        result = format_market_summary(quotes, mode="morning", tz_str="Not/A/Zone")
+        # Invalid zone name degrades to a bare header — no label, no crash.
+        assert "**Pre-market futures:**" in result
 
     def test_formats_all_quotes(self):
         quotes = [
@@ -236,7 +258,8 @@ class TestFormatMarketSummary:
             )
         ]
         result = format_market_summary(quotes)
-        assert "As of:" not in result
+        assert "**Pre-market futures:**" in result
+        assert "As of" not in result
 
 
 class TestDefaults:

@@ -90,7 +90,7 @@ def _read_workspace_text(ctx: SourceContext, path: str) -> str | None:
 
 
 def resolve_markets(config: dict, ctx: SourceContext) -> GatheredSource:
-    now, _tz, is_morning, is_weekend = _now_in_user_tz(ctx)
+    now, tz_str, is_morning, is_weekend = _now_in_user_tz(ctx)
     mode = "morning" if is_morning else "evening"
     try:
         from istota.skills.briefing import (
@@ -108,7 +108,7 @@ def resolve_markets(config: dict, ctx: SourceContext) -> GatheredSource:
     }
     parts: list[str] = []
     if not is_weekend:
-        market_data = _fetch_market_data(market_config, mode)
+        market_data = _fetch_market_data(market_config, mode, tz_str=tz_str)
         if market_data:
             parts.append(market_data)
         if not is_morning:

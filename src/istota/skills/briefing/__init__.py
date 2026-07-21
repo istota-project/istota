@@ -296,13 +296,17 @@ def save_briefing_digest(
 # Data fetchers (from briefing.py)
 # ---------------------------------------------------------------------------
 
-def _fetch_market_data(market_config: dict, mode: str) -> str | None:
+def _fetch_market_data(
+    market_config: dict, mode: str, *, tz_str: str | None = None,
+) -> str | None:
     """
     Pre-fetch market data and format for prompt.
 
     Args:
         market_config: Market configuration dict
         mode: "morning" or "evening"
+        tz_str: Optional reader IANA timezone, threaded to
+            :func:`format_market_summary` for the pre-market query-time label.
 
     Returns:
         Formatted market data string, or None if unavailable
@@ -322,7 +326,7 @@ def _fetch_market_data(market_config: dict, mode: str) -> str | None:
         if not quotes:
             return None
 
-        return format_market_summary(quotes, mode)
+        return format_market_summary(quotes, mode, tz_str=tz_str)
     except ImportError:
         # yfinance not installed - silently skip
         return None
