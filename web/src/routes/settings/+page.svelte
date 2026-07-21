@@ -6,18 +6,13 @@
 		getModules,
 		getProfile,
 		updateProfile,
-		getResources,
-		addResource,
-		deleteResource,
 		getMe,
 		disconnectNextcloudToken,
 		type ServiceCard as ServiceCardData,
 		type UserProfile,
-		type UserResourceRow,
-		type ResourceTypeSchema,
 		type NextcloudTokenStatus,
 	} from '$lib/api';
-	import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
+	import { Button, Select, type SelectOption } from '$lib/components/ui';
 	import {
 		ServiceCard,
 		GarminCard,
@@ -59,31 +54,12 @@
 		profile ? JSON.stringify(profile) !== initialProfileJson : false,
 	);
 
-	let resourceTypes: ResourceTypeSchema[] = $state([]);
-	let resources: UserResourceRow[] = $state([]);
-	let newRes = $state({ type: '', path: '', name: '', permissions: 'read', extrasJson: '' });
-	let resourceError = $state('');
-	let resourceSaving = $state(false);
-
-	const resourceTypeOptions: SelectOption[] = $derived([
-		{ value: '', label: 'Type…' },
-		...resourceTypes.map((rt) => ({ value: rt.type, label: rt.label })),
-	]);
-	const permissionOptions: SelectOption[] = [
-		{ value: 'read', label: 'read' },
-		{ value: 'readwrite', label: 'readwrite' },
-	];
-
-	type ConfirmKind = { kind: 'resource'; id: number; label: string };
-	let confirmDelete: ConfirmKind | null = $state(null);
-
 	async function refresh() {
 		loading = true;
 		try {
-			const [svcResp, profResp, resResp, modResp, meResp] = await Promise.all([
+			const [svcResp, profResp, modResp, meResp] = await Promise.all([
 				getSettingsServices(),
 				getProfile(),
-				getResources(),
 				getModules(),
 				getMe(),
 			]);
@@ -96,8 +72,6 @@
 				profile.default_destination = profile.default_destination || 'talk';
 			}
 			initialProfileJson = profile ? JSON.stringify(profile) : '';
-			resourceTypes = resResp.types;
-			resources = resResp.resources;
 			allModules = modResp.modules;
 			error = '';
 		} catch (e) {
@@ -255,76 +229,6 @@
 		}
 	}
 
-	async function submitResource(e: SubmitEvent) {
-		e.preventDefault();
-		resourceError = '';
-		const t = newRes.type.trim();
-		if (!t) {
-			resourceError = 'Pick a resource type.';
-			return;
-		}
-		const spec = resourceTypes.find((rt) => rt.type === t);
-		if (spec?.needs_path && !newRes.path.trim()) {
-			resourceError = `${spec.label} requires a path.`;
-			return;
-		}
-		let extras: Record<string, unknown> | undefined;
-		const rawExtras = newRes.extrasJson.trim();
-		if (rawExtras) {
-			try {
-				const parsed = JSON.parse(rawExtras);
-				if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-					resourceError = 'Extras must be a JSON object.';
-					return;
-				}
-				extras = parsed as Record<string, unknown>;
-			} catch (err) {
-				resourceError = `Extras JSON parse error: ${(err as Error).message}`;
-				return;
-			}
-		}
-
-		resourceSaving = true;
-		try {
-			await addResource({
-				type: t,
-				path: newRes.path.trim() || undefined,
-				name: newRes.name.trim() || undefined,
-				permissions: newRes.permissions || 'read',
-				extras,
-			});
-			newRes = { type: '', path: '', name: '', permissions: 'read', extrasJson: '' };
-			await refresh();
-		} catch (e) {
-			resourceError = (e as Error).message || 'Add failed';
-		} finally {
-			resourceSaving = false;
-		}
-	}
-
-	function askRemoveResource(r: UserResourceRow) {
-		if (r.id === undefined) return;
-		confirmDelete = {
-			kind: 'resource',
-			id: r.id,
-			label: r.name || r.path || r.type,
-		};
-	}
-
-	async function performDelete() {
-		if (!confirmDelete) return;
-		const target = confirmDelete;
-		confirmDelete = null;
-		try {
-			if (target.kind === 'resource') {
-				await deleteResource(target.id);
-				await refresh();
-			}
-		} catch (e) {
-			error = (e as Error).message || 'Delete failed';
-		}
-	}
-
 	onMount(() => {
 		void refresh();
 	});
@@ -340,7 +244,7 @@
 
 <SettingsLayout
 	title="Settings"
-	description="Profile, resources, and per-service credentials. Secrets are encrypted at rest and never sent back to the browser — secret fields are write-only."
+	description="Profile and per-service credentials. Secrets are encrypted at rest and never sent back to the browser — secret fields are write-only."
 	{loading}
 	{error}
 	{info}
@@ -513,110 +417,6 @@
 		</SettingsCard>
 	{/if}
 
-	<SettingsCard title="Resources ({resources.length})">
-		<p class="hint">
-			Calendars, folders, modules, and integrations available to your
-			account. Operator-managed entries (from <code>config.toml</code>) are
-			read-only here.
-		</p>
-
-			{#if resources.length === 0}
-				<p class="empty">No resources configured yet.</p>
-			{:else}
-				<div class="table-scroll">
-					<table class="grid">
-						<thead>
-							<tr>
-								<th class="col-type">Type</th>
-								<th class="col-name">Name</th>
-								<th class="col-path">Path</th>
-								<th class="col-perms">Perms</th>
-								<th class="col-source">Source</th>
-								<th class="actions"></th>
-							</tr>
-						</thead>
-						<tbody>
-							{#each resources as r (`${r.managed}-${r.id ?? r.path}-${r.type}`)}
-								<tr>
-									<td class="col-type">{r.type}</td>
-									<td class="col-name">{r.name || '—'}</td>
-									<td class="col-path"><code>{r.path || '—'}</code></td>
-									<td class="col-perms">{r.permissions}</td>
-									<td class="col-source muted">
-										{r.managed === 'config' ? 'config.toml' : 'user'}
-									</td>
-									<td class="actions">
-										{#if r.managed === 'db' && r.id !== undefined}
-											<button
-												class="icon-btn danger"
-												title="Remove"
-												type="button"
-												onclick={() => askRemoveResource(r)}>×</button
-											>
-										{/if}
-									</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			{/if}
-
-			<form class="add-resource" onsubmit={submitResource}>
-				<h3>Add resource</h3>
-				<div class="add-grid">
-					<SettingsField label="Type">
-						<Select
-							value={newRes.type}
-							options={resourceTypeOptions}
-							onValueChange={(v) => (newRes.type = v)}
-							ariaLabel="Type"
-							fullWidth
-						/>
-					</SettingsField>
-					<SettingsField label="Path">
-						<input
-							type="text"
-							placeholder="(if applicable)"
-							bind:value={newRes.path}
-						/>
-					</SettingsField>
-					<SettingsField label="Display name">
-						<input type="text" placeholder="(optional)" bind:value={newRes.name} />
-					</SettingsField>
-					<SettingsField label="Permissions">
-						<Select
-							value={newRes.permissions}
-							options={permissionOptions}
-							onValueChange={(v) => (newRes.permissions = v)}
-							ariaLabel="Permissions"
-							fullWidth
-						/>
-					</SettingsField>
-					<SettingsField label="Extras (JSON)" wide>
-						<textarea
-							rows="2"
-							placeholder={'e.g. {"ingest_token": "…", "default_radius": 75}'}
-							bind:value={newRes.extrasJson}
-						></textarea>
-					</SettingsField>
-				</div>
-				<div class="add-actions">
-					<Button
-						variant="primary"
-						size="sm"
-						type="submit"
-						disabled={resourceSaving}
-					>
-						{resourceSaving ? 'Adding…' : 'Add resource'}
-					</Button>
-				</div>
-				{#if resourceError}
-					<div class="banner error">{resourceError}</div>
-				{/if}
-			</form>
-		</SettingsCard>
-
 		<SettingsCard title="Briefings">
 			<p class="hint">
 				Cron-scheduled summaries with their own schedule, delivery, and
@@ -686,71 +486,10 @@
 		{/each}
 </SettingsLayout>
 
-{#if confirmDelete}
-	<Modal
-		open={true}
-		title="Remove resource?"
-		onOpenChange={(o) => {
-			if (!o) confirmDelete = null;
-		}}
-	>
-		<p>Remove <strong>{confirmDelete.label}</strong>?</p>
-		{#snippet footer()}
-			<Button variant="ghost" onclick={() => (confirmDelete = null)}>Cancel</Button>
-			<Button variant="primary" onclick={performDelete}>Remove</Button>
-		{/snippet}
-	</Modal>
-{/if}
-
 <style>
 	/* Shared .settings/.card/.field/.grid/.banner/.icon-btn primitives live in
 	   web/src/lib/styles/settings.css (imported by app.css). Only page-specific
-	   layout (resource/briefing add forms, table column widths, module toggles)
-	   stays here. */
-
-	.col-type {
-		width: 7rem;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.col-name {
-		width: auto;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.col-path {
-		width: auto;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.col-perms {
-		width: 5.5rem;
-	}
-	.col-source {
-		width: 6rem;
-	}
-
-	.add-resource {
-		display: flex;
-		flex-direction: column;
-		gap: 0.6rem;
-		padding-top: 0.4rem;
-		border-top: 1px solid var(--border-subtle);
-	}
-
-	.add-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-		gap: 0.6rem;
-	}
-
-	.add-actions {
-		display: flex;
-		justify-content: flex-end;
-	}
+	   layout (module toggles, connected-service rows) stays here. */
 
 
 	/* Mirrors ServiceCard's Connect/Disconnect row so the Nextcloud card and
@@ -781,12 +520,5 @@
 	.module-chip input[type='checkbox'] {
 		margin: 0;
 		width: auto;
-	}
-
-	@container settings (max-width: 520px) {
-		.col-source,
-		.col-perms {
-			display: none;
-		}
 	}
 </style>

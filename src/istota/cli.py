@@ -423,21 +423,16 @@ def cmd_resource(args):
             print("Error: --type is required for ensure", file=sys.stderr)
             sys.exit(1)
 
-        # Module-shaped resources don't carry a real path; the (user, type,
-        # type) tuple acts as the unique key. Matches the web UI behavior.
-        # Filesystem-shaped types (folder, calendar, todo_file, ...) require
-        # an explicit --path so a typo doesn't silently create a row at the
-        # type-named pseudo-path.
-        _MODULE_SHAPED_TYPES = {"feeds", "money", "moneyman", "overland", "karakeep", "monarch"}
-        if not args.path and args.type not in _MODULE_SHAPED_TYPES:
+        # folder is the only declarable type after the Resources sunset and
+        # always requires an explicit --path (a folder mount without a path is
+        # meaningless; the old module-shaped pseudo-path default is gone).
+        if not args.path:
             print(
-                f"Error: --path is required for resource type {args.type!r}; "
-                f"only module-shaped types ({', '.join(sorted(_MODULE_SHAPED_TYPES))}) "
-                "default the path to the type name",
+                "Error: --path is required for folder resources",
                 file=sys.stderr,
             )
             sys.exit(1)
-        resource_path = args.path if args.path else args.type
+        resource_path = args.path
         display_name = args.name
         permissions = args.permissions or "read"
         new_extras = _build_resource_extras(args)
@@ -1460,12 +1455,14 @@ def main():
     show_parser = subparsers.add_parser("show", help="Show task details")
     show_parser.add_argument("task_id", type=int, help="Task ID")
 
-    # resource
-    resource_parser = subparsers.add_parser("resource", help="Manage user resources")
+    # resource — folder-only operator command (Resources sunset). The
+    # other declarable types were retired; folder survives as the mechanism
+    # for mounting an out-of-workspace path into the sandbox.
+    resource_parser = subparsers.add_parser("resource", help="Manage user folder mounts")
     resource_parser.add_argument("action", choices=["list", "add", "ensure"], help="Action")
     resource_parser.add_argument("-u", "--user", required=True, help="User ID")
-    resource_parser.add_argument("-t", "--type", help="Resource type (calendar, folder, todo_file, email_folder, feeds, money, overland, ...)")
-    resource_parser.add_argument("-p", "--path", help="Resource path (defaults to type for module-shaped resources)")
+    resource_parser.add_argument("-t", "--type", choices=["folder"], help="Resource type (folder only — other types were retired by the Resources sunset)")
+    resource_parser.add_argument("-p", "--path", help="Resource path (required for folder)")
     resource_parser.add_argument("-n", "--name", help="Display name")
     resource_parser.add_argument("--permissions", help="Permissions (read, write)")
     resource_parser.add_argument(

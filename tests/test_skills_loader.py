@@ -1015,16 +1015,37 @@ class TestDirectoryBasedDiscovery:
         _write_skill_md(bundled, "test_skill", {
             "name": "test_skill",
             "description": "Test skill with env",
-            "env": [{"var": "MY_API_URL", "from": "user_resource_config",
-                     "resource_type": "my_service", "field": "base_url"}],
+            "env": [{"var": "MY_API_URL", "from": "config",
+                     "config_path": "browser.api_url", "when": "browser.enabled"}],
         })
         index = load_skill_index(tmp_path / "empty_config", bundled_dir=bundled)
         meta = index["test_skill"]
         assert len(meta.env_specs) == 1
         assert meta.env_specs[0].var == "MY_API_URL"
-        assert meta.env_specs[0].source == "user_resource_config"
-        assert meta.env_specs[0].resource_type == "my_service"
-        assert meta.env_specs[0].field == "base_url"
+        assert meta.env_specs[0].source == "config"
+        assert meta.env_specs[0].config_path == "browser.api_url"
+        assert meta.env_specs[0].when == "browser.enabled"
+
+    def test_retired_resource_sources_resolve_none(self, tmp_path):
+        """The resource-backed env sources were removed by the Resources
+        sunset (no bundled skill used them). A manifest declaring one now
+        resolves to None (falls through to the unknown-source warning) —
+        the guard the sunset spec requires."""
+        from istota.skills._env import EnvContext, _resolve_env_spec
+        from istota.skills._types import EnvSpec
+        from unittest.mock import MagicMock
+
+        ctx = EnvContext(
+            config=MagicMock(),
+            task=MagicMock(user_id="alice"),
+            user_resources=[],
+            user_config=None,
+            user_temp_dir=tmp_path / "t",
+            is_admin=True,
+        )
+        for retired in ("resource", "resource_json", "user_resource_config"):
+            spec = EnvSpec(var="X", source=retired)
+            assert _resolve_env_spec(spec, ctx) is None
 
     def test_frontmatter_with_dependencies(self, tmp_path):
         bundled = tmp_path / "bundled"

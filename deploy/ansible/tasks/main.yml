@@ -955,10 +955,14 @@
     - "restart istota-scheduler"
 
 # Write user_resources rows into the DB via `istota resource ensure`.
-# The DB is the source of truth — each (user, type, path) is upserted
-# independently. type/path/name/permissions are extracted as flags and
-# any remaining keys are passed as --extras-json so nested values
-# round-trip cleanly.
+# After the Resources sunset only `folder` (an out-of-workspace sandbox
+# mount) is a declarable type; the other path-shaped types
+# (calendar / todo_file / notes_folder / email_folder / reminders_file)
+# are inert and auto-cleaned, and todo/reminders/notes are read by
+# workspace convention. Filter to folder so a stale inventory entry of
+# a retired type doesn't trip the CLI's type allowlist. type/path/name/
+# permissions are extracted as flags and any remaining keys are passed
+# as --extras-json so nested values round-trip cleanly.
 - name: Plan user_resources ensure invocations
   set_fact:
     _istota_resource_targets: "{{ _resource_targets_json | from_json }}"
@@ -967,9 +971,11 @@
       {%- set ns = namespace(out=[]) -%}
       {%- for user_id, user_cfg in istota_users.items() -%}
       {%- for r in (user_cfg.resources | default([])) -%}
+      {%- if r.type == 'folder' -%}
       {%- set rkey = ['type','path','name','permissions'] -%}
       {%- set extras = dict(r.items() | rejectattr(0, 'in', rkey) | list) -%}
       {%- set _ = ns.out.append({'user': user_id, 'type': r.type, 'path': r.path | default(''), 'name': r.name | default(''), 'permissions': r.permissions | default('read'), 'extras': extras}) -%}
+      {%- endif -%}
       {%- endfor -%}
       {%- endfor -%}
       {{ ns.out | to_json }}

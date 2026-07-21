@@ -369,21 +369,25 @@ istota_experimental_features: []
 
 # Users configuration (dict of user_id -> user config).
 #
-# After the modules / connected services refactor, the data model is split
-# three ways:
+# After the modules / connected services refactor and the Resources sunset,
+# the data model is split three ways:
 #
 #   * Profile fields           → user_profiles DB table (`istota user ensure`)
-#   * Resources (paths only)   → user_resources DB table (`istota resource ensure`)
+#   * Folder mounts (paths only) → user_resources DB table (`istota resource ensure`)
 #   * Briefings                → briefing_configs DB table (`istota briefings schedule ensure`)
 #   * Tier-2 credentials       → encrypted secrets table (`istota secret ensure`,
 #                                see `istota_user_secrets` below)
 #   * Module opt-outs          → `disabled_modules:` list
 #
-# Resource types in this dict are PATH-shaped only: folder, calendar,
-# todo_file, notes_folder, email_folder, reminders_file, ledger. The old
-# module/credential-shaped types (feeds, money, monarch, karakeep,
-# overland) are retired — they're auto-cleaned from user_resources on
-# scheduler startup, and their values now live in the secrets table.
+# The only declarable resource type is `folder` — an out-of-workspace path
+# mounted into the sandbox (a cross-user share, an absolute path elsewhere).
+# The other path-shaped types (calendar, todo_file, notes_folder,
+# email_folder, reminders_file) were retired: calendars are CalDAV-discovered,
+# todo/reminders/notes are read by workspace convention ({bot_dir}/TODO.md,
+# reminders.md, NOTES.md), and email folders have no consumer. Retired module/
+# credential-shaped types (feeds, money, monarch, karakeep, overland) are
+# auto-cleaned from user_resources on scheduler startup; their values live in
+# the secrets table.
 #
 # Example:
 # istota_users:
@@ -425,17 +429,12 @@ istota_experimental_features: []
 #     email_reply_routing: "origin+thread"  # where a reply to a sent email goes:
 #                                   # origin+thread (default) | origin | thread
 #     resources:
+#       # Only `folder` is declarable after the Resources sunset — an
+#       # out-of-workspace path mounted into the sandbox. In-workspace paths
+#       # are already covered by the wholesale user-dir bind.
 #       - type: "folder"
-#         path: "/alice/Projects"
+#         path: "/shared/Projects"
 #         name: "Projects"
-#         permissions: "write"
-#       - type: "todo_file"
-#         path: "/Users/alice/workspace/TASKS.md"
-#         name: "Tasks"
-#         permissions: "write"
-#       - type: "ledger"
-#         path: "/Users/alice/beancount/main.beancount"
-#         name: "Personal"
 #         permissions: "write"
 #     briefings:
 #       - name: "morning"

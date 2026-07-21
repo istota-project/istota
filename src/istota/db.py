@@ -1461,12 +1461,20 @@ def delete_user_resource(
     return cur.rowcount > 0
 
 
-# Resource types retired by the modules / connected services refactor.
-# Their data flows through is_module_enabled (feeds, money, location) or the
-# encrypted secrets table (karakeep, monarch). Cleaning them out of
-# user_resources keeps stale rows from leaking into the executor / web UI.
+# Resource types retired by the modules / connected services refactor and
+# the Resources sunset. Their data flows through is_module_enabled (feeds,
+# money, location), the encrypted secrets table (karakeep, monarch, overland),
+# CalDAV discovery (calendar), or workspace conventions (todo/reminders/notes).
+# Cleaning them out of user_resources keeps stale rows from leaking into the
+# executor / web UI.
+#
+# todo_file / reminders_file are intentionally NOT here — they survive as
+# deprecated overrides read by the legacy briefing fetchers (the briefings-
+# module path uses a source ``path`` instead). They are never auto-cleaned;
+# an operator removes them when the user has migrated off the legacy path.
 _OBSOLETE_RESOURCE_TYPES = (
     "feeds", "money", "monarch", "moneyman", "karakeep", "overland",
+    "calendar", "email_folder", "notes_folder",
 )
 
 

@@ -151,6 +151,9 @@ def blocks_from_components(components: dict) -> list[dict]:
             })
 
         elif key == "todos":
+            # No convention path — the user sets the source `path` in the web
+            # editor. Seeds empty so the block exists; the source reads
+            # nothing until configured.
             specs.append({
                 "title": "Todos",
                 "directive": None,
@@ -160,6 +163,8 @@ def blocks_from_components(components: dict) -> list[dict]:
             })
 
         elif key == "notes":
+            # No convention path — the user sets the source `path` in the web
+            # editor (the `notes/` folder convention is prompt guidance only).
             specs.append({
                 "title": "Notes",
                 "directive": None,
@@ -169,6 +174,9 @@ def blocks_from_components(components: dict) -> list[dict]:
             })
 
         elif key == "reminders":
+            # No convention path — the user sets the source `path` in the web
+            # editor. Seeds empty so the block exists; the source reads
+            # nothing until configured.
             specs.append({
                 "title": "Reminder",
                 "directive": None,

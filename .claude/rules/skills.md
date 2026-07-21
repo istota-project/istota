@@ -169,7 +169,7 @@ Returns sorted list of skill names (the eager set).
 All metadata lives in YAML frontmatter at the top of each `skill.md` file:
 - `name`, `triggers` (keyword list — `!skills` documentation only, not a selector), `description` (shown in the menu catalogue and `!skills`)
 - `always_include`, `admin_only`, `cli` (booleans)
-- `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_resources` (lists)
+- `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies` (lists)
 - `exclude_memory`, `exclude_persona` (booleans)
 - `env` (JSON-encoded array of env spec objects)
 
@@ -335,11 +335,10 @@ Create `src/istota/skills/<name>/` with:
 name: my_skill
 triggers: [trigger, words]
 description: What it does
-resource_types: [my_resource]
 source_types: [briefing]
 cli: true
 dependencies: [some-package]
-env: [{"var":"MY_VAR","from":"user_resource_config","resource_type":"my_resource","field":"path"}]
+env: [{"var":"MY_API_KEY","from":"secret","service":"my_service","key":"api_key","sensitive":true}]
 ---
 
 # My Skill
@@ -376,16 +375,21 @@ if __name__ == "__main__":
     main()
 ```
 
-### 4. (Optional) Add env vars in executor.py
-In `execute_task()` L643-725, add env var mapping for the new resource type:
-```python
-# After existing resource mappings
-my_resources = [r for r in user_resources if r.resource_type == "my_resource"]
-if my_resources:
-    env["MY_RESOURCE_PATH"] = str(config.nextcloud_mount_path / my_resources[0].resource_path.lstrip("/"))
+### 4. Declare env vars in the manifest
+
+The skill's `env:` block is the **only** place env vars should be wired — no
+executor edits. `build_skill_env()` walks every loaded skill's manifest and
+resolves each `EnvSpec` against the task's `EnvContext`.
+
+```yaml
+env:
+  - {"var":"MY_API_KEY","from":"secret","service":"my_service","key":"api_key","sensitive":true}
+  - {"var":"MY_API_HOST","from":"config","config_path":"my_section.api_host","when":"my_section.enabled"}
 ```
 
-### 5. (Optional) Add resource type
-- Add to `ResourceConfig.type` validation (if any)
-- Document in skill md file
-- Users add via `uv run istota resource add -u USER -t my_resource -p /path`
+Available `from:` sources: `config` (dotted config path with `when` guard),
+`secret` (per-user encrypted secret), `setup_env` (skill-defined hook in
+`__init__.py:setup_env(ctx)`), `template_file` (auto-create from template),
+`user_id` (literal task user_id). The resource-backed sources (`resource`,
+`resource_json`, `user_resource_config`) were removed in the Resources sunset
+— no bundled skill used them.

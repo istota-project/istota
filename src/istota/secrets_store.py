@@ -396,12 +396,13 @@ _IMPORT_MAP: dict[str, tuple[str, list[tuple[str, str]]]] = {
     # in db.py:cleanup_obsolete_resources running, just with no field copies.
     "money": ("monarch", []),
     "monarch": ("monarch", []),
-    # base_url moves into the secrets table alongside api_key as part of
-    # the modules/connected-services refactor — once the bookmarks resource
-    # type is dropped, the secrets table is the only place these values live.
+    # base_url / api_key for the retired ``karakeep`` [[resources]] type
+    # live in ``ResourceConfig.extra`` after the Resources sunset (no longer
+    # flat fields); the secrets table is the only place these values live
+    # once the row is dropped by cleanup_obsolete_resources.
     "karakeep": ("karakeep", [
-        ("base_url", "base_url"),
-        ("api_key", "api_key"),
+        ("extra:base_url", "base_url"),
+        ("extra:api_key", "api_key"),
     ]),
     "feeds": ("feeds", [
         ("extra:tumblr_api_key", "tumblr_api_key"),

@@ -61,7 +61,7 @@ uv run istota-scheduler
 ```bash
 uv run istota task "prompt" -u USER -x [--dry-run]  # Execute task
 uv run istota task "prompt" -u USER -t ROOM -x       # With conversation context
-uv run istota resource add -u USER -t TYPE -p PATH   # Add resource
+uv run istota resource add -u USER -t folder -p PATH   # Add folder mount
 uv run istota resource list -u USER                   # List resources
 uv run istota run [--once] [--briefings]              # Process tasks
 uv run istota email list|poll|test                    # Email commands

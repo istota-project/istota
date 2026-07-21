@@ -47,8 +47,8 @@ class BriefingsContext:
 
     All paths are absolute. ``data_dir`` / ``db_path`` are materialised by the
     workspace loader. ``workspace_root`` is the user's bot workspace dir (parent
-    of ``briefings/``); callers that need workspace-relative default files
-    (todos/reminders/notes convention paths) consult it rather than
+    of ``briefings/``); callers that need the bot dir (e.g. to resolve a
+    source ``path`` relative to the workspace) consult it rather than
     ``data_dir.parent`` (which is unreliable under a ``data_dir`` override).
     """
 

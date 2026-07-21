@@ -232,15 +232,25 @@ class BriefingConfig:
 
 @dataclass
 class ResourceConfig:
-    """User resource configuration (defined in per-user TOML files)."""
-    type: str           # calendar, folder, todo_file, email_folder, shared_file, reminders_file, notes_folder
+    """User resource configuration (per-user TOML ``[[resources]]`` blocks).
+
+    After the Resources sunset only ``folder`` (an out-of-workspace sandbox
+    mount) and ``shared_file`` (internal organizer state) are live types.
+    Obsolete credential types (karakeep, monarch, overland, ...) survive only
+    in the load-time migration window (``_allow_obsolete=True``) so their
+    credentials can be absorbed into the secrets table; calendar /
+    email_folder / notes_folder rows are inert and auto-cleaned, and
+    todo_file / reminders_file survive as deprecated overrides read by the
+    briefing fetchers' workspace-convention fallback. Service credentials
+    live in ``extra`` (read by ``secrets_store``) or the encrypted secrets
+    table, not flat fields.
+    """
+    type: str
     path: str = ""
     name: str = ""
     permissions: str = "read"
-    # Service-specific credentials (e.g. karakeep, moneyman)
-    base_url: str = ""
-    api_key: str = ""
-    # Arbitrary extra fields for plugin skills (unrecognized keys go here)
+    # Arbitrary extra fields (unrecognized TOML keys, incl. base_url/api_key
+    # for the obsolete credential migration, land here).
     extra: dict = field(default_factory=dict)
     # Marks entries appended by ``_apply_user_resources`` from the DB. The
     # web listing endpoint skips these so post-delete in-memory staleness
@@ -257,11 +267,13 @@ class ResourceConfig:
         from . import db as _db
         if self.type in _db._OBSOLETE_RESOURCE_TYPES:
             raise ValueError(
-                f"ResourceConfig type {self.type!r} was retired by the modules "
-                f"refactor. Live data flows through is_module_enabled "
-                f"(feeds, money, location) or the encrypted secrets table "
-                f"(karakeep, monarch, overland). Update the fixture or pass "
-                f"_allow_obsolete=True if this is a load-time migration path."
+                f"ResourceConfig type {self.type!r} was retired (modules "
+                f"refactor or Resources sunset). Live data flows through "
+                f"is_module_enabled (feeds, money, location), the encrypted "
+                f"secrets table (karakeep, monarch, overland), or workspace "
+                f"conventions (todo/reminders/notes). Update the fixture or "
+                f"pass _allow_obsolete=True if this is a load-time migration "
+                f"path."
             )
 
 
@@ -1257,8 +1269,12 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             blocks=list(raw_blocks) if isinstance(raw_blocks, list) else [],
         ))
 
-    # Parse resources
-    _resource_known_keys = {"type", "path", "name", "permissions", "base_url", "api_key"}
+    # Parse resources. After the Resources sunset only ``folder`` (and the
+    # internal ``shared_file``) are live; obsolete credential types
+    # (karakeep, monarch, ...) are absorbed into the secrets table by
+    # _migrate_obsolete_resources, and ``base_url`` / ``api_key`` flow into
+    # ``extra`` rather than flat fields.
+    _resource_known_keys = {"type", "path", "name", "permissions"}
     resources = []
     for r in user_data.get("resources", []):
         extra = {k: v for k, v in r.items() if k not in _resource_known_keys}
@@ -1267,8 +1283,6 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             path=r.get("path", ""),
             name=r.get("name", ""),
             permissions=r.get("permissions", "read"),
-            base_url=r.get("base_url", ""),
-            api_key=r.get("api_key", ""),
             extra=extra,
             _allow_obsolete=True,
         ))
@@ -2122,15 +2136,12 @@ def _apply_user_resources(config: "Config") -> None:
                 # on first startup after the modules refactor; the next
                 # _migrate_obsolete_resources pass absorbs and deletes it.
                 for r in db_resources:
-                    extras = dict(r.extras or {})
                     rc = ResourceConfig(
                         type=r.resource_type,
                         path=r.resource_path,
                         name=r.display_name or "",
                         permissions=r.permissions or "read",
-                        base_url=str(extras.pop("base_url", "")) or "",
-                        api_key=str(extras.pop("api_key", "")) or "",
-                        extra=extras,
+                        extra=dict(r.extras or {}),
                         _allow_obsolete=True,
                     )
                     rc.from_db = True
@@ -2184,6 +2195,9 @@ def _migrate_obsolete_resources(config: "Config") -> None:
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("obsolete resource cleanup failed: %s", e)
 
+    # Filter uc.resources in memory so the rest of this load cycle sees the
+    # post-cleanup state (the executor merge, scheduler hooks, etc. all read
+    # this list).
     obsolete = set(_db._OBSOLETE_RESOURCE_TYPES)
     for uc in config.users.values():
         uc.resources = [rc for rc in uc.resources if rc.type not in obsolete]

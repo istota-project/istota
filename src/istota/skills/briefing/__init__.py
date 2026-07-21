@@ -422,10 +422,6 @@ def build_briefing_prompt(
             "- Read any shared notes files and include relevant agenda items or reminders"
         )
 
-    # Email summary (general, not newsletters)
-    if components.get("email"):
-        prompt_parts.append("- Summary of unread emails")
-
     # Daily reminder - pre-fetch random reminder
     if _component_enabled(components, "reminders"):
         reminder = _fetch_random_reminder(config, user_id)
@@ -686,6 +682,10 @@ def _fetch_random_reminder(config: Config, user_id: str) -> str | None:
     have been cycled through, the queue is reshuffled. If the reminders file
     content changes, the queue resets.
 
+    Reads the user's ``reminders_file`` resource path (a deprecated override
+    kept for back-compat; the briefings-module path uses a source ``path``
+    instead). Absent, returns None.
+
     Args:
         config: Application configuration (used for mount-aware file reading)
         user_id: The user's ID
@@ -700,20 +700,24 @@ def _fetch_random_reminder(config: Config, user_id: str) -> str | None:
     if not user_config:
         return None
 
-    reminder_resources = [r for r in user_config.resources if r.type == "reminders_file"]
-    if not reminder_resources:
+    # Deprecated override: explicit reminders_file resources only — no
+    # convention default (the briefings-module path owns the location via a
+    # source ``path``; the legacy path reads only an explicit resource).
+    paths = [r.path for r in user_config.resources
+             if r.type == "reminders_file" and r.path]
+    if not paths:
         return None
 
     # Collect all reminders and compute content hash
     all_content = []
     all_reminders = []
-    for resource in reminder_resources:
+    for path in paths:
         try:
-            content = read_text(config, resource.path)
+            content = read_text(config, path)
             all_content.append(content or "")
             all_reminders.extend(_parse_reminders(content))
         except Exception as e:
-            logger.warning("Failed to read reminders file %s: %s", resource.path, e)
+            logger.warning("Failed to read reminders file %s: %s", path, e)
 
     if not all_reminders:
         return None
@@ -751,7 +755,11 @@ def _fetch_random_reminder(config: Config, user_id: str) -> str | None:
 
 def _fetch_todo_items(config: Config, user_id: str) -> str | None:
     """
-    Pre-fetch pending TODO items from the user's todo_file resources.
+    Pre-fetch pending TODO items.
+
+    Reads the user's ``todo_file`` resource path (a deprecated override kept
+    for back-compat; the briefings-module path uses a source ``path``
+    instead). Absent, returns None.
 
     Args:
         config: Application configuration
@@ -766,14 +774,18 @@ def _fetch_todo_items(config: Config, user_id: str) -> str | None:
     if not user_config:
         return None
 
-    todo_resources = [r for r in user_config.resources if r.type == "todo_file"]
-    if not todo_resources:
+    # Deprecated override: explicit todo_file resources only — no convention
+    # default (the briefings-module path owns the location via a source
+    # ``path``; the legacy path reads only an explicit resource).
+    paths = [r.path for r in user_config.resources
+             if r.type == "todo_file" and r.path]
+    if not paths:
         return None
 
     all_items = []
-    for resource in todo_resources:
+    for path in paths:
         try:
-            content = read_text(config, resource.path)
+            content = read_text(config, path)
             if not content:
                 continue
             # Extract pending items (lines starting with "- [ ]" or "* [ ]")
@@ -782,7 +794,7 @@ def _fetch_todo_items(config: Config, user_id: str) -> str | None:
                 if stripped.startswith(("- [ ]", "* [ ]")):
                     all_items.append(stripped)
         except Exception as e:
-            logger.warning("Failed to read TODO file %s: %s", resource.path, e)
+            logger.warning("Failed to read TODO file %s: %s", path, e)
 
     if not all_items:
         return None

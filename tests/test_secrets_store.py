@@ -161,7 +161,12 @@ class TestImport:
         # _allow_obsolete=True: this fixture simulates the load-time
         # migration window where TOML still carries the retired type and
         # import_from_user_configs is meant to absorb its credentials
-        # before the row is dropped.
+        # before the row is dropped. base_url/api_key live in extra after
+        # the Resources sunset (no longer flat ResourceConfig fields).
+        extra = {
+            "base_url": kwargs.get("base_url", ""),
+            "api_key": kwargs.get("api_key", ""),
+        }
         return UserConfig(
             display_name="Alice",
             timezone="UTC",
@@ -169,8 +174,7 @@ class TestImport:
                 ResourceConfig(
                     type="karakeep",
                     name="Karakeep",
-                    base_url=kwargs.get("base_url", ""),
-                    api_key=kwargs.get("api_key", ""),
+                    extra=extra,
                     _allow_obsolete=True,
                 )
             ],
@@ -218,8 +222,7 @@ class TestImport:
                 ResourceConfig(
                     type="karakeep",
                     name="Karakeep",
-                    base_url="https://k.example",
-                    api_key="abcd",
+                    extra={"base_url": "https://k.example", "api_key": "abcd"},
                     _allow_obsolete=True,
                 ),
             ],

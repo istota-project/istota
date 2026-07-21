@@ -39,12 +39,21 @@ istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR 
 ### Resources
 
 ```bash
-istota resource ensure -u USER -t TYPE -p PATH [--name NAME] [--permissions read|readwrite] [--extras k=v | --extras-json '{…}'] [--extras-clear]
-istota resource add    -u USER -t TYPE -p PATH         # one-shot add (fails if duplicate)
+istota resource ensure -u USER -t folder -p PATH [--name NAME] [--permissions read|readwrite] [--extras k=v | --extras-json '{…}'] [--extras-clear]
+istota resource add    -u USER -t folder -p PATH         # one-shot add (fails if duplicate)
 istota resource list   -u USER                          # List resources
 ```
 
-Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `reminders_file`, `shared_file`, `notes_folder`. The retired types (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`, `ledger`, `invoicing`) are auto-cleaned at scheduler startup — feeds/money/location are now modules, karakeep/monarch/overland/tumblr are connected services in the encrypted `secrets` table.
+Only `folder` is declarable (an out-of-workspace sandbox mount) after the
+Resources sunset. The retired types (`calendar`, `notes_folder`,
+`email_folder`, `feeds`, `money`, `monarch`, `moneyman`, `karakeep`,
+`overland`, `ledger`, `invoicing`) are auto-cleaned at scheduler startup —
+feeds/money/location are modules, karakeep/monarch/overland/tumblr are
+connected services in the encrypted `secrets` table, and calendars are
+CalDAV-discovered. `todo_file`/`reminders_file` are **not** auto-cleaned:
+they survive as deprecated explicit-path overrides read by the legacy
+briefing fetcher (todo/reminders/notes otherwise take an explicit
+briefing-source `path`, with no convention-default filename).
 
 ### Briefings
 

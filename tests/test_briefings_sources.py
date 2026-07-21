@@ -339,37 +339,28 @@ class TestBrowse:
 
 
 # ---------------------------------------------------------------------------
-# Builtins — todos / reminders / notes convention paths
+# Builtins — todos / reminders / notes (path is a source property)
 # ---------------------------------------------------------------------------
 
 
-def _write_workspace_file(cfg: Config, user_id: str, filename: str, content: str):
-    from istota.storage import get_user_bot_path
-    rel = f"{get_user_bot_path(user_id, cfg.bot_dir_name)}/{filename}".lstrip("/")
-    path = cfg.nextcloud_mount_path / rel
+def _write_workspace_file(cfg: Config, rel: str, content: str):
+    path = cfg.nextcloud_mount_path / rel.lstrip("/")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
 
 
 class TestBuiltinTodos:
-    def test_reads_convention_todo_file(self, tmp_path):
-        ctx = _ctx(tmp_path)
-        _write_workspace_file(
-            ctx.app_config, "stefan", "TODO.md",
-            "# Todo\n- [ ] buy milk\n- [x] done thing\n- [ ] call bank\n",
-        )
-        gs = resolve_source("todos", {}, ctx)
-        assert gs.ok is True
-        texts = [i["text"] for i in gs.items]
-        assert "- [ ] buy milk" in texts
-        assert "- [ ] call bank" in texts
-        assert all("done thing" not in t for t in texts)
-
-    def test_missing_todo_file(self, tmp_path):
+    def test_no_path_returns_not_configured(self, tmp_path):
         gs = resolve_source("todos", {}, _ctx(tmp_path))
         assert gs.ok is False
+        assert "path" in gs.provenance.lower()
 
-    def test_path_override(self, tmp_path):
+    def test_missing_todo_file(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is False
+
+    def test_path_reads_file(self, tmp_path):
         ctx = _ctx(tmp_path)
         rel = "custom/mytodos.md"
         p = ctx.app_config.nextcloud_mount_path / rel
@@ -381,35 +372,49 @@ class TestBuiltinTodos:
 
 
 class TestBuiltinReminders:
-    def test_reads_convention_reminders(self, tmp_path):
+    def test_no_path_returns_not_configured(self, tmp_path):
+        gs = resolve_source("reminders", {}, _ctx(tmp_path))
+        assert gs.ok is False
+        assert "path" in gs.provenance.lower()
+
+    def test_missing_reminders_file(self, tmp_path):
         ctx = _ctx(tmp_path)
-        # Framework DB for the shuffle-queue state.
+        gs = resolve_source("reminders", {"path": "reminders.md"}, ctx)
+        assert gs.ok is False
+
+    def test_path_reads_file(self, tmp_path):
+        ctx = _ctx(tmp_path)
         from istota import db
         db.init_db(ctx.app_config.db_path)
-        _write_workspace_file(
-            ctx.app_config, "stefan", "reminders.md",
-            "Drink water\n\nStand up straight\n",
-        )
-        gs = resolve_source("reminders", {}, ctx)
+        rel = "my/reminders.md"
+        p = ctx.app_config.nextcloud_mount_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("Drink water\n\nStand up straight\n")
+        gs = resolve_source("reminders", {"path": rel}, ctx)
         assert gs.ok is True
         assert gs.text in ("Drink water", "Stand up straight")
 
-    def test_missing_reminders_file(self, tmp_path):
-        gs = resolve_source("reminders", {}, _ctx(tmp_path))
-        assert gs.ok is False
-
 
 class TestBuiltinNotes:
-    def test_reads_convention_notes(self, tmp_path):
-        ctx = _ctx(tmp_path)
-        _write_workspace_file(ctx.app_config, "stefan", "NOTES.md", "agenda item")
-        gs = resolve_source("notes", {}, ctx)
-        assert gs.ok is True
-        assert "agenda item" in gs.text
-
-    def test_missing_notes(self, tmp_path):
+    def test_no_path_returns_not_configured(self, tmp_path):
         gs = resolve_source("notes", {}, _ctx(tmp_path))
         assert gs.ok is False
+        assert "path" in gs.provenance.lower()
+
+    def test_missing_notes(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        gs = resolve_source("notes", {"path": "NOTES.md"}, ctx)
+        assert gs.ok is False
+
+    def test_path_reads_file(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        rel = "my/agenda.md"
+        p = ctx.app_config.nextcloud_mount_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("agenda item")
+        gs = resolve_source("notes", {"path": rel}, ctx)
+        assert gs.ok is True
+        assert "agenda item" in gs.text
 
 
 # ---------------------------------------------------------------------------

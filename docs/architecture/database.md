@@ -9,7 +9,7 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | Table | Purpose |
 |---|---|
 | `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempts, `last_heartbeat` (worker-liveness ping for stuck-task reclaim, ISSUE-112), execution trace, model/effort overrides, plus `skill` / `skill_args` for skill-task dispatch |
-| `user_resources` | Per-user resource permissions (calendar, folder, todo_file, email_folder, ledger, etc.) |
+| `user_resources` | Per-user folder mounts (`folder`) + internal `shared_file` organizer state |
 | `user_profiles` | Per-user profile fields (display_name, timezone, channels, worker overrides, disabled_skills, disabled_modules, email_addresses, trusted_email_senders) |
 | `briefing_configs` | DB-stored briefing configurations (cron, components, conversation_token, enabled flag) |
 | `secrets` | Per-user encrypted credentials (Fernet over scrypt-derived `ISTOTA_SECRET_KEY`) |

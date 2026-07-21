@@ -664,11 +664,15 @@ timezone = "America/New_York"  # IANA timezone for briefing scheduling
 # alerts_channel = "alertsroom456"  # Talk room for confirmations and security alerts
 # trusted_email_senders = ["*@company.com"]  # trusted senders bypass email confirmation gate
 
-# Alice's resources
-[[users.alice.resources]]
-type = "reminders_file"
-path = "/Users/alice/shared/Notes/_REMINDERS.md"
-name = "Reminders"
+# Alice's resources — only `folder` (an out-of-workspace sandbox mount)
+# is declarable after the Resources sunset. todo/reminders/notes are
+# briefing-source properties (set the source `path`), and calendars are
+# CalDAV-discovered.
+# [[users.alice.resources]]
+# type = "folder"
+# path = "/shared/Projects"
+# name = "Projects"
+# permissions = "write"
 
 # Alice's briefings - morning and evening
 [[users.alice.briefings]]
@@ -682,7 +686,7 @@ calendar = true
 todos = true
 markets = true    # morning → futures, evening → indices (automatic)
 news = true       # expands using [briefing_defaults.news] sources
-reminders = { enabled = true }  # random item from user's reminders_file resource
+reminders = { enabled = true }  # random item from the user's reminders file (path is a briefing-source property)
 
 [[users.alice.briefings]]
 name = "evening"
@@ -763,7 +767,7 @@ timezone = "America/Los_Angeles"
 #   - markets: { enabled, futures, indices } - pre-fetched market data
 #   - news: { enabled, lookback_hours, sources } - newsletter summaries
 #   - notes: { enabled } - parse shared notes files for agenda items
-#   - reminders: { enabled } - random item from user's reminders_file
+#   - reminders: { enabled } - random item from the user's reminders file
 #
 # Market symbols:
 #   - Futures: ES=F (S&P 500), NQ=F (Nasdaq 100), YM=F (Dow)

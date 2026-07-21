@@ -786,17 +786,12 @@ class TestResourceConfig:
         assert rc.name == "Tasks"
         assert rc.permissions == "write"
 
-    def test_defaults_service_credentials(self):
-        rc = ResourceConfig(type="folder", path="/test")
-        assert rc.base_url == ""
-        assert rc.api_key == ""
-
     def test_obsolete_type_raises(self):
         """Direct construction with retired types raises — protects fixtures
-        from drifting after the modules / connected services refactor (the
-        c1423ba class of bugs)."""
+        from drifting after the modules / connected services refactor and the
+        Resources sunset (the c1423ba class of bugs)."""
         with pytest.raises(ValueError, match="retired"):
-            ResourceConfig(type="karakeep", base_url="https://x")
+            ResourceConfig(type="karakeep", extra={"base_url": "https://x"})
         with pytest.raises(ValueError, match="retired"):
             ResourceConfig(type="feeds")
         with pytest.raises(ValueError, match="retired"):
@@ -806,7 +801,7 @@ class TestResourceConfig:
         """The TOML/DB loaders set ``_allow_obsolete=True`` so the migration
         step can absorb credentials before dropping the rows."""
         rc = ResourceConfig(
-            type="karakeep", base_url="https://x", _allow_obsolete=True,
+            type="karakeep", extra={"base_url": "https://x"}, _allow_obsolete=True,
         )
         assert rc.type == "karakeep"
 
@@ -1948,3 +1943,72 @@ class TestCleanupObsoleteResources:
         assert secrets_store.get_secret(
             db_path, "alice", "overland", "ingest_token",
         ) == "tok-xyz"
+
+
+class TestCleanupSunsetResources:
+    """The Resources sunset retires calendar/email_folder/notes_folder
+    (cleaned unconditionally). todo_file/reminders_file survive as deprecated
+    overrides (read by the legacy briefing fetchers) and are never auto-cleaned."""
+
+    def test_drops_sunset_obsolete_types(self, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            for rtype in ("calendar", "email_folder", "notes_folder"):
+                db.add_user_resource(
+                    conn, user_id="alice", resource_type=rtype,
+                    resource_path=f"/{rtype}", display_name=rtype,
+                )
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="folder",
+                resource_path="/Docs", display_name="Docs",
+            )
+        removed = db.cleanup_obsolete_resources(db_path)
+        assert removed == 3
+        with db.get_db(db_path) as conn:
+            rows = db.get_user_resources(conn, "alice")
+        assert [r.resource_type for r in rows] == ["folder"]
+
+    def test_todo_file_reminders_file_not_auto_cleaned(self, tmp_path):
+        """todo_file/reminders_file are deprecated overrides, not obsolete —
+        they survive cleanup so a user on the legacy path keeps their file."""
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="todo_file",
+                resource_path="Users/alice/shared/TASKS.md", display_name="Tasks",
+            )
+            db.add_user_resource(
+                conn, user_id="alice", resource_type="reminders_file",
+                resource_path="Users/alice/shared/REMINDERS.md",
+            )
+        removed = db.cleanup_obsolete_resources(db_path)
+        assert removed == 0
+        with db.get_db(db_path) as conn:
+            rows = db.get_user_resources(conn, "alice")
+        assert sorted(r.resource_type for r in rows) == ["reminders_file", "todo_file"]
+
+    def test_missing_db_is_noop(self, tmp_path):
+        from istota import db
+        assert db.cleanup_obsolete_resources(tmp_path / "no.db") == 0
+
+
+class TestResourceConfigGrepGuard:
+    """After the Resources sunset, ResourceConfig has no base_url/api_key
+    fields (credentials live in extra/secrets). Guards against drift."""
+
+    def test_no_base_url_or_api_key_attributes(self):
+        from istota.config import ResourceConfig
+        rc = ResourceConfig(type="folder", path="/x")
+        assert not hasattr(rc, "base_url")
+        assert not hasattr(rc, "api_key")
+        # Credentials flow through extra, not flat fields.
+        rc2 = ResourceConfig(
+            type="folder", path="/x",
+            extra={"base_url": "https://k.example", "api_key": "secret"},
+        )
+        assert rc2.extra["base_url"] == "https://k.example"
+        assert rc2.extra["api_key"] == "secret"

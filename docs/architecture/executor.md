@@ -46,11 +46,11 @@ The executor builds a minimal, clean environment for the subprocess. `build_clea
 
 Everything else — Nextcloud / CalDAV / IMAP / SMTP credentials, service tokens, per-user secrets — is **manifest-derived**. Each skill's `skill.md` frontmatter declares its env vars in the `env:` block; `build_skill_env()` walks the loaded skill index and resolves each `EnvSpec` against the task's `EnvContext`. This replaces the hardcoded credential-injection block in `execute_task` that used to duplicate the same wiring across the executor, the proxy strip-set, and the auth map.
 
-`EnvSpec` sources: `config` (dotted config path with `when` guard), `resource` (resource mount path), `resource_json` (all resources of a type as JSON), `user_resource_config` (TOML `extras` field), `template_file` (auto-create from template), `secret` (per-user encrypted secret), `setup_env` (skill-defined hook in `__init__.py:setup_env(ctx)` — used by `developer` for the git credential helper + API wrappers it bind-mounts into the sandbox).
+`EnvSpec` sources: `config` (dotted config path with `when` guard), `template_file` (auto-create from template), `secret` (per-user encrypted secret), `setup_env` (skill-defined hook in `__init__.py:setup_env(ctx)` — used by `developer` for the git credential helper + API wrappers it bind-mounts into the sandbox). The resource-backed sources (`resource`, `resource_json`, `user_resource_config`) and the `gate_user_has_resource` flag were removed in the Resources sunset — no bundled skill used them.
 
 Two pre-resolution gates filter out specs that shouldn't fire:
 
-- `gate_user_has_resource: "<type>"` — only resolve when the user owns at least one resource of that type
+- `gate_has_discovered_calendars: true` — only resolve when CalDAV discovery returned at least one calendar
 - `gate_has_discovered_calendars: true` — only resolve when CalDAV discovery returned at least one calendar
 
 CalDAV discovery is itself a best-effort step: `discover_calendars_for_task(task, config)` returns `[]` when CalDAV is unconfigured / unreachable / the user owns no calendars. The same helper is reused by the scheduler's two subprocess paths (`_execute_skill_task`, `_execute_command_task`) so the gate fires consistently across LLM, skill-task, and command-task dispatch.

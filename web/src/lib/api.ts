@@ -639,49 +639,6 @@ export async function updateProfile(
 	});
 }
 
-export interface ResourceTypeSchema {
-	type: string;
-	label: string;
-	needs_path: boolean;
-	permissions: string[];
-}
-
-export interface UserResourceRow {
-	managed: 'config' | 'db';
-	id?: number;
-	type: string;
-	name: string;
-	path: string;
-	permissions: string;
-	extras?: Record<string, unknown>;
-}
-
-export async function getResources(): Promise<{
-	types: ResourceTypeSchema[];
-	resources: UserResourceRow[];
-}> {
-	return apiFetch('/settings/resources');
-}
-
-export async function addResource(payload: {
-	type: string;
-	path?: string;
-	name?: string;
-	permissions?: string;
-	extras?: Record<string, unknown>;
-}): Promise<{ ok: boolean; id: number }> {
-	return apiFetch('/settings/resources', {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(payload),
-	});
-}
-
-export async function deleteResource(
-	id: number,
-): Promise<{ ok: boolean; deleted: boolean }> {
-	return apiFetch(`/settings/resources/${id}`, { method: 'DELETE' });
-}
 
 // --- Phase 7b: briefings ---
 

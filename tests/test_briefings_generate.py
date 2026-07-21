@@ -20,12 +20,13 @@ def _config(tmp_path) -> Config:
     )
 
 
-def _write_workspace_file(cfg: Config, filename: str, content: str):
+def _write_workspace_file(cfg: Config, filename: str, content: str) -> str:
     from istota.storage import get_user_bot_path
     rel = f"{get_user_bot_path('stefan', cfg.bot_dir_name)}/{filename}".lstrip("/")
     p = cfg.nextcloud_mount_path / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
+    return rel
 
 
 def _ctx_with_blocks(cfg: Config, blocks: list[dict]):
@@ -60,9 +61,9 @@ class TestAssembleBriefingInput:
 
     def test_grouped_prompt_with_notes_block(self, tmp_path):
         cfg = _config(tmp_path)
-        _write_workspace_file(cfg, "NOTES.md", "Buy a gift for mom")
+        rel = _write_workspace_file(cfg, "NOTES.md", "Buy a gift for mom")
         ctx = _ctx_with_blocks(cfg, [
-            {"title": "Notes", "sources": [{"kind": "notes"}]},
+            {"title": "Notes", "sources": [{"kind": "notes", "config": {"path": rel}}]},
         ])
         db.init_db(cfg.db_path)
         with db.get_db(cfg.db_path) as conn:
@@ -91,11 +92,11 @@ class TestAssembleBriefingInput:
 
     def test_block_order_preserved(self, tmp_path):
         cfg = _config(tmp_path)
-        _write_workspace_file(cfg, "NOTES.md", "note one")
-        _write_workspace_file(cfg, "TODO.md", "- [ ] task one")
+        notes_rel = _write_workspace_file(cfg, "NOTES.md", "note one")
+        todos_rel = _write_workspace_file(cfg, "TODO.md", "- [ ] task one")
         ctx = _ctx_with_blocks(cfg, [
-            {"title": "Notes", "sources": [{"kind": "notes"}]},
-            {"title": "Todos", "sources": [{"kind": "todos"}]},
+            {"title": "Notes", "sources": [{"kind": "notes", "config": {"path": notes_rel}}]},
+            {"title": "Todos", "sources": [{"kind": "todos", "config": {"path": todos_rel}}]},
         ])
         db.init_db(cfg.db_path)
         with db.get_db(cfg.db_path) as conn:
@@ -217,8 +218,8 @@ class TestExecutorRouting:
 
         cfg = _config(tmp_path)
         cfg.temp_dir = tmp_path / "temp"
-        _write_workspace_file(cfg, "NOTES.md", "an important note")
-        _ctx_with_blocks(cfg, [{"title": "Notes", "sources": [{"kind": "notes"}]}])
+        rel = _write_workspace_file(cfg, "NOTES.md", "an important note")
+        _ctx_with_blocks(cfg, [{"title": "Notes", "sources": [{"kind": "notes", "config": {"path": rel}}]}])
         db.init_db(cfg.db_path)
 
         task = self._task()
