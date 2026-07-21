@@ -10,7 +10,7 @@
 		briefingArchiveCount,
 		briefingsRefreshNonce,
 	} from '$lib/stores/briefings';
-	import { AppShell, ShellHeader, Sidebar, SidebarToggle, Chip } from '$lib/components/ui';
+	import { AppShell, ShellHeader, Sidebar, SidebarToggle, Chip, Select } from '$lib/components/ui';
 	import { Cog } from 'lucide-svelte';
 
 	let { children } = $props();
@@ -23,6 +23,12 @@
 	let offset = $state(0);
 	let sidebarOpen = $state(false);
 	let loadingMore = $state(false);
+
+	// Briefing-name filter, auto-populated from the archive's distinct names.
+	let nameOptions = $derived([
+		{ value: '', label: 'All' },
+		...names.map((n) => ({ value: n, label: n })),
+	]);
 
 	let onSettings = $derived(page.url.pathname.startsWith(`${base}/briefings/settings`));
 
@@ -104,6 +110,16 @@
 <AppShell>
 	{#snippet header()}
 		<ShellHeader title="Briefings">
+			{#snippet nav()}
+				{#if !onSettings && names.length > 1}
+					<Select
+						value={$briefingFilterName}
+						options={nameOptions}
+						onValueChange={(v) => pickName(v)}
+						ariaLabel="Filter by briefing"
+					/>
+				{/if}
+			{/snippet}
 			{#snippet tools()}
 				<Chip icon checked={onSettings} onclick={toggleSettings} title="Briefing settings">
 					<Cog size={14} />
@@ -128,17 +144,6 @@
 				open={sidebarOpen}
 				onClose={() => (sidebarOpen = false)}
 			>
-				{#snippet extras()}
-					{#if names.length > 1}
-						<div class="name-filter">
-							<Chip checked={$briefingFilterName === ''} onclick={() => pickName('')}>All</Chip>
-							{#each names as n (n)}
-								<Chip checked={$briefingFilterName === n} onclick={() => pickName(n)}>{n}</Chip>
-							{/each}
-						</div>
-					{/if}
-				{/snippet}
-
 				{#if items.length === 0}
 					<p class="sidebar-empty">No briefings yet.</p>
 				{:else}
@@ -167,13 +172,6 @@
 </AppShell>
 
 <style>
-	.name-filter {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--chip-gap);
-		padding: 0 0.5rem 0.5rem;
-	}
-
 	.archive-btn {
 		display: flex;
 		flex-direction: column;
