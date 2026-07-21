@@ -235,6 +235,10 @@ Nothing here changes the server/Ansible/Docker path: every field defaults to the
 - **Native WebFetch tool**: the native harness ships a daemon-side `WebFetch` tool (`session/tools/web_fetch.py`, native-only, `[brain.native.web_fetch]`). It runs in the daemon netns (not gated by the CONNECT allowlist), but is credential-free (`trust_env=False`, no cookies) and SSRF-hardened — every resolved IP validated against a private/reserved blocklist on each request and redirect hop, connection pinned to the validated IP (DNS-rebinding mitigation), GET/text-only, size/time capped, content wrapped in an untrusted-content delimiter (`untrusted_input` folded into the eager set when enabled). Off via `enabled = false`; `require_url_provenance` locks fetches to task-seen URLs for sensitive deployments. See `.claude/rules/brain.md`.
 - **Deferred DB**: sandboxed Claude writes JSON to temp dir; scheduler processes after success. Identity (`user_id`, `conversation_token`) always from task, not JSON. Subtasks rate-limited (`max_subtasks_per_task`, `max_subtask_depth`, `max_subtask_prompt_chars`), admin-only.
 
+## Code Style
+
+Indentation is **spaces, never tabs**, declared in `.editorconfig` at the repo root: Python is 4 spaces (ruff-managed), everything under `web/` is 2 spaces. The frontend is formatted by prettier — run `npm run format` in `web/` before committing frontend changes (config in `web/.prettierrc.json`). Exceptions: `web/package-lock.json` (npm-generated) and `docker/devbox/etc/gitconfig` (git-idiomatic tabs).
+
 ## Testing
 
 TDD with pytest + pytest-asyncio, class-based, `unittest.mock`, real SQLite via `tmp_path`. Integration tests `@pytest.mark.integration`.

@@ -1,0 +1,24 @@
+root = true
+
+[*]
+indent_style = space
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# Python: 4-space indent (matches ruff / PEP 8, the existing norm)
+[*.py]
+indent_size = 4
+
+# Frontend: 2-space indent (SvelteKit / prettier default)
+[web/**]
+indent_size = 2
+
+# Markdown: keep trailing whitespace (hard line breaks) and don't hard-wrap
+[*.md]
+trim_trailing_whitespace = false
+
+# git-idiomatic: git writes tab-indented values here, leave as-is
+[docker/devbox/etc/gitconfig]
+indent_style = tab
