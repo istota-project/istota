@@ -114,7 +114,7 @@ class TestStructuredGoldenParity:
         import istota.skills.briefing as briefing_mod
 
         golden = "🟢 **S&P 500**: 6,104.75 (+30.25, +0.50%)"
-        monkeypatch.setattr(briefing_mod, "_fetch_market_data", lambda mc, mode: golden)
+        monkeypatch.setattr(briefing_mod, "_fetch_market_data", lambda mc, mode, tz_str=None: golden)
 
         cfg = _config(tmp_path)
         from istota.briefings.sources import SourceContext

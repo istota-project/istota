@@ -551,7 +551,7 @@ class TestBuiltinMarkets:
         import istota.skills.briefing as briefing_mod
         monkeypatch.setattr(
             briefing_mod, "_fetch_market_data",
-            lambda mc, mode: "📈 MARKETS\nES=F +0.5%",
+            lambda mc, mode, tz_str=None: "📈 MARKETS\nES=F +0.5%",
         )
         gs = bi.resolve_markets({"futures": ["ES=F"]}, ctx)
         assert gs.ok is True

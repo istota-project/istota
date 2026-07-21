@@ -12,6 +12,7 @@ import os
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 @dataclass
@@ -130,13 +131,21 @@ def format_quote(quote: MarketQuote) -> str:
     )
 
 
-def format_market_summary(quotes: list[MarketQuote], mode: str = "morning") -> str:
-    """
-    Format market quotes for display in briefing.
+def format_market_summary(
+    quotes: list[MarketQuote], mode: str = "morning", *, tz_str: str | None = None,
+) -> str:
+    """Format market quotes for display in briefing.
 
     Args:
         quotes: List of MarketQuote objects
         mode: "morning" for pre-market futures, "evening" for day summary
+        tz_str: Optional reader IANA timezone. In morning (pre-market) mode the
+            query time — the moment the futures were fetched — is rendered in
+            this zone inside the header, e.g. ``Pre-market futures (5:30am
+            PST):``. Evening (close) mode emits no timestamp at all: the header
+            already says "Market Close" and yfinance's quotes carry no close
+            time, so a synthetic "as of" would mislabel the data as current to
+            the fetch instant rather than the actual close.
 
     Returns:
         Formatted string for display
@@ -144,7 +153,17 @@ def format_market_summary(quotes: list[MarketQuote], mode: str = "morning") -> s
     if not quotes:
         return "Market data unavailable"
 
-    header = "Pre-market Futures" if mode == "morning" else "Market Close"
+    if mode == "morning":
+        header = "Pre-market futures"
+        # The query time (when yfinance was actually hit) in the reader's zone —
+        # the only honest "as of" for pre-market futures, which have no single
+        # session close. Placed in the header so the whole label reads as one
+        # bold run and strip_markdown flattens it cleanly for plain-text email.
+        time_label = _format_query_time(quotes[0].timestamp, tz_str)
+        if time_label:
+            header = f"{header} ({time_label})"
+    else:
+        header = "Market Close"
     # Bold label, NOT a markdown heading: this text is copied verbatim into
     # structured briefing blocks (which forbid headings), and a stray `## `
     # leaks literally into plain-text email. Bold renders in Talk/web and is
@@ -154,12 +173,32 @@ def format_market_summary(quotes: list[MarketQuote], mode: str = "morning") -> s
     for quote in quotes:
         lines.append(f"  {format_quote(quote)}")
 
-    # Add timestamp from first quote if available
-    if quotes[0].timestamp:
-        time_str = quotes[0].timestamp.strftime("%H:%M")
-        lines.append(f"  As of: {time_str}")
-
     return "\n".join(lines)
+
+
+def _format_query_time(timestamp: datetime | None, tz_str: str | None) -> str | None:
+    """Render a fetch timestamp as ``5:30am PST`` in the reader's timezone.
+
+    ``timestamp`` comes from :func:`get_quotes` as a naive ``datetime.now()``
+    value (the host's local clock); ``astimezone`` interprets a naive datetime
+    as the system zone, so the real instant is preserved when converting to
+    ``tz_str`` — correct on the UTC server and on a dev box whose clock matches
+    its zone. Returns ``None`` (no parenthesised label) when ``timestamp`` or
+    ``tz_str`` is absent or the zone name is invalid, so a caller can always
+    splice the result into a header.
+    """
+    if not timestamp or not tz_str:
+        return None
+    try:
+        tz = ZoneInfo(tz_str)
+    except Exception:  # noqa: BLE001 — invalid zone name; omit the label
+        return None
+    local = timestamp.astimezone(tz)
+    hour = local.strftime("%I").lstrip("0")  # "05" -> "5", "12" stays "12"
+    minute = local.strftime("%M")
+    ampm = local.strftime("%p").lower()  # "AM" -> "am"
+    tz_abbr = local.strftime("%Z")  # "PST" / "PDT" / "UTC"
+    return f"{hour}:{minute}{ampm} {tz_abbr}".strip()
 
 
 # --- CLI ---
