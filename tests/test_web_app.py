@@ -804,6 +804,101 @@ class TestAdminStats:
             assert feeds["users_resolved"] == 0
             assert feeds["status"] == "unreachable"
 
+    async def test_admin_stats_includes_health_module(self, tmp_path):
+        """The health module surfaces per-user panel/stat counts + last update."""
+        from istota import health as health_mod
+        config = self._config_with_admin(tmp_path)
+
+        health_db = config.module_db_path("alice", "health")
+        health_db.parent.mkdir(parents=True, exist_ok=True)
+        health_mod.init_db(health_db)
+        with health_mod.connect(health_db) as conn:
+            conn.execute(
+                "INSERT INTO panels (drawn_at, lab_name) VALUES (?, ?)",
+                ("2026-07-01", "Quest"),
+            )
+            conn.execute(
+                "INSERT INTO stats (measured_at, metric, value, unit) "
+                "VALUES (?, ?, ?, ?)",
+                ("2026-07-10", "weight", 70.0, "kg"),
+            )
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            assert "health" in data["modules"]
+            health = data["modules"]["health"]
+            assert health["users_configured"] >= 1
+            assert health["panels_total"] == 1
+            assert health["biomarkers_total"] == 0
+            assert health["last_update"] == "2026-07-10T00:00:00Z"
+
+    async def test_admin_stats_includes_briefings_module(self, tmp_path):
+        """The briefings module surfaces block/source/archive counts."""
+        from istota.briefings import db as briefings_db
+        config = self._config_with_admin(tmp_path)
+
+        bdb_path = config.module_db_path("alice", "briefings")
+        bdb_path.parent.mkdir(parents=True, exist_ok=True)
+        briefings_db.init_db(bdb_path)
+        with briefings_db.connect(bdb_path) as conn:
+            conn.execute(
+                "INSERT INTO briefing_blocks "
+                "(briefing_name, position, title, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("morning", 0, "Headlines", "2026-07-01 00:00:00", "2026-07-01 00:00:00"),
+            )
+            conn.execute(
+                "INSERT INTO briefing_archive "
+                "(briefing_name, body_md, generated_at) VALUES (?, ?, ?)",
+                ("morning", "# hi", "2026-07-12 07:00:00"),
+            )
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            assert "briefings" in data["modules"]
+            briefings = data["modules"]["briefings"]
+            assert briefings["users_configured"] >= 1
+            assert briefings["blocks_total"] == 1
+            assert briefings["archived_total"] == 1
+            assert briefings["last_generated"] == "2026-07-12T07:00:00Z"
+
+    async def test_admin_stats_includes_location_module(self, tmp_path):
+        """Location surfaces on per-user module enablement (no receiver gate)."""
+        from istota import location as location_mod
+        config = self._config_with_admin(tmp_path)
+        # Receiver flag defaults off; the module still surfaces from per-user
+        # enablement alone.
+        config.location.enabled = False
+
+        loc_db = config.module_db_path("alice", "location")
+        loc_db.parent.mkdir(parents=True, exist_ok=True)
+        location_mod.init_db(loc_db)
+        with location_mod.connect(loc_db) as conn:
+            conn.execute(
+                "INSERT INTO places (name, lat, lon) VALUES (?, ?, ?)",
+                ("Home", 0.0, 0.0),
+            )
+            conn.commit()
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            loc = resp.json()["modules"]["location"]
+            assert loc["users_configured"] >= 1
+            assert loc["places_total"] == 1
+
     async def test_admin_stats_last_active_uses_created_at(self, tmp_path):
         """Background ``updated_at`` bumps must not skew last_active."""
         from istota import db

@@ -87,6 +87,14 @@
 		visits_total: 'Visits',
 		places_total: 'Places',
 		last_update: 'Last update',
+		panels_total: 'Panels',
+		biomarkers_total: 'Biomarkers',
+		encounters_total: 'Encounters',
+		immunizations_total: 'Immunizations',
+		blocks_total: 'Blocks',
+		sources_total: 'Sources',
+		archived_total: 'Archived',
+		last_generated: 'Last generated',
 	};
 
 	function fieldLabel(key: string): string {
@@ -97,6 +105,7 @@
 		'last_poll',
 		'last_sync',
 		'last_update',
+		'last_generated',
 		'last_active',
 		'last_run_at',
 		'last_success_at',
