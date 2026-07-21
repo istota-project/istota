@@ -82,9 +82,19 @@
 
 <style>
 	.reader {
-		flex: 1;
-		min-height: 0;
+		/* flex-basis: auto (not 0) so the box grows with its content — otherwise
+		   the box is pinned to the scroll viewport height and long briefings
+		   overflow *past* padding-bottom, losing the bottom gap at scroll-end.
+		   flex-grow keeps short content (and the empty state) filling the area. */
+		flex: 1 0 auto;
 		padding: 1.5rem 2rem;
+		/* Card-colored reading surface, matching the chat message area. */
+		background: var(--surface-card);
+	}
+	/* Match .chat-pane's light-theme fill exactly (light --surface-card is a soft
+	   gray; chat uses pure white for the reading surface). */
+	:global(:root[data-theme='light']) .reader {
+		background: #ffffff;
 	}
 
 	.briefing {
