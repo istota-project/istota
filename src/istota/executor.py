@@ -509,9 +509,15 @@ def _append_model_note(result_text, dropped_pin, primary_kind, actual_model):
     uniformly across every surface and persists with the result.
     """
     model_str = actual_model or "a different model"
+    # Italicize only the prose runs — the emoji and the `code` spans stay
+    # outside emphasis so they render upright (a single wrapping `_…_` would
+    # inherit italics onto the emoji and the model IDs). Asterisk emphasis
+    # (not underscore) because `primary_kind`/model IDs can contain `_`
+    # (e.g. `claude_code`), which would confuse underscore delimiters.
     note = (
-        f"_⚠️ Model note: `{dropped_pin}` isn't available on the fallback brain "
-        f"({primary_kind} unavailable), so this ran on `{model_str}` instead._"
+        f"⚠️ *Model note:* `{dropped_pin}` *isn't available on the fallback "
+        f"brain ({primary_kind} unavailable), so this ran on* `{model_str}` "
+        f"*instead.*"
     )
     return f"{result_text}\n\n{note}"
 
