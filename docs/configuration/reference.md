@@ -230,20 +230,26 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 | `auto_recall` | `false` | BM25 auto-recall in prompts |
 | `auto_recall_limit` | `5` | Max recall results |
 
-## `[briefing_defaults]`
+## `[[default_briefings]]`
 
-Admin-level defaults expanded when users set `markets = true` or `news = true`:
+A canonical shared briefing set, seeded once into each opted-in user (per-user
+`default_briefings` flag, default on). Same `name`/`cron`/`output`/`blocks`
+shape as a per-user briefing; content is blocks-only. (Replaces the retired
+`[briefing_defaults]` boolean-component defaults.)
 
 ```toml
-[briefing_defaults.news]
-lookback_hours = 12
-sources = [
-    { type = "domain", value = "semafor.com" },
-    { type = "email", value = "briefing@nytimes.com" },
-]
+[[default_briefings]]
+name = "Daily"
+cron = "0 7 * * *"
+output = "talk"
 
-[briefing_defaults.headlines]
-sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
+  [[default_briefings.blocks]]
+  title = "World News"
+  render_mode = "synthesis"
+
+    [[default_briefings.blocks.sources]]
+    kind = "browse"
+    config = { preset = "ap" }
 ```
 
 ## `[developer]`
