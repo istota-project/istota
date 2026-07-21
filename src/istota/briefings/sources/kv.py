@@ -1,12 +1,11 @@
-"""KV source resolver — pre-made curated content from the shared_kv store.
+"""Shared-block source resolver — pre-made curated content from the shared_kv store.
 
-A ``kv`` source reads a shared (or the caller's own) KV entry and contributes it
-to a briefing block, so expensive shared generation (headlines, a markets
-summary, a newsletter digest) runs *once globally* and every user's briefing
-reads the pre-made artifact instead of regenerating it.
+A ``shared_block`` source reads a module-owned shared block from the shared_kv
+store and contributes it to a briefing block, so expensive shared generation
+(headlines, a markets summary, a newsletter digest) runs *once globally* and
+every user's briefing reads the pre-made artifact instead of regenerating it.
 
-The **writer chooses granularity** via the stored JSON shape (one source kind
-spans both):
+The **writer chooses granularity** via the stored JSON shape:
 
 * ``{"items": [{"title","summary","url"}, …]}`` (or a bare JSON list) → the
   reader's block **synthesizes** the items (share the fetch, not the prose).
@@ -16,17 +15,10 @@ spans both):
 Fail-soft like every source: a missing/stale/malformed value yields an empty
 result with a provenance note (the block is omitted), never an exception.
 
-Source config shape (``kv``)::
-
-    {"scope": "shared"|"own",   // default "shared"
-     "namespace": "briefings",
-     "key": "world-headlines",
-     "max_age_hours": 12,       // 0 / absent = no freshness check
-     "trusted": false}          // default false → wrap content untrusted
-
 The ``shared_block`` sugar takes ``{"name": "world-headlines", "max_age_hours":
-12, "trusted": false}`` and resolves to the shared_kv read at namespace
-``briefing_shared_blocks``, key ``name``.
+12}`` and resolves to the shared_kv read at namespace ``briefing_shared_blocks``,
+key ``name``. Trust is a property of the stored value (an admin-written
+``trusted`` flag), never chosen by the consuming user.
 """
 
 from __future__ import annotations
@@ -84,42 +76,37 @@ def _normalize_items(raw_items: list) -> list[dict]:
     return out
 
 
-def _read(scope: str, namespace: str, key: str, ctx: SourceContext):
-    """Return the shared/own KV row dict or None. No gate on reads."""
+def _read(namespace: str, key: str, ctx: SourceContext):
+    """Return the shared KV row dict or None. No gate on reads."""
     from istota import db
 
     if ctx.conn is None:
-        return None, "(kv source skipped — no DB connection)"
-    if scope == "own":
-        row = db.kv_get(ctx.conn, ctx.user_id, namespace, key)
-        return row, None
+        return None, "(shared_block source skipped — no DB connection)"
     row = db.shared_kv_get(ctx.conn, namespace, key)
     return row, None
 
 
 def _resolve(
     *,
-    scope: str,
     namespace: str,
     key: str,
     max_age_hours: float,
-    trusted: bool,
     title: str,
     ctx: SourceContext,
     missing_note: str | None = None,
 ) -> GatheredSource:
     if not namespace or not key:
         return GatheredSource(
-            kind="kv", title=title,
-            provenance="(kv source missing namespace/key)", ok=False,
+            kind="shared_block", title=title,
+            provenance="(shared_block source missing namespace/key)", ok=False,
         )
 
-    row, err = _read(scope, namespace, key, ctx)
+    row, err = _read(namespace, key, ctx)
     if err:
-        return GatheredSource(kind="kv", title=title, provenance=err, ok=False)
+        return GatheredSource(kind="shared_block", title=title, provenance=err, ok=False)
     if row is None:
-        note = missing_note or f"(no {'shared ' if scope != 'own' else ''}KV at {namespace}/{key})"
-        return GatheredSource(kind="kv", title=title, provenance=note, ok=False)
+        note = missing_note or f"(no shared KV at {namespace}/{key})"
+        return GatheredSource(kind="shared_block", title=title, provenance=note, ok=False)
 
     # Freshness: stale-but-present content is dropped, not shown, so a wedged
     # generator degrades to an omitted block rather than yesterday's headlines.
@@ -127,7 +114,7 @@ def _resolve(
     age = _age_hours(updated_at, ctx.now)
     if max_age_hours and age is not None and age > max_age_hours:
         return GatheredSource(
-            kind="kv", title=title,
+            kind="shared_block", title=title,
             provenance=f"(stale: {namespace}/{key} written {int(age)}h ago)",
             ok=False,
         )
@@ -136,16 +123,13 @@ def _resolve(
         parsed = json.loads(row["value"])
     except (json.JSONDecodeError, TypeError):
         return GatheredSource(
-            kind="kv", title=title,
+            kind="shared_block", title=title,
             provenance=f"(malformed KV value at {namespace}/{key})", ok=False,
         )
 
-    # Trust for a shared *block* is a property of the content's writer (an admin),
-    # stored in the value — never chosen by the consuming user. Honor the stored
-    # ``trusted`` flag for the briefing_shared_blocks namespace, overriding any
-    # consumer config ``trusted`` there. Other namespaces keep the consumer setting.
-    if namespace == SHARED_BLOCK_NAMESPACE:
-        trusted = bool(parsed.get("trusted", False)) if isinstance(parsed, dict) else False
+    # Trust is a property of the content's writer (an admin), stored in the
+    # value — never chosen by the consuming user.
+    trusted = bool(parsed.get("trusted", False)) if isinstance(parsed, dict) else False
 
     items: list[dict] = []
     text = ""
@@ -159,60 +143,41 @@ def _resolve(
         items = _normalize_items(parsed)
     else:
         return GatheredSource(
-            kind="kv", title=title,
+            kind="shared_block", title=title,
             provenance=f"(unusable KV shape at {namespace}/{key})", ok=False,
         )
 
     if not items and not text.strip():
         return GatheredSource(
-            kind="kv", title=title,
+            kind="shared_block", title=title,
             provenance=f"(empty KV content at {namespace}/{key})", ok=False,
         )
 
-    # Provenance: own-scope drops written_by.
     age_str = f", written {int(age)}h ago" if age is not None else ""
-    if scope == "own":
-        provenance = f"your KV {namespace}/{key}{age_str}"
-    else:
-        by = row.get("written_by") or "?"
-        provenance = f"shared KV {namespace}/{key}{age_str} by {by}"
+    by = row.get("written_by") or "?"
+    provenance = f"shared KV {namespace}/{key}{age_str} by {by}"
 
     return GatheredSource(
-        kind="kv", title=title, items=items, text=text,
+        kind="shared_block", title=title, items=items, text=text,
         provenance=provenance, untrusted=not trusted,
     )
 
 
-def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
-    scope = config.get("scope", "shared")
-    namespace = config.get("namespace", "")
-    key = config.get("key", "")
-    max_age_hours = float(config.get("max_age_hours", 0) or 0)
-    trusted = bool(config.get("trusted", False))
-    title = config.get("title") or key or "Curated"
-    return _resolve(
-        scope=scope, namespace=namespace, key=key,
-        max_age_hours=max_age_hours, trusted=trusted, title=title, ctx=ctx,
-    )
-
-
 def resolve_shared_block(config: dict, ctx: SourceContext) -> GatheredSource:
-    """Sugar over ``kv``: read a module-owned shared block by name.
+    """Read a module-owned shared block by name.
 
-    ``{"name": "world-headlines", "max_age_hours": 12, "trusted": false}`` maps
-    to a shared read at namespace ``briefing_shared_blocks``, key ``name``. If
-    the referenced block isn't configured *and* has no stored value, the
-    provenance note says so (a stale reference reads more clearly than a bare
-    "no shared KV").
+    ``{"name": "world-headlines", "max_age_hours": 12}`` maps to a shared read at
+    namespace ``briefing_shared_blocks``, key ``name``. If the referenced block
+    isn't configured *and* has no stored value, the provenance note says so (a
+    stale reference reads more clearly than a bare "no shared KV").
     """
     name = config.get("name") or config.get("key") or ""
     if not name:
         return GatheredSource(
-            kind="kv", title="Shared block",
+            kind="shared_block", title="Shared block",
             provenance="(shared_block source missing name)", ok=False,
         )
     max_age_hours = float(config.get("max_age_hours", 0) or 0)
-    trusted = bool(config.get("trusted", False))
     title = config.get("title") or name
 
     # Flag an unknown name only when it's neither a configured/DB-defined block
@@ -225,8 +190,8 @@ def resolve_shared_block(config: dict, ctx: SourceContext) -> GatheredSource:
         missing_note = f"(unknown shared block '{name}')"
 
     return _resolve(
-        scope="shared", namespace=SHARED_BLOCK_NAMESPACE, key=name,
-        max_age_hours=max_age_hours, trusted=trusted, title=title, ctx=ctx,
+        namespace=SHARED_BLOCK_NAMESPACE, key=name,
+        max_age_hours=max_age_hours, title=title, ctx=ctx,
         missing_note=missing_note,
     )
 

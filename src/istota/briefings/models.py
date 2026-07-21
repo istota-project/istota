@@ -30,12 +30,10 @@ SOURCE_KINDS = (
     "todos",
     "reminders",
     "notes",
-    # Curated shared content read from the shared_kv store. `kv` is the generic
-    # read (any namespace/key); `shared_block` is sugar for a module-owned shared
-    # block (namespace "briefing_shared_blocks", key = block name). Either can be
-    # synthesis or structured — the block's render_mode decides, so neither is in
-    # STRUCTURED_KINDS.
-    "kv",
+    # Curated shared content read from the shared_kv store. `shared_block` is a
+    # module-owned shared block (namespace "briefing_shared_blocks", key = block
+    # name). It can be synthesis or structured — the block's render_mode decides,
+    # so it's not in STRUCTURED_KINDS.
     "shared_block",
 )
 

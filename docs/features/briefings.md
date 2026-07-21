@@ -120,21 +120,21 @@ A briefing consumes a shared block with a `shared_block` source (or the generic 
 
 ### External-script curation (the escape hatch)
 
-For content the module doesn't ship a generator for, write `shared_kv` directly from an admin CRON `command:` job (running as an admin user):
+For content the module doesn't ship a generator for, write into the shared-block namespace (`briefing_shared_blocks`) directly from an admin CRON `command:` job (running as an admin user):
 
 ```bash
 # CRON.md job body — fetch/build content, then publish to the shared store.
-istota-skill kv set --shared briefings my-digest '{"text": "…section text…"}'
+istota-skill kv set --shared briefing_shared_blocks my-digest '{"text": "…section text…"}'
 # or, to share raw items for per-user synthesis:
-istota-skill kv set --shared briefings my-digest '{"items": [{"title": "…", "url": "…"}]}'
+istota-skill kv set --shared briefing_shared_blocks my-digest '{"items": [{"title": "…", "url": "…"}]}'
 ```
 
-Then a briefing reads it via a `kv` source:
+Then a briefing reads it via a `shared_block` source (the key becomes the block name, and it shows up in the web editor's shared-block picker as a "custom" entry):
 
 ```toml
     [[users.alice.briefings.blocks.sources]]
-    kind = "kv"
-    config = { scope = "shared", namespace = "briefings", key = "my-digest", max_age_hours = 12 }
+    kind = "shared_block"
+    config = { name = "my-digest", max_age_hours = 12 }
 ```
 
 A full copy-paste example lives at [`scripts/examples/shared_kv_curation.sh`](../../scripts/examples/shared_kv_curation.sh).
@@ -149,8 +149,7 @@ The **writer** chooses whether the fetch or the synthesis is shared, via the sto
 ### Authorization + trust
 
 - **Writes are admin-only** (the `/etc/istota/admins` allowlist), **fail-closed**: on a deployment with a *blank* admins file, no user can write shared content (only module-owned generation, a trusted daemon write, still works). Reads are open to any user.
-- Shared content is **wrapped untrusted by default** (a trusted identity typically relayed web-sourced content), matching the `browse`/`email` posture. Set `trusted = true` on the source to skip the wrap for content you control.
-- A `kv` source with `scope = "own"` reads *your own* per-user KV — a source config can never reach another user's personal KV.
+- Shared content is **wrapped untrusted by default** (a trusted identity typically relayed web-sourced content), matching the `browse`/`email` posture. Trust is a property of the stored value — set `"trusted": true` in the published JSON to skip the wrap for content you control. A consuming user can never flip it.
 
 ## Output format
 
