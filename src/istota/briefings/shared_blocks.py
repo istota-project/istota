@@ -95,12 +95,16 @@ def _gather_shared(config, sources: list[dict], now: datetime | None) -> list[Ga
 
     if not sources:
         return []
-    gathered: list[GatheredSource] = []
+    # Reassemble by source index, not completion order — a structured block's
+    # verbatim concatenation (``_assemble_verbatim``) splices sources in this
+    # order, so it must match the configured source order regardless of which
+    # worker finishes first. Mirrors the per-user pipeline's slot dict.
+    by_index: dict[int, GatheredSource] = {}
     with ThreadPoolExecutor(max_workers=min(8, len(sources))) as pool:
-        futures = [pool.submit(_one, s) for s in sources]
+        futures = {pool.submit(_one, s): i for i, s in enumerate(sources)}
         for fut in as_completed(futures):
-            gathered.append(fut.result())
-    return gathered
+            by_index[futures[fut]] = fut.result()
+    return [by_index[i] for i in range(len(sources))]
 
 
 def _section_directive(block_def) -> str:
@@ -122,9 +126,10 @@ def _section_directive(block_def) -> str:
 def _assemble_verbatim(gathered: list[GatheredSource]) -> str | None:
     """Concatenate a structured block's gathered source text verbatim.
 
-    Sources are reassembled in the order gathered (deterministic — the pool
-    preserves nothing, so callers order the input; today every structured shared
-    block has a single source). Each source's ``text`` is used as-is; a source
+    Sources are reassembled in configured source order (``_gather_shared``
+    reassembles its pool results by source index, so a multi-source structured
+    block splices deterministically in the order authored). Each source's
+    ``text`` is used as-is; a source
     that returned ``items`` instead of ``text`` (no shared source kind does today
     — markets/browse/email all return ``text``) is rendered as a simple bullet
     list so verbatim still has something to splice. Returns ``None`` when nothing
@@ -181,10 +186,11 @@ def _build_synthesis_prompt(block_def, non_empty: list[GatheredSource]) -> str:
         lines.append(_render_source(gs))
     lines += [
         "",
-        "Output ONLY the section content as plain text: an emoji-prefixed header "
-        f"line (use the given title '{title}'), then the content. Do NOT output "
-        "JSON, a subject line, preamble, commentary, or code fences. Do NOT send "
-        "emails or use any tools.",
+        "Output ONLY the section body as plain text — do NOT emit a title or "
+        f"header line for '{title}' (the consuming briefing supplies the section "
+        "title from its block, so a header here would duplicate it). Do NOT "
+        "output JSON, a subject line, preamble, commentary, or code fences. Do "
+        "NOT send emails or use any tools.",
     ]
     return "\n".join(lines)
 

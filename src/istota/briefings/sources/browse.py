@@ -1,8 +1,7 @@
 """Browse source resolver — a user-defined URL fetched via the browse skill.
 
-Generalizes the legacy ``_fetch_headlines`` frontpage fetcher: a source
-references either a bundled preset key (``ap``, ``reuters``, …) or an arbitrary
-``url``. The page text is fetched through the headless browser API and
+A source references either a bundled preset key (``ap``, ``reuters``, …) or an
+arbitrary ``url``. The page text is fetched through the headless browser API and
 truncated. Requires ``config.browser.enabled``; off → empty + note. Content is
 untrusted (the block's companion ``untrusted_input`` skill carries the handling
 rules).
@@ -24,16 +23,36 @@ from istota.briefings.sources import GatheredSource, SourceContext
 logger = logging.getLogger(__name__)
 
 
-# Bundled presets, superseding the legacy ``HEADLINE_SOURCES`` map. Keyed by a
-# short slug the settings UI offers as a pick-list.
+# Bundled frontpage presets, keyed by a short slug the settings UI offers as a
+# pick-list. Reputable, mostly-text frontpages that render useful headline text
+# through the headless browser; grouped by beat for readability (insertion order
+# is what the pick-list shows). A user can always point a browse source at an
+# arbitrary ``url`` instead.
 BROWSE_PRESETS: dict[str, dict] = {
+    # Global / general news
     "ap": {"url": "https://apnews.com", "name": "AP News"},
     "reuters": {"url": "https://www.reuters.com", "name": "Reuters"},
+    "bbc": {"url": "https://www.bbc.com/news", "name": "BBC News"},
     "guardian": {"url": "https://www.theguardian.com/world", "name": "The Guardian"},
-    "ft": {"url": "https://www.ft.com", "name": "Financial Times"},
+    "npr": {"url": "https://www.npr.org", "name": "NPR"},
     "aljazeera": {"url": "https://www.aljazeera.com", "name": "Al Jazeera"},
+    # Europe
+    "ft": {"url": "https://www.ft.com", "name": "Financial Times"},
     "lemonde": {"url": "https://www.lemonde.fr/en/", "name": "Le Monde"},
     "spiegel": {"url": "https://www.spiegel.de/international/", "name": "Der Spiegel"},
+    "dw": {"url": "https://www.dw.com/en/", "name": "Deutsche Welle"},
+    "france24": {"url": "https://www.france24.com/en/", "name": "France 24"},
+    # Asia-Pacific
+    "japantimes": {"url": "https://www.japantimes.co.jp", "name": "The Japan Times"},
+    "scmp": {"url": "https://www.scmp.com", "name": "South China Morning Post"},
+    # Business / markets
+    "cnbc": {"url": "https://www.cnbc.com", "name": "CNBC"},
+    # US politics / policy
+    "politico": {"url": "https://www.politico.com", "name": "Politico"},
+    "axios": {"url": "https://www.axios.com", "name": "Axios"},
+    # Technology
+    "techmeme": {"url": "https://www.techmeme.com", "name": "Techmeme"},
+    "hackernews": {"url": "https://news.ycombinator.com", "name": "Hacker News"},
 }
 
 _FETCH_TIMEOUT = 60.0

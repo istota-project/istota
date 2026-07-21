@@ -500,45 +500,40 @@ istota_user_secrets: {}
 # name/cron/output/blocks shape as a per-user briefing; content is blocks-only.
 # Seed-once: a user's later web edits win and re-runs never clobber them.
 #
-# The default set below is the weekday morning + evening briefing translated
-# from the legacy component config (news + markets + calendar, weekday cron,
-# email delivery; morning also carries a reminder block). Blocks map to the old
-# components: `news` -> a News block over the shared newsletter pool, `markets`
-# -> a structured Markets block, `calendar` -> a structured Calendar block over
-# the user's discovered CalDAV calendars. Notes:
+# The default set below is a weekday morning + evening briefing. World headlines
+# and Markets are read from the module-owned shared blocks (`world-headlines` /
+# `markets-summary`, see istota_briefing_shared_blocks) via `shared_block`
+# sources, so the browse/markets fetch + synthesis happens ONCE globally per
+# window instead of per user. The shared blocks are scheduled to regenerate
+# shortly before each briefing window (see their crons below), so both the
+# morning and evening briefings read fresh content by default. Notes:
+#   * A `shared_block` consuming block is `structured` — the shared text is
+#     already synthesized/formatted, so it is spliced in verbatim (no per-user
+#     re-synthesis). `max_age_hours` gates freshness: a shared block older than
+#     the window (e.g. the morning generation seen at evening) is omitted, so a
+#     stale block never leaks across windows.
+#   * World headlines needs the headless browser and is omitted until the shared
+#     block's first generation — both harmless soft-degrades (empty -> omitted).
 #   * The Calendar block reads the user's CalDAV calendars (discovered from
 #     Nextcloud); with none available it soft-degrades (empty -> omitted).
-#   * The morning Reminder block seeds an empty `reminders` source: it reads
-#     nothing until the user sets a file `path` in the web editor (there is no
-#     convention-default path), so it renders as an omitted block until then.
-#   * headlines/todos are not seeded.
+#   * News-newsletter/reminders/todos blocks are not seeded — add them per user.
 # Set to [] to seed nothing.
 istota_default_briefings:
   - name: "morning"
     cron: "0 6 * * 1-5"
     output: "email"
     blocks:
-      # World headlines are read from the module-owned `world-headlines` shared
-      # block (generated once at 06:00 UTC via browse presets — see
-      # istota_briefing_shared_blocks), not fetched per user. Omitted until the
-      # shared block's first generation (harmless); requires the headless
-      # browser (soft-degrades to an omitted section when it's off).
-      - title: "🌍 World headlines"
+      - title: "🌍 Headlines"
         render_mode: "structured"
         sources:
           - kind: "shared_block"
-            config: { name: "world-headlines", max_age_hours: 12 }
-      - title: "News"
-        render_mode: "synthesis"
-        sources:
-          - kind: "email"
-            config: { mode: "shared", lookback_hours: 12 }
-      - title: "Markets"
+            config: { name: "world-headlines", max_age_hours: 6 }
+      - title: "📈 Markets"
         render_mode: "structured"
         sources:
-          - kind: "markets"
-            config: {}
-      - title: "Calendar"
+          - kind: "shared_block"
+            config: { name: "markets-summary", max_age_hours: 6 }
+      - title: "📅 Calendar"
         render_mode: "structured"
         sources:
           - kind: "calendar"
@@ -547,34 +542,43 @@ istota_default_briefings:
     cron: "0 18 * * 1-5"
     output: "email"
     blocks:
-      - title: "News"
-        render_mode: "synthesis"
-        sources:
-          - kind: "email"
-            config: { mode: "shared", lookback_hours: 12 }
-      - title: "Markets"
+      - title: "🌍 Headlines"
         render_mode: "structured"
         sources:
-          - kind: "markets"
-            config: {}
-      - title: "Calendar"
+          - kind: "shared_block"
+            config: { name: "world-headlines", max_age_hours: 6 }
+      - title: "📈 Markets"
+        render_mode: "structured"
+        sources:
+          - kind: "shared_block"
+            config: { name: "markets-summary", max_age_hours: 6 }
+      - title: "📅 Calendar"
         render_mode: "structured"
         sources:
           - kind: "calendar"
             config: {}
 
 # Module-owned shared briefing blocks (shared-kv-curated-content). Generated
-# ONCE globally by the scheduler (no user, UTC cron) and written into the
-# shared_kv store; per-user briefings read them via a `shared_block` source, so
-# the N-way frontpage fetch + synthesis collapses to one generation total.
-# Mirrors the batteries-included DEFAULT_SHARED_BLOCKS in config.py — set to []
-# to disable, or override per deployment. Allowed source kinds are user-agnostic
-# only: browse / markets / email (the shared/unowned pool). `world-headlines`
-# needs the headless browser (soft-degrades when off); `markets-summary` needs
-# only yfinance.
+# globally by the scheduler (no user, UTC cron) and written into the shared_kv
+# store; per-user briefings read them via a `shared_block` source, so the N-way
+# frontpage fetch + synthesis collapses to one generation total. Mirrors the
+# batteries-included DEFAULT_SHARED_BLOCKS in config.py — set to [] to disable,
+# or override per deployment. Allowed source kinds are user-agnostic only:
+# browse / markets / email (the shared/unowned pool). `world-headlines` needs
+# the headless browser (soft-degrades when off); `markets-summary` needs only
+# yfinance.
+#
+# Crons fire TWICE daily, ~15 min before the default briefing windows (06:00 /
+# 18:00) so both the morning and evening briefings read fresh content — the
+# consuming `shared_block` sources gate on `max_age_hours` (6h), so each window
+# reads its own just-generated copy and never the other window's stale one. The
+# crons are UTC (global) while briefing crons are per-user TZ; align these to
+# your users' timezone, or run each block more often, if your window differs.
+# markets-summary is regenerated per window too so it picks up the correct
+# morning (pre-market) vs evening (close) mode at generation time.
 istota_briefing_shared_blocks:
   - name: "world-headlines"
-    cron: "0 6 * * *"
+    cron: "45 5,17 * * *"
     title: "🌍 World headlines"
     directive: "Synthesize the frontpages into ~8 top world stories, lead with what's new. Neutral wire-service tone."
     render_mode: "synthesis"
@@ -585,7 +589,7 @@ istota_briefing_shared_blocks:
       - kind: "browse"
         config: { preset: "reuters" }
   - name: "markets-summary"
-    cron: "30 6 * * *"
+    cron: "50 5,17 * * *"
     title: "📈 Markets"
     # Structured/verbatim: the markets source already emits a formatted quote
     # table — stored as-is with zero LLM passes (no directive). Trusted (pure
