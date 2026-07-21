@@ -8,6 +8,7 @@
   import SidebarToggle from '$lib/components/ui/SidebarToggle.svelte';
   import KebabMenu from '$lib/components/ui/KebabMenu.svelte';
   import Chip from '$lib/components/ui/Chip.svelte';
+  import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
@@ -253,9 +254,10 @@
 
   // Mark every room read (header chip). Confirmed like the feeds equivalent —
   // it's a bulk, not-really-undoable cursor advance.
-  async function handleMarkAllRead() {
-    const confirmed = window.confirm("Mark all rooms as read? This can't be undone.");
-    if (!confirmed) return;
+  let confirmMarkAllRead = $state(false);
+
+  async function performMarkAllRead() {
+    confirmMarkAllRead = false;
     await session.markAllRead();
   }
 
@@ -312,7 +314,7 @@
         {/if}
       {/snippet}
       {#snippet tools()}
-        <Chip icon onclick={handleMarkAllRead} title="Mark all rooms as read">
+        <Chip icon onclick={() => (confirmMarkAllRead = true)} title="Mark all rooms as read">
           <CheckCheck size={14} />
         </Chip>
         <SidebarToggle
@@ -518,6 +520,15 @@
       onClose={() => (settingsRoom = null)}
     />
   {/if}
+
+  <ConfirmDialog
+    bind:open={confirmMarkAllRead}
+    title="Mark all rooms as read"
+    message="Are you sure you want to mark all rooms as read? This can't be undone."
+    confirmLabel="Mark all read"
+    confirmVariant="primary"
+    onConfirm={performMarkAllRead}
+  />
 </AppShell>
 
 <style>

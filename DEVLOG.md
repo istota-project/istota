@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-21: Web UI — standardized confirmation modals (ConfirmDialog primitive)
+
+The web UI had three competing confirmation patterns: native `window.confirm()` (unstyled, theme-ignoring browser dialogs), hand-rolled `.modal-backdrop` divs (each re-implementing backdrop/modal/button CSS with no focus-trap or Esc handling), and the shared bits-ui `Modal` — whose confirms used a redundant *title-is-the-question* form (`"Delete block?"` + body `Remove **X**?`). Standardized everything on one primitive with cleaner two-part copy.
+
+**New `ConfirmDialog` primitive** (`web/src/lib/components/ui/ConfirmDialog.svelte`, exported from the `ui` barrel), wrapping the existing `Modal` (bits-ui `Dialog`). Copy convention is now an imperative title (`"Delete block"`, no `?`) plus a full "Are you sure you want to remove the block "Calendar"?" body with the name interpolated into the sentence. Props: `open` (bindable), `title`, `message` string or a `body` snippet for rich markup, `confirmLabel`/`cancelLabel`, `confirmVariant` (`danger` default / `primary` for non-destructive), `onConfirm`/`onCancel`, and an optional `challenge` string that requires typing an exact value (e.g. a room name) before the confirm enables — the high-friction path for hard deletes. Resets its typed-challenge field on each open.
+
+**New `danger` Button variant** — a red-outline/text confirm button (`#c66` dark / `#c0271d` light, matching the existing hand-rolled `.btn.danger` convention it replaces) so destructive confirms no longer look identical to Save.
+
+**Migrated every confirmation site:**
+- 6 native `confirm()` → `ConfirmDialog` (immunizations list + detail delete, place delete, dismissed-area restore, chat mark-all-read, feeds mark-all-read). Native `confirm` is synchronous, so each became a state var + async handler split.
+- 3 hand-rolled `.modal-backdrop` confirms → `ConfirmDialog` (bloodwork panel, diagnosis, encounter deletes), deleting their duplicated `.modal-backdrop`/`.modal`/`.modal-actions` CSS. Page-level `.btn` trigger styles left intact where still used.
+- Restyled the flagged shared-`Modal` confirms in `briefings/settings` (block/source/briefing + shared-block delete) and `feeds/settings` (feed/category delete) to the new component + copy. `Modal` became unused in `briefings/settings` and was dropped from its import.
+- Folded `RoomSettings`' bespoke type-the-name hard delete into `ConfirmDialog`'s `challenge` prop, removing its inline `danger-zone` markup, the `showDanger`/`confirmText`/`canDelete`/`handleDelete` machinery, and the `.danger-zone`/`.danger-btn`/etc. CSS. The imported-room one-click **Hide** path is unchanged.
+
+**Deliberate exclusion:** `health/stats`'s "Log measurement" hand-rolled backdrop is a *form*, not a confirmation, and its `.modal`-scoped form CSS makes it a larger form-modal refactor — left as-is (a future follow-up if form modals get standardized on the shared `Modal` too).
+
+Non-destructive bulk actions (mark-all-read, restore) use `confirmVariant="primary"` rather than the red danger button. Nested confirms (place delete inside the PlaceForm modal; room delete over RoomSettings) work via bits-ui's portal stacking.
+
+`npm run check` clean (0 errors), prettier formatted (also normalized some unrelated line-wrapping in `api.ts`), production build passes.
+
+**Files added/modified:**
+- `web/src/lib/components/ui/ConfirmDialog.svelte` — new shared confirmation primitive
+- `web/src/lib/components/ui/Button.svelte` — added `danger` (red outline/text) variant
+- `web/src/lib/components/ui/index.ts` — export `ConfirmDialog`
+- `web/src/lib/components/chat/RoomSettings.svelte` — type-the-name delete → `ConfirmDialog` `challenge`
+- `web/src/lib/components/location/PlaceForm.svelte` — native confirm → `ConfirmDialog`
+- `web/src/routes/briefings/settings/+page.svelte` — two confirms → `ConfirmDialog`, dropped `Modal` import
+- `web/src/routes/feeds/settings/+page.svelte` — delete confirm → `ConfirmDialog`
+- `web/src/routes/feeds/+layout.svelte` — mark-all-read → `ConfirmDialog` (primary)
+- `web/src/routes/chat/+page.svelte` — mark-all-read → `ConfirmDialog` (primary)
+- `web/src/routes/health/bloodwork/panel/+page.svelte`, `health/history/diagnoses/+page.svelte`, `health/history/encounter/+page.svelte` — hand-rolled backdrops → `ConfirmDialog`, removed modal CSS
+- `web/src/routes/health/immunizations/+page.svelte`, `health/immunizations/detail/+page.svelte`, `location/history/+page.svelte` — native confirms → `ConfirmDialog`
+- `web/src/lib/api.ts` — prettier line-wrap normalization (no logic change)
+- `AGENTS.md` — noted `ConfirmDialog` in the ui primitives + the confirmation convention
+
 ## 2026-07-21: Briefings — block-title-driven sections, shared-block defaults, ordering + preamble hardening
 
 A follow-on cleanup pass over the briefings system after the shared-KV / block work landed. Five related changes.

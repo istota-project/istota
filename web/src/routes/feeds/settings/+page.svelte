@@ -15,7 +15,7 @@
     type FeedsFeedState,
     type ServiceCard as ServiceCardData,
   } from '$lib/api';
-  import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Modal, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import {
     ServiceCard,
     SettingsLayout,
@@ -650,25 +650,24 @@
 {/if}
 
 {#if confirmDelete}
-  <Modal
+  <ConfirmDialog
     open={true}
-    title="Delete {confirmDelete.kind}?"
-    onOpenChange={(o) => {
-      if (!o) confirmDelete = null;
-    }}
+    title={confirmDelete.kind === 'category' ? 'Delete category' : 'Delete feed'}
+    confirmLabel="Delete"
+    onConfirm={performDelete}
+    onCancel={() => (confirmDelete = null)}
   >
-    <p>
-      Remove <strong>{confirmDelete.label}</strong>?
-      {#if confirmDelete.kind === 'category'}
-        Subscriptions in this category will keep their entries but become uncategorised.
-      {/if}
-      Changes apply when you save.
-    </p>
-    {#snippet footer()}
-      <Button variant="ghost" onclick={() => (confirmDelete = null)}>Cancel</Button>
-      <Button variant="primary" onclick={performDelete}>Delete</Button>
+    {#snippet body()}
+      <p>
+        Are you sure you want to remove the {confirmDelete?.kind}
+        <strong>{confirmDelete?.label}</strong>?
+        {#if confirmDelete?.kind === 'category'}
+          Subscriptions in this category will keep their entries but become uncategorised.
+        {/if}
+        Changes apply when you save.
+      </p>
     {/snippet}
-  </Modal>
+  </ConfirmDialog>
 {/if}
 
 <style>

@@ -24,6 +24,7 @@
     CategoryGroup,
     Chip,
     Select,
+    ConfirmDialog,
   } from '$lib/components/ui';
   import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from 'lucide-svelte';
 
@@ -103,19 +104,21 @@
     if (onSettings) goto(`${base}/feeds`);
   }
 
-  async function handleMarkAllRead() {
-    const scope = $selectedFeedId ? 'feed' : $selectedCategoryId ? 'category' : 'all';
-    const scopeId = $selectedFeedId || $selectedCategoryId || 0;
-    const targetTitle = $selectedFeedId
+  let markAllTargetTitle = $state<string | null>(null);
+
+  function handleMarkAllRead() {
+    markAllTargetTitle = $selectedFeedId
       ? feeds.find((f) => f.id === $selectedFeedId)?.title || 'this feed'
       : $selectedCategoryId
         ? feeds.find((f) => f.category.id === $selectedCategoryId)?.category.title ||
           'this category'
         : 'every feed';
-    const confirmed = window.confirm(
-      `Mark all unread entries in ${targetTitle} as read? This can't be undone.`,
-    );
-    if (!confirmed) return;
+  }
+
+  async function performMarkAllRead() {
+    const scope = $selectedFeedId ? 'feed' : $selectedCategoryId ? 'category' : 'all';
+    const scopeId = $selectedFeedId || $selectedCategoryId || 0;
+    markAllTargetTitle = null;
     try {
       await markAsRead(scope, scopeId ? { id: scopeId } : undefined);
       feedsRefreshNonce.update((n) => n + 1);
@@ -258,6 +261,16 @@
 
   {@render children()}
 </AppShell>
+
+<ConfirmDialog
+  open={markAllTargetTitle != null}
+  title="Mark all as read"
+  message={`Are you sure you want to mark all unread entries in ${markAllTargetTitle} as read? This can't be undone.`}
+  confirmLabel="Mark all read"
+  confirmVariant="primary"
+  onConfirm={performMarkAllRead}
+  onCancel={() => (markAllTargetTitle = null)}
+/>
 
 <style>
   .filter-group {

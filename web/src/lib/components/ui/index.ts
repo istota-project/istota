@@ -11,6 +11,7 @@ export { default as Button } from './Button.svelte';
 export { default as Select } from './Select.svelte';
 export { default as AutocompleteInput } from './AutocompleteInput.svelte';
 export { default as Modal } from './Modal.svelte';
+export { default as ConfirmDialog } from './ConfirmDialog.svelte';
 export { default as KebabMenu } from './KebabMenu.svelte';
 export type { SelectOption } from './Select.svelte';
 export type { KebabItem } from './KebabMenu.svelte';

@@ -276,9 +276,7 @@ export async function getFeedsConfig(): Promise<FeedsConfigResponse> {
   return apiFetch<FeedsConfigResponse>('/feeds/config');
 }
 
-export async function putFeedsConfig(
-  config: FeedsConfigPayload,
-): Promise<{
+export async function putFeedsConfig(config: FeedsConfigPayload): Promise<{
   status: string;
   sync: { categories_added: number; feeds_added: number; feeds_updated: number };
 }> {
@@ -905,9 +903,7 @@ export async function listHealthPanels(
   return healthFetch(`/panels${suffix}`);
 }
 
-export async function getHealthPanel(
-  id: number,
-): Promise<{
+export async function getHealthPanel(id: number): Promise<{
   panel: HealthPanel;
   biomarkers: Biomarker[];
   source: { available: boolean; mime: string | null };

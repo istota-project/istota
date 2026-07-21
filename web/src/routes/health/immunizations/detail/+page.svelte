@@ -10,7 +10,7 @@
     type Encounter,
     type Immunization,
   } from '$lib/api';
-  import { Select, type SelectOption } from '$lib/components/ui';
+  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
 
   const routeOptions: SelectOption[] = [
     { value: '', label: '' },
@@ -71,8 +71,11 @@
     }
   }
 
+  let confirmDelete = $state(false);
+
   async function remove() {
-    if (!immunization || !confirm('Delete this immunization?')) return;
+    if (!immunization) return;
+    confirmDelete = false;
     try {
       await deleteImmunization(immunization.id);
       await goto(`${base}/health/immunizations`);
@@ -101,7 +104,8 @@
       >
         View all {immunization.name}
       </a>
-      <button class="btn danger" type="button" onclick={remove}>Delete</button>
+      <button class="btn danger" type="button" onclick={() => (confirmDelete = true)}>Delete</button
+      >
     {/if}
   </div>
 </div>
@@ -252,6 +256,14 @@
 {:else}
   <div class="empty">Immunization not found.</div>
 {/if}
+
+<ConfirmDialog
+  bind:open={confirmDelete}
+  title="Delete immunization"
+  message="Are you sure you want to delete this immunization? This cannot be undone."
+  confirmLabel="Delete"
+  onConfirm={remove}
+/>
 
 <style>
   .header {

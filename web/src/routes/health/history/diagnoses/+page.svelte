@@ -10,7 +10,7 @@
     type Diagnosis,
     type Encounter,
   } from '$lib/api';
-  import { Select, type SelectOption } from '$lib/components/ui';
+  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
 
   const statusOptions: SelectOption[] = [
     { value: 'active', label: 'Active' },
@@ -344,18 +344,20 @@
 {/if}
 
 {#if deleteTarget}
-  <div class="modal-backdrop" onclick={() => (deleteTarget = null)} role="presentation">
-    <div class="modal" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h2>Delete diagnosis?</h2>
+  <ConfirmDialog
+    open={true}
+    title="Delete diagnosis"
+    confirmLabel="Delete"
+    onConfirm={confirmDeletion}
+    onCancel={() => (deleteTarget = null)}
+  >
+    {#snippet body()}
       <p>
-        Permanently removes <strong>{deleteTarget.name}</strong> from your history. This cannot be undone.
+        Are you sure you want to delete <strong>{deleteTarget?.name}</strong>? Permanently removes
+        it from your history. This cannot be undone.
       </p>
-      <div class="modal-actions">
-        <button class="btn" type="button" onclick={() => (deleteTarget = null)}>Cancel</button>
-        <button class="btn danger" type="button" onclick={confirmDeletion}>Delete</button>
-      </div>
-    </div>
-  </div>
+    {/snippet}
+  </ConfirmDialog>
 {/if}
 
 <style>
@@ -609,42 +611,6 @@
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
     color: #f0a;
-  }
-
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-  .modal {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: 1.5rem;
-    max-width: 26rem;
-  }
-  .modal h2 {
-    font-size: var(--text-base);
-    font-weight: 500;
-    margin: 0 0 0.5rem;
-    text-transform: none;
-    letter-spacing: 0;
-    color: var(--text-primary);
-    display: block;
-  }
-  .modal p {
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    margin: 0 0 1rem;
-  }
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
   }
 
   /* Light theme overrides — dark rules above untouched. */

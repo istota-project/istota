@@ -14,7 +14,7 @@
     type Encounter,
     type HealthPanel,
   } from '$lib/api';
-  import { Select, type SelectOption } from '$lib/components/ui';
+  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
 
   // Read the panel id from ?id=… so the page is statically prerenderable
   // under adapter-static; the actual lookup happens client-side.
@@ -370,18 +370,13 @@
     </div>
   {/if}
 
-  {#if confirmDelete}
-    <div class="modal-backdrop" onclick={() => (confirmDelete = false)} role="presentation">
-      <div class="modal" onclick={(e) => e.stopPropagation()} role="presentation">
-        <h2>Delete this panel?</h2>
-        <p>Removes the panel, all biomarkers, derived stat entries, and the source file.</p>
-        <div class="modal-actions">
-          <button class="btn" type="button" onclick={() => (confirmDelete = false)}>Cancel</button>
-          <button class="btn danger" type="button" onclick={deletePanel}>Delete</button>
-        </div>
-      </div>
-    </div>
-  {/if}
+  <ConfirmDialog
+    bind:open={confirmDelete}
+    title="Delete panel"
+    message="Are you sure you want to delete this panel? Removes the panel, all biomarkers, derived stat entries, and the source file."
+    confirmLabel="Delete"
+    onConfirm={deletePanel}
+  />
 </div>
 
 <style>
@@ -663,37 +658,5 @@
   }
   :global(:root[data-theme='light']) .msg.info {
     color: #2563b0;
-  }
-
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-  .modal {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: 1.5rem;
-    max-width: 24rem;
-  }
-  .modal h2 {
-    font-size: var(--text-base);
-    font-weight: 500;
-    margin: 0 0 0.5rem;
-  }
-  .modal p {
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    margin: 0 0 1rem;
-  }
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
   }
 </style>

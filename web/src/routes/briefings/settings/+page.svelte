@@ -29,7 +29,13 @@
     type SharedBlockOption,
     type SharedBlock,
   } from '$lib/api';
-  import { Button, Modal, Select, AutocompleteInput, type SelectOption } from '$lib/components/ui';
+  import {
+    Button,
+    ConfirmDialog,
+    Select,
+    AutocompleteInput,
+    type SelectOption,
+  } from '$lib/components/ui';
   import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
   import SourceConfigFields from '$lib/components/briefings/SourceConfigFields.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
@@ -1203,45 +1209,36 @@
 </SettingsLayout>
 
 {#if confirmSharedDelete}
-  <Modal
+  <ConfirmDialog
     open={true}
-    title="Delete shared block?"
-    onOpenChange={(o) => {
-      if (!o) confirmSharedDelete = null;
-    }}
+    title="Delete shared block"
+    confirmLabel="Delete"
+    onConfirm={() => confirmSharedDelete && doDeleteShared(confirmSharedDelete)}
+    onCancel={() => (confirmSharedDelete = null)}
   >
-    <p>
-      Delete <strong>{confirmSharedDelete}</strong>? The last generated value stays until it goes
-      stale. Users referencing it lose the section once it expires.
-    </p>
-    {#snippet footer()}
-      <Button variant="ghost" onclick={() => (confirmSharedDelete = null)}>Cancel</Button>
-      <Button
-        variant="primary"
-        onclick={() => confirmSharedDelete && doDeleteShared(confirmSharedDelete)}>Delete</Button
-      >
+    {#snippet body()}
+      <p>
+        Are you sure you want to delete the shared block <strong>{confirmSharedDelete}</strong>? The
+        last generated value stays until it goes stale. Users referencing it lose the section once
+        it expires.
+      </p>
     {/snippet}
-  </Modal>
+  </ConfirmDialog>
 {/if}
 
 {#if confirmDelete}
-  <Modal
+  <ConfirmDialog
     open={true}
     title={confirmDelete.kind === 'briefing'
-      ? 'Remove briefing?'
+      ? 'Remove briefing'
       : confirmDelete.kind === 'block'
-        ? 'Delete block?'
-        : 'Remove source?'}
-    onOpenChange={(o) => {
-      if (!o) confirmDelete = null;
-    }}
-  >
-    <p>Remove <strong>{confirmDelete.label}</strong>?</p>
-    {#snippet footer()}
-      <Button variant="ghost" onclick={() => (confirmDelete = null)}>Cancel</Button>
-      <Button variant="primary" onclick={performDelete}>Remove</Button>
-    {/snippet}
-  </Modal>
+        ? 'Delete block'
+        : 'Remove source'}
+    message={`Are you sure you want to remove the ${confirmDelete.kind} "${confirmDelete.label}"?`}
+    confirmLabel="Remove"
+    onConfirm={performDelete}
+    onCancel={() => (confirmDelete = null)}
+  />
 {/if}
 
 <style>

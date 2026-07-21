@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { ChatRoom } from '$lib/api';
-  import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import { getBaseModelChoices } from '$lib/components/chat/autocomplete/providers';
 
   interface Props {
@@ -64,8 +64,7 @@
   // Local edit state. Re-seeded whenever the modal is opened for a different
   // room so reusing one component instance across rooms never leaks state.
   let name = $state(untrack(() => room.name));
-  let confirmText = $state('');
-  let showDanger = $state(false);
+  let showDeleteConfirm = $state(false);
   let copied = $state(false);
   let copyError = $state('');
   let lastRoomId = $state(untrack(() => room.id));
@@ -76,8 +75,7 @@
       name = room.name;
       modelValue = room.model ?? '';
       effortValue = room.effort ?? '';
-      confirmText = '';
-      showDanger = false;
+      showDeleteConfirm = false;
       copied = false;
       copyError = '';
     }
@@ -89,9 +87,6 @@
   const effortChanged = $derived(effortValue !== (room.effort ?? ''));
   // Saveable when anything changed, and the name is never blanked.
   const canSave = $derived(trimmed.length > 0 && (nameChanged || modelChanged || effortChanged));
-  // Exact, case-sensitive match against the *saved* name (what the sidebar
-  // still shows), not any unsaved edit in the Name field above.
-  const canDelete = $derived(confirmText === room.name);
 
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
   async function copyToken() {
@@ -117,11 +112,6 @@
     if (modelChanged) patch.model = modelValue || null;
     if (effortChanged) patch.effort = effortValue || null;
     onSave(patch);
-  }
-
-  function handleDelete() {
-    if (!canDelete) return;
-    onDelete();
   }
 
   function handleOpenChange(next: boolean) {
@@ -207,17 +197,6 @@
       Hiding only removes this room from your web chat list. The Nextcloud Talk conversation and its
       messages aren't deleted, and it reappears here if you post in it again.
     </p>
-  {:else if showDanger}
-    <div class="danger-zone">
-      <p class="danger-warn">
-        This permanently deletes this room and all its messages. This cannot be undone.
-      </p>
-      <p class="danger-prompt">Type <code>{room.name}</code> to confirm.</p>
-      <input type="text" bind:value={confirmText} placeholder={room.name} />
-      <button class="danger-btn" type="button" disabled={!canDelete} onclick={handleDelete}>
-        Delete this room
-      </button>
-    </div>
   {/if}
 
   {#snippet footer()}
@@ -225,26 +204,24 @@
       <!-- A hide is reversible (re-engagement un-hides), so it's a one-click
 			     action with no type-the-name confirm — unlike a real delete. -->
       <button class="delete-link" type="button" onclick={onDelete}> Hide </button>
-    {:else if !showDanger}
-      <button class="delete-link" type="button" onclick={() => (showDanger = true)}>
-        Delete
-      </button>
     {:else}
-      <button
-        class="delete-link"
-        type="button"
-        onclick={() => {
-          showDanger = false;
-          confirmText = '';
-        }}
-      >
-        Keep room
+      <button class="delete-link" type="button" onclick={() => (showDeleteConfirm = true)}>
+        Delete
       </button>
     {/if}
     <Button variant="ghost" onclick={onClose}>Cancel</Button>
     <Button variant="primary" onclick={handleSave} disabled={!canSave}>Save</Button>
   {/snippet}
 </Modal>
+
+<ConfirmDialog
+  bind:open={showDeleteConfirm}
+  title="Delete room"
+  message={`Permanently deletes "${room.name}" and all its messages. This cannot be undone.`}
+  challenge={room.name}
+  confirmLabel="Delete this room"
+  onConfirm={onDelete}
+/>
 
 <style>
   .field {
@@ -342,66 +319,6 @@
     margin: 0.1rem 0 0;
   }
 
-  .danger-zone {
-    border: 1px solid #6b2b2b;
-    border-radius: 0.4rem;
-    padding: 0.6rem 0.7rem;
-    margin-bottom: 0.5rem;
-    background: rgba(120, 40, 40, 0.08);
-  }
-
-  .danger-warn {
-    font-size: var(--text-xs);
-    color: var(--text-secondary);
-    margin: 0 0 0.5rem;
-  }
-
-  .danger-prompt {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    margin: 0 0 0.35rem;
-  }
-
-  .danger-prompt code {
-    font-family: var(--font-mono, monospace);
-    color: var(--text-primary);
-    background: var(--surface-base);
-    padding: 0.05rem 0.3rem;
-    border-radius: 0.2rem;
-  }
-
-  .danger-zone input[type='text'] {
-    width: 100%;
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: 0.35rem 0.5rem;
-    border-radius: 0.25rem;
-    margin-bottom: 0.5rem;
-  }
-
-  .danger-btn {
-    width: 100%;
-    background: #8a3030;
-    border: none;
-    color: #fff;
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.25rem;
-    cursor: pointer;
-    transition: background var(--transition-fast);
-  }
-  .danger-btn:hover:not(:disabled) {
-    background: #a23a3a;
-  }
-  .danger-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
   .delete-link {
     margin-right: auto;
     background: none;
@@ -424,8 +341,5 @@
   }
   :global(:root[data-theme='light']) .delete-link:hover {
     color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .danger-zone {
-    border-color: #e3b3b3;
   }
 </style>
