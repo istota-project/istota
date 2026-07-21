@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
 
-  type Variant = 'primary' | 'secondary' | 'ghost' | 'pill' | 'subtle' | 'danger-icon';
+  type Variant = 'primary' | 'secondary' | 'ghost' | 'pill' | 'subtle' | 'danger' | 'danger-icon';
   type Size = 'sm' | 'md';
 
   interface Props {
@@ -113,6 +113,25 @@
   }
   .btn-subtle:hover:not(:disabled) {
     color: var(--text-muted);
+  }
+
+  /* Red outline/text for a destructive confirm action (the confirm button in
+	   ConfirmDialog). Matches the hand-rolled .btn.danger convention it replaces
+	   (#c66 dark / #c0271d light). */
+  .btn-danger {
+    background: transparent;
+    border: 1px solid #c66;
+    color: #c66;
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: rgba(204, 102, 102, 0.12);
+  }
+  :global(:root[data-theme='light']) .btn-danger {
+    border-color: #c0271d;
+    color: #c0271d;
+  }
+  :global(:root[data-theme='light']) .btn-danger:hover:not(:disabled) {
+    background: rgba(192, 39, 29, 0.08);
   }
 
   .btn-danger-icon {

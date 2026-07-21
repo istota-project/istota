@@ -30,7 +30,7 @@
   import DayStats from '$lib/components/location/DayStats.svelte';
   import TripList from '$lib/components/location/TripList.svelte';
   import Chip from '$lib/components/ui/Chip.svelte';
-  import { Select } from '$lib/components/ui';
+  import { Select, ConfirmDialog } from '$lib/components/ui';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
   import { ACTIVITY_LABELS, ALL_ACTIVITY_TYPES } from '$lib/location-constants';
 
@@ -89,11 +89,18 @@
     $requestNewPlace?.({ lat: cluster.lat, lon: cluster.lon, cluster });
   }
 
-  async function handleDismissedClick(d: DismissedCluster) {
-    const ok = confirm('Restore this dismissed area? Future pings here may form a cluster again.');
-    if (!ok) return;
+  let restoreTarget: DismissedCluster | null = $state(null);
+
+  function handleDismissedClick(d: DismissedCluster) {
+    restoreTarget = d;
+  }
+
+  async function performRestore() {
+    if (!restoreTarget) return;
+    const id = restoreTarget.id;
+    restoreTarget = null;
     try {
-      await restoreDismissedCluster(d.id);
+      await restoreDismissedCluster(id);
       await loadDiscover();
     } catch {
       // ignore
@@ -367,6 +374,16 @@
     {/if}
   {/if}
 </div>
+
+<ConfirmDialog
+  open={restoreTarget != null}
+  title="Restore dismissed area"
+  message="Are you sure you want to restore this dismissed area? Future pings here may form a cluster again."
+  confirmLabel="Restore"
+  confirmVariant="primary"
+  onConfirm={performRestore}
+  onCancel={() => (restoreTarget = null)}
+/>
 
 <style>
   .page-fill {

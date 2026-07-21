@@ -11,7 +11,7 @@
     type Encounter,
     type HealthPanel,
   } from '$lib/api';
-  import { Select, type SelectOption } from '$lib/components/ui';
+  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
 
   let loading = $state(true);
   let error = $state('');
@@ -294,18 +294,13 @@
   </section>
 {/if}
 
-{#if confirmDelete}
-  <div class="modal-backdrop" onclick={() => (confirmDelete = false)} role="presentation">
-    <div class="modal" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h2>Delete this encounter?</h2>
-      <p>Linked panels and diagnoses keep their data but lose the link.</p>
-      <div class="modal-actions">
-        <button class="btn" type="button" onclick={() => (confirmDelete = false)}>Cancel</button>
-        <button class="btn danger" type="button" onclick={destroy}>Delete</button>
-      </div>
-    </div>
-  </div>
-{/if}
+<ConfirmDialog
+  bind:open={confirmDelete}
+  title="Delete encounter"
+  message="Are you sure you want to delete this encounter? Linked panels and diagnoses keep their data but lose the link."
+  confirmLabel="Delete"
+  onConfirm={destroy}
+/>
 
 <style>
   .header {
@@ -538,41 +533,6 @@
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
     color: #f0a;
-  }
-
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-  .modal {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: 1.5rem;
-    max-width: 24rem;
-  }
-  .modal h2 {
-    font-size: var(--text-base);
-    font-weight: 500;
-    margin: 0 0 0.5rem;
-    text-transform: none;
-    letter-spacing: 0;
-    color: var(--text-primary);
-  }
-  .modal p {
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    margin: 0 0 1rem;
-  }
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
   }
 
   /* Light theme overrides — dark rules above untouched. */

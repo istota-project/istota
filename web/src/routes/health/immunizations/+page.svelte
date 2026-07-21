@@ -12,7 +12,7 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Select, type SelectOption } from '$lib/components/ui';
+  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
 
   let loading = $state(true);
   let error = $state('');
@@ -95,8 +95,12 @@
     }
   }
 
-  async function deleteRow(id: number) {
-    if (!confirm('Delete this immunization?')) return;
+  let deleteTargetId: number | null = $state(null);
+
+  async function performDeleteRow() {
+    if (deleteTargetId == null) return;
+    const id = deleteTargetId;
+    deleteTargetId = null;
     try {
       await deleteImmunization(id);
       await load();
@@ -373,7 +377,11 @@
                   <a class="btn small" href="{base}/health/immunizations/detail?id={i.id}">
                     Edit
                   </a>
-                  <button class="btn small danger" type="button" onclick={() => deleteRow(i.id)}>
+                  <button
+                    class="btn small danger"
+                    type="button"
+                    onclick={() => (deleteTargetId = i.id)}
+                  >
                     Delete
                   </button>
                 </td>
@@ -385,6 +393,15 @@
     {/if}
   </section>
 {/if}
+
+<ConfirmDialog
+  open={deleteTargetId != null}
+  title="Delete immunization"
+  message="Are you sure you want to delete this immunization? This cannot be undone."
+  confirmLabel="Delete"
+  onConfirm={performDeleteRow}
+  onCancel={() => (deleteTargetId = null)}
+/>
 
 <style>
   .header {

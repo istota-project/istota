@@ -2,7 +2,7 @@
   import { untrack } from 'svelte';
   import type { DiscoveredCluster, Place } from '$lib/api';
   import { locationPlaces } from '$lib/stores/location';
-  import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
 
   interface Props {
     cluster?: DiscoveredCluster;
@@ -97,10 +97,16 @@
     onDismiss?.({ lat, lon, radius_meters: radius });
   }
 
+  let confirmDelete = $state(false);
+
   function handleDelete() {
     if (!place || !onDelete) return;
-    const ok = confirm(`Delete "${place.name}"? This cannot be undone.`);
-    if (!ok) return;
+    confirmDelete = true;
+  }
+
+  function performDelete() {
+    if (!place || !onDelete) return;
+    confirmDelete = false;
     onDelete(place);
   }
 
@@ -175,6 +181,14 @@
     </Button>
   {/snippet}
 </Modal>
+
+<ConfirmDialog
+  bind:open={confirmDelete}
+  title="Delete place"
+  message={`Are you sure you want to delete "${place?.name ?? 'this place'}"? This cannot be undone.`}
+  confirmLabel="Delete"
+  onConfirm={performDelete}
+/>
 
 <style>
   .meta {
