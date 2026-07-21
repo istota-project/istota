@@ -20,9 +20,9 @@ export const feedsRefreshNonce = writable(0);
 
 /** Filter/view state shared between layout (chips) and page (filtering). */
 function persistedWritable<T>(key: string, fallback: T) {
-	const store = writable<T>(loadSetting(key, fallback));
-	store.subscribe((v) => saveSetting(key, v));
-	return store;
+  const store = writable<T>(loadSetting(key, fallback));
+  store.subscribe((v) => saveSetting(key, v));
+  return store;
 }
 
 export const showImages = persistedWritable('feeds.showImages', true);

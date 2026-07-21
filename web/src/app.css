@@ -3,262 +3,306 @@
 @import './lib/styles/sidebar.css';
 
 :root {
-	color-scheme: dark;
+  color-scheme: dark;
 
-	/* Surfaces */
-	--surface-base: #111;
-	--surface-card: #1a1a1a;
-	--surface-raised: #222;
-	--surface-badge: #252525;
+  /* Surfaces */
+  --surface-base: #111;
+  --surface-card: #1a1a1a;
+  --surface-raised: #222;
+  --surface-badge: #252525;
 
-	/* Text */
-	--text-primary: #e0e0e0;
-	--text-secondary: #bbb;
-	--text-muted: #888;
-	--text-dim: #666;
+  /* Text */
+  --text-primary: #e0e0e0;
+  --text-secondary: #bbb;
+  --text-muted: #888;
+  --text-dim: #666;
 
-	/* Borders */
-	--border-default: #333;
-	--border-subtle: #222;
+  /* Borders */
+  --border-default: #333;
+  --border-subtle: #222;
 
-	/* Interactive */
-	--accent: #e0e0e0;
-	--accent-hover: #fff;
-	/* Amber terminal accent — the bot's identity color + highlights (links). */
-	--accent-amber: #f5a623;
+  /* Interactive */
+  --accent: #e0e0e0;
+  --accent-hover: #fff;
+  /* Amber terminal accent — the bot's identity color + highlights (links). */
+  --accent-amber: #f5a623;
 
-	/* Map colors */
-	--map-path: #4a9eff;
-	--map-current: #4aff7f;
-	--map-stop: #e0e0e0;
-	--map-place-fill: rgba(51, 51, 51, 0.15);
-	--map-place-stroke: #555;
+  /* Map colors */
+  --map-path: #4a9eff;
+  --map-current: #4aff7f;
+  --map-stop: #e0e0e0;
+  --map-place-fill: rgba(51, 51, 51, 0.15);
+  --map-place-stroke: #555;
 
-	/* Radii */
-	--radius-card: 0.5rem;
-	--radius-pill: 999px;
+  /* Radii */
+  --radius-card: 0.5rem;
+  --radius-pill: 999px;
 
-	/* Chip / pill horizontal padding — referenced by Chip + NavLink so a parent
+  /* Chip / pill horizontal padding — referenced by Chip + NavLink so a parent
 	   container can use `margin-inline-start: calc(-1 * var(--chip-padding-x))`
 	   to make the chip *text* align with surrounding content. */
-	--chip-padding-x: 0.5rem;
-	/* Gap between sibling chips/nav-links in a flex row. */
-	--chip-gap: 0.1rem;
+  --chip-padding-x: 0.5rem;
+  /* Gap between sibling chips/nav-links in a flex row. */
+  --chip-gap: 0.1rem;
 
-	/* Transitions */
-	--transition-fast: 0.15s ease;
+  /* Transitions */
+  --transition-fast: 0.15s ease;
 
-	/* Typography */
-	--font-sans: system-ui, -apple-system, sans-serif;
-	--text-xs: 0.7rem;
-	--text-sm: 0.75rem;
-	--text-base: 0.85rem;
+  /* Typography */
+  --font-sans: system-ui, -apple-system, sans-serif;
+  --text-xs: 0.7rem;
+  --text-sm: 0.75rem;
+  --text-base: 0.85rem;
 }
 
 /* Light theme — overrides the surface/text/border/accent variables. Everything
    built on these variables flips automatically; only the dark-tuned status and
    chart colors on data-heavy pages keep their hardcoded values. */
 :root[data-theme='light'] {
-	color-scheme: light;
+  color-scheme: light;
 
-	/* Surfaces */
-	--surface-base: #ffffff;
-	--surface-card: #f4f4f5;
-	--surface-raised: #e8e8ea;
-	--surface-badge: #e0e0e3;
+  /* Surfaces */
+  --surface-base: #ffffff;
+  --surface-card: #f4f4f5;
+  --surface-raised: #e8e8ea;
+  --surface-badge: #e0e0e3;
 
-	/* Text */
-	--text-primary: #1a1a1a;
-	--text-secondary: #3f3f46;
-	--text-muted: #6b6b72;
-	--text-dim: #9a9aa2;
+  /* Text */
+  --text-primary: #1a1a1a;
+  --text-secondary: #3f3f46;
+  --text-muted: #6b6b72;
+  --text-dim: #9a9aa2;
 
-	/* Borders */
-	--border-default: #d4d4d8;
-	--border-subtle: #e4e4e7;
+  /* Borders */
+  --border-default: #d4d4d8;
+  --border-subtle: #e4e4e7;
 
-	/* Interactive */
-	--accent: #1a1a1a;
-	--accent-hover: #000000;
-	/* Darker amber so the bot's accent stays legible on a light surface. */
-	--accent-amber: #b9740a;
+  /* Interactive */
+  --accent: #1a1a1a;
+  --accent-hover: #000000;
+  /* Darker amber so the bot's accent stays legible on a light surface. */
+  --accent-amber: #b9740a;
 
-	/* Map colors — keep the path/current hues; soften the place overlay. */
-	--map-place-fill: rgba(0, 0, 0, 0.05);
-	--map-place-stroke: #b8b8bd;
+  /* Map colors — keep the path/current hues; soften the place overlay. */
+  --map-place-fill: rgba(0, 0, 0, 0.05);
+  --map-place-stroke: #b8b8bd;
 }
 
-*,*::before,*::after { box-sizing: border-box; }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
 
-html, body {
-	height: 100%;
+html,
+body {
+  height: 100%;
 }
 
 body {
-	margin: 0;
-	font-family: system-ui, -apple-system, sans-serif;
-	background: var(--surface-base);
-	color: var(--text-primary);
-	line-height: 1.5;
-	display: flex;
-	flex-direction: column;
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    sans-serif;
+  background: var(--surface-base);
+  color: var(--text-primary);
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
 }
 
-a { color: var(--text-primary); }
-a:hover { color: var(--accent-hover); }
+a {
+  color: var(--text-primary);
+}
+a:hover {
+  color: var(--accent-hover);
+}
 
 /* Use on a flex nav container whose first chip/link is the leftmost element of
    its row. Pulls the row left by one chip's horizontal padding so chip TEXT
    visually aligns with the heading text on the row above. */
 .nav-hang {
-	margin-inline-start: calc(-1 * var(--chip-padding-x));
+  margin-inline-start: calc(-1 * var(--chip-padding-x));
 }
 
 /* App shell */
 .app-nav {
-	display: flex;
-	align-items: center;
-	gap: 1rem;
-	padding: 0.75rem;
-	background: var(--surface-card);
-	border-bottom: 1px solid var(--border-subtle);
-	font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem;
+  background: var(--surface-card);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.85rem;
 }
 
 .app-nav .app-name {
-	font-weight: 600;
-	font-size: 0.9rem;
-	text-decoration: none;
-	color: var(--text-primary);
+  font-weight: 600;
+  font-size: 0.9rem;
+  text-decoration: none;
+  color: var(--text-primary);
 }
 
 .app-nav .nav-links {
-	display: flex;
-	gap: 0.75rem;
+  display: flex;
+  gap: 0.75rem;
 }
 
 .app-nav .nav-links a {
-	color: var(--text-muted);
-	text-decoration: none;
-	padding: 0.15rem 0;
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 0.15rem 0;
 }
 
 .app-nav .nav-links a:hover,
 .app-nav .nav-links a.active {
-	color: var(--text-primary);
+  color: var(--text-primary);
 }
 
 .app-nav .nav-right {
-	margin-left: auto;
-	display: flex;
-	align-items: center;
-	gap: 0.75rem;
-	color: var(--text-dim);
-	font-size: 0.8rem;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.8rem;
 }
 
 .app-nav .nav-right a {
-	color: var(--text-dim);
-	text-decoration: none;
+  color: var(--text-dim);
+  text-decoration: none;
 }
 
-.app-nav .nav-right a:hover { color: var(--text-secondary); }
+.app-nav .nav-right a:hover {
+  color: var(--text-secondary);
+}
 
 .app-nav .nav-right .logout-btn {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	padding: 0.25rem;
-	border-radius: var(--radius-pill);
-	transition: color var(--transition-fast), background var(--transition-fast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem;
+  border-radius: var(--radius-pill);
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast);
 }
 
 .app-nav .nav-right .logout-btn:hover {
-	background: var(--surface-raised);
-	color: var(--text-primary);
+  background: var(--surface-raised);
+  color: var(--text-primary);
 }
 
 .app-content {
-	padding: 1.5rem;
+  padding: 1.5rem;
 }
 
 .app-content-fill {
-	display: flex;
-	flex-direction: column;
-	flex: 1;
-	overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
 }
 
 /* Loading / error states */
-.loading, .error-msg {
-	text-align: center;
-	padding: 3rem 1rem;
-	color: var(--text-dim);
-	font-size: 0.85rem;
+.loading,
+.error-msg {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
 }
 
-.error-msg { color: #c66; }
+.error-msg {
+  color: #c66;
+}
 
 /* Rendered markdown — shared by every chat surface that draws bot output
    (the Message answer body + command output). Global so the rules apply across
    component boundaries; the `.markdown` container class scopes them to rendered
    output only. */
-.markdown p { margin: 0 0 1rem; }
-.markdown p:last-child { margin-bottom: 0; }
+.markdown p {
+  margin: 0 0 1rem;
+}
+.markdown p:last-child {
+  margin-bottom: 0;
+}
 .markdown ul,
-.markdown ol { margin: 0 0 1rem; padding-left: 1.3rem; }
-.markdown li { margin: 0.5rem 0; }
+.markdown ol {
+  margin: 0 0 1rem;
+  padding-left: 1.3rem;
+}
+.markdown li {
+  margin: 0.5rem 0;
+}
 .markdown li > ul,
-.markdown li > ol { margin: 0.5rem 0; }
+.markdown li > ol {
+  margin: 0.5rem 0;
+}
 .markdown h1,
 .markdown h2,
 .markdown h3,
-.markdown h4 { margin: 0.4rem 0 0.3rem; font-size: var(--text-base); font-weight: 600; }
+.markdown h4 {
+  margin: 0.4rem 0 0.3rem;
+  font-size: var(--text-base);
+  font-weight: 600;
+}
 .markdown blockquote {
-	margin: 0 0 1rem;
-	padding: 0.1rem 0.7rem;
-	border-left: 3px solid var(--border-default);
-	color: var(--text-secondary);
+  margin: 0 0 1rem;
+  padding: 0.1rem 0.7rem;
+  border-left: 3px solid var(--border-default);
+  color: var(--text-secondary);
 }
 .markdown code {
-	font-family: ui-monospace, monospace;
-	font-size: 0.9em;
-	background: #2d2d2d;
-	color: #e6e6e6;
-	padding: 0.05rem 0.3rem;
-	border-radius: 0.25rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  background: #2d2d2d;
+  color: #e6e6e6;
+  padding: 0.05rem 0.3rem;
+  border-radius: 0.25rem;
 }
 .markdown pre {
-	background: #2d2d2d;
-	color: #e6e6e6;
-	border: 1px solid var(--border-subtle);
-	border-radius: 0.35rem;
-	padding: 0.5rem 0.65rem;
-	overflow-x: auto;
-	margin: 0 0 1rem;
+  background: #2d2d2d;
+  color: #e6e6e6;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.35rem;
+  padding: 0.5rem 0.65rem;
+  overflow-x: auto;
+  margin: 0 0 1rem;
 }
-.markdown pre code { background: none; padding: 0; }
-.markdown a { color: var(--accent-amber); }
-.markdown del { color: var(--text-muted); }
+.markdown pre code {
+  background: none;
+  padding: 0;
+}
+.markdown a {
+  color: var(--accent-amber);
+}
+.markdown del {
+  color: var(--text-muted);
+}
 .markdown table {
-	border-collapse: collapse;
-	margin: 0 0 1rem;
-	font-size: var(--text-sm);
-	display: block;
-	overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 1rem;
+  font-size: var(--text-sm);
+  display: block;
+  overflow-x: auto;
 }
 .markdown th,
 .markdown td {
-	border: 1px solid var(--border-subtle);
-	padding: 0.2rem 0.45rem;
-	text-align: left;
+  border: 1px solid var(--border-subtle);
+  padding: 0.2rem 0.45rem;
+  text-align: left;
 }
-.markdown th { background: var(--surface-base); font-weight: 600; }
+.markdown th {
+  background: var(--surface-base);
+  font-weight: 600;
+}
 
 :root[data-theme='light'] .markdown code,
 :root[data-theme='light'] .markdown pre {
-	background: #f3f3f5;
-	color: #1a1a1a;
+  background: #f3f3f5;
+  color: #1a1a1a;
 }
 
 /* highlight.js token palette. The renderer (src/lib/markdown) tags fenced code
@@ -266,80 +310,128 @@ a:hover { color: var(--accent-hover); }
    sit on the #2d2d2d block background; the light overrides below sit on #ececef.
    Tuned to the One Dark / One Light families for familiarity. */
 .markdown .hljs-comment,
-.markdown .hljs-quote { color: #7f848e; font-style: italic; }
+.markdown .hljs-quote {
+  color: #7f848e;
+  font-style: italic;
+}
 .markdown .hljs-keyword,
 .markdown .hljs-selector-tag,
 .markdown .hljs-literal,
 .markdown .hljs-section,
 .markdown .hljs-doctag,
-.markdown .hljs-name { color: #c678dd; }
+.markdown .hljs-name {
+  color: #c678dd;
+}
 .markdown .hljs-string,
 .markdown .hljs-regexp,
 .markdown .hljs-addition,
 .markdown .hljs-attribute,
-.markdown .hljs-meta .hljs-string { color: #98c379; }
+.markdown .hljs-meta .hljs-string {
+  color: #98c379;
+}
 .markdown .hljs-number,
 .markdown .hljs-symbol,
 .markdown .hljs-bullet,
-.markdown .hljs-link { color: #d19a66; }
+.markdown .hljs-link {
+  color: #d19a66;
+}
 .markdown .hljs-title,
 .markdown .hljs-title.function_,
-.markdown .hljs-section { color: #61afef; }
+.markdown .hljs-section {
+  color: #61afef;
+}
 .markdown .hljs-built_in,
 .markdown .hljs-class .hljs-title,
 .markdown .hljs-title.class_,
-.markdown .hljs-type { color: #e5c07b; }
+.markdown .hljs-type {
+  color: #e5c07b;
+}
 .markdown .hljs-variable,
 .markdown .hljs-template-variable,
 .markdown .hljs-attr,
 .markdown .hljs-selector-attr,
 .markdown .hljs-selector-class,
 .markdown .hljs-selector-id,
-.markdown .hljs-deletion { color: #e06c75; }
+.markdown .hljs-deletion {
+  color: #e06c75;
+}
 .markdown .hljs-meta,
-.markdown .hljs-comment .hljs-doctag { color: #56b6c2; }
-.markdown .hljs-emphasis { font-style: italic; }
-.markdown .hljs-strong { font-weight: 600; }
+.markdown .hljs-comment .hljs-doctag {
+  color: #56b6c2;
+}
+.markdown .hljs-emphasis {
+  font-style: italic;
+}
+.markdown .hljs-strong {
+  font-weight: 600;
+}
 
 :root[data-theme='light'] .markdown .hljs-comment,
-:root[data-theme='light'] .markdown .hljs-quote { color: #a0a1a7; }
+:root[data-theme='light'] .markdown .hljs-quote {
+  color: #a0a1a7;
+}
 :root[data-theme='light'] .markdown .hljs-keyword,
 :root[data-theme='light'] .markdown .hljs-selector-tag,
 :root[data-theme='light'] .markdown .hljs-literal,
 :root[data-theme='light'] .markdown .hljs-doctag,
-:root[data-theme='light'] .markdown .hljs-name { color: #a626a4; }
+:root[data-theme='light'] .markdown .hljs-name {
+  color: #a626a4;
+}
 :root[data-theme='light'] .markdown .hljs-string,
 :root[data-theme='light'] .markdown .hljs-regexp,
 :root[data-theme='light'] .markdown .hljs-addition,
 :root[data-theme='light'] .markdown .hljs-attribute,
-:root[data-theme='light'] .markdown .hljs-meta .hljs-string { color: #50a14f; }
+:root[data-theme='light'] .markdown .hljs-meta .hljs-string {
+  color: #50a14f;
+}
 :root[data-theme='light'] .markdown .hljs-number,
 :root[data-theme='light'] .markdown .hljs-symbol,
 :root[data-theme='light'] .markdown .hljs-bullet,
-:root[data-theme='light'] .markdown .hljs-link { color: #b76b01; }
+:root[data-theme='light'] .markdown .hljs-link {
+  color: #b76b01;
+}
 :root[data-theme='light'] .markdown .hljs-title,
 :root[data-theme='light'] .markdown .hljs-title.function_,
-:root[data-theme='light'] .markdown .hljs-section { color: #4078f2; }
+:root[data-theme='light'] .markdown .hljs-section {
+  color: #4078f2;
+}
 :root[data-theme='light'] .markdown .hljs-built_in,
 :root[data-theme='light'] .markdown .hljs-class .hljs-title,
 :root[data-theme='light'] .markdown .hljs-title.class_,
-:root[data-theme='light'] .markdown .hljs-type { color: #c18401; }
+:root[data-theme='light'] .markdown .hljs-type {
+  color: #c18401;
+}
 :root[data-theme='light'] .markdown .hljs-variable,
 :root[data-theme='light'] .markdown .hljs-template-variable,
 :root[data-theme='light'] .markdown .hljs-attr,
 :root[data-theme='light'] .markdown .hljs-selector-attr,
 :root[data-theme='light'] .markdown .hljs-selector-class,
 :root[data-theme='light'] .markdown .hljs-selector-id,
-:root[data-theme='light'] .markdown .hljs-deletion { color: #e45649; }
-:root[data-theme='light'] .markdown .hljs-meta { color: #0184bc; }
+:root[data-theme='light'] .markdown .hljs-deletion {
+  color: #e45649;
+}
+:root[data-theme='light'] .markdown .hljs-meta {
+  color: #0184bc;
+}
 
 /* An errored assistant turn tints its rendered answer. Global so it reaches the
    `.markdown` answer body across the `.msg.error` row owned by Message. */
-.msg.error .markdown { color: #e0a0a0; }
-:root[data-theme='light'] .msg.error .markdown { color: #c0271d; }
+.msg.error .markdown {
+  color: #e0a0a0;
+}
+:root[data-theme='light'] .msg.error .markdown {
+  color: #c0271d;
+}
 
 @media (max-width: 640px) {
-	.app-nav { padding: 0.5rem 0.75rem; gap: 0.5rem; }
-	.app-nav .nav-links { display: none; }
-	.app-content { padding: 1rem 0.75rem; }
+  .app-nav {
+    padding: 0.5rem 0.75rem;
+    gap: 0.5rem;
+  }
+  .app-nav .nav-links {
+    display: none;
+  }
+  .app-content {
+    padding: 1rem 0.75rem;
+  }
 }
