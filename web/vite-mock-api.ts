@@ -1775,7 +1775,10 @@ const handlers: MockHandler[] = [
 				};
 			}
 			if (p === '/path-suggest' && method === 'GET') {
-				return { paths: MOCK_FILES };
+				const qs = new URLSearchParams(url.split('?')[1] || '');
+				const q = (qs.get('q') || '').trim().toLowerCase();
+				const paths = q ? MOCK_FILES.filter((f) => f.toLowerCase().includes(q)) : MOCK_FILES;
+				return { paths };
 			}
 			if (p === '/path-check' && method === 'GET') {
 				const qs = new URLSearchParams(url.split('?')[1] || '');

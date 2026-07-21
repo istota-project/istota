@@ -63,11 +63,18 @@
 	);
 	let newSender = $state('');
 
-	// File-path picker state for todos/reminders/notes sources: datalist
-	// suggestions (loaded once) + the current draft path's verification result.
+	// File-path picker state for todos/reminders/notes sources. Suggestions are
+	// fetched server-side as the user types (so deep/late files surface), and
+	// existence is verified as an advisory hint — never a save blocker (the
+	// resolver is fail-soft: a missing file just contributes a provenance note).
 	let pathSuggestions = $state<string[]>([]);
-	let pathError = $state('');
-	let pathChecking = $state(false);
+	// '' idle | 'checking' | 'ok' | 'missing' — advisory only.
+	let pathStatus = $state<'' | 'checking' | 'ok' | 'missing'>('');
+	let pathResolved = $state('');
+	// Debounce + last-write-wins guards for the two async calls on each keystroke.
+	let pathDebounce: ReturnType<typeof setTimeout> | undefined;
+	let suggestSeq = 0;
+	let verifySeq = 0;
 
 	// A unified delete confirmation across briefings / blocks / sources.
 	let confirmDelete = $state<{
@@ -251,7 +258,7 @@
 		await reloadContent();
 		newSender = '';
 		if (resp.id) sourceDraft = { id: resp.id, kind, config: cfg };
-		pathError = '';
+		resetPathState();
 	}
 
 	function startEditSource(source: BriefingSource) {
@@ -263,50 +270,83 @@
 			config: JSON.parse(JSON.stringify(source.config ?? {})),
 		};
 		newSender = '';
-		pathError = '';
+		resetPathState();
+		// Verify the existing path up front so the hint reflects reality on open.
+		if (FILE_KINDS.includes(source.kind)) {
+			const p = String(sourceDraft.config.path ?? '').trim();
+			if (p) refreshPathHints(p);
+		}
 	}
 
 	function cancelSource() {
 		sourceDraft = null;
 		newSender = '';
-		pathError = '';
+		resetPathState();
 	}
 
 	const FILE_KINDS = ['todos', 'reminders', 'notes'];
 
-	// Verify a file-source path against the backend. Sets pathError to '' when
-	// the path resolves to an existing file, or to the backend's message
-	// otherwise. Returns whether the path is valid.
-	async function verifyPath(): Promise<boolean> {
-		if (!sourceDraft || !FILE_KINDS.includes(sourceDraft.kind)) return true;
-		const path = String(sourceDraft.config.path ?? '').trim();
-		if (!path) {
-			pathError = 'Enter a file path.';
-			return false;
+	function resetPathState() {
+		clearTimeout(pathDebounce);
+		pathDebounce = undefined;
+		suggestSeq += 1;
+		verifySeq += 1;
+		pathStatus = '';
+		pathResolved = '';
+	}
+
+	// Fetch matching suggestions + verify existence for the current path. Both
+	// are advisory (verification never blocks the save) and both are guarded by
+	// a per-call sequence so a slower earlier response can't clobber a newer one.
+	async function refreshPathHints(path: string) {
+		const query = path.trim();
+
+		const sSeq = (suggestSeq += 1);
+		getBriefingPathSuggestions(query)
+			.then((r) => {
+				if (sSeq === suggestSeq) pathSuggestions = r.paths;
+			})
+			.catch(() => {});
+
+		const vSeq = (verifySeq += 1);
+		if (!query) {
+			pathStatus = '';
+			pathResolved = '';
+			return;
 		}
-		pathChecking = true;
+		pathStatus = 'checking';
 		try {
-			const res = await checkBriefingPath(path);
-			pathError = res.ok ? '' : res.error || 'No file found at that path.';
-			return res.ok;
+			const res = await checkBriefingPath(query);
+			if (vSeq !== verifySeq) return; // superseded by a later keystroke
+			pathStatus = res.ok ? 'ok' : 'missing';
+			pathResolved = res.ok ? res.resolved ?? '' : '';
 		} catch {
-			// Network/verification failure shouldn't block saving — treat as
-			// unverified rather than invalid.
-			pathError = '';
-			return true;
-		} finally {
-			pathChecking = false;
+			// A transient verification failure is not the user's problem — leave
+			// the hint idle rather than showing a scary error or blocking save.
+			if (vSeq === verifySeq) {
+				pathStatus = '';
+				pathResolved = '';
+			}
 		}
+	}
+
+	// Debounced input handler for the file-path field.
+	function onPathInput(v: string) {
+		setDraftConfig({ path: v.trim() || undefined });
+		clearTimeout(pathDebounce);
+		pathDebounce = setTimeout(() => refreshPathHints(v), 150);
 	}
 
 	async function saveSource() {
 		if (!sourceDraft) return;
-		// A file-source must point at an existing file before it can be saved.
-		if (FILE_KINDS.includes(sourceDraft.kind) && !(await verifyPath())) return;
+		// Verification is advisory — the resolver is fail-soft (a missing file
+		// contributes a provenance note, never an error), so a not-yet-created
+		// or transiently-unreachable path must not trap the user. Save always
+		// proceeds; the inline hint tells them whether it currently resolves.
 		await putBriefingSource({ id: sourceDraft.id, config: sourceDraft.config });
 		sourceDraft = null;
 		newSender = '';
-		pathError = '';
+		resetPathState();
 		await reloadContent();
 	}
 
@@ -911,19 +951,20 @@
 																										value={(sourceDraft.config.path as string) ?? ''}
 																										options={pathSuggestions}
 																										placeholder={FILE_PLACEHOLDER[source.kind]}
-																										invalid={!!pathError}
+																										invalid={pathStatus === 'missing'}
 																										monospace
 																										ariaLabel="File path"
-																										onValueChange={(v) => {
-																											pathError = '';
-																											setDraftConfig({ path: v.trim() || undefined });
-																										}}
-																										onCommit={verifyPath}
+																										filter={(opts) => opts}
+																										onValueChange={onPathInput}
 																									/>
-																									{#if pathChecking}
+																									{#if pathStatus === 'checking'}
 																										<p class="path-msg muted">Checking…</p>
-																									{:else if pathError}
-																										<p class="path-msg path-error">{pathError}</p>
+																									{:else if pathStatus === 'ok'}
+																										<p class="path-msg path-ok">✓ Resolves to {pathResolved}</p>
+																									{:else if pathStatus === 'missing'}
+																										<p class="path-msg path-warn">
+																											No file there yet — this source is skipped until the file exists.
+																										</p>
 																									{/if}
 																								</SettingsField>
 																							{/if}
@@ -1331,8 +1372,12 @@
 		font-size: 0.85rem;
 	}
 
-	.path-error {
-		color: var(--color-danger, #d33);
+	.path-ok {
+		color: var(--color-success, #2a8);
+	}
+
+	.path-warn {
+		color: var(--color-warning, #b80);
 	}
 
 	.chip-list {

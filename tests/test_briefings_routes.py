@@ -267,3 +267,35 @@ class TestPathPicker:
         assert "istota/config/TODO.md" in paths
         # Non-text files are excluded.
         assert not any(p.endswith(".bin") for p in paths)
+
+    def test_suggest_filters_by_query(self, path_client):
+        body = path_client.get(
+            "/istota/api/briefings/path-suggest", params={"q": "team"},
+        ).json()
+        paths = body["paths"]
+        assert paths == ["shared/team-todo.md"]
+
+    def test_suggest_query_matches_directory_component(self, path_client):
+        body = path_client.get(
+            "/istota/api/briefings/path-suggest", params={"q": "config"},
+        ).json()
+        assert "istota/config/TODO.md" in body["paths"]
+
+    def test_suggest_query_no_match(self, path_client):
+        body = path_client.get(
+            "/istota/api/briefings/path-suggest", params={"q": "zzzznope"},
+        ).json()
+        assert body["paths"] == []
+
+    def test_suggest_finds_deep_file_by_query(self, path_client, tmp_path):
+        # A file deeper than the on-load walk would surface only via query.
+        deep = (
+            tmp_path / "mount" / "Users" / "stefan"
+            / "istota" / "notes" / "2026" / "q3" / "sprint-plan.md"
+        )
+        deep.parent.mkdir(parents=True, exist_ok=True)
+        deep.write_text("plan\n")
+        body = path_client.get(
+            "/istota/api/briefings/path-suggest", params={"q": "sprint"},
+        ).json()
+        assert "istota/notes/2026/q3/sprint-plan.md" in body["paths"]

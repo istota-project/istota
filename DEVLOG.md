@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-20: Robust briefing file-path picker (server-side search + advisory verify)
+
+Follow-up to the verified-path-picker commit. The `todos`/`reminders`/`notes` source path field had two rough edges: the autocomplete only ever saw a small, fixed slice of the workspace (a single bounded walk loaded once on page open, then filtered client-side — so a deep or late-in-walk file could never appear no matter what you typed), and the *first* save of a newly-typed path would sometimes fail before a retry succeeded.
+
+The save flake was a race: clicking "Save source" blurs the input, and the input's blur handler (`onCommit`) fired `verifyPath()` at the same time `saveSource()` awaited its own `verifyPath()` — two concurrent existence checks mutating shared state, with the save hard-gated on the result. Either landing a transient false (or just resolving in the wrong order) silently aborted the save; the second click then went through.
+
+Fixed both structurally. **(A)** `path-suggest` is now a real server-side search: it takes a `q` param and walks the workspace filtering by substring (basename hits ranked ahead of directory-only hits), bounded by depth, a total-scan cap, and a returned cap — so a deep file surfaces as you type instead of being clipped by the pool bound. The editor debounce-fetches suggestions on input (last-write-wins guarded). **(B)** Verification is now advisory, never a save blocker — which matches the resolver's own fail-soft semantics (a missing file just contributes a provenance note, never an error). `saveSource` always proceeds; the check runs as a debounced inline hint (*Checking…* / *✓ Resolves to …* / *No file there yet — skipped until it exists*), and the blur/click double-verify race is gone.
+
+**Key changes:**
+- `_walk_text_files(root, query)` filters by substring with basename-first ranking; depth 4→6, added an 8000-file scan cap, returned cap 200→50.
+- `GET /briefings/path-suggest` accepts `q`; `getBriefingPathSuggestions(q)` client helper.
+- Frontend: debounced `refreshPathHints` (suggest + verify, sequence-guarded); `onPathInput` replaces the inline onChange; `saveSource` no longer gates on verification; advisory `pathStatus` hint replaces the blocking `pathError`.
+- Mock API `/path-suggest` honors `q`; 4 new backend tests (query filter, directory-component match, no-match, deep-file-by-query).
+
+**Files added/modified:**
+- `src/istota/briefings/routes.py` - query-filtered walk + `q` param
+- `web/src/lib/api.ts` - `getBriefingPathSuggestions(q)`
+- `web/src/routes/briefings/settings/+page.svelte` - debounced hints, advisory verify, no save gate
+- `web/vite-mock-api.ts` - mock `q` filter
+- `tests/test_briefings_routes.py` - query-search tests
+- `AGENTS.md` - path picker description
+
 ## 2026-07-20: Align money web API to the `/istota/api/<module>` convention
 
 The money module's FastAPI router was mounted at `/istota/money/api`, the lone exception to the `/istota/api/<module>` pattern every other web module follows (`briefings`, `health`, `garmin`). The cause is historical: money is a self-contained/vendored package whose `routes.py` ships with no prefix ("the host application mounts `router` at its chosen prefix"), and istota had mounted it module-first. Nothing structural required it — nginx has a catch-all `location /istota/`, and every money route is relative — so this was a pure mount-point realignment to `/istota/api/money`.
