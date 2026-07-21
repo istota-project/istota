@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-21: Briefings — block-title-driven sections, shared-block defaults, ordering + preamble hardening
+
+A follow-on cleanup pass over the briefings system after the shared-KV / block work landed. Five related changes.
+
+**Shared-block gather ordering.** `_gather_shared` collected pool results in `as_completed` (completion) order, and `_assemble_verbatim` spliced a `structured` shared block's source text in that order — so a multi-source structured block would render its sections in nondeterministic, run-to-run order. Masked today because every structured shared block ships a single source, but latent. Fixed to reassemble by source index (a `{future: index}` map, mirroring the per-user pipeline's slot dict in `generate.py`). The per-user path was already order-correct; this was the one divergent spot.
+
+**Browse-preset dedup + expansion.** `BROWSE_PRESETS` (the live map for the `browse` briefing source + settings pick-list) was a byte-for-byte copy of `HEADLINE_SOURCES` in the legacy `skills/briefing` module. That legacy map + its `_fetch_headlines` fetcher were dead — their only caller (`build_briefing_prompt`) was deleted in the retire-legacy-briefings work. Removed the dead map/function/constants (+ the now-unused `httpx` import); `BROWSE_PRESETS` is the single source of truth. Expanded it 7 → 18 reputable mostly-text frontpages, grouped by beat (added BBC, NPR, Deutsche Welle, France 24, Japan Times, SCMP, CNBC, Politico, Axios, Techmeme, Hacker News). New entries auto-surface in the web settings pick-list via the existing `/browse-presets` endpoint.
+
+**Ansible default briefings → shared blocks.** Rewired the default morning + evening briefings to read the module-owned `world-headlines` + `markets-summary` shared blocks via `shared_block` sources (`render_mode: structured`, spliced verbatim) instead of per-user `email`/`markets` sources — collapsing the browse/markets fetch+synthesis to one global generation per window. Retimed the shared blocks from once-daily to twice-daily (`45 5,17` / `50 5,17` UTC) so they regenerate ~15 min before each briefing window; consuming sources gate on `max_age_hours: 6` so each window reads its own fresh copy and the other window's stale copy is omitted. markets-summary regenerating per window also picks up the correct morning (pre-market) vs evening (close) mode. The UTC-vs-user-TZ caveat is documented in the section comment (operators shift the crons for non-UTC users). Verified end-to-end: rendered the defaults through the real Ansible filters, confirmed valid TOML, and that `load_config` materializes the intended shapes + both crons fire twice/weekday.
+
+**Emoji section headers no longer hardcoded.** The output path told the model to produce "emoji-prefixed" section headers in three prompt spots (`generate.py`) + three guideline spots (`briefing/skill.md`), independent of the block title — so a plain title like `Calendar` got a model-invented emoji and an emoji title risked doubling. Made the block title the single source of truth: used verbatim, emoji only if the author put one there. Also fixed the shared-block synthesis prompt to emit **no** title/header line at all (the consuming briefing block titles the section) — otherwise the newly-wired `world-headlines` default would double-header (the shared block's own `🌍 World headlines` line plus the consuming block's title).
+
+**Preamble stripper hardened, emoji assumption dropped.** `strip_briefing_preamble` (the non-JSON fallback — the primary path is `{subject, body}` JSON via `parse_briefing_json`) anchored on "first line starting with an emoji." With block-driven titles that's actively wrong: if a malformed-JSON briefing had a non-emoji first section (`News`) and a later emoji section (`📈 Markets`), it would delete the first section. Replaced with a structural walk: drop leading blank + conversational-preamble lines (prose enders `.`/`!`/`?`, or a lead-in opener like "Let me"/"Here's") until the first header/content line, keep everything from there. Emoji is now one "this is a header" signal, not the anchor. Fail-safe: if the walk would consume all content, the original is returned unchanged. Colon-ended titles are preserved (colon handled via openers, not as a bare prose ender).
+
+Full suite green (7886 passed, 7 skipped).
+
+**Files modified:**
+- `src/istota/briefings/shared_blocks.py` — gather reassembled by source index; synthesis prompt emits no header line
+- `src/istota/briefings/sources/browse.py` — `BROWSE_PRESETS` expanded 7→18, dropped "legacy" docstring wording
+- `src/istota/briefings/generate.py` — block-title-verbatim section headers (3 prompt spots)
+- `src/istota/skills/briefing/__init__.py` — removed dead `HEADLINE_SOURCES`/`_fetch_headlines`/`httpx`; rewrote `strip_briefing_preamble` (emoji-free, fail-safe)
+- `src/istota/skills/briefing/skill.md` — block-title-verbatim headers (3 guideline spots)
+- `deploy/ansible/defaults/main.yml` — default briefings read shared blocks; shared blocks regenerate twice daily
+- `tests/test_shared_block_generation.py`, `tests/test_briefings_sources.py`, `tests/test_briefing.py`, `tests/test_scheduler.py` — new ordering, preset-integrity, preamble-hardening coverage; removed dead headline tests
+
 ## 2026-07-21: Shared curated briefing content + admin-editable shared blocks
 
 Two related things land together. First, the **shared-KV curated-content** substrate (spec `Done/shared-kv-curated-briefing-content.md`): a cross-user `shared_kv` table (namespaced JSON, open reads / admin-only fail-closed writes via `Config.is_shared_kv_writer`), two consuming briefing source kinds (`kv` generic + `shared_block` sugar), the `--shared` flag on the `kv` skill/CLI, and module-owned shared blocks generated once globally under a reserved `__system__` identity by `scheduler.check_shared_blocks`. This collapses N-way duplicate fetch+synthesis of identical content (world headlines, a markets table) to a single generation every user's briefing reads.

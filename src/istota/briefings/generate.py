@@ -163,8 +163,9 @@ def assemble_briefing_input(
         "",
         "Below are the briefing's content blocks, in order. Each block lists "
         "its sources' gathered content. Produce ONE section per non-empty "
-        "block, titled with the block title (emoji-prefixed section header), "
-        "in this exact order.",
+        "block, titled with the block title exactly as given (use it verbatim "
+        "as the section header — do not add, remove, or change emojis or "
+        "wording), in this exact order.",
     ]
 
     # Previous-briefing dedup, reusing the legacy digest store.
@@ -267,15 +268,18 @@ def assemble_briefing_input(
     lines += [
         "",
         "Format the briefing following the section format in the briefing "
-        "skill reference. Use emoji-prefixed labels as section headers (not "
-        "markdown headings). Output one section per block above, in the given "
-        "order, omitting any block with no content. NO tables.",
+        "skill reference. Title each section with its block title verbatim as a "
+        "plain label (not a markdown heading); use the emoji only if the block "
+        "title itself includes one — never add your own. Output one section per "
+        "block above, in the given order, omitting any block with no content. "
+        "NO tables.",
         "",
         "CRITICAL: Your entire response must be a single JSON object with this "
         'exact format:\n{"subject": "<briefing subject>", "body": "<briefing '
         'content here>"}\n\n'
-        "The body field contains the full briefing text with emoji section "
-        "headers. Use \\n for newlines within the body string. Do NOT output "
+        "The body field contains the full briefing text, one section per block "
+        "titled by its block title. Use \\n for newlines within the body "
+        "string. Do NOT output "
         "anything outside the JSON object — no preamble, no commentary, no code "
         "fences. Do NOT send emails or use any email commands. Delivery is "
         "handled by the scheduler.",

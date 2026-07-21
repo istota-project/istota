@@ -6,13 +6,13 @@ exclude_persona: true
 source_types: [briefing]
 exclude_skills: [email]
 ---
-Briefings must be returned as a JSON object: `{"subject": "Morning Briefing", "body": "<content>"}`. The body contains the full briefing text with emoji section headers, using `\n` for newlines. Do not output anything outside the JSON object. Do not send emails or use email commands — delivery is handled by the scheduler.
+Briefings must be returned as a JSON object: `{"subject": "Morning Briefing", "body": "<content>"}`. The body contains the full briefing text, one section per block, using `\n` for newlines. Do not output anything outside the JSON object. Do not send emails or use email commands — delivery is handled by the scheduler.
 
-The body is formatted for chat messages (markdown). Use emoji-prefixed labels as section headers. Only include sections that have data.
+The body is formatted for chat messages (markdown). Title each section with its block's title exactly as given — the title may already include an emoji, in which case keep it; if it doesn't, do not add one. Only include sections that have data.
 
 ## Structure — follow the prompt
 
-The prompt presents the briefing's content grouped into **blocks**, each with a title and its gathered source data (tagged by provenance). Produce **one section per block**, titled with the block's title as an emoji-prefixed header, in the exact order the blocks appear. Honor any per-block synthesis directive (story counts, tone, "include verbatim"). Omit a block that has no content — never emit an empty header. Do not reorder sections to match the order data happened to arrive within a block.
+The prompt presents the briefing's content grouped into **blocks**, each with a title and its gathered source data (tagged by provenance). Produce **one section per block**, titled with the block's title verbatim (emoji only if the title itself carries one — never invent one), in the exact order the blocks appear. Honor any per-block synthesis directive (story counts, tone, "include verbatim"). Omit a block that has no content — never emit an empty header. Do not reorder sections to match the order data happened to arrive within a block.
 
 A block may fan in several sources of different kinds (newsletters, RSS entries, a browsed frontpage, structured market/calendar data). **Synthesize them into one coherent section**: merge stories that recur across sources into a single entry with combined attribution, rather than stacking each source as its own sub-list. A source marked as pre-formatted / "include as-is" (market quotes, calendar events, a pre-selected reminder) must be reproduced verbatim — do not reword its numbers, quotes, or details.
 

@@ -70,6 +70,37 @@ class TestAssemble:
         assert assemble_shared_block_input(block, cfg) is None
 
 
+class TestGatherShared:
+    def test_gather_preserves_source_order_under_stagger(
+        self, tmp_path, monkeypatch
+    ):
+        """``_gather_shared`` must reassemble by source index, not completion.
+
+        The first source sleeps longest, so a completion-order implementation
+        returns it last. Reassembly by slot keeps configured order.
+        """
+        import time
+
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        sources = [
+            {"kind": "markets", "config": {}},
+            {"kind": "browse", "config": {}},
+            {"kind": "email", "config": {}},
+        ]
+        # Delay is inversely proportional to index → completion order reverses
+        # configured order.
+        delays = {"markets": 0.15, "browse": 0.05, "email": 0.0}
+
+        def _fake_resolve(kind, cfg_, ctx):
+            time.sleep(delays[kind])
+            return GatheredSource(kind=kind, title=kind, text=kind)
+
+        monkeypatch.setattr(shared_blocks, "resolve_source", _fake_resolve)
+        gathered = shared_blocks._gather_shared(cfg, sources, None)
+        assert [g.kind for g in gathered] == ["markets", "browse", "email"]
+
+
 class TestRunSharedBlock:
     def test_returns_text_dict(self, tmp_path, monkeypatch):
         cfg = _config(tmp_path)

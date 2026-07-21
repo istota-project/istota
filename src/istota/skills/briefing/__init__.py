@@ -16,7 +16,6 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import httpx
 import tomli
 
 from ...config import BriefingConfig, Config
@@ -29,27 +28,70 @@ logger = logging.getLogger("istota.briefing")
 # Post-processing (from scheduler.py)
 # ---------------------------------------------------------------------------
 
-# Pattern to detect the start of actual briefing content (emoji section header)
+# An emoji at the start of a line is a strong "this is a section header" signal —
+# used by _is_preamble_line as one signal, NOT as the sole content anchor (block
+# titles may be plain text like "Calendar" / "**Markets**").
 _BRIEFING_SECTION_RE = re.compile(
     r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B50]",  # Emoji at start of line
     re.MULTILINE,
 )
 
 
-def strip_briefing_preamble(text: str) -> str:
-    """Strip any preamble/reasoning before the first emoji section header.
+# Conversational lead-ins the model sometimes emits before the real content.
+# Used as one preamble signal alongside sentence-final punctuation.
+_PREAMBLE_OPENER = re.compile(
+    r"^(let me\b|let's\b|let’s\b|here's\b|here’s\b|here is\b|"
+    r"here are\b|i'?ll\b|i’ll\b|i will\b|i've\b|i’ve\b|i have\b|"
+    r"now\b|okay\b|ok\b|alright\b|sure\b|based on\b|looking at\b|below\b|"
+    r"first,|to summarize\b|got it\b|compiling\b|composing\b|generating\b)",
+    re.IGNORECASE,
+)
 
-    Briefings always start with an emoji-prefixed section header (e.g. 📰, 📈, 📅).
-    If the model outputs thinking/reasoning before the first section, strip it.
+# Prose sentence enders. A leading line ending in one of these reads as chatter,
+# not a section title (block titles never end in these). Colon is deliberately
+# excluded — a header could plausibly end in ':'; colon-ended lead-ins are caught
+# by the opener check instead.
+_PROSE_ENDERS = (".", "!", "?")
+
+
+def _is_preamble_line(line: str) -> bool:
+    """Whether a leading line reads as model chatter rather than a section header."""
+    s = line.strip()
+    if not s:
+        return False  # blank lines are handled by the caller (skipped, not "preamble")
+    if _BRIEFING_SECTION_RE.match(s):
+        return False  # emoji-led line is a header start, never preamble
+    core = s.rstrip("*_ ")  # ignore trailing markdown emphasis when checking enders
+    if core.endswith(_PROSE_ENDERS):
+        return True
+    if _PREAMBLE_OPENER.match(s):
+        return True
+    return False
+
+
+def strip_briefing_preamble(text: str) -> str:
+    """Strip conversational preamble the model may emit before the first section.
+
+    Only reached on the non-JSON fallback path — a well-formed briefing is
+    returned as ``{subject, body}`` (parsed by ``parse_briefing_json``) and never
+    passes through here. Section titles are block-driven and may or may not carry
+    an emoji, so this no longer anchors on an emoji header: it drops leading blank
+    + preamble lines until the first line that reads like a section header (or any
+    non-chatter content) and keeps everything from there. Fail-safe: if that would
+    consume all content (e.g. the model emitted only prose), the original text is
+    returned unchanged.
     """
-    match = _BRIEFING_SECTION_RE.search(text)
-    if match and match.start() > 0:
-        stripped = text[match.start():]
-        logger.debug(
-            "Stripped %d chars of briefing preamble", match.start(),
-        )
-        return stripped
-    return text
+    if not text.strip():
+        return text
+    lines = text.split("\n")
+    idx = 0
+    while idx < len(lines) and (not lines[idx].strip() or _is_preamble_line(lines[idx])):
+        idx += 1
+    if idx == 0 or idx >= len(lines):
+        # Nothing to strip, or everything looked like preamble — keep the original.
+        return text
+    logger.debug("Stripped %d preamble line(s) from briefing", idx)
+    return "\n".join(lines[idx:])
 
 
 def strip_markdown(text: str) -> str:
@@ -316,82 +358,6 @@ def _fetch_finviz_market_data() -> str | None:
     except Exception as e:
         logger.warning("FinViz market data fetch failed: %s", e)
         return None
-
-
-# ---------------------------------------------------------------------------
-# Headlines fetcher (news frontpages via browse skill)
-# ---------------------------------------------------------------------------
-
-HEADLINE_SOURCES = {
-    "ap": {"url": "https://apnews.com", "name": "AP News"},
-    "reuters": {"url": "https://www.reuters.com", "name": "Reuters"},
-    "guardian": {"url": "https://www.theguardian.com/world", "name": "The Guardian"},
-    "ft": {"url": "https://www.ft.com", "name": "Financial Times"},
-    "aljazeera": {"url": "https://www.aljazeera.com", "name": "Al Jazeera"},
-    "lemonde": {"url": "https://www.lemonde.fr/en/", "name": "Le Monde"},
-    "spiegel": {"url": "https://www.spiegel.de/international/", "name": "Der Spiegel"},
-}
-
-_HEADLINE_PAGE_MAX_CHARS = 5000
-_HEADLINE_FETCH_TIMEOUT = 60.0
-
-
-def _fetch_headlines(headlines_config: dict, app_config: "Config") -> str | None:
-    """Pre-fetch frontpage headlines from configured news sources via the browse API.
-
-    Args:
-        headlines_config: Headlines component config with 'sources' list of source keys.
-        app_config: Application config (for browser API URL).
-
-    Returns:
-        Formatted string with frontpage text from each source, or None if unavailable.
-    """
-    if not app_config.browser.enabled:
-        return None
-
-    sources = headlines_config.get("sources", [])
-    if not sources:
-        return None
-
-    api_url = app_config.browser.api_url
-    results = []
-
-    for source_key in sources:
-        source = HEADLINE_SOURCES.get(source_key)
-        if not source:
-            logger.warning("Unknown headline source: %s", source_key)
-            continue
-
-        try:
-            resp = httpx.post(
-                f"{api_url}/browse",
-                json={"url": source["url"], "timeout": 30, "keep_session": False},
-                timeout=_HEADLINE_FETCH_TIMEOUT,
-            )
-            data = resp.json()
-
-            if data.get("status") != "ok":
-                logger.warning(
-                    "Headlines fetch from %s returned status %s",
-                    source_key, data.get("status"),
-                )
-                continue
-
-            text = data.get("text", "")
-            if not text:
-                continue
-
-            if len(text) > _HEADLINE_PAGE_MAX_CHARS:
-                text = text[:_HEADLINE_PAGE_MAX_CHARS] + "\n[truncated]"
-
-            results.append(f"### {source['name']} ({source['url']})\n{text}")
-        except Exception as e:
-            logger.warning("Failed to fetch headlines from %s: %s", source_key, e)
-
-    if not results:
-        return None
-
-    return "## News Frontpages (pre-fetched)\n\n" + "\n\n---\n\n".join(results)
 
 
 def _fetch_random_reminder(config: Config, user_id: str) -> str | None:

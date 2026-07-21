@@ -1,6 +1,6 @@
 """Tests for istota.skills.briefing module."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import istota.skills.briefing as briefing_mod
 from istota.skills.briefing import (
@@ -11,13 +11,11 @@ from istota.skills.briefing import (
     _fetch_finviz_market_data,
     _fetch_random_reminder,
     _fetch_calendar_events,
-    _fetch_headlines,
     _briefing_digest_key,
     load_previous_briefing_digest,
     save_briefing_digest,
-    HEADLINE_SOURCES,
 )
-from istota.config import Config, BriefingConfig, BrowserConfig, NextcloudConfig, ResourceConfig, UserConfig
+from istota.config import Config, BriefingConfig, NextcloudConfig, ResourceConfig, UserConfig
 
 
 def test_legacy_generator_removed():
@@ -26,6 +24,10 @@ def test_legacy_generator_removed():
     assert not hasattr(briefing_mod, "_component_enabled")
     assert not hasattr(briefing_mod, "_fetch_todo_items")
     assert not hasattr(briefing_mod, "_fetch_newsletter_content")
+    # The legacy headlines fetcher moved to the browse briefing source
+    # (BROWSE_PRESETS); the duplicate HEADLINE_SOURCES map is gone.
+    assert not hasattr(briefing_mod, "_fetch_headlines")
+    assert not hasattr(briefing_mod, "HEADLINE_SOURCES")
 
 
 class TestStripHtml:
@@ -537,148 +539,6 @@ class TestBriefingDigest:
         result = load_previous_briefing_digest("alice", cfg, conversation_token="room1")
         assert "Second briefing" in result
         assert "First briefing" not in result
-
-class TestHeadlineSources:
-    """Test the HEADLINE_SOURCES registry."""
-
-    def test_all_expected_sources_present(self):
-        expected = {"ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"}
-        assert expected <= set(HEADLINE_SOURCES.keys())
-
-    def test_sources_have_required_fields(self):
-        for key, source in HEADLINE_SOURCES.items():
-            assert "url" in source, f"{key} missing url"
-            assert "name" in source, f"{key} missing name"
-            assert source["url"].startswith("http"), f"{key} url invalid"
-
-
-class TestFetchHeadlines:
-    """Tests for _fetch_headlines."""
-
-    def _make_config(self, browser_enabled=True):
-        return Config(
-            browser=BrowserConfig(
-                enabled=browser_enabled,
-                api_url="http://localhost:9223",
-            ),
-        )
-
-    def test_browser_disabled_returns_none(self):
-        config = self._make_config(browser_enabled=False)
-        result = _fetch_headlines({"sources": ["ap"]}, config)
-        assert result is None
-
-    def test_empty_sources_returns_none(self):
-        config = self._make_config()
-        result = _fetch_headlines({"sources": []}, config)
-        assert result is None
-
-    def test_no_sources_key_returns_none(self):
-        config = self._make_config()
-        result = _fetch_headlines({}, config)
-        assert result is None
-
-    def test_unknown_source_skipped(self):
-        config = self._make_config()
-        with patch("istota.skills.briefing.httpx") as mock_httpx:
-            result = _fetch_headlines({"sources": ["nonexistent"]}, config)
-        assert result is None
-
-    @patch("istota.skills.briefing.httpx")
-    def test_successful_fetch(self, mock_httpx):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "status": "ok",
-            "text": "Breaking: Major event happens. More details follow.",
-        }
-        mock_httpx.post.return_value = mock_response
-
-        config = self._make_config()
-        result = _fetch_headlines({"sources": ["ap"]}, config)
-
-        assert result is not None
-        assert "AP News" in result
-        assert "Major event happens" in result
-        assert "pre-fetched" in result.lower()
-
-    @patch("istota.skills.briefing.httpx")
-    def test_multiple_sources(self, mock_httpx):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "status": "ok",
-            "text": "Some headlines here.",
-        }
-        mock_httpx.post.return_value = mock_response
-
-        config = self._make_config()
-        result = _fetch_headlines({"sources": ["ap", "reuters"]}, config)
-
-        assert result is not None
-        assert "AP News" in result
-        assert "Reuters" in result
-
-    @patch("istota.skills.briefing.httpx")
-    def test_truncates_long_pages(self, mock_httpx):
-        long_text = "x" * 10000
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"status": "ok", "text": long_text}
-        mock_httpx.post.return_value = mock_response
-
-        config = self._make_config()
-        result = _fetch_headlines({"sources": ["ap"]}, config)
-
-        assert result is not None
-        assert "[truncated]" in result
-
-    @patch("istota.skills.briefing.httpx")
-    def test_fetch_error_skips_source(self, mock_httpx):
-        mock_httpx.post.side_effect = Exception("connection refused")
-
-        config = self._make_config()
-        result = _fetch_headlines({"sources": ["ap"]}, config)
-        assert result is None
-
-    @patch("istota.skills.briefing.httpx")
-    def test_non_ok_status_skips_source(self, mock_httpx):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"status": "error", "error": "captcha"}
-        mock_httpx.post.return_value = mock_response
-
-        config = self._make_config()
-        result = _fetch_headlines({"sources": ["ap"]}, config)
-        assert result is None
-
-    @patch("istota.skills.briefing.httpx")
-    def test_empty_text_skips_source(self, mock_httpx):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"status": "ok", "text": ""}
-        mock_httpx.post.return_value = mock_response
-
-        config = self._make_config()
-        result = _fetch_headlines({"sources": ["ap"]}, config)
-        assert result is None
-
-    @patch("istota.skills.briefing.httpx")
-    def test_partial_failure_still_returns_successful(self, mock_httpx):
-        """If one source fails but another succeeds, return the successful one."""
-        call_count = [0]
-
-        def side_effect(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise Exception("timeout")
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"status": "ok", "text": "Reuters headlines"}
-            return mock_resp
-
-        mock_httpx.post.side_effect = side_effect
-
-        config = self._make_config()
-        result = _fetch_headlines({"sources": ["ap", "reuters"]}, config)
-
-        assert result is not None
-        assert "Reuters" in result
-        assert "AP" not in result
 
 
 class TestParseBriefingJson:

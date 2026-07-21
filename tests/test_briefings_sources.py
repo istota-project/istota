@@ -337,6 +337,17 @@ class TestBrowse:
         gs = resolve_source("browse", {"preset": "nope"}, _ctx(tmp_path, browser=True))
         assert gs.ok is False
 
+    def test_presets_well_formed(self):
+        from istota.briefings.sources.browse import BROWSE_PRESETS
+
+        assert BROWSE_PRESETS, "expected bundled presets"
+        for key, preset in BROWSE_PRESETS.items():
+            assert key == key.lower() and " " not in key, f"bad slug {key!r}"
+            assert preset["name"], f"{key} missing name"
+            assert preset["url"].startswith("https://"), f"{key} url not https"
+        # The core reputable set must remain available as pick-list keys.
+        assert {"ap", "reuters", "guardian", "bbc"} <= set(BROWSE_PRESETS)
+
 
 # ---------------------------------------------------------------------------
 # Builtins — todos / reminders / notes (path is a source property)

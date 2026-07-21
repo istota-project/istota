@@ -3016,7 +3016,7 @@ class TestStripBriefingPreamble:
         result = strip_briefing_preamble(text)
         assert result.startswith("📈 MARKETS")
 
-    def test_no_emoji_returns_unchanged(self):
+    def test_plain_text_no_punctuation_unchanged(self):
         text = "Just plain text with no emoji headers"
         assert strip_briefing_preamble(text) == text
 
@@ -3026,6 +3026,41 @@ class TestStripBriefingPreamble:
     def test_emoji_at_start_no_strip(self):
         text = "📅 CALENDAR\n- 9:00 AM: Meeting"
         assert strip_briefing_preamble(text) == text
+
+    # --- Emoji assumption dropped: non-emoji block titles must survive ---
+
+    def test_strips_preamble_before_plain_title(self):
+        """A plain (non-emoji) first section must not be eaten as preamble."""
+        text = "Let me put this together.\n\nCalendar\n- 9:00 Meeting"
+        result = strip_briefing_preamble(text)
+        assert result == "Calendar\n- 9:00 Meeting"
+
+    def test_strips_preamble_before_bold_title(self):
+        text = "Here is the briefing:\n\n**Markets**\nS&P 500: +0.5%"
+        result = strip_briefing_preamble(text)
+        assert result == "**Markets**\nS&P 500: +0.5%"
+
+    def test_plain_first_section_not_stripped_by_later_emoji(self):
+        """The old emoji-anchored version would delete the plain first section
+        when a later one carried an emoji. It must be preserved now."""
+        text = "News\nStuff happened.\n\n📈 Markets\nUp today"
+        assert strip_briefing_preamble(text) == text
+
+    def test_all_prose_returns_original(self):
+        """Fail-safe: if every line looks like preamble, keep the original text
+        rather than returning an empty string."""
+        text = "Let me think about this.\n\nStill composing the sections."
+        assert strip_briefing_preamble(text) == text
+
+    def test_colon_titled_section_not_stripped(self):
+        """A colon-ended header with no conversational opener is kept (colon is
+        not treated as a prose ender on its own)."""
+        text = "Q&A:\n- What happened?"
+        assert strip_briefing_preamble(text) == text
+
+    def test_leading_blank_lines_trimmed_before_header(self):
+        text = "\n\n📰 NEWS\nSome news"
+        assert strip_briefing_preamble(text) == "📰 NEWS\nSome news"
 
 
 # ---------------------------------------------------------------------------
