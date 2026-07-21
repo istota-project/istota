@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import random
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -153,6 +154,39 @@ def resolve_calendar(config: dict, ctx: SourceContext) -> GatheredSource:
 # -- todos --------------------------------------------------------------------
 
 
+# A checkbox list item: bullet marker, "[ ]"/"[x]"/"[X]", then the text.
+_CHECKBOX_RE = re.compile(r"^[-*+]\s+\[(?P<mark>[ xX])\]\s*\S")
+# A plain bullet list item: "- ", "* ", "+ ".
+_BULLET_RE = re.compile(r"^[-*+]\s+\S")
+# A numbered list item: "1. " or "1) ".
+_NUMBERED_RE = re.compile(r"^\d+[.)]\s+\S")
+_HORIZONTAL_RULES = {"---", "***", "___"}
+
+
+def _extract_todo_items(content: str) -> list[str]:
+    """Pull pending todo lines from a markdown-ish list, format-lenient.
+
+    Accepts any standard todo-list line — GitHub checkboxes (``- [ ]``),
+    plain bullets (``-`` / ``*`` / ``+``), and numbered items (``1.`` /
+    ``1)``) — with arbitrary leading indentation. Checked checkboxes
+    (``- [x]``) are treated as done and excluded; headings, horizontal
+    rules, blank lines, and unmarked prose are skipped.
+    """
+    items: list[str] = []
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line in _HORIZONTAL_RULES:
+            continue
+        checkbox = _CHECKBOX_RE.match(line)
+        if checkbox:
+            if checkbox.group("mark") == " ":  # unchecked → pending
+                items.append(line)
+            continue  # checked → done, skip
+        if _BULLET_RE.match(line) or _NUMBERED_RE.match(line):
+            items.append(line)
+    return items
+
+
 def resolve_todos(config: dict, ctx: SourceContext) -> GatheredSource:
     path = _workspace_file(ctx, config.get("path"))
     if not path:
@@ -166,11 +200,7 @@ def resolve_todos(config: dict, ctx: SourceContext) -> GatheredSource:
             kind="todos", title="Todos",
             provenance="(no TODO file at configured path)", ok=False,
         )
-    items = [
-        {"text": line.strip()}
-        for line in content.splitlines()
-        if line.strip().startswith(("- [ ]", "* [ ]"))
-    ]
+    items = [{"text": text} for text in _extract_todo_items(content)]
     if not items:
         return GatheredSource(
             kind="todos", title="Todos",

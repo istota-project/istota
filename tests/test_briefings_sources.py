@@ -421,6 +421,68 @@ class TestBuiltinTodos:
         assert gs.ok is True
         assert gs.items[0]["text"] == "- [ ] shared item"
 
+    def test_plain_dash_bullets(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "- buy milk\n- call bank\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is True
+        assert [i["text"] for i in gs.items] == ["- buy milk", "- call bank"]
+
+    def test_star_and_plus_bullets(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "* star item\n+ plus item\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is True
+        assert [i["text"] for i in gs.items] == ["* star item", "+ plus item"]
+
+    def test_numbered_lists(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "1. first\n2) second\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is True
+        assert [i["text"] for i in gs.items] == ["1. first", "2) second"]
+
+    def test_checked_items_excluded_unchecked_kept(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(
+            ctx,
+            "TODO.md",
+            "- [ ] pending one\n- [x] done one\n- [X] done two\n* [ ] pending two\n",
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is True
+        assert [i["text"] for i in gs.items] == ["- [ ] pending one", "* [ ] pending two"]
+
+    def test_all_checked_returns_not_ok(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "- [x] done one\n- [X] done two\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is False
+
+    def test_headings_and_rules_and_blanks_skipped(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(
+            ctx,
+            "TODO.md",
+            "# My todos\n\n- real item\n\n---\n\n## Later\n* another\n",
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is True
+        assert [i["text"] for i in gs.items] == ["- real item", "* another"]
+
+    def test_indented_items_supported(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "- parent\n    - child\n\t* deep\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is True
+        assert [i["text"] for i in gs.items] == ["- parent", "- child", "* deep"]
+
+    def test_prose_lines_without_markers_ignored(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "Just some prose.\nAnother sentence.\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is False
+
 
 class TestBuiltinReminders:
     def test_no_path_returns_not_configured(self, tmp_path):
