@@ -2082,7 +2082,6 @@ class TestBriefingEndpoints:
                 "cron": "0 12 * * *",
                 "conversation_token": "logtoken",
                 "output": "talk",
-                "components": {"calendar": True},
             },
             cookies=cookies,
             headers={"origin": "https://example.com"},
@@ -2101,7 +2100,6 @@ class TestBriefingEndpoints:
             "cron": "0 12 * * *",
             "conversation_token": "logtoken",
             "output": "talk",
-            "components": {"calendar": True},
         }
         await client.post(
             "/istota/api/settings/briefings",

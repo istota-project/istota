@@ -417,14 +417,6 @@
 		</SettingsCard>
 	{/if}
 
-		<SettingsCard title="Briefings">
-			<p class="hint">
-				Cron-scheduled summaries with their own schedule, delivery, and
-				content-block editor. Manage them on the
-				<a href="{base}/briefings/settings">Briefings settings</a> page.
-			</p>
-		</SettingsCard>
-
 		{#if activeServices.length > 0 || ncToken}
 			<div class="subsection-heading">
 				<h2>Connected services</h2>
