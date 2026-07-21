@@ -155,6 +155,50 @@ class ScheduledJob:
     skill_args: str | None = None
 
 
+def _backfill_briefing_output(conn: sqlite3.Connection) -> None:
+    """Hoist a legacy ``__output__`` component key into the ``output`` column.
+
+    Per-row best-effort: a bad row is left intact (its ``output`` stays at the
+    default) rather than failing startup. Runs after the add-column migration;
+    a no-op once every row has been migrated (no row still carries
+    ``__output__``).
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(briefing_configs)").fetchall()}
+    except sqlite3.OperationalError:
+        return  # Table doesn't exist yet.
+    if "output" not in cols or "components" not in cols:
+        return
+
+    try:
+        rows = conn.execute(
+            "SELECT id, components FROM briefing_configs"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+
+    for row in rows:
+        raw = row[1]
+        if not raw or "__output__" not in raw:
+            continue
+        try:
+            comps = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(comps, dict) or "__output__" not in comps:
+            continue
+        output = comps.pop("__output__")
+        if not (isinstance(output, str) and output.strip()):
+            output = "talk"
+        try:
+            conn.execute(
+                "UPDATE briefing_configs SET output = ?, components = ? WHERE id = ?",
+                (output, json.dumps(comps, sort_keys=True), row[0]),
+            )
+        except sqlite3.OperationalError:
+            continue
+
+
 def _run_migrations(conn: sqlite3.Connection) -> None:
     """Run ALTER TABLE migrations before schema to avoid index failures on new columns."""
     # Tasks table migrations
@@ -332,6 +376,32 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         pass
+
+    # User profiles: per-user default-briefings opt-in (retire-legacy-briefing-
+    # components spec). Default-on; when true the shared [[default_briefings]]
+    # set is seeded into the user's briefings. Mirrors disabled_modules handling.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "default_briefings INTEGER NOT NULL DEFAULT 1"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # Briefing configs: real `output` delivery column (retire-legacy-briefing-
+    # components spec). Previously smuggled into components JSON under the
+    # reserved `__output__` key. Add the column, then hoist `__output__` out of
+    # each row's components into the column and rewrite components without it.
+    # Idempotent: a re-run is a no-op once the column exists and no row still
+    # carries `__output__`.
+    try:
+        conn.execute(
+            "ALTER TABLE briefing_configs ADD COLUMN "
+            "output TEXT NOT NULL DEFAULT 'talk'"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists or table not created yet.
+    _backfill_briefing_output(conn)
 
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError

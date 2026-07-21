@@ -79,20 +79,26 @@ def _decode_components(raw: str | None) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def _row_key(row: sqlite3.Row, key: str) -> Any:
+    """Read a column that may be absent on a not-yet-migrated row."""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
 def _row_to_briefing(row: sqlite3.Row) -> UserBriefing:
     # The DB column is named ``cron_expression`` for legacy reasons; the
-    # in-memory ``BriefingConfig`` uses ``cron`` (matches the TOML key). The
-    # ``output`` column also doesn't exist on the legacy table — store it
-    # under components or leave the default.
-    output = "talk"
+    # in-memory ``BriefingConfig`` uses ``cron`` (matches the TOML key).
     components = _decode_components(row["components"])
-    # Some clients pack ``output`` into components for back-compat. Hoist it
-    # into the dataclass field.
-    raw_output = components.pop("__output__", None)
-    # Accept any stored descriptor (talk/email/both/all/ntfy/talk:<tok>/comma
-    # lists); the legacy {talk,email,both} values are a subset.
-    if isinstance(raw_output, str) and raw_output.strip():
-        output = raw_output
+    # ``output`` is a real column now. Defensively fall back to a legacy
+    # ``__output__`` component key when reading a mid-migration row whose
+    # column read yields the default while the key is still present.
+    raw_output = _row_key(row, "output")
+    output = raw_output if isinstance(raw_output, str) and raw_output.strip() else "talk"
+    legacy_output = components.pop("__output__", None)
+    if output == "talk" and isinstance(legacy_output, str) and legacy_output.strip():
+        output = legacy_output
     return UserBriefing(
         id=int(row["id"]),
         user_id=row["user_id"],
@@ -161,12 +167,7 @@ def ensure_briefing(
         )
 
     components = dict(components or {})
-    # Pack ``output`` into components for storage on the legacy schema, since
-    # ``briefing_configs`` has no dedicated output column. ``_row_to_briefing``
-    # hoists it back out on read.
-    stored_components = dict(components)
-    stored_components["__output__"] = output
-    components_json = json.dumps(stored_components, sort_keys=True)
+    components_json = json.dumps(components, sort_keys=True)
     enabled_int = 1 if enabled else 0
 
     existing = get_briefing(db_path, user_id, name)
@@ -189,15 +190,16 @@ def ensure_briefing(
         conn.execute(
             """
             INSERT INTO briefing_configs
-                (user_id, name, cron_expression, conversation_token, components, enabled)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (user_id, name, cron_expression, conversation_token, components, output, enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (user_id, name) DO UPDATE SET
                 cron_expression = excluded.cron_expression,
                 conversation_token = excluded.conversation_token,
                 components = excluded.components,
+                output = excluded.output,
                 enabled = excluded.enabled
             """,
-            (user_id, name, cron, conversation_token or "", components_json, enabled_int),
+            (user_id, name, cron, conversation_token or "", components_json, output, enabled_int),
         )
 
     fresh = get_briefing(db_path, user_id, name)
@@ -268,22 +270,21 @@ def import_from_user_configs(
                 output = getattr(b, "output", "talk") or "talk"
                 token = getattr(b, "conversation_token", "") or ""
                 comps = dict(getattr(b, "components", {}) or {})
-                stored_components = dict(comps)
-                stored_components["__output__"] = output
 
                 try:
                     conn.execute(
                         """
                         INSERT INTO briefing_configs
-                            (user_id, name, cron_expression, conversation_token, components, enabled)
-                        VALUES (?, ?, ?, ?, ?, 1)
+                            (user_id, name, cron_expression, conversation_token, components, output, enabled)
+                        VALUES (?, ?, ?, ?, ?, ?, 1)
                         """,
                         (
                             user_id,
                             key[1],
                             cron,
                             token,
-                            json.dumps(stored_components, sort_keys=True),
+                            json.dumps(comps, sort_keys=True),
+                            output,
                         ),
                     )
                     written += 1
