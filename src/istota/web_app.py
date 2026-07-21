@@ -7,6 +7,7 @@ SvelteKit frontend served as static files, Python handles auth and API.
 """
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import signal
 import sqlite3
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
@@ -1267,6 +1269,9 @@ def _admin_modules_section() -> dict:
     if not _config:
         return modules
 
+    # feeds + money keep bespoke aggregators: feeds carries richer
+    # unreachable/resolve-error status semantics, money has no SQLite to count
+    # (beancount files). The remaining SQLite-backed modules share one driver.
     feeds = _admin_module_feeds()
     if feeds is not None:
         modules["feeds"] = feeds
@@ -1275,15 +1280,10 @@ def _admin_modules_section() -> dict:
     if money is not None:
         modules["money"] = money
 
-    if _config.location.enabled:
-        location_users = sum(
-            1 for uid in _config.users
-            if _config.is_module_enabled(uid, "location")
-        )
-        if location_users:
-            loc = _admin_module_location()
-            loc["users_configured"] = location_users
-            modules["location"] = loc
+    for spec in _MODULE_DB_STATS:
+        stats = _aggregate_module_db(spec)
+        if stats is not None:
+            modules[spec.name] = stats
 
     return modules
 
@@ -1370,44 +1370,125 @@ def _admin_module_money() -> dict | None:
     return {"users_configured": users_with}
 
 
-def _admin_module_location() -> dict:
-    """Aggregate location stats across every user's ``location.db``.
+@dataclass(frozen=True)
+class _ModuleDbStats:
+    """Declarative admin snapshot for a per-user SQLite-backed module.
 
-    Per-user files: sum visits + places, take max(last ping timestamp).
-    Per-user try/except so one broken DB doesn't blank the whole row.
+    Only three things vary between modules: the ``COUNT(*)`` queries, the
+    timestamp queries feeding a single "last activity" field, and the module
+    handle. The driver (`_aggregate_module_db`) supplies the shared loop:
+    enumerate enabled users, resolve + connect each user's DB, sum the counts,
+    take the max timestamp, and skip a broken DB without blanking the row.
+
+    The module must expose the standard loader protocol — ``list_users`` /
+    ``resolve_for_user`` / a ``connect`` context manager / ``UserNotFoundError``
+    and a context object with ``.db_path`` (see `_module_loader`).
+
+    - ``counts``: ``(output_field, "SELECT COUNT(*) AS n FROM …")`` pairs.
+    - ``timestamp_field`` / ``timestamp_queries``: the queries (each aliasing
+      the value ``AS ts``) whose max fills that one field.
     """
-    out = {"visits_total": 0, "places_total": 0, "last_update": None}
-    if not _config:
-        return out
-    try:
-        from . import location as _location  # noqa: PLC0415
 
-        latest: str | None = None
-        for uid in _location.list_users(_config):
-            try:
-                ctx = _location.resolve_for_user(uid, _config)
-                if not ctx.db_path.exists():
-                    continue
-                with _location.connect(ctx.db_path) as conn:
-                    out["visits_total"] += conn.execute(
-                        "SELECT COUNT(*) AS n FROM visits"
-                    ).fetchone()["n"]
-                    out["places_total"] += conn.execute(
-                        "SELECT COUNT(*) AS n FROM places"
-                    ).fetchone()["n"]
-                    row = conn.execute(
-                        "SELECT MAX(timestamp) AS ts FROM location_pings"
-                    ).fetchone()
+    name: str
+    counts: tuple[tuple[str, str], ...]
+    timestamp_field: str
+    timestamp_queries: tuple[str, ...]
+
+
+_MODULE_DB_STATS: tuple[_ModuleDbStats, ...] = (
+    _ModuleDbStats(
+        name="location",
+        counts=(
+            ("visits_total", "SELECT COUNT(*) AS n FROM visits"),
+            ("places_total", "SELECT COUNT(*) AS n FROM places"),
+        ),
+        timestamp_field="last_update",
+        timestamp_queries=("SELECT MAX(timestamp) AS ts FROM location_pings",),
+    ),
+    _ModuleDbStats(
+        name="health",
+        counts=(
+            ("panels_total", "SELECT COUNT(*) AS n FROM panels"),
+            ("biomarkers_total", "SELECT COUNT(*) AS n FROM biomarkers"),
+            ("encounters_total", "SELECT COUNT(*) AS n FROM encounters"),
+            ("immunizations_total", "SELECT COUNT(*) AS n FROM immunizations"),
+        ),
+        timestamp_field="last_update",
+        timestamp_queries=(
+            "SELECT MAX(measured_at) AS ts FROM stats",
+            "SELECT MAX(drawn_at) AS ts FROM panels",
+        ),
+    ),
+    _ModuleDbStats(
+        name="briefings",
+        counts=(
+            ("blocks_total", "SELECT COUNT(*) AS n FROM briefing_blocks"),
+            ("sources_total", "SELECT COUNT(*) AS n FROM briefing_block_sources"),
+            ("archived_total", "SELECT COUNT(*) AS n FROM briefing_archive"),
+        ),
+        timestamp_field="last_generated",
+        timestamp_queries=("SELECT MAX(generated_at) AS ts FROM briefing_archive",),
+    ),
+)
+
+
+def _module_loader(name: str):
+    """Resolve a module's loader protocol via lazy import.
+
+    Returns ``(list_users, resolve_for_user, connect, UserNotFoundError)``.
+    ``connect`` lives on the package for most modules but on the ``.db``
+    submodule for briefings — one fallback handles that without a per-module
+    special case. Lazy so importing ``web_app`` doesn't pull every module in.
+    """
+    mod = importlib.import_module(f"istota.{name}")
+    connect = getattr(mod, "connect", None)
+    if connect is None:
+        connect = importlib.import_module(f"istota.{name}.db").connect
+    return mod.list_users, mod.resolve_for_user, connect, mod.UserNotFoundError
+
+
+def _aggregate_module_db(spec: _ModuleDbStats) -> dict | None:
+    """Shared driver for a per-user SQLite-backed module's admin snapshot.
+
+    Returns ``None`` (module hidden) when no user has it enabled; otherwise a
+    dict of ``users_configured`` + the spec's counts + its single timestamp
+    field. Per-user try/except so one broken DB doesn't blank the row; an
+    unresolvable user (e.g. no mount) is skipped quietly.
+    """
+    try:
+        list_users, resolve_for_user, connect, not_found = _module_loader(spec.name)
+    except Exception:  # pragma: no cover - module import failure
+        logger.exception("%s module loader import failed", spec.name)
+        return None
+
+    users = list_users(_config)
+    if not users:
+        return None
+
+    out: dict = {"users_configured": len(users)}
+    for field, _sql in spec.counts:
+        out[field] = 0
+    out[spec.timestamp_field] = None
+
+    latest: str | None = None
+    for uid in users:
+        try:
+            ctx = resolve_for_user(uid, _config)
+            if not ctx.db_path.exists():
+                continue
+            with connect(ctx.db_path) as conn:
+                for field, sql in spec.counts:
+                    out[field] += conn.execute(sql).fetchone()["n"]
+                for query in spec.timestamp_queries:
+                    row = conn.execute(query).fetchone()
                     ts = row["ts"] if row else None
                     if ts and (latest is None or ts > latest):
                         latest = ts
-            except Exception:
-                logger.exception(
-                    "location module stats failed for user=%s", uid,
-                )
-        out["last_update"] = _iso_utc(latest)
-    except Exception:
-        logger.exception("location module stats failed")
+        except not_found:
+            continue
+        except Exception:
+            logger.exception("%s module stats failed for user=%s", spec.name, uid)
+    out[spec.timestamp_field] = _iso_utc(latest)
     return out
 
 
