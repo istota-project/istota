@@ -965,6 +965,8 @@ def cmd_user_ensure(args):
             )
             sys.exit(1)
         updates["email_reply_routing"] = args.email_reply_routing
+    if getattr(args, "default_briefings", None) is not None:
+        updates["default_briefings"] = args.default_briefings
 
     profile, state = user_profiles.update_profile_with_status(db_path, user_id, **updates)
 
@@ -987,6 +989,8 @@ def cmd_user_ensure(args):
         print(f"  default_destination: {profile.default_destination}")
     if profile.email_reply_routing and profile.email_reply_routing != "origin+thread":
         print(f"  email_reply_routing: {profile.email_reply_routing}")
+    if not profile.default_briefings:
+        print("  default_briefings: off")
     if profile.routing:
         print(f"  routing: {', '.join(f'{k}={v}' for k, v in sorted(profile.routing.items()))}")
     print(f"STATE: {state}")
@@ -1023,6 +1027,7 @@ def cmd_user_show(args):
         "routing": profile.routing,
         "default_destination": profile.default_destination,
         "email_reply_routing": profile.email_reply_routing,
+        "default_briefings": profile.default_briefings,
     }, indent=2))
 
 
@@ -1616,6 +1621,16 @@ def main():
             "Where a reply to an email this bot sent is delivered: 'origin+thread' "
             "(default — origin surface and the email thread), 'origin' (origin "
             "surface only), or 'thread' (email only)."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--default-briefings",
+        dest="default_briefings", default=None,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Seed the shared [[default_briefings]] set into this user (default on). "
+            "Pass --no-default-briefings to opt out; already-seeded briefings are "
+            "left intact."
         ),
     )
     # user show  (Phase 6: dump the DB row as JSON)

@@ -41,6 +41,7 @@ class _FakeArgs:
             "default_destination": None,
             "route": None,
             "email_reply_routing": None,
+            "default_briefings": None,
         }
         defaults.update(kwargs)
         self.__dict__.update(defaults)
@@ -199,3 +200,46 @@ class TestUserEnsureRouting:
             cmd_user_ensure(_FakeArgs(
                 config=str(cfg), name="alice", route=["alert"],
             ))
+
+
+class TestUserEnsureDefaultBriefings:
+    def test_default_is_on(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice"))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.default_briefings is True
+
+    def test_opt_out_persists(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", default_briefings=False,
+        ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.default_briefings is False
+
+    def test_omitted_flag_preserves_existing(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", default_briefings=False,
+        ))
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", display_name="Alice K",
+        ))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.default_briefings is False
+        assert profile.display_name == "Alice K"
+
+    def test_re_enable(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", default_briefings=False))
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", default_briefings=True))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.default_briefings is True

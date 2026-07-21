@@ -318,6 +318,47 @@ class TestConfigLoading:
         assert not hasattr(cfg, "briefing_defaults")
         assert not hasattr(config_mod, "BriefingDefaultsConfig")
 
+    def test_parse_default_briefings_section(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[[default_briefings]]\n'
+            'name = "Daily"\n'
+            'cron = "0 7 * * *"\n'
+            'output = "talk"\n'
+            '\n'
+            '[[default_briefings.blocks]]\n'
+            'title = "News"\n'
+            '\n'
+            '[[default_briefings.blocks.sources]]\n'
+            'kind = "rss"\n'
+        )
+        cfg = load_config(p)
+        assert len(cfg.default_briefings) == 1
+        d = cfg.default_briefings[0]
+        assert d.name == "Daily"
+        assert d.cron == "0 7 * * *"
+        assert d.output == "talk"
+        assert d.blocks[0]["title"] == "News"
+
+    def test_default_briefings_seeded_into_user(self, tmp_path):
+        db_file = tmp_path / "istota.db"
+        from istota import db as _db
+        _db.init_db(db_file)
+        p = tmp_path / "config.toml"
+        p.write_text(
+            f'db_path = "{db_file}"\n'
+            '\n'
+            '[[default_briefings]]\n'
+            'name = "Daily"\n'
+            'cron = "0 7 * * *"\n'
+            '\n'
+            '[users.alice]\n'
+            'display_name = "Alice"\n'
+        )
+        cfg = load_config(p)
+        names = [b.name for b in cfg.users["alice"].briefings]
+        assert "Daily" in names
+
     def test_toml_components_authoring_ignored(self, tmp_path):
         # Legacy `[[briefings]] [briefings.components]` authoring is dropped;
         # a stray components key is ignored (blocks-only content model).

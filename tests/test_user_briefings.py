@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from istota import user_briefings
-from istota.config import BriefingConfig, UserConfig
+from istota.config import BriefingConfig, Config, UserConfig
 
 
 class TestEnsureBriefing:
@@ -241,3 +241,67 @@ class TestOutputColumn:
         assert b is not None
         assert b.output == "both"
         assert b.components == {}
+
+
+class TestDefaultBriefings:
+    """Shared [[default_briefings]] seeded into opted-in users (by name, user wins)."""
+
+    def _default(self, name="Daily"):
+        return BriefingConfig(
+            name=name, cron="0 7 * * *", output="talk",
+            blocks=[{"title": "News", "sources": [{"kind": "rss", "config": {}}]}],
+        )
+
+    def test_opted_in_user_gets_defaults_with_blocks(self, db_path):
+        from istota import config as cfgmod
+
+        cfg = Config(db_path=db_path, default_briefings=[self._default()])
+        cfg.users = {"alice": UserConfig(display_name="Alice")}
+        cfgmod._apply_user_briefings(cfg)
+        briefings = cfg.users["alice"].briefings
+        assert [b.name for b in briefings] == ["Daily"]
+        assert briefings[0].blocks[0]["title"] == "News"
+
+    def test_opted_out_user_gets_none(self, db_path):
+        from istota import config as cfgmod
+
+        cfg = Config(db_path=db_path, default_briefings=[self._default()])
+        cfg.users = {"bob": UserConfig(display_name="Bob", default_briefings=False)}
+        cfgmod._apply_user_briefings(cfg)
+        assert cfg.users["bob"].briefings == []
+
+    def test_user_own_briefing_wins_by_name(self, db_path):
+        from istota import config as cfgmod
+
+        cfg = Config(db_path=db_path, default_briefings=[self._default()])
+        cfg.users = {
+            "carol": UserConfig(
+                display_name="Carol",
+                briefings=[BriefingConfig(name="Daily", cron="0 9 * * *", output="email")],
+            ),
+        }
+        cfgmod._apply_user_briefings(cfg)
+        daily = [b for b in cfg.users["carol"].briefings if b.name == "Daily"]
+        assert len(daily) == 1  # no duplicate
+        assert daily[0].cron == "0 9 * * *"  # user's own, default not merged
+
+    def test_defaults_reach_db_via_import(self, db_path):
+        from istota import config as cfgmod
+
+        cfg = Config(db_path=db_path, default_briefings=[self._default()])
+        cfg.users = {"alice": UserConfig(display_name="Alice")}
+        cfgmod._apply_user_briefings(cfg)
+        # The seeded default is now an ordinary in-memory briefing → import writes it.
+        written = user_briefings.import_from_user_configs(db_path, cfg.users)
+        assert written == 1
+        rows = user_briefings.list_briefings(db_path, "alice")
+        assert [r.name for r in rows] == ["Daily"]
+        assert rows[0].output == "talk"
+
+    def test_no_defaults_configured_is_noop(self, db_path):
+        from istota import config as cfgmod
+
+        cfg = Config(db_path=db_path, default_briefings=[])
+        cfg.users = {"alice": UserConfig(display_name="Alice")}
+        cfgmod._apply_user_briefings(cfg)
+        assert cfg.users["alice"].briefings == []
