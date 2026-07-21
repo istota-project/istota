@@ -27,7 +27,7 @@
    settings.css scopes `.settings .card`. */
 
 .card-grid {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(min(var(--card-min, 240px), 100%), 1fr));
-	gap: var(--card-gap, 0.75rem);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(var(--card-min, 240px), 100%), 1fr));
+  gap: var(--card-gap, 0.75rem);
 }

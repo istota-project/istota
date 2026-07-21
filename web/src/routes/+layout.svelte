@@ -1,296 +1,308 @@
 <script lang="ts">
-	import { base } from '$app/paths';
-	import { page } from '$app/state';
-	import { onMount } from 'svelte';
-	import { LogOut, Menu, Sun, Moon } from 'lucide-svelte';
-	import { DropdownMenu } from 'bits-ui';
-	import { getMe, AuthError, type User } from '$lib/api';
-	import { theme, toggleTheme } from '$lib/stores/theme';
-	import '../app.css';
+  import { base } from '$app/paths';
+  import { page } from '$app/state';
+  import { onMount } from 'svelte';
+  import { LogOut, Menu, Sun, Moon } from 'lucide-svelte';
+  import { DropdownMenu } from 'bits-ui';
+  import { getMe, AuthError, type User } from '$lib/api';
+  import { theme, toggleTheme } from '$lib/stores/theme';
+  import '../app.css';
 
-	let { children } = $props();
+  let { children } = $props();
 
-	let user: User | null = $state(null);
-	let loading = $state(true);
-	let error = $state('');
+  let user: User | null = $state(null);
+  let loading = $state(true);
+  let error = $state('');
 
-	onMount(async () => {
-		console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);
-		try {
-			user = await getMe();
-		} catch (e) {
-			if (e instanceof AuthError) {
-				window.location.href = `${base}/login`;
-				return;
-			}
-			error = 'Failed to load user info';
-		} finally {
-			loading = false;
-		}
-	});
+  onMount(async () => {
+    console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);
+    try {
+      user = await getMe();
+    } catch (e) {
+      if (e instanceof AuthError) {
+        window.location.href = `${base}/login`;
+        return;
+      }
+      error = 'Failed to load user info';
+    } finally {
+      loading = false;
+    }
+  });
 
-	function isActive(path: string): boolean {
-		const current = page.url.pathname;
-		if (path === '/') return current === `${base}` || current === `${base}/`;
-		return current.startsWith(`${base}${path}`);
-	}
+  function isActive(path: string): boolean {
+    const current = page.url.pathname;
+    if (path === '/') return current === `${base}` || current === `${base}/`;
+    return current.startsWith(`${base}${path}`);
+  }
 
-	const pageTitle = $derived.by(() => {
-		const path = page.url.pathname.replace(base, '').replace(/^\/+/, '');
-		if (!path) return 'Istota';
-		const segment = path.split('/')[0];
-		return `Istota - ${segment.charAt(0).toUpperCase()}${segment.slice(1)}`;
-	});
+  const pageTitle = $derived.by(() => {
+    const path = page.url.pathname.replace(base, '').replace(/^\/+/, '');
+    if (!path) return 'Istota';
+    const segment = path.split('/')[0];
+    return `Istota - ${segment.charAt(0).toUpperCase()}${segment.slice(1)}`;
+  });
 </script>
 
 <svelte:head>
-	<title>{pageTitle}</title>
+  <title>{pageTitle}</title>
 </svelte:head>
 
 {#if loading}
-	<div class="loading">Loading...</div>
+  <div class="loading">Loading...</div>
 {:else if error}
-	<div class="error-msg">{error}</div>
+  <div class="error-msg">{error}</div>
 {:else if user}
-	<nav class="app-nav">
-		<a href="{base}/" class="app-name">Istota</a>
-		<div class="nav-links">
-			<a href="{base}/chat" class:active={isActive('/chat')}>Chat</a>
-			{#if user.features.briefings}
-				<a href="{base}/briefings" class:active={isActive('/briefings')}>Briefings</a>
-			{/if}
-			{#if user.features.feeds}
-				<a href="{base}/feeds" class:active={isActive('/feeds')}>Feeds</a>
-			{/if}
-			{#if user.features.location}
-				<a href="{base}/location" class:active={isActive('/location')}>Location</a>
-			{/if}
-			{#if user.features.money}
-				<a href="{base}/money" class:active={isActive('/money')}>Money</a>
-			{/if}
-			{#if user.features.health}
-				<a href="{base}/health" class:active={isActive('/health')}>Health</a>
-			{/if}
-			{#if user.features.admin}
-				<a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
-			{/if}
-		</div>
-		<div class="nav-right">
-			<a
-				href="{base}/settings"
-				class="nav-user"
-				class:active={isActive('/settings')}
-				title="Settings"
-			>
-				{user.display_name}
-			</a>
-			<button
-				type="button"
-				class="theme-btn"
-				onclick={toggleTheme}
-				title={$theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-				aria-label="Toggle color theme"
-			>
-				{#if $theme === 'dark'}
-					<Sun size={15} />
-				{:else}
-					<Moon size={15} />
-				{/if}
-			</button>
-			<a href="{base}/logout" class="logout-btn" title="Log out" aria-label="Log out">
-				<LogOut size={14} />
-			</a>
-			<DropdownMenu.Root>
-				<DropdownMenu.Trigger>
-					{#snippet child({ props })}
-						<button class="hamburger-btn" aria-label="Open menu" {...props}>
-							<Menu size={18} />
-						</button>
-					{/snippet}
-				</DropdownMenu.Trigger>
-				<DropdownMenu.Portal>
-					<DropdownMenu.Content class="app-nav-menu" align="end" sideOffset={6}>
-						<DropdownMenu.Item>
-							{#snippet child({ props })}
-								<a
-									href="{base}/chat"
-									class="app-nav-menu-link"
-									class:active={isActive('/chat')}
-									{...props}>Chat</a
-								>
-							{/snippet}
-						</DropdownMenu.Item>
-						{#if user.features.briefings}
-							<DropdownMenu.Item>
-								{#snippet child({ props })}
-									<a
-										href="{base}/briefings"
-										class="app-nav-menu-link"
-										class:active={isActive('/briefings')}
-										{...props}>Briefings</a
-									>
-								{/snippet}
-							</DropdownMenu.Item>
-						{/if}
-						{#if user.features.feeds}
-							<DropdownMenu.Item>
-								{#snippet child({ props })}
-									<a
-										href="{base}/feeds"
-										class="app-nav-menu-link"
-										class:active={isActive('/feeds')}
-										{...props}>Feeds</a
-									>
-								{/snippet}
-							</DropdownMenu.Item>
-						{/if}
-						{#if user.features.location}
-							<DropdownMenu.Item>
-								{#snippet child({ props })}
-									<a
-										href="{base}/location"
-										class="app-nav-menu-link"
-										class:active={isActive('/location')}
-										{...props}>Location</a
-									>
-								{/snippet}
-							</DropdownMenu.Item>
-						{/if}
-						{#if user.features.money}
-							<DropdownMenu.Item>
-								{#snippet child({ props })}
-									<a
-										href="{base}/money"
-										class="app-nav-menu-link"
-										class:active={isActive('/money')}
-										{...props}>Money</a
-									>
-								{/snippet}
-							</DropdownMenu.Item>
-						{/if}
-						{#if user.features.health}
-							<DropdownMenu.Item>
-								{#snippet child({ props })}
-									<a
-										href="{base}/health"
-										class="app-nav-menu-link"
-										class:active={isActive('/health')}
-										{...props}>Health</a
-									>
-								{/snippet}
-							</DropdownMenu.Item>
-						{/if}
-						{#if user.features.admin}
-							<DropdownMenu.Item>
-								{#snippet child({ props })}
-									<a
-										href="{base}/admin"
-										class="app-nav-menu-link"
-										class:active={isActive('/admin')}
-										{...props}>Admin</a
-									>
-								{/snippet}
-							</DropdownMenu.Item>
-						{/if}
-						<DropdownMenu.Item>
-							{#snippet child({ props })}
-								<a
-									href="{base}/settings"
-									class="app-nav-menu-link"
-									class:active={isActive('/settings')}
-									{...props}>Settings</a
-								>
-							{/snippet}
-						</DropdownMenu.Item>
-					</DropdownMenu.Content>
-				</DropdownMenu.Portal>
-			</DropdownMenu.Root>
-		</div>
-	</nav>
-	<main class="app-content" class:app-content-fill={isActive('/chat') || isActive('/location') || isActive('/feeds') || isActive('/money') || isActive('/health') || isActive('/briefings')}>
-		{@render children()}
-	</main>
+  <nav class="app-nav">
+    <a href="{base}/" class="app-name">Istota</a>
+    <div class="nav-links">
+      <a href="{base}/chat" class:active={isActive('/chat')}>Chat</a>
+      {#if user.features.briefings}
+        <a href="{base}/briefings" class:active={isActive('/briefings')}>Briefings</a>
+      {/if}
+      {#if user.features.feeds}
+        <a href="{base}/feeds" class:active={isActive('/feeds')}>Feeds</a>
+      {/if}
+      {#if user.features.location}
+        <a href="{base}/location" class:active={isActive('/location')}>Location</a>
+      {/if}
+      {#if user.features.money}
+        <a href="{base}/money" class:active={isActive('/money')}>Money</a>
+      {/if}
+      {#if user.features.health}
+        <a href="{base}/health" class:active={isActive('/health')}>Health</a>
+      {/if}
+      {#if user.features.admin}
+        <a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
+      {/if}
+    </div>
+    <div class="nav-right">
+      <a
+        href="{base}/settings"
+        class="nav-user"
+        class:active={isActive('/settings')}
+        title="Settings"
+      >
+        {user.display_name}
+      </a>
+      <button
+        type="button"
+        class="theme-btn"
+        onclick={toggleTheme}
+        title={$theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        aria-label="Toggle color theme"
+      >
+        {#if $theme === 'dark'}
+          <Sun size={15} />
+        {:else}
+          <Moon size={15} />
+        {/if}
+      </button>
+      <a href="{base}/logout" class="logout-btn" title="Log out" aria-label="Log out">
+        <LogOut size={14} />
+      </a>
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger>
+          {#snippet child({ props })}
+            <button class="hamburger-btn" aria-label="Open menu" {...props}>
+              <Menu size={18} />
+            </button>
+          {/snippet}
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content class="app-nav-menu" align="end" sideOffset={6}>
+            <DropdownMenu.Item>
+              {#snippet child({ props })}
+                <a
+                  href="{base}/chat"
+                  class="app-nav-menu-link"
+                  class:active={isActive('/chat')}
+                  {...props}>Chat</a
+                >
+              {/snippet}
+            </DropdownMenu.Item>
+            {#if user.features.briefings}
+              <DropdownMenu.Item>
+                {#snippet child({ props })}
+                  <a
+                    href="{base}/briefings"
+                    class="app-nav-menu-link"
+                    class:active={isActive('/briefings')}
+                    {...props}>Briefings</a
+                  >
+                {/snippet}
+              </DropdownMenu.Item>
+            {/if}
+            {#if user.features.feeds}
+              <DropdownMenu.Item>
+                {#snippet child({ props })}
+                  <a
+                    href="{base}/feeds"
+                    class="app-nav-menu-link"
+                    class:active={isActive('/feeds')}
+                    {...props}>Feeds</a
+                  >
+                {/snippet}
+              </DropdownMenu.Item>
+            {/if}
+            {#if user.features.location}
+              <DropdownMenu.Item>
+                {#snippet child({ props })}
+                  <a
+                    href="{base}/location"
+                    class="app-nav-menu-link"
+                    class:active={isActive('/location')}
+                    {...props}>Location</a
+                  >
+                {/snippet}
+              </DropdownMenu.Item>
+            {/if}
+            {#if user.features.money}
+              <DropdownMenu.Item>
+                {#snippet child({ props })}
+                  <a
+                    href="{base}/money"
+                    class="app-nav-menu-link"
+                    class:active={isActive('/money')}
+                    {...props}>Money</a
+                  >
+                {/snippet}
+              </DropdownMenu.Item>
+            {/if}
+            {#if user.features.health}
+              <DropdownMenu.Item>
+                {#snippet child({ props })}
+                  <a
+                    href="{base}/health"
+                    class="app-nav-menu-link"
+                    class:active={isActive('/health')}
+                    {...props}>Health</a
+                  >
+                {/snippet}
+              </DropdownMenu.Item>
+            {/if}
+            {#if user.features.admin}
+              <DropdownMenu.Item>
+                {#snippet child({ props })}
+                  <a
+                    href="{base}/admin"
+                    class="app-nav-menu-link"
+                    class:active={isActive('/admin')}
+                    {...props}>Admin</a
+                  >
+                {/snippet}
+              </DropdownMenu.Item>
+            {/if}
+            <DropdownMenu.Item>
+              {#snippet child({ props })}
+                <a
+                  href="{base}/settings"
+                  class="app-nav-menu-link"
+                  class:active={isActive('/settings')}
+                  {...props}>Settings</a
+                >
+              {/snippet}
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
+    </div>
+  </nav>
+  <main
+    class="app-content"
+    class:app-content-fill={isActive('/chat') ||
+      isActive('/location') ||
+      isActive('/feeds') ||
+      isActive('/money') ||
+      isActive('/health') ||
+      isActive('/briefings')}
+  >
+    {@render children()}
+  </main>
 {/if}
 
 <style>
-	.theme-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		background: none;
-		border: none;
-		color: var(--text-dim);
-		padding: 0.25rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
-		transition: color var(--transition-fast), background var(--transition-fast);
-	}
+  .theme-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    padding: 0.25rem;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition:
+      color var(--transition-fast),
+      background var(--transition-fast);
+  }
 
-	.theme-btn:hover {
-		color: var(--text-primary);
-		background: var(--surface-raised);
-	}
+  .theme-btn:hover {
+    color: var(--text-primary);
+    background: var(--surface-raised);
+  }
 
-	.hamburger-btn {
-		display: none;
-		background: none;
-		border: none;
-		color: var(--text-muted);
-		padding: 0.25rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
-		align-items: center;
-		justify-content: center;
-		transition: color var(--transition-fast), background var(--transition-fast);
-	}
+  .hamburger-btn {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    padding: 0.25rem;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    transition:
+      color var(--transition-fast),
+      background var(--transition-fast);
+  }
 
-	.hamburger-btn:hover,
-	.hamburger-btn[data-state='open'] {
-		color: var(--text-primary);
-		background: var(--surface-raised);
-	}
+  .hamburger-btn:hover,
+  .hamburger-btn[data-state='open'] {
+    color: var(--text-primary);
+    background: var(--surface-raised);
+  }
 
-	.nav-user.active {
-		color: var(--text-primary);
-	}
+  .nav-user.active {
+    color: var(--text-primary);
+  }
 
-	@media (max-width: 640px) {
-		.hamburger-btn {
-			display: inline-flex;
-		}
-		.nav-user {
-			display: none;
-		}
-	}
+  @media (max-width: 640px) {
+    .hamburger-btn {
+      display: inline-flex;
+    }
+    .nav-user {
+      display: none;
+    }
+  }
 
-	:global(.app-nav-menu) {
-		min-width: 9rem;
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-card);
-		padding: 0.25rem;
-		z-index: 60;
-		box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-		outline: none;
-	}
+  :global(.app-nav-menu) {
+    min-width: 9rem;
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-card);
+    padding: 0.25rem;
+    z-index: 60;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    outline: none;
+  }
 
-	:global(.app-nav-menu-link) {
-		display: block;
-		padding: 0.4rem 0.75rem;
-		font-size: var(--text-base);
-		color: var(--text-muted);
-		text-decoration: none;
-		border-radius: 0.3rem;
-		outline: none;
-	}
+  :global(.app-nav-menu-link) {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    font-size: var(--text-base);
+    color: var(--text-muted);
+    text-decoration: none;
+    border-radius: 0.3rem;
+    outline: none;
+  }
 
-	:global(.app-nav-menu-link:hover),
-	:global(.app-nav-menu-link[data-highlighted]) {
-		background: var(--surface-raised);
-		color: var(--text-primary);
-	}
+  :global(.app-nav-menu-link:hover),
+  :global(.app-nav-menu-link[data-highlighted]) {
+    background: var(--surface-raised);
+    color: var(--text-primary);
+  }
 
-	:global(.app-nav-menu-link.active) {
-		color: var(--text-primary);
-	}
+  :global(.app-nav-menu-link.active) {
+    color: var(--text-primary);
+  }
 </style>

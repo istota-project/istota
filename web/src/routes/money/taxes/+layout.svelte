@@ -1,7 +1,7 @@
 <script lang="ts">
-	let { children } = $props();
+  let { children } = $props();
 </script>
 
 <div class="money-section-body">
-	{@render children()}
+  {@render children()}
 </div>

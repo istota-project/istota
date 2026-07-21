@@ -3,56 +3,56 @@
    .card / .section-header / .field / .banner / .grid primitives below. */
 
 .settings {
-	width: 100%;
-	max-width: 980px;
-	margin: 0 auto;
-	padding: 1.5rem 1rem 4rem;
-	display: flex;
-	flex-direction: column;
-	gap: 1rem;
-	box-sizing: border-box;
-	container-type: inline-size;
-	container-name: settings;
+  width: 100%;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  box-sizing: border-box;
+  container-type: inline-size;
+  container-name: settings;
 }
 
 .settings-header {
-	display: flex;
-	justify-content: space-between;
-	align-items: flex-start;
-	gap: 1rem;
-	flex-wrap: wrap;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
 }
 
 .settings-header h1 {
-	margin: 0;
-	font-size: var(--text-lg, 1.05rem);
-	color: var(--text-primary);
+  margin: 0;
+  font-size: var(--text-lg, 1.05rem);
+  color: var(--text-primary);
 }
 
 .settings .hint {
-	margin: 0.25rem 0 0;
-	font-size: var(--text-sm);
-	color: var(--text-muted);
-	max-width: 60ch;
+  margin: 0.25rem 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  max-width: 60ch;
 }
 
 .settings .hint code,
 .settings code {
-	background: var(--surface-raised);
-	padding: 0 0.3rem;
-	border-radius: 0.2rem;
-	font-size: 0.8em;
+  background: var(--surface-raised);
+  padding: 0 0.3rem;
+  border-radius: 0.2rem;
+  font-size: 0.8em;
 }
 
 .settings .header-actions {
-	display: flex;
-	align-items: center;
-	gap: 0.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
 }
 
 .settings .dirty-badge {
-	font-size: var(--text-xs);
-	color: #d6a000;
+  font-size: var(--text-xs);
+  color: #d6a000;
 }
 
 /* Banners are unscoped so they work both inside .settings wrappers and in
@@ -60,258 +60,266 @@
    distinct enough that a global .banner / .banner.error / .banner.info is
    acceptable. */
 .banner {
-	padding: 0.4rem 0.75rem;
-	border-radius: var(--radius-card);
-	font-size: var(--text-sm);
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--radius-card);
+  font-size: var(--text-sm);
 }
 .banner.error {
-	background: rgba(204, 102, 102, 0.15);
-	color: #e88;
+  background: rgba(204, 102, 102, 0.15);
+  color: #e88;
 }
 .banner.info {
-	background: rgba(110, 184, 132, 0.15);
-	color: #8d8;
+  background: rgba(110, 184, 132, 0.15);
+  color: #8d8;
 }
 
 .settings .placeholder {
-	color: var(--text-dim);
-	padding: 2rem 0;
-	text-align: center;
+  color: var(--text-dim);
+  padding: 2rem 0;
+  text-align: center;
 }
 
 .settings .card {
-	background: var(--surface-card);
-	border: 1px solid var(--border-subtle);
-	border-radius: var(--radius-card);
-	padding: 1rem;
-	display: flex;
-	flex-direction: column;
-	gap: 0.75rem;
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 }
 
 .settings .card h2 {
-	margin: 0;
-	font-size: var(--text-base);
-	color: var(--text-primary);
+  margin: 0;
+  font-size: var(--text-base);
+  color: var(--text-primary);
 }
 
 .settings .card h3 {
-	margin: 0;
-	font-size: var(--text-sm);
-	color: var(--text-muted);
-	font-weight: 600;
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-weight: 600;
 }
 
 .settings .section-header {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	gap: 0.75rem;
-	flex-wrap: wrap;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .settings .subsection-heading {
-	display: flex;
-	flex-direction: column;
-	gap: 0.2rem;
-	margin: 0.5rem 0 -0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0.5rem 0 -0.25rem;
 }
 
 .settings .subsection-heading h2 {
-	margin: 0;
-	font-size: var(--text-base);
-	color: var(--text-primary);
+  margin: 0;
+  font-size: var(--text-base);
+  color: var(--text-primary);
 }
 
 .settings .subsection-heading .hint {
-	margin: 0;
+  margin: 0;
 }
 
 .settings .title {
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .settings .meta {
-	font-size: var(--text-xs);
-	color: var(--text-dim);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
 }
 
 .settings .status-pill {
-	font-size: var(--text-xs);
-	padding: 0.05rem 0.4rem;
-	border-radius: var(--radius-pill);
-	background: var(--surface-raised);
-	color: var(--text-muted);
+  font-size: var(--text-xs);
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill);
+  background: var(--surface-raised);
+  color: var(--text-muted);
 }
-.settings .status-pill.status-configured { color: #6eb884; }
-.settings .status-pill.status-partial { color: #d6a000; }
-.settings .status-pill.status-missing { color: var(--text-dim); }
-.settings .status-pill.status-unavailable { color: var(--text-dim); }
+.settings .status-pill.status-configured {
+  color: #6eb884;
+}
+.settings .status-pill.status-partial {
+  color: #d6a000;
+}
+.settings .status-pill.status-missing {
+  color: var(--text-dim);
+}
+.settings .status-pill.status-unavailable {
+  color: var(--text-dim);
+}
 
 .settings .empty {
-	font-size: var(--text-sm);
-	color: var(--text-dim);
-	margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  margin: 0;
 }
 
 .settings .field {
-	display: flex;
-	flex-direction: column;
-	gap: 0.2rem;
-	font-size: var(--text-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: var(--text-sm);
 }
 
 .settings .field > span {
-	color: var(--text-muted);
+  color: var(--text-muted);
 }
 
 .settings .field input:not([type='checkbox']),
 .settings .field select,
 .settings .field textarea {
-	background: var(--surface-base);
-	color: var(--text-primary);
-	border: 1px solid var(--border-default);
-	border-radius: 0.3rem;
-	padding: 0.3rem 0.5rem;
-	font: inherit;
-	font-size: var(--text-sm);
-	width: 100%;
-	max-width: 24rem;
-	min-width: 0;
-	box-sizing: border-box;
+  background: var(--surface-base);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 0.3rem;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  font-size: var(--text-sm);
+  width: 100%;
+  max-width: 24rem;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .settings .field textarea {
-	font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
-	resize: vertical;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  resize: vertical;
 }
 
 .settings .field-wide textarea,
 .settings .field-wide input {
-	max-width: 36rem;
+  max-width: 36rem;
 }
 
 .settings .field input:focus,
 .settings .field select:focus,
 .settings .field textarea:focus {
-	outline: 1px solid var(--accent, #6c8ebf);
+  outline: 1px solid var(--accent, #6c8ebf);
 }
 
 .settings .field.checkbox {
-	flex-direction: row;
-	align-items: center;
-	gap: 0.4rem;
-	color: var(--text-primary);
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-primary);
 }
 .settings .field.checkbox > span {
-	color: var(--text-primary);
+  color: var(--text-primary);
 }
 .settings .field.checkbox input[type='checkbox'] {
-	width: auto;
+  width: auto;
 }
 
 .settings .row {
-	display: flex;
-	gap: 0.4rem;
-	align-items: center;
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
 }
 
 .settings .flash {
-	font-size: var(--text-xs);
-	color: #6eb884;
+  font-size: var(--text-xs);
+  color: #6eb884;
 }
 
 .settings .field-error {
-	font-size: var(--text-xs);
-	color: #e88;
+  font-size: var(--text-xs);
+  color: #e88;
 }
 
 .settings .table-scroll {
-	width: 100%;
-	overflow-x: auto;
-	-webkit-overflow-scrolling: touch;
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .settings .grid {
-	width: 100%;
-	table-layout: fixed;
-	border-collapse: collapse;
-	font-size: var(--text-sm);
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
 }
 
 .settings .grid th,
 .settings .grid td {
-	text-align: left;
-	padding: 0.4rem 0.5rem;
-	border-bottom: 1px solid var(--border-subtle);
-	vertical-align: middle;
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
 }
 
 .settings .grid th {
-	color: var(--text-dim);
-	font-weight: 500;
-	font-size: var(--text-xs);
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .settings .grid td.actions,
 .settings .grid th.actions {
-	text-align: right;
-	width: 3rem;
-	white-space: nowrap;
+  text-align: right;
+  width: 3rem;
+  white-space: nowrap;
 }
 
 .settings .muted {
-	color: var(--text-dim);
+  color: var(--text-dim);
 }
 
 .settings .icon-btn {
-	background: transparent;
-	border: none;
-	color: var(--text-dim);
-	cursor: pointer;
-	padding: 0.1rem 0.35rem;
-	border-radius: 0.2rem;
-	font: inherit;
-	font-size: var(--text-base);
-	line-height: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.2rem;
+  font: inherit;
+  font-size: var(--text-base);
+  line-height: 1;
 }
 
 .settings .icon-btn:hover:not(:disabled) {
-	color: var(--text-primary);
-	background: var(--surface-raised);
+  color: var(--text-primary);
+  background: var(--surface-raised);
 }
 
 .settings .icon-btn.danger:hover:not(:disabled) {
-	color: #e88;
+  color: #e88;
 }
 
 .settings .icon-btn:disabled {
-	opacity: 0.3;
-	cursor: not-allowed;
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 @media (max-width: 768px) {
-	.settings {
-		padding: 1rem 0.75rem 3rem;
-	}
-	.settings-header {
-		flex-direction: column;
-		align-items: stretch;
-	}
-	.settings .card {
-		padding: 0.75rem;
-	}
+  .settings {
+    padding: 1rem 0.75rem 3rem;
+  }
+  .settings-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .settings .card {
+    padding: 0.75rem;
+  }
 }
 
 @media (max-width: 640px) {
-	.settings {
-		padding: 0.75rem 0.5rem 3rem;
-	}
-	.settings .card {
-		padding: 0.6rem;
-	}
+  .settings {
+    padding: 0.75rem 0.5rem 3rem;
+  }
+  .settings .card {
+    padding: 0.6rem;
+  }
 }

@@ -1,143 +1,143 @@
 <script lang="ts">
-	import { Select as BitsSelect } from 'bits-ui';
-	import { ChevronDown } from 'lucide-svelte';
+  import { Select as BitsSelect } from 'bits-ui';
+  import { ChevronDown } from 'lucide-svelte';
 
-	export interface SelectOption {
-		value: string;
-		label: string;
-	}
+  export interface SelectOption {
+    value: string;
+    label: string;
+  }
 
-	interface Props {
-		value: string;
-		options: SelectOption[];
-		onValueChange?: (value: string) => void;
-		placeholder?: string;
-		disabled?: boolean;
-		ariaLabel?: string;
-		/** Render as a full-width control matching text inputs (settings forms). */
-		fullWidth?: boolean;
-	}
+  interface Props {
+    value: string;
+    options: SelectOption[];
+    onValueChange?: (value: string) => void;
+    placeholder?: string;
+    disabled?: boolean;
+    ariaLabel?: string;
+    /** Render as a full-width control matching text inputs (settings forms). */
+    fullWidth?: boolean;
+  }
 
-	let {
-		value = $bindable(''),
-		options,
-		onValueChange,
-		placeholder = 'Select…',
-		disabled = false,
-		ariaLabel,
-		fullWidth = false,
-	}: Props = $props();
+  let {
+    value = $bindable(''),
+    options,
+    onValueChange,
+    placeholder = 'Select…',
+    disabled = false,
+    ariaLabel,
+    fullWidth = false,
+  }: Props = $props();
 
-	const selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? placeholder);
+  const selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? placeholder);
 </script>
 
 <BitsSelect.Root type="single" bind:value {onValueChange} {disabled}>
-	<BitsSelect.Trigger
-		class={fullWidth ? 'ui-select-trigger ui-select-trigger--full' : 'ui-select-trigger'}
-		aria-label={ariaLabel}
-	>
-		<span class="ui-select-label">{selectedLabel}</span>
-		<ChevronDown size={12} />
-	</BitsSelect.Trigger>
-	<BitsSelect.Portal>
-		<BitsSelect.Content class="ui-select-content" sideOffset={4}>
-			<BitsSelect.Viewport class="ui-select-viewport">
-				{#each options as opt (opt.value)}
-					<BitsSelect.Item value={opt.value} label={opt.label} class="ui-select-item">
-						{opt.label}
-					</BitsSelect.Item>
-				{/each}
-			</BitsSelect.Viewport>
-		</BitsSelect.Content>
-	</BitsSelect.Portal>
+  <BitsSelect.Trigger
+    class={fullWidth ? 'ui-select-trigger ui-select-trigger--full' : 'ui-select-trigger'}
+    aria-label={ariaLabel}
+  >
+    <span class="ui-select-label">{selectedLabel}</span>
+    <ChevronDown size={12} />
+  </BitsSelect.Trigger>
+  <BitsSelect.Portal>
+    <BitsSelect.Content class="ui-select-content" sideOffset={4}>
+      <BitsSelect.Viewport class="ui-select-viewport">
+        {#each options as opt (opt.value)}
+          <BitsSelect.Item value={opt.value} label={opt.label} class="ui-select-item">
+            {opt.label}
+          </BitsSelect.Item>
+        {/each}
+      </BitsSelect.Viewport>
+    </BitsSelect.Content>
+  </BitsSelect.Portal>
 </BitsSelect.Root>
 
 <style>
-	:global(.ui-select-trigger) {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.4rem;
-		background: var(--surface-card);
-		color: var(--text-primary);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-pill);
-		padding: 0.15rem 0.5rem;
-		font: inherit;
-		font-size: var(--text-xs);
-		line-height: 1.2;
-		cursor: pointer;
-		transition: background var(--transition-fast);
-	}
-	:global(.ui-select-trigger:hover) {
-		background: var(--surface-raised);
-	}
+  :global(.ui-select-trigger) {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: var(--surface-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-pill);
+    padding: 0.15rem 0.5rem;
+    font: inherit;
+    font-size: var(--text-xs);
+    line-height: 1.2;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+  :global(.ui-select-trigger:hover) {
+    background: var(--surface-raised);
+  }
 
-	/* Full-width variant: matches the settings text inputs exactly — width:100%
+  /* Full-width variant: matches the settings text inputs exactly — width:100%
 	   capped at the same 24rem (border-box). On screens narrower than 24rem the
 	   width:100% already shrinks it to fill the container, same as the inputs,
 	   so no mobile-specific override is needed. */
-	:global(.ui-select-trigger--full) {
-		display: flex;
-		justify-content: space-between;
-		width: 100%;
-		max-width: 24rem;
-		box-sizing: border-box;
-		background: var(--surface-base);
-		border-radius: 0.3rem;
-		padding: 0.3rem 0.5rem;
-		font-size: var(--text-sm);
-		/* Match native text-input height: inputs inherit line-height 1.5, but the
+  :global(.ui-select-trigger--full) {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    max-width: 24rem;
+    box-sizing: border-box;
+    background: var(--surface-base);
+    border-radius: 0.3rem;
+    padding: 0.3rem 0.5rem;
+    font-size: var(--text-sm);
+    /* Match native text-input height: inputs inherit line-height 1.5, but the
 		   base trigger pins 1.2, which left the full-width trigger ~4px shorter
 		   than the inputs it sits beside in forms. */
-		line-height: 1.5;
-	}
-	:global(.ui-select-trigger--full .ui-select-label) {
-		max-width: none;
-	}
-	:global(.ui-select-trigger:disabled) {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	:global(.ui-select-label) {
-		max-width: 220px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
+    line-height: 1.5;
+  }
+  :global(.ui-select-trigger--full .ui-select-label) {
+    max-width: none;
+  }
+  :global(.ui-select-trigger:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  :global(.ui-select-label) {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
-	:global(.ui-select-content) {
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: 0.4rem;
-		padding: 0.25rem;
-		z-index: 100;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-		min-width: var(--bits-select-anchor-width, 8rem);
-		max-height: 18rem;
-		overflow: auto;
-		outline: none;
-	}
+  :global(.ui-select-content) {
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: 0.4rem;
+    padding: 0.25rem;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    min-width: var(--bits-select-anchor-width, 8rem);
+    max-height: 18rem;
+    overflow: auto;
+    outline: none;
+  }
 
-	:global(.ui-select-viewport) {
-		display: flex;
-		flex-direction: column;
-		gap: 0.05rem;
-	}
+  :global(.ui-select-viewport) {
+    display: flex;
+    flex-direction: column;
+    gap: 0.05rem;
+  }
 
-	:global(.ui-select-item) {
-		padding: 0.3rem 0.5rem;
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		border-radius: 0.3rem;
-		cursor: pointer;
-		outline: none;
-		user-select: none;
-	}
-	:global(.ui-select-item[data-highlighted]) {
-		background: var(--surface-raised);
-		color: var(--text-primary);
-	}
-	:global(.ui-select-item[data-selected]) {
-		color: var(--text-primary);
-	}
+  :global(.ui-select-item) {
+    padding: 0.3rem 0.5rem;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    border-radius: 0.3rem;
+    cursor: pointer;
+    outline: none;
+    user-select: none;
+  }
+  :global(.ui-select-item[data-highlighted]) {
+    background: var(--surface-raised);
+    color: var(--text-primary);
+  }
+  :global(.ui-select-item[data-selected]) {
+    color: var(--text-primary);
+  }
 </style>

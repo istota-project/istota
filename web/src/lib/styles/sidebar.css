@@ -22,40 +22,40 @@
    and intentionally not shared: feeds runs its list at --text-sm, chat at
    --text-base. */
 .sidebar .views {
-	display: flex;
-	flex-direction: column;
-	margin-bottom: 0.5rem;
-	padding-bottom: 0.5rem;
-	border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .sidebar .view-btn {
-	display: flex;
-	align-items: center;
-	gap: 0.4rem;
-	width: 100%;
-	background: none;
-	border: none;
-	color: var(--text-muted);
-	font: inherit;
-	font-size: var(--text-base);
-	cursor: pointer;
-	padding: 0.3rem 0.6rem;
-	border-radius: 0.3rem;
-	transition: background var(--transition-fast);
-	text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-base);
+  cursor: pointer;
+  padding: 0.3rem 0.6rem;
+  border-radius: 0.3rem;
+  transition: background var(--transition-fast);
+  text-align: left;
 }
 
 .sidebar .view-btn:hover {
-	background: var(--surface-raised);
+  background: var(--surface-raised);
 }
 
 .sidebar .view-btn.active {
-	background: var(--surface-raised);
-	color: var(--text-primary);
+  background: var(--surface-raised);
+  color: var(--text-primary);
 }
 
 .sidebar .view-name {
-	flex: 1;
-	min-width: 0;
+  flex: 1;
+  min-width: 0;
 }

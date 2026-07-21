@@ -23,28 +23,28 @@ import MarkdownIt from 'markdown-it';
 import hljs from 'highlight.js/lib/common';
 
 const md = new MarkdownIt({
-	html: false, // never emit raw HTML from source — safe-by-construction
-	linkify: true, // auto-link bare URLs
-	breaks: true, // single newline -> <br>, which reads better in chat
-	typographer: false,
-	// Syntax-highlight fenced blocks. Returning a full `<pre><code>…</code></pre>`
-	// string tells markdown-it to use it verbatim (it won't re-wrap). The `hljs`
-	// class on <code> activates the token palette; `language-<lang>` is kept for
-	// parity with the un-highlighted path and CSS hooks.
-	highlight(str, lang): string {
-		const langClass = lang ? ` language-${md.utils.escapeHtml(lang)}` : '';
-		if (lang && hljs.getLanguage(lang)) {
-			try {
-				const { value } = hljs.highlight(str, { language: lang, ignoreIllegals: true });
-				return `<pre><code class="hljs${langClass}">${value}</code></pre>`;
-			} catch {
-				// Fall through to the escaped-plain path on any hljs failure.
-			}
-		}
-		// Unknown / missing language: escape the body ourselves and still tag it
-		// `hljs` so the block background/padding match highlighted blocks.
-		return `<pre><code class="hljs${langClass}">${md.utils.escapeHtml(str)}</code></pre>`;
-	},
+  html: false, // never emit raw HTML from source — safe-by-construction
+  linkify: true, // auto-link bare URLs
+  breaks: true, // single newline -> <br>, which reads better in chat
+  typographer: false,
+  // Syntax-highlight fenced blocks. Returning a full `<pre><code>…</code></pre>`
+  // string tells markdown-it to use it verbatim (it won't re-wrap). The `hljs`
+  // class on <code> activates the token palette; `language-<lang>` is kept for
+  // parity with the un-highlighted path and CSS hooks.
+  highlight(str, lang): string {
+    const langClass = lang ? ` language-${md.utils.escapeHtml(lang)}` : '';
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        const { value } = hljs.highlight(str, { language: lang, ignoreIllegals: true });
+        return `<pre><code class="hljs${langClass}">${value}</code></pre>`;
+      } catch {
+        // Fall through to the escaped-plain path on any hljs failure.
+      }
+    }
+    // Unknown / missing language: escape the body ourselves and still tag it
+    // `hljs` so the block background/padding match highlighted blocks.
+    return `<pre><code class="hljs${langClass}">${md.utils.escapeHtml(str)}</code></pre>`;
+  },
 });
 
 // Disable linkify's fuzzy (schema-less) link detection. Without this, bare
@@ -63,17 +63,17 @@ md.validateLink = (url: string): boolean => SAFE_URL.test(url.trim());
 // Open links in a new tab with noopener/noreferrer. We layer onto the default
 // renderer rather than replacing it so URL normalization/encoding still runs.
 const defaultLinkOpen =
-	md.renderer.rules.link_open ??
-	((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+  md.renderer.rules.link_open ??
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
 
 md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-	const token = tokens[idx];
-	token.attrSet('target', '_blank');
-	token.attrSet('rel', 'noopener noreferrer');
-	return defaultLinkOpen(tokens, idx, options, env, self);
+  const token = tokens[idx];
+  token.attrSet('target', '_blank');
+  token.attrSet('rel', 'noopener noreferrer');
+  return defaultLinkOpen(tokens, idx, options, env, self);
 };
 
 export function renderMarkdown(src: string): string {
-	if (!src) return '';
-	return md.render(src);
+  if (!src) return '';
+  return md.render(src);
 }

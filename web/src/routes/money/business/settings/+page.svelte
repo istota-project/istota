@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { base } from '$app/paths';
-	import { goto } from '$app/navigation';
-	import { onMount } from 'svelte';
+  import { base } from '$app/paths';
+  import { goto } from '$app/navigation';
+  import { onMount } from 'svelte';
 
-	onMount(() => {
-		goto(`${base}/money/settings`, { replaceState: true });
-	});
+  onMount(() => {
+    goto(`${base}/money/settings`, { replaceState: true });
+  });
 </script>

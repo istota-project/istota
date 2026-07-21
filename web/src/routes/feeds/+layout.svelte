@@ -1,292 +1,303 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { base } from '$app/paths';
-	import { goto } from '$app/navigation';
-	import { page } from '$app/state';
-	import { getFeeds, markAsRead, type Feed } from '$lib/api';
-	import {
-		feedsList,
-		selectedFeedId,
-		selectedCategoryId,
-		showImages,
-		showStarred,
-		showText,
-		showUnseen,
-		sortBy,
-		viewMode,
-		feedsRefreshNonce,
-	} from '$lib/stores/feeds';
-	import {
-		AppShell,
-		ShellHeader,
-		Sidebar,
-		SidebarToggle,
-		CategoryGroup,
-		Chip,
-		Select,
-	} from '$lib/components/ui';
-	import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from 'lucide-svelte';
+  import { onMount } from 'svelte';
+  import { base } from '$app/paths';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/state';
+  import { getFeeds, markAsRead, type Feed } from '$lib/api';
+  import {
+    feedsList,
+    selectedFeedId,
+    selectedCategoryId,
+    showImages,
+    showStarred,
+    showText,
+    showUnseen,
+    sortBy,
+    viewMode,
+    feedsRefreshNonce,
+  } from '$lib/stores/feeds';
+  import {
+    AppShell,
+    ShellHeader,
+    Sidebar,
+    SidebarToggle,
+    CategoryGroup,
+    Chip,
+    Select,
+  } from '$lib/components/ui';
+  import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from 'lucide-svelte';
 
-	let { children } = $props();
+  let { children } = $props();
 
-	const sortOptions = [
-		{ value: 'published', label: 'Published' },
-		{ value: 'added', label: 'Added' },
-	];
+  const sortOptions = [
+    { value: 'published', label: 'Published' },
+    { value: 'added', label: 'Added' },
+  ];
 
-	let feeds: Feed[] = $state([]);
-	let sidebarOpen = $state(false);
+  let feeds: Feed[] = $state([]);
+  let sidebarOpen = $state(false);
 
-	let onSettings = $derived(page.url.pathname.startsWith(`${base}/feeds/settings`));
+  let onSettings = $derived(page.url.pathname.startsWith(`${base}/feeds/settings`));
 
-	function toggleSettings() {
-		if (onSettings) goto(`${base}/feeds`);
-		else goto(`${base}/feeds/settings`);
-	}
+  function toggleSettings() {
+    if (onSettings) goto(`${base}/feeds`);
+    else goto(`${base}/feeds/settings`);
+  }
 
-	let groupedFeeds = $derived.by(() => {
-		const groups: Record<string, Feed[]> = {};
-		for (const f of feeds) {
-			const cat = f.category.title || 'uncategorized';
-			if (!groups[cat]) groups[cat] = [];
-			groups[cat].push(f);
-		}
-		for (const arr of Object.values(groups)) {
-			arr.sort((a, b) => a.title.localeCompare(b.title));
-		}
-		return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
-	});
+  let groupedFeeds = $derived.by(() => {
+    const groups: Record<string, Feed[]> = {};
+    for (const f of feeds) {
+      const cat = f.category.title || 'uncategorized';
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(f);
+    }
+    for (const arr of Object.values(groups)) {
+      arr.sort((a, b) => a.title.localeCompare(b.title));
+    }
+    return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
+  });
 
-	function handleFeedClick(feedId: number) {
-		selectedFeedId.set($selectedFeedId === feedId ? 0 : feedId);
-		selectedCategoryId.set(0);
-		showStarred.set(false);
-		showUnseen.set(false);
-		sidebarOpen = false;
-		if (onSettings) goto(`${base}/feeds`);
-	}
+  function handleFeedClick(feedId: number) {
+    selectedFeedId.set($selectedFeedId === feedId ? 0 : feedId);
+    selectedCategoryId.set(0);
+    showStarred.set(false);
+    showUnseen.set(false);
+    sidebarOpen = false;
+    if (onSettings) goto(`${base}/feeds`);
+  }
 
-	function handleCategoryClick(categoryId: number) {
-		// Toggle: clicking the active category again returns to All.
-		selectedCategoryId.set($selectedCategoryId === categoryId ? 0 : categoryId);
-		selectedFeedId.set(0);
-		showStarred.set(false);
-		showUnseen.set(false);
-		sidebarOpen = false;
-		if (onSettings) goto(`${base}/feeds`);
-	}
+  function handleCategoryClick(categoryId: number) {
+    // Toggle: clicking the active category again returns to All.
+    selectedCategoryId.set($selectedCategoryId === categoryId ? 0 : categoryId);
+    selectedFeedId.set(0);
+    showStarred.set(false);
+    showUnseen.set(false);
+    sidebarOpen = false;
+    if (onSettings) goto(`${base}/feeds`);
+  }
 
-	function handleAllClick() {
-		selectedFeedId.set(0);
-		selectedCategoryId.set(0);
-		showStarred.set(false);
-		showUnseen.set(false);
-		sidebarOpen = false;
-		if (onSettings) goto(`${base}/feeds`);
-	}
+  function handleAllClick() {
+    selectedFeedId.set(0);
+    selectedCategoryId.set(0);
+    showStarred.set(false);
+    showUnseen.set(false);
+    sidebarOpen = false;
+    if (onSettings) goto(`${base}/feeds`);
+  }
 
-	function handleUnreadClick() {
-		showUnseen.set(true);
-		showStarred.set(false);
-		selectedFeedId.set(0);
-		selectedCategoryId.set(0);
-		sidebarOpen = false;
-		if (onSettings) goto(`${base}/feeds`);
-	}
+  function handleUnreadClick() {
+    showUnseen.set(true);
+    showStarred.set(false);
+    selectedFeedId.set(0);
+    selectedCategoryId.set(0);
+    sidebarOpen = false;
+    if (onSettings) goto(`${base}/feeds`);
+  }
 
-	function handleStarredClick() {
-		showStarred.set(true);
-		showUnseen.set(false);
-		selectedFeedId.set(0);
-		selectedCategoryId.set(0);
-		sidebarOpen = false;
-		if (onSettings) goto(`${base}/feeds`);
-	}
+  function handleStarredClick() {
+    showStarred.set(true);
+    showUnseen.set(false);
+    selectedFeedId.set(0);
+    selectedCategoryId.set(0);
+    sidebarOpen = false;
+    if (onSettings) goto(`${base}/feeds`);
+  }
 
-	async function handleMarkAllRead() {
-		const scope = $selectedFeedId ? 'feed' : $selectedCategoryId ? 'category' : 'all';
-		const scopeId = $selectedFeedId || $selectedCategoryId || 0;
-		const targetTitle = $selectedFeedId
-			? feeds.find((f) => f.id === $selectedFeedId)?.title || 'this feed'
-			: $selectedCategoryId
-				? feeds.find((f) => f.category.id === $selectedCategoryId)?.category.title || 'this category'
-				: 'every feed';
-		const confirmed = window.confirm(
-			`Mark all unread entries in ${targetTitle} as read? This can't be undone.`,
-		);
-		if (!confirmed) return;
-		try {
-			await markAsRead(scope, scopeId ? { id: scopeId } : undefined);
-			feedsRefreshNonce.update((n) => n + 1);
-		} catch (e) {
-			console.error('mark-all-read failed', e);
-		}
-	}
+  async function handleMarkAllRead() {
+    const scope = $selectedFeedId ? 'feed' : $selectedCategoryId ? 'category' : 'all';
+    const scopeId = $selectedFeedId || $selectedCategoryId || 0;
+    const targetTitle = $selectedFeedId
+      ? feeds.find((f) => f.id === $selectedFeedId)?.title || 'this feed'
+      : $selectedCategoryId
+        ? feeds.find((f) => f.category.id === $selectedCategoryId)?.category.title ||
+          'this category'
+        : 'every feed';
+    const confirmed = window.confirm(
+      `Mark all unread entries in ${targetTitle} as read? This can't be undone.`,
+    );
+    if (!confirmed) return;
+    try {
+      await markAsRead(scope, scopeId ? { id: scopeId } : undefined);
+      feedsRefreshNonce.update((n) => n + 1);
+    } catch (e) {
+      console.error('mark-all-read failed', e);
+    }
+  }
 
-	onMount(async () => {
-		try {
-			const data = await getFeeds({ limit: '1', offset: '0' });
-			feeds = data.feeds;
-			feedsList.set(data.feeds);
-		} catch {
-			// page handles its own errors
-		}
-	});
+  onMount(async () => {
+    try {
+      const data = await getFeeds({ limit: '1', offset: '0' });
+      feeds = data.feeds;
+      feedsList.set(data.feeds);
+    } catch {
+      // page handles its own errors
+    }
+  });
 </script>
 
 <AppShell>
-	{#snippet header()}
-		<ShellHeader title="Feeds">
-			{#snippet nav()}
-				{#if !onSettings}
-					<Select
-						value={$sortBy}
-						options={sortOptions}
-						onValueChange={(v) => sortBy.set(v as 'published' | 'added')}
-						ariaLabel="Sort order"
-					/>
-					<div class="filter-group">
-						<Chip checked={$showImages} onclick={() => showImages.update((v) => !v)}>Images</Chip>
-						<Chip checked={$showText} onclick={() => showText.update((v) => !v)}>Text</Chip>
-					</div>
-				{/if}
-			{/snippet}
-			{#snippet tools()}
-				{#if !onSettings}
-					<Chip icon checked={$viewMode === 'grid'} onclick={() => viewMode.set('grid')} title="Grid view">
-						<LayoutGrid size={14} />
-					</Chip>
-					<Chip icon checked={$viewMode === 'list'} onclick={() => viewMode.set('list')} title="List view">
-						<List size={14} />
-					</Chip>
-					<Chip icon onclick={handleMarkAllRead}
-						title={$selectedFeedId
-							? 'Mark this feed as read'
-							: 'Mark every feed as read'}>
-						<CheckCheck size={14} />
-					</Chip>
-				{/if}
-				<Chip icon checked={onSettings} onclick={toggleSettings} title="Feed settings">
-					<Cog size={14} />
-				</Chip>
-				{#if !onSettings}
-					<SidebarToggle
-						open={sidebarOpen}
-						label="Sources"
-						count={feeds.length}
-						onclick={() => (sidebarOpen = !sidebarOpen)}
-					/>
-				{/if}
-			{/snippet}
-		</ShellHeader>
-	{/snippet}
+  {#snippet header()}
+    <ShellHeader title="Feeds">
+      {#snippet nav()}
+        {#if !onSettings}
+          <Select
+            value={$sortBy}
+            options={sortOptions}
+            onValueChange={(v) => sortBy.set(v as 'published' | 'added')}
+            ariaLabel="Sort order"
+          />
+          <div class="filter-group">
+            <Chip checked={$showImages} onclick={() => showImages.update((v) => !v)}>Images</Chip>
+            <Chip checked={$showText} onclick={() => showText.update((v) => !v)}>Text</Chip>
+          </div>
+        {/if}
+      {/snippet}
+      {#snippet tools()}
+        {#if !onSettings}
+          <Chip
+            icon
+            checked={$viewMode === 'grid'}
+            onclick={() => viewMode.set('grid')}
+            title="Grid view"
+          >
+            <LayoutGrid size={14} />
+          </Chip>
+          <Chip
+            icon
+            checked={$viewMode === 'list'}
+            onclick={() => viewMode.set('list')}
+            title="List view"
+          >
+            <List size={14} />
+          </Chip>
+          <Chip
+            icon
+            onclick={handleMarkAllRead}
+            title={$selectedFeedId ? 'Mark this feed as read' : 'Mark every feed as read'}
+          >
+            <CheckCheck size={14} />
+          </Chip>
+        {/if}
+        <Chip icon checked={onSettings} onclick={toggleSettings} title="Feed settings">
+          <Cog size={14} />
+        </Chip>
+        {#if !onSettings}
+          <SidebarToggle
+            open={sidebarOpen}
+            label="Sources"
+            count={feeds.length}
+            onclick={() => (sidebarOpen = !sidebarOpen)}
+          />
+        {/if}
+      {/snippet}
+    </ShellHeader>
+  {/snippet}
 
-	{#snippet sidebar()}
-		{#if !onSettings}
-			<Sidebar
-				title="Sources"
-				count={feeds.length}
-				open={sidebarOpen}
-				onClose={() => (sidebarOpen = false)}
-			>
-			<!-- Cross-feed views, above the feed list. Mirrors the chat sidebar's
+  {#snippet sidebar()}
+    {#if !onSettings}
+      <Sidebar
+        title="Sources"
+        count={feeds.length}
+        open={sidebarOpen}
+        onClose={() => (sidebarOpen = false)}
+      >
+        <!-- Cross-feed views, above the feed list. Mirrors the chat sidebar's
 			     All / Unread / Starred entries so the two read the same. -->
-			<div class="views">
-				<button
-					class="view-btn"
-					class:active={!$selectedFeedId && !$selectedCategoryId && !$showStarred && !$showUnseen}
-					onclick={handleAllClick}
-					type="button"
-				>
-					<span class="view-name">All</span>
-				</button>
-				<button
-					class="view-btn"
-					class:active={$showUnseen && !$showStarred && !$selectedFeedId}
-					onclick={handleUnreadClick}
-					type="button"
-				>
-					<Circle size={12} />
-					<span class="view-name">Unread</span>
-				</button>
-				<button
-					class="view-btn"
-					class:active={$showStarred}
-					onclick={handleStarredClick}
-					type="button"
-				>
-					<Star size={12} />
-					<span class="view-name">Starred</span>
-				</button>
-			</div>
-			{#each groupedFeeds as [category, catFeeds] (category)}
-				{@const catId = catFeeds[0]?.category.id ?? 0}
-				<CategoryGroup
-					label={category}
-					count={catFeeds.length}
-					collapsible
-					active={catId !== 0 && $selectedCategoryId === catId}
-					onSelect={catId !== 0 ? () => handleCategoryClick(catId) : undefined}
-				>
-					{#each catFeeds as feed (feed.id)}
-						<button
-							class="feed-btn"
-							class:active={$selectedFeedId === feed.id}
-							onclick={() => handleFeedClick(feed.id)}
-							type="button"
-						>
-							<span class="feed-name">{feed.title}</span>
-						</button>
-					{/each}
-				</CategoryGroup>
-			{/each}
-			</Sidebar>
-		{/if}
-	{/snippet}
+        <div class="views">
+          <button
+            class="view-btn"
+            class:active={!$selectedFeedId && !$selectedCategoryId && !$showStarred && !$showUnseen}
+            onclick={handleAllClick}
+            type="button"
+          >
+            <span class="view-name">All</span>
+          </button>
+          <button
+            class="view-btn"
+            class:active={$showUnseen && !$showStarred && !$selectedFeedId}
+            onclick={handleUnreadClick}
+            type="button"
+          >
+            <Circle size={12} />
+            <span class="view-name">Unread</span>
+          </button>
+          <button
+            class="view-btn"
+            class:active={$showStarred}
+            onclick={handleStarredClick}
+            type="button"
+          >
+            <Star size={12} />
+            <span class="view-name">Starred</span>
+          </button>
+        </div>
+        {#each groupedFeeds as [category, catFeeds] (category)}
+          {@const catId = catFeeds[0]?.category.id ?? 0}
+          <CategoryGroup
+            label={category}
+            count={catFeeds.length}
+            collapsible
+            active={catId !== 0 && $selectedCategoryId === catId}
+            onSelect={catId !== 0 ? () => handleCategoryClick(catId) : undefined}
+          >
+            {#each catFeeds as feed (feed.id)}
+              <button
+                class="feed-btn"
+                class:active={$selectedFeedId === feed.id}
+                onclick={() => handleFeedClick(feed.id)}
+                type="button"
+              >
+                <span class="feed-name">{feed.title}</span>
+              </button>
+            {/each}
+          </CategoryGroup>
+        {/each}
+      </Sidebar>
+    {/if}
+  {/snippet}
 
-	{@render children()}
+  {@render children()}
 </AppShell>
 
 <style>
-	.filter-group {
-		display: flex;
-		gap: var(--chip-gap);
-		/* Preserve the separation the sort dropdown's old margin-right gave. */
-		margin-left: 0.4rem;
-	}
+  .filter-group {
+    display: flex;
+    gap: var(--chip-gap);
+    /* Preserve the separation the sort dropdown's old margin-right gave. */
+    margin-left: 0.4rem;
+  }
 
-	.feed-btn {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
-		width: 100%;
-		background: none;
-		border: none;
-		color: inherit;
-		font: inherit;
-		cursor: pointer;
-		padding: 0.3rem 0.75rem;
-		border-radius: 0.3rem;
-		transition: background var(--transition-fast);
-		text-align: left;
-	}
+  .feed-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    padding: 0.3rem 0.75rem;
+    border-radius: 0.3rem;
+    transition: background var(--transition-fast);
+    text-align: left;
+  }
 
-	/* .views / .view-btn / .view-name (the All / Unread / Starred block) come
+  /* .views / .view-btn / .view-name (the All / Unread / Starred block) come
 	   from web/src/lib/styles/sidebar.css, shared with the chat sidebar. */
-	.feed-btn:hover {
-		background: var(--surface-raised);
-	}
+  .feed-btn:hover {
+    background: var(--surface-raised);
+  }
 
-	.feed-btn.active {
-		background: var(--surface-raised);
-		color: var(--text-primary);
-	}
+  .feed-btn.active {
+    background: var(--surface-raised);
+    color: var(--text-primary);
+  }
 
-	.feed-name {
-		font-size: var(--text-sm);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
+  .feed-name {
+    font-size: var(--text-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 </style>
