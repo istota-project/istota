@@ -231,6 +231,26 @@ def cmd_namespaces(args):
     print(json.dumps({"status": "ok", "namespaces": namespaces}))
 
 
+def cmd_shared_status(args):
+    """Report whether this identity may write shared KV. Pure read.
+
+    The gate is Config.is_shared_kv_writer, which is deliberately asymmetric to
+    is_admin: a blank admins file authorizes NOBODY here (fail-closed). So this
+    answers the deployment-specific question directly instead of the model
+    inferring it from admin status or hunting through config/source.
+    """
+    user_id = _user_id()
+    config = _load_config()
+    can_write = bool(config is not None and config.is_shared_kv_writer(user_id))
+    admins_configured = bool(config is not None and config.admin_users)
+    print(json.dumps({
+        "status": "ok",
+        "user_id": user_id,
+        "can_write_shared": can_write,
+        "admins_configured": admins_configured,
+    }))
+
+
 def cmd_set_contains(args):
     user_id = _user_id()
     with _get_conn() as conn:
@@ -351,6 +371,11 @@ def build_parser():
     p_ns = sub.add_parser("namespaces", help="List all namespaces")
     p_ns.add_argument("--shared", action="store_true", help=_shared_help)
 
+    sub.add_parser(
+        "shared-status",
+        help="Report whether you may write shared_kv (admin-only, deployment-specific)",
+    )
+
     # Set-ops accept --shared only so we can reject it with a clean JSON error
     # (curated shared content is whole-value writes, not incremental set
     # membership). Without the flag argparse would exit 2 with a stderr message.
@@ -423,6 +448,7 @@ def main(argv=None):
         "delete": cmd_delete,
         "list": cmd_list,
         "namespaces": cmd_namespaces,
+        "shared-status": cmd_shared_status,
         "set-contains": cmd_set_contains,
         "set-size": cmd_set_size,
         "set-members": cmd_set_members,

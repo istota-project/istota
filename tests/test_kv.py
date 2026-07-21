@@ -4,7 +4,10 @@ import json
 from contextlib import contextmanager
 
 from istota import db
-from istota.cli import cmd_kv_get, cmd_kv_set, cmd_kv_list, cmd_kv_delete, cmd_kv_namespaces
+from istota.cli import (
+    cmd_kv_get, cmd_kv_set, cmd_kv_list, cmd_kv_delete, cmd_kv_namespaces,
+    cmd_kv_shared_status,
+)
 
 
 # ============================================================================
@@ -323,3 +326,39 @@ class TestCmdKvShared:
         cmd_kv_namespaces(args)
         out = json.loads(capsys.readouterr().out)
         assert out["namespaces"] == ["world"]
+
+
+class TestCmdKvSharedStatus:
+    """Operator `istota kv shared-status` parity with the skill CLI."""
+
+    def test_admin_can_write(self, db_path, capsys, monkeypatch):
+        monkeypatch.setattr(
+            "istota.cli._load_kv_config",
+            lambda args: Config(db_path=db_path, admin_users={"alice"}),
+        )
+        cmd_kv_shared_status(_FakeArgs(user="alice", config=None))
+        out = json.loads(capsys.readouterr().out)
+        assert out == {
+            "status": "ok", "user_id": "alice",
+            "can_write_shared": True, "admins_configured": True,
+        }
+
+    def test_non_admin_cannot_write(self, db_path, capsys, monkeypatch):
+        monkeypatch.setattr(
+            "istota.cli._load_kv_config",
+            lambda args: Config(db_path=db_path, admin_users={"bob"}),
+        )
+        cmd_kv_shared_status(_FakeArgs(user="alice", config=None))
+        out = json.loads(capsys.readouterr().out)
+        assert out["can_write_shared"] is False
+        assert out["admins_configured"] is True
+
+    def test_blank_allowlist_fails_closed(self, db_path, capsys, monkeypatch):
+        monkeypatch.setattr(
+            "istota.cli._load_kv_config",
+            lambda args: Config(db_path=db_path, admin_users=set()),
+        )
+        cmd_kv_shared_status(_FakeArgs(user="alice", config=None))
+        out = json.loads(capsys.readouterr().out)
+        assert out["can_write_shared"] is False
+        assert out["admins_configured"] is False
