@@ -1804,8 +1804,9 @@ export async function checkBriefingPath(
 	return apiFetch(`/briefings/path-check?path=${encodeURIComponent(path)}`);
 }
 
-export async function getBriefingPathSuggestions(): Promise<{ paths: string[] }> {
-	return apiFetch('/briefings/path-suggest');
+export async function getBriefingPathSuggestions(q = ''): Promise<{ paths: string[] }> {
+	const query = q.trim();
+	return apiFetch(query ? `/briefings/path-suggest?q=${encodeURIComponent(query)}` : '/briefings/path-suggest');
 }
 
 export { AuthError };

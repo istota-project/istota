@@ -403,31 +403,48 @@ def get_feed_options(
 # sources.builtins._resolve_user_path); these endpoints let the editor verify a
 # path exists and offer a datalist of candidate text files.
 _PATH_SUGGEST_EXTS = (".md", ".txt")
-_PATH_SUGGEST_MAX = 200
-_PATH_SUGGEST_DEPTH = 4
+_PATH_SUGGEST_MAX = 50
+_PATH_SUGGEST_DEPTH = 6
+# Hard cap on candidate files inspected per request, so the query walk stays
+# bounded even on a huge workspace where few paths match.
+_PATH_SUGGEST_SCAN_MAX = 8000
 
 
-def _walk_text_files(root: Path) -> list[str]:
-    """Bounded walk of ``root`` for ``.md`` / ``.txt`` files.
+def _walk_text_files(root: Path, query: str = "") -> list[str]:
+    """Bounded walk of ``root`` for ``.md`` / ``.txt`` files matching ``query``.
 
     Returns paths relative to ``root`` (forward-slashed) — the same form the
-    user types into the source path field. Capped by depth and count; hidden
-    directories are skipped.
+    user types into the source path field. When ``query`` is given, only paths
+    whose relative form contains it (case-insensitive substring) are returned,
+    so a deep or late file still surfaces as the user types; matches whose
+    basename hits the query rank ahead of directory-only hits. Bounded by
+    depth, a total-scan cap, and the returned-count cap; hidden directories are
+    skipped.
     """
-    results: list[str] = []
+    needle = query.strip().lower()
     root_str = str(root)
+    scanned = 0
+    name_hits: list[str] = []  # query matched the filename
+    path_hits: list[str] = []  # query matched only a parent directory
     for dirpath, dirnames, filenames in os.walk(root_str):
         rel_dir = os.path.relpath(dirpath, root_str)
         depth = 0 if rel_dir == "." else rel_dir.count(os.sep) + 1
         kept = sorted(d for d in dirnames if not d.startswith("."))
         dirnames[:] = [] if depth >= _PATH_SUGGEST_DEPTH else kept
         for fn in sorted(filenames):
-            if fn.lower().endswith(_PATH_SUGGEST_EXTS):
-                rel = os.path.relpath(os.path.join(dirpath, fn), root_str)
-                results.append(rel.replace(os.sep, "/"))
-                if len(results) >= _PATH_SUGGEST_MAX:
-                    return results
-    return results
+            if not fn.lower().endswith(_PATH_SUGGEST_EXTS):
+                continue
+            scanned += 1
+            rel = os.path.relpath(os.path.join(dirpath, fn), root_str).replace(os.sep, "/")
+            if not needle:
+                name_hits.append(rel)
+            elif needle in fn.lower():
+                name_hits.append(rel)
+            elif needle in rel.lower():
+                path_hits.append(rel)
+            if len(name_hits) >= _PATH_SUGGEST_MAX or scanned >= _PATH_SUGGEST_SCAN_MAX:
+                return (name_hits + path_hits)[:_PATH_SUGGEST_MAX]
+    return (name_hits + path_hits)[:_PATH_SUGGEST_MAX]
 
 
 @router.get("/path-check")
@@ -463,17 +480,20 @@ def check_path(
 @router.get("/path-suggest")
 def suggest_paths(
     request: Request,
+    q: str = Query("", description="Filter suggestions by substring"),
     user: dict = Depends(require_auth),
 ) -> dict:
-    """Candidate text-file paths under the user's folder, for the datalist.
+    """Candidate text-file paths under the user's folder, for the autocomplete.
 
     Bounded, ``.md`` / ``.txt`` only, returned relative to the user's own
-    folder (the form the user types). Empty under rclone (no on-disk root) or a
-    missing workspace.
+    folder (the form the user types). ``q`` filters server-side (a substring of
+    the relative path), so a deep or late-in-walk file still surfaces as the
+    user types rather than being clipped by the bound. Empty under rclone (no
+    on-disk root) or a missing workspace.
     """
     cfg = _app_config(request)
     root = cfg.workspace_root(user["username"]) if cfg is not None else None
-    paths = _walk_text_files(root) if root is not None and root.is_dir() else []
+    paths = _walk_text_files(root, q) if root is not None and root.is_dir() else []
     return {"paths": paths}
 
 
