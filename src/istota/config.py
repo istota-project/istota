@@ -231,6 +231,79 @@ class BriefingConfig:
 
 
 @dataclass
+class BriefingSharedBlock:
+    """A module-owned shared briefing block (shared-kv-curated-content spec).
+
+    A one-block briefing generated *once globally* (no user) under the reserved
+    ``__system__`` identity, whose rendered content is written into ``shared_kv``
+    at namespace ``briefing_shared_blocks`` / key ``name``. Per-user briefings
+    reference it via a ``shared_block`` (or ``kv``) source, collapsing N-way
+    duplicate fetch + synthesis to one generation total.
+
+    ``sources`` is a list of ``{"kind": ..., "config": {...}}`` dicts. Only
+    user-agnostic kinds (``browse``/``markets``/``email``) are usable; others
+    (notably ``rss``, which needs a real feeds user, and the personal built-ins)
+    are dropped at generation time. In-memory config only (like
+    ``default_briefings``); never persisted to a per-user table — shared blocks
+    are global.
+    """
+    name: str
+    cron: str  # evaluated in UTC (global, no per-user timezone)
+    title: str = ""
+    directive: str | None = None
+    render_mode: str = "synthesis"
+    enabled: bool = True
+    # Whether the generated content renders un-wrapped in a consuming briefing.
+    # Set by the admin/writer, honored from the stored shared_kv value — never by
+    # a consuming user. Default False → content is untrusted-wrapped, protecting
+    # every reader from an injection riding in via one admin's web-derived block.
+    trusted: bool = False
+    sources: list[dict] = field(default_factory=list)
+
+
+# Batteries-included canonical shared blocks. Seeded when config declares no
+# ``[[briefing_shared_blocks]]`` (parity with how ``[[default_briefings]]`` is
+# operator/Ansible-provided). ``world-headlines`` needs the headless browser
+# (soft-degrades to an omitted section when it's off); ``markets-summary`` needs
+# only yfinance. Both generate before the 07:00 briefing window; a consuming
+# briefing reads them via a ``shared_block`` source with a freshness window, so
+# they degrade to an omitted section until first generation (harmless).
+DEFAULT_SHARED_BLOCKS: list[dict] = [
+    {
+        "name": "world-headlines",
+        "cron": "0 6 * * *",
+        "title": "🌍 World headlines",
+        "directive": (
+            "Synthesize the frontpages into ~8 top world stories, lead with "
+            "what's new. Neutral wire-service tone."
+        ),
+        "render_mode": "synthesis",
+        "enabled": True,
+        "sources": [
+            {"kind": "browse", "config": {"preset": "ap"}},
+            {"kind": "browse", "config": {"preset": "reuters"}},
+        ],
+    },
+    {
+        "name": "markets-summary",
+        "cron": "30 6 * * *",
+        "title": "📈 Markets",
+        # Structured/verbatim: the markets source already emits a formatted
+        # emoji quote table; store it as-is with zero LLM passes (no directive).
+        # Trusted — pure numbers, no free-text injection surface — so it renders
+        # un-wrapped. Every other default/seeded block stays untrusted.
+        "directive": "",
+        "render_mode": "structured",
+        "enabled": True,
+        "trusted": True,
+        "sources": [
+            {"kind": "markets", "config": {}},
+        ],
+    },
+]
+
+
+@dataclass
 class ResourceConfig:
     """User resource configuration (per-user TOML ``[[resources]]`` blocks).
 
@@ -788,6 +861,13 @@ class Config:
     # briefings (user wins) in ``_apply_user_briefings`` when their
     # ``default_briefings`` flag is true.
     default_briefings: list[BriefingConfig] = field(default_factory=list)
+    # Module-owned shared briefing blocks (shared-kv-curated-content spec):
+    # generated once globally and written into ``shared_kv``; per-user briefings
+    # read them via a ``shared_block`` source. In-memory only (global; never in a
+    # per-user table). ``load_config`` seeds ``DEFAULT_SHARED_BLOCKS`` when the
+    # config declares no ``[[briefing_shared_blocks]]``; a directly-constructed
+    # Config (tests) has none unless set.
+    briefing_shared_blocks: list[BriefingSharedBlock] = field(default_factory=list)
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     rclone_remote: str = "nextcloud"  # rclone remote name
     nextcloud_mount_path: Path | None = None  # If set, use mount instead of rclone CLI
@@ -1198,6 +1278,19 @@ class Config:
             return True
         return user_id in self.admin_users
 
+    def is_shared_kv_writer(self, user_id: str) -> bool:
+        """Authoritative gate for shared_kv writes. Fail-closed.
+
+        Deliberately asymmetric to :meth:`is_admin`: an empty admin allowlist
+        authorizes NOBODY here (mirroring ``web_app._user_is_web_admin``),
+        rather than everyone. Content written to ``shared_kv`` flows into other
+        users' briefing prompts (a prompt-injection surface), so a blank admins
+        file must not silently make every user a shared-content writer.
+        Returns True iff ``admin_users`` is non-empty and ``user_id`` is in it.
+        Do not collapse this into ``is_admin``.
+        """
+        return bool(self.admin_users) and user_id in self.admin_users
+
 
 def load_admin_users(path: str | None = None) -> set[str]:
     """Load admin user IDs from a plain-text file.
@@ -1281,6 +1374,42 @@ def _parse_briefing_specs(entries: "list | None") -> list[BriefingConfig]:
             blocks=list(raw_blocks) if isinstance(raw_blocks, list) else [],
         ))
     return briefings
+
+
+def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBlock]:
+    """Parse ``[[briefing_shared_blocks]]`` TOML entries into dataclasses.
+
+    Fail-soft: a non-dict entry, or one missing ``name``/``cron``, is skipped
+    with a warning. ``sources`` is a raw ``[{kind, config}]`` passthrough —
+    validation (allowed kinds) happens at generation time, matching how per-user
+    briefing blocks defer normalisation to the seeder.
+    """
+    blocks: list[BriefingSharedBlock] = []
+    for b in entries or []:
+        if not isinstance(b, dict):
+            logger.warning("[[briefing_shared_blocks]] entry is not a table; ignoring")
+            continue
+        name = b.get("name", "")
+        cron = b.get("cron", "")
+        if not name or not cron:
+            logger.warning(
+                "briefing_shared_blocks entry %r missing name/cron; ignoring",
+                name or "?",
+            )
+            continue
+        raw_sources = b.get("sources", [])
+        directive = b.get("directive")
+        blocks.append(BriefingSharedBlock(
+            name=name,
+            cron=cron,
+            title=b.get("title", ""),
+            directive=directive if isinstance(directive, str) and directive else None,
+            render_mode=b.get("render_mode", "synthesis"),
+            enabled=bool(b.get("enabled", True)),
+            trusted=bool(b.get("trusted", False)),
+            sources=list(raw_sources) if isinstance(raw_sources, list) else [],
+        ))
+    return blocks
 
 
 def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
@@ -1725,6 +1854,21 @@ def load_config(config_path: Path | None = None) -> Config:
         else:
             logger.warning("[[default_briefings]] must be a list of tables; ignoring")
 
+    # Module-owned shared briefing blocks. An explicit ``[[briefing_shared_blocks]]``
+    # (operator/Ansible) replaces the batteries-included defaults wholesale; an
+    # absent section seeds ``DEFAULT_SHARED_BLOCKS`` (batteries-included). An
+    # explicit empty list opts out entirely.
+    if "briefing_shared_blocks" in data:
+        raw_shared = data["briefing_shared_blocks"]
+        if isinstance(raw_shared, list):
+            config.briefing_shared_blocks = _parse_shared_block_specs(raw_shared)
+        else:
+            logger.warning(
+                "[[briefing_shared_blocks]] must be a list of tables; ignoring"
+            )
+    else:
+        config.briefing_shared_blocks = _parse_shared_block_specs(DEFAULT_SHARED_BLOCKS)
+
     if "briefings" in data:
         br = data["briefings"]
         config.briefings = BriefingsModuleConfig(
@@ -2011,6 +2155,12 @@ def load_config(config_path: Path | None = None) -> Config:
     # ``check_briefings`` and ``get_briefings_for_user`` keep reading
     # ``user_config.briefings`` unchanged.
     _apply_user_briefings(config)
+
+    # admin-shared-briefing-blocks: overlay shared_block_configs rows onto
+    # config.briefing_shared_blocks. DB wins by name (admin edits survive
+    # operator re-runs); ``check_shared_blocks`` then reads DB-authoritative
+    # definitions.
+    _apply_shared_blocks(config)
 
     # Apply operator role-alias overrides globally so every downstream call
     # to ``brain.resolve_model_name`` / ``brain.resolve_alias`` picks up the
@@ -2314,3 +2464,56 @@ def _apply_user_briefings(config: "Config") -> None:
             )
             bc.from_db = True
             user_config.briefings.append(bc)
+
+
+def _apply_shared_blocks(config: "Config") -> None:
+    """Overlay ``shared_block_configs`` rows onto ``config.briefing_shared_blocks``.
+
+    DB wins by ``name`` (an admin's web edit survives operator re-runs); a DB row
+    replaces a config/TOML block of the same name, and DB-only rows are appended.
+    A disabled DB row still overlays (present-but-muted) — ``check_shared_blocks``
+    already skips a block that isn't ``enabled``.
+
+    Best-effort: a missing/unreadable DB leaves the config-only blocks in place,
+    so the server still runs on TOML/DEFAULT definitions.
+    """
+    db_path = config.db_path
+    if db_path is None or not Path(db_path).exists():
+        return
+
+    try:
+        from . import db as _db
+        with _db.get_db(Path(db_path)) as conn:
+            rows = _db.list_shared_block_configs(conn)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("shared_block_configs overlay skipped: %s", e)
+        return
+
+    if not rows:
+        return
+
+    def _from_row(r) -> BriefingSharedBlock:
+        return BriefingSharedBlock(
+            name=r.name,
+            cron=r.cron,
+            title=r.title or "",
+            directive=r.directive if r.directive else None,
+            render_mode=r.render_mode or "synthesis",
+            enabled=bool(r.enabled),
+            trusted=bool(r.trusted),
+            sources=list(r.sources or []),
+        )
+
+    db_by_name = {r.name: r for r in rows}
+    merged: list[BriefingSharedBlock] = []
+    seen: set[str] = set()
+    for block in config.briefing_shared_blocks:
+        if block.name in db_by_name:
+            merged.append(_from_row(db_by_name[block.name]))
+        else:
+            merged.append(block)
+        seen.add(block.name)
+    for r in rows:
+        if r.name not in seen:
+            merged.append(_from_row(r))
+    config.briefing_shared_blocks = merged

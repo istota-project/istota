@@ -427,6 +427,39 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #     config = { preset = "ap" }
 
 # ============================================================================
+# Shared briefing blocks (module-owned curated content)
+# ============================================================================
+# Generated ONCE globally by the scheduler (no user, UTC cron) and written into
+# the shared_kv store; per-user briefings read them via a `shared_block` (or
+# `kv`) source, so the N-way frontpage fetch + synthesis collapses to one
+# generation total. Only user-agnostic source kinds are allowed: browse /
+# markets / email (the shared/unowned pool).
+#
+# Omit the section entirely to seed the batteries-included defaults
+# (world-headlines, markets-summary). An explicit empty list opts out.
+#
+# [[briefing_shared_blocks]]
+# name = "world-headlines"          # → shared_kv key in namespace "briefing_shared_blocks"
+# cron = "0 6 * * *"                # before the 07:00 briefing window; UTC (global)
+# title = "🌍 World headlines"
+# directive = "Synthesize the frontpages into ~8 top world stories."
+# render_mode = "synthesis"
+# enabled = true
+#
+#   [[briefing_shared_blocks.sources]]
+#   kind = "browse"
+#   config = { preset = "ap" }
+#
+#   [[briefing_shared_blocks.sources]]
+#   kind = "browse"
+#   config = { preset = "reuters" }
+#
+# A consuming briefing then reads it:
+#   [[users.alice.briefings.blocks.sources]]
+#   kind = "shared_block"
+#   config = { name = "world-headlines", max_age_hours = 12 }
+
+# ============================================================================
 # Skills (routing)
 # ============================================================================
 # Skill routing is single-axis and has no configuration. A skill is either

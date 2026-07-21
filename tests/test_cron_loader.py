@@ -125,6 +125,37 @@ skip_log_channel = true
         assert len(jobs) == 1
         assert jobs[0].skip_log_channel is True
 
+    def test_publish_shared_kv_parses(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "digest"
+cron = "0 7 * * *"
+prompt = "generate the film digest"
+publish_shared_kv = "film-business-digest"
+publish_shared_kv_trusted = true
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].publish_shared_kv == "film-business-digest"
+        assert jobs[0].publish_shared_kv_trusted is True
+
+    def test_publish_shared_kv_defaults(self, mount_path, make_config_with_mount):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", """\
+```toml
+[[jobs]]
+name = "plain"
+cron = "0 7 * * *"
+prompt = "no publish"
+```
+""")
+        jobs = load_cron_jobs(config, "alice")
+        assert jobs[0].publish_shared_kv == ""
+        assert jobs[0].publish_shared_kv_trusted is False
+
     def test_enabled_false(self, mount_path, make_config_with_mount):
         config = make_config_with_mount()
         _write_cron_md(mount_path, "alice", """\

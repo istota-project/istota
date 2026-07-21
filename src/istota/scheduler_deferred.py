@@ -328,6 +328,38 @@ def _process_deferred_kv_ops(
             key = entry.get("key", "")
             if not namespace or not key:
                 continue
+            # Shared-scope writes are gated on the task's *trusted* identity
+            # (task.user_id, never the JSON), fail-closed via is_shared_kv_writer.
+            # Set-ops never carry scope:"shared" (rejected at the skill), so the
+            # shared branch only handles whole-value set/delete.
+            scope = entry.get("scope")
+            if scope == "shared":
+                if not config.is_shared_kv_writer(task.user_id):
+                    logger.warning(
+                        "shared KV write denied for task %d user %s (%s %s/%s)",
+                        task.id, task.user_id, op, namespace, key,
+                    )
+                    continue
+                try:
+                    if op == "set":
+                        db.shared_kv_set(
+                            conn, namespace, key,
+                            entry.get("value", ""), task.user_id,
+                        )
+                        count += 1
+                    elif op == "delete":
+                        db.shared_kv_delete(conn, namespace, key)
+                        count += 1
+                    else:
+                        logger.warning(
+                            "Unsupported shared KV op %r for task %d", op, task.id,
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to process shared KV op for task %d: %s",
+                        task.id, e,
+                    )
+                continue
             try:
                 if op == "set":
                     value = entry.get("value", "")

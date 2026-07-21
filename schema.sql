@@ -248,6 +248,11 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     -- Skill-task dispatch (Phase 1.3). Mutually exclusive with command.
     skill TEXT,
     skill_args TEXT,
+    -- Publish this job's result text into shared_kv on success (admin-shared-
+    -- briefing-blocks spec). "<ns>/<key>" or bare "<key>" (→ briefing_shared_blocks).
+    -- Gated on is_shared_kv_writer at write time.
+    publish_shared_kv TEXT,
+    publish_shared_kv_trusted INTEGER NOT NULL DEFAULT 0,
     UNIQUE(user_id, name)
 );
 
@@ -397,6 +402,47 @@ CREATE TABLE IF NOT EXISTS istota_kv (
 );
 
 CREATE INDEX IF NOT EXISTS idx_istota_kv_ns ON istota_kv(user_id, namespace);
+
+-- Shared (cross-user) key-value store. Namespaced JSON values readable by any
+-- user; writes are admin-gated at the caller (the table itself does no auth).
+-- The table *is* the shared scope (no user_id in the key), so a write here is
+-- definitionally a shared write. `written_by` is audit-only, never an
+-- authorization input.
+CREATE TABLE IF NOT EXISTS shared_kv (
+    namespace  TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    written_by TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (namespace, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_kv_ns ON shared_kv(namespace);
+
+-- Cron bookkeeping for module-owned shared briefing blocks (generated once
+-- globally, written into shared_kv). Mirrors briefing_state.
+CREATE TABLE IF NOT EXISTS briefing_shared_block_state (
+    name         TEXT PRIMARY KEY,
+    last_run_at  TEXT
+);
+
+-- Admin-editable shared briefing block definitions (admin-shared-briefing-blocks
+-- spec). Seeded once from config (DEFAULT_SHARED_BLOCKS / [[briefing_shared_blocks]])
+-- and DB-wins thereafter, so an admin's web edit survives operator re-runs — the
+-- same seed-once + edit-preservation contract as default_briefings.
+CREATE TABLE IF NOT EXISTS shared_block_configs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    cron        TEXT NOT NULL,
+    title       TEXT NOT NULL DEFAULT '',
+    directive   TEXT,
+    render_mode TEXT NOT NULL DEFAULT 'synthesis',   -- 'synthesis' | 'structured'
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    trusted     INTEGER NOT NULL DEFAULT 0,
+    sources     TEXT NOT NULL DEFAULT '[]',          -- JSON: [{"kind":..., "config":{...}}]
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 
 -- Trusted email senders (runtime-managed via !trust command / confirmation flow)
 CREATE TABLE IF NOT EXISTS trusted_email_senders (

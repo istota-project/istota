@@ -1907,9 +1907,20 @@ def process_one_task(
 
                 # Track scheduled job success
                 if task.scheduled_job_id:
-                    db.reset_scheduled_job_failures(conn, task.scheduled_job_id)
-                    # Auto-remove one-time jobs after successful execution
                     job = db.get_scheduled_job(conn, task.scheduled_job_id)
+                    # Publish the result into shared_kv when the job opts in
+                    # (admin-shared-briefing-blocks). Gated + fail-loud inside;
+                    # a failed/unauthorized publish records a job failure that the
+                    # success reset below must NOT wipe (observability + de-admin
+                    # auto-disable), so gate the reset on the publish outcome.
+                    publish_ok = True
+                    if job and job.publish_shared_kv:
+                        publish_ok = _publish_result_to_shared_kv(
+                            conn, config, task, job, result,
+                        )
+                    if publish_ok:
+                        db.reset_scheduled_job_failures(conn, task.scheduled_job_id)
+                    # Auto-remove one-time jobs after successful execution
                     if job and job.once:
                         db.delete_scheduled_job(conn, task.scheduled_job_id)
                         logger.info(
@@ -2525,6 +2536,206 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
             created_tasks.append(task_id)
 
     return created_tasks
+
+
+def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str]:
+    """Generate any due module-owned shared briefing blocks.
+
+    A shared block is generated *once globally* (no user) and its content written
+    into ``shared_kv`` for per-user briefings to read (shared-kv-curated-content
+    spec, Stage 5). Cron is evaluated in **UTC** (global — no per-user timezone).
+
+    Like ``check_briefings``, the slow gather (browse ~60s / IMAP) + the Brain
+    call are kept off the dispatch thread: a due block is handed to a short-lived
+    worker thread (the ``_send_operator_alert`` / sleep-cycle pattern). ``last_run``
+    is stamped up front so a slow or failed generation does not re-fire every
+    tick. ``run_inline=True`` runs generation synchronously (tests).
+
+    Returns the list of due block names.
+    """
+    blocks = getattr(config, "briefing_shared_blocks", None) or []
+    if not blocks:
+        return []
+
+    now_naive = _now(ZoneInfo("UTC")).replace(tzinfo=None)
+    due = []
+    with db.get_db(config.db_path) as conn:
+        for block in blocks:
+            if not getattr(block, "enabled", True) or not block.cron:
+                continue
+            last_run_at = db.get_briefing_shared_block_last_run(conn, block.name)
+            if last_run_at:
+                last_run = datetime.fromisoformat(last_run_at)
+                if last_run.tzinfo is not None:
+                    last_run = last_run.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+                base = last_run
+            else:
+                base = now_naive.replace(hour=0, minute=0, second=0, microsecond=0)
+            next_run = croniter(block.cron, base).get_next(datetime)
+            should_run = now_naive >= next_run
+            if should_run and _is_stale_fire(
+                f"shared block {block.name}", next_run, now_naive,
+                config.scheduler.cron_max_staleness_minutes,
+            ):
+                db.set_briefing_shared_block_last_run(
+                    conn, block.name, now_naive.isoformat(),
+                )
+                continue
+            if should_run:
+                due.append(block)
+        # Stamp last_run up front (mirrors check_briefings' phase-2 stamp) so a
+        # slow/failed generation doesn't re-fire on the next tick.
+        for block in due:
+            db.set_briefing_shared_block_last_run(
+                conn, block.name, now_naive.isoformat(),
+            )
+
+    for block in due:
+        if run_inline:
+            _generate_shared_block(config, block)
+        else:
+            threading.Thread(
+                target=_generate_shared_block, args=(config, block),
+                name=f"shared-block-{block.name}", daemon=True,
+            ).start()
+    return [b.name for b in due]
+
+
+def _generate_shared_block(config: Config, block) -> None:
+    """Gather + synthesize one shared block and write it to shared_kv.
+
+    A ``None`` result (no usable sources / all-empty gather / failed Brain call)
+    skips the write and leaves the prior value intact — a transient upstream
+    outage degrades to last-known-good rather than blanking the section. Runs on
+    a short-lived worker thread; never raises into the caller.
+    """
+    from istota.briefings.shared_blocks import SYSTEM_IDENTITY, run_shared_block
+    from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+
+    try:
+        result = run_shared_block(block, config)
+    except Exception as e:  # noqa: BLE001
+        logger.error("shared block %s generation failed: %s", block.name, e)
+        return
+    if result is None:
+        logger.warning(
+            "shared block %s: nothing generated, keeping prior content", block.name,
+        )
+        return
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.shared_kv_set(
+                conn, SHARED_BLOCK_NAMESPACE, block.name,
+                json.dumps(result), SYSTEM_IDENTITY,
+            )
+        logger.info("shared block %s regenerated", block.name)
+    except Exception as e:  # noqa: BLE001
+        logger.error("shared block %s write failed: %s", block.name, e)
+
+
+def _parse_shared_kv_target(target: str) -> tuple[str, str]:
+    """Parse a ``publish_shared_kv`` target into ``(namespace, key)``.
+
+    ``"<ns>/<key>"`` → split on the first slash; a bare ``"<key>"`` →
+    (``briefing_shared_blocks``, key) so a publish job populates a shared block
+    by name with no ceremony.
+    """
+    from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+
+    target = (target or "").strip()
+    if "/" in target:
+        ns, _, key = target.partition("/")
+        return ns.strip(), key.strip()
+    return SHARED_BLOCK_NAMESPACE, target
+
+
+def _publish_result_to_shared_kv(conn, config: Config, task, job, result_text: str) -> bool:
+    """Publish a completed job's result text into ``shared_kv`` (gated).
+
+    A post-success gated write in the ``_process_deferred_*`` genre — NOT an
+    ``output_target`` surface (a publish job's own delivery is orthogonal). The
+    identity is always the task's ``user_id`` (never anything from job payload).
+
+    Returns ``True`` when the publish succeeded or was cleanly skipped
+    (empty-result → keep last-known-good), ``False`` when it failed and recorded
+    a job failure — the caller then withholds the success reset so the failure
+    survives (observability + de-admin auto-disable).
+
+    * Unauthorized (``not is_shared_kv_writer``) → **fail loud**: ERROR log,
+      operator alert, job-failure increment → ``False``.
+    * Empty/whitespace result → skip (preserve last-known-good), INFO → ``True``.
+    * Never raises out of ``process_one_task``.
+    """
+    ns, key = _parse_shared_kv_target(job.publish_shared_kv)
+    if not key:
+        logger.error(
+            "publish_shared_kv job=%s has no key in target %r; skipping",
+            job.name, job.publish_shared_kv,
+        )
+        _record_publish_failure(conn, config, task, job, "publish_shared_kv missing key")
+        return False
+
+    if not config.is_shared_kv_writer(task.user_id):
+        logger.error(
+            "publish_shared_kv unauthorized user=%s job=%s key=%s/%s",
+            task.user_id, job.name, ns, key,
+        )
+        _record_publish_failure(
+            conn, config, task, job,
+            f"publish_shared_kv unauthorized for user {task.user_id}",
+        )
+        try:
+            user = _operator_alert_user(config)
+            if user:
+                _send_operator_alert(
+                    config, user,
+                    f"⚠️ Scheduled job '{job.name}' tried to publish shared content "
+                    f"as non-writer {task.user_id} (key {ns}/{key}). Nothing was "
+                    f"written.",
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.error("publish_shared_kv alert failed: %s", e)
+        return False
+
+    if not (result_text or "").strip():
+        logger.info(
+            "publish_shared_kv job=%s: empty result, keeping prior value at %s/%s",
+            job.name, ns, key,
+        )
+        return True
+
+    value = json.dumps({
+        "text": result_text,
+        "trusted": bool(job.publish_shared_kv_trusted),
+    })
+    try:
+        db.shared_kv_set(conn, ns, key, value, task.user_id)
+        logger.info(
+            "publish_shared_kv job=%s wrote %s/%s (%d bytes, trusted=%s)",
+            job.name, ns, key, len(result_text), bool(job.publish_shared_kv_trusted),
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error("publish_shared_kv write failed job=%s key=%s/%s: %s",
+                     job.name, ns, key, e)
+        try:
+            _record_publish_failure(conn, config, task, job, f"shared_kv write failed: {e}")
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
+def _record_publish_failure(conn, config: Config, task, job, error: str) -> None:
+    """Increment a job's failure counter for an unauthorized/failed publish, and
+    auto-disable after the configured threshold (mirrors the normal failure path)."""
+    fail_count = db.increment_scheduled_job_failures(conn, job.id, error)
+    max_failures = config.scheduler.scheduled_job_max_consecutive_failures
+    if max_failures > 0 and fail_count >= max_failures:
+        db.disable_scheduled_job(conn, job.id)
+        logger.warning(
+            "Scheduled job %d auto-disabled after %d consecutive publish failures",
+            job.id, fail_count,
+        )
 
 
 def check_briefing_triggers(db_path, config: Config) -> list[int]:
@@ -3711,6 +3922,14 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     if briefing_tasks:
         logger.info("Queued %d briefing(s)", len(briefing_tasks))
 
+    # Generate any due module-owned shared briefing blocks.
+    try:
+        shared_names = check_shared_blocks(config)
+        if shared_names:
+            logger.info("Generating %d shared block(s)", len(shared_names))
+    except Exception as e:
+        logger.error("Error checking shared blocks: %s", e)
+
     # Check scheduled jobs and sleep cycles
     with db.get_db(config.db_path) as conn:
         scheduled_tasks = check_scheduled_jobs(conn, config)
@@ -4013,6 +4232,20 @@ def run_daemon(
     except Exception as e:  # noqa: BLE001
         logger.warning("user_briefings migration skipped: %s", e)
 
+    # admin-shared-briefing-blocks: seed shared_block_configs from config
+    # (DEFAULT_SHARED_BLOCKS / [[briefing_shared_blocks]]) on first run — seed-once,
+    # DB-wins thereafter — then re-apply the overlay so in-memory config reflects
+    # any DB edits.
+    try:
+        from . import shared_blocks_store as _sbs  # noqa: PLC0415
+
+        _sbs.import_from_config(config.db_path, config.briefing_shared_blocks)
+        from .config import _apply_shared_blocks  # noqa: PLC0415
+
+        _apply_shared_blocks(config)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("shared_blocks seed skipped: %s", e)
+
     # Phase 1.3: purge orphan skill scheduled_jobs / pending skill tasks
     # whose skill name no longer exists in the index (e.g. operator
     # renamed `feeds` → `feed_reader`). Runs once per startup; the
@@ -4070,6 +4303,7 @@ def run_daemon(
     last_tasks_file_poll = 0.0
     last_shared_file_check = 0.0
     last_scheduled_job_check = 0.0
+    last_shared_block_check = 0.0
     last_cleanup_check = 0.0
     last_sleep_cycle_check = 0.0
     last_channel_sleep_cycle_check = 0.0
@@ -4116,6 +4350,21 @@ def run_daemon(
             except Exception as e:
                 logger.error("Error checking briefings: %s", e)
             last_briefing_check = now
+
+        # Generate any due module-owned shared briefing blocks (same interval as
+        # briefings). Generation runs off the dispatch thread on worker threads,
+        # so the slow gather can't stall dispatch.
+        if now - last_shared_block_check >= config.scheduler.briefing_check_interval:
+            try:
+                shared_names = check_shared_blocks(config)
+                if shared_names:
+                    logger.info(
+                        "Generating %d shared block(s): %s",
+                        len(shared_names), ", ".join(shared_names),
+                    )
+            except Exception as e:
+                logger.error("Error checking shared blocks: %s", e)
+            last_shared_block_check = now
 
         # Check briefing triggers from NC app (every 30s)
         if now - last_trigger_check >= config.scheduler.tasks_file_poll_interval:

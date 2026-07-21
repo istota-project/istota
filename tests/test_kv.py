@@ -269,3 +269,57 @@ class TestCmdKvNamespaces:
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "ok"
         assert sorted(out["namespaces"]) == ["ns1", "ns2"]
+
+
+# ============================================================================
+# CLI --shared flag
+# ============================================================================
+
+
+import pytest  # noqa: E402
+
+from istota.config import Config  # noqa: E402
+
+
+class TestCmdKvShared:
+    def test_get_shared_open(self, db_conn, capsys, monkeypatch):
+        monkeypatch.setattr("istota.cli._get_kv_conn", _mock_get_kv_conn(db_conn))
+        db.shared_kv_set(db_conn, "ns", "k", '"hi"', "admin")
+        args = _FakeArgs(namespace="ns", key="k", user="nonadmin", config=None, shared=True)
+        cmd_kv_get(args)
+        out = json.loads(capsys.readouterr().out)
+        assert out["value"] == "hi"
+
+    def test_set_shared_admin_allowed(self, db_conn, db_path, capsys, monkeypatch):
+        monkeypatch.setattr("istota.cli._get_kv_conn", _mock_get_kv_conn(db_conn))
+        monkeypatch.setattr(
+            "istota.cli._load_kv_config",
+            lambda args: Config(db_path=db_path, admin_users={"alice"}),
+        )
+        args = _FakeArgs(namespace="ns", key="k", value='"v"', user="alice", config=None, shared=True)
+        cmd_kv_set(args)
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert db.shared_kv_get(db_conn, "ns", "k")["written_by"] == "alice"
+
+    def test_set_shared_non_admin_denied(self, db_conn, db_path, capsys, monkeypatch):
+        monkeypatch.setattr("istota.cli._get_kv_conn", _mock_get_kv_conn(db_conn))
+        monkeypatch.setattr(
+            "istota.cli._load_kv_config",
+            lambda args: Config(db_path=db_path, admin_users={"bob"}),
+        )
+        args = _FakeArgs(namespace="ns", key="k", value='"v"', user="alice", config=None, shared=True)
+        with pytest.raises(SystemExit) as exc:
+            cmd_kv_set(args)
+        assert exc.value.code == 1
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "error"
+        assert db.shared_kv_get(db_conn, "ns", "k") is None
+
+    def test_namespaces_shared(self, db_conn, capsys, monkeypatch):
+        monkeypatch.setattr("istota.cli._get_kv_conn", _mock_get_kv_conn(db_conn))
+        db.shared_kv_set(db_conn, "world", "k", "1", "admin")
+        args = _FakeArgs(user="alice", config=None, shared=True)
+        cmd_kv_namespaces(args)
+        out = json.loads(capsys.readouterr().out)
+        assert out["namespaces"] == ["world"]

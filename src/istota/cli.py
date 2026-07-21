@@ -1134,16 +1134,34 @@ def cmd_tasks_file_poll(args):
         print("No new tasks found")
 
 
+def _load_kv_config(args):
+    """Load config for KV commands (shared writes need the admin allowlist)."""
+    return load_config(Path(args.config) if args.config else None)
+
+
 def _get_kv_conn(args):
     """Get a DB connection for KV commands."""
-    config = load_config(Path(args.config) if args.config else None)
-    return db.get_db(config.db_path)
+    return db.get_db(_load_kv_config(args).db_path)
+
+
+def _shared_write_denied(config, user_id) -> bool:
+    """Print the standard error envelope + return True when a shared write is
+    refused (non-admin identity / blank allowlist). Callers exit non-zero."""
+    if config.is_shared_kv_writer(user_id):
+        return False
+    print(json.dumps({
+        "status": "error", "error": "shared KV writes require admin",
+    }))
+    return True
 
 
 def cmd_kv_get(args):
     """Get a value from the KV store."""
     with _get_kv_conn(args) as conn:
-        result = db.kv_get(conn, args.user, args.namespace, args.key)
+        if getattr(args, "shared", False):
+            result = db.shared_kv_get(conn, args.namespace, args.key)
+        else:
+            result = db.kv_get(conn, args.user, args.namespace, args.key)
     if result is None:
         print(json.dumps({"status": "not_found"}))
     else:
@@ -1157,15 +1175,24 @@ def cmd_kv_set(args):
     except json.JSONDecodeError:
         print(json.dumps({"status": "error", "message": "invalid JSON value"}))
         return
-    with _get_kv_conn(args) as conn:
-        db.kv_set(conn, args.user, args.namespace, args.key, args.value)
+    if getattr(args, "shared", False):
+        if _shared_write_denied(_load_kv_config(args), args.user):
+            sys.exit(1)
+        with _get_kv_conn(args) as conn:
+            db.shared_kv_set(conn, args.namespace, args.key, args.value, args.user)
+    else:
+        with _get_kv_conn(args) as conn:
+            db.kv_set(conn, args.user, args.namespace, args.key, args.value)
     print(json.dumps({"status": "ok"}))
 
 
 def cmd_kv_list(args):
     """List all entries in a namespace."""
     with _get_kv_conn(args) as conn:
-        entries = db.kv_list(conn, args.user, args.namespace)
+        if getattr(args, "shared", False):
+            entries = db.shared_kv_list(conn, args.namespace)
+        else:
+            entries = db.kv_list(conn, args.user, args.namespace)
     # Parse JSON values for output
     for entry in entries:
         try:
@@ -1177,8 +1204,14 @@ def cmd_kv_list(args):
 
 def cmd_kv_delete(args):
     """Delete a key from the KV store."""
-    with _get_kv_conn(args) as conn:
-        deleted = db.kv_delete(conn, args.user, args.namespace, args.key)
+    if getattr(args, "shared", False):
+        if _shared_write_denied(_load_kv_config(args), args.user):
+            sys.exit(1)
+        with _get_kv_conn(args) as conn:
+            deleted = db.shared_kv_delete(conn, args.namespace, args.key)
+    else:
+        with _get_kv_conn(args) as conn:
+            deleted = db.kv_delete(conn, args.user, args.namespace, args.key)
     if deleted:
         print(json.dumps({"status": "ok", "deleted": True}))
     else:
@@ -1188,7 +1221,10 @@ def cmd_kv_delete(args):
 def cmd_kv_namespaces(args):
     """List namespaces for a user."""
     with _get_kv_conn(args) as conn:
-        namespaces = db.kv_namespaces(conn, args.user)
+        if getattr(args, "shared", False):
+            namespaces = db.shared_kv_namespaces(conn)
+        else:
+            namespaces = db.kv_namespaces(conn, args.user)
     print(json.dumps({"status": "ok", "namespaces": namespaces}))
 
 
@@ -1610,11 +1646,14 @@ def main():
     kv_parser = subparsers.add_parser("kv", help="Key-value store for script state")
     kv_subparsers = kv_parser.add_subparsers(dest="kv_action", required=True)
 
+    _shared_help = "Operate on the cross-user shared_kv store (writes admin-only)"
+
     # kv get
     kv_get_parser = kv_subparsers.add_parser("get", help="Get a value")
     kv_get_parser.add_argument("namespace", help="Namespace")
     kv_get_parser.add_argument("key", help="Key")
     kv_get_parser.add_argument("-u", "--user", required=True, help="User ID")
+    kv_get_parser.add_argument("--shared", action="store_true", help=_shared_help)
 
     # kv set
     kv_set_parser = kv_subparsers.add_parser("set", help="Set a value (JSON)")
@@ -1622,21 +1661,25 @@ def main():
     kv_set_parser.add_argument("key", help="Key")
     kv_set_parser.add_argument("value", help="JSON-encoded value")
     kv_set_parser.add_argument("-u", "--user", required=True, help="User ID")
+    kv_set_parser.add_argument("--shared", action="store_true", help=_shared_help)
 
     # kv list
     kv_list_parser = kv_subparsers.add_parser("list", help="List entries in a namespace")
     kv_list_parser.add_argument("namespace", help="Namespace")
     kv_list_parser.add_argument("-u", "--user", required=True, help="User ID")
+    kv_list_parser.add_argument("--shared", action="store_true", help=_shared_help)
 
     # kv delete
     kv_delete_parser = kv_subparsers.add_parser("delete", help="Delete a key")
     kv_delete_parser.add_argument("namespace", help="Namespace")
     kv_delete_parser.add_argument("key", help="Key")
     kv_delete_parser.add_argument("-u", "--user", required=True, help="User ID")
+    kv_delete_parser.add_argument("--shared", action="store_true", help=_shared_help)
 
     # kv namespaces
     kv_ns_parser = kv_subparsers.add_parser("namespaces", help="List namespaces")
     kv_ns_parser.add_argument("-u", "--user", required=True, help="User ID")
+    kv_ns_parser.add_argument("--shared", action="store_true", help=_shared_help)
 
     # chat (with subparsers)
     chat_parser = subparsers.add_parser("chat", help="Web chat room maintenance")

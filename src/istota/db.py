@@ -153,6 +153,31 @@ class ScheduledJob:
     # Phase 1.3 — skill-task dispatch (mirrors ``Task.skill`` / ``skill_args``).
     skill: str | None = None
     skill_args: str | None = None
+    # admin-shared-briefing-blocks spec: post-success shared_kv publish target
+    # ("<ns>/<key>" or bare "<key>") + trusted flag.
+    publish_shared_kv: str | None = None
+    publish_shared_kv_trusted: bool = False
+
+
+@dataclass
+class SharedBlockConfigRow:
+    """An admin-editable shared briefing block definition row.
+
+    Mirrors :class:`istota.config.BriefingSharedBlock` plus the DB-only ``id`` /
+    timestamps. ``sources`` is decoded from the stored JSON into a list of
+    ``{"kind", "config"}`` dicts.
+    """
+    id: int
+    name: str
+    cron: str
+    title: str = ""
+    directive: str | None = None
+    render_mode: str = "synthesis"
+    enabled: bool = True
+    trusted: bool = False
+    sources: list = field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 def _backfill_briefing_output(conn: sqlite3.Connection) -> None:
@@ -261,6 +286,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # Phase 1.3 — skill-task dispatch
         ("skill", "TEXT"),
         ("skill_args", "TEXT"),
+        # admin-shared-briefing-blocks spec: publish a job's result text into
+        # shared_kv on success (gated on is_shared_kv_writer at write time).
+        ("publish_shared_kv", "TEXT"),
+        ("publish_shared_kv_trusted", "INTEGER NOT NULL DEFAULT 0"),
     ]:
         try:
             conn.execute(f"ALTER TABLE scheduled_jobs ADD COLUMN {col} {col_type}")
@@ -659,6 +688,47 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_task_steers_pending "
             "ON task_steers (task_id, status, seq)"
         )
+        # Shared (cross-user) KV store. Created here for existing DBs; schema.sql
+        # also has it for fresh installs. Admin-gated at the caller — the table
+        # itself does no auth (see shared_kv_* below + Config.is_shared_kv_writer).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS shared_kv (
+                namespace  TEXT NOT NULL,
+                key        TEXT NOT NULL,
+                value      TEXT NOT NULL,
+                written_by TEXT,
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (namespace, key)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shared_kv_ns ON shared_kv(namespace)"
+        )
+        # Cron bookkeeping for module-owned shared briefing blocks.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS briefing_shared_block_state (
+                name         TEXT PRIMARY KEY,
+                last_run_at  TEXT
+            )
+        """)
+        # Admin-editable shared briefing block definitions (admin-shared-briefing-
+        # blocks spec). Seeded once from config, DB-wins thereafter. Created here
+        # for existing DBs; schema.sql also has it for fresh installs.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS shared_block_configs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL UNIQUE,
+                cron        TEXT NOT NULL,
+                title       TEXT NOT NULL DEFAULT '',
+                directive   TEXT,
+                render_mode TEXT NOT NULL DEFAULT 'synthesis',
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                trusted     INTEGER NOT NULL DEFAULT 0,
+                sources     TEXT NOT NULL DEFAULT '[]',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            )
+        """)
     except sqlite3.OperationalError:
         pass
 
@@ -4790,6 +4860,216 @@ def kv_namespaces(conn: sqlite3.Connection, user_id: str) -> list[str]:
 
 
 # ============================================================================
+# Shared (cross-user) Key-Value Store
+# ============================================================================
+#
+# The shared_kv table is the shared scope: no user_id in the key. These are
+# pure DB operations — they do NO authorization. The gate lives at the caller
+# (Config.is_shared_kv_writer for user-task writes; trusted-daemon paths write
+# directly). Reads are open to any user by design.
+
+
+def shared_kv_get(conn: sqlite3.Connection, namespace: str, key: str) -> dict | None:
+    """Get a value from the shared KV store.
+
+    Returns dict with value, updated_at, written_by, or None if absent.
+    """
+    cursor = conn.execute(
+        "SELECT value, updated_at, written_by FROM shared_kv "
+        "WHERE namespace = ? AND key = ?",
+        (namespace, key),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        "value": row["value"],
+        "updated_at": row["updated_at"],
+        "written_by": row["written_by"],
+    }
+
+
+def shared_kv_set(
+    conn: sqlite3.Connection, namespace: str, key: str, value: str, written_by: str,
+) -> None:
+    """Set a value in the shared KV store. Upserts if the key already exists.
+
+    ``written_by`` records the writer for audit only — it is never an
+    authorization input.
+    """
+    conn.execute(
+        """
+        INSERT INTO shared_kv (namespace, key, value, written_by, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(namespace, key) DO UPDATE SET
+            value = excluded.value,
+            written_by = excluded.written_by,
+            updated_at = excluded.updated_at
+        """,
+        (namespace, key, value, written_by),
+    )
+
+
+def shared_kv_delete(conn: sqlite3.Connection, namespace: str, key: str) -> bool:
+    """Delete a key from the shared KV store. Returns True if the key existed."""
+    cursor = conn.execute(
+        "DELETE FROM shared_kv WHERE namespace = ? AND key = ?",
+        (namespace, key),
+    )
+    return cursor.rowcount > 0
+
+
+def shared_kv_list(conn: sqlite3.Connection, namespace: str) -> list[dict]:
+    """List all entries in a shared namespace, ordered by key."""
+    cursor = conn.execute(
+        "SELECT key, value, updated_at, written_by FROM shared_kv "
+        "WHERE namespace = ? ORDER BY key",
+        (namespace,),
+    )
+    return [
+        {
+            "key": row["key"],
+            "value": row["value"],
+            "updated_at": row["updated_at"],
+            "written_by": row["written_by"],
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+def shared_kv_namespaces(conn: sqlite3.Connection) -> list[str]:
+    """List distinct namespaces in the shared KV store."""
+    cursor = conn.execute(
+        "SELECT DISTINCT namespace FROM shared_kv ORDER BY namespace",
+    )
+    return [row["namespace"] for row in cursor.fetchall()]
+
+
+# ============================================================================
+# Shared briefing-block cron state
+# ============================================================================
+
+
+def get_briefing_shared_block_last_run(
+    conn: sqlite3.Connection, name: str,
+) -> str | None:
+    """Return the last successful generation time for a shared block, or None."""
+    cursor = conn.execute(
+        "SELECT last_run_at FROM briefing_shared_block_state WHERE name = ?",
+        (name,),
+    )
+    row = cursor.fetchone()
+    return row["last_run_at"] if row else None
+
+
+def set_briefing_shared_block_last_run(
+    conn: sqlite3.Connection, name: str, last_run_at: str,
+) -> None:
+    """Stamp the last generation time for a shared block. Upsert."""
+    conn.execute(
+        """
+        INSERT INTO briefing_shared_block_state (name, last_run_at)
+        VALUES (?, ?)
+        ON CONFLICT(name) DO UPDATE SET last_run_at = excluded.last_run_at
+        """,
+        (name, last_run_at),
+    )
+
+
+# ============================================================================
+# Shared briefing-block definitions (admin-editable; admin-shared-briefing-blocks)
+# ============================================================================
+
+
+def _row_to_shared_block_config(row: sqlite3.Row) -> SharedBlockConfigRow:
+    try:
+        sources = json.loads(row["sources"]) if row["sources"] else []
+    except (json.JSONDecodeError, TypeError):
+        sources = []
+    if not isinstance(sources, list):
+        sources = []
+    return SharedBlockConfigRow(
+        id=int(row["id"]),
+        name=row["name"],
+        cron=row["cron"],
+        title=row["title"] or "",
+        directive=row["directive"],
+        render_mode=row["render_mode"] or "synthesis",
+        enabled=bool(row["enabled"]),
+        trusted=bool(row["trusted"]),
+        sources=sources,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def list_shared_block_configs(conn: sqlite3.Connection) -> list[SharedBlockConfigRow]:
+    """Return all shared-block definitions, ordered by name."""
+    cursor = conn.execute(
+        "SELECT * FROM shared_block_configs ORDER BY name"
+    )
+    return [_row_to_shared_block_config(r) for r in cursor.fetchall()]
+
+
+def get_shared_block_config(
+    conn: sqlite3.Connection, name: str,
+) -> SharedBlockConfigRow | None:
+    """Return a single shared-block definition by name, or None."""
+    row = conn.execute(
+        "SELECT * FROM shared_block_configs WHERE name = ?", (name,),
+    ).fetchone()
+    return _row_to_shared_block_config(row) if row else None
+
+
+def upsert_shared_block_config(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    cron: str,
+    title: str = "",
+    directive: str | None = None,
+    render_mode: str = "synthesis",
+    enabled: bool = True,
+    trusted: bool = False,
+    sources: list | None = None,
+) -> SharedBlockConfigRow:
+    """Create or update a shared-block definition (keyed on ``name``)."""
+    sources_json = json.dumps(list(sources or []))
+    conn.execute(
+        """
+        INSERT INTO shared_block_configs
+            (name, cron, title, directive, render_mode, enabled, trusted,
+             sources, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(name) DO UPDATE SET
+            cron = excluded.cron,
+            title = excluded.title,
+            directive = excluded.directive,
+            render_mode = excluded.render_mode,
+            enabled = excluded.enabled,
+            trusted = excluded.trusted,
+            sources = excluded.sources,
+            updated_at = datetime('now')
+        """,
+        (
+            name, cron, title, directive, render_mode,
+            1 if enabled else 0, 1 if trusted else 0, sources_json,
+        ),
+    )
+    fresh = get_shared_block_config(conn, name)
+    assert fresh is not None
+    return fresh
+
+
+def delete_shared_block_config(conn: sqlite3.Connection, name: str) -> bool:
+    """Delete a shared-block definition by name. Returns True if it existed."""
+    cursor = conn.execute(
+        "DELETE FROM shared_block_configs WHERE name = ?", (name,),
+    )
+    return cursor.rowcount > 0
+
+
+# ============================================================================
 # Talk polling state functions
 # ============================================================================
 
@@ -4977,7 +5257,8 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once, model, effort, skill, skill_args
+               once, model, effort, skill, skill_args,
+               publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE enabled = 1
         """
@@ -4993,7 +5274,8 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once, model, effort, skill, skill_args
+               once, model, effort, skill, skill_args,
+               publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE user_id = ?
         ORDER BY name
@@ -5027,6 +5309,14 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
         effort=row["effort"] if "effort" in row.keys() else None,
         skill=row["skill"] if "skill" in row.keys() else None,
         skill_args=row["skill_args"] if "skill_args" in row.keys() else None,
+        publish_shared_kv=(
+            row["publish_shared_kv"] if "publish_shared_kv" in row.keys() else None
+        ),
+        publish_shared_kv_trusted=(
+            bool(row["publish_shared_kv_trusted"])
+            if "publish_shared_kv_trusted" in row.keys()
+            else False
+        ),
     )
 
 
@@ -5091,7 +5381,8 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once, model, effort, skill, skill_args
+               once, model, effort, skill, skill_args,
+               publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE id = ?
         """,
@@ -5136,7 +5427,8 @@ def get_scheduled_job_by_name(
                conversation_token, output_target, enabled, last_run_at, created_at,
                silent_unless_action, skip_log_channel,
                consecutive_failures, last_error, last_success_at,
-               once, model, effort, skill, skill_args
+               once, model, effort, skill, skill_args,
+               publish_shared_kv, publish_shared_kv_trusted
         FROM scheduled_jobs
         WHERE user_id = ? AND name = ?
         """,

@@ -2,6 +2,48 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-21: Shared curated briefing content + admin-editable shared blocks
+
+Two related things land together. First, the **shared-KV curated-content** substrate (spec `Done/shared-kv-curated-briefing-content.md`): a cross-user `shared_kv` table (namespaced JSON, open reads / admin-only fail-closed writes via `Config.is_shared_kv_writer`), two consuming briefing source kinds (`kv` generic + `shared_block` sugar), the `--shared` flag on the `kv` skill/CLI, and module-owned shared blocks generated once globally under a reserved `__system__` identity by `scheduler.check_shared_blocks`. This collapses N-way duplicate fetch+synthesis of identical content (world headlines, a markets table) to a single generation every user's briefing reads.
+
+Then the **admin-shared-briefing-blocks** feature (spec `Done/admin-shared-briefing-blocks.md`) makes those blocks admin-manageable and closes two gaps found while designing it.
+
+The design splits shared-content generation cleanly. The **built-in generator** stays tool-less and unsandboxed under `__system__` — good for simple generic sources (markets, shared-pool newsletters, shallow frontpage roundups). Deep-browse content (a world-news briefing that follows into individual articles to verify + link them) is served instead by **`publish_shared_kv` jobs**: an admin's existing agentic scheduled prompt, which already runs with a real sandbox and tools, gets one gated post-success attribute to write its result into `shared_kv`. No new synthetic-identity sandbox, no rebuilding the generator, and the prompts port over unchanged. Both write the same namespace; one user-facing Shared source consumes either.
+
+Two deliberate design calls, both from the spec: `publish_shared_kv` is a **typed post-success attribute**, not a general `pre/post_hook` — an executable hook would run unsandboxed in the daemon with the master key in scope, breaking the "task supplies data, not code" invariant. And it is **not an `output_target` surface** — `shared_kv` is a pure storage sink, can't implement the `Transport` protocol, and its authz is a hard gate incompatible with the delivery planner's never-raise/drop-with-warning contract. So it lives with the other gated post-success writes (`_process_deferred_*`).
+
+Trust is a property of the content's **writer** (an admin), stored in the value, honored from the value at read time — a consuming user can never unwrap another admin's block. Default untrusted, because shared blocks are typically web-derived (an injection surface). `markets-summary` is the exception (pure numbers) and renders un-wrapped.
+
+Verbatim structured generation: `render_mode="structured"` now truly **skips the brain** for shared blocks — self-formatting data like the markets emoji table is stored as-is with zero LLM passes, instead of being flattened back into prose by a needless synthesis call. Scoped to shared-block generation (each block is its own generation); per-user briefings still prompt-instruct verbatim since they synthesize all blocks in one pass.
+
+Web UI cleanup (from live review): extracted the per-kind source editors into a shared `SourceConfigFields.svelte` used by both the per-user block editor and the new admin shared-block editor (the admin editor's raw JSON textareas are gone — real dropdowns now). Fixed field alignment (top-aligned 2-col grid instead of `flex-end` inline-fields), made source Type+config inline, matched the shared-block table's cron/render chips to the sibling cards, compact last-run date, and fixed mobile overflow (the global `.grid` is `table-layout:fixed` and the three wide text actions overflowed the 3rem actions column — gave this table a `min-width` so `.table-scroll` scrolls instead of overlapping).
+
+**Key changes:**
+- Verbatim structured generation: `run_shared_block` branches on `render_mode`; `structured` → `_assemble_verbatim` (no brain), returns `{"text", "trusted"}`. `BriefingSharedBlock.trusted` added; default `markets-summary` → structured/verbatim/trusted.
+- Definitions persistence: `shared_block_configs` table + `db.py` CRUD (`SharedBlockConfigRow`), `shared_blocks_store.import_from_config` (seed-once), `config._apply_shared_blocks` overlay (DB-wins), `istota briefings shared` CLI, scheduler startup seed.
+- Admin web: `require_admin` (= `is_shared_kv_writer`, fail-closed) + `GET/PUT/DELETE /shared-blocks` + `POST /shared-blocks/{name}/run` + `GET /shared-block-options`; `ALLOWED_SHARED_SOURCE_KINDS` canonicalized in `briefings.models`. Admin-only "Shared blocks" card + per-user "Shared block" source.
+- `publish_shared_kv`: `scheduled_jobs` columns + `ScheduledJob` + `cron_loader` parse/round-trip + `_publish_result_to_shared_kv` (gated, fail-loud, returns bool so the success reset withholds on failure).
+- Read side: `sources/kv.py` honors stored-value `trusted` for the shared-block namespace; custom-published key with no definition is valid, not "unknown".
+- Web: extracted `SourceConfigFields.svelte` (reused by both editors); alignment, inline sources, mobile-scroll, sibling-matching chips/cron/date.
+- Ansible: `istota_toml.py` filter emits `trusted`; default `markets-summary` → structured/trusted.
+- ~50 new backend tests; svelte-check + vitest clean.
+
+**Files added/modified:**
+- `src/istota/briefings/shared_blocks.py` - `_assemble_verbatim`, `render_mode` branch, `trusted` in value
+- `src/istota/briefings/sources/kv.py` - stored-value trust, custom-key-not-unknown
+- `src/istota/briefings/routes.py` - admin shared-block CRUD/run/options routes + `require_admin`
+- `src/istota/briefings/models.py` - `ALLOWED_SHARED_SOURCE_KINDS`
+- `src/istota/shared_blocks_store.py` - config→DB seeder (new)
+- `src/istota/config.py` - `BriefingSharedBlock.trusted`, `_apply_shared_blocks` overlay, `is_shared_kv_writer`
+- `src/istota/db.py` - `shared_block_configs` table + CRUD; `scheduled_jobs.publish_shared_kv*`
+- `src/istota/scheduler.py` - `_publish_result_to_shared_kv`, verbatim result write
+- `src/istota/cron_loader.py` - `publish_shared_kv` parse/round-trip
+- `src/istota/cli_briefings.py` - `briefings shared` subgroup
+- `web/src/lib/components/briefings/SourceConfigFields.svelte` - shared source editor (new)
+- `web/src/routes/briefings/settings/+page.svelte` - admin card, per-user Shared source, layout/mobile fixes
+- `web/src/lib/api.ts`, `web/vite-mock-api.ts` - wrappers + mock endpoints
+- `schema.sql`, Ansible filter/defaults, AGENTS.md, tests
+
 ## 2026-07-20: Robust briefing file-path picker (server-side search + advisory verify)
 
 Follow-up to the verified-path-picker commit. The `todos`/`reminders`/`notes` source path field had two rough edges: the autocomplete only ever saw a small, fixed slice of the workspace (a single bounded walk loaded once on page open, then filtered client-side — so a deep or late-in-walk file could never appear no matter what you typed), and the *first* save of a newly-typed path would sometimes fail before a retry succeeded.

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
@@ -28,6 +29,8 @@ from istota.briefings import db as bdb
 from istota.briefings._loader import UserNotFoundError, resolve_for_user
 from istota.briefings._migrate import ensure_initialised
 from istota.briefings.models import (
+    ALLOWED_SHARED_SOURCE_KINDS,
+    RENDER_MODES,
     SOURCE_KINDS,
     STRUCTURED_KINDS,
     ArchivedBriefing,
@@ -35,6 +38,7 @@ from istota.briefings.models import (
     BriefingsContext,
 )
 from istota.briefings.sources.browse import BROWSE_PRESETS
+from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +68,25 @@ def verify_origin(request: Request) -> None:
 
 def _app_config(request: Request):
     return getattr(request.app.state, "istota_config", None)
+
+
+def require_admin(
+    request: Request,
+    user: dict = Depends(require_auth),
+) -> dict:
+    """Gate shared-block admin routes on shared-content-writer authority.
+
+    Uses ``Config.is_shared_kv_writer`` — the same fail-closed gate that governs
+    every ``shared_kv`` write (an empty admins allowlist authorizes NOBODY). This
+    is the correct authority for admin surfaces that create content flowing into
+    other users' briefings, and it matches ``web_app._user_is_web_admin`` without
+    a cross-module import.
+    """
+    cfg = _app_config(request)
+    username = user.get("username", "")
+    if cfg is None or not cfg.is_shared_kv_writer(username):
+        raise HTTPException(403, "admin only")
+    return user
 
 
 def get_user_context(
@@ -396,6 +419,238 @@ def get_feed_options(
         "subscriptions": subscriptions,
         "categories": categories,
     }
+
+
+# ---------------------------------------------------------------------------
+# Shared briefing blocks (admin-editable; admin-shared-briefing-blocks spec)
+# ---------------------------------------------------------------------------
+
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def _shared_block_status(conn, name: str) -> dict:
+    """Per-block runtime status: last generation + current shared_kv preview."""
+    from istota import db as fdb
+
+    last_run_at = fdb.get_briefing_shared_block_last_run(conn, name)
+    val = fdb.shared_kv_get(conn, SHARED_BLOCK_NAMESPACE, name)
+    preview = None
+    updated_at = None
+    stored_trusted = None
+    if val:
+        updated_at = val.get("updated_at")
+        try:
+            import json as _json
+            parsed = _json.loads(val["value"])
+            if isinstance(parsed, dict):
+                stored_trusted = bool(parsed.get("trusted", False))
+                text = parsed.get("text")
+                if isinstance(text, str):
+                    preview = text[:400]
+        except (ValueError, TypeError):
+            preview = (val.get("value") or "")[:400]
+    return {
+        "last_run_at": last_run_at,
+        "value_updated_at": updated_at,
+        "value_preview": preview,
+        "stored_trusted": stored_trusted,
+        "has_content": val is not None,
+    }
+
+
+def _map_shared_block(row, status: dict) -> dict:
+    return {
+        "name": row.name,
+        "cron": row.cron,
+        "title": row.title,
+        "directive": row.directive or "",
+        "render_mode": row.render_mode,
+        "enabled": row.enabled,
+        "trusted": row.trusted,
+        "sources": row.sources,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "status": status,
+    }
+
+
+@router.get("/shared-blocks")
+def list_shared_blocks(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+) -> dict:
+    """List shared-block definitions + per-block status. Admin-gated."""
+    from istota import db as fdb
+
+    cfg = _app_config(request)
+    with fdb.get_db(cfg.db_path) as conn:
+        rows = fdb.list_shared_block_configs(conn)
+        blocks = [_map_shared_block(r, _shared_block_status(conn, r.name)) for r in rows]
+    return {
+        "shared_blocks": blocks,
+        "allowed_source_kinds": sorted(ALLOWED_SHARED_SOURCE_KINDS),
+        "render_modes": list(RENDER_MODES),
+    }
+
+
+def _validate_shared_block_payload(payload: dict) -> dict:
+    """Validate + normalise a shared-block create/update payload. Raises 400."""
+    from croniter import croniter
+
+    name = (payload.get("name") or "").strip()
+    if not name or not _SLUG_RE.match(name):
+        raise HTTPException(400, "name must be a slug: lowercase letters, digits, - and _")
+    cron = (payload.get("cron") or "").strip()
+    if not cron or not croniter.is_valid(cron):
+        raise HTTPException(400, f"invalid cron expression: {cron!r}")
+    render_mode = payload.get("render_mode") or "synthesis"
+    if render_mode not in RENDER_MODES:
+        raise HTTPException(400, f"render_mode must be one of {list(RENDER_MODES)}")
+    raw_sources = payload.get("sources")
+    if raw_sources is None:
+        raw_sources = []
+    if not isinstance(raw_sources, list):
+        raise HTTPException(400, "sources must be a list")
+    sources: list = []
+    for s in raw_sources:
+        if not isinstance(s, dict) or "kind" not in s:
+            raise HTTPException(400, "each source must be an object with a 'kind'")
+        kind = s["kind"]
+        if kind not in ALLOWED_SHARED_SOURCE_KINDS:
+            raise HTTPException(
+                400,
+                f"source kind {kind!r} not allowed for shared blocks "
+                f"(allowed: {sorted(ALLOWED_SHARED_SOURCE_KINDS)})",
+            )
+        sources.append({"kind": kind, "config": s.get("config") or {}})
+    return {
+        "name": name,
+        "cron": cron,
+        "title": (payload.get("title") or "").strip(),
+        "directive": payload.get("directive") or None,
+        "render_mode": render_mode,
+        "enabled": bool(payload.get("enabled", True)),
+        "trusted": bool(payload.get("trusted", False)),
+        "sources": sources,
+    }
+
+
+@router.put("/shared-blocks")
+def put_shared_block(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+    __: None = Depends(verify_origin),
+    payload: dict = Body(...),
+) -> dict:
+    """Create or update a shared-block definition (keyed on name). Admin-gated."""
+    from istota import db as fdb
+
+    fields = _validate_shared_block_payload(payload)
+    cfg = _app_config(request)
+    with fdb.get_db(cfg.db_path) as conn:
+        row = fdb.upsert_shared_block_config(conn, **fields)
+        status = _shared_block_status(conn, row.name)
+    return {"status": "ok", "shared_block": _map_shared_block(row, status)}
+
+
+@router.delete("/shared-blocks/{name}")
+def delete_shared_block(
+    name: str,
+    request: Request,
+    _admin: dict = Depends(require_admin),
+    __: None = Depends(verify_origin),
+    delete_value: bool = Query(False),
+) -> dict:
+    """Delete a shared-block definition. Admin-gated.
+
+    By default the last ``shared_kv`` value is left in place (consuming briefings
+    keep splicing it until it goes stale, then the freshness gate omits it). Pass
+    ``?delete_value=true`` for a hard removal.
+    """
+    from istota import db as fdb
+
+    cfg = _app_config(request)
+    with fdb.get_db(cfg.db_path) as conn:
+        removed = fdb.delete_shared_block_config(conn, name)
+        if delete_value:
+            fdb.shared_kv_delete(conn, SHARED_BLOCK_NAMESPACE, name)
+    if not removed:
+        raise HTTPException(404, "shared block not found")
+    return {"status": "ok", "deleted_value": bool(delete_value)}
+
+
+@router.post("/shared-blocks/{name}/run")
+def run_shared_block_now(
+    name: str,
+    request: Request,
+    _admin: dict = Depends(require_admin),
+    __: None = Depends(verify_origin),
+) -> dict:
+    """Run-now: regenerate a shared block synchronously, return fresh status.
+
+    Inline on the request thread (v1 — generation is bounded: fail-soft gather +
+    a 180s brain ceiling). A generation error is returned in the payload rather
+    than raising, so one bad block doesn't 500 the page.
+    """
+    from istota import db as fdb
+    from istota.config import BriefingSharedBlock
+    from istota.scheduler import _generate_shared_block
+
+    cfg = _app_config(request)
+    with fdb.get_db(cfg.db_path) as conn:
+        row = fdb.get_shared_block_config(conn, name)
+    if row is None:
+        raise HTTPException(404, "shared block not found")
+
+    block = BriefingSharedBlock(
+        name=row.name, cron=row.cron, title=row.title, directive=row.directive,
+        render_mode=row.render_mode, enabled=row.enabled, trusted=row.trusted,
+        sources=row.sources,
+    )
+    error = None
+    try:
+        _generate_shared_block(cfg, block)
+    except Exception as e:  # noqa: BLE001 — surfaced, not raised
+        logger.error("run-now shared block %s failed: %s", name, e)
+        error = str(e)
+    with fdb.get_db(cfg.db_path) as conn:
+        status = _shared_block_status(conn, name)
+    return {"status": "ok" if error is None else "error", "error": error, **{"block_status": status}}
+
+
+@router.get("/shared-block-options")
+def get_shared_block_options(
+    request: Request,
+    user: dict = Depends(require_auth),
+) -> dict:
+    """Live pickable shared blocks for the per-user Shared source dropdown.
+
+    Available to any authenticated user (read-only discovery). Lists every live
+    ``shared_kv`` key in the shared-block namespace, tagged ``config`` (has a
+    definition row) or ``custom`` (published by a job, no definition). A defined
+    block with no content yet is also surfaced so a user can reference it ahead
+    of first generation.
+    """
+    from istota import db as fdb
+
+    cfg = _app_config(request)
+    options: dict[str, dict] = {}
+    with fdb.get_db(cfg.db_path) as conn:
+        defined = {r.name for r in fdb.list_shared_block_configs(conn)}
+        for r in fdb.list_shared_block_configs(conn):
+            options[r.name] = {
+                "name": r.name, "updated_at": None, "has_content": False,
+                "source": "config",
+            }
+        for row in fdb.shared_kv_list(conn, SHARED_BLOCK_NAMESPACE):
+            key = row["key"]
+            options[key] = {
+                "name": key,
+                "updated_at": row.get("updated_at"),
+                "has_content": True,
+                "source": "config" if key in defined else "custom",
+            }
+    return {"options": sorted(options.values(), key=lambda o: o["name"])}
 
 
 # File-path picker for todos / reminders / notes sources. The path a user
