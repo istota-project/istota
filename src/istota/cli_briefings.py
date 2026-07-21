@@ -33,8 +33,6 @@ def build_parser() -> argparse.ArgumentParser:
     sched.add_argument("--cron")
     sched.add_argument("--conversation-token")
     sched.add_argument("--output", default="talk")
-    sched.add_argument("--components-json")
-    sched.add_argument("--component", action="append")
     sched.add_argument("--disabled", action="store_true")
 
     # blocks --------------------------------------------------------------
@@ -70,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_schedule(args, config) -> int:
-    from istota.cli import _parse_components_arg, run_briefing_schedule
+    from istota.cli import run_briefing_schedule
 
     run_briefing_schedule(
         config,
@@ -80,7 +78,6 @@ def _run_schedule(args, config) -> int:
         cron=args.cron,
         conversation_token=args.conversation_token,
         output=args.output or "talk",
-        components=_parse_components_arg(args),
         disabled=args.disabled,
     )
     return 0

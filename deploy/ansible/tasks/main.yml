@@ -942,6 +942,7 @@
     {% for purpose, descriptor in (user_item.value.routing | default({})).items() %}--route "{{ purpose }}={{ descriptor }}" {% endfor %}
     {% if (user_item.value.default_destination | default('')) %}--default-destination "{{ user_item.value.default_destination }}"{% endif %}
     {% if (user_item.value.email_reply_routing | default('')) %}--email-reply-routing "{{ user_item.value.email_reply_routing }}"{% endif %}
+    {% if user_item.value.default_briefings is defined %}{{ '--default-briefings' if user_item.value.default_briefings else '--no-default-briefings' }}{% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"
   loop: "{{ istota_users | dict2items }}"
@@ -1003,11 +1004,11 @@
     - "restart istota-scheduler"
 
 # Write briefing rows into the briefing_configs DB table via
-# `istota briefing ensure`. The DB is the source of truth — each
-# (user, briefing.name) is upserted independently. Components is a
-# freeform dict so we pass it through as JSON; output (talk|email|ntfy,
-# or a comma list / surface:channel descriptor) and conversation_token
-# are extracted as flags. Legacy "both" still parses as a silent alias.
+# `istota briefings schedule ensure`. The DB is the source of truth — each
+# (user, briefing.name) is upserted independently. Only schedule + delivery
+# (cron, conversation_token, output, enabled) are provisioned here; content
+# lives in blocks (seeded once from the config `blocks:` via the module DB
+# seeder). Legacy `components:` authoring is retired.
 - name: Plan briefing ensure invocations
   set_fact:
     _istota_briefing_targets: "{{ _briefing_targets_json | from_json }}"
@@ -1022,7 +1023,6 @@
         'cron': b.cron,
         'conversation_token': b.conversation_token | default(''),
         'output': b.output | default('talk'),
-        'components': b.components | default({}),
         'enabled': b.enabled | default(true),
       }) -%}
       {%- endfor -%}
@@ -1040,7 +1040,6 @@
     --cron "{{ item.cron }}"
     {% if item.conversation_token %}--conversation-token "{{ item.conversation_token }}"{% endif %}
     --output "{{ item.output }}"
-    {% if item.components %}--components-json '{{ item.components | to_json }}'{% endif %}
     {% if not item.enabled %}--disabled{% endif %}
   args:
     chdir: "{{ istota_repo_dir }}"

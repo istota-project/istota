@@ -27,8 +27,7 @@ class TestSchedule:
     def test_ensure_and_list(self, config, capsys):
         rc = cli_briefings.dispatch(
             ["schedule", "ensure", "-u", "stefan", "--name", "Morning",
-             "--cron", "0 7 * * *", "--conversation-token", "tok",
-             "--component", "markets=true"],
+             "--cron", "0 7 * * *", "--conversation-token", "tok"],
             config,
         )
         assert rc == 0
@@ -191,7 +190,7 @@ class TestDeprecationShim:
         ns = argparse.Namespace(
             config=None, action="ensure", user="stefan", name="M",
             cron="0 7 * * *", conversation_token="tok", output="talk",
-            components_json=None, component=None, disabled=False,
+            disabled=False,
         )
         cmd_briefing(ns)
         captured = capsys.readouterr()

@@ -406,27 +406,25 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # db_backup_dir = ""                # empty = {nextcloud_mount}/istota-db-backups
 
 # ============================================================================
-# Briefing Defaults
+# Default briefings (shared canonical set)
 # ============================================================================
-# Admin-level defaults for briefing components. When a user sets
-# `markets = true` or `news = true` in their workspace BRIEFINGS.md,
-# these defaults are expanded into the full component config.
-
-# [briefing_defaults.markets]
-# Not needed — futures/indices symbols default from markets.py
-# Only add if you want to override the built-in symbols:
-# futures = ["ES=F", "NQ=F", "YM=F"]
-# indices = ["^GSPC", "^IXIC", "^DJI"]
-
-[briefing_defaults.news]
-lookback_hours = 12
-sources = [
-    { type = "domain", value = "semafor.com" },
-    { type = "email", value = "briefing@nytimes.com" },
-]
-
-[briefing_defaults.headlines]
-sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
+# A canonical briefing set seeded once into each opted-in user (per-user
+# `default_briefings = true`, the default). Same name/cron/output/blocks shape
+# as a per-user briefing; content is blocks-only. Seed-once: a user's later web
+# edits win and re-runs never clobber them. Omit the section for no defaults.
+#
+# [[default_briefings]]
+# name = "Daily"
+# cron = "0 7 * * *"
+# output = "talk"
+#
+#   [[default_briefings.blocks]]
+#   title = "World News"
+#   render_mode = "synthesis"
+#
+#     [[default_briefings.blocks.sources]]
+#     kind = "browse"
+#     config = { preset = "ap" }
 
 # ============================================================================
 # Skills (routing)
@@ -674,39 +672,40 @@ timezone = "America/New_York"  # IANA timezone for briefing scheduling
 # name = "Projects"
 # permissions = "write"
 
-# Alice's briefings - morning and evening
+# Alice's briefings. Content is config-authored blocks (the sole content model);
+# schedule + delivery come from name/cron/conversation_token/output. When a
+# briefing declares `blocks`, they are seeded ONCE into the user's briefings
+# module DB as an editable baseline. After the first materialisation the briefing
+# is an ordinary editable per-user briefing; the user reorders/edits it in the
+# web editor and operator re-runs never re-clobber it (seed-once). `blocks` are
+# never stored in the framework DB — they live only in this config and are
+# consumed by the module-DB seeder. See the per-kind config reference below.
 [[users.alice.briefings]]
 name = "morning"
 cron = "0 6 * * *"  # 6am in user's timezone
 conversation_token = "room123"  # Talk room to post to
 output = "talk,email"  # talk / email / ntfy, or a comma list (default: "talk")
 
-[users.alice.briefings.components]
-calendar = true
-todos = true
-markets = true    # morning → futures, evening → indices (automatic)
-news = true       # expands using [briefing_defaults.news] sources
-reminders = { enabled = true }  # random item from the user's reminders file (path is a briefing-source property)
+  [[users.alice.briefings.blocks]]
+  title = "Today"
+  render_mode = "structured"
 
-[[users.alice.briefings]]
-name = "evening"
-cron = "0 18 * * *"  # 6pm in user's timezone
-conversation_token = "room123"
-output = "talk"  # Talk only for evening briefing
+    [[users.alice.briefings.blocks.sources]]
+    kind = "calendar"
+    config = {}
 
-[users.alice.briefings.components]
-calendar = true
-todos = true
-markets = true    # morning → futures, evening → indices (automatic)
+    [[users.alice.briefings.blocks.sources]]
+    kind = "todos"
+    config = {}
 
-# Rich config-authored blocks (alternative to `components`). When a briefing
-# declares `blocks`, they are seeded ONCE into the user's briefings module DB as
-# an editable baseline — `blocks` win over `components` for seeding. After the
-# first materialisation the briefing is an ordinary editable per-user briefing;
-# the user reorders/edits it in the web editor and operator re-runs never
-# re-clobber it (seed-once). `blocks` are never stored in the framework DB — they
-# live only in this config and are consumed by the module-DB seeder. See the
-# per-kind config reference below.
+  [[users.alice.briefings.blocks]]
+  title = "Markets"
+  render_mode = "structured"
+
+    [[users.alice.briefings.blocks.sources]]
+    kind = "markets"
+    config = {}
+
 [[users.alice.briefings]]
 name = "world"
 cron = "0 7 * * *"
@@ -758,33 +757,16 @@ timezone = "America/Los_Angeles"
 #   - name: identifier (e.g., "morning", "evening")
 #   - cron: cron expression evaluated in user's timezone
 #   - conversation_token: Talk room ID to post briefing to
-#   - components: what to include in the briefing
-#
-# Available components:
-#   - calendar: boolean - today's (morning) or tomorrow's (evening) events
-#   - todos: boolean - pending TODO items
-#   - email: boolean - general unread email summary
-#   - markets: { enabled, futures, indices } - pre-fetched market data
-#   - news: { enabled, lookback_hours, sources } - newsletter summaries
-#   - notes: { enabled } - parse shared notes files for agenda items
-#   - reminders: { enabled } - random item from the user's reminders file
-#
-# Market symbols:
-#   - Futures: ES=F (S&P 500), NQ=F (Nasdaq 100), YM=F (Dow)
-#   - Indices: ^GSPC (S&P 500), ^IXIC (Nasdaq), ^DJI (Dow Jones)
-#
-# News sources support:
-#   - { type = "email", value = "newsletter@example.com" } - exact sender
-#   - { type = "domain", value = "example.com" } - sender domain match
+#   - output: delivery target (talk / email / ntfy, or a comma list)
+#   - blocks: the briefing content (the sole content model; see below)
 #
 # ----------------------------------------------------------------------------
-# Rich config-authored blocks ([[users.NAME.briefings.blocks]])
+# Config-authored blocks ([[users.NAME.briefings.blocks]])
 # ----------------------------------------------------------------------------
 #
-# An alternative to `components` that exposes the full block/source model. A
-# briefing may carry `components`, `blocks`, both, or neither; when `blocks` is
-# present and non-empty it wins for seeding. Blocks seed ONCE into the user's
-# module DB (per-briefing, seed-once) and are then user-editable in the web UI.
+# Blocks are the full block/source content model. Blocks seed ONCE into the
+# user's module DB (per-briefing, seed-once) and are then user-editable in the
+# web UI.
 #
 # Each block:
 #   - title: required, non-empty (section header; a titleless block is skipped)

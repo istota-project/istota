@@ -322,37 +322,13 @@ talk_cache_max_per_conversation = {{ istota_scheduler_talk_cache_max_per_convers
 temp_file_retention_days = {{ istota_scheduler_temp_file_retention_days }}
 location_ping_retention_days = {{ istota_scheduler_location_ping_retention_days }}
 
-{% if istota_briefing_defaults is defined and istota_briefing_defaults %}
+{# Canonical shared briefing set (retire-legacy-briefing-components). Rendered
+   as the top-level [[default_briefings]] section; seeded once into each opted-in
+   user by _apply_user_briefings. Content is blocks-only. #}
+{% set _default_briefings_toml = istota_default_briefings | default([]) | istota_default_briefings_toml %}
+{% if _default_briefings_toml %}
 
-[briefing_defaults]
-{% if istota_briefing_defaults.markets is defined %}
-[briefing_defaults.markets]
-{% if istota_briefing_defaults.markets.futures is defined %}
-futures = {{ istota_briefing_defaults.markets.futures | to_json }}
-{% endif %}
-{% if istota_briefing_defaults.markets.indices is defined %}
-indices = {{ istota_briefing_defaults.markets.indices | to_json }}
-{% endif %}
-{% endif %}
-{% if istota_briefing_defaults.news is defined %}
-[briefing_defaults.news]
-{% if istota_briefing_defaults.news.lookback_hours is defined %}
-lookback_hours = {{ istota_briefing_defaults.news.lookback_hours }}
-{% endif %}
-{% if istota_briefing_defaults.news.sources is defined and istota_briefing_defaults.news.sources | length > 0 %}
-sources = [
-{% for source in istota_briefing_defaults.news.sources %}
-    { type = "{{ source.type }}", value = "{{ source.value }}" },
-{% endfor %}
-]
-{% endif %}
-{% endif %}
-{% if istota_briefing_defaults.headlines is defined %}
-[briefing_defaults.headlines]
-{% if istota_briefing_defaults.headlines.sources is defined and istota_briefing_defaults.headlines.sources | length > 0 %}
-sources = {{ istota_briefing_defaults.headlines.sources | to_json }}
-{% endif %}
-{% endif %}
+{{ _default_briefings_toml }}
 {% endif %}
 
 {% if istota_browser_enabled %}

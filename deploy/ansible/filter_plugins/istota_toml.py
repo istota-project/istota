@@ -43,8 +43,8 @@ def _toml_value(value) -> str:
     return _toml_str(str(value))
 
 
-def _render_source(uid: str, src: dict) -> list[str]:
-    lines = [f"    [[users.{uid}.briefings.blocks.sources]]"]
+def _render_source(prefix: str, src: dict) -> list[str]:
+    lines = [f"    [[{prefix}.blocks.sources]]"]
     kind = src.get("kind", "")
     lines.append(f"    kind = {_toml_value(kind)}")
     cfg = src.get("config") or {}
@@ -52,8 +52,8 @@ def _render_source(uid: str, src: dict) -> list[str]:
     return lines
 
 
-def _render_block(uid: str, block: dict) -> list[str]:
-    lines = [f"  [[users.{uid}.briefings.blocks]]"]
+def _render_block(prefix: str, block: dict) -> list[str]:
+    lines = [f"  [[{prefix}.blocks]]"]
     lines.append(f"  title = {_toml_value(block.get('title', ''))}")
     if block.get("directive"):
         lines.append(f"  directive = {_toml_value(block['directive'])}")
@@ -64,7 +64,7 @@ def _render_block(uid: str, block: dict) -> list[str]:
         lines.append(f"  options = {_toml_value(options)}")
     for src in block.get("sources") or []:
         lines.append("")
-        lines.extend(_render_source(uid, src))
+        lines.extend(_render_source(prefix, src))
     return lines
 
 
@@ -84,16 +84,46 @@ def istota_briefing_blocks_toml(users) -> str:
             blocks = briefing.get("blocks") if isinstance(briefing, dict) else None
             if not blocks:
                 continue
-            out.append(f"[[users.{uid}.briefings]]")
+            prefix = f"users.{uid}.briefings"
+            out.append(f"[[{prefix}]]")
             out.append(f"name = {_toml_value(briefing.get('name', ''))}")
             out.append(f"cron = {_toml_value(briefing.get('cron', ''))}")
             for block in blocks:
                 out.append("")
-                out.extend(_render_block(uid, block))
+                out.extend(_render_block(prefix, block))
             out.append("")
+    return "\n".join(out).rstrip() + ("\n" if out else "")
+
+
+def istota_default_briefings_toml(defaults) -> str:
+    """Render the top-level ``[[default_briefings]]`` section from a list.
+
+    Each entry carries ``name`` / ``cron`` / ``output`` plus the same nested
+    ``[[default_briefings.blocks]]`` / ``[[...blocks.sources]]`` shape as a
+    per-user briefing. Returns "" for an empty/invalid list so the template
+    renders nothing (byte-unchanged config) when no defaults are configured.
+    """
+    if not isinstance(defaults, (list, tuple)):
+        return ""
+    out: list[str] = []
+    for briefing in defaults:
+        if not isinstance(briefing, dict) or not briefing.get("name"):
+            continue
+        prefix = "default_briefings"
+        out.append(f"[[{prefix}]]")
+        out.append(f"name = {_toml_value(briefing.get('name', ''))}")
+        out.append(f"cron = {_toml_value(briefing.get('cron', ''))}")
+        out.append(f"output = {_toml_value(briefing.get('output', 'talk'))}")
+        for block in briefing.get("blocks") or []:
+            out.append("")
+            out.extend(_render_block(prefix, block))
+        out.append("")
     return "\n".join(out).rstrip() + ("\n" if out else "")
 
 
 class FilterModule:
     def filters(self):
-        return {"istota_briefing_blocks_toml": istota_briefing_blocks_toml}
+        return {
+            "istota_briefing_blocks_toml": istota_briefing_blocks_toml,
+            "istota_default_briefings_toml": istota_default_briefings_toml,
+        }

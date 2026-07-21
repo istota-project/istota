@@ -23,14 +23,16 @@ _FILTER_PATH = (
 )
 
 
-def _load_filter():
+def _load_filter_module():
     spec = importlib.util.spec_from_file_location("istota_toml", _FILTER_PATH)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.istota_briefing_blocks_toml
+    return mod
 
 
-render = _load_filter()
+_FILTER_MOD = _load_filter_module()
+render = _FILTER_MOD.istota_briefing_blocks_toml
+render_defaults = _FILTER_MOD.istota_default_briefings_toml
 
 
 _USERS = {
@@ -112,6 +114,56 @@ class TestBriefingBlocksTomlFilter:
         parsed = tomllib.loads(render(users))
         title = parsed["users"]["u"]["briefings"][0]["blocks"][0]["title"]
         assert title == 'Say "hi"\\bye'
+
+
+class TestDefaultBriefingsTomlFilter:
+    _DEFAULTS = [
+        {
+            "name": "Daily",
+            "cron": "0 7 * * *",
+            "output": "talk",
+            "blocks": [
+                {
+                    "title": "World News",
+                    "render_mode": "synthesis",
+                    "sources": [{"kind": "browse", "config": {"preset": "ap"}}],
+                },
+                {
+                    "title": "Markets",
+                    "render_mode": "structured",
+                    "sources": [{"kind": "markets", "config": {}}],
+                },
+            ],
+        },
+    ]
+
+    def test_empty_when_no_defaults(self):
+        assert render_defaults([]) == ""
+        assert render_defaults("nope") == ""
+
+    def test_renders_parseable_default_briefings_section(self):
+        out = render_defaults(self._DEFAULTS)
+        parsed = tomllib.loads(out)
+        assert "default_briefings" in parsed
+        entries = parsed["default_briefings"]
+        assert len(entries) == 1
+        assert entries[0]["name"] == "Daily"
+        assert entries[0]["cron"] == "0 7 * * *"
+        assert entries[0]["output"] == "talk"
+        assert [b["title"] for b in entries[0]["blocks"]] == ["World News", "Markets"]
+
+    def test_round_trips_into_config_default_briefings(self, tmp_path):
+        from istota.config import load_config
+
+        out = render_defaults(self._DEFAULTS)
+        p = tmp_path / "config.toml"
+        p.write_text(out)
+        cfg = load_config(p)
+        assert len(cfg.default_briefings) == 1
+        d0 = cfg.default_briefings[0]
+        assert d0.name == "Daily"
+        assert d0.output == "talk"
+        assert [b["title"] for b in d0.blocks] == ["World News", "Markets"]
 
 
 def test_config_example_blocks_round_trip():
