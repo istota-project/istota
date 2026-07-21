@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import tomli
 
-from ...config import BriefingConfig, BriefingDefaultsConfig, Config
+from ...config import BriefingConfig, Config
 from ...storage import get_user_briefings_path
 
 logger = logging.getLogger("istota.briefing")
@@ -967,46 +967,16 @@ def _load_workspace_briefings(config: Config, user_id: str) -> list[BriefingConf
 
     briefings = []
     for b in data.get("briefings", []):
+        # Workspace BRIEFINGS.md is name/cron/output only now; legacy
+        # `components` keys are ignored (blocks are the sole content model).
         briefings.append(BriefingConfig(
             name=b.get("name", ""),
             cron=b.get("cron", ""),
             conversation_token=b.get("conversation_token", ""),
             output=b.get("output", "talk"),
-            components=b.get("components", {}),
         ))
 
     return briefings
-
-
-def _expand_boolean_components(
-    components: dict,
-    defaults: BriefingDefaultsConfig,
-) -> dict:
-    """
-    Merge admin defaults into component values.
-
-    - `markets = true` → `{enabled: true, **defaults.markets}`
-    - `markets = {enabled: true}` → same — user-supplied keys win, default keys fill the gaps
-    - Dict with explicit overrides (e.g. `sources = [...]`) keeps the overrides
-    - Simple booleans without defaults stay as-is
-    """
-    expanded = {}
-    for key, value in components.items():
-        default_dict = getattr(defaults, key, None)
-        has_defaults = isinstance(default_dict, dict) and bool(default_dict)
-
-        if isinstance(value, bool) and value:
-            if has_defaults:
-                expanded[key] = {"enabled": True, **default_dict}
-            else:
-                expanded[key] = value
-        elif isinstance(value, dict) and has_defaults:
-            # Merge defaults under user-supplied keys (user wins)
-            merged = {**default_dict, **value}
-            expanded[key] = merged
-        else:
-            expanded[key] = value
-    return expanded
 
 
 def get_briefings_for_user(config: Config, user_id: str) -> list[BriefingConfig]:
@@ -1014,7 +984,8 @@ def get_briefings_for_user(config: Config, user_id: str) -> list[BriefingConfig]
     Get briefings for a user with workspace > per-user config > main config precedence.
 
     Workspace BRIEFINGS.md overrides admin config at the briefing name level.
-    Boolean component values are expanded using briefing_defaults.
+    Briefings are returned verbatim — content is assembled from blocks by the
+    briefings module; the legacy boolean-component expansion is retired.
     """
     user_config = config.users.get(user_id)
     admin_briefings = user_config.briefings if user_config else []
@@ -1031,24 +1002,6 @@ def get_briefings_for_user(config: Config, user_id: str) -> list[BriefingConfig]
         for b in workspace_briefings:
             merged_by_name[b.name] = b
 
-        result = list(merged_by_name.values())
-    else:
-        result = list(admin_briefings)
+        return list(merged_by_name.values())
 
-    # Expand boolean components using defaults
-    defaults = config.briefing_defaults
-    expanded = []
-    for b in result:
-        new_components = _expand_boolean_components(b.components, defaults)
-        if new_components != b.components:
-            b = BriefingConfig(
-                name=b.name,
-                cron=b.cron,
-                conversation_token=b.conversation_token,
-                output=b.output,
-                components=new_components,
-                blocks=b.blocks,
-            )
-        expanded.append(b)
-
-    return expanded
+    return list(admin_briefings)
