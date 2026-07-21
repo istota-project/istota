@@ -4698,7 +4698,7 @@ try:
     from istota.money.routes import router as _money_router
     from istota.money.routes import verify_origin as _money_verify_origin
 
-    app.include_router(_money_router, prefix="/istota/money/api", tags=["money"])
+    app.include_router(_money_router, prefix="/istota/api/money", tags=["money"])
     app.dependency_overrides[_money_require_auth] = _require_api_auth
     app.dependency_overrides[_money_verify_origin] = _verify_origin
 except ImportError:

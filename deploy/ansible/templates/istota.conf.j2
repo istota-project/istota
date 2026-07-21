@@ -69,7 +69,7 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
   }
 
-  # Money is served by istota's web service at /istota/money/* — no separate
+  # Money is served by istota's web service at /istota/api/money/* — no separate
   # backend or nginx include needed.
 {% endif %}
 

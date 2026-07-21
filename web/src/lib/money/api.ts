@@ -8,8 +8,8 @@ class AuthError extends Error {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-	// `base` is istota's URL prefix (e.g. /istota). Money's routes live under /money/api.
-	const resp = await fetch(`${base}/money/api${path}`, {
+	// `base` is istota's URL prefix (e.g. /istota). Money's routes live under /api/money.
+	const resp = await fetch(`${base}/api/money${path}`, {
 		...init,
 		credentials: 'same-origin',
 	});
@@ -308,7 +308,7 @@ export async function markInvoicePending(invoice_number: string): Promise<Invoic
 
 /** URL for the generated invoice PDF — open in a new tab / download. */
 export function invoicePdfUrl(invoice_number: string): string {
-	return `${base}/money/api/invoices/${encodeURIComponent(invoice_number)}/pdf`;
+	return `${base}/api/money/invoices/${encodeURIComponent(invoice_number)}/pdf`;
 }
 
 export interface TransactionUpdate {
