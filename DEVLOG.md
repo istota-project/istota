@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-20: Retire legacy briefing components (blocks-only briefings)
+
+Briefings had been running on two parallel content models since the first-class module landed: the legacy boolean-`components` engine (a flat dict expanded against admin `[briefing_defaults]`, consumed by `build_briefing_prompt`) and the native block/source model. The bridge was a per-briefing migration that seeded blocks from either config-authored `blocks` or a components translation; but at generation time the executor still **fell back** to the legacy generator whenever a briefing had no blocks — so "components" wasn't config sugar, it was a live second engine. This spec (`Specs/Done/retire-legacy-briefing-components.md`) collapses everything to one model: blocks. `blocks_from_components` survives only as a one-time migration so existing production briefings convert on first touch. Implemented across all 7 stages, one commit each, full suite green throughout.
+
+**Stage 1 — real `output` column.** The delivery target had been smuggled into the components JSON under a reserved `__output__` key (there was no `output` column). Added `briefing_configs.output TEXT NOT NULL DEFAULT 'talk'` plus a `_run_migrations` backfill (`_backfill_briefing_output`) that hoists `__output__` out of each row's components into the column and rewrites components without it (idempotent, per-row best-effort). `user_briefings` reads/writes the column and stops packing `__output__`, with a defensive fallback for a mid-migration read. Also added the `user_profiles.default_briefings` column (default 1) here so the later default-briefings stage had its schema in place.
+
+**Stage 2 — retire the config machinery.** Deleted `BriefingDefaultsConfig`, the `[briefing_defaults]` load block, and `_expand_boolean_components`. `get_briefings_for_user` now returns briefings verbatim (no defaults merged). TOML `[[briefings]] components =` authoring is dropped — a stray `components` key is ignored with a one-line warning. Factored the briefing+block parse into a shared `_parse_briefing_specs` helper so the later top-level `[[default_briefings]]` parse reuses it.
+
+**Stage 3 — delete the legacy generator.** Removed `build_briefing_prompt`, `_component_enabled`, and the now-orphaned `_fetch_newsletter_content`/`_fetch_todo_items` from the briefing skill (AST-based removal to keep boundaries exact). The executor's `build_deferred_briefing_prompt` drops its legacy fallback branch: `_build_module_briefing_prompt` (block assembly, running the components→blocks migration first via `ensure_initialised`) is the sole path, and a `None` result (module disabled for the user, or no blocks after migration) is a task failure with the existing quiet retry — never a legacy render. Kept the `_fetch_*` helpers the block sources actually import (`_fetch_market_data`, `_fetch_finviz_market_data`, `_fetch_headlines`, `_fetch_calendar_events`, `_parse_reminders`, `_strip_html`) and the digest store.
+
+**Stage 4 — shared default briefings.** A canonical set defined once in a top-level `[[default_briefings]]` config section (`Config.default_briefings`, parsed via the shared helper) is seeded by name into each opted-in user's briefings in `_apply_user_briefings` (an explicit user briefing of the same name wins), before the DB overlay — so `import_from_user_configs` and the one-time block sentinel give seed-once + edit-preservation for free, no new sentinel. Gated by a per-user `default_briefings` flag (`UserConfig` bool + `user_profiles` scalar column, default on, `_coerce_bool` helper for the INTEGER round-trip), plumbed through `_apply_user_profiles` and `istota user ensure --default-briefings/--no-default-briefings`.
+
+**Stage 5 — CLI + Ansible.** Removed `--components-json`/`--component` and `_parse_components_arg`; `run_briefing_schedule` no longer takes or prints components. Ansible stops passing `--components-json`; a new `istota_default_briefings_toml` filter (reusing the block renderer) renders the `[[default_briefings]]` section from an `istota_default_briefings` var, and each user's `default_briefings` flag flows to `istota user ensure`. `defaults/main.yml` + `config.example.toml` drop the `[briefing_defaults]` and component-authoring examples in favor of blocks-only + default-briefings docs.
+
+**Stage 6 — web UI.** `_briefing_to_dict` and `_validate_briefing_payload` drop the `components` field (output is validated via `parse_output_target`); `api.ts` and the mock API drop it too. Removed the now-redundant Briefings pointer card from the main `/settings` page — the full schedule/delivery + block editor already lives on the briefings module settings page (commit `aed5ea8`). `npm run check` (0 errors) + vitest (136) green.
+
+**Stage 7 — docs.** Updated AGENTS.md, `.claude/rules/config.md`, `docs/features/briefings.md`, `docs/configuration/reference.md`, and CHANGELOG for the blocks-only model, the retired machinery, the real `output` column, and the default-briefings set.
+
+**Deliberate retention.** `components` stays as a field on `BriefingConfig`/`UserBriefing` — a migration-read carrier only, populated from the DB row so `blocks_from_components` (the sole surviving consumer, one-time per-briefing sentinel in `briefings/_migrate.py`) still converts an un-migrated deployment. A later cleanup can drop it once all deployments are known-migrated.
+
+**Files added/modified:**
+- `schema.sql` - `briefing_configs.output` + `user_profiles.default_briefings` columns
+- `src/istota/db.py` - `_backfill_briefing_output` + add-column migrations
+- `src/istota/user_briefings.py` - read/write `output` column, drop `__output__` packing
+- `src/istota/config.py` - delete `BriefingDefaultsConfig`; `_parse_briefing_specs`; `Config.default_briefings`; `UserConfig.default_briefings`; `_merge_default_briefings`
+- `src/istota/user_profiles.py` - `default_briefings` scalar bool plumbing
+- `src/istota/skills/briefing/__init__.py` - delete `build_briefing_prompt`/`_component_enabled`/`_expand_boolean_components`/two orphan fetchers; verbatim `get_briefings_for_user`
+- `src/istota/executor.py` - drop the legacy fallback branch in the deferred briefing prompt
+- `src/istota/cli.py`, `src/istota/cli_briefings.py` - remove component args; `--default-briefings` flag
+- `src/istota/web_app.py` - drop `components` from briefing dict + payload validation
+- `deploy/ansible/{tasks/main.yml,defaults/main.yml,templates/config.toml.j2,filter_plugins/istota_toml.py}`, `deploy/settings_to_vars.py` - default-briefings provisioning; drop `--components-json`/`[briefing_defaults]`
+- `web/src/lib/api.ts`, `web/vite-mock-api.ts`, `web/src/routes/settings/+page.svelte` - drop components; remove settings pointer card
+- `config/config.example.toml`, `docs/`, `AGENTS.md`, `.claude/rules/config.md`, `CHANGELOG.md` - docs
+- `tests/` - rewrote briefing/config/CLI/web/ansible tests for the blocks-only model
+
 ## 2026-07-20: Resources sunset (briefings-first-class-module Stage 7)
 
 The "resources" config surface had been hollowed out by two prior refactors: the modules refactor (feeds/money/location → `is_module_enabled`) and the secrets store (karakeep/monarch/overland → encrypted `secrets` table). What remained was mostly prompt-text-only path pointers, and the briefing builder was the **last real consumer** of the two worth sunsetting (`todo_file`, `reminders_file`). The briefings-first-class-module spec (`Specs/Active/briefings-first-class-module.md`) sequenced the Resources sunset as its Stage 7 — deferred only on a prod audit of `user_resources` folder-reach, which Stages 1–6 had already unblocked technically (Stage 2's `builtins.py` repointed todos/reminders to workspace conventions, severing the last live consumers). The audit confirmed every folder mount is in-workspace (the zorg single-user case), so the full sunset — including the optional Stage 3a (static workspace-layout prompt line) and 3b (folder as out-of-workspace mount only, user-facing surface removed) — ships here.
