@@ -499,25 +499,59 @@ istota_user_secrets: {}
 # top-level [[default_briefings]] config section. Each entry has the same
 # name/cron/output/blocks shape as a per-user briefing; content is blocks-only.
 # Seed-once: a user's later web edits win and re-runs never clobber them.
-# Default empty — set this to hand every user a sensible starting briefing.
-# Example:
-# istota_default_briefings:
-#   - name: "Daily"
-#     cron: "0 7 * * *"
-#     output: "talk"
-#     blocks:
-#       - title: "World News"
-#         directive: "3-5 stories, neutral tone."
-#         render_mode: "synthesis"
-#         sources:
-#           - kind: "browse"
-#             config: { preset: "ap" }
-#       - title: "Markets"
-#         render_mode: "structured"
-#         sources:
-#           - kind: "markets"
-#             config: {}
-istota_default_briefings: []
+#
+# The default set below is the weekday morning + evening briefing translated
+# from the legacy component config (news + markets + calendar, weekday cron,
+# email delivery; morning also carries a reminder block). Blocks map to the old
+# components: `news` -> a News block over the shared newsletter pool, `markets`
+# -> a structured Markets block, `calendar` -> a structured Calendar block over
+# the user's discovered CalDAV calendars. Notes:
+#   * The Calendar block reads the user's CalDAV calendars (discovered from
+#     Nextcloud); with none available it soft-degrades (empty -> omitted).
+#   * The morning Reminder block seeds an empty `reminders` source: it reads
+#     nothing until the user sets a file `path` in the web editor (there is no
+#     convention-default path), so it renders as an omitted block until then.
+#   * headlines/todos are not seeded.
+# Set to [] to seed nothing.
+istota_default_briefings:
+  - name: "morning"
+    cron: "0 6 * * 1-5"
+    output: "email"
+    blocks:
+      - title: "News"
+        render_mode: "synthesis"
+        sources:
+          - kind: "email"
+            config: { mode: "shared", lookback_hours: 12 }
+      - title: "Markets"
+        render_mode: "structured"
+        sources:
+          - kind: "markets"
+            config: {}
+      - title: "Calendar"
+        render_mode: "structured"
+        sources:
+          - kind: "calendar"
+            config: {}
+  - name: "evening"
+    cron: "0 18 * * 1-5"
+    output: "email"
+    blocks:
+      - title: "News"
+        render_mode: "synthesis"
+        sources:
+          - kind: "email"
+            config: { mode: "shared", lookback_hours: 12 }
+      - title: "Markets"
+        render_mode: "structured"
+        sources:
+          - kind: "markets"
+            config: {}
+      - title: "Calendar"
+        render_mode: "structured"
+        sources:
+          - kind: "calendar"
+            config: {}
 
 # rclone remote name for Nextcloud
 istota_rclone_remote: "nextcloud"
