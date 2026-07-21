@@ -1228,6 +1228,18 @@ def cmd_kv_namespaces(args):
     print(json.dumps({"status": "ok", "namespaces": namespaces}))
 
 
+def cmd_kv_shared_status(args):
+    """Report whether a user may write shared KV on this deployment."""
+    config = _load_kv_config(args)
+    can_write = config.is_shared_kv_writer(args.user)
+    print(json.dumps({
+        "status": "ok",
+        "user_id": args.user,
+        "can_write_shared": can_write,
+        "admins_configured": bool(config.admin_users),
+    }))
+
+
 def cmd_chat_backfill_history(args):
     """Recover dormant rooms' transcripts from the Talk message cache.
 
@@ -1681,6 +1693,12 @@ def main():
     kv_ns_parser.add_argument("-u", "--user", required=True, help="User ID")
     kv_ns_parser.add_argument("--shared", action="store_true", help=_shared_help)
 
+    # kv shared-status
+    kv_status_parser = kv_subparsers.add_parser(
+        "shared-status", help="Report whether a user may write shared KV",
+    )
+    kv_status_parser.add_argument("-u", "--user", required=True, help="User ID")
+
     # chat (with subparsers)
     chat_parser = subparsers.add_parser("chat", help="Web chat room maintenance")
     chat_subparsers = chat_parser.add_subparsers(dest="chat_action", required=True)
@@ -1755,6 +1773,7 @@ def main():
             "list": cmd_kv_list,
             "delete": cmd_kv_delete,
             "namespaces": cmd_kv_namespaces,
+            "shared-status": cmd_kv_shared_status,
         }
         kv_commands[args.kv_action](args)
     elif args.command == "chat":

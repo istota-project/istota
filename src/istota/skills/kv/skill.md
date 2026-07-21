@@ -44,6 +44,8 @@ istota-skill kv list      <ns> --shared
 istota-skill kv namespaces --shared
 istota-skill kv set       <ns> <key> '<json>' --shared   # admin-only
 istota-skill kv delete    <ns> <key> --shared            # admin-only
+
+istota-skill kv shared-status   # can I write shared KV on this deployment?
 ```
 
 - **Reads are open** to any user. **Writes are admin-only** — content flows into
@@ -51,6 +53,15 @@ istota-skill kv delete    <ns> <key> --shared            # admin-only
   write returns `{"status":"error","error":"shared KV writes require admin"}`
   and exits non-zero. On a deployment with a *blank* admins file no one can
   write (fail-closed).
+- **Check before you wire.** Whether *you* may write shared content is
+  deployment-specific (it depends on the admins allowlist, which differs per
+  install). Run `istota-skill kv shared-status` to find out — don't infer it
+  from being an admin generally. It returns
+  `{"status":"ok","user_id":…,"can_write_shared":true|false,"admins_configured":true|false}`.
+  The gate is deliberately *not* the same as admin status: a blank admins file
+  makes everyone an admin but authorizes **nobody** to write shared KV
+  (fail-closed). Use this before adding a `publish_shared_kv` scheduled job or a
+  `--shared` write, so a job that can never publish isn't wired up.
 - **Set-ops (`set-add`/`set-remove`/…) reject `--shared`** — shared content is
   written as a whole value, not incremental set membership.
 - **Value shape controls briefing granularity** when a briefing `kv` source

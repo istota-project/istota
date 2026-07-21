@@ -127,3 +127,57 @@ class TestSetOpsRejectShared:
         out = json.loads(capsys.readouterr().out)
         assert out["status"] == "error"
         assert "set-op" in out["error"] or "whole-value" in out["error"]
+
+
+class TestSharedStatus:
+    """`kv shared-status` reports whether this identity may write shared KV.
+
+    The predicate is is_shared_kv_writer, NOT is_admin — a blank admins file
+    authorizes nobody here (fail-closed), so the check must target the real
+    gate rather than admin-ness by analogy.
+    """
+
+    def test_admin_can_write(self, _shared_env, db_path, capsys, monkeypatch):
+        _patch_config(monkeypatch, db_path, {"alice"})
+        kv_main(["shared-status"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert out["can_write_shared"] is True
+        assert out["user_id"] == "alice"
+        assert out["admins_configured"] is True
+
+    def test_non_admin_cannot_write(self, _shared_env, db_path, capsys, monkeypatch):
+        _patch_config(monkeypatch, db_path, {"bob"})  # alice not admin
+        kv_main(["shared-status"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert out["can_write_shared"] is False
+        assert out["admins_configured"] is True
+
+    def test_blank_allowlist_fails_closed(self, _shared_env, db_path, capsys, monkeypatch):
+        _patch_config(monkeypatch, db_path, set())
+        kv_main(["shared-status"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert out["can_write_shared"] is False
+        assert out["admins_configured"] is False
+
+    def test_status_is_read_only_no_deferral(self, db_path, tmp_path, capsys, monkeypatch):
+        # Even in sandbox mode (deferred dir set) this is a pure read — it must
+        # answer directly, never write a deferred op.
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
+        monkeypatch.setenv("ISTOTA_TASK_ID", "99")
+        _patch_config(monkeypatch, db_path, {"alice"})
+        kv_main(["shared-status"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["can_write_shared"] is True
+        assert not (tmp_path / "task_99_kv_ops.json").exists()
+
+    def test_config_unavailable_fails_closed(self, _shared_env, db_path, capsys, monkeypatch):
+        monkeypatch.setattr(kv_skill, "_load_config", lambda: None)
+        kv_main(["shared-status"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "ok"
+        assert out["can_write_shared"] is False

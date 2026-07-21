@@ -1475,6 +1475,23 @@ class TestAdminPromptIsolation:
         assert "Database path: (restricted)" in prompt
         assert str(config.db_path) not in prompt
 
+    def test_admin_prompt_states_admin_privileges(self, tmp_path):
+        config = self._make_config(tmp_path)
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+        prompt = build_prompt(task, [], config, is_admin=True)
+        assert "Privileges: admin" in prompt
+
+    def test_non_admin_prompt_states_standard_privileges(self, tmp_path):
+        config = self._make_config(tmp_path, admin_users={"bob"})
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            task = self._make_task(conn)
+        prompt = build_prompt(task, [], config, is_admin=False)
+        assert "Privileges: standard user" in prompt
+        assert "Privileges: admin" not in prompt
+
     def test_prompt_has_no_sqlite3_tool(self, tmp_path):
         """sqlite3 tool removed in favor of deferred JSON operations."""
         config = self._make_config(tmp_path)

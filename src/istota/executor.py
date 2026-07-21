@@ -2332,6 +2332,11 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # Build admin-sensitive sections
     db_path_line = f"Database path: {config.db_path}" if is_admin else "Database path: (restricted)"
 
+    # Explicit privileges line so admin-gated capabilities (subtasks, shared-KV
+    # writes, DB access) don't have to be inferred from indirect signals or
+    # discovered by hunting through config/source.
+    privileges_line = "Privileges: admin" if is_admin else "Privileges: standard user"
+
     db_tool_line = ""  # DB writes handled via deferred JSON files
 
     if is_admin:
@@ -2390,6 +2395,7 @@ Conversation token: {task.conversation_token or 'none'}{group_chat_line}
 Source: {source_type or task.source_type or 'unknown'}
 Output target: {output_target or 'text'}{per_user_email_line}
 {db_path_line}
+{privileges_line}
 {emissaries_section}{persona_section}
 ## User's accessible resources
 

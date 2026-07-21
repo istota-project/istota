@@ -267,7 +267,7 @@ uv run istota run [--once] [--briefings]           # Process pending
 uv run istota email list|poll|test
 uv run istota calendar discover|test
 uv run istota tasks-file poll|status [-u USER]
-uv run istota kv get|set|list|delete|namespaces
+uv run istota kv get|set|list|delete|namespaces|shared-status
 uv run istota list [-s STATUS] [-u USER]
 uv run istota show <task-id>
 uv run istota-scheduler [-d] [-v] [--max-tasks N]
