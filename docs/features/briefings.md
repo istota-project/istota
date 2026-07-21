@@ -2,30 +2,37 @@
 
 Scheduled summaries delivered to Talk and/or email. A morning briefing might include today's calendar events, market futures, headline news, and pending todos.
 
+## Content model: blocks
+
+Blocks are the sole content model. A briefing is an ordered list of **blocks**, each with a title, an optional synthesis directive, a render mode (`synthesis` / `structured`), and 1..N **sources**. Each block is gathered and synthesized into one section at generation time.
+
+Source kinds (`kind = …`):
+
+| Kind | What it gathers |
+|---|---|
+| `rss` | A Feeds subscription or category (needs the Feeds module) |
+| `email` | Shared-pool newsletters, windowed and owner-filtered |
+| `browse` | A bundled preset frontpage or an arbitrary URL (needs the browser) |
+| `markets` | Futures / indices via yfinance |
+| `calendar` | Today's / tomorrow's events |
+| `todos` | Pending todo items from a workspace file |
+| `reminders` | A random reminder |
+| `notes` | Recent notes |
+
+> The legacy boolean-`components` content model (and its `[briefing_defaults]` expansion) is retired. Existing component-based briefings migrate once into blocks on first touch of the briefings module DB.
+
 ## Configuration sources
 
-Briefing config is loaded from three sources (higher precedence wins):
+Schedule + delivery are loaded from (higher precedence wins):
 
-1. User workspace `BRIEFINGS.md` (Nextcloud file, user self-service)
-2. `briefing_configs` DB table — provisioned via `istota briefing ensure` (Ansible) or the web UI (`/istota/settings → Briefings`); `enabled=0` mutes a row without scheduling.
-3. `[[users.alice.briefings]]` blocks in main `config/config.toml` (docker entrypoint shortcut; DB rows win)
+1. `briefing_configs` DB table — provisioned via `istota briefings schedule ensure` (Ansible) or the web UI (briefings tab → settings); `enabled=0` mutes a row without scheduling.
+2. `[[users.alice.briefings]]` in main `config/config.toml` (name/cron/output; DB rows win by name).
 
-Merging happens at the briefing name level.
+Content **blocks** are seeded once into the per-user briefings module DB from config-authored `[[users.X.briefings.blocks]]` and are then edited in the web block editor.
 
-## Components
+## Default briefings
 
-| Component | What it includes |
-|---|---|
-| `calendar` | Today's events (morning) or tomorrow's events (evening) |
-| `todos` | Pending TODO items from the user's TODO file (path is a briefing-source property) |
-| `email` | General unread email summary / newsletter content |
-| `markets` | Pre-fetched futures (morning) and indices (evening) via yfinance |
-| `headlines` | Pre-fetched frontpages from major news outlets |
-| `news` | Newsletter summaries from configured email sources |
-| `notes` | Recent notes summary |
-| `reminders` | Random item from user's REMINDERS file |
-
-Market data and newsletter IDs are pre-fetched before Claude execution so the model doesn't need API access for data collection.
+A canonical shared set defined once in the top-level `[[default_briefings]]` section is seeded by name into each opted-in user (per-user `default_briefings` flag, default on; an explicit user briefing of the same name wins). Seeding is one-time — later web edits win and re-runs never clobber them. Opt a user out with `istota user ensure --no-default-briefings`.
 
 ## Memory isolation
 
@@ -40,28 +47,25 @@ cron = "0 6 * * *"               # 6am in user's timezone
 conversation_token = "room123"    # Talk room to post to
 output = "both"                   # "talk", "email", or "both"
 
-[users.alice.briefings.components]
-calendar = true
-todos = true
-markets = true                    # auto-selects futures (morning) or indices (evening)
-news = true                       # expands using [briefing_defaults.news] sources
-reminders = { enabled = true }
-```
+  [[users.alice.briefings.blocks]]
+  title = "Today"
+  render_mode = "structured"
 
-## Boolean expansion
+    [[users.alice.briefings.blocks.sources]]
+    kind = "calendar"
+    config = {}
 
-Setting `markets = true` or `news = true` in BRIEFINGS.md expands using admin-configured `[briefing_defaults]`:
+    [[users.alice.briefings.blocks.sources]]
+    kind = "todos"
+    config = {}
 
-```toml
-[briefing_defaults.news]
-lookback_hours = 12
-sources = [
-    { type = "domain", value = "semafor.com" },
-    { type = "email", value = "briefing@nytimes.com" },
-]
+  [[users.alice.briefings.blocks]]
+  title = "World News"
+  render_mode = "synthesis"
 
-[briefing_defaults.headlines]
-sources = ["ap", "reuters", "guardian", "ft", "aljazeera", "lemonde", "spiegel"]
+    [[users.alice.briefings.blocks.sources]]
+    kind = "browse"
+    config = { preset = "ap" }
 ```
 
 ## Output format

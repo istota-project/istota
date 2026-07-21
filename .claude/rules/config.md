@@ -259,19 +259,38 @@ See `docs/EXPERIMENTAL.md` for the registry and graduation policy.
 ### `BriefingConfig`
 ```
 name: str                    cron: str                   conversation_token: str = ""
-output: str = "talk"         components: dict = {}
+output: str = "talk"         components: dict = {}   # migration-read carrier only (never TOML-authored)
 blocks: list[dict] = []      # config-authored rich blocks; in-memory only
 ```
 `blocks` (config-authored-rich-briefing-blocks spec) is the full block/source
 authoring shape (`[[users.X.briefings.blocks]]` + `[[...blocks.sources]]`): a raw
-dict passthrough parsed in `_parse_user_data`, threaded through
+dict passthrough parsed by `_parse_briefing_specs`, threaded through
 `_apply_user_briefings` (re-attached to the DB-shadowed entry by name) and
-`get_briefings_for_user` (carried through the `_expand_boolean_components`
-rebuild), and read **once** by the module-DB seeder (`briefings/_migrate.normalize_block_specs`
+`get_briefings_for_user` (verbatim — the legacy component expansion is retired),
+and read **once** by the module-DB seeder (`briefings/_migrate.normalize_block_specs`
 → `_seed_blocks`) as an editable baseline. `compare=False`/`repr=False`; it is
 **never persisted to `briefing_configs`** (content is module-DB territory, so the
-framework row stays byte-unchanged). `blocks` present and non-empty wins over
-`components` for seeding; seed-once via the same per-briefing sentinel.
+framework row stays byte-unchanged). Blocks are the **sole content model**
+(retire-legacy-briefing-components spec): `components` is retained only as a
+migration-read carrier populated from the DB row (`__output__` no longer packs
+into it — `output` is a real `briefing_configs` column now); TOML `components =`
+authoring is dropped (a stray key is ignored with a warning in
+`_parse_briefing_specs`).
+
+### `default_briefings` (top-level) + `UserConfig.default_briefings`
+```
+Config.default_briefings: list[BriefingConfig] = []   # parsed from [[default_briefings]]
+UserConfig.default_briefings: bool = True             # per-user opt-in (user_profiles column, DEFAULT 1)
+```
+A canonical shared briefing set (retire-legacy-briefing-components spec): the
+top-level `[[default_briefings]]` section (same name/cron/output/blocks shape,
+parsed via `_parse_briefing_specs`) is seeded by name into each opted-in user's
+`briefings` in `_apply_user_briefings` (an explicit user briefing of the same
+name wins), before the DB overlay. `import_from_user_configs` (never overwrites
+an existing `briefing_configs` row) + the one-time block sentinel give
+seed-once + edit-preservation for free. The per-user flag is a `user_profiles`
+scalar bool plumbed through `_apply_user_profiles` + `istota user ensure
+--default-briefings/--no-default-briefings`.
 
 ### `ResourceConfig`
 ```
@@ -327,10 +346,14 @@ github_reviewer: str = ""
 github_api_allowlist: list[str] = [default safe set]  # Endpoint allowlist for API wrapper
 ```
 
-### `BriefingDefaultsConfig`
-```
-markets: dict = {}           news: dict = {}              headlines: dict = {}
-```
+### `BriefingDefaultsConfig` — removed
+
+`BriefingDefaultsConfig` and the `[briefing_defaults]` load block are **gone**
+(retire-legacy-briefing-components spec). Boolean-component defaults expansion
+(`_expand_boolean_components`) and the legacy component generator
+(`build_briefing_prompt`) were deleted with it; blocks are the sole content
+model. A stale `[briefing_defaults]` section in TOML is ignored (no field to
+populate).
 
 ### `Config`
 ```
@@ -344,7 +367,7 @@ email: EmailConfig                  conversation: ConversationConfig
 scheduler: SchedulerConfig          browser: BrowserConfig
 devbox: DevboxConfig
 logging: LoggingConfig
-briefing_defaults: BriefingDefaultsConfig
+default_briefings: list[BriefingConfig] = []  # canonical shared set, seeded into opted-in users
 brain: BrainConfig                          # selects model-invocation backend
 security: SecurityConfig
 memory_search: MemorySearchConfig   playbooks: PlaybooksConfig
@@ -390,7 +413,7 @@ Methods:
 Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`
 
 1. Parse TOML file
-2. Build each sub-config from sections: `[logging]`, `[nextcloud]`, `[talk]`, `[email]`, `[browser]`, `[conversation]`, `[scheduler]`, `[memory_search]`, `[channel_sleep_cycle]`, `[briefing_defaults]`, `[location]`, `[site]`, `[developer]`
+2. Build each sub-config from sections: `[logging]`, `[nextcloud]`, `[talk]`, `[email]`, `[browser]`, `[conversation]`, `[scheduler]`, `[memory_search]`, `[channel_sleep_cycle]`, `[[default_briefings]]`, `[location]`, `[site]`, `[developer]`
 3. Parse `[users.*]` section → `_parse_user_data()` for each
 4. Parse `[security]` section → `SecurityConfig`
 5. Call `load_admin_users()` → `config.admin_users`
