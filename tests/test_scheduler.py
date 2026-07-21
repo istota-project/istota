@@ -1183,9 +1183,10 @@ class TestBriefingDeferredPrompt:
                 ("alice", "morning", yesterday),
             )
 
-        # Patch the build at its source. If check_briefings calls it, fail.
+        # Patch the block assembler at its source. If check_briefings calls it,
+        # the prefetch ran on the dispatch thread — fail.
         with patch(
-            "istota.skills.briefing.build_briefing_prompt",
+            "istota.briefings.generate.assemble_briefing_input",
             side_effect=AssertionError("prefetch ran on the dispatch thread"),
         ):
             result = check_briefings(db_path, config)
@@ -1203,30 +1204,21 @@ class TestBriefingDeferredPrompt:
     def test_executor_builds_briefing_prompt_at_execution_time(self, db_path):
         from istota.executor import build_deferred_briefing_prompt
 
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *", conversation_token="room1",
-            components={"calendar": True},
-        )
-        user = UserConfig(timezone="America/New_York", briefings=[briefing])
-        config = Config(db_path=db_path, users={"alice": user})
+        config = Config(db_path=db_path, users={"alice": UserConfig(timezone="UTC")})
         task = db.Task(
             id=7, status="running", source_type="briefing", user_id="alice",
             prompt="Generate the 'morning' briefing.", briefing_name="morning",
         )
 
+        # The module block-assembly path is the sole builder.
         with patch(
-            "istota.skills.briefing.build_briefing_prompt",
+            "istota.executor._build_module_briefing_prompt",
             return_value="FULL BRIEFING PROMPT",
         ) as mock_build:
             built = build_deferred_briefing_prompt(task, config)
 
         assert built == "FULL BRIEFING PROMPT"
-        mock_build.assert_called_once()
-        # Resolved the live briefing config + timezone for the build.
-        called_briefing, called_user, _cfg, called_tz = mock_build.call_args.args
-        assert called_briefing.name == "morning"
-        assert called_user == "alice"
-        assert called_tz == "America/New_York"
+        mock_build.assert_called_once_with(task, config)
 
     def test_executor_keeps_placeholder_when_briefing_missing(self, db_path):
         from istota.executor import build_deferred_briefing_prompt
@@ -1260,12 +1252,8 @@ class TestBriefingDeferredPrompt:
         db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
         skills_dir.mkdir(parents=True)
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *", conversation_token="room1",
-            components={"calendar": True},
-        )
         config = Config(
-            db_path=db_path, users={"alice": UserConfig(timezone="UTC", briefings=[briefing])},
+            db_path=db_path, users={"alice": UserConfig(timezone="UTC")},
             skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
         )
@@ -1278,7 +1266,7 @@ class TestBriefingDeferredPrompt:
             task = db.get_task(conn, task_id)
 
         with patch(
-            "istota.skills.briefing.build_briefing_prompt",
+            "istota.executor._build_module_briefing_prompt",
             return_value="SENTINEL_BRIEFING_BODY",
         ):
             _ok, rendered, _a, _t = execute_task(

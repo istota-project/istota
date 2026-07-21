@@ -228,47 +228,26 @@ class TestExecutorRouting:
         assert "### Block: Notes" in prompt
         assert "an important note" in prompt
 
-    def test_legacy_path_when_no_blocks(self, tmp_path, monkeypatch):
+    def test_no_blocks_returns_none(self, tmp_path):
+        # Blocks are the sole content model: module enabled but no blocks →
+        # None (task fails with quiet retry), never a legacy render.
         from istota.executor import build_deferred_briefing_prompt
 
         cfg = _config(tmp_path)
         cfg.temp_dir = tmp_path / "temp"
-        # Module enabled but no blocks → legacy builder is used.
         ctx = resolve_for_user("stefan", cfg)
         ensure_initialised(ctx, app_config=cfg)
         db.init_db(cfg.db_path)
 
-        called = {}
-
-        def fake_legacy(briefing, user_id, config, tz):
-            called["yes"] = True
-            return "LEGACY PROMPT"
-
-        # Provide a legacy briefing config so get_briefings_for_user finds one.
-        from istota.config import BriefingConfig
-        cfg.users["stefan"].briefings = [
-            BriefingConfig(name="M", cron="0 7 * * *", components={})
-        ]
-        monkeypatch.setattr("istota.skills.briefing.build_briefing_prompt", fake_legacy)
-
         task = self._task()
-        prompt = build_deferred_briefing_prompt(task, cfg)
-        assert prompt == "LEGACY PROMPT"
-        assert called.get("yes") is True
+        assert build_deferred_briefing_prompt(task, cfg) is None
 
-    def test_legacy_path_when_module_disabled(self, tmp_path, monkeypatch):
+    def test_module_disabled_returns_none(self, tmp_path):
+        # Module disabled for the user → None (no legacy fallback).
         from istota.executor import build_deferred_briefing_prompt
 
         cfg = _config(tmp_path)
         cfg.temp_dir = tmp_path / "temp"
         cfg.users["stefan"].disabled_modules = ["briefings"]
-        from istota.config import BriefingConfig
-        cfg.users["stefan"].briefings = [
-            BriefingConfig(name="M", cron="0 7 * * *", components={})
-        ]
-        monkeypatch.setattr(
-            "istota.skills.briefing.build_briefing_prompt",
-            lambda *a, **k: "LEGACY",
-        )
         task = self._task()
-        assert build_deferred_briefing_prompt(task, cfg) == "LEGACY"
+        assert build_deferred_briefing_prompt(task, cfg) is None

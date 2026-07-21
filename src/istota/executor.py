@@ -2428,45 +2428,24 @@ def build_deferred_briefing_prompt(task: db.Task, config: Config) -> str | None:
     if not task.briefing_name:
         return None
 
-    # Module path (briefings-first-class): if the briefings module is enabled
-    # for the user and the briefing has content blocks, assemble the
-    # block-grouped prompt. Falls through to the legacy builder for any user
-    # with no blocks or the module disabled — the back-compat guarantee.
-    module_prompt = _build_module_briefing_prompt(task, config)
-    if module_prompt is not None:
-        return module_prompt
-
-    try:
-        from .skills.briefing import build_briefing_prompt, get_briefings_for_user
-
-        briefings = get_briefings_for_user(config, task.user_id)
-        briefing = next(
-            (b for b in briefings if b.name == task.briefing_name), None
-        )
-        if briefing is None:
-            logger.warning(
-                "Deferred briefing %r not found for user %s (task %s); "
-                "keeping placeholder prompt",
-                task.briefing_name, task.user_id, task.id,
-            )
-            return None
-        user_tz = config.resolve_user_timezone(task.user_id)
-        return build_briefing_prompt(briefing, task.user_id, config, user_tz)
-    except Exception as e:
-        logger.error(
-            "Deferred briefing prompt build failed for task %s (%s): %s",
-            task.id, task.briefing_name, e,
-        )
-        return None
+    # Blocks are the sole content model (retire-legacy-briefing-components).
+    # The module path runs the components→blocks migration on first touch, so a
+    # legacy components-only briefing is seeded to blocks before assembly. A
+    # ``None`` here (module disabled for the user, or a briefing with no blocks
+    # after migration) is a misconfiguration: the task fails with the existing
+    # quiet retry rather than falling back to a dead legacy generator.
+    return _build_module_briefing_prompt(task, config)
 
 
 def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
     """Assemble a block-grouped briefing prompt from the briefings module.
 
-    Returns the prompt when the module is enabled and the briefing has blocks;
-    ``None`` to defer to the legacy builder (module disabled / no blocks / any
-    error). Also stashes per-block provenance in a deferred file the scheduler
-    reads when archiving the rendered briefing.
+    Returns the prompt when the module is enabled and the briefing has blocks
+    (running the one-time components→blocks migration first); ``None`` when the
+    module is disabled for the user, the briefing has no blocks, or any error
+    occurs — the caller treats ``None`` as a task failure. Also stashes
+    per-block provenance in a deferred file the scheduler reads when archiving
+    the rendered briefing.
     """
     try:
         from . import briefings as briefings_module
@@ -2478,7 +2457,7 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
     try:
         ctx = briefings_module.resolve_for_user(task.user_id, config)
     except briefings_module.UserNotFoundError:
-        return None  # module disabled → legacy path
+        return None  # module disabled for the user → task fails (quiet retry)
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "briefings module resolve failed for task %s: %s", task.id, e,
@@ -2493,14 +2472,13 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
             )
     except Exception as e:  # noqa: BLE001
         logger.warning(
-            "briefings module prompt build failed for task %s (%s): %s; "
-            "falling back to legacy path",
+            "briefings module prompt build failed for task %s (%s): %s",
             task.id, task.briefing_name, e,
         )
         return None
 
     if assembled is None:
-        return None  # no blocks → legacy path
+        return None  # no blocks after migration → task fails (quiet retry)
 
     # Stash per-block provenance for the scheduler's archive write.
     try:
