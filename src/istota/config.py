@@ -2,7 +2,7 @@
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 
 import tomli
@@ -296,6 +296,7 @@ class UserConfig:
     routing: dict[str, str] = field(default_factory=dict)  # purpose -> output_target descriptor
     default_destination: str = "talk"  # fallback delivery descriptor
     email_reply_routing: str = "origin+thread"  # origin+thread | origin | thread
+    default_briefings: bool = True  # seed the shared [[default_briefings]] set into this user
 
 
 @dataclass
@@ -781,6 +782,12 @@ class Config:
     models: ModelsConfig = field(default_factory=ModelsConfig)
     experimental: ExperimentalConfig = field(default_factory=ExperimentalConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
+    # Canonical shared briefing set, seeded into each opted-in user (retire-
+    # legacy-briefing-components spec). Parsed from the top-level
+    # ``[[default_briefings]]`` TOML section; merged by name into a user's
+    # briefings (user wins) in ``_apply_user_briefings`` when their
+    # ``default_briefings`` flag is true.
+    default_briefings: list[BriefingConfig] = field(default_factory=list)
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     rclone_remote: str = "nextcloud"  # rclone remote name
     nextcloud_mount_path: Path | None = None  # If set, use mount instead of rclone CLI
@@ -1708,6 +1715,16 @@ def load_config(config_path: Path | None = None) -> Config:
                     "[experimental] unknown feature %r — typo or stale flag", f,
                 )
 
+    if "default_briefings" in data:
+        # The canonical shared briefing set. Same name/cron/output/blocks shape
+        # as ``[[users.X.briefings]]`` — parsed via the shared helper (fail-soft:
+        # a bad entry is skipped with a warning inside _parse_briefing_specs).
+        raw_defaults = data["default_briefings"]
+        if isinstance(raw_defaults, list):
+            config.default_briefings = _parse_briefing_specs(raw_defaults)
+        else:
+            logger.warning("[[default_briefings]] must be a list of tables; ignoring")
+
     if "briefings" in data:
         br = data["briefings"]
         config.briefings = BriefingsModuleConfig(
@@ -2207,6 +2224,31 @@ def _migrate_obsolete_resources(config: "Config") -> None:
         uc.resources = [rc for rc in uc.resources if rc.type not in obsolete]
 
 
+def _merge_default_briefings(config: "Config") -> None:
+    """Seed the shared ``[[default_briefings]]`` set into each opted-in user.
+
+    For each user whose ``default_briefings`` flag is true, append every
+    default briefing whose ``name`` the user does not already define (an
+    explicit user briefing wins). Seed-once + edit-preservation fall out of
+    the downstream machinery for free: ``import_from_user_configs`` never
+    overwrites an existing ``briefing_configs`` row and the block seeder is
+    one-time, so after the first seed the user's edits survive an Ansible
+    re-run. Runs before the DB overlay so a seeded default's config-authored
+    blocks are captured and ride onto its DB-sourced entry.
+    """
+    if not config.default_briefings:
+        return
+    for user_config in config.users.values():
+        if not getattr(user_config, "default_briefings", True):
+            continue
+        existing = {b.name for b in user_config.briefings}
+        for default in config.default_briefings:
+            if default.name and default.name not in existing:
+                # Copy so a per-user edit can't mutate the shared template.
+                user_config.briefings.append(_dc_replace(default))
+                existing.add(default.name)
+
+
 def _apply_user_briefings(config: "Config") -> None:
     """Merge ``briefing_configs`` rows into ``config.users[*].briefings``.
 
@@ -2215,8 +2257,13 @@ def _apply_user_briefings(config: "Config") -> None:
     a replacement, so an operator can switch a TOML-templated briefing off
     via the web UI without re-templating.
 
+    Also seeds the shared ``[[default_briefings]]`` set into opted-in users
+    (by name, user wins) before the DB overlay.
+
     Best-effort: a missing DB does not fail config loading.
     """
+    _merge_default_briefings(config)
+
     try:
         from . import user_briefings as _ub  # avoid import cycles at module load
     except Exception:  # pragma: no cover - defensive

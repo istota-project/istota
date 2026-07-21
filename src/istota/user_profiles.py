@@ -57,6 +57,8 @@ class UserProfile:
     default_destination: str = "talk"
     # Email-reply mirror policy: origin+thread | origin | thread.
     email_reply_routing: str = "origin+thread"
+    # Seed the shared [[default_briefings]] set into this user (default on).
+    default_briefings: bool = True
 
 
 _PROFILE_COLUMNS = (
@@ -66,6 +68,7 @@ _PROFILE_COLUMNS = (
     "disabled_skills", "trusted_email_senders", "quiet_email_senders",
     "disabled_modules",
     "routing", "default_destination", "email_reply_routing",
+    "default_briefings",
 )
 
 # Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
@@ -74,6 +77,17 @@ _LIST_COLUMNS = frozenset({
     "email_addresses", "disabled_skills", "trusted_email_senders",
     "quiet_email_senders", "disabled_modules",
 })
+# Columns stored as INTEGER 0/1 booleans.
+_BOOL_COLUMNS = frozenset({"default_briefings"})
+
+
+def _coerce_bool(value: object, default: bool = True) -> bool:
+    """Coerce a stored/int/None value to bool; None → default."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(value)
 
 
 @contextmanager
@@ -112,7 +126,16 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         routing=_parse_json_dict(row["routing"]),
         default_destination=row["default_destination"] or "talk",
         email_reply_routing=row["email_reply_routing"] or "origin+thread",
+        default_briefings=_coerce_bool(_row_get(row, "default_briefings"), True),
     )
+
+
+def _row_get(row: sqlite3.Row, key: str) -> object:
+    """Read a column that may be absent on a not-yet-migrated row."""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
 
 
 def _parse_json_dict(value: str | None) -> dict[str, str]:
@@ -238,6 +261,7 @@ def ensure_profile(
         routing=dict(_attr(seed_from, "routing") or {}),
         default_destination=_attr(seed_from, "default_destination") or "talk",
         email_reply_routing=_attr(seed_from, "email_reply_routing") or "origin+thread",
+        default_briefings=_coerce_bool(_attr(seed_from, "default_briefings"), True),
     )
     _insert(db_path, profile)
     logger.info("ensured user_profile user=%s (new row)", user_id)
@@ -340,6 +364,10 @@ def update_profile_with_status(
             if dict(current or {}) != dict(value or {}):
                 same = False
                 break
+        elif col in _BOOL_COLUMNS:
+            if _coerce_bool(current, True) != _coerce_bool(value, True):
+                same = False
+                break
         elif col == "default_destination":
             if (current or "talk") != (value or "talk"):
                 same = False
@@ -391,6 +419,8 @@ def update_profile(
             value = json.dumps(list(value or []))
         elif col in _DICT_COLUMNS:
             value = json.dumps(dict(value or {}))
+        elif col in _BOOL_COLUMNS:
+            value = 1 if _coerce_bool(value, True) else 0
         elif col in {"max_foreground_workers", "max_background_workers"}:
             value = int(value or 0)
         elif col == "default_destination":
@@ -451,6 +481,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         json.dumps(dict(profile.routing)),
         profile.default_destination or "talk",
         profile.email_reply_routing or "origin+thread",
+        1 if profile.default_briefings else 0,
     )
     cols_sql = ", ".join(insert_cols)
     if replace:
@@ -513,6 +544,7 @@ def import_from_user_configs(
             routing=dict(getattr(user_config, "routing", {}) or {}),
             default_destination=getattr(user_config, "default_destination", "") or "talk",
             email_reply_routing=getattr(user_config, "email_reply_routing", "") or "origin+thread",
+            default_briefings=_coerce_bool(getattr(user_config, "default_briefings", True), True),
         )
         try:
             _insert(db_path, profile, replace=False)
@@ -546,6 +578,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "timezone", profile.timezone or "UTC")
     setattr(user_config, "default_destination", profile.default_destination or "talk")
     setattr(user_config, "email_reply_routing", profile.email_reply_routing or "origin+thread")
+    setattr(user_config, "default_briefings", bool(profile.default_briefings))
     for attr in (
         "log_channel", "alerts_channel",
         "max_foreground_workers", "max_background_workers",
