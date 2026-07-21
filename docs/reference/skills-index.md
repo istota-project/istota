@@ -117,7 +117,7 @@ Codifies a spec-driven development workflow. Specs live in `{notes_folder}/Specs
 
 Skill loading is single-axis: a skill is either **eager** (full body in the prompt) or in the **menu** (a one-line "load on demand" entry the model pulls in full via `istota-skill skills show <name>`). A single deterministic pass produces the eager set from these selectors: `always_include`, `source_types` match, `file_types` match, sticky skills (carried from recent conversation turns), and `companion_skills` of the selected set. Everything else eligible goes in the menu, which is the full eligible catalogue minus the eager set.
 
-Keyword (`triggers`) matching and `resource_types` matching are **no longer selectors**. `triggers` survives only as `!skills` documentation; `resource_types` survives only as a menu-membership gate. The former "progressive disclosure" two-axis model and the LLM Pass-2 pre-router are both gone.
+Keyword (`triggers`) matching and the former `resource_types` matching are **no longer selectors**. `triggers` survives only as `!skills` documentation; the `resource_types` menu-membership gate was removed in the Resources sunset. The former "progressive disclosure" two-axis model and the LLM Pass-2 pre-router are both gone.
 
 See [skills](../features/skills.md) for details on the selection system.
 

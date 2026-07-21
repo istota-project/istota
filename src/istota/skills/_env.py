@@ -4,7 +4,6 @@ Processes EnvSpec declarations from skill manifests to build
 environment variables for the Claude subprocess.
 """
 
-import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -41,19 +40,6 @@ def _resolve_config_path(config: object, dotted_path: str) -> object:
     return obj
 
 
-def _spec_resource_types(spec: EnvSpec) -> set[str]:
-    """Return the set of resource types this spec accepts.
-
-    Supports both ``resource_types: [a, b]`` (plural) and the legacy
-    ``resource_type: a`` (singular). Either form alone works; if both are
-    set, they are unioned.
-    """
-    accepted = set(spec.resource_types or [])
-    if spec.resource_type:
-        accepted.add(spec.resource_type)
-    return accepted
-
-
 def _resolve_env_spec(
     spec: EnvSpec,
     ctx: EnvContext,
@@ -79,10 +65,6 @@ def _resolve_env_spec(
 def _resolve_env_spec_primary(spec: EnvSpec, ctx: EnvContext) -> str | None:
     """Primary resolution (no fallback_var)."""
     # Pre-filters: gates apply regardless of source.
-    if spec.gate_user_has_resource:
-        if not any(r.resource_type == spec.gate_user_has_resource
-                   for r in ctx.user_resources):
-            return None
     if spec.gate_has_discovered_calendars and not ctx.discovered_calendars:
         return None
 
@@ -101,47 +83,6 @@ def _resolve_env_spec_primary(spec: EnvSpec, ctx: EnvContext) -> str | None:
         if val is None:
             return None
         return str(val)
-
-    elif spec.source == "resource":
-        # First DB resource of this type, resolved through mount
-        mount = getattr(ctx.config, "nextcloud_mount_path", None)
-        if not mount:
-            return None
-        for r in ctx.user_resources:
-            if r.resource_type == spec.resource_type:
-                return str(mount / r.resource_path.lstrip("/"))
-        return None
-
-    elif spec.source == "resource_json":
-        # All DB resources of this type as JSON array
-        mount = getattr(ctx.config, "nextcloud_mount_path", None)
-        if not mount:
-            return None
-        items = []
-        for r in ctx.user_resources:
-            if r.resource_type == spec.resource_type:
-                items.append({
-                    "name": r.display_name or "default",
-                    "path": str(mount / r.resource_path.lstrip("/")),
-                })
-        if not items:
-            return None
-        return json.dumps(items)
-
-    elif spec.source == "user_resource_config":
-        # From user config [[resources]] entry
-        if not ctx.user_config:
-            return None
-        accepted = _spec_resource_types(spec)
-        for rc in ctx.user_config.resources:
-            if rc.type in accepted:
-                # Check named field first, then fall back to extra dict
-                val = getattr(rc, spec.field, None)
-                if val is None or val == "":
-                    val = getattr(rc, "extra", {}).get(spec.field)
-                if val:
-                    return str(val)
-        return None
 
     elif spec.source == "user_id":
         return getattr(ctx.task, "user_id", None) or None

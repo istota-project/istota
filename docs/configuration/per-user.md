@@ -4,7 +4,7 @@ Per-user data lives in three DB tables and (optionally) the user's Nextcloud wor
 
 1. **DB tables** (authoritative)
    - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table)
-   - `user_resources` — resources (calendar, folder, todo_file, notes_folder, email_folder, reminders_file). The `extras` JSON column carries resource-type-specific config.
+   - `user_resources` — folder mounts (`folder`) and internal `shared_file` organizer state. Only `folder` is declarable after the Resources sunset; the other path-shaped types were retired (calendars are CalDAV-discovered, todo/reminders/notes are workspace-convention files).
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
    - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, ntfy, etc.). See [credentials](credentials.md) for the full per-user inventory.
 2. `[users.alice]` block in main `config/config.toml` (the docker entrypoint path) — DB rows still win at config-load time.
@@ -61,20 +61,29 @@ log = "web:<room-token>"       # verbose execution log streamed to a web chat ro
 
 > ntfy push notifications are **not** a profile field. They live in the encrypted `secrets` table — provision via the web UI (`/istota/settings` → Connected services → ntfy push) or `istota secret ensure --user alice --service ntfy --key topic --value …`.
 
-### Resources
+### Resources (folder mounts)
 
-Resources define what data the bot can access for this user. Provision via Ansible (`istota resource ensure --user alice --type calendar --path /Personal --name Personal`) or the web UI (`/istota/settings`). The `[[users.X.resources]]` TOML block is also accepted as a docker-entrypoint shortcut.
+After the Resources sunset, the only declarable resource type is `folder` —
+an out-of-workspace path mounted into the sandbox (a cross-user share, an
+absolute path elsewhere). In-workspace paths are already covered by the
+wholesale user-dir bind, so a `folder` row only does real work for paths
+outside `Users/<id>/`. Provision via Ansible (`istota resource ensure
+--user alice --type folder --path /shared/Projects --name Projects`) or the
+`[[users.X.resources]]` TOML block. Calendars are CalDAV-discovered;
+todo/reminders/notes read an explicit path (a briefing-source `path`, or a
+deprecated `todo_file`/`reminders_file` resource override) — there is no
+convention-default filename, and the `notes/` folder is prompt guidance for
+the model only; email folders have no consumer. `calendar`, `notes_folder`,
+`email_folder`, and the module/credential types are auto-cleaned from
+`user_resources` on scheduler startup; `todo_file`/`reminders_file` are left
+in place as deprecated overrides (removed by hand when the user migrates).
 
 ```toml
 [[users.alice.resources]]
-type = "reminders_file"
-path = "/Users/alice/shared/Notes/_REMINDERS.md"
-name = "Reminders"
-
-[[users.alice.resources]]
-type = "calendar"
-path = "Personal"
-name = "Personal"
+type = "folder"
+path = "/shared/Projects"
+name = "Projects"
+permissions = "write"
 ```
 
 Resource types: `calendar`, `folder`, `todo_file`, `email_folder`, `shared_file`, `reminders_file`, `notes_folder`.

@@ -2083,7 +2083,6 @@ def build_prompt(
     output_target: str | None = None,
     recalled_memories: str | None = None,
     playbooks: str | None = None,
-    excluded_resource_types: set[str] | None = None,
     skip_persona: bool = False,
     cli_skills_text: str | None = None,
     skills_index: str | None = None,
@@ -2096,81 +2095,45 @@ def build_prompt(
     Pass ``conn`` to let the per-task timezone lookup reuse an existing
     framework-DB connection instead of opening a throwaway one.
     """
-    # Group resources by type
-    resources_by_type: dict[str, list[db.UserResource]] = {}
-    for r in user_resources:
-        resources_by_type.setdefault(r.resource_type, []).append(r)
-
+    # Stage 3a (Resources sunset): resources are no longer a per-task prompt
+    # surface. The enumerated Nextcloud Folders / TODO Files / Notes /
+    # Reminders / Calendar-fallback sections are replaced by a single static
+    # workspace-layout line; the model finds files by convention + the tools
+    # it already has (Glob/Read over the bound workspace). The folder
+    # bind-mount loop (build_sandbox_command / native_fs_roots) still mounts
+    # out-of-workspace paths into the sandbox; CalDAV discovery still drives
+    # the Calendar section; the web root stays config-driven.
     resource_sections = []
 
-    # Use discovered calendars if available, otherwise fall back to user_resources
+    if config.use_mount:
+        resource_sections.append(
+            f"Your workspace is at Users/{task.user_id}/, containing "
+            f"shared/, inbox/, memories/, and your bot dir "
+            f"({config.bot_dir_name}/). Notes live in {config.bot_dir_name}/notes/."
+        )
+    else:
+        resource_sections.append(
+            f"Your workspace is at Users/{task.user_id}/."
+        )
+
+    # Calendars stay discovery-driven (CalDAV); the resource-typed fallback
+    # is gone.
     if discovered_calendars:
         cal_list = "\n".join(
             f"  - {name}: {url} ({'read/write' if writable else 'read-only'})"
             for name, url, writable in discovered_calendars
         )
         resource_sections.append(f"Calendars (shared by {task.user_id}):\n{cal_list}")
-    elif "calendar" in resources_by_type:
-        calendars = resources_by_type["calendar"]
-        cal_list = "\n".join(
-            f"  - {r.display_name or r.resource_path}: {r.resource_path} ({r.permissions})"
-            for r in calendars
-        )
-        resource_sections.append(f"Calendars:\n{cal_list}")
 
-    if "folder" in resources_by_type:
-        folders = resources_by_type["folder"]
-        folder_list = "\n".join(
-            f"  - {r.display_name or r.resource_path}: {r.resource_path} ({r.permissions})"
-            for r in folders
-        )
-        folders_header = "Nextcloud Folders:" if config.storage_is_nextcloud else "Folders:"
-        resource_sections.append(f"{folders_header}\n{folder_list}")
-
-    if "todo_file" in resources_by_type:
-        todos = resources_by_type["todo_file"]
-        todo_list = "\n".join(
-            f"  - {r.display_name or r.resource_path}: {r.resource_path} ({r.permissions})"
-            for r in todos
-        )
-        resource_sections.append(f"TODO Files:\n{todo_list}")
-
-    # Notes folder: user-configured or default to {bot_dir}/notes/
-    if "notes_folder" in resources_by_type:
-        notes_folders = resources_by_type["notes_folder"]
-        nf_list = "\n".join(
-            f"  - {r.display_name or r.resource_path}: {r.resource_path} ({r.permissions})"
-            for r in notes_folders
-        )
-        resource_sections.append(f"Notes Folders:\n{nf_list}")
-    elif config.use_mount:
-        default_notes = config.nextcloud_mount_path / "Users" / task.user_id / config.bot_dir_name / "notes"
-        resource_sections.append(f"Notes Folder:\n  - {default_notes} (readwrite)")
-
-    if "email_folder" in resources_by_type:
-        email_folders = resources_by_type["email_folder"]
-        email_list = "\n".join(
-            f"  - {r.display_name or r.resource_path}: {r.resource_path}"
-            for r in email_folders
-        )
-        resource_sections.append(f"Email Folders:\n{email_list}")
-
-    _excluded_rt = excluded_resource_types or set()
-    if "reminders_file" in resources_by_type and "reminders_file" not in _excluded_rt:
-        reminders = resources_by_type["reminders_file"]
-        reminders_list = "\n".join(
-            f"  - {r.display_name or r.resource_path}: {r.resource_path} ({r.permissions})"
-            for r in reminders
-        )
-        resource_sections.append(f"Reminders Files:\n{reminders_list}")
-
+    # Instance web root (the bot's own static site) — config-driven, not a
+    # declarable resource type.
     if config.site.enabled and config.site.base_path:
         site_lines = [f"  - Path: {config.site.base_path} (readwrite)"]
         if config.site.hostname:
             site_lines.insert(0, f"  - URL: https://{config.site.hostname}/")
         resource_sections.append("Web Root (your own static site):\n" + "\n".join(site_lines))
 
-    resources_text = "\n\n".join(resource_sections) if resource_sections else "No specific resources configured."
+    resources_text = "\n\n".join(resource_sections)
 
     # Load emissaries and persona (skipped for neutral output like briefings)
     emissaries_section = ""
@@ -2773,7 +2736,6 @@ def execute_task(
     _selected_metas = [skill_index[n] for n in selected_skills if n in skill_index]
     _skip_memory = any(m.exclude_memory for m in _selected_metas)
     _skip_persona = any(m.exclude_persona for m in _selected_metas)
-    _excluded_resource_types = {rt for m in _selected_metas for rt in m.exclude_resources}
 
     # Skills changelog: detect changes for interactive tasks
     skills_changelog = None
@@ -2978,7 +2940,6 @@ def execute_task(
         output_target=effective_output_target,
         recalled_memories=recalled_memories,
         playbooks=playbooks_text,
-        excluded_resource_types=_excluded_resource_types or None,
         skip_persona=_skip_persona,
         cli_skills_text=cli_skills_text,
         skills_index=skills_index,

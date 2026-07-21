@@ -276,9 +276,18 @@ framework row stays byte-unchanged). `blocks` present and non-empty wins over
 ### `ResourceConfig`
 ```
 type: str                    path: str = ""              name: str = ""
-permissions: str = "read"    base_url: str = ""          api_key: str = ""
-extra: dict = {}            # unrecognized TOML keys
+permissions: str = "read"
+extra: dict = {}            # unrecognized TOML keys (incl. base_url/api_key for the obsolete migration)
 ```
+After the Resources sunset only `folder` (an out-of-workspace sandbox mount)
+and `shared_file` (internal organizer state) are live types. Obsolete
+credential types (karakeep, monarch, overland, …) survive only in the
+load-time migration window (`_allow_obsolete=True`); calendar/email_folder/
+notes_folder are auto-cleaned; todo_file/reminders_file are **not**
+auto-cleaned — they survive as the deprecated explicit-path override the
+legacy briefing fetcher reads (there is no convention-default fallback).
+`base_url`/`api_key` are no longer flat fields — they live in `extra` and are
+absorbed into the secrets table by `secrets_store.import_from_user_configs`.
 
 ### `UserConfig`
 ```
@@ -388,12 +397,12 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 6. Apply env var overrides for secrets (`ISTOTA_NEXTCLOUD_APP_PASSWORD` → `nextcloud.app_password`, etc.)
 7. **Phase 6**: `_apply_user_profiles(config)` overlays the `user_profiles` DB table onto `config.users`. Profile-shaped scalar fields (display_name, timezone, log_channel, alerts_channel, max_foreground_workers, max_background_workers) are unconditionally replaced from the DB row when one exists; list fields (email_addresses, disabled_skills, trusted_email_senders) replace TOML only when non-empty (so an auto-seeded blank row doesn't wipe ansible-templated lists). Best-effort: missing/unreadable DB doesn't fail config loading.
 8. **Phase 7a**: `_apply_user_resources(config)` overlays the `user_resources` DB table onto `config.users[*].resources`. Each row becomes a `ResourceConfig` entry with extras decoded from JSON. Dedup is keyed on `(type, path)` — DB wins. Distinct paths coexist.
-9. **Modules refactor (between 7a and 7b)**: `_migrate_obsolete_resources(config)` first calls `secrets_store.import_from_user_configs` (idempotent — extends `_IMPORT_MAP` to absorb karakeep `base_url`, overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources(db_path)` deletes `user_resources` rows whose type is in the retired set (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`), then filters those types out of `uc.resources` in memory so the rest of the load cycle sees post-cleanup state.
+9. **Modules refactor + Resources sunset (between 7a and 7b)**: `_migrate_obsolete_resources(config)` first calls `secrets_store.import_from_user_configs` (idempotent — extends `_IMPORT_MAP` to absorb karakeep `base_url`/`api_key` [from `extra`], overland `ingest_token`, monarch creds), then `db.cleanup_obsolete_resources(db_path)` deletes `user_resources` rows whose type is in the retired set (`feeds`, `money`, `monarch`, `moneyman`, `karakeep`, `overland`, `calendar`, `email_folder`, `notes_folder`). `todo_file`/`reminders_file` are deliberately **not** in that set — they survive as deprecated explicit-path overrides the legacy briefing fetcher still reads (an operator removes them by hand once the user migrates). The cleanup is idempotent (no marker needed). Finally, the retired set is filtered out of `uc.resources` in memory so the rest of the load cycle sees post-cleanup state.
 10. **Phase 7b**: `_apply_user_briefings(config)` overlays the `briefing_configs` DB table onto `config.users[*].briefings`. Each row becomes a `BriefingConfig` entry. Dedup is keyed on `name` — DB wins. Disabled DB rows (`enabled=0`) drop the matching TOML name without scheduling, so the web UI can mute a TOML-templated briefing without re-templating. **Config-authored `blocks` re-attach**: before dropping TOML briefings claimed by a DB name, it captures `{name: blocks}` from the TOML entries and re-attaches `blocks` onto the appended DB-sourced entry when the name matches (DB rows never carry `blocks`; the field lives only in TOML/`Config`). Without this the module-DB seeder would never see config-authored blocks on a briefing that already has a `briefing_configs` row (every imported TOML briefing gets one after first startup).
 11. Return `Config`
 
 **Modules vs resources vs connected services.** Three distinct concepts that used to be conflated under `[[resources]]`:
-- **Resources** — paths/identifiers (calendars, folders, todos). Multiple per user. `[[users.X.resources]]` + `user_resources` DB table. Picker types: `calendar`, `folder`, `todo_file`, `notes_folder`, `email_folder`, `reminders_file`.
+- **Resources** — after the Resources sunset, only `folder` (an out-of-workspace sandbox mount) is declarable. `[[users.X.resources]]` + `user_resources` DB table. The path-shaped types (`calendar`, `todo_file`, `notes_folder`, `email_folder`, `reminders_file`) were retired: calendars are CalDAV-discovered; todo/reminders/notes read an explicit path (a briefing-source `path`, or a deprecated `todo_file`/`reminders_file` resource override) with no convention-default filename, and the `notes/` folder is prompt guidance only; email folders have no consumer. `shared_file` survives as internal organizer state.
 - **Modules** — on-by-default features with their own UI tab + cog (`feeds`, `money`, `location`). Per-user opt-out via `disabled_modules`. Module names live in `istota.modules.MODULE_NAMES`. Gated everywhere by `Config.is_module_enabled(user_id, module)`.
 - **Connected services** — per-user external API credentials (karakeep, google_workspace) consumed by skills. Stored encrypted in the `secrets` table.
 
@@ -409,7 +418,7 @@ Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config
 
 **user_profiles table (Phase 6).** Per-user profile fields live in `user_profiles` (one row per user). The scheduler imports any profile-shaped fields from TOML on startup via `user_profiles.import_from_user_configs(db_path, config.users)` (idempotent — only writes rows that don't yet exist). DB row wins at config-load time. The web UI reads/writes via `/istota/api/settings/profile` (GET, PUT). Ansible deploys provision via the `istota user ensure --name <user> ...` CLI (idempotent partial update). See `src/istota/user_profiles.py`.
 
-**user_resources table (Phase 7a).** Per-user resources live in `user_resources` (id PK, `UNIQUE(user_id, resource_type, resource_path)`). The `extras` column is a JSON dict for resource-type-specific config (overland `ingest_token`, money `data_dir`/`ledgers`, feeds `tumblr_api_key`, etc.). At config-load time, `_apply_user_resources` decodes extras and merges DB rows into `config.users[uid].resources` so existing call sites (`executor.py:1738`, `webhook_receiver.py:55`, `money/_loader.py`, `feeds/_loader.py`, `secrets_store._IMPORT_MAP`) read DB and TOML rows uniformly. Web UI reads/writes via `GET/POST /istota/api/settings/resources` and `DELETE /istota/api/settings/resources/{id}`; payload accepts `{type, path, name, permissions, extras}`. Ansible deploys provision via `istota resource ensure --user … --type … [--path …] [--extras key=value | --extras-json '{…}']` (idempotent upsert with `STATE: created|updated|noop` output). The `add_user_resource()` helper preserves existing extras when called without the kwarg and overwrites when an explicit dict (including `{}`) is passed. The CLI's `--extras-clear` flag is the operator-facing equivalent of "explicit empty."
+**user_resources table (Phase 7a).** Per-user resources live in `user_resources` (id PK, `UNIQUE(user_id, resource_type, resource_path)`). The `extras` column is a JSON dict for resource-type-specific config. After the Resources sunset only `folder` and `shared_file` are live types; `calendar`/`email_folder`/`notes_folder` are auto-cleaned at startup by `cleanup_obsolete_resources`, while `todo_file`/`reminders_file` are left in place as deprecated explicit-path overrides (never auto-cleaned). At config-load time, `_apply_user_resources` decodes extras and merges DB rows into `config.users[uid].resources`. The `/settings/resources` web endpoints were removed; folder mounts are operator-only via `istota resource ensure --user … --type folder --path …` (idempotent upsert). Ansible's `resource ensure` task filters to `folder` only.
 
 **briefing_configs table (Phase 7b).** Per-user briefings live in `briefing_configs` (id PK, `UNIQUE(user_id, name)`). The `cron_expression` column stores the cron string, `components` is a JSON dict of per-component flags, and `enabled` lets the web UI mute a briefing without deleting it. Output (`talk` / `email` / `both`) is packed into `components.__output__` since the legacy schema has no dedicated column; reads hoist it back into the dataclass. The scheduler imports `[[briefings]]` blocks from TOML on startup via `user_briefings.import_from_user_configs(db_path, config.users)` (idempotent — only writes rows whose `(user_id, name)` pair doesn't already exist). At config-load time, `_apply_user_briefings` merges DB rows into `config.users[uid].briefings` so `check_briefings` and `get_briefings_for_user` (in `skills/briefing`) read DB and TOML rows uniformly. Web UI reads/writes via `GET/POST /istota/api/settings/briefings` and `DELETE /istota/api/settings/briefings/{id}`; payload accepts `{name, cron, conversation_token?, output?, components?, enabled?}`. The GET response also returns a `rooms` list (auto-provisioned `log_channel` + `alerts_channel` tokens) so the UI can offer them as conversation_token picks. Ansible deploys provision via `istota briefing ensure --user … --name … --cron … [--conversation-token …] [--output …] [--components-json '{…}'] [--component k=v] [--disabled]` (idempotent upsert with `STATE: created|updated|noop` output). See `src/istota/user_briefings.py`.
 
@@ -435,8 +444,8 @@ Loads admin user IDs from plain text file (one per line, `#` comments, blank lin
 Parses user dict → `UserConfig`:
 - Parses `[[briefings]]` → `BriefingConfig` list
 - Parses `[sleep_cycle]` → `SleepCycleConfig`
-- Parses `[[resources]]` → `ResourceConfig` list
-- Backward compat: migrates `reminders_file` string to `ResourceConfig(type="reminders_file")`
+- Parses `[[resources]]` → `ResourceConfig` list (only `folder` is declarable after the sunset; unknown keys including `base_url`/`api_key` land in `extra`)
+- Backward compat: migrates `reminders_file` string to `ResourceConfig(type="reminders_file")` (a deprecated explicit-path override; not auto-cleaned)
 
 ## UserResource (DB Model, in db.py)
 ```python
@@ -444,14 +453,15 @@ Parses user dict → `UserConfig`:
 class UserResource:
     id: int
     user_id: str
-    resource_type: str      # "calendar", "folder", "todo_file", "email_folder",
-                            # "reminders_file", "shared_file", "ledger",
-                            # "invoicing", "karakeep", "monarch", "money", "feeds"
+    resource_type: str      # "folder", "shared_file" (live)
+                            # "todo_file", "reminders_file" (deprecated override)
+                            # "calendar", "email_folder", "notes_folder",
+                            # "feeds", "money", "monarch", "moneyman",
+                            # "karakeep", "overland" (auto-cleaned)
     resource_path: str
     display_name: str | None
     permissions: str        # "read" or "readwrite"
 ```
-Note: Uses `resource_name` field alias at executor.py L645 (historical quirk; field is `display_name` on class, but DB column may differ — check actual column name if modifying).
 
 ## How to Add a New Config Field
 
@@ -473,16 +483,19 @@ Note: Uses `resource_name` field alias at executor.py L645 (historical quirk; fi
 3. It loads from `[users.NAME.field]` in main config (docker entrypoint path)
 4. If profile-shaped, plumb it through `user_profiles` (DB row, web UI, `istota user ensure`)
 
-## How to Add a New Resource Type
+## How to Add a New Folder Mount
 
-1. Choose a `resource_type` string (e.g., `"my_data"`)
-2. Users add via: `uv run istota resource add -u USER -t my_data -p /path/to/file`
-3. In `executor.py` `execute_task()` (L643-725), add env var mapping:
-   ```python
-   my_data = [r for r in user_resources if r.resource_type == "my_data"]
-   if my_data:
-       env["MY_DATA_PATH"] = str(config.nextcloud_mount_path / my_data[0].resource_path.lstrip("/"))
-   ```
-4. In `build_prompt()` (L180-242), add resource display section if user should see it
-5. In `skill.md` frontmatter, add `resource_types: [my_data]` to relevant skill
-6. Document in skill markdown file
+After the Resources sunset, `folder` is the only declarable resource type —
+used for mounting an out-of-workspace path into the sandbox.
+
+1. Users add via: `uv run istota resource ensure -u USER -t folder -p /shared/path`
+2. The executor's `build_sandbox_command` / `native_fs_roots` already bind-mount
+   any `folder` resource path that isn't already inside `Users/{user_id}/` (RW
+   or RO per `permissions`).
+3. The prompt no longer enumerates resource paths (Stage 3a replaced them with a
+   static workspace-layout line); the model discovers files by convention +
+   Glob/Read over the bound workspace.
+
+To read a workspace file by convention (notes, todos, reminders), use the
+`files` skill's mount-aware `read_text(config, path)` against
+`{bot_dir}/NOTES.md`, `TODO.md`, `reminders.md` — no resource declaration needed.

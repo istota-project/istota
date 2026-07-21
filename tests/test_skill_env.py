@@ -49,29 +49,6 @@ def _make_config(tmp_path: Path, mount: bool = True) -> _MockConfig:
     return _MockConfig(nextcloud_mount_path=mount_path)
 
 
-@dataclass
-class _MockResource:
-    resource_type: str
-    resource_path: str
-    display_name: str | None = None
-
-
-@dataclass
-class _MockResourceConfig:
-    type: str
-    path: str = ""
-    name: str = ""
-    permissions: str = "read"
-    base_url: str = ""
-    api_key: str = ""
-    extra: dict = field(default_factory=dict)
-
-
-@dataclass
-class _MockUserConfig:
-    resources: list = field(default_factory=list)
-
-
 class TestBuildSkillEnvConfig:
     """Tests for 'config' source type."""
 
@@ -129,197 +106,6 @@ class TestBuildSkillEnvConfig:
         assert "NONEXISTENT" not in env
 
 
-class TestBuildSkillEnvResource:
-    """Tests for 'resource' source type."""
-
-    def test_resolves_first_resource_path(self, tmp_path):
-        config = _make_config(tmp_path)
-        resources = [
-            _MockResource("ledger", "/Users/alice/finance/main.beancount", "Main"),
-            _MockResource("ledger", "/Users/alice/finance/extra.beancount", "Extra"),
-        ]
-        ctx = _make_ctx(tmp_path, config=config, user_resources=resources)
-
-        meta = SkillMeta(
-            name="accounting",
-            description="Accounting",
-            env_specs=[EnvSpec(
-                var="LEDGER_PATH",
-                source="resource",
-                resource_type="ledger",
-            )],
-        )
-        env = build_skill_env(["accounting"], {"accounting": meta}, ctx)
-        assert env["LEDGER_PATH"] == str(config.nextcloud_mount_path / "Users/alice/finance/main.beancount")
-
-    def test_skips_when_no_mount(self, tmp_path):
-        config = _make_config(tmp_path, mount=False)
-        resources = [_MockResource("ledger", "/Users/alice/finance/main.beancount")]
-        ctx = _make_ctx(tmp_path, config=config, user_resources=resources)
-
-        meta = SkillMeta(
-            name="accounting",
-            description="Accounting",
-            env_specs=[EnvSpec(var="LEDGER_PATH", source="resource", resource_type="ledger")],
-        )
-        env = build_skill_env(["accounting"], {"accounting": meta}, ctx)
-        assert "LEDGER_PATH" not in env
-
-    def test_skips_when_no_matching_resource(self, tmp_path):
-        config = _make_config(tmp_path)
-        ctx = _make_ctx(tmp_path, config=config, user_resources=[])
-
-        meta = SkillMeta(
-            name="accounting",
-            description="Accounting",
-            env_specs=[EnvSpec(var="LEDGER_PATH", source="resource", resource_type="ledger")],
-        )
-        env = build_skill_env(["accounting"], {"accounting": meta}, ctx)
-        assert "LEDGER_PATH" not in env
-
-
-class TestBuildSkillEnvResourceJson:
-    """Tests for 'resource_json' source type."""
-
-    def test_returns_json_array(self, tmp_path):
-        import json
-
-        config = _make_config(tmp_path)
-        resources = [
-            _MockResource("ledger", "/Users/alice/finance/main.beancount", "Main"),
-            _MockResource("ledger", "/Users/alice/finance/extra.beancount", "Extra"),
-        ]
-        ctx = _make_ctx(tmp_path, config=config, user_resources=resources)
-
-        meta = SkillMeta(
-            name="accounting",
-            description="Accounting",
-            env_specs=[EnvSpec(var="LEDGER_PATHS", source="resource_json", resource_type="ledger")],
-        )
-        env = build_skill_env(["accounting"], {"accounting": meta}, ctx)
-        parsed = json.loads(env["LEDGER_PATHS"])
-        assert len(parsed) == 2
-        assert parsed[0]["name"] == "Main"
-        assert parsed[1]["name"] == "Extra"
-
-
-class TestBuildSkillEnvUserResourceConfig:
-    """Tests for 'user_resource_config' source type."""
-
-    def test_resolves_named_field(self, tmp_path):
-        # Uses a placeholder type ("svc_a") rather than a live one — the
-        # resolver dispatches purely on type+field, so any string works.
-        # (Karakeep moved to ``from: "secret"`` after the modules refactor;
-        # this code path remains for any future user_resource_config skill.)
-        config = _make_config(tmp_path)
-        user_config = _MockUserConfig(resources=[
-            _MockResourceConfig(type="svc_a", base_url="https://k.example/api/v1", api_key="secret123"),
-        ])
-        ctx = _make_ctx(tmp_path, config=config, user_config=user_config)
-
-        meta = SkillMeta(
-            name="bookmarks",
-            description="Bookmarks",
-            env_specs=[
-                EnvSpec(var="SVC_A_BASE_URL", source="user_resource_config", resource_type="svc_a", field="base_url"),
-                EnvSpec(var="SVC_A_API_KEY", source="user_resource_config", resource_type="svc_a", field="api_key"),
-            ],
-        )
-        env = build_skill_env(["bookmarks"], {"bookmarks": meta}, ctx)
-        assert env["SVC_A_BASE_URL"] == "https://k.example/api/v1"
-        assert env["SVC_A_API_KEY"] == "secret123"
-
-    def test_resolves_extra_field(self, tmp_path):
-        config = _make_config(tmp_path)
-        user_config = _MockUserConfig(resources=[
-            _MockResourceConfig(type="custom_service", extra={"token": "abc123"}),
-        ])
-        ctx = _make_ctx(tmp_path, config=config, user_config=user_config)
-
-        meta = SkillMeta(
-            name="custom",
-            description="Custom",
-            env_specs=[
-                EnvSpec(var="CUSTOM_TOKEN", source="user_resource_config", resource_type="custom_service", field="token"),
-            ],
-        )
-        env = build_skill_env(["custom"], {"custom": meta}, ctx)
-        assert env["CUSTOM_TOKEN"] == "abc123"
-
-    def test_skips_when_no_user_config(self, tmp_path):
-        config = _make_config(tmp_path)
-        ctx = _make_ctx(tmp_path, config=config, user_config=None)
-
-        meta = SkillMeta(
-            name="bookmarks",
-            description="Bookmarks",
-            env_specs=[
-                EnvSpec(var="SVC_A_BASE_URL", source="user_resource_config", resource_type="svc_a", field="base_url"),
-            ],
-        )
-        env = build_skill_env(["bookmarks"], {"bookmarks": meta}, ctx)
-        assert "SVC_A_BASE_URL" not in env
-
-    def test_skips_when_no_matching_resource(self, tmp_path):
-        config = _make_config(tmp_path)
-        user_config = _MockUserConfig(resources=[
-            _MockResourceConfig(type="other"),
-        ])
-        ctx = _make_ctx(tmp_path, config=config, user_config=user_config)
-
-        meta = SkillMeta(
-            name="bookmarks",
-            description="Bookmarks",
-            env_specs=[
-                EnvSpec(var="SVC_A_BASE_URL", source="user_resource_config", resource_type="svc_a", field="base_url"),
-            ],
-        )
-        env = build_skill_env(["bookmarks"], {"bookmarks": meta}, ctx)
-        assert "SVC_A_BASE_URL" not in env
-
-    def test_resolves_via_resource_types_list(self, tmp_path):
-        """A spec with resource_types matches any of the listed types."""
-        config = _make_config(tmp_path)
-        user_config = _MockUserConfig(resources=[
-            _MockResourceConfig(type="svc_b", extra={"config_path": "/etc/svc/config.toml"}),
-        ])
-        ctx = _make_ctx(tmp_path, config=config, user_config=user_config)
-
-        meta = SkillMeta(
-            name="svc",
-            description="Service",
-            env_specs=[EnvSpec(
-                var="SVC_CONFIG",
-                source="user_resource_config",
-                resource_types=["svc_a", "svc_b"],
-                field="config_path",
-            )],
-        )
-        env = build_skill_env(["svc"], {"svc": meta}, ctx)
-        assert env["SVC_CONFIG"] == "/etc/svc/config.toml"
-
-    def test_resource_types_falls_back_to_singular(self, tmp_path):
-        """Singular resource_type still works when resource_types is empty."""
-        config = _make_config(tmp_path)
-        user_config = _MockUserConfig(resources=[
-            _MockResourceConfig(type="svc_a", base_url="https://svc.example.com", api_key="k"),
-        ])
-        ctx = _make_ctx(tmp_path, config=config, user_config=user_config)
-
-        meta = SkillMeta(
-            name="bookmarks",
-            description="Bookmarks",
-            env_specs=[EnvSpec(
-                var="SVC_A_BASE_URL",
-                source="user_resource_config",
-                resource_type="svc_a",
-                field="base_url",
-            )],
-        )
-        env = build_skill_env(["bookmarks"], {"bookmarks": meta}, ctx)
-        assert env["SVC_A_BASE_URL"] == "https://svc.example.com"
-
-
 class TestBuildSkillEnvUserId:
     """Tests for 'user_id' source type."""
 
@@ -351,19 +137,10 @@ class TestBuildSkillEnvMultipleSkills:
     def test_merges_env_from_multiple_skills(self, tmp_path):
         config = _make_config(tmp_path)
         config.browser.enabled = True
-        user_config = _MockUserConfig(resources=[
-            _MockResourceConfig(type="svc_a", base_url="https://svc.example.com", api_key="key1"),
-        ])
-        ctx = _make_ctx(tmp_path, config=config, user_config=user_config)
+        config.browser.api_url = "http://browse:9223"
+        ctx = _make_ctx(tmp_path, config=config)
 
         index = {
-            "bookmarks": SkillMeta(
-                name="bookmarks",
-                description="Bookmarks",
-                env_specs=[
-                    EnvSpec(var="SVC_A_BASE_URL", source="user_resource_config", resource_type="svc_a", field="base_url"),
-                ],
-            ),
             "browse": SkillMeta(
                 name="browse",
                 description="Browser",
@@ -371,10 +148,17 @@ class TestBuildSkillEnvMultipleSkills:
                     EnvSpec(var="BROWSER_API_URL", source="config", config_path="browser.api_url", when="browser.enabled"),
                 ],
             ),
+            "files": SkillMeta(
+                name="files",
+                description="Files",
+                env_specs=[
+                    EnvSpec(var="BOT_DIR", source="config", config_path="bot_dir_name"),
+                ],
+            ),
         }
-        env = build_skill_env(["bookmarks", "browse"], index, ctx)
-        assert env["SVC_A_BASE_URL"] == "https://svc.example.com"
-        assert env["BROWSER_API_URL"] == "http://localhost:9223"
+        env = build_skill_env(["browse", "files"], index, ctx)
+        assert env["BROWSER_API_URL"] == "http://browse:9223"
+        assert env["BOT_DIR"] == "istota"
 
     def test_skips_skills_not_in_index(self, tmp_path):
         ctx = _make_ctx(tmp_path)
@@ -447,20 +231,26 @@ class TestResourceConfigExtra:
     def test_known_fields_not_in_extra(self):
         from istota.config import _parse_user_data
 
-        # ``svc_a`` is a placeholder type — _parse_user_data only cares
-        # about field shape, not whether the type is in any registry.
+        # Known fields (type/path/name/permissions) don't leak into extra.
+        # After the Resources sunset base_url/api_key are no longer special
+        # flat fields, so they land in extra alongside other unknown keys.
         user_data = {
             "resources": [{
                 "type": "svc_a",
+                "path": "/x",
+                "name": "S",
+                "permissions": "read",
                 "base_url": "https://svc.example.com",
                 "api_key": "secret",
             }],
         }
         uc = _parse_user_data(user_data, "test_user")
         rc = uc.resources[0]
-        assert rc.base_url == "https://svc.example.com"
-        assert rc.api_key == "secret"
-        assert rc.extra == {}
+        assert rc.type == "svc_a"
+        assert rc.path == "/x"
+        assert rc.name == "S"
+        assert rc.permissions == "read"
+        assert rc.extra == {"base_url": "https://svc.example.com", "api_key": "secret"}
 
     def test_empty_resources_no_crash(self):
         from istota.config import _parse_user_data
@@ -604,44 +394,6 @@ class TestDispatcherIteratesFullIndex:
         env = dispatch_setup_env_hooks([], index, ctx)
         assert called["count"] == 1
         assert env["FAKE_VAR"] == "yes"
-
-
-class TestGateUserHasResource:
-    """Phase 1.1: ``gate_user_has_resource`` pre-filters resolution by
-    whether the user owns at least one resource of the named type."""
-
-    def test_resolves_when_resource_present(self, tmp_path):
-        config = _make_config(tmp_path)
-        resources = [_MockResource("calendar", "/cal/personal")]
-        ctx = _make_ctx(tmp_path, config=config, user_resources=resources)
-
-        meta = SkillMeta(
-            name="x",
-            description="x",
-            env_specs=[EnvSpec(
-                var="CAL_OWNER",
-                source="user_id",
-                gate_user_has_resource="calendar",
-            )],
-        )
-        env = build_skill_env(["x"], {"x": meta}, ctx)
-        assert env.get("CAL_OWNER") == "alice"
-
-    def test_skips_when_resource_missing(self, tmp_path):
-        config = _make_config(tmp_path)
-        ctx = _make_ctx(tmp_path, config=config, user_resources=[])
-
-        meta = SkillMeta(
-            name="x",
-            description="x",
-            env_specs=[EnvSpec(
-                var="CAL_OWNER",
-                source="user_id",
-                gate_user_has_resource="calendar",
-            )],
-        )
-        env = build_skill_env(["x"], {"x": meta}, ctx)
-        assert "CAL_OWNER" not in env
 
 
 class TestGateHasDiscoveredCalendars:

@@ -1,16 +1,12 @@
 """Built-in structured source resolvers.
 
 Wrap the existing structured fetchers (markets/calendar) for byte-identical
-behaviour, and repoint todos/reminders/notes off declarable resources onto
-**workspace-convention default paths** — the change that severs the last
-``todo_file`` / ``reminders_file`` consumers, enabling the Resources sunset
-(Stage 7). A source's ``config.path`` overrides the convention default.
-
-Convention defaults (under the user's bot dir):
-
-* ``todos``     → ``TODO.md``
-* ``reminders`` → ``reminders.md``
-* ``notes``     → ``NOTES.md``
+behaviour. ``todos`` / ``reminders`` / ``notes`` read a workspace file whose
+**path is a briefing-source property** (``config.path``) — there is no convention
+default filename. The ``notes/`` folder convention lives only in the prompt's
+workspace-layout line as guidance for the model, not in the resolver. A
+source without a ``path`` returns a not-configured result (reads nothing);
+the user configures the path in the web editor or the migration.
 """
 
 from __future__ import annotations
@@ -43,14 +39,16 @@ def _now_in_user_tz(ctx: SourceContext) -> tuple[datetime, str, bool, bool]:
     return now, tz_str, now.hour < 12, now.weekday() in (5, 6)
 
 
-def _workspace_file(ctx: SourceContext, default_filename: str, override: str | None) -> str:
-    """Resolve a mount-relative path for a convention file (or an override)."""
-    if override:
-        return override
-    from istota.storage import get_user_bot_path
+def _workspace_file(ctx: SourceContext, override: str | None) -> str | None:
+    """Return the source-config ``path`` override, or None when unset.
 
-    bot = get_user_bot_path(ctx.user_id, ctx.app_config.bot_dir_name)
-    return f"{bot}/{default_filename}"
+    After the Resources sunset there is no convention default filename for
+    todos / reminders / notes — the location is a briefing-source property
+    (set in the web editor or the migration). The ``notes/`` folder
+    convention lives only in the prompt's workspace-layout line as guidance
+    for the model, not in the resolver.
+    """
+    return override
 
 
 def _read_workspace_text(ctx: SourceContext, path: str) -> str | None:
@@ -131,12 +129,17 @@ def resolve_calendar(config: dict, ctx: SourceContext) -> GatheredSource:
 
 
 def resolve_todos(config: dict, ctx: SourceContext) -> GatheredSource:
-    path = _workspace_file(ctx, "TODO.md", config.get("path"))
+    path = _workspace_file(ctx, config.get("path"))
+    if not path:
+        return GatheredSource(
+            kind="todos", title="Todos",
+            provenance="(no path configured — set the source path)", ok=False,
+        )
     content = _read_workspace_text(ctx, path)
     if not content:
         return GatheredSource(
             kind="todos", title="Todos",
-            provenance="(no TODO file)", ok=False,
+            provenance="(no TODO file at configured path)", ok=False,
         )
     items = [
         {"text": line.strip()}
@@ -158,12 +161,17 @@ def resolve_todos(config: dict, ctx: SourceContext) -> GatheredSource:
 
 
 def resolve_reminders(config: dict, ctx: SourceContext) -> GatheredSource:
-    path = _workspace_file(ctx, "reminders.md", config.get("path"))
+    path = _workspace_file(ctx, config.get("path"))
+    if not path:
+        return GatheredSource(
+            kind="reminders", title="Reminder",
+            provenance="(no path configured — set the source path)", ok=False,
+        )
     content = _read_workspace_text(ctx, path)
     if not content:
         return GatheredSource(
             kind="reminders", title="Reminder",
-            provenance="(no reminders file)", ok=False,
+            provenance="(no reminders file at configured path)", ok=False,
         )
     reminder = _pick_reminder(ctx, content)
     if not reminder:
@@ -213,12 +221,17 @@ def _pick_reminder(ctx: SourceContext, content: str) -> str | None:
 
 
 def resolve_notes(config: dict, ctx: SourceContext) -> GatheredSource:
-    path = _workspace_file(ctx, "NOTES.md", config.get("path"))
+    path = _workspace_file(ctx, config.get("path"))
+    if not path:
+        return GatheredSource(
+            kind="notes", title="Notes",
+            provenance="(no path configured — set the source path)", ok=False,
+        )
     content = _read_workspace_text(ctx, path)
     if not content or not content.strip():
         return GatheredSource(
             kind="notes", title="Notes",
-            provenance="(no notes file)", ok=False,
+            provenance="(no notes file at configured path)", ok=False,
         )
     max_chars = int(ctx.module_config.max_source_chars)
     text = content.strip()

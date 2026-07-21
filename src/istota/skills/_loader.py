@@ -35,16 +35,12 @@ def _parse_env_specs(data: list[dict]) -> list[EnvSpec]:
             source=entry.get("from", ""),
             config_path=entry.get("config_path", ""),
             when=entry.get("when", ""),
-            resource_type=entry.get("resource_type", ""),
-            resource_types=list(entry.get("resource_types") or []),
-            field=entry.get("field", ""),
             template=entry.get("template", ""),
             user_path_fn=entry.get("user_path_fn", ""),
             service=entry.get("service", ""),
             key=entry.get("key", ""),
             sensitive=bool(entry.get("sensitive", False)),
             fallback_var=entry.get("fallback_var", ""),
-            gate_user_has_resource=entry.get("gate_user_has_resource", ""),
             gate_has_discovered_calendars=bool(
                 entry.get("gate_has_discovered_calendars", False)
             ),
@@ -202,7 +198,6 @@ def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
         requires_capability=_get_list("requires_capability"),
         exclude_memory=_get_bool("exclude_memory"),
         exclude_persona=_get_bool("exclude_persona"),
-        exclude_resources=_get_list("exclude_resources"),
         cli=_get_bool("cli"),
         experimental=_get_bool("experimental"),
         skill_dir=str(skill_dir),
@@ -254,7 +249,6 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
             requires_capability=meta.get("requires_capability", []),
             exclude_memory=meta.get("exclude_memory", False),
             exclude_persona=meta.get("exclude_persona", False),
-            exclude_resources=meta.get("exclude_resources", []),
             cli=meta.get("cli", False),
             experimental=meta.get("experimental", False),
         )

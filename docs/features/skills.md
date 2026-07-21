@@ -16,7 +16,7 @@ A single deterministic pass produces the **eager** skill set (the former LLM "Pa
 - Sticky skills carried from recent conversation turns (see below)
 - `companion_skills` of already-selected skills are pulled in
 
-Keyword (`triggers`) matching is **not** a selector — every non-eager eligible skill is in the on-demand menu, so a keyword guess is redundant. `triggers` survives only as `!skills` documentation. `resource_types` survives only as a menu-membership gate.
+Keyword (`triggers`) matching is **not** a selector — every non-eager eligible skill is in the on-demand menu, so a keyword guess is redundant. `triggers` survives only as `!skills` documentation. (The former `resource_types` menu-membership gate was removed in the Resources sunset — no bundled skill declared it.)
 
 Admin-only skills are filtered out for non-admin users. Skills with unmet `dependencies` are skipped. Skills listed in `disabled_skills` (instance or per-user) are excluded.
 
@@ -80,7 +80,7 @@ dependencies: [caldav, icalendar]
 Calendar operations use CalDAV...
 ```
 
-Supported frontmatter fields: `name`, `triggers`, `description`, `always_include`, `admin_only`, `cli`, `experimental` (requires `skill_<name>` in `[experimental] features`), `resource_types`, `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_memory`, `exclude_persona`, `exclude_resources`, `env` (JSON-encoded array of env spec objects).
+Supported frontmatter fields: `name`, `triggers`, `description`, `always_include`, `admin_only`, `cli`, `experimental` (requires `skill_<name>` in `[experimental] features`), `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `exclude_memory`, `exclude_persona`, `env` (JSON-encoded array of env spec objects).
 
 Operator overrides in `config/skills/` can use `skill.md` (or `skill.toml` for backward compatibility).
 

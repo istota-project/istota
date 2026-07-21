@@ -377,8 +377,9 @@ api_proxy_socket_dir = "{{ istota_docker_proxy_socket_dir }}"
 api_proxy_exec_ttl_seconds = {{ istota_devbox_api_proxy_exec_ttl_seconds }}
 api_proxy_audit_log = "{{ istota_devbox_api_proxy_audit_log }}"
 {% endif %}
-{# The money skill is in-process and resolves per-user config from each
-   user's [[resources]] entry — no instance-level [money] block. #}
+{# The money skill is in-process and resolves per-user config from the
+   user's workspace (auto-derived) — no instance-level [money] block and no
+   [[resources]] entry. #}
 
 {% if istota_memory_search_enabled %}
 
@@ -519,7 +520,7 @@ devbox_proxy_socket_dir = "{{ istota_devbox_proxy_socket_dir }}"
 devbox_proxy_audit_log = "{{ istota_devbox_proxy_audit_log }}"
 {% endif %}
 
-# User profiles, resources, and briefing schedule/delivery live in the DB
+# User profiles, folder mounts, and briefing schedule/delivery live in the DB
 # (user_profiles, user_resources, briefing_configs tables). They are populated by
 # `istota user/resource/briefings schedule ensure` invocations in the playbook —
 # config.toml does not render that per-user data.

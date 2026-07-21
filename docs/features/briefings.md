@@ -17,7 +17,7 @@ Merging happens at the briefing name level.
 | Component | What it includes |
 |---|---|
 | `calendar` | Today's events (morning) or tomorrow's events (evening) |
-| `todos` | Pending TODO items from todo_file resources |
+| `todos` | Pending TODO items from the user's TODO file (path is a briefing-source property) |
 | `email` | General unread email summary / newsletter content |
 | `markets` | Pre-fetched futures (morning) and indices (evening) via yfinance |
 | `headlines` | Pre-fetched frontpages from major news outlets |

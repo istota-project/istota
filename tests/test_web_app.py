@@ -1974,319 +1974,37 @@ class TestProfileEndpoints:
 
 
 @_needs_web_deps
-class TestResourceEndpoints:
-    """Settings → resources: list TOML+DB merged, add/remove DB rows."""
+class TestResourcesSettingsRemoved:
+    """The /settings/resources surface was removed by the Resources sunset
+    (folder mounts are now operator-only via `istota resource` / TOML; the
+    web UI no longer lists resources). No API route handles it anymore — a
+    GET falls through to the SvelteKit static catch-all as a 404, while a
+    POST/DELETE hits the same catch-all and gets 405 (StaticFiles serves
+    only GET/HEAD). Either proves the API handler is gone; the point is the
+    request is never handled by a real resources endpoint."""
 
     @pytest.fixture(autouse=True)
-    def _setup_db(self, monkeypatch, tmp_path):
+    def _setup(self, monkeypatch, tmp_path):
         from istota import db
         db_path = tmp_path / "test.db"
         db.init_db(db_path)
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
-        self._db_path = db_path
+        self._cfg = _make_config(tmp_path)
 
-    def _make_test_config(self, tmp_path):
-        cfg = _make_config(
-            tmp_path,
-            users={
-                "alice": UserConfig(
-                    display_name="Alice",
-                    resources=[
-                        ResourceConfig(
-                            type="folder", path="/Notes-toml", name="Notes (TOML)",
-                        ),
-                    ],
-                ),
-            },
-        )
-        cfg.db_path = self._db_path
-        return cfg
-
-    async def _login(self, client):
-        import istota.web_app as mod
-        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
-            "user_id": "alice",
-        })
-        resp = await client.get("/istota/callback", follow_redirects=False)
-        return resp.cookies
-
-    async def test_list_includes_toml_and_db(self, tmp_path, client, app):
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        from istota import db
-        with db.get_db(self._db_path) as conn:
-            db.add_user_resource(
-                conn, user_id="alice", resource_type="folder",
-                resource_path="/Notes", display_name="Notes",
-            )
-        cookies = await self._login(client)
-        resp = await client.get("/istota/api/settings/resources", cookies=cookies)
-        assert resp.status_code == 200
-        body = resp.json()
-        types = {t["type"] for t in body["types"]}
-        # The modules refactor pruned `feeds`, `money`, `overland`, etc.
-        # from the resource picker — those flow through the modules /
-        # connected services paths now. The picker only exposes true
-        # path/identifier resources.
-        assert "calendar" in types and "folder" in types
-        assert "feeds" not in types
-        managed = {(r["type"], r["managed"]) for r in body["resources"]}
-        assert ("folder", "config") in managed
-        assert ("folder", "db") in managed
-
-    async def test_add_resource(self, tmp_path, client, app):
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        cookies = await self._login(client)
-        resp = await client.post(
-            "/istota/api/settings/resources",
-            json={"type": "calendar", "path": "/dav/work", "name": "Work"},
-            cookies=cookies,
-            headers={"origin": "https://example.com"},
-        )
-        assert resp.status_code == 200
-        rid = resp.json()["id"]
-        assert rid > 0
-        from istota import db
-        with db.get_db(self._db_path) as conn:
-            rows = db.get_user_resources(conn, "alice", resource_type="calendar")
-        assert len(rows) == 1
-        assert rows[0].resource_path == "/dav/work"
-
-    async def test_add_resource_rejects_unknown_type(self, tmp_path, client, app):
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        cookies = await self._login(client)
-        resp = await client.post(
-            "/istota/api/settings/resources",
-            json={"type": "evil", "path": "/x"},
-            cookies=cookies,
-            headers={"origin": "https://example.com"},
-        )
-        assert resp.status_code == 400
-
-    async def test_add_resource_requires_path_when_needed(self, tmp_path, client, app):
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        cookies = await self._login(client)
-        resp = await client.post(
-            "/istota/api/settings/resources",
-            json={"type": "folder"},
-            cookies=cookies,
-            headers={"origin": "https://example.com"},
-        )
-        assert resp.status_code == 400
-
-    async def test_add_resource_rejects_retired_module_types(self, tmp_path, client, app):
-        # The modules refactor retired `feeds`, `money`, `overland`,
-        # `karakeep`, `monarch` from the resource picker. POSTs for those
-        # types now fail validation — they belong on /<module>/settings or
-        # /settings → connected services.
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        cookies = await self._login(client)
-        resp = await client.post(
-            "/istota/api/settings/resources",
-            json={"type": "money", "name": "Money"},
-            cookies=cookies,
-            headers={"origin": "https://example.com"},
-        )
-        assert resp.status_code == 400
-
-    async def test_delete_db_resource(self, tmp_path, client, app):
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        from istota import db
-        with db.get_db(self._db_path) as conn:
-            rid = db.add_user_resource(
-                conn, user_id="alice", resource_type="folder",
-                resource_path="/x", display_name="X",
-            )
-        cookies = await self._login(client)
-        resp = await client.delete(
-            f"/istota/api/settings/resources/{rid}",
-            cookies=cookies,
-            headers={"origin": "https://example.com"},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["deleted"] is True
-        with db.get_db(self._db_path) as conn:
-            assert db.get_user_resources(conn, "alice", resource_type="folder") == []
-
-    async def test_delete_other_users_resource_returns_404(self, tmp_path, client, app):
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        from istota import db
-        with db.get_db(self._db_path) as conn:
-            rid = db.add_user_resource(
-                conn, user_id="bob", resource_type="folder",
-                resource_path="/bobs", display_name="Bob's",
-            )
-        cookies = await self._login(client)  # logged in as alice
-        resp = await client.delete(
-            f"/istota/api/settings/resources/{rid}",
-            cookies=cookies,
-            headers={"origin": "https://example.com"},
-        )
-        # 404 is intentional: indistinguishable from "no such id" so a
-        # caller can't probe for other users' resource IDs.
+    async def test_get_returns_404(self, client, app):
+        resp = await client.get("/istota/api/settings/resources")
         assert resp.status_code == 404
-        with db.get_db(self._db_path) as conn:
-            still_there = db.get_user_resources(conn, "bob", resource_type="folder")
-        assert len(still_there) == 1
 
-    async def test_delete_negative_id_rejected(self, tmp_path, client, app):
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        cookies = await self._login(client)
-        resp = await client.delete(
-            "/istota/api/settings/resources/-1",
-            cookies=cookies,
-            headers={"origin": "https://example.com"},
-        )
-        assert resp.status_code == 400
-
-    async def test_add_resource_with_extras_persists(self, tmp_path, client, app):
-        # `extras` is still a generic JSON dict on each row even though the
-        # specific extras-bearing resource types (overland.ingest_token,
-        # feeds.tumblr_api_key, monarch creds) moved into the secrets
-        # store. This guards the round-trip for any future extras-bearing
-        # type the picker accepts.
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        cookies = await self._login(client)
+    async def test_post_is_unhandled(self, client, app):
         resp = await client.post(
             "/istota/api/settings/resources",
-            json={
-                "type": "folder", "path": "/Docs", "name": "Docs",
-                "extras": {"meta_key": "meta-val", "meta_count": 75},
-            },
-            cookies=cookies,
-            headers={"origin": "https://example.com"},
+            json={"type": "folder", "path": "/x"},
         )
-        assert resp.status_code == 200
-        from istota import db
-        with db.get_db(self._db_path) as conn:
-            rows = db.get_user_resources(conn, "alice", resource_type="folder")
-        assert rows[0].extras == {"meta_key": "meta-val", "meta_count": 75}
+        assert resp.status_code in (404, 405)
 
-    async def test_list_returns_extras_on_db_rows(self, tmp_path, client, app):
-        # The UI needs to read back extras to render an editable form;
-        # otherwise users can only delete-and-recreate.
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        from istota import db
-        with db.get_db(self._db_path) as conn:
-            db.add_user_resource(
-                conn, user_id="alice", resource_type="folder",
-                resource_path="/Notes", display_name="Notes",
-                extras={"meta_key": "meta-val"},
-            )
-        cookies = await self._login(client)
-        resp = await client.get("/istota/api/settings/resources", cookies=cookies)
-        assert resp.status_code == 200
-        db_rows = [r for r in resp.json()["resources"] if r["managed"] == "db"]
-        notes = next(r for r in db_rows if r["path"] == "/Notes")
-        assert notes["extras"] == {"meta_key": "meta-val"}
-
-    async def test_add_resource_rejects_non_dict_extras(self, tmp_path, client, app):
-        cfg = self._make_test_config(tmp_path)
-        _patch_app(cfg)
-        cookies = await self._login(client)
-        resp = await client.post(
-            "/istota/api/settings/resources",
-            json={"type": "folder", "path": "/x", "name": "X", "extras": "not a dict"},
-            cookies=cookies,
-            headers={"origin": "https://example.com"},
-        )
-        assert resp.status_code == 400
-
-    async def test_db_row_not_double_listed_when_in_uc_resources(self, tmp_path, client, app):
-        # _apply_user_resources merges DB rows into UserConfig.resources so
-        # other code paths see them through one surface. The settings GET
-        # must not show the same row twice (once as "config" via the
-        # merged UserConfig, once as "db" via the direct DB query).
-        from istota import db
-        with db.get_db(self._db_path) as conn:
-            db.add_user_resource(
-                conn, user_id="alice", resource_type="folder",
-                resource_path="/Notes", display_name="Notes",
-                extras={"meta_key": "meta-val"},
-            )
-        # Build a config whose UserConfig already holds the DB row (as
-        # _apply_user_resources would have done) plus a separate TOML
-        # entry of a different path.
-        cfg = _make_config(
-            tmp_path,
-            users={
-                "alice": UserConfig(
-                    display_name="Alice",
-                    resources=[
-                        ResourceConfig(
-                            type="folder", path="/Other", name="Other (TOML)",
-                        ),
-                        ResourceConfig(
-                            type="folder", path="/Notes",
-                            name="Notes", extra={"meta_key": "meta-val"},
-                        ),
-                    ],
-                ),
-            },
-        )
-        cfg.db_path = self._db_path
-        _patch_app(cfg)
-        cookies = await self._login(client)
-        resp = await client.get("/istota/api/settings/resources", cookies=cookies)
-        assert resp.status_code == 200
-        rows = resp.json()["resources"]
-        notes = [r for r in rows if r["path"] == "/Notes"]
-        assert len(notes) == 1
-        assert notes[0]["managed"] == "db"
-        # The unrelated TOML folder entry still renders as config.
-        others = [r for r in rows if r["path"] == "/Other"]
-        assert others[0]["managed"] == "config"
-
-    async def test_stale_db_merged_resource_not_shown_as_config(self, tmp_path, client, app):
-        # Bug: _apply_user_resources merges DB rows into UserConfig.resources
-        # at startup. When the user later deletes that row via the web UI,
-        # the in-memory copy stays. On the next listing, it doesn't match
-        # the current DB query, so the dedup falls through and labels the
-        # stale entry "config" — making it look like an Ansible-managed
-        # config.toml row that the UI can't remove. The fix: tag merged-DB
-        # ResourceConfigs and skip them in the listing.
-        from istota.config import ResourceConfig
-        # Build a config that simulates the post-startup, post-delete state:
-        # a DB-merged ResourceConfig (from_db=True) that's no longer in DB.
-        merged_from_db = ResourceConfig(
-            type="folder", path="/Moneyman", name="Moneyman",
-        )
-        merged_from_db.from_db = True
-        cfg = _make_config(
-            tmp_path,
-            users={
-                "alice": UserConfig(
-                    display_name="Alice",
-                    resources=[
-                        ResourceConfig(
-                            type="folder", path="/RealToml", name="Real TOML",
-                        ),
-                        merged_from_db,
-                    ],
-                ),
-            },
-        )
-        cfg.db_path = self._db_path
-        _patch_app(cfg)
-        cookies = await self._login(client)
-        resp = await client.get("/istota/api/settings/resources", cookies=cookies)
-        assert resp.status_code == 200
-        rows = resp.json()["resources"]
-        moneyman = [r for r in rows if r["path"] == "/Moneyman"]
-        assert moneyman == [], (
-            "Stale DB-merged entry must not surface as managed=config"
-        )
-        # The genuine TOML row still shows.
-        assert any(r["path"] == "/RealToml" and r["managed"] == "config" for r in rows)
+    async def test_delete_is_unhandled(self, client, app):
+        resp = await client.delete("/istota/api/settings/resources/1")
+        assert resp.status_code in (404, 405)
 
 
 @_needs_web_deps

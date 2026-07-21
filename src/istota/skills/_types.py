@@ -13,8 +13,7 @@ class EnvSpec:
     """
 
     var: str
-    source: str  # "config" | "resource" | "resource_json" | "user_resource_config"
-                 # | "template_file" | "user_id" | "secret" | "setup_env"
+    source: str  # "config" | "template_file" | "user_id" | "secret" | "setup_env"
     # For source="config"
     config_path: str = ""
     # Guard: dotted config path(s) that must all be truthy. Accepts a
@@ -22,13 +21,6 @@ class EnvSpec:
     # (["developer.enabled", "developer.gitlab_token"]) — all paths in
     # the list must be truthy for the spec to resolve.
     when: "str | list[str]" = ""
-    # For source="resource" / "resource_json" / "user_resource_config".
-    # ``resource_types`` matches any of the listed types; ``resource_type`` is
-    # the singular shortcut still supported for skills with a single type.
-    resource_type: str = ""
-    resource_types: list[str] = field(default_factory=list)
-    # For source="user_resource_config"
-    field: str = ""
     # For source="template_file"
     template: str = ""
     user_path_fn: str = ""
@@ -45,9 +37,6 @@ class EnvSpec:
     # passes ``fallbacks_disabled=True`` so an instance-wide
     # EnvironmentFile value cannot fan out to per-user auto-authorization.
     fallback_var: str = ""
-    # If set, the spec resolves only when the user owns at least one
-    # resource of this resource_type.
-    gate_user_has_resource: str = ""
     # If true, the spec resolves only when CalDAV discovery returned at
     # least one calendar for this user (preserves the existing per-user
     # privacy gate on CALDAV credentials).
@@ -79,7 +68,6 @@ class SkillMeta:
     requires_capability: list[str] = field(default_factory=list)
     exclude_memory: bool = False
     exclude_persona: bool = False
-    exclude_resources: list[str] = field(default_factory=list)
     cli: bool = False  # skill has a CLI (istota-skill <name>)
     # Experimental skill — operator must opt in via the matching
     # ``skill_<name>`` entry in ``[experimental] features``. Filtered out of
