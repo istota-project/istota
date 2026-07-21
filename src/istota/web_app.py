@@ -3838,7 +3838,6 @@ def _briefing_to_dict(b, *, managed: str) -> dict:
         "cron": getattr(b, "cron", "") or "",
         "conversation_token": getattr(b, "conversation_token", "") or "",
         "output": getattr(b, "output", "talk") or "talk",
-        "components": dict(getattr(b, "components", {}) or {}),
         "enabled": bool(getattr(b, "enabled", True)),
     }
     if managed == "db":
@@ -3929,14 +3928,6 @@ def _validate_briefing_payload(payload: dict, *, name_required: bool) -> dict:
             detail=f"conversation_token is required when output is {output!r}",
         )
 
-    raw_components = payload.get("components")
-    if raw_components is None:
-        components = {}
-    elif isinstance(raw_components, dict):
-        components = dict(raw_components)
-    else:
-        raise HTTPException(status_code=400, detail="components must be a JSON object")
-
     enabled = payload.get("enabled", True)
     if not isinstance(enabled, bool):
         raise HTTPException(status_code=400, detail="enabled must be a boolean")
@@ -3946,7 +3937,6 @@ def _validate_briefing_payload(payload: dict, *, name_required: bool) -> dict:
         "cron": cron,
         "conversation_token": token,
         "output": output,
-        "components": components,
         "enabled": enabled,
     }
 
@@ -3959,7 +3949,7 @@ async def settings_add_briefing(
 ) -> dict:
     """Upsert a briefing for the current user.
 
-    Body: ``{"name", "cron", "conversation_token"?, "output"?, "components"?, "enabled"?}``.
+    Body: ``{"name", "cron", "conversation_token"?, "output"?, "enabled"?}``.
     Idempotent — a second POST with the same ``name`` updates in place.
     """
     from fastapi import HTTPException

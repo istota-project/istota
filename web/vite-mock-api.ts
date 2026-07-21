@@ -1458,7 +1458,6 @@ const handlers: MockHandler[] = [
 			cron: string;
 			conversation_token: string;
 			output: string;
-			components: Record<string, unknown>;
 			enabled: boolean;
 		}[] = [];
 		const tomlBriefings = [
@@ -1467,7 +1466,6 @@ const handlers: MockHandler[] = [
 				cron: '0 7 * * 1-5',
 				conversation_token: 'abc123',
 				output: 'talk' as const,
-				components: { calendar: true, todos: true, email: true },
 				enabled: true,
 			},
 		];
@@ -1496,8 +1494,6 @@ const handlers: MockHandler[] = [
 					cron: String(p.cron ?? ''),
 					conversation_token: String(p.conversation_token ?? ''),
 					output: (p.output as string) ?? 'talk',
-					components:
-						(p.components as Record<string, unknown> | undefined) ?? {},
 					enabled: p.enabled !== false,
 				};
 				if (existing >= 0) mockDbBriefings[existing] = row;
