@@ -364,10 +364,10 @@ def convert(settings: dict) -> dict:
         if isinstance(roles, dict) and roles:
             result["istota_models_roles"] = roles
 
-    # Briefing defaults (pass through as-is, it's a nested dict)
-    briefing_defaults = settings.get("briefing_defaults", {})
-    if briefing_defaults:
-        result["istota_briefing_defaults"] = briefing_defaults
+    # Shared default briefings (pass through as-is, it's a list of dicts)
+    default_briefings = settings.get("default_briefings", [])
+    if default_briefings:
+        result["istota_default_briefings"] = default_briefings
 
     # Users section — pass through as-is (Ansible expects istota_users dict)
     users = settings.get("users", {})

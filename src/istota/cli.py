@@ -453,45 +453,6 @@ def cmd_resource(args):
         print(f"STATE: {state}")
 
 
-def _parse_components_arg(args) -> "dict[str, object] | None":
-    """Build the components dict from --components-json or --component flags.
-
-    Returns ``None`` when neither is set (caller decides default).
-    ``--components-json`` takes precedence; ``--component k=v`` pairs are
-    merged on top so an operator can override a single key.
-    """
-    components_json = getattr(args, "components_json", None)
-    component_kv = getattr(args, "component", None) or []
-
-    result: dict[str, object] | None = None
-
-    if components_json:
-        try:
-            decoded = json.loads(components_json)
-        except json.JSONDecodeError as e:
-            print(f"Error: --components-json is not valid JSON: {e}", file=sys.stderr)
-            sys.exit(1)
-        if not isinstance(decoded, dict):
-            print("Error: --components-json must decode to a JSON object", file=sys.stderr)
-            sys.exit(1)
-        result = dict(decoded)
-
-    for pair in component_kv:
-        if "=" not in pair:
-            print(f"Error: --component pair must be key=value, got {pair!r}", file=sys.stderr)
-            sys.exit(1)
-        key, _, value = pair.partition("=")
-        key = key.strip()
-        if not key:
-            print(f"Error: --component key cannot be empty in {pair!r}", file=sys.stderr)
-            sys.exit(1)
-        if result is None:
-            result = {}
-        result[key] = _coerce_extras_value(value)
-
-    return result
-
-
 def run_briefing_schedule(
     config,
     action,
@@ -501,7 +462,6 @@ def run_briefing_schedule(
     cron=None,
     conversation_token=None,
     output="talk",
-    components=None,
     disabled=False,
 ):
     """Core of ``istota briefings schedule`` (framework ``briefing_configs``).
@@ -522,15 +482,6 @@ def run_briefing_schedule(
             found = True
             for b in user_config.briefings:
                 print(f"{user_id:15} {b.name:10} {b.cron:15} -> {b.conversation_token}")
-                if b.components:
-                    enabled = []
-                    for k, v in b.components.items():
-                        if isinstance(v, bool) and v:
-                            enabled.append(k)
-                        elif isinstance(v, dict) and v.get("enabled"):
-                            enabled.append(k)
-                    if enabled:
-                        print(f"{'':15} components: {', '.join(enabled)}")
         db_rows = _ub.list_briefings(config.db_path)
         disabled_rows = [r for r in db_rows if not r.enabled]
         if user:
@@ -566,7 +517,6 @@ def run_briefing_schedule(
                 cron=cron,
                 conversation_token=conversation_token or "",
                 output=output,
-                components=components or {},
                 enabled=not disabled,
             )
         except ValueError as e:
@@ -608,7 +558,6 @@ def cmd_briefing(args):
         cron=args.cron,
         conversation_token=args.conversation_token,
         output=args.output or "talk",
-        components=_parse_components_arg(args),
         disabled=args.disabled,
     )
 
@@ -1500,15 +1449,6 @@ def main():
         "--output", default="talk",
         help="Delivery target: talk / email / ntfy, or a comma list / "
              "surface:channel descriptor (validated by parse_output_target)",
-    )
-    briefing_parser.add_argument(
-        "--components-json",
-        help='JSON object of components, e.g. \'{"calendar": true, "email": true}\'',
-    )
-    briefing_parser.add_argument(
-        "--component",
-        action="append",
-        help="Repeatable: simple component flag, e.g. --component calendar=true",
     )
     briefing_parser.add_argument(
         "--disabled",

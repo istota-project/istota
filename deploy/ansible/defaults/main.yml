@@ -436,34 +436,21 @@ istota_experimental_features: []
 #         path: "/shared/Projects"
 #         name: "Projects"
 #         permissions: "write"
+#     # Opt this user out of the shared [[default_briefings]] set (default on).
+#     default_briefings: false
 #     briefings:
-#       - name: "morning"
-#         cron: "0 6 * * *"
-#         conversation_token: "room123"
-#         output: "talk,email"   # talk / email / ntfy, or a comma list
-#         components:
-#           calendar: true
-#           todos: true
-#           markets:
-#             enabled: true
-#           news:
-#             enabled: true
-#           headlines:
-#             enabled: true
-#           reminders:
-#             enabled: true
-#       # Rich config-authored blocks (alternative to `components:`). When a
-#       # briefing declares `blocks:`, they are seeded ONCE into the user's
-#       # module DB as an editable baseline (blocks win over components for
-#       # seeding; the user then edits them in the web editor and operator
-#       # re-runs never re-clobber). Schedule/delivery still come from
-#       # name/cron/output above via the CLI/DB path. Source `kind` is one of
+#       # Content is blocks-only (legacy `components:` authoring is retired).
+#       # A briefing declaring `blocks:` seeds them ONCE into the user's module
+#       # DB as an editable baseline; the user then edits them in the web editor
+#       # and operator re-runs never re-clobber. Schedule/delivery come from
+#       # name/cron/output via the CLI/DB path. Source `kind` is one of
 #       # rss / email / browse / markets / calendar / todos / reminders / notes;
 #       # `render_mode` is synthesis | structured (omit to infer). Loop over
 #       # `istota_users` in the playbook to apply one definition to many users.
 #       - name: "world"
 #         cron: "0 7 * * *"
-#         output: "email"
+#         conversation_token: "room123"
+#         output: "talk,email"   # talk / email / ntfy, or a comma list
 #         blocks:
 #           - title: "World News"
 #             directive: "3-5 stories, neutral tone, no markets."
@@ -507,33 +494,30 @@ istota_users: {}
 #     - { service: feeds,    key: tumblr_api_key, value: "{{ vault_alice_tumblr_api_key }}" }
 istota_user_secrets: {}
 
-# Briefing defaults (expanded when user sets `markets = true` or `news = true`)
-# markets futures/indices symbols default from markets.py — only override if needed
-istota_briefing_defaults:
-  news:
-    lookback_hours: 12
-    sources:
-      - type: "domain"
-        value: "semafor.com"
-      - type: "domain"
-        value: "bloomberg.com"
-      - type: "domain"
-        value: "reuters.com"
-      - type: "domain"
-        value: "axios.com"
-      - type: "domain"
-        value: "nytimes.com"
-      - type: "domain"
-        value: "economist.com"
-  headlines:
-    sources:
-      - "ap"
-      - "reuters"
-      - "guardian"
-      - "ft"
-      - "aljazeera"
-      - "lemonde"
-      - "spiegel"
+# Canonical shared briefing set, seeded once into each opted-in user
+# (per-user `default_briefings: true`, the default). Rendered into the
+# top-level [[default_briefings]] config section. Each entry has the same
+# name/cron/output/blocks shape as a per-user briefing; content is blocks-only.
+# Seed-once: a user's later web edits win and re-runs never clobber them.
+# Default empty — set this to hand every user a sensible starting briefing.
+# Example:
+# istota_default_briefings:
+#   - name: "Daily"
+#     cron: "0 7 * * *"
+#     output: "talk"
+#     blocks:
+#       - title: "World News"
+#         directive: "3-5 stories, neutral tone."
+#         render_mode: "synthesis"
+#         sources:
+#           - kind: "browse"
+#             config: { preset: "ap" }
+#       - title: "Markets"
+#         render_mode: "structured"
+#         sources:
+#           - kind: "markets"
+#             config: {}
+istota_default_briefings: []
 
 # rclone remote name for Nextcloud
 istota_rclone_remote: "nextcloud"

@@ -18,8 +18,6 @@ class _FakeArgs:
             "cron": None,
             "conversation_token": None,
             "output": "talk",
-            "components_json": None,
-            "component": None,
             "disabled": False,
         }
         defaults.update(kwargs)
@@ -50,7 +48,6 @@ class TestBriefingEnsureCreate:
             action="ensure", config=str(cfg), user="alice",
             name="morning", cron="0 7 * * 1-5",
             conversation_token="tok123",
-            components_json='{"calendar": true, "email": true}',
         )
         cmd_briefing(args)
         out = capsys.readouterr().out
@@ -58,20 +55,6 @@ class TestBriefingEnsureCreate:
         rows = user_briefings.list_briefings(db_path, "alice")
         assert len(rows) == 1
         assert rows[0].name == "morning"
-        assert rows[0].components == {"calendar": True, "email": True}
-
-    def test_component_kv_pairs_parse(self, cfg_with_db, capsys):
-        from istota.cli import cmd_briefing
-
-        cfg, db_path = cfg_with_db
-        args = _FakeArgs(
-            action="ensure", config=str(cfg), user="alice",
-            name="m", cron="0 7 * * *", conversation_token="t",
-            component=["calendar=true", "todos=true"],
-        )
-        cmd_briefing(args)
-        rows = user_briefings.list_briefings(db_path, "alice")
-        assert rows[0].components == {"calendar": True, "todos": True}
 
     def test_talk_output_requires_conversation_token(self, cfg_with_db, capsys):
         from istota.cli import cmd_briefing
@@ -144,7 +127,6 @@ class TestBriefingEnsureIdempotency:
         kwargs = dict(
             action="ensure", config=str(cfg), user="alice",
             name="m", cron="0 7 * * *", conversation_token="t",
-            components_json='{"calendar": true}',
         )
         cmd_briefing(_FakeArgs(**kwargs))
         capsys.readouterr()
