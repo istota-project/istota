@@ -115,8 +115,9 @@ def assemble_briefing_input(
 
     ``conn`` is a *framework* DB connection threaded to the source resolvers
     (email ownership, Feeds gating). Returns ``None`` when the briefing has no
-    blocks — the caller then falls back to the legacy ``build_briefing_prompt``.
-    Never raises on a single source failure (resolvers are fail-soft).
+    blocks — the caller treats that as a task failure (blocks are the sole
+    content model). Never raises on a single source failure (resolvers are
+    fail-soft).
     """
     with briefings_db.connect(ctx.db_path) as bconn:
         blocks = briefings_db.list_blocks(bconn, briefing_name)

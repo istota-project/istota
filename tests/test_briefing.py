@@ -2,22 +2,29 @@
 
 from unittest.mock import patch, MagicMock
 
+import istota.skills.briefing as briefing_mod
 from istota.skills.briefing import (
     _strip_html,
     _parse_reminders,
     _fetch_market_data,
     _fetch_finviz_market_data,
     _fetch_random_reminder,
-    _fetch_todo_items,
     _fetch_calendar_events,
     _fetch_headlines,
     _briefing_digest_key,
     load_previous_briefing_digest,
     save_briefing_digest,
-    build_briefing_prompt,
     HEADLINE_SOURCES,
 )
 from istota.config import Config, BriefingConfig, BrowserConfig, NextcloudConfig, ResourceConfig, UserConfig
+
+
+def test_legacy_generator_removed():
+    """The legacy component-based generator is gone — blocks are the sole path."""
+    assert not hasattr(briefing_mod, "build_briefing_prompt")
+    assert not hasattr(briefing_mod, "_component_enabled")
+    assert not hasattr(briefing_mod, "_fetch_todo_items")
+    assert not hasattr(briefing_mod, "_fetch_newsletter_content")
 
 
 class TestStripHtml:
@@ -121,129 +128,6 @@ class TestParseReminders:
         assert len(result) >= 3
         # The standalone thought should have the attribution merged
         assert any("Someone Famous" in r for r in result)
-
-
-class TestBuildBriefingPrompt:
-    def _make_briefing(self, **kwargs):
-        defaults = dict(
-            name="morning",
-            cron="0 6 * * *",
-            conversation_token="room1",
-            components={"calendar": True, "todos": True},
-        )
-        defaults.update(kwargs)
-        return BriefingConfig(**defaults)
-
-    def _make_config(self, tmp_path=None, users=None):
-        cfg = Config()
-        if users:
-            cfg.users = users
-        return cfg
-
-    def test_basic_prompt_structure(self):
-        briefing = self._make_briefing()
-        config = self._make_config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        assert "testuser" in result
-        assert "briefing" in result.lower()
-        assert "TODO" in result
-
-    @patch("istota.skills.briefing.datetime")
-    def test_morning_mode(self, mock_dt):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Set to 8 AM UTC
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        briefing = self._make_briefing()
-        config = self._make_config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        assert "morning" in result.lower()
-        # Calendar skipped when no CalDAV configured (no unscoped fallback)
-
-    @patch("istota.skills.briefing.datetime")
-    def test_evening_mode(self, mock_dt):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Set to 8 PM UTC
-        mock_now = datetime(2025, 1, 15, 20, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        briefing = self._make_briefing()
-        config = self._make_config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        assert "evening" in result.lower()
-        # Calendar skipped when no CalDAV configured (no unscoped fallback)
-
-    @patch("istota.skills.briefing._fetch_calendar_events")
-    def test_calendar_component(self, mock_cal):
-        mock_cal.return_value = "## Today's Calendar (pre-fetched)\n- 09:00 Standup"
-        briefing = self._make_briefing(components={"calendar": True})
-        config = self._make_config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        assert "calendar" in result.lower()
-        assert "Standup" in result
-
-    def test_todos_component(self):
-        briefing = self._make_briefing(components={"todos": True})
-        config = self._make_config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        assert "TODO" in result
-
-    @patch("istota.skills.briefing._fetch_todo_items")
-    def test_todos_prefetched_when_available(self, mock_fetch):
-        mock_fetch.return_value = "## Pending TODO Items (pre-fetched)\n- [ ] Buy groceries"
-        briefing = self._make_briefing(components={"todos": True})
-        config = self._make_config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        assert "Buy groceries" in result
-        assert "Pending TODO Items" in result
-
-    def test_no_preamble_instruction(self):
-        briefing = self._make_briefing()
-        config = self._make_config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        assert "preamble" in result.lower()
-
-    @patch("istota.skills.briefing._fetch_market_data")
-    @patch("istota.skills.briefing.datetime")
-    def test_markets_component(self, mock_dt, mock_fetch):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Wednesday (weekday) so markets are fetched
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_fetch.return_value = "## Market Data\nES=F: 5000.00 (+0.5%)"
-        briefing = self._make_briefing(
-            components={"markets": {"enabled": True, "futures": ["ES=F"]}}
-        )
-        config = self._make_config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        assert "Market Data" in result
-        mock_fetch.assert_called_once()
-
-    @patch("istota.skills.briefing._fetch_random_reminder")
-    def test_reminders_component(self, mock_reminder):
-        mock_reminder.return_value = "Stay curious."
-        user_cfg = UserConfig(
-            display_name="Test",
-            resources=[ResourceConfig(type="reminders_file", path="/path/to/REMINDERS.md")],
-        )
-        briefing = self._make_briefing(
-            components={"reminders": {"enabled": True}}
-        )
-        config = self._make_config(users={"testuser": user_cfg})
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        assert "Stay curious." in result
-        assert "REMINDER" in result
 
 
 class TestFetchMarketData:
@@ -445,208 +329,6 @@ class TestFetchRandomReminder:
             assert result == "Fallback reminder"
 
 
-class TestWeekendMarketSkip:
-    """Test that market quotes are skipped on weekends."""
-
-    def _make_briefing(self, **kwargs):
-        defaults = dict(
-            name="morning",
-            cron="0 6 * * *",
-            conversation_token="room1",
-            components={
-                "markets": {"enabled": True, "futures": ["ES=F"]},
-                "calendar": True,
-            },
-        )
-        defaults.update(kwargs)
-        return BriefingConfig(**defaults)
-
-    @patch("istota.skills.briefing._fetch_market_data")
-    @patch("istota.skills.briefing.datetime")
-    def test_weekday_fetches_market_data(self, mock_dt, mock_fetch):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Wednesday
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-        mock_fetch.return_value = "## Market Data\nES=F: 5000"
-
-        briefing = self._make_briefing()
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        mock_fetch.assert_called_once()
-        assert "Market Data" in result
-
-    @patch("istota.skills.briefing._fetch_market_data")
-    @patch("istota.skills.briefing.datetime")
-    def test_saturday_skips_market_data(self, mock_dt, mock_fetch):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Saturday
-        mock_now = datetime(2025, 1, 18, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        briefing = self._make_briefing()
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        mock_fetch.assert_not_called()
-
-    @patch("istota.skills.briefing._fetch_market_data")
-    @patch("istota.skills.briefing.datetime")
-    def test_sunday_skips_market_data(self, mock_dt, mock_fetch):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Sunday
-        mock_now = datetime(2025, 1, 19, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        briefing = self._make_briefing()
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-        mock_fetch.assert_not_called()
-
-
-class TestNewsletterSectionSplit:
-    """Test that newsletter prompt instructs Claude to split stories between NEWS and MARKETS."""
-
-    @patch("istota.skills.briefing._fetch_newsletter_content")
-    @patch("istota.skills.briefing.datetime")
-    def test_newsletter_prompt_instructs_section_split(self, mock_dt, mock_news):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_news.return_value = "## Newsletter content\n\nSome news here"
-
-        briefing = BriefingConfig(
-            name="morning",
-            cron="0 6 * * *",
-            conversation_token="room1",
-            components={
-                "news": {
-                    "enabled": True,
-                    "lookback_hours": 12,
-                    "sources": [{"type": "domain", "value": "semafor.com"}],
-                },
-            },
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        assert "NEWS section" in result
-        assert "MARKETS section" in result
-        mock_news.assert_called_once()
-
-    @patch("istota.skills.briefing._fetch_newsletter_content")
-    @patch("istota.skills.briefing._fetch_market_data")
-    @patch("istota.skills.briefing.datetime")
-    def test_weekend_skips_quotes_but_fetches_newsletters(self, mock_dt, mock_market, mock_news):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Saturday
-        mock_now = datetime(2025, 1, 18, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_news.return_value = "## Newsletter content\n\nMarket and general news"
-
-        briefing = BriefingConfig(
-            name="morning",
-            cron="0 6 * * *",
-            conversation_token="room1",
-            components={
-                "markets": {"enabled": True, "futures": ["ES=F"]},
-                "news": {
-                    "enabled": True,
-                    "lookback_hours": 12,
-                    "sources": [{"type": "domain", "value": "semafor.com"}],
-                },
-            },
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        # Market quotes skipped on weekend
-        mock_market.assert_not_called()
-        # Newsletters still fetched
-        mock_news.assert_called_once()
-        assert "Newsletter content" in result
-
-
-class TestFetchTodoItems:
-    def _make_config(self, users=None):
-        cfg = Config()
-        if users:
-            cfg.users = users
-        return cfg
-
-    def test_no_user_config(self):
-        config = self._make_config()
-        assert _fetch_todo_items(config, "unknown") is None
-
-    def test_no_todo_resources(self):
-        user = UserConfig(display_name="Test", resources=[])
-        config = self._make_config(users={"testuser": user})
-        assert _fetch_todo_items(config, "testuser") is None
-
-    @patch("istota.skills.files.read_text")
-    def test_extracts_pending_items(self, mock_read):
-        from istota.config import ResourceConfig
-
-        mock_read.return_value = (
-            "# Tasks\n"
-            "- [ ] Buy groceries\n"
-            "- [x] Clean house\n"
-            "- [ ] Write report\n"
-            "- [~] In progress item\n"
-        )
-        user = UserConfig(
-            display_name="Test",
-            resources=[ResourceConfig(type="todo_file", path="/todo.md", permissions="read")],
-        )
-        config = self._make_config(users={"testuser": user})
-        result = _fetch_todo_items(config, "testuser")
-        assert result is not None
-        assert "Buy groceries" in result
-        assert "Write report" in result
-        assert "Clean house" not in result
-        assert "In progress" not in result
-
-    @patch("istota.skills.files.read_text")
-    def test_empty_todo_file(self, mock_read):
-        from istota.config import ResourceConfig
-
-        mock_read.return_value = "# Tasks\n"
-        user = UserConfig(
-            display_name="Test",
-            resources=[ResourceConfig(type="todo_file", path="/todo.md", permissions="read")],
-        )
-        config = self._make_config(users={"testuser": user})
-        assert _fetch_todo_items(config, "testuser") is None
-
-    @patch("istota.skills.files.read_text")
-    def test_read_failure_returns_none(self, mock_read):
-        from istota.config import ResourceConfig
-
-        mock_read.side_effect = Exception("mount unavailable")
-        user = UserConfig(
-            display_name="Test",
-            resources=[ResourceConfig(type="todo_file", path="/todo.md", permissions="read")],
-        )
-        config = self._make_config(users={"testuser": user})
-        assert _fetch_todo_items(config, "testuser") is None
-
-
 class TestFetchCalendarEvents:
     def _make_config(self, **kwargs):
         return Config(
@@ -742,59 +424,6 @@ class TestFetchCalendarEvents:
         assert _fetch_calendar_events(config, "testuser", True, "UTC") is None
 
 
-class TestCalendarPreFetchInPrompt:
-    """Test that calendar events are pre-fetched and embedded in the prompt."""
-
-    @patch("istota.skills.briefing._fetch_calendar_events")
-    @patch("istota.skills.briefing.datetime")
-    def test_calendar_prefetched_in_prompt(self, mock_dt, mock_cal):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_cal.return_value = "## Today's Calendar (pre-fetched)\n- 09:00 - 09:30: Standup [Personal]"
-
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-            components={"calendar": True},
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        assert "Standup" in result
-        assert "pre-fetched" in result
-        # Should NOT have the fallback instruction
-        assert "Today's calendar events" not in result
-
-    @patch("istota.skills.briefing._fetch_calendar_events")
-    @patch("istota.skills.briefing.datetime")
-    def test_calendar_skipped_when_prefetch_fails(self, mock_dt, mock_cal):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_cal.return_value = None  # No calendars for this user
-
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-            components={"calendar": True},
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        # Should NOT emit unscoped calendar instruction (ISSUE-015)
-        assert "Today's calendar events" not in result
-        assert "Tomorrow's calendar events" not in result
-
-
 class TestFetchFinvizMarketData:
     """Tests for _fetch_finviz_market_data."""
 
@@ -829,105 +458,6 @@ class TestFetchFinvizMarketData:
     def test_returns_none_on_exception(self, mock_fetch):
         result = _fetch_finviz_market_data()
         assert result is None
-
-
-class TestFinvizInBriefingPrompt:
-    """Test FinViz integration in build_briefing_prompt."""
-
-    @patch("istota.skills.briefing._fetch_finviz_market_data")
-    @patch("istota.skills.briefing._fetch_market_data")
-    @patch("istota.skills.briefing.datetime")
-    def test_evening_includes_finviz(self, mock_dt, mock_market, mock_finviz):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Wednesday evening
-        mock_now = datetime(2025, 1, 15, 18, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_market.return_value = "## Market Close\nS&P 500: 6994.25"
-        mock_finviz.return_value = "## FinViz Market Data\n**MOVERS**\n🟢 **SPOT** +14.36%"
-
-        briefing = BriefingConfig(
-            name="evening", cron="0 18 * * *",
-            conversation_token="room1",
-            components={"markets": {"enabled": True}},
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        assert "FinViz" in result
-        assert "MOVERS" in result
-        mock_finviz.assert_called_once()
-
-    @patch("istota.skills.briefing._fetch_finviz_market_data")
-    @patch("istota.skills.briefing._fetch_market_data")
-    @patch("istota.skills.briefing.datetime")
-    def test_morning_does_not_include_finviz(self, mock_dt, mock_market, mock_finviz):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Wednesday morning
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_market.return_value = "## Pre-market Futures\nES=F: 5000"
-
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-            components={"markets": {"enabled": True}},
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        mock_finviz.assert_not_called()
-
-    @patch("istota.skills.briefing._fetch_finviz_market_data")
-    @patch("istota.skills.briefing._fetch_market_data")
-    @patch("istota.skills.briefing.datetime")
-    def test_weekend_evening_skips_finviz(self, mock_dt, mock_market, mock_finviz):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Saturday evening
-        mock_now = datetime(2025, 1, 18, 18, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        briefing = BriefingConfig(
-            name="evening", cron="0 18 * * *",
-            conversation_token="room1",
-            components={"markets": {"enabled": True}},
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        mock_finviz.assert_not_called()
-
-    @patch("istota.skills.briefing._fetch_finviz_market_data")
-    @patch("istota.skills.briefing._fetch_market_data")
-    @patch("istota.skills.briefing.datetime")
-    def test_markets_disabled_skips_finviz(self, mock_dt, mock_market, mock_finviz):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Wednesday evening, but markets disabled
-        mock_now = datetime(2025, 1, 15, 18, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        briefing = BriefingConfig(
-            name="evening", cron="0 18 * * *",
-            conversation_token="room1",
-            components={"calendar": True},  # no markets
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        mock_finviz.assert_not_called()
 
 
 class TestBriefingDigest:
@@ -969,37 +499,6 @@ class TestBriefingDigest:
         result = load_previous_briefing_digest("alice", cfg, conversation_token="room1")
         assert "Second briefing" in result
         assert "First briefing" not in result
-
-    @patch("istota.skills.briefing.load_previous_briefing_digest")
-    def test_prompt_includes_previous_digest(self, mock_load):
-        mock_load.return_value = "Generated: 2025-01-15T06:00:00Z\n\n📰 NEWS\n- Old story"
-
-        briefing = BriefingConfig(
-            name="evening", cron="0 18 * * *",
-            conversation_token="room1",
-            components={"calendar": True},
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        assert "Previous briefing" in result
-        assert "Old story" in result
-        assert "Focus on new stories" in result
-
-    @patch("istota.skills.briefing.load_previous_briefing_digest")
-    def test_prompt_without_previous_digest(self, mock_load):
-        mock_load.return_value = None
-
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-            components={"calendar": True},
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        assert "Previous briefing" not in result
-
 
 class TestHeadlineSources:
     """Test the HEADLINE_SOURCES registry."""
@@ -1142,110 +641,6 @@ class TestFetchHeadlines:
         assert result is not None
         assert "Reuters" in result
         assert "AP" not in result
-
-
-class TestHeadlinesInBriefingPrompt:
-    """Test headlines integration in build_briefing_prompt."""
-
-    @patch("istota.skills.briefing._fetch_headlines")
-    @patch("istota.skills.briefing.datetime")
-    def test_headlines_included_in_prompt(self, mock_dt, mock_headlines):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_headlines.return_value = (
-            "## News Frontpages (pre-fetched)\n\n"
-            "### AP News\nBig story happening today."
-        )
-
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-            components={"headlines": {"enabled": True, "sources": ["ap"]}},
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        assert "Big story happening today" in result
-        assert "Group stories by theme" in result
-        mock_headlines.assert_called_once()
-
-    @patch("istota.skills.briefing._fetch_headlines")
-    @patch("istota.skills.briefing.datetime")
-    def test_headlines_disabled_not_fetched(self, mock_dt, mock_headlines):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-            components={"calendar": True},
-        )
-        config = Config()
-        build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        mock_headlines.assert_not_called()
-
-    @patch("istota.skills.briefing._fetch_headlines")
-    @patch("istota.skills.briefing.datetime")
-    def test_headlines_fetch_failure_graceful(self, mock_dt, mock_headlines):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_headlines.return_value = None
-
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-            components={"headlines": {"enabled": True, "sources": ["ap"]}},
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        # Should still produce a valid prompt without headlines
-        assert "briefing" in result.lower()
-        assert "Frontpages" not in result
-
-    @patch("istota.skills.briefing._fetch_headlines")
-    @patch("istota.skills.briefing._fetch_newsletter_content")
-    @patch("istota.skills.briefing.datetime")
-    def test_headlines_and_news_coexist(self, mock_dt, mock_news, mock_headlines):
-        """Headlines (web) and news (newsletters) can both be enabled."""
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        mock_now = datetime(2025, 1, 15, 8, 0, tzinfo=ZoneInfo("UTC"))
-        mock_dt.now.return_value = mock_now
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-
-        mock_headlines.return_value = "## News Frontpages (pre-fetched)\n\nAP headlines"
-        mock_news.return_value = "## Newsletter content\n\nNewsletter stories"
-
-        briefing = BriefingConfig(
-            name="morning", cron="0 6 * * *",
-            conversation_token="room1",
-            components={
-                "headlines": {"enabled": True, "sources": ["ap"]},
-                "news": {"enabled": True, "lookback_hours": 12, "sources": [{"type": "domain", "value": "semafor.com"}]},
-            },
-        )
-        config = Config()
-        result = build_briefing_prompt(briefing, "testuser", config, "UTC")
-
-        assert "AP headlines" in result
-        assert "Newsletter stories" in result
 
 
 class TestParseBriefingJson:
