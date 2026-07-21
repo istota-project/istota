@@ -101,6 +101,26 @@
 		max-width: 46rem;
 	}
 
+	/* Match the chat message body: same font size (configurable later) and
+	   line height so the reader reads at one scale with the rest of the app. */
+	.body {
+		font-size: var(--text-base);
+		line-height: 1.5;
+	}
+
+	/* Bullet/numbered lists sit flush with paragraphs — no browser default
+	   indent; the marker aligns with the left edge of the surrounding text. */
+	.body :global(ul),
+	.body :global(ol) {
+		margin: 0 0 1rem;
+		padding-left: 0;
+		list-style-position: inside;
+	}
+
+	.body :global(li) {
+		margin: 0.25rem 0;
+	}
+
 	.briefing-head h1 {
 		margin: 0 0 0.25rem;
 		font-size: 1.25rem;
