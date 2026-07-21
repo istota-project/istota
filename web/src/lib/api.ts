@@ -1809,4 +1809,66 @@ export async function getBriefingPathSuggestions(q = ''): Promise<{ paths: strin
 	return apiFetch(query ? `/briefings/path-suggest?q=${encodeURIComponent(query)}` : '/briefings/path-suggest');
 }
 
+// --- Shared briefing blocks (admin) + options (any user) ------------------
+
+export interface SharedBlockStatus {
+	last_run_at: string | null;
+	value_updated_at: string | null;
+	value_preview: string | null;
+	stored_trusted: boolean | null;
+	has_content: boolean;
+}
+
+export interface SharedBlock {
+	name: string;
+	cron: string;
+	title: string;
+	directive: string;
+	render_mode: string;
+	enabled: boolean;
+	trusted: boolean;
+	sources: { kind: string; config: Record<string, unknown> }[];
+	created_at: string | null;
+	updated_at: string | null;
+	status: SharedBlockStatus;
+}
+
+export interface SharedBlocksResponse {
+	shared_blocks: SharedBlock[];
+	allowed_source_kinds: string[];
+	render_modes: string[];
+}
+
+export interface SharedBlockOption {
+	name: string;
+	updated_at: string | null;
+	has_content: boolean;
+	source: 'config' | 'custom';
+}
+
+export async function getSharedBlocks(): Promise<SharedBlocksResponse> {
+	return apiFetch('/briefings/shared-blocks');
+}
+
+export async function putSharedBlock(payload: Record<string, unknown>): Promise<{ status: string; shared_block?: SharedBlock }> {
+	return apiFetch('/briefings/shared-blocks', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload),
+	});
+}
+
+export async function deleteSharedBlock(name: string, deleteValue = false): Promise<void> {
+	const qs = deleteValue ? '?delete_value=true' : '';
+	await apiFetch(`/briefings/shared-blocks/${encodeURIComponent(name)}${qs}`, { method: 'DELETE' });
+}
+
+export async function runSharedBlock(name: string): Promise<{ status: string; error: string | null; block_status: SharedBlockStatus }> {
+	return apiFetch(`/briefings/shared-blocks/${encodeURIComponent(name)}/run`, { method: 'POST' });
+}
+
+export async function getSharedBlockOptions(): Promise<{ options: SharedBlockOption[] }> {
+	return apiFetch('/briefings/shared-block-options');
+}
+
 export { AuthError };

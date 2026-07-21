@@ -1527,8 +1527,78 @@ const handlers: MockHandler[] = [
 			'todos',
 			'reminders',
 			'notes',
+			'kv',
+			'shared_block',
 		];
 		const STRUCTURED_KINDS = ['markets', 'calendar'];
+		const ALLOWED_SHARED_SOURCE_KINDS = ['browse', 'markets', 'email'];
+
+		// Admin shared-block definitions + a custom-published key with no def.
+		interface SharedBlockDef {
+			name: string;
+			cron: string;
+			title: string;
+			directive: string;
+			render_mode: string;
+			enabled: boolean;
+			trusted: boolean;
+			sources: { kind: string; config: Record<string, unknown> }[];
+			last_run_at: string | null;
+			value: { text: string; updated_at: string } | null;
+		}
+		const sharedBlocks: SharedBlockDef[] = [
+			{
+				name: 'world-headlines',
+				cron: '0 6 * * *',
+				title: '🌍 World headlines',
+				directive: 'Synthesize the frontpages into ~8 top world stories.',
+				render_mode: 'synthesis',
+				enabled: true,
+				trusted: false,
+				sources: [
+					{ kind: 'browse', config: { preset: 'ap' } },
+					{ kind: 'browse', config: { preset: 'reuters' } },
+				],
+				last_run_at: new Date(Date.now() - 3600_000).toISOString(),
+				value: { text: '🌍 World headlines\n• Story one\n• Story two', updated_at: new Date(Date.now() - 3600_000).toISOString() },
+			},
+			{
+				name: 'markets-summary',
+				cron: '30 6 * * *',
+				title: '📈 Markets',
+				directive: '',
+				render_mode: 'structured',
+				enabled: true,
+				trusted: true,
+				sources: [{ kind: 'markets', config: {} }],
+				last_run_at: new Date(Date.now() - 1800_000).toISOString(),
+				value: { text: '📈 S&P 500 +0.4%  Nasdaq +0.6%', updated_at: new Date(Date.now() - 1800_000).toISOString() },
+			},
+		];
+		// A custom-published key (from a publish_shared_kv job) with no definition.
+		const customPublishedKeys = [
+			{ name: 'film-business-digest', updated_at: new Date(Date.now() - 7200_000).toISOString() },
+		];
+		const sharedStatus = (b: SharedBlockDef) => ({
+			last_run_at: b.last_run_at,
+			value_updated_at: b.value?.updated_at ?? null,
+			value_preview: b.value?.text?.slice(0, 400) ?? null,
+			stored_trusted: b.value ? b.trusted : null,
+			has_content: b.value != null,
+		});
+		const mapSharedBlock = (b: SharedBlockDef) => ({
+			name: b.name,
+			cron: b.cron,
+			title: b.title,
+			directive: b.directive,
+			render_mode: b.render_mode,
+			enabled: b.enabled,
+			trusted: b.trusted,
+			sources: b.sources,
+			created_at: null,
+			updated_at: null,
+			status: sharedStatus(b),
+		});
 		const BROWSE_PRESETS = [
 			{ key: 'ap', name: 'AP News', url: 'https://apnews.com' },
 			{ key: 'reuters', name: 'Reuters', url: 'https://www.reuters.com' },
@@ -1786,6 +1856,66 @@ const handlers: MockHandler[] = [
 				if (!path) return { ok: false, error: 'Enter a file path.' };
 				if (MOCK_FILES.includes(path)) return { ok: true, resolved: `Users/dana/${path}` };
 				return { ok: false, error: 'No file found at that path.' };
+			}
+
+			// --- Shared blocks (admin) + options (any user) ---
+			if (p === '/shared-block-options' && method === 'GET') {
+				const opts: { name: string; updated_at: string | null; has_content: boolean; source: string }[] = [];
+				for (const b of sharedBlocks) {
+					opts.push({ name: b.name, updated_at: b.value?.updated_at ?? null, has_content: b.value != null, source: 'config' });
+				}
+				for (const c of customPublishedKeys) {
+					opts.push({ name: c.name, updated_at: c.updated_at, has_content: true, source: 'custom' });
+				}
+				opts.sort((a, z) => a.name.localeCompare(z.name));
+				return { options: opts };
+			}
+			if (p === '/shared-blocks' && method === 'GET') {
+				return {
+					shared_blocks: sharedBlocks.map(mapSharedBlock),
+					allowed_source_kinds: ALLOWED_SHARED_SOURCE_KINDS,
+					render_modes: ['synthesis', 'structured'],
+				};
+			}
+			if (p === '/shared-blocks' && method === 'PUT') {
+				const b = (body ?? {}) as Record<string, unknown>;
+				const name = String(b.name ?? '').trim();
+				if (!name) return { error: 'name required' };
+				const srcs = ((b.sources as { kind: string; config: Record<string, unknown> }[]) ?? []).map(
+					(s) => ({ kind: s.kind, config: s.config ?? {} }),
+				);
+				let existing = sharedBlocks.find((x) => x.name === name);
+				if (!existing) {
+					existing = {
+						name, cron: '', title: '', directive: '', render_mode: 'synthesis',
+						enabled: true, trusted: false, sources: [], last_run_at: null, value: null,
+					};
+					sharedBlocks.push(existing);
+				}
+				existing.cron = String(b.cron ?? '');
+				existing.title = String(b.title ?? '');
+				existing.directive = String(b.directive ?? '') || '';
+				existing.render_mode = String(b.render_mode ?? 'synthesis');
+				existing.enabled = b.enabled !== false;
+				existing.trusted = !!b.trusted;
+				existing.sources = srcs;
+				return { status: 'ok', shared_block: mapSharedBlock(existing) };
+			}
+			const sbRun = p.match(/^\/shared-blocks\/([^/]+)\/run$/);
+			if (sbRun && method === 'POST') {
+				const name = decodeURIComponent(sbRun[1]);
+				const b = sharedBlocks.find((x) => x.name === name);
+				if (!b) return { error: 'not found', __status: 404 };
+				b.last_run_at = new Date().toISOString();
+				b.value = { text: `${b.title}\n(freshly generated ${new Date().toLocaleTimeString()})`, updated_at: b.last_run_at };
+				return { status: 'ok', error: null, block_status: sharedStatus(b) };
+			}
+			const sbDel = p.match(/^\/shared-blocks\/([^/]+)$/);
+			if (sbDel && method === 'DELETE') {
+				const name = decodeURIComponent(sbDel[1]);
+				const idx = sharedBlocks.findIndex((x) => x.name === name);
+				if (idx >= 0) sharedBlocks.splice(idx, 1);
+				return { status: 'ok', deleted_value: false };
 			}
 			return undefined;
 		};

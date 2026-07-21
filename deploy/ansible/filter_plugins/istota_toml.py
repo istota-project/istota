@@ -121,9 +121,48 @@ def istota_default_briefings_toml(defaults) -> str:
     return "\n".join(out).rstrip() + ("\n" if out else "")
 
 
+def istota_briefing_shared_blocks_toml(shared_blocks) -> str:
+    """Render the top-level ``[[briefing_shared_blocks]]`` section from a list.
+
+    Each entry is a one-block shared briefing (name/cron/title/directive/
+    render_mode/enabled + nested ``[[briefing_shared_blocks.sources]]``),
+    generated once globally and written into ``shared_kv`` (shared-kv-curated-
+    content spec). Returns "" for an empty/invalid list so the template renders
+    nothing and ``load_config`` seeds ``DEFAULT_SHARED_BLOCKS`` instead.
+    """
+    if not isinstance(shared_blocks, (list, tuple)):
+        return ""
+    out: list[str] = []
+    for block in shared_blocks:
+        if not isinstance(block, dict) or not block.get("name") or not block.get("cron"):
+            continue
+        prefix = "briefing_shared_blocks"
+        out.append(f"[[{prefix}]]")
+        out.append(f"name = {_toml_value(block.get('name', ''))}")
+        out.append(f"cron = {_toml_value(block.get('cron', ''))}")
+        if block.get("title"):
+            out.append(f"title = {_toml_value(block['title'])}")
+        if block.get("directive"):
+            out.append(f"directive = {_toml_value(block['directive'])}")
+        if block.get("render_mode"):
+            out.append(f"render_mode = {_toml_value(block['render_mode'])}")
+        if "enabled" in block:
+            out.append(f"enabled = {_toml_value(bool(block['enabled']))}")
+        if "trusted" in block:
+            out.append(f"trusted = {_toml_value(bool(block['trusted']))}")
+        for src in block.get("sources") or []:
+            out.append("")
+            out.append(f"  [[{prefix}.sources]]")
+            out.append(f"  kind = {_toml_value(src.get('kind', ''))}")
+            out.append(f"  config = {_toml_value(src.get('config') or {})}")
+        out.append("")
+    return "\n".join(out).rstrip() + ("\n" if out else "")
+
+
 class FilterModule:
     def filters(self):
         return {
             "istota_briefing_blocks_toml": istota_briefing_blocks_toml,
             "istota_default_briefings_toml": istota_default_briefings_toml,
+            "istota_briefing_shared_blocks_toml": istota_briefing_shared_blocks_toml,
         }

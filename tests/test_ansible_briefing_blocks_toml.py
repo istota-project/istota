@@ -177,3 +177,82 @@ def test_config_example_blocks_round_trip():
     world_bc = [b for b in uc.briefings if b.name == "world"][0]
     specs = normalize_block_specs(world_bc.blocks, briefing_name="world")
     assert [s["title"] for s in specs] == ["World News", "Markets"]
+
+
+render_shared = _FILTER_MOD.istota_briefing_shared_blocks_toml
+
+
+class TestSharedBlocksToml:
+    _SHARED = [
+        {
+            "name": "world-headlines",
+            "cron": "0 6 * * *",
+            "title": "🌍 World headlines",
+            "directive": "Synthesize the frontpages.",
+            "render_mode": "synthesis",
+            "enabled": True,
+            "sources": [
+                {"kind": "browse", "config": {"preset": "ap"}},
+                {"kind": "browse", "config": {"preset": "reuters"}},
+            ],
+        },
+    ]
+
+    def test_empty_renders_nothing(self):
+        assert render_shared([]) == ""
+        assert render_shared(None) == ""
+
+    def test_skips_entry_missing_cron(self):
+        assert render_shared([{"name": "x"}]) == ""
+
+    def test_round_trips_into_config(self, tmp_path):
+        from istota.config import load_config
+
+        out = render_shared(self._SHARED)
+        p = tmp_path / "config.toml"
+        p.write_text(out)
+        cfg = load_config(p)
+        assert len(cfg.briefing_shared_blocks) == 1
+        b = cfg.briefing_shared_blocks[0]
+        assert b.name == "world-headlines"
+        assert b.cron == "0 6 * * *"
+        assert [s["kind"] for s in b.sources] == ["browse", "browse"]
+        assert b.sources[0]["config"] == {"preset": "ap"}
+
+    def test_trusted_renders_and_round_trips(self, tmp_path):
+        from istota.config import load_config
+
+        blocks = [{
+            "name": "markets-summary", "cron": "30 6 * * *", "title": "📈 Markets",
+            "render_mode": "structured", "enabled": True, "trusted": True,
+            "sources": [{"kind": "markets", "config": {}}],
+        }]
+        out = render_shared(blocks)
+        assert "trusted = true" in out
+        p = tmp_path / "config.toml"
+        p.write_text(out)
+        cfg = load_config(p)
+        assert cfg.briefing_shared_blocks[0].trusted is True
+
+
+def test_ansible_default_shared_blocks_match_code_defaults(tmp_path):
+    """The Ansible istota_briefing_shared_blocks default renders TOML that
+    round-trips to the same block names as the code DEFAULT_SHARED_BLOCKS."""
+    import yaml
+
+    from istota.config import DEFAULT_SHARED_BLOCKS, load_config
+
+    defaults_path = (
+        Path(__file__).resolve().parents[1]
+        / "deploy" / "ansible" / "defaults" / "main.yml"
+    )
+    data = yaml.safe_load(defaults_path.read_text())
+    ansible_blocks = data["istota_briefing_shared_blocks"]
+
+    out = render_shared(ansible_blocks)
+    p = tmp_path / "config.toml"
+    p.write_text(out)
+    cfg = load_config(p)
+    assert {b.name for b in cfg.briefing_shared_blocks} == {
+        b["name"] for b in DEFAULT_SHARED_BLOCKS
+    }

@@ -181,6 +181,11 @@ class CronJob:
     once: bool = False
     model: str = ""  # Per-job Claude model override; empty = use config default
     effort: str = ""  # Per-job effort override (low/medium/high/xhigh/max); empty = use config default
+    # admin-shared-briefing-blocks: publish this job's result text into shared_kv
+    # on success. "<ns>/<key>" or bare "<key>" (→ briefing_shared_blocks). Empty =
+    # no publish. Gated on is_shared_kv_writer at write time (admin-only).
+    publish_shared_kv: str = ""
+    publish_shared_kv_trusted: bool = False
 
 
 def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
@@ -272,6 +277,8 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
             once=j.get("once", False),
             model=model,
             effort=effort,
+            publish_shared_kv=str(j.get("publish_shared_kv", "")).strip(),
+            publish_shared_kv_trusted=bool(j.get("publish_shared_kv_trusted", False)),
         ))
 
     return jobs
@@ -316,6 +323,10 @@ def generate_cron_md(jobs: list[CronJob]) -> str:
             lines.append(f'model = "{job.model}"')
         if job.effort:
             lines.append(f'effort = "{job.effort}"')
+        if job.publish_shared_kv:
+            lines.append(_toml_string("publish_shared_kv", job.publish_shared_kv))
+        if job.publish_shared_kv_trusted:
+            lines.append("publish_shared_kv_trusted = true")
 
     lines.append("```")
     lines.append("")
@@ -376,6 +387,8 @@ def sync_cron_jobs_to_db(
                 "once": 1 if fj.once else 0,
                 "model": fj.model or None,
                 "effort": fj.effort or None,
+                "publish_shared_kv": fj.publish_shared_kv or None,
+                "publish_shared_kv_trusted": 1 if fj.publish_shared_kv_trusted else 0,
             }
             # File is authoritative for enabled state (symmetric sync)
             updates["enabled"] = 1 if fj.enabled else 0
@@ -423,8 +436,9 @@ def sync_cron_jobs_to_db(
                    (user_id, name, cron_expression, prompt, command,
                     skill, skill_args,
                     conversation_token, output_target, enabled, silent_unless_action,
-                    skip_log_channel, once, model, effort)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    skip_log_channel, once, model, effort,
+                    publish_shared_kv, publish_shared_kv_trusted)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id, fj.name, fj.cron, fj.prompt,
                     cmd_val,
@@ -436,6 +450,8 @@ def sync_cron_jobs_to_db(
                     1 if fj.once else 0,
                     fj.model or None,
                     fj.effort or None,
+                    fj.publish_shared_kv or None,
+                    1 if fj.publish_shared_kv_trusted else 0,
                 ),
             )
 
@@ -503,6 +519,8 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
             once=j.once,
             model=j.model or "",
             effort=j.effort or "",
+            publish_shared_kv=j.publish_shared_kv or "",
+            publish_shared_kv_trusted=bool(j.publish_shared_kv_trusted),
         ))
 
     cron_path.parent.mkdir(parents=True, exist_ok=True)

@@ -331,6 +331,16 @@ location_ping_retention_days = {{ istota_scheduler_location_ping_retention_days 
 {{ _default_briefings_toml }}
 {% endif %}
 
+{# Module-owned shared briefing blocks (shared-kv-curated-content). Rendered as
+   the top-level [[briefing_shared_blocks]] section; generated once globally by
+   the scheduler and written into shared_kv. An empty/undefined var renders
+   nothing, so load_config seeds the batteries-included DEFAULT_SHARED_BLOCKS. #}
+{% set _shared_blocks_toml = istota_briefing_shared_blocks | default([]) | istota_briefing_shared_blocks_toml %}
+{% if _shared_blocks_toml %}
+
+{{ _shared_blocks_toml }}
+{% endif %}
+
 {% if istota_browser_enabled %}
 
 [browser]

@@ -30,11 +30,26 @@ SOURCE_KINDS = (
     "todos",
     "reminders",
     "notes",
+    # Curated shared content read from the shared_kv store. `kv` is the generic
+    # read (any namespace/key); `shared_block` is sugar for a module-owned shared
+    # block (namespace "briefing_shared_blocks", key = block name). Either can be
+    # synthesis or structured — the block's render_mode decides, so neither is in
+    # STRUCTURED_KINDS.
+    "kv",
+    "shared_block",
 )
 
 # Blocks whose gathered content is deterministically pre-formatted and passed to
 # the model for near-verbatim inclusion (markets/calendar), vs. synthesized.
 RENDER_MODES = ("synthesis", "structured")
+
+# Source kinds an admin-editable *shared* block may use — genuinely user-agnostic
+# only (a shared block is generated once globally under the __system__ identity,
+# so a per-user kind like ``rss`` would leak one person's subscriptions to
+# everyone). The admin CRUD route + CLI validate against this; generation defends
+# again via ``shared_blocks._allowed_sources``. Canonical set lives here so the
+# web/route/CLI layers import it without pulling the generation module.
+ALLOWED_SHARED_SOURCE_KINDS = frozenset({"browse", "markets", "email"})
 
 # Source kinds whose content is structured (pre-rendered verbatim) rather than
 # free-text synthesized. Used to pick a block's default render_mode.

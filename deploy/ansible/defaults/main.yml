@@ -518,6 +518,16 @@ istota_default_briefings:
     cron: "0 6 * * 1-5"
     output: "email"
     blocks:
+      # World headlines are read from the module-owned `world-headlines` shared
+      # block (generated once at 06:00 UTC via browse presets — see
+      # istota_briefing_shared_blocks), not fetched per user. Omitted until the
+      # shared block's first generation (harmless); requires the headless
+      # browser (soft-degrades to an omitted section when it's off).
+      - title: "🌍 World headlines"
+        render_mode: "structured"
+        sources:
+          - kind: "shared_block"
+            config: { name: "world-headlines", max_age_hours: 12 }
       - title: "News"
         render_mode: "synthesis"
         sources:
@@ -552,6 +562,40 @@ istota_default_briefings:
         sources:
           - kind: "calendar"
             config: {}
+
+# Module-owned shared briefing blocks (shared-kv-curated-content). Generated
+# ONCE globally by the scheduler (no user, UTC cron) and written into the
+# shared_kv store; per-user briefings read them via a `shared_block` source, so
+# the N-way frontpage fetch + synthesis collapses to one generation total.
+# Mirrors the batteries-included DEFAULT_SHARED_BLOCKS in config.py — set to []
+# to disable, or override per deployment. Allowed source kinds are user-agnostic
+# only: browse / markets / email (the shared/unowned pool). `world-headlines`
+# needs the headless browser (soft-degrades when off); `markets-summary` needs
+# only yfinance.
+istota_briefing_shared_blocks:
+  - name: "world-headlines"
+    cron: "0 6 * * *"
+    title: "🌍 World headlines"
+    directive: "Synthesize the frontpages into ~8 top world stories, lead with what's new. Neutral wire-service tone."
+    render_mode: "synthesis"
+    enabled: true
+    sources:
+      - kind: "browse"
+        config: { preset: "ap" }
+      - kind: "browse"
+        config: { preset: "reuters" }
+  - name: "markets-summary"
+    cron: "30 6 * * *"
+    title: "📈 Markets"
+    # Structured/verbatim: the markets source already emits a formatted quote
+    # table — stored as-is with zero LLM passes (no directive). Trusted (pure
+    # numbers, no injection surface) so it renders un-wrapped.
+    render_mode: "structured"
+    enabled: true
+    trusted: true
+    sources:
+      - kind: "markets"
+        config: {}
 
 # rclone remote name for Nextcloud
 istota_rclone_remote: "nextcloud"

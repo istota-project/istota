@@ -15,20 +15,29 @@
 		getFeedOptions,
 		checkBriefingPath,
 		getBriefingPathSuggestions,
+		getSharedBlockOptions,
+		getSharedBlocks,
+		putSharedBlock,
+		deleteSharedBlock,
+		runSharedBlock,
 		type UserBriefingRow,
 		type BriefingBlock,
 		type BriefingSource,
 		type BriefingConfigResponse,
 		type BrowsePreset,
 		type FeedOptions,
+		type SharedBlockOption,
+		type SharedBlock,
 	} from '$lib/api';
 	import { Button, Modal, Select, AutocompleteInput, type SelectOption } from '$lib/components/ui';
 	import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+	import SourceConfigFields from '$lib/components/briefings/SourceConfigFields.svelte';
 	import { briefingsRefreshNonce } from '$lib/stores/briefings';
 
 	let loading = $state(true);
 	let error = $state('');
 	let moduleEnabled = $state(true);
+	let isAdmin = $state(false);
 
 	// --- Schedule & delivery ---
 	let briefings: UserBriefingRow[] = $state([]);
@@ -51,6 +60,8 @@
 	let config = $state<BriefingConfigResponse | null>(null);
 	let presets = $state<BrowsePreset[]>([]);
 	let feedOptions = $state<FeedOptions | null>(null);
+	// Live pickable shared blocks (built-in + custom-published) for the Shared source.
+	let sharedBlockOptions = $state<SharedBlockOption[]>([]);
 	let selectedName = $state<string>('');
 	let newBlockTitle = $state('');
 	let expandedId = $state<number | null>(null);
@@ -61,7 +72,6 @@
 	let sourceDraft = $state<{ id: number; kind: string; config: Record<string, unknown> } | null>(
 		null,
 	);
-	let newSender = $state('');
 
 	// File-path picker state for todos/reminders/notes sources. Suggestions are
 	// fetched server-side as the user types (so deep/late files surface), and
@@ -83,6 +93,179 @@
 		label: string;
 	} | null>(null);
 
+	// --- Admin: shared blocks (generated once globally, read by any user) ---
+	type SharedDraftSource = { kind: string; config: Record<string, unknown> };
+	type SharedDraft = {
+		name: string;
+		cron: string;
+		title: string;
+		directive: string;
+		render_mode: string;
+		trusted: boolean;
+		enabled: boolean;
+		sources: SharedDraftSource[];
+	};
+	function emptySharedDraft(): SharedDraft {
+		return {
+			name: '',
+			cron: '0 6 * * *',
+			title: '',
+			directive: '',
+			render_mode: 'synthesis',
+			trusted: false,
+			enabled: true,
+			sources: [],
+		};
+	}
+	let sharedBlocks = $state<SharedBlock[]>([]);
+	let sharedAllowedKinds = $state<string[]>(['browse', 'markets', 'email']);
+	let sharedDraft = $state<SharedDraft | null>(null);
+	let sharedEditingName = $state<string | null>(null); // non-null = editing existing
+	let sharedError = $state('');
+	let sharedSaving = $state(false);
+	let sharedRunning = $state<string | null>(null);
+	let confirmSharedDelete = $state<string | null>(null);
+
+	const sharedKindOptions: SelectOption[] = $derived(
+		sharedAllowedKinds.map((k) => ({ value: k, label: KIND_LABELS[k] ?? k })),
+	);
+
+	async function reloadSharedBlocks() {
+		const resp = await getSharedBlocks();
+		sharedBlocks = resp.shared_blocks;
+		if (resp.allowed_source_kinds?.length) sharedAllowedKinds = resp.allowed_source_kinds;
+	}
+
+	// Compact "last run" — the raw ISO string is wide and ugly; show a short
+	// local "Mon D, HH:MM".
+	function fmtLastRun(iso: string | null): string {
+		if (!iso) return '—';
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return iso;
+		return d.toLocaleString(undefined, {
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit',
+		});
+	}
+
+	function startNewShared() {
+		sharedEditingName = null;
+		sharedError = '';
+		sharedDraft = emptySharedDraft();
+	}
+
+	function editShared(b: SharedBlock) {
+		sharedEditingName = b.name;
+		sharedError = '';
+		sharedDraft = {
+			name: b.name,
+			cron: b.cron,
+			title: b.title,
+			directive: b.directive ?? '',
+			render_mode: b.render_mode,
+			trusted: b.trusted,
+			enabled: b.enabled,
+			sources: (b.sources ?? []).map((s) => ({
+				kind: s.kind,
+				config: { ...(s.config ?? {}) },
+			})),
+		};
+	}
+
+	function cancelShared() {
+		sharedDraft = null;
+		sharedEditingName = null;
+		sharedError = '';
+	}
+
+	function addSharedSource() {
+		if (!sharedDraft) return;
+		sharedDraft = {
+			...sharedDraft,
+			sources: [...sharedDraft.sources, { kind: sharedAllowedKinds[0] ?? 'browse', config: {} }],
+		};
+	}
+
+	function removeSharedSource(idx: number) {
+		if (!sharedDraft) return;
+		sharedDraft = {
+			...sharedDraft,
+			sources: sharedDraft.sources.filter((_, i) => i !== idx),
+		};
+	}
+
+	function setSharedSourceKind(idx: number, kind: string) {
+		if (!sharedDraft) return;
+		// A kind change invalidates the prior kind's config shape — reset it.
+		sharedDraft.sources[idx] = { kind, config: {} };
+	}
+
+	function patchSharedSourceConfig(idx: number, patch: Record<string, unknown>) {
+		if (!sharedDraft) return;
+		const next = { ...sharedDraft.sources[idx].config, ...patch };
+		for (const [k, v] of Object.entries(patch)) {
+			if (v === undefined || v === null) delete next[k];
+		}
+		sharedDraft.sources[idx] = { ...sharedDraft.sources[idx], config: next };
+	}
+
+	async function saveShared() {
+		if (!sharedDraft) return;
+		sharedError = '';
+		const name = sharedDraft.name.trim();
+		if (!name) {
+			sharedError = 'Name is required.';
+			return;
+		}
+		const sources = sharedDraft.sources.map((s) => ({ kind: s.kind, config: s.config }));
+		sharedSaving = true;
+		try {
+			await putSharedBlock({
+				name,
+				cron: sharedDraft.cron.trim(),
+				title: sharedDraft.title.trim(),
+				directive: sharedDraft.directive.trim() || null,
+				render_mode: sharedDraft.render_mode,
+				trusted: sharedDraft.trusted,
+				enabled: sharedDraft.enabled,
+				sources,
+			});
+			await reloadSharedBlocks();
+			sharedDraft = null;
+			sharedEditingName = null;
+		} catch (e) {
+			sharedError = (e as Error).message || 'Save failed';
+		} finally {
+			sharedSaving = false;
+		}
+	}
+
+	async function doRunShared(name: string) {
+		sharedRunning = name;
+		try {
+			const res = await runSharedBlock(name);
+			if (res.status === 'error') sharedError = `Run failed: ${res.error}`;
+			await reloadSharedBlocks();
+		} catch (e) {
+			sharedError = (e as Error).message || 'Run failed';
+		} finally {
+			sharedRunning = null;
+		}
+	}
+
+	async function doDeleteShared(name: string) {
+		try {
+			await deleteSharedBlock(name);
+			await reloadSharedBlocks();
+		} catch (e) {
+			sharedError = (e as Error).message || 'Delete failed';
+		} finally {
+			confirmSharedDelete = null;
+		}
+	}
+
 	const KIND_LABELS: Record<string, string> = {
 		rss: 'RSS feed',
 		email: 'Newsletters',
@@ -92,6 +275,7 @@
 		todos: 'Todos',
 		reminders: 'Reminders',
 		notes: 'Notes',
+		shared_block: 'Shared block',
 	};
 	const FILE_PLACEHOLDER: Record<string, string> = {
 		todos: 'shared/team-todo.md',
@@ -101,10 +285,6 @@
 	const RENDER_OPTIONS: SelectOption[] = [
 		{ value: 'synthesis', label: 'Synthesis (summarize)' },
 		{ value: 'structured', label: 'Structured (verbatim)' },
-	];
-	const EMAIL_MODE_OPTIONS: SelectOption[] = [
-		{ value: 'shared', label: 'Shared newsletter pool' },
-		{ value: 'senders', label: 'Selected senders' },
 	];
 
 	const sourceKinds = $derived(config?.source_kinds ?? Object.keys(KIND_LABELS));
@@ -136,6 +316,12 @@
 		{ value: '__custom__', label: 'Custom URL…' },
 		...presets.map((p) => ({ value: `preset:${p.key}`, label: p.name })),
 	]);
+	const sharedBlockSelectOptions: SelectOption[] = $derived(
+		sharedBlockOptions.map((o) => ({
+			value: o.name,
+			label: o.source === 'custom' ? `${o.name} (custom)` : o.name,
+		})),
+	);
 
 	async function reloadSchedule() {
 		const resp = await getBriefings();
@@ -152,7 +338,11 @@
 		try {
 			const me = await getMe();
 			moduleEnabled = me.features.briefings;
+			isAdmin = !!me.features.admin;
 			if (!moduleEnabled) return;
+			if (isAdmin) {
+				reloadSharedBlocks().catch(() => (sharedBlocks = []));
+			}
 			await Promise.all([
 				reloadSchedule(),
 				(async () => {
@@ -165,6 +355,9 @@
 				getBriefingPathSuggestions()
 					.then((r) => (pathSuggestions = r.paths))
 					.catch(() => (pathSuggestions = [])),
+				getSharedBlockOptions()
+					.then((r) => (sharedBlockOptions = r.options))
+					.catch(() => (sharedBlockOptions = [])),
 			]);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load settings';
@@ -255,9 +448,7 @@
 	async function addSource(block: BriefingBlock, kind: string) {
 		const cfg: Record<string, unknown> = kind === 'email' ? { mode: 'shared' } : {};
 		const resp = await putBriefingSource({ block_id: block.id, kind, config: cfg });
-		await reloadContent();
-		newSender = '';
-		if (resp.id) sourceDraft = { id: resp.id, kind, config: cfg };
+		await reloadContent();		if (resp.id) sourceDraft = { id: resp.id, kind, config: cfg };
 		resetPathState();
 	}
 
@@ -268,9 +459,7 @@
 			// JSON round-trip deep-clones and strips the reactive $state proxy
 			// (structuredClone rejects proxies); source config is plain JSON.
 			config: JSON.parse(JSON.stringify(source.config ?? {})),
-		};
-		newSender = '';
-		resetPathState();
+		};		resetPathState();
 		// Verify the existing path up front so the hint reflects reality on open.
 		if (FILE_KINDS.includes(source.kind)) {
 			const p = String(sourceDraft.config.path ?? '').trim();
@@ -279,9 +468,7 @@
 	}
 
 	function cancelSource() {
-		sourceDraft = null;
-		newSender = '';
-		resetPathState();
+		sourceDraft = null;		resetPathState();
 	}
 
 	const FILE_KINDS = ['todos', 'reminders', 'notes'];
@@ -344,9 +531,7 @@
 		// or transiently-unreachable path must not trap the user. Save always
 		// proceeds; the inline hint tells them whether it currently resolves.
 		await putBriefingSource({ id: sourceDraft.id, config: sourceDraft.config });
-		sourceDraft = null;
-		newSender = '';
-		resetPathState();
+		sourceDraft = null;		resetPathState();
 		await reloadContent();
 	}
 
@@ -392,48 +577,12 @@
 		sourceDraft = { ...sourceDraft, config: next };
 	}
 
-	function setDraftNumber(field: string, raw: string) {
-		const t = raw.trim();
-		if (t === '') {
-			setDraftConfig({ [field]: undefined });
-			return;
-		}
-		const n = Number(t);
-		if (Number.isFinite(n)) setDraftConfig({ [field]: n });
-	}
-
-	function draftSenders(): string[] {
-		return (sourceDraft?.config.senders as string[]) ?? [];
-	}
-
-	function addSender() {
-		const v = newSender.trim();
-		if (!v) return;
-		const cur = draftSenders();
-		if (!cur.includes(v)) setDraftConfig({ senders: [...cur, v] });
-		newSender = '';
-	}
-
-	function removeSender(v: string) {
-		setDraftConfig({ senders: draftSenders().filter((s) => s !== v) });
-	}
-
 	// ---- Summaries / labels ----
 	function feedRefLabel(ref: { kind: string; value: number }): string {
 		const list = ref.kind === 'category' ? feedOptions?.categories : feedOptions?.subscriptions;
 		const hit = list?.find((o) => o.value === ref.value);
 		const prefix = ref.kind === 'category' ? 'Category' : 'Feed';
 		return hit ? `${prefix}: ${hit.label}` : `${prefix} #${ref.value}`;
-	}
-
-	function rssDraftValue(): string {
-		const ref = sourceDraft?.config.feed_ref as { kind: string; value: number } | undefined;
-		return ref ? `${ref.kind}:${ref.value}` : '';
-	}
-
-	function browseDraftValue(): string {
-		const preset = sourceDraft?.config.preset;
-		return preset ? `preset:${preset}` : '__custom__';
 	}
 
 	function sourceSummary(s: BriefingSource): string {
@@ -461,6 +610,8 @@
 			case 'reminders':
 			case 'notes':
 				return c.path ? String(c.path) : 'No path set';
+			case 'shared_block':
+				return c.name ? `Shared: ${String(c.name)}` : 'No shared block selected';
 			default:
 				return '';
 		}
@@ -567,8 +718,8 @@
 					</SettingsField>
 				</div>
 				<div class="add-actions">
-					<Button variant="primary" size="sm" type="submit" disabled={briefingSaving}>
-						{briefingSaving ? 'Saving…' : 'Add briefing'}
+					<Button variant="secondary" size="sm" type="submit" disabled={briefingSaving}>
+						{briefingSaving ? 'Saving…' : '+ Add briefing'}
 					</Button>
 				</div>
 				{#if briefingError}
@@ -745,204 +896,7 @@
 																								<span class="source-form-editing">Editing</span>
 																							</div>
 
-																							{#if source.kind === 'email'}
-																								<SettingsField label="Mode">
-																									<Select
-																										value={(sourceDraft.config.mode as string) ??
-																											'shared'}
-																										options={EMAIL_MODE_OPTIONS}
-																										onValueChange={(v) => setDraftConfig({ mode: v })}
-																										ariaLabel="Email mode"
-																										fullWidth
-																									/>
-																								</SettingsField>
-																								{#if sourceDraft.config.mode === 'senders'}
-																									<SettingsField
-																										label="Sender filters"
-																										hint="fnmatch patterns, e.g. *@semafor.com or news@axios.com"
-																									>
-																										<div class="chip-list">
-																											{#each draftSenders() as s (s)}
-																												<span class="chip">
-																													{s}
-																													<button
-																														type="button"
-																														title="Remove"
-																														onclick={() => removeSender(s)}>×</button
-																													>
-																												</span>
-																											{/each}
-																											{#if draftSenders().length === 0}
-																												<span class="muted small">No senders yet.</span>
-																											{/if}
-																										</div>
-																										<div class="chip-add">
-																											<input
-																												type="text"
-																												placeholder="*@example.com"
-																												bind:value={newSender}
-																												onkeydown={(e) => {
-																													if (e.key === 'Enter') {
-																														e.preventDefault();
-																														addSender();
-																													}
-																												}}
-																											/>
-																											<Button
-																												variant="secondary"
-																												size="sm"
-																												onclick={addSender}
-																												disabled={!newSender.trim()}>Add</Button
-																											>
-																										</div>
-																									</SettingsField>
-																								{/if}
-																								<SettingsField
-																									label="Lookback (hours)"
-																									hint="Leave blank to use the briefing default."
-																								>
-																									<input
-																										type="number"
-																										min="1"
-																										value={(sourceDraft.config.lookback_hours as number) ??
-																											''}
-																										placeholder="default"
-																										oninput={(e) =>
-																											setDraftNumber(
-																												'lookback_hours',
-																												(e.target as HTMLInputElement).value,
-																											)}
-																									/>
-																								</SettingsField>
-																							{:else if source.kind === 'rss'}
-																								<SettingsField label="Feed or category">
-																									<Select
-																										value={rssDraftValue()}
-																										options={rssOptions}
-																										placeholder="Pick a feed / category…"
-																										onValueChange={(v) => {
-																											const [kind, value] = v.split(':');
-																											setDraftConfig({
-																												feed_ref: { kind, value: Number(value) },
-																											});
-																										}}
-																										ariaLabel="Feed or category"
-																										fullWidth
-																									/>
-																								</SettingsField>
-																								{#if rssOptions.length === 0}
-																									<p class="muted small">
-																										No feeds available — subscribe in the Feeds module first.
-																									</p>
-																								{/if}
-																								<div class="inline-fields">
-																									<SettingsField label="Max entries">
-																										<input
-																											type="number"
-																											min="1"
-																											value={(sourceDraft.config.limit as number) ?? ''}
-																											placeholder="10"
-																											oninput={(e) =>
-																												setDraftNumber(
-																													'limit',
-																													(e.target as HTMLInputElement).value,
-																												)}
-																										/>
-																									</SettingsField>
-																									<SettingsField label="Unread only" checkbox>
-																										<input
-																											type="checkbox"
-																											checked={!!sourceDraft.config.unread_only}
-																											onchange={(e) =>
-																												setDraftConfig({
-																													unread_only: (e.target as HTMLInputElement)
-																														.checked,
-																												})}
-																										/>
-																									</SettingsField>
-																								</div>
-																							{:else if source.kind === 'browse'}
-																								<SettingsField label="Source">
-																									<Select
-																										value={browseDraftValue()}
-																										options={browseOptions}
-																										onValueChange={(v) => {
-																											if (v === '__custom__') {
-																												setDraftConfig({
-																													preset: undefined,
-																													url:
-																														(sourceDraft?.config.url as string) ?? '',
-																												});
-																											} else {
-																												setDraftConfig({
-																													preset: v.split(':')[1],
-																													url: undefined,
-																												});
-																											}
-																										}}
-																										ariaLabel="Browse source"
-																										fullWidth
-																									/>
-																								</SettingsField>
-																								{#if !sourceDraft.config.preset}
-																									<SettingsField label="URL">
-																										<input
-																											type="text"
-																											placeholder="https://…"
-																											value={(sourceDraft.config.url as string) ?? ''}
-																											oninput={(e) =>
-																												setDraftConfig({
-																													url: (e.target as HTMLInputElement).value,
-																												})}
-																										/>
-																									</SettingsField>
-																								{/if}
-																							{:else if source.kind === 'markets'}
-																								<p class="muted small">
-																									Leave blank for the default index & futures set.
-																								</p>
-																								<SettingsField
-																									label="Indices"
-																									hint="Comma-separated symbols, e.g. ^GSPC, ^IXIC"
-																								>
-																									<input
-																										type="text"
-																										value={((sourceDraft.config.indices as string[]) ??
-																											[]).join(', ')}
-																										placeholder="default"
-																										oninput={(e) =>
-																											setDraftConfig({
-																												indices: (e.target as HTMLInputElement).value
-																													.split(',')
-																													.map((x) => x.trim())
-																													.filter(Boolean),
-																											})}
-																									/>
-																								</SettingsField>
-																								<SettingsField
-																									label="Futures"
-																									hint="Comma-separated symbols."
-																								>
-																									<input
-																										type="text"
-																										value={((sourceDraft.config.futures as string[]) ??
-																											[]).join(', ')}
-																										placeholder="default"
-																										oninput={(e) =>
-																											setDraftConfig({
-																												futures: (e.target as HTMLInputElement).value
-																													.split(',')
-																													.map((x) => x.trim())
-																													.filter(Boolean),
-																											})}
-																									/>
-																								</SettingsField>
-																							{:else if source.kind === 'calendar'}
-																								<p class="muted small">
-																									Pulls from your connected calendars. No configuration
-																									needed.
-																								</p>
-																							{:else if source.kind === 'todos' || source.kind === 'reminders' || source.kind === 'notes'}
+																							{#if source.kind === 'todos' || source.kind === 'reminders' || source.kind === 'notes'}
 																								<SettingsField
 																									label="File path"
 																									hint="Relative to your user folder. Use shared/… for a file shared with the bot, or istota/… for the bot's workspace. Required — no default."
@@ -967,6 +921,15 @@
 																										</p>
 																									{/if}
 																								</SettingsField>
+																							{:else}
+																								<SourceConfigFields
+																									kind={source.kind}
+																									config={sourceDraft.config}
+																									onChange={setDraftConfig}
+																									{browseOptions}
+																									{rssOptions}
+																									sharedBlockOptions={sharedBlockSelectOptions}
+																								/>
 																							{/if}
 
 																							<div class="source-form-actions">
@@ -1056,8 +1019,189 @@
 				{/if}
 			{/if}
 		</SettingsCard>
+
+		{#if isAdmin}
+			<SettingsCard
+				title="Shared blocks ({sharedBlocks.length})"
+				description="Admin only. Content generated once globally and read by any user via a Shared source. Structured blocks are stored verbatim (no LLM). Only user-agnostic sources are allowed."
+			>
+				{#if sharedError}
+					<div class="banner error">{sharedError}</div>
+				{/if}
+
+				{#if sharedBlocks.length === 0}
+					<p class="empty">No shared blocks yet.</p>
+				{:else}
+					<div class="table-scroll">
+						<table class="grid sb-table">
+							<thead>
+								<tr>
+									<th>Name</th>
+									<th>Cron</th>
+									<th class="col-render">Render</th>
+									<th>Trust</th>
+									<th>Last run</th>
+									<th class="actions"></th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each sharedBlocks as b (b.name)}
+									<tr>
+										<td class="sb-name">
+											<strong>{b.name}</strong>
+											{#if !b.enabled}<span class="muted small"> (disabled)</span>{/if}
+											{#if b.status.has_content}
+												<div class="muted small sb-preview" title={b.status.value_preview ?? ''}>
+													{(b.status.value_preview ?? '').slice(0, 60)}
+												</div>
+											{/if}
+										</td>
+										<td class="nowrap"><code>{b.cron}</code></td>
+										<td class="col-render"><span class="render-pill">{b.render_mode}</span></td>
+										<td class="small">{b.trusted ? 'trusted' : 'untrusted'}</td>
+										<td class="small nowrap">{fmtLastRun(b.status.last_run_at)}</td>
+										<td class="actions">
+											<Button
+												variant="ghost"
+												size="sm"
+												onclick={() => doRunShared(b.name)}
+												disabled={sharedRunning === b.name}
+											>
+												{sharedRunning === b.name ? 'Running…' : 'Run now'}
+											</Button>
+											<Button variant="ghost" size="sm" onclick={() => editShared(b)}>Edit</Button>
+											<Button
+												variant="ghost"
+												size="sm"
+												onclick={() => (confirmSharedDelete = b.name)}>Delete</Button
+											>
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+
+				{#if !sharedDraft}
+					<div style="margin-top: 0.75rem;">
+						<Button variant="secondary" size="sm" onclick={startNewShared}
+							>+ New shared block</Button
+						>
+					</div>
+				{:else}
+					<div class="shared-editor">
+						<h4>{sharedEditingName ? `Edit ${sharedEditingName}` : 'New shared block'}</h4>
+						<div class="sb-grid">
+							<SettingsField label="Name" hint="Slug: lowercase, digits, - and _">
+								<input
+									type="text"
+									placeholder="world-headlines"
+									bind:value={sharedDraft.name}
+									disabled={!!sharedEditingName}
+								/>
+							</SettingsField>
+							<SettingsField label="Cron (UTC)">
+								<input type="text" placeholder="0 6 * * *" bind:value={sharedDraft.cron} />
+							</SettingsField>
+						</div>
+						<SettingsField label="Title">
+							<input type="text" placeholder="🌍 World headlines" bind:value={sharedDraft.title} />
+						</SettingsField>
+						<SettingsField label="Render mode">
+							<Select
+								value={sharedDraft.render_mode}
+								options={RENDER_OPTIONS}
+								onValueChange={(v) => sharedDraft && (sharedDraft.render_mode = v)}
+								ariaLabel="Render mode"
+								fullWidth
+							/>
+						</SettingsField>
+						{#if sharedDraft.render_mode === 'synthesis'}
+							<SettingsField label="Directive" hint="How to synthesize the sources.">
+								<textarea rows="2" bind:value={sharedDraft.directive}></textarea>
+							</SettingsField>
+						{/if}
+						<div class="sb-grid">
+							<SettingsField label="Trusted" checkbox hint="Only for injection-safe content.">
+								<input type="checkbox" bind:checked={sharedDraft.trusted} />
+							</SettingsField>
+							<SettingsField label="Enabled" checkbox>
+								<input type="checkbox" bind:checked={sharedDraft.enabled} />
+							</SettingsField>
+						</div>
+
+						<div class="shared-sources">
+							<div class="shared-sources-head">
+								<span class="field-label">Sources</span>
+								<Button variant="ghost" size="sm" onclick={addSharedSource}>+ Add source</Button>
+							</div>
+							{#if sharedDraft.sources.length === 0}
+								<p class="muted small">
+									No sources — add at least one browse/markets/email source.
+								</p>
+							{/if}
+							{#each sharedDraft.sources as src, i (i)}
+								<div class="sb-source">
+									<button
+										type="button"
+										class="sb-source-remove"
+										title="Remove source"
+										onclick={() => removeSharedSource(i)}>×</button
+									>
+									<SettingsField label="Type">
+										<Select
+											value={src.kind}
+											options={sharedKindOptions}
+											onValueChange={(v) => setSharedSourceKind(i, v)}
+											ariaLabel="Source kind"
+											fullWidth
+										/>
+									</SettingsField>
+									<SourceConfigFields
+										kind={src.kind}
+										config={src.config}
+										onChange={(patch) => patchSharedSourceConfig(i, patch)}
+										{browseOptions}
+									/>
+								</div>
+							{/each}
+						</div>
+
+						<div class="source-form-actions">
+							<Button variant="ghost" size="sm" onclick={cancelShared}>Cancel</Button>
+							<Button variant="primary" size="sm" onclick={saveShared} disabled={sharedSaving}
+								>{sharedSaving ? 'Saving…' : 'Save shared block'}</Button
+							>
+						</div>
+					</div>
+				{/if}
+			</SettingsCard>
+		{/if}
 	{/if}
 </SettingsLayout>
+
+{#if confirmSharedDelete}
+	<Modal
+		open={true}
+		title="Delete shared block?"
+		onOpenChange={(o) => {
+			if (!o) confirmSharedDelete = null;
+		}}
+	>
+		<p>
+			Delete <strong>{confirmSharedDelete}</strong>? The last generated value stays until it goes
+			stale. Users referencing it lose the section once it expires.
+		</p>
+		{#snippet footer()}
+			<Button variant="ghost" onclick={() => (confirmSharedDelete = null)}>Cancel</Button>
+			<Button
+				variant="primary"
+				onclick={() => confirmSharedDelete && doDeleteShared(confirmSharedDelete)}>Delete</Button
+			>
+		{/snippet}
+	</Modal>
+{/if}
 
 {#if confirmDelete}
 	<Modal
@@ -1126,7 +1270,7 @@
 
 	.add-actions {
 		display: flex;
-		justify-content: flex-end;
+		justify-content: flex-start;
 	}
 
 	.briefing-pick {
@@ -1353,13 +1497,6 @@
 		color: var(--text-primary);
 	}
 
-	.inline-fields {
-		display: flex;
-		gap: 1.25rem;
-		align-items: flex-end;
-		flex-wrap: wrap;
-	}
-
 	.source-form-actions {
 		display: flex;
 		justify-content: flex-end;
@@ -1378,51 +1515,6 @@
 
 	.path-warn {
 		color: var(--color-warning, #b80);
-	}
-
-	.chip-list {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.3rem;
-		margin-bottom: 0.4rem;
-	}
-
-	.chip {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.3rem;
-		font-size: var(--text-xs);
-		padding: 0.1rem 0.2rem 0.1rem 0.5rem;
-		border-radius: var(--radius-pill);
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		color: var(--text-secondary);
-	}
-
-	.chip button {
-		background: none;
-		border: none;
-		color: var(--text-dim);
-		cursor: pointer;
-		font: inherit;
-		font-size: var(--text-sm);
-		line-height: 1;
-		padding: 0 0.15rem;
-	}
-
-	.chip button:hover {
-		color: #e88;
-	}
-
-	.chip-add {
-		display: flex;
-		gap: 0.4rem;
-		align-items: center;
-	}
-
-	.chip-add input {
-		flex: 1;
-		max-width: 20rem;
 	}
 
 	.add-block {
@@ -1455,6 +1547,114 @@
 		}
 		.col-source {
 			display: none;
+		}
+	}
+
+	/* Admin shared-blocks editor */
+	.nowrap {
+		white-space: nowrap;
+	}
+	/* The global .grid is table-layout:fixed/width:100%, which squishes (and
+	   overlaps) on mobile since the three text actions can't fit the 3rem actions
+	   column. Give this table a natural min-width so .table-scroll scrolls
+	   horizontally on narrow screens instead of overlapping columns. */
+	.sb-table {
+		table-layout: auto;
+		min-width: 44rem;
+	}
+	.sb-table td.actions,
+	.sb-table th.actions {
+		width: 1%;
+		white-space: nowrap;
+	}
+	.sb-name {
+		min-width: 9rem;
+	}
+	.sb-preview {
+		max-width: 16rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.shared-editor {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		margin-top: 0.75rem;
+		padding: 1rem;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md, 0.5rem);
+		background: var(--surface-sunken, transparent);
+	}
+	.shared-editor h4 {
+		margin: 0;
+		font-size: var(--text-sm);
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+	/* Two-column field row that top-aligns, so a field with a hint doesn't push
+	   its sibling's input out of line (unlike .inline-fields' flex-end). */
+	.sb-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.4rem 1.25rem;
+		align-items: start;
+	}
+	.shared-sources {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+	.shared-sources-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+	.field-label {
+		font-size: var(--text-sm);
+		color: var(--text-muted);
+	}
+	/* Type + the source's config fields flow inline by default, wrapping on
+	   narrow widths. The remove button pins to the top-right corner. */
+	.sb-source {
+		position: relative;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-end;
+		gap: 0.5rem 1rem;
+		padding: 0.75rem 2.25rem 0.75rem 0.75rem;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md, 0.5rem);
+		background: var(--surface-base);
+	}
+	.sb-source :global(.field) {
+		flex: 1 1 12rem;
+		min-width: 10rem;
+	}
+	/* Full-width notes / helper text (e.g. the markets "leave blank" hint) break
+	   the inline row rather than squeezing between the selects. */
+	.sb-source :global(p) {
+		flex-basis: 100%;
+		margin: 0;
+	}
+	.sb-source-remove {
+		position: absolute;
+		top: 0.35rem;
+		right: 0.4rem;
+		background: none;
+		border: none;
+		cursor: pointer;
+		font-size: 1.25rem;
+		line-height: 1;
+		padding: 0.1rem 0.3rem;
+		color: var(--text-muted);
+	}
+	.sb-source-remove:hover {
+		color: var(--text-primary);
+	}
+	@container settings (max-width: 560px) {
+		.sb-grid {
+			grid-template-columns: 1fr;
 		}
 	}
 </style>

@@ -13,6 +13,9 @@ Four ingestion paths under one typed abstraction:
 * ``browse`` — a user-defined URL (or preset) fetched via the browse skill.
 * ``markets`` / ``calendar`` / ``todos`` / ``reminders`` / ``notes`` — the
   existing structured built-ins wrapped as source kinds.
+* ``kv`` / ``shared_block`` — pre-made curated content read from the shared_kv
+  store (or the caller's own KV), so expensive shared generation runs once
+  globally instead of once per user.
 """
 
 from __future__ import annotations
@@ -44,6 +47,10 @@ class GatheredSource:
     text: str = ""
     provenance: str = ""
     ok: bool = True
+    # When True, the rendered content is wrapped in an untrusted-content
+    # delimiter at prompt-assembly time (web-sourced curated content that a
+    # trusted identity merely relayed — the content itself is untrusted).
+    untrusted: bool = False
 
     @property
     def is_empty(self) -> bool:
@@ -98,7 +105,7 @@ def resolve_source(kind: str, config: dict, ctx: SourceContext) -> GatheredSourc
 
 def _load_resolvers() -> dict:
     """Import the resolver callables lazily (avoids import cycles at module load)."""
-    from istota.briefings.sources import browse, builtins, email, rss
+    from istota.briefings.sources import browse, builtins, email, kv, rss
 
     return {
         "rss": rss.resolve,
@@ -109,6 +116,8 @@ def _load_resolvers() -> dict:
         "todos": builtins.resolve_todos,
         "reminders": builtins.resolve_reminders,
         "notes": builtins.resolve_notes,
+        "kv": kv.resolve,
+        "shared_block": kv.resolve_shared_block,
     }
 
 

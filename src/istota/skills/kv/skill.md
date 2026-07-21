@@ -31,6 +31,36 @@ choked one task in production. `set-add` / `set-remove` accept multiple
 members in a single call. The deferred apply re-reads the current value, so
 concurrent set-adds across tasks compose correctly.
 
+## Shared (cross-user) store — `--shared`
+
+The per-user store above is private to you. A separate **shared** store lets one
+identity publish content that *other* users read — used for curated briefing
+content (world headlines, a markets summary, a newsletter digest) that would
+otherwise be regenerated per user.
+
+```bash
+istota-skill kv get       <ns> <key> --shared   # open to any user
+istota-skill kv list      <ns> --shared
+istota-skill kv namespaces --shared
+istota-skill kv set       <ns> <key> '<json>' --shared   # admin-only
+istota-skill kv delete    <ns> <key> --shared            # admin-only
+```
+
+- **Reads are open** to any user. **Writes are admin-only** — content flows into
+  other users' prompts, so it must come from a trusted identity. A non-admin
+  write returns `{"status":"error","error":"shared KV writes require admin"}`
+  and exits non-zero. On a deployment with a *blank* admins file no one can
+  write (fail-closed).
+- **Set-ops (`set-add`/`set-remove`/…) reject `--shared`** — shared content is
+  written as a whole value, not incremental set membership.
+- **Value shape controls briefing granularity** when a briefing `kv` source
+  reads the entry:
+  - `{"items": [{"title","summary","url"}, …]}` (or a bare JSON list) → each
+    reader's briefing **synthesizes** the items (share the fetch, not the prose).
+  - `{"text": "…"}` (or a bare JSON string) → the section text is **spliced**
+    near-verbatim into a `structured` block (share the synthesis too).
+  Prefer `{"text": …}` for a finished section, `{"items": […]}` for raw material.
+
 ## Environment variables
 
 | Variable | Description |
@@ -42,8 +72,8 @@ concurrent set-adds across tasks compose correctly.
 
 ## Sandbox constraints
 
-- **Reads** (`get`, `list`, `namespaces`, `set-contains`, `set-size`, `set-members`) work directly — the DB is read-only accessible.
-- **Writes** (`set`, `delete`, `set-add`, `set-remove`) are deferred when running in the sandbox: the CLI writes a JSON file to `$ISTOTA_DEFERRED_DIR` and the scheduler processes it after task completion.
+- **Reads** (`get`, `list`, `namespaces`, `set-contains`, `set-size`, `set-members`) work directly — the DB is read-only accessible. `--shared` reads work the same way.
+- **Writes** (`set`, `delete`, `set-add`, `set-remove`) are deferred when running in the sandbox: the CLI writes a JSON file to `$ISTOTA_DEFERRED_DIR` and the scheduler processes it after task completion. A `--shared` write carries the shared scope in the deferred op; the scheduler applies it only if your task's identity is an admin (fail-closed).
 
 The CLI handles this automatically — use the write commands normally and they will be deferred transparently when `ISTOTA_DEFERRED_DIR` is set.
 
