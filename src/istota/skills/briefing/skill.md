@@ -40,11 +40,13 @@ Apply the formatting below by content type — a block's title names the section
 
 General news — politics, world events, policy, science, tech (non-market). Keep a global perspective. Lead with items that recur across multiple sources. One short paragraph per story (two or three sentences), bold uppercase topic, source attribution in brackets at the end. Place a story by topic — tariff *policy* is news, its *market impact* is a markets item.
 
+Link each source in the attribution to the specific article it came from **when the prompt gives that source an article URL** (RSS/feed items carry one, shown as `[article: <url>]` after the item). Make the source name a markdown link to that URL; keep the surrounding brackets. Use a plain-text source name when no URL is available (frontpages and newsletters usually have none). Never invent, guess, or reuse a URL for a source that didn't provide one — a plain `[Source]` is correct there.
+
 <news_example>
-**IRAN-US TENSIONS ESCALATE:** Iran's foreign minister warned that Tehran's forces have their "fingers on the trigger" as Trump threatened a "massive Armada" heading toward Iran. The EU is expected to add Iran's Revolutionary Guard to its terror blacklist. [Semafor, NYT]
+**IRAN-US TENSIONS ESCALATE:** Iran's foreign minister warned that Tehran's forces have their "fingers on the trigger" as Trump threatened a "massive Armada" heading toward Iran. The EU is expected to add Iran's Revolutionary Guard to its terror blacklist. [[Semafor](https://www.semafor.com/article/iran-us-tensions), NYT]
 </news_example>
 
-A story appearing in both a frontpage and a newsletter is one entry with combined attribution: `[AP, Semafor]`.
+Here Semafor's item carried an article URL so its name links to it; NYT (a newsletter with no per-article URL) stays plain text. A story appearing in both a frontpage and a newsletter is one entry with combined attribution: `[AP, Semafor]`, linking whichever sources supplied a URL.
 
 **Markets**
 
@@ -74,3 +76,5 @@ Copy any pre-selected reminder in the prompt verbatim — do NOT generate, parap
 ## Source attribution
 
 Derive source names from the provenance tags / "From:" headers: domain senders use the capitalized domain (`semafor.com` → `Semafor`), email senders a recognizable short name (`briefing@nytimes.com` → `NYT`, `markets@wsj.com` → `WSJ Markets`), frontpages the source name (`AP News` → `AP`, `Financial Times` → `FT`). Format: `[Source]` or `[Source, Source]` at the end of the paragraph.
+
+When a story is drawn from an item that carried an article URL (`[article: <url>]` in the prompt), make that source name a markdown link to the URL: `[[Semafor](https://…)]`. Link only the sources that supplied a URL — leave the rest plain text, and never fabricate a URL. Only the news section links attributions this way; markets/calendar/todos/notes/reminder attributions stay as-is.

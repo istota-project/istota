@@ -86,7 +86,9 @@ def _render_source(gs: GatheredSource) -> str:
                 line += f" — {summary}"
             url = item.get("url")
             if url:
-                line += f" ({url})"
+                # The canonical article URL for this item. When this story
+                # makes it into the briefing, its citation should link here.
+                line += f" [article: {url}]"
             parts.append(line)
     return "\n".join(parts)
 
@@ -99,7 +101,10 @@ def _default_directive(block: BriefingBlock) -> str:
         )
     return (
         "Synthesize the sources below into one coherent section. Group related "
-        "items, attribute across sources, and lead with what's new."
+        "items, attribute across sources, and lead with what's new. When a "
+        "source item carries an article URL (shown as '[article: <url>]'), link "
+        "that source's attribution to the specific article it came from; use a "
+        "plain-text source name when no URL is available."
     )
 
 
