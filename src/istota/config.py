@@ -703,20 +703,10 @@ class BrainConfig:
 
 
 @dataclass
-class BriefingDefaultsConfig:
-    """Admin-level defaults for briefing components (expanded when user sets boolean)."""
-    markets: dict = field(default_factory=dict)
-    news: dict = field(default_factory=dict)
-    headlines: dict = field(default_factory=dict)
-
-
-@dataclass
 class BriefingsModuleConfig:
     """Module-level config for the first-class briefings module (``[briefings]``).
 
-    Distinct from ``[briefing_defaults]`` (per-component fetch defaults, retained
-    for the legacy prompt builder). This governs the module's per-user content
-    store + archive.
+    Governs the module's per-user content store + archive.
 
     ``archive_retention_days`` — prune archived briefings older than this per
     insert (0 = keep forever). ``default_lookback_hours`` seeds the email/rss
@@ -774,7 +764,6 @@ class Config:
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    briefing_defaults: BriefingDefaultsConfig = field(default_factory=BriefingDefaultsConfig)
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
@@ -1252,22 +1241,45 @@ def load_admin_users(path: str | None = None) -> set[str]:
     return admins
 
 
-def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
-    """Parse a user data dict (from main config or per-user file) into UserConfig."""
-    # Parse briefings
-    briefings = []
-    for b in user_data.get("briefings", []):
+def _parse_briefing_specs(entries: "list | None") -> list[BriefingConfig]:
+    """Parse ``[[briefings]]`` / ``[[default_briefings]]`` TOML entries.
+
+    Shared by ``_parse_user_data`` (per-user briefings) and the top-level
+    ``[[default_briefings]]`` parse so both accept the same
+    name/cron/output/blocks shape.
+
+    Legacy ``components =`` authoring is retired (retire-legacy-briefing-
+    components spec): a stray ``components`` key is ignored with a one-line
+    warning. The in-memory ``components`` field survives only as a
+    migration-read carrier populated from the DB, never from TOML.
+    """
+    briefings: list[BriefingConfig] = []
+    for b in entries or []:
+        if not isinstance(b, dict):
+            continue
+        if "components" in b:
+            logger.warning(
+                "briefing %r: TOML `components =` authoring is retired and ignored; "
+                "use `blocks` instead",
+                b.get("name", "?"),
+            )
         raw_blocks = b.get("blocks", [])
         briefings.append(BriefingConfig(
             name=b.get("name", ""),
             cron=b.get("cron", ""),
             conversation_token=b.get("conversation_token", ""),
             output=b.get("output", "talk"),
-            components=b.get("components", {}),
             # Raw parsed dict passthrough — normalisation is the seeder's job so
             # the config layer stays decoupled from module internals.
             blocks=list(raw_blocks) if isinstance(raw_blocks, list) else [],
         ))
+    return briefings
+
+
+def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
+    """Parse a user data dict (from main config or per-user file) into UserConfig."""
+    # Parse briefings
+    briefings = _parse_briefing_specs(user_data.get("briefings", []))
 
     # Parse resources. After the Resources sunset only ``folder`` (and the
     # internal ``shared_file``) are live; obsolete credential types
@@ -1695,14 +1707,6 @@ def load_config(config_path: Path | None = None) -> Config:
                 logger.warning(
                     "[experimental] unknown feature %r — typo or stale flag", f,
                 )
-
-    if "briefing_defaults" in data:
-        bd = data["briefing_defaults"]
-        config.briefing_defaults = BriefingDefaultsConfig(
-            markets=bd.get("markets", {}),
-            news=bd.get("news", {}),
-            headlines=bd.get("headlines", {}),
-        )
 
     if "briefings" in data:
         br = data["briefings"]

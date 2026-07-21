@@ -304,38 +304,41 @@ class TestConfigLoading:
         assert cfg.logging.max_size_mb == 50
         assert cfg.logging.backup_count == 10
 
-    def test_load_briefing_defaults_section(self, tmp_path):
+    def test_briefing_defaults_section_ignored(self, tmp_path):
+        # [briefing_defaults] is retired (retire-legacy-briefing-components).
+        # A stale section in TOML no longer parses into any config field.
+        from istota import config as config_mod
+
         p = tmp_path / "config.toml"
         p.write_text(
-            '[briefing_defaults.news]\n'
-            'lookback_hours = 12\n'
-            'sources = [\n'
-            '    { type = "domain", value = "semafor.com" },\n'
-            '    { type = "email", value = "briefing@nytimes.com" },\n'
-            ']\n'
-            '\n'
-            '[briefing_defaults.headlines]\n'
-            'sources = ["ap", "reuters", "guardian"]\n'
-            '\n'
             '[briefing_defaults.markets]\n'
             'futures = ["ES=F", "NQ=F"]\n'
         )
         cfg = load_config(p)
-        assert cfg.briefing_defaults.news.get("lookback_hours") == 12
-        assert len(cfg.briefing_defaults.news.get("sources", [])) == 2
-        assert cfg.briefing_defaults.headlines.get("sources") == ["ap", "reuters", "guardian"]
-        assert cfg.briefing_defaults.markets.get("futures") == ["ES=F", "NQ=F"]
+        assert not hasattr(cfg, "briefing_defaults")
+        assert not hasattr(config_mod, "BriefingDefaultsConfig")
 
-    def test_load_briefing_defaults_headlines_only(self, tmp_path):
+    def test_toml_components_authoring_ignored(self, tmp_path):
+        # Legacy `[[briefings]] [briefings.components]` authoring is dropped;
+        # a stray components key is ignored (blocks-only content model).
         p = tmp_path / "config.toml"
         p.write_text(
-            '[briefing_defaults.headlines]\n'
-            'sources = ["ap", "guardian"]\n'
+            '[users.alice]\n'
+            'display_name = "Alice"\n'
+            '\n'
+            '[[users.alice.briefings]]\n'
+            'name = "morning"\n'
+            'cron = "0 7 * * *"\n'
+            'output = "talk"\n'
+            '\n'
+            '[users.alice.briefings.components]\n'
+            'calendar = true\n'
         )
         cfg = load_config(p)
-        assert cfg.briefing_defaults.headlines.get("sources") == ["ap", "guardian"]
-        assert cfg.briefing_defaults.news == {}
-        assert cfg.briefing_defaults.markets == {}
+        briefings = cfg.users["alice"].briefings
+        assert len(briefings) == 1
+        assert briefings[0].name == "morning"
+        assert briefings[0].components == {}
 
     def test_load_users_section(self, tmp_path):
         p = tmp_path / "config.toml"
@@ -397,7 +400,8 @@ class TestConfigLoading:
         assert morning.cron == "0 7 * * *"
         assert morning.conversation_token == "room1"
         assert morning.output == "both"
-        assert morning.components == {"calendar": True, "todos": True}
+        # TOML component authoring is retired — the stray section is ignored.
+        assert morning.components == {}
         evening = bob.briefings[1]
         assert evening.name == "evening"
         assert evening.cron == "0 18 * * *"
@@ -1731,12 +1735,11 @@ class TestConfigAuthoredBriefingBlocks:
         assert "__blocks__" not in row.components
         assert "blocks" not in row.components
 
-    def test_blocks_survive_get_briefings_for_user_expansion(self, tmp_path):
-        # A component that triggers _expand_boolean_components reconstruction
-        # must not drop blocks off the rebuilt BriefingConfig.
+    def test_blocks_survive_get_briefings_for_user(self, tmp_path):
+        # get_briefings_for_user returns briefings verbatim (no component
+        # expansion); config-authored blocks pass through untouched.
         from istota.config import (
             BriefingConfig,
-            BriefingDefaultsConfig,
             Config,
             UserConfig,
         )
@@ -1744,20 +1747,15 @@ class TestConfigAuthoredBriefingBlocks:
 
         briefing = BriefingConfig(
             name="morning", cron="0 7 * * *",
-            components={"markets": True},  # expands via defaults
             blocks=[{"title": "News", "sources": [{"kind": "rss", "config": {}}]}],
         )
         config = Config(
             db_path=tmp_path / "istota.db",
             nextcloud_mount_path=tmp_path / "mount",
             users={"alice": UserConfig(briefings=[briefing])},
-            briefing_defaults=BriefingDefaultsConfig(markets={"futures": ["ES=F"]}),
         )
         result = get_briefings_for_user(config, "alice")
         assert len(result) == 1
-        # Reconstruction happened (components expanded) …
-        assert result[0].components != briefing.components
-        # … and blocks survived it.
         assert [b["title"] for b in result[0].blocks] == ["News"]
 
 

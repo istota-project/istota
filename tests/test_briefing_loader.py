@@ -5,109 +5,14 @@ from pathlib import Path
 import pytest
 
 from istota.skills.briefing import (
-    _expand_boolean_components,
     _load_workspace_briefings,
     get_briefings_for_user,
 )
 from istota.config import (
     BriefingConfig,
-    BriefingDefaultsConfig,
     Config,
     UserConfig,
 )
-
-
-class TestExpandBooleanComponents:
-    def test_simple_booleans_unchanged(self):
-        defaults = BriefingDefaultsConfig()
-        result = _expand_boolean_components(
-            {"calendar": True, "todos": True}, defaults,
-        )
-        assert result == {"calendar": True, "todos": True}
-
-    def test_markets_true_expands(self):
-        defaults = BriefingDefaultsConfig(
-            markets={"futures": ["ES=F"], "indices": ["^GSPC"]},
-        )
-        result = _expand_boolean_components({"markets": True}, defaults)
-        assert result == {
-            "markets": {"enabled": True, "futures": ["ES=F"], "indices": ["^GSPC"]},
-        }
-
-    def test_news_true_expands(self):
-        defaults = BriefingDefaultsConfig(
-            news={"lookback_hours": 12, "sources": [{"type": "domain", "value": "x.com"}]},
-        )
-        result = _expand_boolean_components({"news": True}, defaults)
-        assert result == {
-            "news": {
-                "enabled": True,
-                "lookback_hours": 12,
-                "sources": [{"type": "domain", "value": "x.com"}],
-            },
-        }
-
-    def test_dict_passthrough(self):
-        defaults = BriefingDefaultsConfig(
-            markets={"futures": ["ES=F"]},
-        )
-        custom = {"enabled": True, "futures": ["NQ=F"]}
-        result = _expand_boolean_components({"markets": custom}, defaults)
-        assert result == {"markets": custom}
-
-    def test_false_unchanged(self):
-        defaults = BriefingDefaultsConfig(markets={"futures": ["ES=F"]})
-        result = _expand_boolean_components({"markets": False}, defaults)
-        assert result == {"markets": False}
-
-    def test_empty_defaults_bool_stays(self):
-        defaults = BriefingDefaultsConfig()
-        result = _expand_boolean_components({"markets": True}, defaults)
-        assert result == {"markets": True}
-
-    def test_dict_enabled_only_merges_defaults(self):
-        # Regression: stored components like {"news": {"enabled": true}} from
-        # the briefing_configs DB row used to drop defaults entirely. Defaults
-        # should still merge in for keys the user didn't override.
-        defaults = BriefingDefaultsConfig(
-            news={
-                "lookback_hours": 12,
-                "sources": [{"type": "domain", "value": "semafor.com"}],
-            },
-        )
-        result = _expand_boolean_components({"news": {"enabled": True}}, defaults)
-        assert result == {
-            "news": {
-                "enabled": True,
-                "lookback_hours": 12,
-                "sources": [{"type": "domain", "value": "semafor.com"}],
-            },
-        }
-
-    def test_dict_user_keys_win(self):
-        defaults = BriefingDefaultsConfig(
-            news={"lookback_hours": 12, "sources": [{"type": "domain", "value": "default.com"}]},
-        )
-        result = _expand_boolean_components(
-            {"news": {"enabled": True, "lookback_hours": 3}},
-            defaults,
-        )
-        assert result["news"]["lookback_hours"] == 3
-        assert result["news"]["sources"] == [{"type": "domain", "value": "default.com"}]
-        assert result["news"]["enabled"] is True
-
-    def test_mixed_components(self):
-        defaults = BriefingDefaultsConfig(
-            markets={"futures": ["ES=F"]},
-            news={"lookback_hours": 6},
-        )
-        result = _expand_boolean_components(
-            {"calendar": True, "markets": True, "news": {"enabled": True, "lookback_hours": 3}},
-            defaults,
-        )
-        assert result["calendar"] is True
-        assert result["markets"] == {"enabled": True, "futures": ["ES=F"]}
-        assert result["news"] == {"enabled": True, "lookback_hours": 3}
 
 
 def _wrap_toml(toml_content: str) -> str:
@@ -160,7 +65,8 @@ class TestLoadWorkspaceBriefings:
         assert result[0].name == "morning"
         assert result[0].cron == "0 7 * * *"
         assert result[0].conversation_token == "room1"
-        assert result[0].components == {"calendar": True}
+        # Workspace BRIEFINGS.md no longer reads component keys (blocks-only).
+        assert result[0].components == {}
 
     def test_malformed_toml_returns_none(self, tmp_path):
         mount = tmp_path / "mount"
@@ -303,35 +209,22 @@ class TestGetBriefingsForUser:
         assert "morning" in names
         assert "afternoon" in names
 
-    def test_boolean_expansion_with_defaults(self, tmp_path):
+    def test_components_not_expanded(self, tmp_path):
+        # The legacy boolean-component expansion is retired: get_briefings_for_user
+        # returns admin briefings verbatim, no defaults merged in.
         mount = tmp_path / "mount"
-        workspace = mount / "Users" / "alice" / "istota" / "config"
-        workspace.mkdir(parents=True)
-        (workspace / "BRIEFINGS.md").write_text(_wrap_toml(
-            '[[briefings]]\n'
-            'name = "morning"\n'
-            'cron = "0 6 * * *"\n'
-            'conversation_token = "room1"\n'
-            '\n'
-            '[briefings.components]\n'
-            'calendar = true\n'
-            'markets = true\n'
-        ))
-        user = UserConfig()
-        defaults = BriefingDefaultsConfig(
-            markets={"futures": ["ES=F", "NQ=F"]},
+        mount.mkdir()
+        admin_briefing = BriefingConfig(
+            name="morning", cron="0 6 * * *",
+            conversation_token="room1", components={"markets": True},
         )
-        config = Config(
-            nextcloud_mount_path=mount,
-            users={"alice": user},
-            briefing_defaults=defaults,
-        )
+        user = UserConfig(briefings=[admin_briefing])
+        config = Config(nextcloud_mount_path=mount, users={"alice": user})
 
         result = get_briefings_for_user(config, "alice")
         assert len(result) == 1
-        comps = result[0].components
-        assert comps["calendar"] is True
-        assert comps["markets"] == {"enabled": True, "futures": ["ES=F", "NQ=F"]}
+        # Verbatim — no {"enabled": True, ...} expansion.
+        assert result[0].components == {"markets": True}
 
     def test_no_workspace_file_uses_admin(self, tmp_path):
         mount = tmp_path / "mount"
