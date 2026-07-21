@@ -265,14 +265,17 @@ class BriefingSharedBlock:
 # ``[[briefing_shared_blocks]]`` (parity with how ``[[default_briefings]]`` is
 # operator/Ansible-provided). ``world-headlines`` needs the headless browser
 # (soft-degrades to an omitted section when it's off); ``markets-summary`` needs
-# only yfinance. Both generate before the 07:00 briefing window; a consuming
-# briefing reads them via a ``shared_block`` source with a freshness window, so
-# they degrade to an omitted section until first generation (harmless).
+# only yfinance. Both regenerate twice daily (UTC), ~15 min before the default
+# 06:00 / 18:00 briefing windows, so morning and evening briefings each read a
+# fresh copy; a consuming briefing reads them via a ``shared_block`` source with
+# a freshness window, so a stale/not-yet-generated block degrades to an omitted
+# section (harmless). Kept in step with the Ansible defaults
+# (``istota_briefing_shared_blocks`` in ``deploy/ansible/defaults/main.yml``).
 DEFAULT_SHARED_BLOCKS: list[dict] = [
     {
         "name": "world-headlines",
-        "cron": "0 6 * * *",
-        "title": "🌍 World headlines",
+        "cron": "45 5,17 * * *",
+        "title": "🌍 Headlines",
         "directive": (
             "Synthesize the frontpages into ~8 top world stories, lead with "
             "what's new. Neutral wire-service tone."
@@ -286,7 +289,7 @@ DEFAULT_SHARED_BLOCKS: list[dict] = [
     },
     {
         "name": "markets-summary",
-        "cron": "30 6 * * *",
+        "cron": "50 5,17 * * *",
         "title": "📈 Markets",
         # Structured/verbatim: the markets source already emits a formatted
         # emoji quote table; store it as-is with zero LLM passes (no directive).

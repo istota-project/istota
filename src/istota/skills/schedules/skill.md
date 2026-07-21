@@ -54,6 +54,33 @@ room = "ROOM_TOKEN"
 - `enabled`: Set to `false` to pause the job (default: true). Use `!cron disable/enable` for runtime control
 - `once`: When `true`, the job auto-deletes from both the DB and CRON.md after successful execution. Failed jobs are kept for retry. Used by the reminders skill for one-shot fire-and-forget entries
 - `silent_unless_action`: When `true`, only posts output if response starts with `ACTION:`. Useful for monitoring jobs
+- `skip_log_channel`: When `true`, this job's run is not mirrored to the verbose execution log channel. Useful for noisy, frequent jobs
+- `model`: Per-job model override (canonical id, provider alias like `opus-high`, or a role alias like `fast`/`general`/`smart`). Empty = the instance default
+- `effort`: Per-job effort override (`low`/`medium`/`high`/`xhigh`/`max`). Empty = the model default
+- `publish_shared_kv`: Publish this job's result text into shared curated content that every user's briefings can read (see "Publishing shared briefing content" below). **Admin-only.**
+- `publish_shared_kv_trusted`: When `true`, the published content is marked trusted (rendered un-wrapped, not treated as untrusted web content). Only use for injection-safe content such as pure numeric tables — never for free-text/web-derived content. Default `false`
+
+## Publishing shared briefing content
+
+Content that is identical for everyone — a world-news digest, a markets snapshot, a curated roundup — should be generated **once** and read by every user's briefing, instead of each user's briefing fetching and summarizing it separately. A scheduled job does the generation; `publish_shared_kv` writes its result where briefings pick it up.
+
+Set `publish_shared_kv` to a shared-content key. A bare key (e.g. `world-headlines`) targets the `briefing_shared_blocks` namespace, so a briefing's **Shared block** source reading that name gets this job's output. Use `<namespace>/<key>` for any other namespace. On each successful run the job's result text is stored; an empty result is skipped (the previous value is kept). A user then adds a `shared_block` (or `kv`) source pointing at the same name to any briefing block.
+
+This is the path for a **rich, agentic** shared block: unlike the built-in shared-block generator (which is tool-less), a scheduled `prompt` job runs with the full sandbox and tools, so it can browse, follow into individual articles, verify, and link them, then publish the digest for everyone.
+
+Guardrails:
+- **Admin-only.** Writing shared content is gated on the shared-KV-writer allowlist; a non-admin job that sets `publish_shared_kv` fails loudly (it does not silently no-op) and alerts the operator. Do not add it to a regular user's job.
+- Leave `publish_shared_kv_trusted` off for anything web- or text-derived (it may carry injected instructions). Set it `true` only for self-formatting, injection-safe data like a numeric quote table.
+
+```markdown
+\`\`\`toml
+[[jobs]]
+name = "world-news-digest"
+cron = "40 5,17 * * *"                # ~before the 06:00 / 18:00 briefing windows
+prompt = "Browse AP, Reuters and the Guardian world sections. Produce ~8 top world stories, leading with what's new; follow into the linked articles to confirm details and include a source link per story. Neutral wire-service tone. Output only the section body — no title/header line."
+publish_shared_kv = "world-headlines"  # briefings reading this Shared block get the digest
+\`\`\`
+```
 
 ## Cron examples
 

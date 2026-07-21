@@ -500,7 +500,7 @@ istota_user_secrets: {}
 # name/cron/output/blocks shape as a per-user briefing; content is blocks-only.
 # Seed-once: a user's later web edits win and re-runs never clobber them.
 #
-# The default set below is a weekday morning + evening briefing. World headlines
+# The default set below is a weekday morning + evening briefing. Headlines
 # and Markets are read from the module-owned shared blocks (`world-headlines` /
 # `markets-summary`, see istota_briefing_shared_blocks) via `shared_block`
 # sources, so the browse/markets fetch + synthesis happens ONCE globally per
@@ -512,8 +512,9 @@ istota_user_secrets: {}
 #     re-synthesis). `max_age_hours` gates freshness: a shared block older than
 #     the window (e.g. the morning generation seen at evening) is omitted, so a
 #     stale block never leaks across windows.
-#   * World headlines needs the headless browser and is omitted until the shared
-#     block's first generation — both harmless soft-degrades (empty -> omitted).
+#   * The Headlines block needs the headless browser and is omitted until the
+#     shared block's first generation — both harmless soft-degrades (empty ->
+#     omitted).
 #   * The Calendar block reads the user's CalDAV calendars (discovered from
 #     Nextcloud); with none available it soft-degrades (empty -> omitted).
 #   * News-newsletter/reminders/todos blocks are not seeded — add them per user.
@@ -579,7 +580,7 @@ istota_default_briefings:
 istota_briefing_shared_blocks:
   - name: "world-headlines"
     cron: "45 5,17 * * *"
-    title: "🌍 World headlines"
+    title: "🌍 Headlines"
     directive: "Synthesize the frontpages into ~8 top world stories, lead with what's new. Neutral wire-service tone."
     render_mode: "synthesis"
     enabled: true
