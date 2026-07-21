@@ -158,6 +158,28 @@ class TestStandaloneHelpers:
 
 
 # ---------------------------------------------------------------------------
+# Config: emissaries parsing (field default + explicit override)
+# ---------------------------------------------------------------------------
+
+
+class TestEmissariesConfig:
+    def test_field_defaults_true(self):
+        assert Config().emissaries_enabled is True
+
+    def test_explicit_false_parsed(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text("emissaries_enabled = false\n")
+        cfg = load_config(p)
+        assert cfg.emissaries_enabled is False
+
+    def test_explicit_true_parsed(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text("emissaries_enabled = true\n")
+        cfg = load_config(p)
+        assert cfg.emissaries_enabled is True
+
+
+# ---------------------------------------------------------------------------
 # Web app: no-auth mode + loopback guard
 # ---------------------------------------------------------------------------
 

@@ -4,7 +4,8 @@
 # Change this to whatever you want to call your assistant.
 bot_name = "Istota"
 
-# Include emissaries.md (constitutional principles) in system prompts (default: true)
+# Include emissaries.md (constitutional principles) in system prompts (default: true).
+# `istota setup` writes `false` here for local single-user installs.
 # emissaries_enabled = true
 
 # =============================================================================

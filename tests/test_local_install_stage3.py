@@ -64,6 +64,14 @@ class TestRenderers:
         assert cfg.security.sandbox_enabled is False
         assert "stefan" in cfg.users
 
+    def test_config_disables_emissaries(self, tmp_path):
+        a = Answers(workspace=tmp_path / "ws", user_id="stefan")
+        p = tmp_path / "config.toml"
+        p.write_text(render_config_toml(a))
+        from istota.config import load_config
+        cfg = load_config(p)
+        assert cfg.emissaries_enabled is False
+
     def test_env_file_keys(self, tmp_path):
         a = Answers(
             workspace=tmp_path / "ws", brain_kind="native",

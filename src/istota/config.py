@@ -827,7 +827,7 @@ class ExperimentalConfig:
 class Config:
     namespace: str = "istota"  # Install namespace (drives /etc/{namespace}/, /srv/app/{namespace}/, etc.)
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
-    emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt
+    emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
     model: str = ""  # Model ID or alias; pin to a versioned ID (e.g. "claude-opus-4-8") rather than a floating alias so upgrades are explicit. Empty = brain default
     effort: str = ""  # Effort level: low, medium, high, xhigh, max. Empty = model default. Support varies by model
     max_memory_chars: int = 0  # cap total memory in prompts (0 = unlimited)
