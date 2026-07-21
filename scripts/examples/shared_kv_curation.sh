@@ -6,9 +6,9 @@
 # markets-summary) that it generates once globally — see
 # docs/features/briefings.md "Module-owned shared blocks". This script is the
 # ESCAPE HATCH for content the module doesn't ship a generator for: an admin
-# fetches/builds content on a schedule and publishes it to the shared_kv store,
-# where any user's briefing reads it via a `kv` source — so the fetch and the
-# synthesis happen ONCE, not once per user.
+# fetches/builds content on a schedule and publishes it into the shared-block
+# namespace, where any user's briefing reads it via a `shared_block` source — so
+# the fetch and the synthesis happen ONCE, not once per user.
 #
 # Run this from an admin CRON `command:` job (the task's identity must be an
 # admin — shared writes are admin-only, fail-closed on a blank admins file):
@@ -21,18 +21,19 @@
 #   cron = "0 6 * * *"          # before the briefing window that reads it
 #   silent_unless_action = true
 #
-# Then a briefing reads it with a `kv` source:
+# Then a briefing reads it with a `shared_block` source (the key is the block
+# name; it also appears in the web editor's shared-block picker as "custom"):
 #
 #   [[users.alice.briefings.blocks]]
 #   title = "📰 Tech digest"
 #   render_mode = "structured"
 #     [[users.alice.briefings.blocks.sources]]
-#     kind = "kv"
-#     config = { scope = "shared", namespace = "briefings", key = "tech-digest", max_age_hours = 24 }
+#     kind = "shared_block"
+#     config = { name = "tech-digest", max_age_hours = 24 }
 #
 set -euo pipefail
 
-NAMESPACE="briefings"
+NAMESPACE="briefing_shared_blocks"
 KEY="tech-digest"
 
 # 1. Build your content however you like (curl an API, run a scraper, call a

@@ -13,9 +13,8 @@ Four ingestion paths under one typed abstraction:
 * ``browse`` — a user-defined URL (or preset) fetched via the browse skill.
 * ``markets`` / ``calendar`` / ``todos`` / ``reminders`` / ``notes`` — the
   existing structured built-ins wrapped as source kinds.
-* ``kv`` / ``shared_block`` — pre-made curated content read from the shared_kv
-  store (or the caller's own KV), so expensive shared generation runs once
-  globally instead of once per user.
+* ``shared_block`` — pre-made curated content read from the shared_kv store, so
+  expensive shared generation runs once globally instead of once per user.
 """
 
 from __future__ import annotations
@@ -116,7 +115,6 @@ def _load_resolvers() -> dict:
         "todos": builtins.resolve_todos,
         "reminders": builtins.resolve_reminders,
         "notes": builtins.resolve_notes,
-        "kv": kv.resolve,
         "shared_block": kv.resolve_shared_block,
     }
 
