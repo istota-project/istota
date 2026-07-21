@@ -13,6 +13,8 @@
 		deleteBriefingSource,
 		getBrowsePresets,
 		getFeedOptions,
+		checkBriefingPath,
+		getBriefingPathSuggestions,
 		type UserBriefingRow,
 		type BriefingBlock,
 		type BriefingSource,
@@ -20,7 +22,7 @@
 		type BrowsePreset,
 		type FeedOptions,
 	} from '$lib/api';
-	import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
+	import { Button, Modal, Select, AutocompleteInput, type SelectOption } from '$lib/components/ui';
 	import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
 	import { briefingsRefreshNonce } from '$lib/stores/briefings';
 
@@ -61,6 +63,12 @@
 	);
 	let newSender = $state('');
 
+	// File-path picker state for todos/reminders/notes sources: datalist
+	// suggestions (loaded once) + the current draft path's verification result.
+	let pathSuggestions = $state<string[]>([]);
+	let pathError = $state('');
+	let pathChecking = $state(false);
+
 	// A unified delete confirmation across briefings / blocks / sources.
 	let confirmDelete = $state<{
 		kind: 'briefing' | 'block' | 'source';
@@ -78,10 +86,10 @@
 		reminders: 'Reminders',
 		notes: 'Notes',
 	};
-	const DEFAULT_FILE: Record<string, string> = {
-		todos: 'TODO.md',
-		reminders: 'reminders.md',
-		notes: 'NOTES.md',
+	const FILE_PLACEHOLDER: Record<string, string> = {
+		todos: 'shared/team-todo.md',
+		reminders: 'istota/config/reminders.md',
+		notes: 'istota/notes/agenda.md',
 	};
 	const RENDER_OPTIONS: SelectOption[] = [
 		{ value: 'synthesis', label: 'Synthesis (summarize)' },
@@ -147,6 +155,9 @@
 					]);
 					await reloadContent();
 				})(),
+				getBriefingPathSuggestions()
+					.then((r) => (pathSuggestions = r.paths))
+					.catch(() => (pathSuggestions = [])),
 			]);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load settings';
@@ -240,6 +251,7 @@
 		await reloadContent();
 		newSender = '';
 		if (resp.id) sourceDraft = { id: resp.id, kind, config: cfg };
+		pathError = '';
 	}
 
 	function startEditSource(source: BriefingSource) {
@@ -251,18 +263,50 @@
 			config: JSON.parse(JSON.stringify(source.config ?? {})),
 		};
 		newSender = '';
+		pathError = '';
 	}
 
 	function cancelSource() {
 		sourceDraft = null;
 		newSender = '';
+		pathError = '';
+	}
+
+	const FILE_KINDS = ['todos', 'reminders', 'notes'];
+
+	// Verify a file-source path against the backend. Sets pathError to '' when
+	// the path resolves to an existing file, or to the backend's message
+	// otherwise. Returns whether the path is valid.
+	async function verifyPath(): Promise<boolean> {
+		if (!sourceDraft || !FILE_KINDS.includes(sourceDraft.kind)) return true;
+		const path = String(sourceDraft.config.path ?? '').trim();
+		if (!path) {
+			pathError = 'Enter a file path.';
+			return false;
+		}
+		pathChecking = true;
+		try {
+			const res = await checkBriefingPath(path);
+			pathError = res.ok ? '' : res.error || 'No file found at that path.';
+			return res.ok;
+		} catch {
+			// Network/verification failure shouldn't block saving — treat as
+			// unverified rather than invalid.
+			pathError = '';
+			return true;
+		} finally {
+			pathChecking = false;
+		}
 	}
 
 	async function saveSource() {
 		if (!sourceDraft) return;
+		// A file-source must point at an existing file before it can be saved.
+		if (FILE_KINDS.includes(sourceDraft.kind) && !(await verifyPath())) return;
 		await putBriefingSource({ id: sourceDraft.id, config: sourceDraft.config });
 		sourceDraft = null;
 		newSender = '';
+		pathError = '';
 		await reloadContent();
 	}
 
@@ -376,7 +420,7 @@
 			case 'todos':
 			case 'reminders':
 			case 'notes':
-				return c.path ? String(c.path) : `${DEFAULT_FILE[s.kind]} (default)`;
+				return c.path ? String(c.path) : 'No path set';
 			default:
 				return '';
 		}
@@ -651,13 +695,14 @@
 																		{#each block.sources as source (source.id)}
 																			{#if sourceDraft?.id === source.id}
 																				<tr class="src-form-row">
-																					<td colspan="4">
+																					<td colspan="4" class="src-form-cell">
 																						<div class="source-form">
 																							<div class="source-form-head">
 																								<span class="kind-pill">{source.kind}</span>
 																								<span class="kind-name"
 																									>{KIND_LABELS[source.kind] ?? source.kind}</span
 																								>
+																								<span class="source-form-editing">Editing</span>
 																							</div>
 
 																							{#if source.kind === 'email'}
@@ -860,19 +905,26 @@
 																							{:else if source.kind === 'todos' || source.kind === 'reminders' || source.kind === 'notes'}
 																								<SettingsField
 																									label="File path"
-																									hint={`Leave blank to use the default (${DEFAULT_FILE[source.kind]}).`}
+																									hint="Relative to your user folder. Use shared/… for a file shared with the bot, or istota/… for the bot's workspace. Required — no default."
 																								>
-																									<input
-																										type="text"
+																									<AutocompleteInput
 																										value={(sourceDraft.config.path as string) ?? ''}
-																										placeholder={DEFAULT_FILE[source.kind]}
-																										oninput={(e) =>
-																											setDraftConfig({
-																												path:
-																													(e.target as HTMLInputElement).value.trim() ||
-																													undefined,
-																											})}
+																										options={pathSuggestions}
+																										placeholder={FILE_PLACEHOLDER[source.kind]}
+																										invalid={!!pathError}
+																										monospace
+																										ariaLabel="File path"
+																										onValueChange={(v) => {
+																											pathError = '';
+																											setDraftConfig({ path: v.trim() || undefined });
+																										}}
+																										onCommit={verifyPath}
 																									/>
+																									{#if pathChecking}
+																										<p class="path-msg muted">Checking…</p>
+																									{:else if pathError}
+																										<p class="path-msg path-error">{pathError}</p>
+																									{/if}
 																								</SettingsField>
 																							{/if}
 
@@ -1220,18 +1272,38 @@
 		font-size: var(--text-xs);
 	}
 
-	/* ---- Source config form (inline in the sources table) ---- */
+	/* ---- Source config form (inline in the sources table) ----
+	   The form replaces a collapsed source row in place, so its content must
+	   share the row's left inset. The colspan cell drops the table padding and
+	   the form re-adds the same 0.5rem horizontal inset the collapsed cells use
+	   (.settings .grid td) — no jump on entering edit mode. A subtle inset
+	   background + a header divider signal the edit state. */
+	.grid.sub .src-form-cell {
+		padding: 0;
+		background: var(--surface-card);
+	}
+
 	.source-form {
 		display: flex;
 		flex-direction: column;
-		gap: 0.6rem;
-		padding: 0.75rem 0.75rem 0.85rem;
+		gap: 0.7rem;
+		padding: 0.7rem 0.5rem 0.75rem;
 	}
 
 	.source-form-head {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
+		padding-bottom: 0.6rem;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.source-form-editing {
+		margin-left: auto;
+		font-size: var(--text-xs);
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--text-dim);
 	}
 
 	.kind-name {
@@ -1252,6 +1324,15 @@
 		justify-content: flex-end;
 		gap: 0.5rem;
 		margin-top: 0.2rem;
+	}
+
+	.path-msg {
+		margin: 0.3rem 0 0;
+		font-size: 0.85rem;
+	}
+
+	.path-error {
+		color: var(--color-danger, #d33);
 	}
 
 	.chip-list {

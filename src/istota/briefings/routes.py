@@ -19,6 +19,8 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
@@ -394,6 +396,85 @@ def get_feed_options(
         "subscriptions": subscriptions,
         "categories": categories,
     }
+
+
+# File-path picker for todos / reminders / notes sources. The path a user
+# types is resolved relative to their own /Users/<uid>/ folder (see
+# sources.builtins._resolve_user_path); these endpoints let the editor verify a
+# path exists and offer a datalist of candidate text files.
+_PATH_SUGGEST_EXTS = (".md", ".txt")
+_PATH_SUGGEST_MAX = 200
+_PATH_SUGGEST_DEPTH = 4
+
+
+def _walk_text_files(root: Path) -> list[str]:
+    """Bounded walk of ``root`` for ``.md`` / ``.txt`` files.
+
+    Returns paths relative to ``root`` (forward-slashed) — the same form the
+    user types into the source path field. Capped by depth and count; hidden
+    directories are skipped.
+    """
+    results: list[str] = []
+    root_str = str(root)
+    for dirpath, dirnames, filenames in os.walk(root_str):
+        rel_dir = os.path.relpath(dirpath, root_str)
+        depth = 0 if rel_dir == "." else rel_dir.count(os.sep) + 1
+        kept = sorted(d for d in dirnames if not d.startswith("."))
+        dirnames[:] = [] if depth >= _PATH_SUGGEST_DEPTH else kept
+        for fn in sorted(filenames):
+            if fn.lower().endswith(_PATH_SUGGEST_EXTS):
+                rel = os.path.relpath(os.path.join(dirpath, fn), root_str)
+                results.append(rel.replace(os.sep, "/"))
+                if len(results) >= _PATH_SUGGEST_MAX:
+                    return results
+    return results
+
+
+@router.get("/path-check")
+def check_path(
+    request: Request,
+    path: str = Query("", description="Candidate source file path"),
+    user: dict = Depends(require_auth),
+) -> dict:
+    """Verify a todos/reminders/notes source path resolves to an existing file.
+
+    Resolves the candidate exactly as the resolver does (relative to the user's
+    own folder) and checks existence. ``{ok: true, resolved}`` or
+    ``{ok: false, error}``.
+    """
+    from istota.briefings.sources.builtins import _resolve_user_path
+    from istota.skills.files import path_exists
+
+    resolved = _resolve_user_path(user["username"], path)
+    if not resolved:
+        return {"ok": False, "error": "Enter a file path."}
+    cfg = _app_config(request)
+    exists = False
+    try:
+        if cfg is not None:
+            exists = path_exists(cfg, resolved)
+    except Exception:  # noqa: BLE001
+        exists = False
+    if not exists:
+        return {"ok": False, "error": "No file found at that path."}
+    return {"ok": True, "resolved": resolved}
+
+
+@router.get("/path-suggest")
+def suggest_paths(
+    request: Request,
+    user: dict = Depends(require_auth),
+) -> dict:
+    """Candidate text-file paths under the user's folder, for the datalist.
+
+    Bounded, ``.md`` / ``.txt`` only, returned relative to the user's own
+    folder (the form the user types). Empty under rclone (no on-disk root) or a
+    missing workspace.
+    """
+    cfg = _app_config(request)
+    root = cfg.workspace_root(user["username"]) if cfg is not None else None
+    paths = _walk_text_files(root) if root is not None and root.is_dir() else []
+    return {"paths": paths}
 
 
 def _valid_render_mode(value):

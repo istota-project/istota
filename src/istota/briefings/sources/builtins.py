@@ -3,10 +3,15 @@
 Wrap the existing structured fetchers (markets/calendar) for byte-identical
 behaviour. ``todos`` / ``reminders`` / ``notes`` read a workspace file whose
 **path is a briefing-source property** (``config.path``) — there is no convention
-default filename. The ``notes/`` folder convention lives only in the prompt's
-workspace-layout line as guidance for the model, not in the resolver. A
-source without a ``path`` returns a not-configured result (reads nothing);
-the user configures the path in the web editor or the migration.
+default filename. A source without a ``path`` returns a not-configured result
+(reads nothing); the user sets the path in the web editor.
+
+The path is interpreted **relative to the user's own ``/Users/<user_id>/``
+folder** (:func:`_resolve_user_path`), so ``shared/team-todo.md`` reaches a file
+shared with the bot and ``istota/config/TODO.md`` reaches the bot workspace —
+both siblings under the user's folder. ``..`` segments are dropped so a path can
+never climb above that folder, and a path naming another user resolves as a
+(nonexistent) subpath of your own folder rather than a cross-user read.
 """
 
 from __future__ import annotations
@@ -39,16 +44,36 @@ def _now_in_user_tz(ctx: SourceContext) -> tuple[datetime, str, bool, bool]:
     return now, tz_str, now.hour < 12, now.weekday() in (5, 6)
 
 
-def _workspace_file(ctx: SourceContext, override: str | None) -> str | None:
-    """Return the source-config ``path`` override, or None when unset.
+def _resolve_user_path(user_id: str, raw: str | None) -> str | None:
+    """Map a user-supplied source path to a workspace-root-relative path.
 
-    After the Resources sunset there is no convention default filename for
-    todos / reminders / notes — the location is a briefing-source property
-    (set in the web editor or the migration). The ``notes/`` folder
-    convention lives only in the prompt's workspace-layout line as guidance
-    for the model, not in the resolver.
+    A relative path resolves under the user's own ``/Users/<user_id>/`` folder,
+    so ``shared/x.md`` and ``istota/config/TODO.md`` both work. A path already
+    rooted at the user's *own* folder (``Users/<user_id>/…`` or
+    ``/Users/<user_id>/…``) passes through unchanged (explicit / back-compat).
+    ``.`` / ``..`` segments are dropped so the result can never escape upward,
+    and a path naming a *different* user is treated as a subpath of this user's
+    folder (nonexistent) rather than a cross-user read. Blank ⇒ ``None``.
     """
-    return override
+    if not raw or not raw.strip():
+        return None
+    parts = [p for p in raw.strip().split("/") if p not in ("", ".", "..")]
+    if not parts:
+        return None
+    if len(parts) >= 2 and parts[0] == "Users" and parts[1] == user_id:
+        return "/".join(parts)  # already rooted at the user's own folder
+    return "/".join(["Users", user_id, *parts])
+
+
+def _workspace_file(ctx: SourceContext, override: str | None) -> str | None:
+    """Return the read path for a source, scoped to the user's own folder.
+
+    The source-config ``path`` (set in the web editor) is resolved relative to
+    the user's ``/Users/<user_id>/`` folder via :func:`_resolve_user_path`.
+    ``None`` when unset — the caller treats that as not-configured (reads
+    nothing).
+    """
+    return _resolve_user_path(ctx.user_id, override)
 
 
 def _read_workspace_text(ctx: SourceContext, path: str) -> str | None:

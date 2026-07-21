@@ -1798,4 +1798,14 @@ export async function getFeedOptions(): Promise<FeedOptions> {
 	return apiFetch('/briefings/feed-options');
 }
 
+export async function checkBriefingPath(
+	path: string
+): Promise<{ ok: boolean; resolved?: string; error?: string }> {
+	return apiFetch(`/briefings/path-check?path=${encodeURIComponent(path)}`);
+}
+
+export async function getBriefingPathSuggestions(): Promise<{ paths: string[] }> {
+	return apiFetch('/briefings/path-suggest');
+}
+
 export { AuthError };
