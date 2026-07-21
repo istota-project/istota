@@ -206,3 +206,64 @@ class TestPickers:
         body = client.get("/istota/api/briefings/feed-options").json()
         assert body["available"] is False
         assert body["subscriptions"] == []
+
+
+class TestPathPicker:
+    @pytest.fixture
+    def path_client(self, tmp_path: Path) -> TestClient:
+        from istota.config import Config, UserConfig
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            nextcloud_mount_path=tmp_path / "mount",
+            users={"stefan": UserConfig(timezone="UTC")},
+        )
+        user_root = cfg.nextcloud_mount_path / "Users" / "stefan"
+        (user_root / "shared").mkdir(parents=True, exist_ok=True)
+        (user_root / "istota" / "config").mkdir(parents=True, exist_ok=True)
+        (user_root / "shared" / "team-todo.md").write_text("- [ ] x\n")
+        (user_root / "istota" / "config" / "TODO.md").write_text("- [ ] y\n")
+        (user_root / "istota" / "config" / "notes.bin").write_text("ignore me")
+
+        app = FastAPI()
+        app.include_router(router, prefix="/istota/api/briefings")
+        app.state.istota_config = cfg
+        app.dependency_overrides[require_auth] = lambda: {"username": "stefan"}
+        app.dependency_overrides[verify_origin] = lambda: None
+        return TestClient(app)
+
+    def test_check_existing_file(self, path_client):
+        body = path_client.get(
+            "/istota/api/briefings/path-check", params={"path": "shared/team-todo.md"},
+        ).json()
+        assert body["ok"] is True
+        assert body["resolved"] == "Users/stefan/shared/team-todo.md"
+
+    def test_check_missing_file(self, path_client):
+        body = path_client.get(
+            "/istota/api/briefings/path-check", params={"path": "shared/nope.md"},
+        ).json()
+        assert body["ok"] is False
+        assert body["error"]
+
+    def test_check_blank_path(self, path_client):
+        body = path_client.get(
+            "/istota/api/briefings/path-check", params={"path": ""},
+        ).json()
+        assert body["ok"] is False
+
+    def test_check_is_user_scoped(self, path_client, tmp_path):
+        # A file outside the user's folder is not reachable via a relative path.
+        (tmp_path / "mount" / "secret.md").write_text("nope")
+        body = path_client.get(
+            "/istota/api/briefings/path-check", params={"path": "../secret.md"},
+        ).json()
+        assert body["ok"] is False
+
+    def test_suggest_lists_text_files(self, path_client):
+        body = path_client.get("/istota/api/briefings/path-suggest").json()
+        paths = body["paths"]
+        assert "shared/team-todo.md" in paths
+        assert "istota/config/TODO.md" in paths
+        # Non-text files are excluded.
+        assert not any(p.endswith(".bin") for p in paths)

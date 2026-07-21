@@ -343,10 +343,57 @@ class TestBrowse:
 # ---------------------------------------------------------------------------
 
 
-def _write_workspace_file(cfg: Config, rel: str, content: str):
-    path = cfg.nextcloud_mount_path / rel.lstrip("/")
+def _write_user_file(ctx, rel: str, content: str):
+    """Write a file relative to the user's own /Users/<uid>/ folder."""
+    path = ctx.app_config.nextcloud_mount_path / "Users" / ctx.user_id / rel.lstrip("/")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+
+
+class TestResolveUserPath:
+    """The path a user types is relative to their own /Users/<uid>/ folder."""
+
+    def test_relative_scoped_to_user_folder(self):
+        from istota.briefings.sources.builtins import _resolve_user_path
+        assert _resolve_user_path("stefan", "shared/x.md") == "Users/stefan/shared/x.md"
+        assert (
+            _resolve_user_path("stefan", "istota/config/TODO.md")
+            == "Users/stefan/istota/config/TODO.md"
+        )
+
+    def test_blank_is_none(self):
+        from istota.briefings.sources.builtins import _resolve_user_path
+        assert _resolve_user_path("stefan", "") is None
+        assert _resolve_user_path("stefan", "   ") is None
+        assert _resolve_user_path("stefan", None) is None
+
+    def test_own_full_path_passthrough(self):
+        from istota.briefings.sources.builtins import _resolve_user_path
+        assert (
+            _resolve_user_path("stefan", "Users/stefan/shared/x.md")
+            == "Users/stefan/shared/x.md"
+        )
+        assert (
+            _resolve_user_path("stefan", "/Users/stefan/shared/x.md")
+            == "Users/stefan/shared/x.md"
+        )
+
+    def test_parent_escape_stripped(self):
+        from istota.briefings.sources.builtins import _resolve_user_path
+        # `..` segments are dropped — can never climb above the user folder.
+        assert (
+            _resolve_user_path("stefan", "../../etc/passwd")
+            == "Users/stefan/etc/passwd"
+        )
+
+    def test_other_user_path_not_honored(self):
+        from istota.briefings.sources.builtins import _resolve_user_path
+        # A path naming another user is treated as a subpath under *your own*
+        # folder (nonexistent), never a cross-user read.
+        assert (
+            _resolve_user_path("stefan", "Users/dana/shared/secret.md")
+            == "Users/stefan/Users/dana/shared/secret.md"
+        )
 
 
 class TestBuiltinTodos:
@@ -360,15 +407,19 @@ class TestBuiltinTodos:
         gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
         assert gs.ok is False
 
-    def test_path_reads_file(self, tmp_path):
+    def test_path_reads_user_folder_file(self, tmp_path):
         ctx = _ctx(tmp_path)
-        rel = "custom/mytodos.md"
-        p = ctx.app_config.nextcloud_mount_path / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("- [ ] custom item\n")
-        gs = resolve_source("todos", {"path": rel}, ctx)
+        _write_user_file(ctx, "istota/config/TODO.md", "- [ ] custom item\n")
+        gs = resolve_source("todos", {"path": "istota/config/TODO.md"}, ctx)
         assert gs.ok is True
         assert gs.items[0]["text"] == "- [ ] custom item"
+
+    def test_path_reads_shared_folder_file(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "shared/team-todo.md", "- [ ] shared item\n")
+        gs = resolve_source("todos", {"path": "shared/team-todo.md"}, ctx)
+        assert gs.ok is True
+        assert gs.items[0]["text"] == "- [ ] shared item"
 
 
 class TestBuiltinReminders:
@@ -386,11 +437,8 @@ class TestBuiltinReminders:
         ctx = _ctx(tmp_path)
         from istota import db
         db.init_db(ctx.app_config.db_path)
-        rel = "my/reminders.md"
-        p = ctx.app_config.nextcloud_mount_path / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("Drink water\n\nStand up straight\n")
-        gs = resolve_source("reminders", {"path": rel}, ctx)
+        _write_user_file(ctx, "shared/reminders.md", "Drink water\n\nStand up straight\n")
+        gs = resolve_source("reminders", {"path": "shared/reminders.md"}, ctx)
         assert gs.ok is True
         assert gs.text in ("Drink water", "Stand up straight")
 
@@ -408,11 +456,8 @@ class TestBuiltinNotes:
 
     def test_path_reads_file(self, tmp_path):
         ctx = _ctx(tmp_path)
-        rel = "my/agenda.md"
-        p = ctx.app_config.nextcloud_mount_path / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("agenda item")
-        gs = resolve_source("notes", {"path": rel}, ctx)
+        _write_user_file(ctx, "istota/notes/agenda.md", "agenda item")
+        gs = resolve_source("notes", {"path": "istota/notes/agenda.md"}, ctx)
         assert gs.ok is True
         assert "agenda item" in gs.text
 

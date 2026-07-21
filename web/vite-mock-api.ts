@@ -1590,6 +1590,28 @@ const handlers: MockHandler[] = [
 					{ id: 803, position: 0, kind: 'markets', config: {}, enabled: true },
 				],
 			},
+			{
+				id: 403,
+				briefing_name: 'morning',
+				position: 2,
+				title: 'Todos & notes',
+				directive: '',
+				render_mode: 'synthesis',
+				options: {},
+				sources: [
+					{ id: 804, position: 0, kind: 'todos', config: { path: 'shared/team-todo.md' }, enabled: true },
+					{ id: 805, position: 1, kind: 'notes', config: {}, enabled: false },
+				],
+			},
+		];
+
+		// Mock workspace text files for the file-path picker + verification.
+		const MOCK_FILES = [
+			'shared/team-todo.md',
+			'shared/reminders.md',
+			'istota/config/TODO.md',
+			'istota/notes/agenda.md',
+			'inbox/dropped-note.md',
 		];
 
 		const archive = [
@@ -1751,6 +1773,16 @@ const handlers: MockHandler[] = [
 						{ kind: 'category', value: 2, label: 'News' },
 					],
 				};
+			}
+			if (p === '/path-suggest' && method === 'GET') {
+				return { paths: MOCK_FILES };
+			}
+			if (p === '/path-check' && method === 'GET') {
+				const qs = new URLSearchParams(url.split('?')[1] || '');
+				const path = (qs.get('path') || '').trim();
+				if (!path) return { ok: false, error: 'Enter a file path.' };
+				if (MOCK_FILES.includes(path)) return { ok: true, resolved: `Users/dana/${path}` };
+				return { ok: false, error: 'No file found at that path.' };
 			}
 			return undefined;
 		};
