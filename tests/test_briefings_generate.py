@@ -125,6 +125,37 @@ class TestStructuredGoldenParity:
         assert gs.text == golden
 
 
+class TestEmailNewsletterDiscrimination:
+    def test_email_source_carries_discrimination_note(self):
+        """A shared-pool email source tells the model to drop non-newsletter
+        mail (receipts / transactional / spam) while keeping ambiguous items."""
+        from istota.briefings.generate import _render_source
+        from istota.briefings.sources import GatheredSource
+
+        gs = GatheredSource(
+            kind="email", title="Newsletters",
+            items=[{"sender": "news@semafor.com", "subject": "Flagship",
+                    "body": "world news today"}],
+            provenance="1 newsletters (past 12h)",
+        )
+        rendered = _render_source(gs)
+        assert "world news today" in rendered
+        low = rendered.lower()
+        assert "newsletter" in low
+        assert "receipt" in low
+        # Fail-open: keep an item when unsure.
+        assert "keep it" in low
+
+    def test_non_email_source_has_no_discrimination_note(self):
+        from istota.briefings.generate import _render_source
+        from istota.briefings.sources import GatheredSource
+
+        gs = GatheredSource(kind="todos", title="Todos",
+                            items=[{"text": "- [ ] task one"}])
+        rendered = _render_source(gs)
+        assert "receipt" not in rendered.lower()
+
+
 class TestArchive:
     def test_archive_and_prune(self, tmp_path):
         cfg = _config(tmp_path)

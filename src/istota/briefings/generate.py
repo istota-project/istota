@@ -61,6 +61,20 @@ def _now_in_tz(app_config, user_id: str, now: datetime | None):
     return resolved, tz_str
 
 
+# The shared-pool email source keeps *all* unowned mail — it has no
+# newsletter classifier, only an ownership boundary. So the pool can carry
+# receipts, shipping notices, account alerts, and spam sent to the bare bot
+# address alongside genuine newsletters. This note asks the model to drop the
+# non-newsletter mail at synthesis time. Fail-open: an ambiguous item is kept,
+# so precision-tuning here never silently loses editorial content.
+_EMAIL_DISCRIMINATION_NOTE = (
+    "Note: these are shared-inbox items and some may not be newsletters. "
+    "Synthesize only genuine newsletter/editorial content — omit obvious "
+    "receipts, order and shipping notices, account or security alerts, and "
+    "spam. If you're unsure whether an item is a newsletter, keep it."
+)
+
+
 def _render_source(gs: GatheredSource) -> str:
     """Render one gathered source's content into prompt text."""
     header = f"--- source: {gs.title}"
@@ -68,6 +82,8 @@ def _render_source(gs: GatheredSource) -> str:
         header += f" ({gs.provenance})"
     header += " ---"
     parts = [header]
+    if gs.kind == "email":
+        parts.append(_EMAIL_DISCRIMINATION_NOTE)
     if gs.text.strip():
         parts.append(gs.text.strip())
     for item in gs.items:
