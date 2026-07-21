@@ -440,8 +440,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #
 # [[briefing_shared_blocks]]
 # name = "world-headlines"          # → shared_kv key in namespace "briefing_shared_blocks"
-# cron = "0 6 * * *"                # before the 07:00 briefing window; UTC (global)
-# title = "🌍 World headlines"
+# cron = "45 5,17 * * *"            # twice daily, ~15 min before the briefing windows; UTC (global)
+# title = "🌍 Headlines"
 # directive = "Synthesize the frontpages into ~8 top world stories."
 # render_mode = "synthesis"
 # enabled = true
