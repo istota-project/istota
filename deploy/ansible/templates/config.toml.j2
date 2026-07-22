@@ -331,6 +331,14 @@ location_ping_retention_days = {{ istota_scheduler_location_ping_retention_days 
 {{ _default_briefings_toml }}
 {% endif %}
 
+{# Briefings module config. ``shared_block_timezone`` is the zone shared
+   briefing block cron schedules evaluate in (global — shared blocks are
+   generated once, not per-user). Default "UTC" preserves the historical
+   behaviour; set to the operator's local zone so regeneration windows line
+   up with their day. #}
+[briefings]
+shared_block_timezone = "{{ istota_briefing_shared_tz | default('UTC') }}"
+
 {# Module-owned shared briefing blocks (shared-kv-curated-content). Rendered as
    the top-level [[briefing_shared_blocks]] section; generated once globally by
    the scheduler and written into shared_kv. An empty/undefined var renders

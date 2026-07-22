@@ -1,4 +1,4 @@
-"""Tests for check_shared_blocks cron scheduling (UTC, off-dispatch worker)."""
+"""Tests for check_shared_blocks cron scheduling (configurable TZ, off-dispatch worker)."""
 
 import json
 from datetime import datetime, timezone
@@ -125,3 +125,36 @@ class TestCheckSharedBlocks:
         names = scheduler.check_shared_blocks(cfg)
         assert names == ["hl"]
         assert started["started"] is True
+
+    def test_configured_timezone_drives_fire_time(self, tmp_path, monkeypatch):
+        # Cron is evaluated in the configured shared-block timezone, not UTC.
+        # A 06:00 America/Los_Angeles cron (PDT = UTC-7 in July) is 13:00 UTC.
+        # At 06:05 UTC the LA-local 06:00 fire hasn't happened yet → not due.
+        cfg = _config(tmp_path, [
+            BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
+        ])
+        cfg.briefings.shared_block_timezone = "America/Los_Angeles"
+        db.init_db(cfg.db_path)
+        _at(monkeypatch, datetime(2026, 7, 21, 6, 5, tzinfo=timezone.utc))
+        _stub_generation(monkeypatch, {"text": "news"})
+
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == []
+
+        # At 13:05 UTC (= 06:05 LA) the 06:00 LA fire is due.
+        _at(monkeypatch, datetime(2026, 7, 21, 13, 5, tzinfo=timezone.utc))
+        assert scheduler.check_shared_blocks(cfg, run_inline=True) == ["hl"]
+
+    def test_invalid_timezone_falls_back_to_utc(self, tmp_path, monkeypatch, caplog):
+        # An invalid zone name logs a warning and falls back to UTC (historical
+        # behaviour), so a misconfiguration never breaks shared-block generation.
+        cfg = _config(tmp_path, [
+            BriefingSharedBlock(name="hl", cron="0 6 * * *", sources=[]),
+        ])
+        cfg.briefings.shared_block_timezone = "Not/A/Zone"
+        db.init_db(cfg.db_path)
+        _at(monkeypatch, NOW_0605)
+        _stub_generation(monkeypatch, {"text": "news"})
+
+        with caplog.at_level("WARNING"):
+            assert scheduler.check_shared_blocks(cfg, run_inline=True) == ["hl"]
+        assert any("Not/A/Zone" in r.message for r in caplog.records)

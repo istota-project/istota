@@ -2543,7 +2543,9 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
 
     A shared block is generated *once globally* (no user) and its content written
     into ``shared_kv`` for per-user briefings to read (shared-kv-curated-content
-    spec, Stage 5). Cron is evaluated in **UTC** (global — no per-user timezone).
+    spec, Stage 5). Cron is evaluated in the configured shared-block timezone
+    (``[briefings] shared_block_timezone``, default UTC) — global, no per-user
+    timezone.
 
     Like ``check_briefings``, the slow gather (browse ~60s / IMAP) + the Brain
     call are kept off the dispatch thread: a due block is handed to a short-lived
@@ -2557,7 +2559,15 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
     if not blocks:
         return []
 
-    now_naive = _now(ZoneInfo("UTC")).replace(tzinfo=None)
+    tz_str = (config.briefings.shared_block_timezone or "").strip() or "UTC"
+    try:
+        tz = ZoneInfo(tz_str)
+    except Exception:
+        logger.warning(
+            "shared_block_timezone %r invalid; falling back to UTC", tz_str,
+        )
+        tz = ZoneInfo("UTC")
+    now_naive = _now(tz).replace(tzinfo=None)
     due = []
     with db.get_db(config.db_path) as conn:
         for block in blocks:
@@ -2567,7 +2577,7 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
             if last_run_at:
                 last_run = datetime.fromisoformat(last_run_at)
                 if last_run.tzinfo is not None:
-                    last_run = last_run.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+                    last_run = last_run.astimezone(tz).replace(tzinfo=None)
                 base = last_run
             else:
                 base = now_naive.replace(hour=0, minute=0, second=0, microsecond=0)

@@ -70,6 +70,8 @@ class TestCrud:
         assert [b["name"] for b in listed["shared_blocks"]] == ["world-headlines"]
         assert "allowed_source_kinds" in listed
         assert set(listed["allowed_source_kinds"]) == {"browse", "markets", "email"}
+        # The configured shared-block timezone is surfaced for the UI label.
+        assert listed["shared_block_timezone"] == "UTC"
 
         d = client.delete("/istota/api/briefings/shared-blocks/world-headlines")
         assert d.status_code == 200
@@ -154,6 +156,15 @@ class TestRunNow:
 
     def test_run_missing_404(self, client):
         assert client.post("/istota/api/briefings/shared-blocks/nope/run").status_code == 404
+
+    def test_surfaces_configured_timezone(self, tmp_path):
+        # A non-UTC shared_block_timezone flows into the list response so the
+        # UI can label the Cron column with the operator's chosen zone.
+        app = _make_app(tmp_path)
+        app.state.istota_config.briefings.shared_block_timezone = "America/Los_Angeles"
+        c = TestClient(app)
+        listed = c.get("/istota/api/briefings/shared-blocks").json()
+        assert listed["shared_block_timezone"] == "America/Los_Angeles"
 
 
 class TestOptions:

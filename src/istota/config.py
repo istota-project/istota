@@ -248,7 +248,10 @@ class BriefingSharedBlock:
     are global.
     """
     name: str
-    cron: str  # evaluated in UTC (global, no per-user timezone)
+    # Cron evaluated in the configured shared-block timezone
+    # (``[briefings] shared_block_timezone``, default UTC) — global, no
+    # per-user timezone.
+    cron: str
     title: str = ""
     directive: str | None = None
     render_mode: str = "synthesis"
@@ -265,11 +268,12 @@ class BriefingSharedBlock:
 # ``[[briefing_shared_blocks]]`` (parity with how ``[[default_briefings]]`` is
 # operator/Ansible-provided). ``world-headlines`` needs the headless browser
 # (soft-degrades to an omitted section when it's off); ``markets-summary`` needs
-# only yfinance. Both regenerate twice daily (UTC), ~15 min before the default
-# 06:00 / 18:00 briefing windows, so morning and evening briefings each read a
-# fresh copy; a consuming briefing reads them via a ``shared_block`` source with
-# a freshness window, so a stale/not-yet-generated block degrades to an omitted
-# section (harmless). Kept in step with the Ansible defaults
+# only yfinance. Both regenerate twice daily in the configured shared-block
+# timezone (default UTC), ~15 min before the default 06:00 / 18:00 briefing
+# windows, so morning and evening briefings each read a fresh copy; a consuming
+# briefing reads them via a ``shared_block`` source with a freshness window,
+# so a stale/not-yet-generated block degrades to an omitted section
+# (harmless). Kept in step with the Ansible defaults
 # (``istota_briefing_shared_blocks`` in ``deploy/ansible/defaults/main.yml``).
 DEFAULT_SHARED_BLOCKS: list[dict] = [
     {
@@ -793,6 +797,14 @@ class BriefingsModuleConfig:
     archive_retention_days: int = 90
     default_lookback_hours: int = 12
     max_source_chars: int = 5000
+    # Timezone shared briefing blocks evaluate their cron in. Shared blocks are
+    # global (generated once, no per-user timezone) so this is a single
+    # operator-chosen zone — typically the operator's local zone so the
+    # morning/evening regeneration windows line up with their day. Defaults to
+    # "UTC" (the historical behaviour). Invalid names fall back to UTC at run
+    # time (see scheduler.check_shared_blocks). Set via
+    # ``[briefings] shared_block_timezone`` (Ansible ``istota_briefing_shared_tz``).
+    shared_block_timezone: str = "UTC"
 
 
 @dataclass
@@ -1878,6 +1890,7 @@ def load_config(config_path: Path | None = None) -> Config:
             archive_retention_days=br.get("archive_retention_days", 90),
             default_lookback_hours=br.get("default_lookback_hours", 12),
             max_source_chars=br.get("max_source_chars", 5000),
+            shared_block_timezone=br.get("shared_block_timezone", "UTC"),
         )
 
     if "logging" in data:
