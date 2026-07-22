@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-22: Degraded-brain policy for automatic tasks (ISSUE-181)
+
+The 2026-07-22 09:29 PT sleep-cycle run failed across every channel with an identical `usage_limit` error in six seconds — the first failure guaranteed the next three, and the next scheduled cycle repeated the whole futile pass. Shared-block synthesis had the same shape (an ad-hoc "keep prior content" reflex, but no cooldown, no alert that the block was now N hours stale). Three related gaps from ISSUE-181: no backoff/cooldown when a run fails on a brain-level error, no pause-when-degraded behavior for non-essential background tasks, and no systematic fallback-compatibility pass over the full set of scheduled/automatic tasks.
+
+**Architectural finding (confirmed).** The sleep cycle (`memory/sleep_cycle.py:_run_sleep_cycle_brain`) and shared-block synthesis (`briefings/shared_blocks.py:_run_section_brain`) call the primary brain **directly** (`make_brain(config.brain).execute(req)`), not through the executor's fallback-wrapped path — so "pause on fallback" reduces to "detect primary-brain unavailability and skip," and the fallback-budget concern is moot for these paths (they never reach the fallback brain at all). The user-facing behavior is identical either way: don't run them against a degraded brain.
+
+**Reusable mechanism.** The `PrimaryAvailabilityBreaker` (`brain/_fallback.py`) already existed — keyed by primary kind, opened by `usage_limit`/`not_found`, with `should_skip`/`record_success`. Added two Config-free helpers so the direct callers share its signal:
+- `primary_brain_unavailable(brain_config) -> (available, reason)` — consult before each call/batch; `(False, "unavailable")` when the breaker is open.
+- `report_brain_result(brain_result, brain_config) -> reason | None` — feed a direct caller's `BrainResult` back in; opens the breaker (returns the stop_reason only on the closed→open transition → one operator alert) and closes it on success. Mirrors the executor's task path, so the breaker is now a **single shared signal across all brain callers** — whichever path first hits the limit opens it and alerts; the others see it open and skip silently (no per-channel/per-block alert spam).
+
+**Sleep cycle.** `_run_sleep_cycle_brain` consults at the top (short-circuits `(False, "")` without a doomed brain call) and reports after each call. `check_sleep_cycles` / `check_channel_sleep_cycles` short-circuit the whole pass at the top (breaker already open → skip, log once) **and** re-check per-iteration so a mid-pass failure stops the remaining users/channels — exactly the four-identical-errors-in-six-seconds pattern. One operator alert (⏸️ "Sleep cycle paused — primary brain unavailable …") fires on the transition.
+
+**Shared blocks.** `_run_section_brain` consults + reports; `scheduler._generate_shared_block` skips the expensive gather for `synthesis` blocks when degraded (keeps last-known-good content — the existing reflex, now gated by the shared breaker instead of an ad-hoc per-task guard). `structured` blocks still generate (no brain call). One alert (⏸️ "Shared block '…' paused — … Briefings will keep serving the last-known-good content …") surfaces the staleness the issue called out.
+
+**Cooldown / self-correction.** The breaker cooldown (`fallback_cooldown_seconds`, default 900s) gates the next scheduled run, so neither re-attempts every cycle while the primary stays down. A bounded "still down" heartbeat re-alerts once per cooldown window (org-monthly limit) until an admin raises it / the month resets, then the next probe succeeds and closes the breaker. Intentionally not a separate permanent-pause mode — the 15-min re-probe is self-correcting (no manual unstick) and matches the existing executor contract.
+
+**Problem 3 — posture registry.** New `brain/_postures.py` declares, for every scheduled/automatic brain-calling task, one of three postures: **skip** (sleep cycle, shared-block synthesis, location discovery — non-essential, skip when degraded), **pin** (briefings per ISSUE-180; scheduled `prompt` jobs via per-job `model`), **fail_clean** (health OCR, biomarker explainer — interactive, visible "couldn't generate" notice). Each entry carries its call site + notes; `TASK_POSTURES` / `task_postures_by_name()` make the policy auditable in one place rather than scattered as ad-hoc per-task logic. The registry is a declared data structure, not an enforcement layer — each task still owns its skip/pin/fail-clean logic at its call site. ISSUE-180 (briefings pin/fail-clean) is the inverse face of this policy; together they define the essentialness/skip-pin-fail-clean contract in both directions.
+
+**Operator-alert plumbing consolidated.** `notifications.send_operator_alert(config, message)` (bounded daemon thread + join timeout, picks the operator user via `operator_alert_user`) is now the canonical home; the scheduler's `_send_operator_alert` / `_operator_alert_user` delegate to it (names kept importable for tests). The sleep cycle and shared blocks both reach it through a thin local `_alert_brain_unavailable` wrapper.
+
+**Residuals (noted).** Health OCR/explainer are recorded as `fail_clean` but not yet made breaker-aware (their existing failure → fallback-message/safe-payload path is the right shape; wiring the consult is a small follow-up). ISSUE-180 (briefings pin/fail-clean) remains the open inverse face.
+
+Regression tests in `tests/test_brain_degraded_policy.py` (28 tests): breaker consult/report unit semantics, sleep-cycle pass short-circuit + per-iteration break + one-alert, shared-block synthesis skip (structured still generates), scheduler gather-skip, posture registry shape. Full suite green (7931 passed). `AGENTS.md` "Sleep Cycle" + `.claude/rules/brain.md` (new "Direct-caller availability" + "Fallback-compatibility posture registry" sections) document the policy.
+
+**Files added/modified:**
+- `src/istota/brain/_fallback.py` — `primary_brain_unavailable` + `report_brain_result` direct-caller helpers
+- `src/istota/brain/_postures.py` — new fallback-compatibility posture registry (Problem 3)
+- `src/istota/brain/__init__.py` — re-export the new helpers + posture registry
+- `src/istota/memory/sleep_cycle.py` — `_run_sleep_cycle_brain` consult/report; `check_sleep_cycles` / `check_channel_sleep_cycles` pass + per-iteration short-circuit; `_alert_brain_unavailable`
+- `src/istota/briefings/shared_blocks.py` — `_run_section_brain` consult/report; `_alert_brain_unavailable`
+- `src/istota/scheduler.py` — `_generate_shared_block` skips synthesis gather when degraded; `_operator_alert_user`/`_send_operator_alert` delegate to notifications
+- `src/istota/notifications.py` — canonical `operator_alert_user` + `send_operator_alert`
+- `tests/test_brain_degraded_policy.py` — new regression suite (28 tests)
+- `AGENTS.md`, `.claude/rules/brain.md` — documentation
+
 ## 2026-07-21: Web UI — standardized confirmation modals (ConfirmDialog primitive)
 
 The web UI had three competing confirmation patterns: native `window.confirm()` (unstyled, theme-ignoring browser dialogs), hand-rolled `.modal-backdrop` divs (each re-implementing backdrop/modal/button CSS with no focus-trap or Esc handling), and the shared bits-ui `Modal` — whose confirms used a redundant *title-is-the-question* form (`"Delete block?"` + body `Remove **X**?`). Standardized everything on one primitive with cleaner two-part copy.

@@ -36,6 +36,24 @@ import dataclasses
 import logging
 
 from ._aliases import CANONICAL_ROLES, is_portable_alias
+from ._fallback import (
+    COOLDOWN_STOP_REASONS,
+    PrimaryAvailabilityBreaker,
+    TRIGGER_STOP_REASONS,
+    effective_fallback_kind,
+    get_availability_breaker,
+    primary_brain_unavailable,
+    report_brain_result,
+    reset_availability_breaker,
+)
+from ._postures import (
+    POSTURE_FAIL_CLEAN,
+    POSTURE_PIN,
+    POSTURE_SKIP,
+    REGISTRY as TASK_POSTURES,
+    TaskPosture,
+    postures_by_name as task_postures_by_name,
+)
 from ._roles import get_role_override, get_role_overrides, set_role_overrides
 from ._types import Brain, BrainConfig, BrainRequest, BrainResult
 from .claude_code import ClaudeCodeBrain, is_usage_limit_error
@@ -104,11 +122,22 @@ __all__ = [
     "BrainResult",
     "CANONICAL_ROLES",
     "ClaudeCodeBrain",
+    "COOLDOWN_STOP_REASONS",
     "ContextManagementEvent",
     "KNOWN_BRAIN_KINDS",
     "NativeBrain",
+    "POSTURE_FAIL_CLEAN",
+    "POSTURE_PIN",
+    "POSTURE_SKIP",
+    "PrimaryAvailabilityBreaker",
+    "TASK_POSTURES",
+    "TRIGGER_STOP_REASONS",
+    "TaskPosture",
     "is_portable_alias",
     "is_usage_limit_error",
+    "primary_brain_unavailable",
+    "report_brain_result",
+    "reset_availability_breaker",
     "ResultEvent",
     "StreamEvent",
     "TextDeltaEvent",
@@ -118,6 +147,8 @@ __all__ = [
     "ToolEndEvent",
     "ToolProgressEvent",
     "ToolUseEvent",
+    "effective_fallback_kind",
+    "get_availability_breaker",
     "get_role_override",
     "get_role_overrides",
     "make_brain",
@@ -125,4 +156,5 @@ __all__ = [
     "parse_stream_line",
     "resolve_brain_kind",
     "set_role_overrides",
+    "task_postures_by_name",
 ]

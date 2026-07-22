@@ -9,6 +9,7 @@ ntfy POST lives in ``transport.ntfy`` (the single ntfy delivery path); the
 """
 
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 # Re-exported so existing references (and the is_channel_configured probe) keep
@@ -448,3 +449,61 @@ def send_notification(
         )
 
     return sent
+
+
+# ---------------------------------------------------------------------------
+# Operator alerts
+# ---------------------------------------------------------------------------
+# Operator-level alerts go to a single recipient (first admin, else first
+# configured user) over the ``alert`` routing purpose. ``send_operator_alert``
+# runs the send on a short-lived daemon thread with a join timeout so a wedged
+# Talk/Nextcloud can't stall the caller — the scheduler main loop, the sleep
+# cycle, shared-block generation, and the backup/loop watchdogs all share this.
+# ISSUE-143 class: a degraded brain is exactly when Talk is likely also down.
+
+
+def operator_alert_user(config: "Config") -> str | None:
+    """Pick the user to receive operator-level alerts.
+
+    Prefers the first admin user (sorted for determinism); falls back to the
+    first configured user. ``None`` when no users are configured.
+    """
+    admins = getattr(config, "admin_users", None)
+    if admins:
+        return sorted(admins)[0]
+    users = getattr(config, "users", None)
+    if users:
+        return sorted(users)[0]
+    return None
+
+
+def send_operator_alert(
+    config: "Config", message: str, *, timeout: float = 30.0
+) -> None:
+    """Send an operator alert without letting a hung delivery stall the caller.
+
+    Picks the recipient via :func:`operator_alert_user` and dispatches through
+    :func:`send_notification` (``purpose="alert"``) on a short-lived daemon
+    thread, waiting at most ``timeout``. If the send is still running after the
+    timeout it is left to finish (or die) in the background — a wedged Talk must
+    never block the scheduler main loop or a sleep-cycle pass (ISSUE-143 class).
+    """
+    user_id = operator_alert_user(config)
+    if not user_id:
+        logger.warning("operator_alert_no_recipient — message not sent: %s", message)
+        return
+
+    def _do() -> None:
+        try:
+            send_notification(config, user_id, message, purpose="alert")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("operator_alert_failed err=%s", exc)
+
+    t = threading.Thread(target=_do, name="operator-alert", daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        logger.error(
+            "operator_alert_timed_out after %ss — send still running in background",
+            timeout,
+        )

@@ -262,6 +262,62 @@ an unknown kind or a self-fallback with one WARNING. Single fallback level only;
 if the fallback is also unavailable the task fails/retries normally. On a dropped
 non-portable pin the successful reply gets a one-line italic model note.
 
+### Direct-caller availability (ISSUE-181)
+
+The sleep cycle (`memory/sleep_cycle.py:_run_sleep_cycle_brain`) and shared-block
+synthesis (`briefings/shared_blocks.py:_run_section_brain`) call the primary
+brain **directly** (`make_brain(config.brain).execute(req)`), not through the
+executor's fallback-wrapped path — so "pause on fallback" reduces to "detect
+primary-brain unavailability and skip." Two Config-free helpers in
+`brain/_fallback.py` give them the same breaker signal the executor arms:
+
+- **`primary_brain_unavailable(brain_config) -> (available, reason)`** —
+  consult before each call (or before a batch). Returns `(False, "unavailable")`
+  when the breaker is open for the primary kind, so a degraded primary doesn't
+  grind through every channel/block. Honours `fallback_cooldown_seconds` (`0` =
+  every caller probes, matching the executor).
+- **`report_brain_result(brain_result, brain_config) -> reason | None`** — feed
+  a direct caller's `BrainResult` back into the shared breaker. Opens it
+  (returns the `stop_reason` only on the closed→open transition → caller arms
+  exactly one operator alert) on `usage_limit`/`not_found`; closes it on success.
+  Mirrors the executor's task path, so the breaker is a **single shared signal
+  across all brain callers** — whichever path first hits the limit opens it and
+  alerts; the others see it open and skip silently.
+
+The sleep cycle short-circuits both passes at the top (`check_sleep_cycles` /
+`check_channel_sleep_cycles`) and re-checks per-iteration so a mid-pass failure
+stops the remaining channels (the four-identical-errors-in-six-seconds pattern
+from ISSUE-181). Shared-block synthesis skips the gather+brain and keeps
+last-known-good content; one operator alert fires when the breaker opens.
+`structured` shared blocks never touch the brain, so they still generate when
+degraded. The breaker cooldown gates the next scheduled run, so neither
+re-attempts every cycle while the primary stays down; a bounded "still down"
+heartbeat re-alerts once per cooldown window (org-monthly limit) until an admin
+raises it, then the next probe succeeds and closes the breaker.
+
+### Fallback-compatibility posture registry (ISSUE-181, Problem 3)
+
+`brain/_postures.py` declares, for every scheduled/automatic brain-calling
+task, one of three postures for what happens when the primary is unavailable:
+
+- **skip** — non-essential tasks (sleep cycle, shared-block synthesis, location
+  discovery) that can wait. Don't run against a degraded brain; resume when the
+  primary recovers. Implemented via the breaker helpers above.
+- **pin** — essential tasks that must produce a real answer and shouldn't ride
+  the fallback (briefings — ISSUE-180; scheduled `prompt` jobs via per-job
+  `model`).
+- **fail_clean** — interactive-but-automatic callers (health OCR, biomarker
+  explainer) whose failure should be visible ("couldn't generate — brain
+  unavailable") rather than a silent stub.
+
+The registry is a declared, discoverable data structure (`TASK_POSTURES`,
+`task_postures_by_name()`) — each entry carries its call site + notes — so the
+policy is auditable in one place rather than scattered as ad-hoc per-task
+logic. A task not listed routes through the executor's fallback wrapper and
+needs no separate posture. ISSUE-180 (briefings pin/fail-clean) is the inverse
+face of this policy; together they define the essentialness/skip-pin-fail-clean
+contract in both directions.
+
 NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
 - **Reasoning effort.** `req.effort or native.effort` → the OpenAI-compat
   `reasoning_effort` field, gated on `get_model_info(model).supports_thinking`
