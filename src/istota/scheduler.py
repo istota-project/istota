@@ -2618,9 +2618,27 @@ def _generate_shared_block(config: Config, block) -> None:
     skips the write and leaves the prior value intact — a transient upstream
     outage degrades to last-known-good rather than blanking the section. Runs on
     a short-lived worker thread; never raises into the caller.
+
+    ISSUE-181: a ``synthesis`` block needs the primary brain, so when it's
+    degraded (breaker open) we skip the whole gather+synthesize — the expensive
+    browse/IMAP fetch would be wasted and the brain call would fail anyway. The
+    prior shared_kv value is kept (last-known-good); one operator alert already
+    fired when the breaker opened. ``structured`` blocks never touch the brain
+    (verbatim source concatenation), so they still generate when degraded.
     """
+    from istota.brain import primary_brain_unavailable
     from istota.briefings.shared_blocks import SYSTEM_IDENTITY, run_shared_block
     from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+
+    if getattr(block, "render_mode", "synthesis") != "structured":
+        available, _reason = primary_brain_unavailable(config.brain)
+        if not available:
+            logger.info(
+                "shared block %s skipped — primary brain unavailable "
+                "(keeping prior content)",
+                block.name,
+            )
+            return
 
     try:
         result = run_shared_block(block, config)
@@ -2906,14 +2924,14 @@ def check_db_health(config: Config) -> list[CheckReport]:
 def _operator_alert_user(config: Config) -> str | None:
     """Pick a user to receive operator-level scheduler alerts.
 
-    Prefers the first admin user (sorted for determinism); falls back to the
-    first configured user. ``None`` when no users are configured.
+    Thin delegate to :func:`istota.notifications.operator_alert_user` (the
+canonical home) so scheduler-internal callers and tests keep their import
+path. Prefers the first admin user (sorted for determinism); falls back to
+    the first configured user. ``None`` when no users are configured.
     """
-    if config.admin_users:
-        return sorted(config.admin_users)[0]
-    if config.users:
-        return sorted(config.users)[0]
-    return None
+    from .notifications import operator_alert_user
+
+    return operator_alert_user(config)
 
 
 def _send_operator_alert(config: Config, user_id: str, message: str, *, timeout: float = 30.0) -> None:

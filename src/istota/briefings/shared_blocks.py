@@ -50,6 +50,27 @@ __all__ = ["ALLOWED_SHARED_SOURCE_KINDS", "SYSTEM_IDENTITY", "run_shared_block"]
 _GENERATION_TIMEOUT_SECONDS = 180
 
 
+def _alert_brain_unavailable(config, label: str, reason: str) -> None:
+    """Fire one operator alert when shared-block generation trips the breaker.
+
+    One-shot per cooldown window (``report_brain_result`` returns the reason
+    only on the closed→open transition). Surfaces that shared blocks are now
+    serving stale content (last-known-good) so the operator knows the morning
+    briefing's shared section is N hours behind, not fresh (ISSUE-181).
+    """
+    try:
+        from istota.notifications import send_operator_alert
+
+        send_operator_alert(
+            config,
+            f"⏸️ Shared block '{label}' paused — primary brain unavailable "
+            f"({reason}). Briefings will keep serving the last-known-good "
+            f"content until the primary recovers.",
+        )
+    except Exception:
+        logger.debug("shared block brain-unavailable alert failed", exc_info=True)
+
+
 def _allowed_sources(block_def) -> list[dict]:
     """Return the block's usable sources, dropping user-specific kinds with a
     WARNING. Each source is a ``{"kind", "config"}`` dict."""
@@ -215,8 +236,25 @@ def _run_section_brain(config, prompt: str, label: str) -> tuple[bool, str]:
 
     Mirrors the sleep cycle's brain call: no tools, no streaming, no sandbox.
     Uses the ``general`` role alias. Returns (success, text).
+
+    ISSUE-181: like the sleep cycle, this calls the primary brain directly, so
+    it consults the shared availability breaker before paying for a doomed call
+    and feeds its own failures back in — a ``usage_limit`` opens the breaker
+    (arming one operator alert) so the next shared-block cycle skips instead of
+    re-attempting, and a success closes it. The ``structured`` path never
+    reaches here (no brain call), so only ``synthesis`` blocks are affected.
     """
     from istota.brain import BrainRequest, make_brain
+    from istota.brain import primary_brain_unavailable, report_brain_result
+
+    # Non-essential task policy (ISSUE-181): skip when the primary is degraded.
+    available, _reason = primary_brain_unavailable(config.brain)
+    if not available:
+        logger.info(
+            "shared block %s skipped — primary brain unavailable (cooling down)",
+            label,
+        )
+        return False, ""
 
     brain = make_brain(config.brain)
     req = BrainRequest(
@@ -238,6 +276,10 @@ def _run_section_brain(config, prompt: str, label: str) -> tuple[bool, str]:
     except Exception as e:  # noqa: BLE001
         logger.error("shared block %s brain error: %s", label, e)
         return False, ""
+    # Feed the result into the shared breaker (one-shot alert on open).
+    _opened_reason = report_brain_result(result, config.brain)
+    if _opened_reason:
+        _alert_brain_unavailable(config, label, _opened_reason)
     if not result.success or result.stop_reason in ("timeout", "not_found"):
         logger.error(
             "shared block %s failed (stop_reason=%s): %s",

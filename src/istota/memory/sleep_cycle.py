@@ -12,6 +12,7 @@ from croniter import croniter
 
 from .. import db
 from ..brain import BrainRequest, make_brain
+from ..brain import primary_brain_unavailable, report_brain_result
 from ..config import Config
 from ..storage import (
     _get_mount_path,
@@ -161,7 +162,29 @@ def _run_sleep_cycle_brain(
     sandbox, no progress callbacks, no PID tracking. The brain handles
     transient API retries; everything else stays text-only by construction
     (empty allowed_tools).
+
+    ISSUE-181: this calls the primary brain *directly* (not through the
+    executor's fallback-wrapped path), so it consults the shared availability
+    breaker before each call and feeds its own failures back into it. When the
+    primary is in a ``usage_limit``/``not_found`` state the breaker is open and
+    this short-circuits ``(False, "")`` without paying for a doomed brain call
+    — so a degraded primary doesn't grind through every channel in a pass. The
+    first failure opens the breaker (arming one operator alert); subsequent
+    calls in the same pass skip. The breaker cooldown also gates the next
+    scheduled run, so the cycle doesn't re-attempt every tick while the primary
+    stays down. A successful run closes the breaker.
     """
+    # Non-essential task policy (ISSUE-181): skip when the primary is degraded
+    # rather than burning a doomed call per channel/block. ``_unavailable``
+    # fires the one-shot operator alert on the closed→open transition so the
+    # operator learns the sleep cycle is paused, not just silent.
+    available, _reason = primary_brain_unavailable(config.brain)
+    if not available:
+        logger.info(
+            "%s skipped — primary brain unavailable (cooling down)", label
+        )
+        return False, ""
+
     req = BrainRequest(
         prompt=prompt,
         allowed_tools=[],
@@ -184,6 +207,13 @@ def _run_sleep_cycle_brain(
     except Exception as e:
         logger.error("%s brain error: %s", label, e)
         return False, ""
+
+    # Feed the result into the shared availability breaker so a usage_limit /
+    # not_found opens it (one-shot alert) and a success closes it. Mirrors the
+    # executor's task path so the breaker is a single signal across all callers.
+    _opened_reason = report_brain_result(result, config.brain)
+    if _opened_reason:
+        _alert_brain_unavailable(config, label, _opened_reason)
 
     if result.stop_reason == "timeout":
         logger.error("%s timed out", label)
@@ -217,6 +247,31 @@ def _excerpt(text: str, budget: int) -> str:
     head_size = int(usable * 0.4)
     tail_size = usable - head_size
     return text[:head_size] + marker + text[-tail_size:]
+
+
+def _alert_brain_unavailable(
+    config: Config, label: str, reason: str
+) -> None:
+    """Fire one operator alert when the sleep cycle trips the availability breaker.
+
+    The breaker opens exactly once per cooldown window (``report_brain_result``
+    returns the reason only on the closed→open transition), so this pages once
+    per degraded episode — not per channel. The cooldown means the next
+    scheduled run re-probes after it elapses; if the primary is still down it
+    fails, re-opens, and re-alerts, giving a bounded "still down" heartbeat
+    rather than silently retrying every cycle (ISSUE-181).
+    """
+    try:
+        from ..notifications import send_operator_alert
+
+        send_operator_alert(
+            config,
+            f"⏸️ Sleep cycle paused — primary brain unavailable ({reason}) "
+            f"during '{label}'. Memory extraction will resume once the primary "
+            f"recovers. Subsequent channels in this pass are skipped.",
+        )
+    except Exception:
+        logger.debug("sleep cycle brain-unavailable alert failed", exc_info=True)
 
 
 # Cap the per-task tool list so a runaway trajectory can't blow the day-data
@@ -1669,6 +1724,20 @@ def check_sleep_cycles(conn: "db.sqlite3.Connection", config: Config) -> list[st
     if not config.sleep_cycle.enabled:
         return []
 
+    # ISSUE-181: non-essential task policy. The sleep cycle calls the primary
+    # brain directly (not the executor's fallback path), so when the primary is
+    # in a usage_limit/not_found state the whole pass is skipped — no per-user
+    # extraction, no curation, no playbook distillation. ``_run_sleep_cycle_brain``
+    # also short-circuits per call, so a failure mid-pass stops the remaining
+    # users; this top-level check avoids even iterating when the breaker is
+    # already open from a prior task or cycle.
+    available, _reason = primary_brain_unavailable(config.brain)
+    if not available:
+        logger.info(
+            "Sleep cycle skipped — primary brain unavailable (cooling down)"
+        )
+        return []
+
     sleep_config = config.sleep_cycle
     processed = []
 
@@ -1700,6 +1769,16 @@ def check_sleep_cycles(conn: "db.sqlite3.Connection", config: Config) -> list[st
             should_run = now >= next_run
 
         if should_run:
+            # ISSUE-181: a prior user's failure may have opened the breaker
+            # mid-pass — re-check before each user so the remaining ones skip
+            # instead of repeating the doomed brain call.
+            avail, _r = primary_brain_unavailable(config.brain)
+            if not avail:
+                logger.info(
+                    "Sleep cycle: skipping remaining users — "
+                    "primary brain unavailable"
+                )
+                break
             logger.info("Running sleep cycle for user %s", user_id)
             try:
                 wrote = process_user_sleep_cycle(config, conn, user_id)
@@ -2080,6 +2159,17 @@ def check_channel_sleep_cycles(
     if not config.channel_sleep_cycle.enabled:
         return []
 
+    # ISSUE-181: same non-essential-task skip as the per-user sleep cycle. The
+    # channel loop is exactly the case the issue calls out — four channels, four
+    # identical usage_limit errors in six seconds. Skipping the whole pass when
+    # the primary is degraded stops the first failure from guaranteeing the rest.
+    available, _reason = primary_brain_unavailable(config.brain)
+    if not available:
+        logger.info(
+            "Channel sleep cycle skipped — primary brain unavailable (cooling down)"
+        )
+        return []
+
     csc = config.channel_sleep_cycle
     processed = []
 
@@ -2116,6 +2206,17 @@ def check_channel_sleep_cycles(
             should_run = now >= next_run
 
         if should_run:
+            # ISSUE-181: a prior channel's failure may have opened the breaker
+            # mid-pass — re-check before each channel so the remaining ones skip
+            # instead of repeating the doomed brain call. (The whole pass is also
+            # short-circuited at the top when the breaker was already open.)
+            avail, _r = primary_brain_unavailable(config.brain)
+            if not avail:
+                logger.info(
+                    "Channel sleep cycle: skipping remaining channels — "
+                    "primary brain unavailable"
+                )
+                break
             logger.info("Running channel sleep cycle for %s", token)
             try:
                 wrote = process_channel_sleep_cycle(config, conn, token)
