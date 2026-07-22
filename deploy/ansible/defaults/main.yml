@@ -602,6 +602,14 @@ istota_briefing_shared_blocks:
       - kind: "markets"
         config: {}
 
+# Timezone shared briefing block jobs evaluate their cron in. Shared blocks are
+# generated once globally (no per-user timezone), so this is a single
+# operator-chosen zone — set it to the operator's local zone (e.g.
+# "America/Los_Angeles") so the morning/evening regeneration windows line up
+# with their day. Defaults to "UTC" (the historical behaviour). Maps to
+# [briefings] shared_block_timezone in config.toml.
+istota_briefing_shared_tz: "UTC"
+
 # rclone remote name for Nextcloud
 istota_rclone_remote: "nextcloud"
 

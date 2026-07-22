@@ -1939,6 +1939,7 @@ export interface SharedBlocksResponse {
   shared_blocks: SharedBlock[];
   allowed_source_kinds: string[];
   render_modes: string[];
+  shared_block_timezone: string;
 }
 
 export interface SharedBlockOption {

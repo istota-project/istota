@@ -490,6 +490,7 @@ def list_shared_blocks(
         "shared_blocks": blocks,
         "allowed_source_kinds": sorted(ALLOWED_SHARED_SOURCE_KINDS),
         "render_modes": list(RENDER_MODES),
+        "shared_block_timezone": cfg.briefings.shared_block_timezone or "UTC",
     }
 
 

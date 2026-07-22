@@ -125,6 +125,7 @@
   }
   let sharedBlocks = $state<SharedBlock[]>([]);
   let sharedAllowedKinds = $state<string[]>(['browse', 'markets', 'email']);
+  let sharedBlockTimezone = $state<string>('UTC');
   let sharedDraft = $state<SharedDraft | null>(null);
   let sharedEditingName = $state<string | null>(null); // non-null = editing existing
   let sharedError = $state('');
@@ -140,6 +141,7 @@
     const resp = await getSharedBlocks();
     sharedBlocks = resp.shared_blocks;
     if (resp.allowed_source_kinds?.length) sharedAllowedKinds = resp.allowed_source_kinds;
+    if (resp.shared_block_timezone) sharedBlockTimezone = resp.shared_block_timezone;
   }
 
   // Compact "last run" — the raw ISO string is wide and ugly; show a short
@@ -1064,7 +1066,7 @@
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Cron</th>
+                  <th>Cron ({sharedBlockTimezone})</th>
                   <th class="col-render">Render</th>
                   <th>Trust</th>
                   <th>Last run</th>
@@ -1128,7 +1130,7 @@
                   disabled={!!sharedEditingName}
                 />
               </SettingsField>
-              <SettingsField label="Cron (UTC)">
+              <SettingsField label={`Cron (${sharedBlockTimezone})`}>
                 <input type="text" placeholder="0 6 * * *" bind:value={sharedDraft.cron} />
               </SettingsField>
             </div>

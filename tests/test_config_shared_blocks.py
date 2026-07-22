@@ -98,6 +98,20 @@ class TestLoadConfigSeeding:
         config = load_config(cfg_path)
         assert config.briefing_shared_blocks == []
 
+    def test_shared_block_timezone_default_utc(self, tmp_path):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(tomli_w.dumps({"bot_name": "Istota"}))
+        config = load_config(cfg_path)
+        assert config.briefings.shared_block_timezone == "UTC"
+
+    def test_shared_block_timezone_parsed(self, tmp_path):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(tomli_w.dumps({
+            "briefings": {"shared_block_timezone": "America/Los_Angeles"},
+        }))
+        config = load_config(cfg_path)
+        assert config.briefings.shared_block_timezone == "America/Los_Angeles"
+
 
 class TestApplySharedBlocksOverlay:
     def _base_config(self, tmp_path):
