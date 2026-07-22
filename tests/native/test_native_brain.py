@@ -15,7 +15,13 @@ from istota.llm.provider import (
     TextDelta,
     ThinkingDelta,
 )
-from istota.llm.types import AssistantMessage, TextContent, ToolCallContent, Usage
+from istota.llm.types import (
+    AssistantMessage,
+    TextContent,
+    ThinkingContent,
+    ToolCallContent,
+    Usage,
+)
 
 from ._mock_provider import MockProvider
 
@@ -115,6 +121,45 @@ class TestTextCompletion:
         )
         result = _brain(provider).execute(_req("hi", tmp_path))
         assert "partial" in result.result_text
+        assert "content filter" in result.result_text.lower()
+
+    def test_max_tokens_empty_is_failure(self, tmp_path):
+        # A truncation that produced *no* answer content — a reasoning model
+        # that spent the whole output-token budget on thinking and emitted
+        # nothing — must fail (not silently succeed with an empty result), so
+        # the executor's retry path engages and the empty reply is never
+        # delivered or archived as a completed task.
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[ThinkingContent(thinking="(reasoning only, no answer)")],
+                    usage=Usage(input_tokens=10, output_tokens=16384),
+                    stop_reason="max_tokens",
+                )
+            ]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.success is False
+        assert result.stop_reason == "error"
+        assert result.result_text.strip()  # non-empty, informative
+        assert "truncated" in result.result_text.lower()
+        assert "output token" in result.result_text.lower()
+
+    def test_content_filter_empty_is_failure(self, tmp_path):
+        # Same contract as max_tokens: a content-filter clip that yielded no
+        # content is a failure, not an empty success.
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[],
+                    usage=Usage(input_tokens=10, output_tokens=0),
+                    stop_reason="content_filter",
+                )
+            ]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path))
+        assert result.success is False
+        assert result.stop_reason == "error"
         assert "content filter" in result.result_text.lower()
 
     def test_clean_completion_has_no_marker(self, tmp_path):

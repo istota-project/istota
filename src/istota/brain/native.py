@@ -803,12 +803,32 @@ class NativeBrain:
 
         # NB-15: a final answer the model was forced to cut short (output token
         # cap) or that the endpoint's content filter clipped is delivered with a
-        # visible marker instead of masquerading as a complete response.
+        # visible marker instead of masquerading as a complete response. A
+        # truncation that produced *no* answer content (typically a reasoning
+        # model that spent the whole output-token budget on thinking and emitted
+        # nothing) is a real failure, not a silent success: return an informative
+        # error so the executor's retry path engages and the empty reply is never
+        # delivered or archived as a completed task.
         result_text = last_assistant_text
-        if not final_stop["reason"] and result_text:
-            marker = _TRUNCATION_MARKERS.get(last_assistant_stop["value"])
-            if marker:
+        marker = (
+            _TRUNCATION_MARKERS.get(last_assistant_stop["value"])
+            if not final_stop["reason"]
+            else None
+        )
+        if marker:
+            if result_text.strip():
+                # Non-empty but cut short — keep the partial answer and flag it.
                 result_text = f"{result_text}\n\n{marker}"
+            else:
+                # Empty content + truncation — no usable output. Fail with the
+                # marker as the error text. _build_result's "error" path runs it
+                # through _classify_native_error, which leaves a truncation note
+                # as a generic "error" (not usage_limit / transient), so the
+                # task flows through the normal retry path rather than rerouting.
+                return self._build_result(
+                    "error", marker, last_error_message,
+                    trace, actions, usage, model,
+                )
 
         return self._build_result(
             final_stop["reason"], result_text, last_error_message,
