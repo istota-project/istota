@@ -1,4 +1,4 @@
-"""End-to-end: assemble_briefing_input with a kv / shared_block source."""
+"""End-to-end: assemble_briefing_input with a shared_block source."""
 
 import json
 
@@ -6,6 +6,7 @@ from istota import db
 from istota.briefings import db as bdb
 from istota.briefings import ensure_initialised, resolve_for_user
 from istota.briefings.generate import assemble_briefing_input
+from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
 from istota.config import Config, UserConfig
 
 
@@ -40,13 +41,12 @@ class TestKvBlockGeneration:
         db.init_db(cfg.db_path)
         with db.get_db(cfg.db_path) as conn:
             db.shared_kv_set(
-                conn, "briefings", "digest",
+                conn, SHARED_BLOCK_NAMESPACE, "digest",
                 json.dumps({"text": "Big news today."}), "admin",
             )
         ctx = _ctx_with_blocks(cfg, [
             {"title": "🌍 Curated", "render_mode": "structured", "sources": [
-                {"kind": "kv", "config": {
-                    "scope": "shared", "namespace": "briefings", "key": "digest"}},
+                {"kind": "shared_block", "config": {"name": "digest"}},
             ]},
         ])
         with db.get_db(cfg.db_path) as conn:
@@ -54,7 +54,7 @@ class TestKvBlockGeneration:
         assert result is not None
         assert result.rendered_blocks == 1
         assert "Big news today." in result.prompt
-        # Untrusted framing rides the content by default.
+        # Untrusted framing rides the content by default (no stored `trusted`).
         assert "UNTRUSTED CONTENT" in result.prompt
 
     def test_trusted_flag_omits_untrusted_wrap(self, tmp_path):
@@ -62,13 +62,12 @@ class TestKvBlockGeneration:
         db.init_db(cfg.db_path)
         with db.get_db(cfg.db_path) as conn:
             db.shared_kv_set(
-                conn, "briefings", "digest",
-                json.dumps({"text": "Trusted."}), "admin",
+                conn, SHARED_BLOCK_NAMESPACE, "digest",
+                json.dumps({"text": "Trusted.", "trusted": True}), "admin",
             )
         ctx = _ctx_with_blocks(cfg, [
             {"title": "Curated", "render_mode": "structured", "sources": [
-                {"kind": "kv", "config": {
-                    "namespace": "briefings", "key": "digest", "trusted": True}},
+                {"kind": "shared_block", "config": {"name": "digest"}},
             ]},
         ])
         with db.get_db(cfg.db_path) as conn:
