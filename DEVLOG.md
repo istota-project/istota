@@ -2,6 +2,43 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-23: Native brain + Google Gemini — tool-schema and finish-reason fixes
+
+Two distinct bugs surfaced in the native brain's OpenAI-compatible provider layer once a configured fallback brain pointed at Google Gemini 3.6 Flash (via OpenRouter) and started taking traffic while the primary `claude_code` brain was unavailable. Both are latent defects that OpenAI/Anthropic tolerate and Google rejects — the switch to Gemini as the active fallback path is what exposed them. Found and fixed together because both manifested as task failures driven by the same provider boundary.
+
+### 1. Array tool parameters missing `items` (HTTP 400 at request time)
+
+The Edit tool's `edits` parameter (`type: "array"`) serialized to `{"type":"array","description":…}` with **no `items` sub-schema**, because `ToolParameter` (`src/istota/llm/types.py`) had no `items` field at all and `_tool_to_wire` (`src/istota/llm/openai_compat.py`) only emitted `type`/`description`/`enum`. OpenAI tolerates a missing `items`; **Google Gemini does not** — it requires `items` with a `type` and 400'd the whole request:
+
+```
+HTTP 400: GenerateContentRequest.tools[0].function_declarations[2]
+  .parameters.properties[edits].items: missing field.  status: INVALID_ARGUMENT
+```
+
+`function_declarations[2]` is the third tool = Edit (tool order is Read, Write, Edit, Grep, Glob, Bash). Every fallback attempt 400'd at request time before the model ever saw the prompt.
+
+**Fix.** `ToolParameter` gains an `items: ToolParameter | None` field (defaulted, backward-compatible — all call sites use keyword args). `_tool_to_wire` is now recursive via a new `_param_to_schema` helper that emits `items` (arrays) and `properties` (objects) whenever declared — the latter also fixes a latent sibling where nested object `properties` were silently dropped (no current core tool exercises it, but it's the same class of bug). The Edit tool now declares `edits.items` as an object with `old_string`/`new_string` string properties. `edits` is the only array parameter across the core toolset.
+
+### 2. `finish_reason: "error"` laundered into `end_turn` (silent empty completion)
+
+OpenRouter reports an upstream generation failure as `finish_reason: "error"` **inside a normal choices chunk with no `error` object** — so the provider's mid-stream error-frame guard (which only fires on a `data: {"error":…}` frame) never engages. The chunk flows to `_assemble_message`, where `_FINISH_REASON_MAP.get("error", "end_turn")` silently fell back to `"end_turn"`. The half-built (often empty-text) response became `BrainResult(success=True, result_text="")`, the executor appended the fallback model-note, and the task was marked `completed` with `stop_reason: "completed"` — no actual answer, silently swallowed.
+
+The trigger is Gemini's known tokenizer quirk: it occasionally emits a tool call whose JSON arguments contain unescaped strings/newlines, which OpenRouter flags as `native_finish_reason: "MALFORMED_FUNCTION_CALL"` / `finish_reason: "error"`. Istota laundered that to `end_turn` and delivered an empty result — the task appeared to complete mid-flow with no answer.
+
+**Fix.** `_FINISH_REASON_MAP` now maps `"error" → "error"`, so the assembled `AssistantMessage` carries `stop_reason="error"`. The agent loop already treats `stop_reason in ("error","aborted")` as a hard stop (`agent_end(stop_reason="error")`), the native brain builds a failure `BrainResult`, and the scheduler retries — MALFORMED is intermittent (~2–15%), so a retry typically succeeds. `_assemble_message` also stamps a descriptive `error_message` for this case (the stream carries no error text — there's no `error` object in the chunk), so the retry log / failure row explains the cause instead of reading as a bare "Native brain execution error."
+
+The loop's `stop_reason="error"` → `agent_end` path was already covered by `test_provider_error_stops_loop`; the new tests cover the provider-layer mapping itself (bare error finish, and a partial-text-then-error variant).
+
+**On the broader Gemini MALFORMED mitigation** (system-prompt JSON-escaping nudge, temp=0 retry, `tool_config: ANY`): worth a follow-up, but the priority fix was stopping Istota from silently swallowing the error as a fake completion. The retry the fix now triggers is itself the single most effective recovery — the community guidance's own "remaining ~2%" bucket.
+
+Regression tests in `tests/native/test_openai_compat.py` (array→`items`, object→nested `properties`, `finish_reason: "error"` → `stop_reason: "error"` + descriptive message, partial-text-then-error). Full native + brain suite green (469 passed).
+
+**Files modified:**
+- `src/istota/llm/types.py` — `ToolParameter.items` field
+- `src/istota/llm/openai_compat.py` — recursive `_param_to_schema`; `"error"` in `_FINISH_REASON_MAP`; descriptive `error_message` on error finish
+- `src/istota/session/tools/files.py` — Edit `edits.items` object schema
+- `tests/native/test_openai_compat.py` — regression tests
+
 ## 2026-07-22: Degraded-brain policy for automatic tasks (ISSUE-181)
 
 The 2026-07-22 09:29 PT sleep-cycle run failed across every channel with an identical `usage_limit` error in six seconds — the first failure guaranteed the next three, and the next scheduled cycle repeated the whole futile pass. Shared-block synthesis had the same shape (an ad-hoc "keep prior content" reflex, but no cooldown, no alert that the block was now N hours stale). Three related gaps from ISSUE-181: no backoff/cooldown when a run fails on a brain-level error, no pause-when-degraded behavior for non-essential background tasks, and no systematic fallback-compatibility pass over the full set of scheduled/automatic tasks.
