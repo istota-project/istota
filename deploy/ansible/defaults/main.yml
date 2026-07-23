@@ -147,7 +147,7 @@ istota_brain_native_effort: "high"                # default effort: low/medium/h
 istota_brain_native_base_url: "https://openrouter.ai/api/v1"
 istota_brain_native_extra_headers: {}             # dict of extra HTTP headers (openai_compat)
 istota_brain_native_context_window: 1000000       # 0 = resolve from bundled model catalog
-istota_brain_native_max_turns: 80                 # hard cap on assistant turns per task
+istota_brain_native_max_turns: 100                # hard cap on assistant turns per task
 istota_brain_native_max_tokens: 32000             # per-completion output cap
 istota_brain_native_bash_spill_full_output: true  # spill over-cap Bash output to a temp file named in the result
 istota_brain_native_prompt_caching: ""            # cache_control breakpoints. "" = derive from base_url
