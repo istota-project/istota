@@ -3731,6 +3731,6 @@ def execute_task_interactive(
         if success:
             db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions, execution_trace=trace)
         else:
-            db.update_task_status(conn, task_id, "failed", error=result)
+            db.update_task_status(conn, task_id, "failed", error=result, actions_taken=actions, execution_trace=trace)
 
         return success, result

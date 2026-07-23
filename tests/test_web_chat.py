@@ -113,6 +113,60 @@ class TestTraceSegments:
             {"kind": "text", "text": "streamed"},
         ]
 
+    def test_cancelled_appends_notice_without_overwriting_trace(self):
+        import json
+        trace = json.dumps([
+            {"type": "tool", "text": "Read a.txt"},
+            {"type": "text", "text": "partial analysis"},
+        ])
+        # ISSUE-183: a cancelled task's terminal notice is appended after the
+        # trace's intermediate content — the trailing text is intermediate, not
+        # a draft answer, so overwriting it (the completed-task path) would lose it.
+        segs = self._fn()(trace, None, "Cancelled by user", status="cancelled")
+        assert segs == [
+            {"kind": "tool", "text": "Read a.txt"},
+            {"kind": "text", "text": "partial analysis"},
+            {"kind": "text", "text": "Cancelled by user"},
+        ]
+
+    def test_failed_appends_error_without_overwriting_trace(self):
+        import json
+        trace = json.dumps([
+            {"type": "text", "text": "Let me check."},
+            {"type": "tool", "text": "Bash: grep foo"},
+        ])
+        segs = self._fn()(trace, None, "API error: rate limited", status="failed")
+        assert segs == [
+            {"kind": "text", "text": "Let me check."},
+            {"kind": "tool", "text": "Bash: grep foo"},
+            {"kind": "text", "text": "API error: rate limited"},
+        ]
+
+    def test_cancelled_with_no_trace_appends_notice(self):
+        # No trace + cancelled → just the cancel notice (not blank).
+        assert self._fn()(None, None, "Cancelled by user", status="cancelled") == [
+            {"kind": "text", "text": "Cancelled by user"},
+        ]
+
+    def test_failed_empty_error_keeps_trace_text(self):
+        import json
+        trace = json.dumps([{"type": "text", "text": "streamed"}])
+        # An empty error leaves the trace intact (no blank trailing segment).
+        assert self._fn()(trace, None, "", status="failed") == [
+            {"kind": "text", "text": "streamed"},
+        ]
+
+    def test_trace_text_none_value_becomes_empty(self):
+        import json
+        # Robustness: a trace entry with an explicit null ``text`` must not
+        # render as the literal string "None".
+        trace = json.dumps([{"type": "text", "text": None}, {"type": "tool", "text": None}])
+        segs = self._fn()(trace, None, "", status="cancelled")
+        assert segs == [
+            {"kind": "text", "text": ""},
+            {"kind": "tool", "text": ""},
+        ]
+
 
 # ---------------------------------------------------------------------------
 # DB layer: rooms + rate-limit counter

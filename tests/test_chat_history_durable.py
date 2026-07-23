@@ -282,3 +282,74 @@ class TestTranscriptSurvivesRetention:
         texts = [(m["role"], m["text"]) for m in out["messages"]]
         assert ("assistant", "4 new transactions") in texts
         assert ("user", "Run sync-monarch") not in texts
+
+    def test_cancelled_task_renders_trace_on_reload(self, db_path):
+        # ISSUE-183: a cancelled native-brain task streamed tools + intermediate
+        # text live, but on reload the tasks row had NULL trace/error/result
+        # (update_task_status dropped them) → a blank agent bubble. With the
+        # trace persisted, the reload reconstructs the full segment list.
+        trace = json.dumps([
+            {"type": "tool", "text": "📄 Reading file"},
+            {"type": "text", "text": "Let me check the data."},
+            {"type": "tool", "text": "⚙️ Fetch results"},
+        ])
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            t = _task(conn, "tok", "run the thing", None, status="cancelled", source_type="web")
+            conn.execute(
+                "UPDATE tasks SET error = ?, actions_taken = ?, execution_trace = ?, "
+                "started_at = ?, completed_at = ? WHERE id = ?",
+                ("Cancelled by user", json.dumps(["📄 Reading file", "⚙️ Fetch results"]),
+                 trace, "2026-07-23 04:19:03", "2026-07-23 04:25:00", t),
+            )
+            db.store_turn_message(conn, "tok", role="user", body="run the thing", task_id=t, origin_surface="web")
+        out = self._loader(db_path)("u", "tok", 50)
+        asst = [m for m in out["messages"] if m["role"] == "assistant"][0]
+        assert asst["status"] == "cancelled"
+        assert asst["text"] == "Cancelled by user"
+        # The intermediate tools survive the reload (not blank).
+        segs = asst["segments"]
+        assert [s["kind"] for s in segs] == ["tool", "text", "tool", "text"]
+        assert segs[0]["text"] == "📄 Reading file"
+        assert segs[1]["text"] == "Let me check the data."
+        assert segs[3]["text"] == "Cancelled by user"
+        # The tool strip is populated too.
+        assert asst["tools"] == ["📄 Reading file", "⚙️ Fetch results"]
+
+    def test_failed_task_renders_trace_on_reload(self, db_path):
+        # ISSUE-183: a failed task's intermediate output must survive reload,
+        # not collapse to just the bare error text.
+        trace = json.dumps([
+            {"type": "text", "text": "Analyzing the input…"},
+            {"type": "tool", "text": "⚙️ Run query"},
+        ])
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            t = _task(conn, "tok", "do stuff", None, status="failed", source_type="web")
+            conn.execute(
+                "UPDATE tasks SET error = ?, execution_trace = ? WHERE id = ?",
+                ("API error: rate limited", trace, t),
+            )
+            db.store_turn_message(conn, "tok", role="user", body="do stuff", task_id=t, origin_surface="web")
+        out = self._loader(db_path)("u", "tok", 50)
+        asst = [m for m in out["messages"] if m["role"] == "assistant"][0]
+        assert asst["status"] == "failed"
+        assert asst["text"] == "API error: rate limited"
+        segs = asst["segments"]
+        # Error notice appended, not overwriting the intermediate text.
+        assert [s["kind"] for s in segs] == ["text", "tool", "text"]
+        assert segs[0]["text"] == "Analyzing the input…"
+        assert segs[2]["text"] == "API error: rate limited"
+
+    def test_cancelled_task_without_trace_shows_cancel_notice(self, db_path):
+        # A cancelled task with no trace (e.g. cancelled before any tool ran)
+        # still shows the cancel notice, never a fully blank bubble.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            t = _task(conn, "tok", "q", None, status="cancelled", source_type="web")
+            conn.execute("UPDATE tasks SET error = ? WHERE id = ?", ("Cancelled by user", t))
+            db.store_turn_message(conn, "tok", role="user", body="q", task_id=t, origin_surface="web")
+        out = self._loader(db_path)("u", "tok", 50)
+        asst = [m for m in out["messages"] if m["role"] == "assistant"][0]
+        assert asst["text"] == "Cancelled by user"
+        assert asst["segments"] == [{"kind": "text", "text": "Cancelled by user"}]

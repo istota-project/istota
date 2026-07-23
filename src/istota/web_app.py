@@ -1970,7 +1970,7 @@ def _trace_tool_descriptions(execution_trace: str | None, actions_taken: str | N
         try:
             entries = json.loads(execution_trace)
             tools = [
-                str(e.get("text", ""))
+                e.get("text") or ""
                 for e in entries
                 if isinstance(e, dict) and e.get("type") == "tool"
             ]
@@ -1992,6 +1992,8 @@ def _trace_segments(
     execution_trace: str | None,
     actions_taken: str | None,
     result: str | None,
+    *,
+    status: str = "completed",
 ) -> list[dict]:
     """Ordered, interleaved ``text`` / ``tool`` segments for a finished task, so
     the web client reconstructs the same in-order layout as the live stream.
@@ -2002,6 +2004,13 @@ def _trace_segments(
     appended when the trace ends on a tool). Falls back to the flat
     ``actions_taken`` tool descriptions plus a result text segment when the
     trace is absent or malformed. Never raises.
+
+    For an *interrupted* task (``status`` of ``failed`` / ``cancelled``) the
+    terminal ``result`` is the error / cancel notice — a new message appended
+    *after* the trace's intermediate content, not a replacement for the draft
+    answer. Overwriting (the completed-task path) would discard the last
+    intermediate text block the model produced before the interruption
+    (ISSUE-183).
     """
     result = result or ""
     segments: list[dict] = []
@@ -2016,9 +2025,9 @@ def _trace_segments(
                         continue
                     etype = e.get("type")
                     if etype == "text":
-                        segments.append({"kind": "text", "text": str(e.get("text", ""))})
+                        segments.append({"kind": "text", "text": e.get("text") or ""})
                     elif etype == "tool":
-                        segments.append({"kind": "tool", "text": str(e.get("text", ""))})
+                        segments.append({"kind": "tool", "text": e.get("text") or ""})
                     # cm_boundary (and anything else) is skipped.
         except (ValueError, TypeError):
             parsed_trace = False
@@ -2027,7 +2036,12 @@ def _trace_segments(
         for desc in _trace_tool_descriptions(None, actions_taken):
             segments.append({"kind": "tool", "text": desc})
     if result:
-        if segments and segments[-1]["kind"] == "text":
+        if status in ("failed", "cancelled"):
+            # Interrupted task: the terminal error / cancel notice is a new
+            # message, not the canonical answer replacing a draft. Append it
+            # so the trace's trailing intermediate text survives.
+            segments.append({"kind": "text", "text": result})
+        elif segments and segments[-1]["kind"] == "text":
             segments[-1]["text"] = result
         else:
             segments.append({"kind": "text", "text": result})
@@ -2068,7 +2082,7 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
         "task_id": _row_get(row, "task_id") or _row_get(row, "id"),
         "status": status, "created_at": _row_get(row, "created_at"),
         "tools": _trace_tool_descriptions(trace, actions),
-        "segments": _trace_segments(trace, actions, text),
+        "segments": _trace_segments(trace, actions, text, status=status),
         "duration_seconds": _task_duration_seconds(
             _row_get(row, "started_at"), _row_get(row, "completed_at"),
         ),
