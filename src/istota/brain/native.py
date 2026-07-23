@@ -127,12 +127,16 @@ def _extract_urls(text: str) -> frozenset[str]:
     return frozenset(m.rstrip(".,;:!?") for m in _URL_RE.findall(text))
 
 # The BrainResult.stop_reason vocabulary the executor documents. The loop's raw
-# agent_end reasons (max_turns / loop_detected / "") are normalized into this
-# set so a future stop_reason-keyed dispatch can't be surprised (NB-18).
+# agent_end reasons are normalized into this set so a future stop_reason-keyed
+# dispatch can't be surprised (NB-18). The two agent-loop backstops —
+# ``max_turns`` / ``loop_detected`` — are first-class members (not collapsed
+# to "completed") so a capped/looping run stays visible in ``stop_reason``
+# rather than masquerading as a natural completion.
 _DOCUMENTED_STOP_REASONS = frozenset(
     {
         "completed", "cancelled", "timeout", "oom", "transient_api_error",
         "usage_limit", "error", "not_found",
+        "max_turns", "loop_detected",
     }
 )
 
@@ -1035,24 +1039,26 @@ class NativeBrain:
                 usage=usage,
                 model_used=model,
             )
-        # Natural end, or a backstop stop (max_turns / loop_detected). Normalize
-        # the tag to the documented BrainResult vocabulary — the raw loop reasons
-        # would leak out of it and break any future stop_reason-keyed dispatch
-        # (NB-18). Both backstops "completed" (they terminated cleanly and kept
-        # whatever text was produced).
+        # Natural end, or a backstop stop (max_turns / loop_detected). The two
+        # backstops are now first-class stop_reasons (see _DOCUMENTED_STOP_REASONS)
+        # so they survive normalization instead of collapsing to "completed".
         result_text = text
-        if not result_text.strip():
-            # A backstop that produced no answer would otherwise be an empty
-            # success. Give the surface a meaningful line and avoid a retry storm
-            # (retrying a wedged model just wedges again).
-            if stop_reason == "max_turns":
-                result_text = (
-                    "(stopped: reached the maximum number of steps without a final answer)"
-                )
-            elif stop_reason == "loop_detected":
-                result_text = (
-                    "(stopped: detected a repeating tool-call loop with no progress)"
-                )
+        if stop_reason in ("max_turns", "loop_detected"):
+            # A backstop stop always carries a visible marker — whether or not
+            # the final turn produced text. The common case is non-empty
+            # narration ("let me try X next"), which would otherwise be
+            # delivered verbatim as a complete answer; append the marker so a
+            # truncated-by-cap run is never mistaken for a finished one. An
+            # empty result keeps the marker as the whole text and avoids a
+            # retry storm (retrying a wedged/capped model just wedges again).
+            marker = (
+                "(stopped: reached the maximum number of steps without a final answer)"
+                if stop_reason == "max_turns"
+                else "(stopped: detected a repeating tool-call loop with no progress)"
+            )
+            result_text = (
+                f"{result_text}\n\n{marker}" if result_text.strip() else marker
+            )
         normalized = stop_reason if stop_reason in _DOCUMENTED_STOP_REASONS else "completed"
         return BrainResult(
             success=True,
