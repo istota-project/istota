@@ -98,7 +98,7 @@ def cmd_task(args):
                     print("\n--- Result ---")
                     print(result)
                 else:
-                    db.update_task_status(conn, task_id, "failed", error=result)
+                    db.update_task_status(conn, task_id, "failed", error=result, actions_taken=_actions, execution_trace=_trace)
                     print("\n--- Error ---", file=sys.stderr)
                     print(result, file=sys.stderr)
                     sys.exit(1)

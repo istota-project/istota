@@ -55,6 +55,82 @@ class TestCountInflightTasksForScheduledJob:
             assert db.count_inflight_tasks_for_scheduled_job(conn, 72) == 0
 
 
+class TestUpdateTaskStatusPersistsTrace:
+    """ISSUE-183: a failed/cancelled task must persist its execution trace +
+    actions_taken + error + completed_at so the web chat can reconstruct the
+    intermediate tool/text output on reload. Previously the ``failed`` branch
+    dropped the trace and ``cancelled`` fell through to a status-only update
+    (losing even the error), leaving a blank agent bubble on reload."""
+
+    def test_failed_persists_trace_actions_error_completed_at(self, db_path):
+        import json
+        trace = json.dumps([{"type": "tool", "text": "Bash: ls"}])
+        actions = json.dumps(["Bash: ls"])
+        with db.get_db(db_path) as conn:
+            tid = db.create_task(conn, prompt="p", user_id="alice")
+            db.update_task_status(conn, tid, "running")
+            db.update_task_status(
+                conn, tid, "failed", error="boom",
+                actions_taken=actions, execution_trace=trace,
+            )
+            row = conn.execute(
+                "SELECT status, error, actions_taken, execution_trace, completed_at "
+                "FROM tasks WHERE id = ?", (tid,)
+            ).fetchone()
+        assert row["status"] == "failed"
+        assert row["error"] == "boom"
+        assert row["actions_taken"] == actions
+        assert row["execution_trace"] == trace
+        assert row["completed_at"] is not None
+
+    def test_cancelled_persists_trace_actions_error_completed_at(self, db_path):
+        import json
+        trace = json.dumps([
+            {"type": "tool", "text": "Read a.txt"},
+            {"type": "text", "text": "partial analysis"},
+        ])
+        actions = json.dumps(["Read a.txt"])
+        with db.get_db(db_path) as conn:
+            tid = db.create_task(conn, prompt="p", user_id="alice")
+            db.update_task_status(conn, tid, "running")
+            db.update_task_status(
+                conn, tid, "cancelled", error="Cancelled by user",
+                actions_taken=actions, execution_trace=trace,
+            )
+            row = conn.execute(
+                "SELECT status, error, actions_taken, execution_trace, completed_at "
+                "FROM tasks WHERE id = ?", (tid,)
+            ).fetchone()
+        assert row["status"] == "cancelled"
+        assert row["error"] == "Cancelled by user"
+        assert row["actions_taken"] == actions
+        assert row["execution_trace"] == trace
+        assert row["completed_at"] is not None
+
+    def test_failed_without_trace_stores_nulls(self, db_path):
+        # Callers without a trace (skill/command tasks) still work — NULLs are
+        # stored, not raised.
+        with db.get_db(db_path) as conn:
+            tid = db.create_task(conn, prompt="p", user_id="alice")
+            db.update_task_status(conn, tid, "failed", error="boom")
+            row = conn.execute(
+                "SELECT actions_taken, execution_trace FROM tasks WHERE id = ?", (tid,)
+            ).fetchone()
+        assert row["actions_taken"] is None
+        assert row["execution_trace"] is None
+
+    def test_cancelled_sets_completed_at_for_retention(self, db_path):
+        # cleanup_old_tasks reaps by completed_at; a NULL completed_at stranded
+        # cancelled rows forever. The fix sets it.
+        with db.get_db(db_path) as conn:
+            tid = db.create_task(conn, prompt="p", user_id="alice")
+            db.update_task_status(conn, tid, "cancelled", error="Cancelled by user")
+            row = conn.execute(
+                "SELECT completed_at FROM tasks WHERE id = ?", (tid,)
+            ).fetchone()
+        assert row["completed_at"] is not None
+
+
 class TestHasActiveForegroundTaskForChannel:
     def test_true_when_pending_fg_task_exists(self, db_path):
         with db.get_db(db_path) as conn:

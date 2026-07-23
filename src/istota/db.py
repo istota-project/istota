@@ -1251,10 +1251,19 @@ def update_task_status(
             "UPDATE tasks SET status = ?, completed_at = datetime('now'), result = ?, actions_taken = ?, execution_trace = ?, updated_at = datetime('now') WHERE id = ?",
             (status, result, actions_taken, execution_trace, task_id),
         )
-    elif status == "failed":
+    elif status in ("failed", "cancelled"):
+        # Persist the execution trace + tool descriptions alongside the error
+        # so an interrupted task's intermediate output survives a reload
+        # (ISSUE-183). The native brain builds a full trace even on cancel /
+        # error; dropping it here left the web chat with a blank agent bubble
+        # on reload (the live stream had the tools, the `tasks` row did not).
+        # `completed_at` is set so `cleanup_old_tasks`' retention window can
+        # reap cancelled rows (NULL `completed_at` stranded them forever) and
+        # the web duration badge renders.
         conn.execute(
-            "UPDATE tasks SET status = ?, completed_at = datetime('now'), error = ?, updated_at = datetime('now') WHERE id = ?",
-            (status, error, task_id),
+            "UPDATE tasks SET status = ?, completed_at = datetime('now'), "
+            "error = ?, actions_taken = ?, execution_trace = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, error, actions_taken, execution_trace, task_id),
         )
     else:
         conn.execute(

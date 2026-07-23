@@ -1936,13 +1936,13 @@ def process_one_task(
             is_cancelled = result == "Cancelled by user"
             is_policy = _is_policy_refusal(result)
             if is_cancelled:
-                db.update_task_status(conn, task_id, "cancelled", error=result)
+                db.update_task_status(conn, task_id, "cancelled", error=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task cancelled by user via !stop")
                 # No Talk notification needed — !stop already acknowledged
             elif is_policy:
                 # Policy refusals are non-retryable: same content will be rejected again.
                 # Mark failed and post an alert so the user sees what was blocked.
-                db.update_task_status(conn, task_id, "failed", error=result)
+                db.update_task_status(conn, task_id, "failed", error=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(
                     conn, task_id, "warn",
                     f"Task failed: API policy refusal (not retried): {result[:200]}",
@@ -1984,7 +1984,7 @@ def process_one_task(
                 # emitted from the terminal-events block below (outside this DB
                 # transaction, so the writer's own connection can't contend).
             else:
-                db.update_task_status(conn, task_id, "failed", error=result)
+                db.update_task_status(conn, task_id, "failed", error=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "error", f"Task failed permanently: {result[:500]}")
 
                 if task.source_type in ("briefing", "scheduled"):
@@ -2243,7 +2243,7 @@ def process_one_task(
         email_ok = asyncio.run(post_result_to_email(config, task, email_result))
         if not email_ok:
             with db.get_db(config.db_path) as conn:
-                db.update_task_status(conn, task_id, "failed", error="Email delivery failed")
+                db.update_task_status(conn, task_id, "failed", error="Email delivery failed", actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
     if post_ntfy:
         from .transport._types import DeliveryOptions

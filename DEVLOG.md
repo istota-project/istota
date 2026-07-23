@@ -2,6 +2,59 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-23: Persist interrupted tasks' execution trace for web-chat reload (ISSUE-183)
+
+A cancelled or failed task that had already streamed tool calls and intermediate text showed a **blank agent bubble** when the web chat was reloaded — the live stream during the run had the tools, but the `tasks` row persisted after the run had none of it. The live view and the reloaded view disagreed, and the reloaded view was the one that mattered for history.
+
+### Root cause
+
+`db.update_task_status` had three terminal branches:
+- `completed` — wrote `result`, `actions_taken`, `execution_trace`, `completed_at`.
+- `failed` — wrote only `status`, `error`, `completed_at`. **Dropped `actions_taken` and `execution_trace`** even when the caller passed them.
+- `cancelled` — fell through to the `else` branch: a **status-only update** (`status`, `updated_at`). It didn't even persist the `error` text, let alone the trace.
+
+So the native brain builds a full execution trace even when a task is cancelled or errors out (the loop measures tools as they run), but the final `update_task_status` call on the failure/cancel path threw that trace away. The web chat's reload path (`_assistant_message_dict` → `_trace_segments`) reads `execution_trace` / `actions_taken` off the `tasks` row; with both NULL it produced an empty segment list, and the assistant message rendered as an empty bubble (the error text wasn't being stored as `result` either, so there was no fallback text segment).
+
+A second, related defect in the reload path: even when the trace *was* present, `_trace_segments` treated the terminal text (the `result` argument) the same way for every status — **overwriting** the last text segment if the trace ended on one, else appending. That's the right call for a *completed* task (the streamed result replaces the draft answer the model was building), but for an *interrupted* task the trace's trailing text is **intermediate** model output (the partial analysis it was writing when cancelled/errored), not a draft of the final answer. Overwriting it discarded the model's last real output and left only the bare error notice.
+
+### Fix
+
+**DB layer (`db.update_task_status`).** Merged the `failed` and `cancelled` branches into one `status in ("failed", "cancelled")` branch that persists `error`, `actions_taken`, `execution_trace`, **and** `completed_at`. The `completed_at` stamp matters beyond the trace: `cleanup_old_tasks` reaps terminal rows by `completed_at`, so a NULL `completed_at` stranded cancelled tasks forever (they never aged out of retention); it also drives the web chat's duration badge, which now renders for cancelled tasks instead of blanking.
+
+**Callers threaded through.** Every `update_task_status(..., "failed"/"cancelled", ...)` site in the scheduler/executor/CLI now passes the `actions_taken` and `execution_trace` it already had in scope:
+- `scheduler.process_one_task` — cancelled-by-`!stop`, policy-refusal (non-retried), permanent-failure (exhausted retries), and the email-delivery-failure path.
+- `executor.execute_task_interactive` — the local interactive path's failure leg.
+- `cli.cmd_task` — the `istota task` CLI's failure leg.
+
+**Reload render path (`web_app._trace_segments`).** Gains a `status` keyword (default `"completed"` — unchanged behavior for the existing call sites' happy path). For `status in ("failed", "cancelled")` the terminal text (error / cancel notice) is **appended** as a new text segment after the trace's intermediate content, instead of overwriting the trailing text segment. So a cancelled task that ran `Read file` → wrote partial analysis → `Fetch results` → cancelled reconstructs as `[tool, text, tool, text(cancel-notice)]` on reload, matching what the live stream showed. A failed/cancelled task with no trace still appends the notice as a lone text segment (never a fully blank bubble).
+
+`_assistant_message_dict` passes the row's `status` through to `_trace_segments`. The live-stream path is unaffected — it builds segments from the event log, not from this function.
+
+**Robustness nit.** `_trace_segments` and `_trace_tool_descriptions` were doing `str(e.get("text", ""))`, which renders a JSON `null` text value as the literal string `"None"`. Switched to `e.get("text") or ""` so a null/missing text becomes an empty string. No core tool emits null text, but a malformed trace shouldn't render `None` chips.
+
+### Tests
+
+Regression coverage across all three layers:
+- `tests/test_db.py::TestUpdateTaskStatusPersistsTrace` — `failed` and `cancelled` each persist `error`/`actions_taken`/`execution_trace`/`completed_at`; the no-trace call stores NULLs without raising; cancelled sets `completed_at` (retention reapability).
+- `tests/test_scheduler.py::TestProcessOneTask` — cancelled and permanently-failed tasks persist the trace through the real `process_one_task` path (mocked `execute_task` returns the trace tuple).
+- `tests/test_web_chat.py::TestTraceSegments` — cancelled/failed append the notice without overwriting the trace; cancelled-with-no-trace shows the notice; empty error leaves the trace intact; null text values render as empty (not `None`).
+- `tests/test_chat_history_durable.py` — end-to-end reload through the durable history loader: a cancelled/failed task's reloaded assistant message carries the full segment list (tools + intermediate text + terminal notice) and the tool strip, not a blank bubble.
+
+Full suite green (646 in the touched files + 266 executor).
+
+### Also
+
+Bumped the default brain-fallback cooldown (`istota_brain_fallback_cooldown_seconds`) from 900s to 3600s in the Ansible defaults — an unavailable primary backend is now re-probed hourly rather than every 15 minutes, which is less aggressive against a quota window that resets monthly. Operator-tunable; existing configs are unchanged.
+
+**Files modified:**
+- `src/istota/db.py` — `update_task_status` failed/cancelled branch persists trace + completed_at
+- `src/istota/scheduler.py` — four `update_task_status` call sites pass trace/actions
+- `src/istota/executor.py` — `execute_task_interactive` failure leg passes trace/actions
+- `src/istota/cli.py` — `cmd_task` failure leg passes trace/actions
+- `src/istota/web_app.py` — `_trace_segments` `status` kwarg (append-on-interrupt); null-text guard
+- `deploy/ansible/defaults/main.yml` — fallback cooldown 900→3600
+- `tests/test_db.py`, `tests/test_scheduler.py`, `tests/test_web_chat.py`, `tests/test_chat_history_durable.py` — regression tests
+
 ## 2026-07-23: Native brain + Google Gemini — tool-schema and finish-reason fixes
 
 Two distinct bugs surfaced in the native brain's OpenAI-compatible provider layer once a configured fallback brain pointed at Google Gemini 3.6 Flash (via OpenRouter) and started taking traffic while the primary `claude_code` brain was unavailable. Both are latent defects that OpenAI/Anthropic tolerate and Google rejects — the switch to Gemini as the active fallback path is what exposed them. Found and fixed together because both manifested as task failures driven by the same provider boundary.

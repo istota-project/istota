@@ -128,7 +128,7 @@ istota_brain_kind: "claude_code"
 # only — if the fallback is also down, the task fails/retries normally.
 istota_brain_fallback: ""                       # "" | "claude_code" | "native" | "tmux_claude"
 istota_brain_fallback_on_transient: true        # also reroute a persistent transient_api_error
-istota_brain_fallback_cooldown_seconds: 900     # skip an unavailable primary this long; 0 disables stickiness
+istota_brain_fallback_cooldown_seconds: 3600    # skip an unavailable primary this long; 0 disables stickiness
 
 # --- Native brain ([brain.native]) -------------------------------------------
 # Only emitted to config.toml when istota_brain_kind == "native", when

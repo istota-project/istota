@@ -2398,6 +2398,72 @@ class TestProcessOneTask:
             task = db.get_task(conn, task_id)
         assert task.status == "failed"
 
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_cancelled_persists_trace_for_reload(self, mock_arun, db_path, tmp_path):
+        # ISSUE-183: a cancelled native-brain task must persist its execution
+        # trace + actions_taken + error so the web chat reconstructs the
+        # intermediate output on reload (not a blank bubble).
+        import json
+        trace = json.dumps([
+            {"type": "tool", "text": "📄 Reading file"},
+            {"type": "text", "text": "partial work"},
+        ])
+        actions = json.dumps(["📄 Reading file"])
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="do thing", user_id="testuser", source_type="web",
+                conversation_token="webtok", output_target="web",
+            )
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(False, "Cancelled by user", actions, trace),
+        ):
+            result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is False
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+            completed_at = conn.execute(
+                "SELECT completed_at FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()["completed_at"]
+        assert task.status == "cancelled"
+        assert task.error == "Cancelled by user"
+        assert task.actions_taken == actions
+        assert task.execution_trace == trace
+        assert completed_at is not None
+
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_failed_persists_trace_for_reload(self, mock_arun, db_path, tmp_path):
+        # ISSUE-183: a permanently-failed task must persist its trace so the
+        # intermediate tools survive a reload.
+        import json
+        trace = json.dumps([{"type": "tool", "text": "⚙️ Bash: ls"}])
+        actions = json.dumps(["⚙️ Bash: ls"])
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="fail me", user_id="testuser", source_type="web")
+            conn.execute("UPDATE tasks SET attempt_count = 2 WHERE id = ?", (task_id,))
+
+        with patch(
+            "istota.scheduler.execute_task",
+            return_value=(False, "API error: rate limited", actions, trace),
+        ):
+            result = process_one_task(config)
+        assert result is not None
+        _, success = result
+        assert success is False
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "failed"
+        assert task.error == "API error: rate limited"
+        assert task.actions_taken == actions
+        assert task.execution_trace == trace
+
     @patch("istota.scheduler.execute_task", return_value=(False, "Process killed (likely out of memory)", None, None))
     @patch("istota.scheduler.asyncio.run", return_value=None)
     def test_oom_skips_retry(self, mock_arun, mock_exec, db_path, tmp_path):
