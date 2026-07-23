@@ -30,6 +30,7 @@ from .types import (
     TextContent,
     ThinkingContent,
     ToolCallContent,
+    ToolParameter,
     ToolSchema,
     Usage,
 )
@@ -398,12 +399,7 @@ class OpenAICompatibleProvider:
         properties: dict = {}
         required: list[str] = []
         for p in tool.parameters:
-            prop: dict = {"type": p.type}
-            if p.description:
-                prop["description"] = p.description
-            if p.enum:
-                prop["enum"] = p.enum
-            properties[p.name] = prop
+            properties[p.name] = OpenAICompatibleProvider._param_to_schema(p)
             if p.required:
                 required.append(p.name)
         return {
@@ -418,6 +414,30 @@ class OpenAICompatibleProvider:
                 },
             },
         }
+
+    @staticmethod
+    def _param_to_schema(p: ToolParameter) -> dict:
+        """Render a ``ToolParameter`` as a JSON-Schema property.
+
+        Recurses into ``properties`` (objects) and ``items`` (arrays). Strict
+        providers — Google Gemini via OpenRouter in particular — reject an
+        array that omits ``items`` (``...items: missing field``), and an
+        object whose nested ``properties`` are absent, so both are emitted
+        whenever they are declared.
+        """
+        schema: dict = {"type": p.type}
+        if p.description:
+            schema["description"] = p.description
+        if p.enum:
+            schema["enum"] = p.enum
+        if p.properties:
+            schema["properties"] = {
+                sub.name: OpenAICompatibleProvider._param_to_schema(sub)
+                for sub in p.properties.values()
+            }
+        if p.items is not None:
+            schema["items"] = OpenAICompatibleProvider._param_to_schema(p.items)
+        return schema
 
     async def _parse_sse_lines(
         self, lines: AsyncIterator[str], model: str = ""

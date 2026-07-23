@@ -200,6 +200,28 @@ def make_edit_tool(env: ToolEnv) -> AgentTool:
                 type="array",
                 description="Array of {old_string, new_string} for multiple disjoint edits.",
                 required=False,
+                # Declared so strict providers (Google Gemini) accept the
+                # array — an undeclared ``items`` is ``INVALID_ARGUMENT``.
+                items=ToolParameter(
+                    name="edit",
+                    type="object",
+                    description="A single find-and-replace edit.",
+                    required=False,
+                    properties={
+                        "old_string": ToolParameter(
+                            name="old_string",
+                            type="string",
+                            description="Exact text to find.",
+                            required=False,
+                        ),
+                        "new_string": ToolParameter(
+                            name="new_string",
+                            type="string",
+                            description="Replacement text.",
+                            required=False,
+                        ),
+                    },
+                ),
             ),
             ToolParameter(
                 name="replace_all",
