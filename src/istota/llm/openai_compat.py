@@ -39,12 +39,20 @@ logger = logging.getLogger("istota.llm.openai_compat")
 
 # OpenAI finish_reason → istota stop_reason. ``content_filter`` is preserved
 # (not laundered into ``end_turn``) so a filtered/blocked answer is visible
-# downstream rather than delivered as a clean completion (NB-15).
+# downstream rather than delivered as a clean completion (NB-15). ``error`` is
+# preserved too: OpenRouter reports an upstream generation failure (notably
+# Gemini's ``MALFORMED_FUNCTION_CALL`` — the model emitted a tool call whose
+# arguments are invalid JSON) as ``finish_reason: "error"`` in a normal choices
+# chunk with NO ``error`` object, so the mid-stream error-frame guard never
+# fires. Without this entry ``.get("error", "end_turn")`` would launder a
+# provider error into a clean ``end_turn`` and the half-built (often empty)
+# response would be delivered as a silent success (ISSUE: zorg-01 #270956).
 _FINISH_REASON_MAP = {
     "stop": "end_turn",
     "tool_calls": "tool_use",
     "length": "max_tokens",
     "content_filter": "content_filter",
+    "error": "error",
 }
 
 # The OpenAI-compatible ``reasoning_effort`` field accepts only low/medium/high.
@@ -615,6 +623,24 @@ class OpenAICompatibleProvider:
             )
 
         stop_reason = _FINISH_REASON_MAP.get(finish_reason or "", "end_turn")
+        # ``finish_reason: "error"`` (OpenRouter's signal for an upstream
+        # generation failure — e.g. Gemini ``MALFORMED_FUNCTION_CALL``, where
+        # the model emitted a tool call with invalid JSON arguments) arrives in
+        # a choices chunk with no ``error`` object, so there is no error text to
+        # capture. Stamp a descriptive message so the downstream error result /
+        # retry log / scheduler row explains the failure instead of reading as a
+        # bare "Native brain execution error".
+        error_message = ""
+        if finish_reason == "error":
+            error_message = (
+                "Provider returned finish_reason='error' (upstream generation "
+                "failure; e.g. MALFORMED_FUNCTION_CALL — the model emitted a "
+                "tool call with invalid JSON arguments)"
+            )
         return AssistantMessage(
-            content=content, usage=usage, stop_reason=stop_reason, model=model
+            content=content,
+            usage=usage,
+            stop_reason=stop_reason,
+            error_message=error_message or None,
+            model=model,
         )

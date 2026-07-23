@@ -425,6 +425,49 @@ class TestWireIntegrity:
         assert isinstance(done, StreamDone)
         assert done.message.stop_reason == "content_filter"
 
+    async def test_error_finish_reason_not_laundered_to_end_turn(self):
+        # OpenRouter reports an upstream generation failure — notably Gemini's
+        # MALFORMED_FUNCTION_CALL (the model emitted a tool call whose arguments
+        # are invalid JSON) — as ``finish_reason: "error"`` in a normal choices
+        # chunk, with NO ``error`` object (so the mid-stream error-frame guard
+        # never fires). Before the fix, ``_FINISH_REASON_MAP.get("error",
+        # "end_turn")`` laundered this into a clean ``end_turn`` and the empty /
+        # half-built response was delivered as a silent success (zorg-01 task
+        # #270956). It must surface as ``stop_reason="error"`` with a
+        # descriptive message so the task fails + retries instead.
+        lines = [
+            'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","function":{"name":"Bash","arguments":"{not valid"}}]}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"error"}]}',
+            "data: [DONE]",
+        ]
+        events = await self._collect(lines)
+        done = events[-1]
+        assert isinstance(done, StreamDone)
+        assert done.message.stop_reason == "error"
+        # A descriptive error_message is stamped (no error object arrived in the
+        # stream, so the provider layer synthesises one).
+        assert done.message.error_message
+        assert "finish_reason='error'" in done.message.error_message
+        assert "MALFORMED" in done.message.error_message
+
+    async def test_error_finish_reason_with_partial_text_keeps_content(self):
+        # Some text streamed before the error must still be carried on the
+        # assembled message (fidelity for logs / a stream surface), but the
+        # stop_reason stays ``error`` so the turn is treated as a failure.
+        lines = [
+            'data: {"choices":[{"delta":{"content":"partial answer"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"error"}]}',
+            "data: [DONE]",
+        ]
+        done = (await self._collect(lines))[-1]
+        assert isinstance(done, StreamDone)
+        assert done.message.stop_reason == "error"
+        assert done.message.error_message
+        assert any(
+            isinstance(c, TextContent) and c.text == "partial answer"
+            for c in done.message.content
+        )
+
     async def test_parallel_tool_calls_without_index_do_not_merge(self):
         # NB-16: some endpoints omit `index`. Two calls with distinct ids must
         # not both collapse into slot 0.
