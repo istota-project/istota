@@ -415,10 +415,12 @@ class TestErrorAndStops:
         provider = MockProvider(turns)
         req = _req("loop", tmp_path, tools=["Read"])
         result = _brain(provider, max_turns=3).execute(req)
-        # NB-18: the raw loop reason is normalized into the documented
-        # BrainResult vocabulary; a backstop stop reports "completed".
-        assert result.stop_reason == "completed"
-        # …with an informative message rather than an empty success.
+        # A capped run surfaces its real stop_reason ("max_turns") rather than
+        # being masked as "completed" — so a truncated-by-cap task stays visible
+        # to stop_reason-keyed dispatch and the done event instead of reading as
+        # a natural completion.
+        assert result.stop_reason == "max_turns"
+        # …with an informative marker rather than an empty success.
         assert "maximum number of steps" in result.result_text
         # Only ran up to the cap, not all 20 scripted turns.
         assert len(provider.calls) <= 4
