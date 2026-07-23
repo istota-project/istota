@@ -133,6 +133,87 @@ class TestRequestBuilding:
         body = _provider()._build_chat_completion_request("", [], [], "m", 100)
         assert "tools" not in body
 
+    def test_array_parameter_emits_items_for_strict_providers(self):
+        # Google Gemini (via OpenRouter) rejects `{"type": "array"}` with no
+        # `items`: "...properties[edits].items: missing field". The serializer
+        # must emit the declared `items` sub-schema (recursively).
+        schema = ToolSchema(
+            name="Edit",
+            description="Edit a file",
+            parameters=[
+                ToolParameter(
+                    name="file_path",
+                    type="string",
+                    description="path",
+                ),
+                ToolParameter(
+                    name="edits",
+                    type="array",
+                    description="batch of edits",
+                    required=False,
+                    items=ToolParameter(
+                        name="edit",
+                        type="object",
+                        description="one edit",
+                        required=False,
+                        properties={
+                            "old_string": ToolParameter(
+                                name="old_string",
+                                type="string",
+                                description="find",
+                                required=False,
+                            ),
+                            "new_string": ToolParameter(
+                                name="new_string",
+                                type="string",
+                                description="replace",
+                                required=False,
+                            ),
+                        },
+                    ),
+                ),
+            ],
+        )
+        body = _provider()._build_chat_completion_request("", [], [schema], "m", 100)
+        props = body["tools"][0]["function"]["parameters"]["properties"]
+        edits = props["edits"]
+        assert edits["type"] == "array"
+        # The bit Gemini was complaining about — `items` must be present and
+        # itself a valid schema with a `type`.
+        assert edits["items"]["type"] == "object"
+        item_props = edits["items"]["properties"]
+        assert item_props["old_string"]["type"] == "string"
+        assert item_props["new_string"]["type"] == "string"
+
+    def test_object_parameter_emits_nested_properties(self):
+        # Nested object `properties` were silently dropped before recursion
+        # was added — guard the latent sibling of the Gemini array bug.
+        schema = ToolSchema(
+            name="Thing",
+            description="d",
+            parameters=[
+                ToolParameter(
+                    name="opts",
+                    type="object",
+                    description="opts",
+                    required=False,
+                    properties={
+                        "name": ToolParameter(
+                            name="name", type="string", description="n", required=False
+                        ),
+                        "count": ToolParameter(
+                            name="count", type="integer", description="c", required=False
+                        ),
+                    },
+                ),
+            ],
+        )
+        body = _provider()._build_chat_completion_request("", [], [schema], "m", 100)
+        opts = body["tools"][0]["function"]["parameters"]["properties"]["opts"]
+        assert opts["type"] == "object"
+        assert set(opts["properties"]) == {"name", "count"}
+        assert opts["properties"]["count"]["type"] == "integer"
+
 
 class TestSSEParsing:
     async def _collect(self, lines, model="m"):

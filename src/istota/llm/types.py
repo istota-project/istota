@@ -109,6 +109,11 @@ class ToolParameter:
     required: bool = True
     enum: list[str] | None = None
     properties: "dict[str, ToolParameter] | None" = None
+    # For ``type == "array"``: the element schema. Some strict providers
+    # (notably Google Gemini via OpenRouter) reject an array parameter that
+    # omits ``items`` entirely (``INVALID_ARGUMENT`` … ``items: missing
+    # field``), so array params must declare this.
+    items: "ToolParameter | None" = None
 
 
 @dataclass(frozen=True)
