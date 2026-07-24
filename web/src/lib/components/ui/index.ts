@@ -13,5 +13,6 @@ export { default as AutocompleteInput } from './AutocompleteInput.svelte';
 export { default as Modal } from './Modal.svelte';
 export { default as ConfirmDialog } from './ConfirmDialog.svelte';
 export { default as KebabMenu } from './KebabMenu.svelte';
+export { default as NoticeBanner } from './NoticeBanner.svelte';
 export type { SelectOption } from './Select.svelte';
 export type { KebabItem } from './KebabMenu.svelte';

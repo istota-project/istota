@@ -959,6 +959,120 @@ class TestAdminStats:
 
 
 @_needs_web_deps
+class TestAdminBrainStatus:
+    """ISSUE-188 — live brain posture (degraded/fallback) on the admin dashboard.
+
+    Distinct from the ``models`` section (configured brain): this consults the
+    process-global availability breaker so a degraded primary (running on the
+    fallback) is visible to the operator at a glance.
+    """
+
+    def _config_with_fallback(self, tmp_path):
+        from istota import db
+        from istota.config import BrainConfig
+        config = _make_config(tmp_path)
+        config.db_path = tmp_path / "istota.db"
+        config.admin_users = {"alice"}
+        config.brain = BrainConfig(
+            kind="claude_code", fallback="native", fallback_cooldown_seconds=900
+        )
+        db.init_db(config.db_path)
+        return config
+
+    def _open_breaker(self, kind, cooldown=900):
+        from istota.brain._fallback import get_availability_breaker
+        get_availability_breaker().open(kind, cooldown)
+
+    def _reset_breaker(self):
+        from istota.brain._fallback import reset_availability_breaker
+        reset_availability_breaker()
+
+    def test_healthy_when_breaker_closed(self, tmp_path):
+        import istota.web_app as mod
+        self._reset_breaker()
+        mod._config = self._config_with_fallback(tmp_path)
+        section = mod._admin_brain_status_section()
+        assert section["degraded"] is False
+        assert section["active"] == "claude_code"
+        assert section["primary"] == "claude_code"
+
+    def test_degraded_when_breaker_open(self, tmp_path):
+        import istota.web_app as mod
+        mod._config = self._config_with_fallback(tmp_path)
+        self._reset_breaker()
+        self._open_breaker("claude_code")
+        try:
+            section = mod._admin_brain_status_section()
+            assert section["degraded"] is True
+            assert section["primary"] == "claude_code"
+            assert section["active"] == "native"
+            assert section["reason"]
+        finally:
+            self._reset_breaker()
+
+    def test_degraded_with_no_fallback_configured(self, tmp_path):
+        import istota.web_app as mod
+        from istota.config import BrainConfig
+        config = self._config_with_fallback(tmp_path)
+        config.brain = BrainConfig(kind="claude_code", fallback_cooldown_seconds=900)
+        mod._config = config
+        self._reset_breaker()
+        self._open_breaker("claude_code")
+        try:
+            section = mod._admin_brain_status_section()
+            assert section["degraded"] is True
+            assert section["primary"] == "claude_code"
+            # No fallback configured — active is null so the frontend can say so.
+            assert section["active"] is None
+        finally:
+            self._reset_breaker()
+
+    def test_cooldown_zero_never_degrades(self, tmp_path):
+        # Stickiness disabled: the breaker is never consulted for skipping, so
+        # there's no persistent degraded posture to display.
+        import istota.web_app as mod
+        from istota.config import BrainConfig
+        config = self._config_with_fallback(tmp_path)
+        config.brain = BrainConfig(
+            kind="claude_code", fallback="native", fallback_cooldown_seconds=0
+        )
+        mod._config = config
+        self._reset_breaker()
+        self._open_breaker("claude_code", cooldown=0)
+        try:
+            section = mod._admin_brain_status_section()
+            assert section["degraded"] is False
+        finally:
+            self._reset_breaker()
+
+    async def _login(self, client, username):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": username,
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def test_brain_status_in_stats_payload(self, tmp_path):
+        config = self._config_with_fallback(tmp_path)
+        self._reset_breaker()
+        self._open_breaker("claude_code")
+        try:
+            app = _patch_app(config)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+                cookies = await self._login(client, "alice")
+                resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+                assert resp.status_code == 200
+                bs = resp.json()["brain_status"]
+                assert bs["degraded"] is True
+                assert bs["active"] == "native"
+                assert bs["primary"] == "claude_code"
+        finally:
+            self._reset_breaker()
+
+
+@_needs_web_deps
 class TestTaskEventEndpoints:
     """SSE / snapshot / admin consumers of the task_events table."""
 

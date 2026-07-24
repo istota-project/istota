@@ -7,13 +7,14 @@
     type AdminStatsUser,
     type AdminStatsUserSource,
   } from '$lib/api';
+  import { NoticeBanner } from '$lib/components/ui';
 
   let stats: AdminStats | null = $state(null);
   let loading = $state(true);
   let error = $state('');
   let expandedJobs: Record<number, boolean> = $state({});
   let modulesExpanded = $state(false);
-  let standaloneCollapsed = $state(false);
+  let standaloneCollapsed = $state(true);
 
   const REFRESH_MS = 60_000;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -234,30 +235,22 @@
     <div class="banner error">{error}</div>
   {:else if stats}
     {#if stats.runtime?.mode === 'standalone'}
-      <section class="card standalone-notice">
-        <button
-          type="button"
-          class="standalone-head"
-          onclick={() => (standaloneCollapsed = !standaloneCollapsed)}
-          aria-expanded={!standaloneCollapsed}
-        >
-          <span class="standalone-title">Running in standalone (local single-user) mode</span>
-          <span class="standalone-toggle">{standaloneCollapsed ? '▸' : '▾'}</span>
-        </button>
-        {#if !standaloneCollapsed}
-          <p class="standalone-lead">
-            This instance runs the slimmed-down local shape. What that means here:
-          </p>
-          <ul class="standalone-caveats">
-            {#each stats.runtime.caveats as caveat}
-              <li>
-                <span class="caveat-title">{caveat.title}</span>
-                <span class="caveat-detail">{caveat.detail}</span>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </section>
+      <NoticeBanner
+        title="Running in standalone (local single-user) mode"
+        bind:collapsed={standaloneCollapsed}
+      >
+        <p class="standalone-lead">
+          This instance runs the slimmed-down local shape. What that means here:
+        </p>
+        <ul class="standalone-caveats">
+          {#each stats.runtime.caveats as caveat}
+            <li>
+              <span class="caveat-title">{caveat.title}</span>
+              <span class="caveat-detail">{caveat.detail}</span>
+            </li>
+          {/each}
+        </ul>
+      </NoticeBanner>
     {/if}
 
     <!-- System banner -->
@@ -267,12 +260,31 @@
         <div class="cell-value">
           <span
             class="dot"
-            class:dot-ok={stats.system.scheduler_healthy}
+            class:dot-ok={stats.system.scheduler_healthy && !stats.brain_status?.degraded}
+            class:dot-warn={stats.system.scheduler_healthy && stats.brain_status?.degraded}
             class:dot-bad={!stats.system.scheduler_healthy}
           ></span>
-          {stats.system.scheduler_healthy ? 'Healthy' : 'Stale'}
+          {#if !stats.system.scheduler_healthy}
+            Stale
+          {:else if stats.brain_status?.degraded}
+            Degraded
+          {:else}
+            Healthy
+          {/if}
         </div>
-        <div class="cell-sub">last activity {formatTimestamp(stats.system.last_scheduler_run)}</div>
+        <div class="cell-sub">
+          {#if stats.system.scheduler_healthy && stats.brain_status?.degraded}
+            {#if stats.brain_status.active}
+              on fallback ({brainLabel(stats.brain_status.active)}) · {brainLabel(
+                stats.brain_status.primary,
+              )} down
+            {:else}
+              {brainLabel(stats.brain_status.primary)} down · no fallback
+            {/if}
+          {:else}
+            last activity {formatTimestamp(stats.system.last_scheduler_run)}
+          {/if}
+        </div>
       </div>
       <div class="banner-cell">
         <div class="cell-label">Version</div>
@@ -650,37 +662,11 @@
     margin: 0;
   }
 
-  /* Standalone-mode notice: informational banner, read-only, collapsible. */
-  .standalone-notice {
-    border-left: 3px solid var(--accent, #c9a227);
-  }
-
-  .standalone-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    background: none;
-    border: none;
-    padding: 0;
-    margin: 0;
-    cursor: pointer;
-    color: inherit;
-    font: inherit;
-    text-align: left;
-  }
-
-  .standalone-title {
-    font-weight: 600;
-  }
-
-  .standalone-toggle {
-    opacity: 0.6;
-    font-size: 0.85rem;
-  }
-
+  /* Standalone-mode notice content — rendered inside the NoticeBanner slot at
+     the top of the page. The banner chrome (border, toggle, title) lives in the
+     NoticeBanner component; only the caveat list is styled here. */
   .standalone-lead {
-    margin: 0.6rem 0 0.4rem;
+    margin: 0 0 0.4rem;
     opacity: 0.85;
     font-size: 0.9rem;
   }
@@ -760,6 +746,9 @@
   }
   .dot-bad {
     background: #ff5a5a;
+  }
+  .dot-warn {
+    background: #f5a623;
   }
   .dot-mute {
     background: var(--text-dim);

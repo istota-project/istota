@@ -131,6 +131,13 @@ export interface AdminStats {
     source_type_overrides?: Record<string, string>;
     error?: string;
   };
+  brain_status?: {
+    degraded: boolean;
+    active: string | null;
+    primary: string;
+    reason?: string | null;
+    error?: string;
+  };
   error?: string;
 }
 

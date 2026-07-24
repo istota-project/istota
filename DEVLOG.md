@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-24: Degraded-brain visibility on the admin dashboard + reusable NoticeBanner (ISSUE-188)
+
+The admin dashboard aggregated *configured* posture, not *live* posture: when the primary brain was down (usage-limit / not-found) and the fallback was serving traffic, the page still looked healthy — it read `_config.brain` (the static config), so `models.brain_kind` showed the configured primary, the scheduler-health block was green, and nothing said "you're running on the fallback right now." The operator had to infer it from per-task model-note footers or a collapsed briefing. The live signal already existed (`brain/_fallback.get_availability_breaker()` / `primary_brain_unavailable`) — it just wasn't wired to the stats payload. Display-only fix; no change to brain selection or routing.
+
+**Key changes:**
+- `web_app._admin_brain_status_section()` consults `primary_brain_unavailable(_config.brain)` and reports `{degraded, primary, active, reason}` — `active` = `effective_fallback_kind(...)` when degraded, else the primary. Wired into `_gather_admin_stats` as `payload["brain_status"]`. Best-effort like the sibling sections. The breaker is process-global in-memory, so a stats call in the daemon's own web process sees real state (single-daemon deployment; not a cross-process problem).
+- Surfaced in the **existing** system-banner Status cell (per operator preference — no new standalone banner). Precedence: scheduler-stale → red "Stale" (bigger problem) > brain-degraded → amber "Degraded" (new `.dot-warn`) > green "Healthy". The subtext swaps to "on fallback (X) · Y down" (or "Y down · no fallback") when degraded, else keeps "last activity …".
+- New reusable UI primitive `NoticeBanner.svelte` — full-width, one-line, expandable notice with `info`/`warn`/`danger` variants (theme-aware `--accent-amber` for warn), a variant-colored left border, and a bindable `collapsed` (default true). The standalone-mode notice on the admin page was re-expressed through it (moved from its own card into this component at the top of the page), so any page can drop `<NoticeBanner>` at its top.
+- `AdminStats.brain_status` type added.
+
+**Design decisions:**
+- The breaker is the right source of truth, not per-task model notes — notes are per-task and absent on success; the breaker is the process-wide "are we on the fallback right now" signal.
+- With `fallback_cooldown_seconds = 0` (stickiness off) `primary_brain_unavailable` always returns available, so there's no persistent degraded posture to display — acceptable, since in that config each task independently probes the primary first.
+- Iterated on placement with the operator: a top-of-page banner → the Status cell (reuse existing UI, no new banner) → then extracted the standalone-notice pattern into a reusable `NoticeBanner` component when a general-purpose expandable notice was wanted.
+
+**Files added/modified:**
+- `src/istota/web_app.py` — `_admin_brain_status_section()` + wire into `_gather_admin_stats`.
+- `web/src/routes/admin/+page.svelte` — Status-cell degraded logic + `.dot-warn`; standalone notice via `<NoticeBanner>` at the page top.
+- `web/src/lib/components/ui/NoticeBanner.svelte` (new) + `index.ts` export.
+- `web/src/lib/api.ts` — `brain_status` on `AdminStats`.
+- `tests/test_web_app.py` — `TestAdminBrainStatus` (5 tests: healthy, degraded-with-fallback, degraded-no-fallback, cooldown-0-never-degrades, end-to-end payload).
+
 ## 2026-07-24: `!retry` / `!resume` — user-initiated re-run of failed tasks (ISSUE-189)
 
 When an interactive task (Talk / web chat) fails or is cancelled, the only recovery was the scheduler's automatic backoff retry — which reruns from a blank slate and doesn't fire in every case. There was no `!command` to re-run a failed task on demand, and no way to tell a retry "you already did X, continue from there." The user's only option was to retype the whole prompt and lose the partial progress the failed attempt made (its tool calls and intermediate findings, now persisted on the task row thanks to ISSUE-183).

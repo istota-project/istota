@@ -822,7 +822,51 @@ def _gather_admin_stats() -> dict:
     payload["modules"] = _admin_modules_section()
     payload["runtime"] = _admin_runtime_section()
     payload["models"] = _admin_models_section()
+    payload["brain_status"] = _admin_brain_status_section()
     return payload
+
+
+def _admin_brain_status_section() -> dict:
+    """Live brain posture for the admin dashboard (ISSUE-188).
+
+    Distinct from :func:`_admin_models_section`, which reports the *configured*
+    brain: this consults the process-global availability breaker so the operator
+    can see when the primary brain is down and the fallback is serving traffic.
+    When the primary breaker is open, reports ``degraded: true`` with the
+    configured fallback kind as ``active``; otherwise ``degraded: false`` on the
+    primary. The breaker is process-global in-memory, so a stats call inside the
+    daemon's own web process sees the real state (single-daemon deployment).
+    Best-effort: any failure returns an ``error`` string rather than aborting the
+    whole stats payload.
+    """
+    if not _config:
+        return {}
+
+    try:
+        from .brain._fallback import (
+            effective_fallback_kind,
+            primary_brain_unavailable,
+        )
+
+        brain_config = _config.brain
+        primary_kind = brain_config.kind
+        available, reason = primary_brain_unavailable(brain_config)
+        if available:
+            return {
+                "degraded": False,
+                "active": primary_kind,
+                "primary": primary_kind,
+            }
+        # Breaker open: the primary is skipped and the fallback (if any) serves.
+        return {
+            "degraded": True,
+            "primary": primary_kind,
+            "active": effective_fallback_kind(brain_config),
+            "reason": reason,
+        }
+    except Exception as exc:  # noqa: BLE001 — never fail the stats payload
+        logger.exception("admin brain status section failed")
+        return {"error": str(exc)}
 
 
 def _admin_models_section() -> dict:
