@@ -135,6 +135,13 @@ features = []
 # base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
 # max_turns = 100                            # hard cap on assistant turns/task
 # max_tokens = 16384                         # per-completion output cap
+# turn_budget_nudge = true                   # pace the model as it nears max_turns: inject an
+#                                            #   environment notice so a long tool-bearing run
+#                                            #   delivers a partial answer instead of getting
+#                                            #   capped mid-plan. Off for models that mishandle
+#                                            #   meta-instructions.
+# turn_budget_nudge_early_percent = 50       # first (~halfway) reminder fires at this % of the cap
+# turn_budget_nudge_remaining = [15, 5]      # escalating late fires at these absolute steps-remaining
 # prompt_caching = true                      # cache_control breakpoints. Omit to use the
 #                                            #   default: ON for api.anthropic.com,
 #                                            #   OFF for any other endpoint. Set explicitly

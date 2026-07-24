@@ -2,6 +2,28 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-24: Native-brain turn-budget awareness nudge (ISSUE-187 defect 3)
+
+The native brain's `max_turns` cap is a hard safety net the model can't see, so a long explorative task routinely gets capped mid-plan and delivers its last narration verbatim as if it were the answer (the incident: a Lisbon-apartment search capped at turn 80 on "let me move to Otodom and OLX next"). Defects 1–2 (the `stop_reason` masking + the truncation marker gated on an empty result) already shipped in `6e4cd4e`, making the cap *visible when hit*. This closes defect 3 — making the model *pace itself* so it's hit less often, and so a capped run produces a deliberate partial deliverable. Native-only; the CLI brains take their budget from `claude` and are unchanged.
+
+**Key changes:**
+- **(B) Threshold reminder — the primary mechanism.** As a tool-bearing, capped run nears `max_turns`, the loop injects an environment notice. `_pick_turn_budget_nudge` counts assistant turns from the loop's `new_messages` accumulator (monotonic across compaction — matches `_max_turns_stop`, so a threshold never re-fires after a context shrink), fires the ~50% "keep it in mind" reminder once, then once each as absolute steps-remaining crosses each level in `[15, 5]` (escalating); each threshold fires at most once via a `fired` set, and a tiny cap collapses to the most urgent crossed threshold (overtaken ones marked fired so they can't fire stale later). `_turn_budget_nudge_message` frames it as a *shrinking* resource ("~N steps remaining"), anchoring-resistant.
+- **(A) Upfront pacing line — optional flavoring, non-numeric.** `_extract_system_prompt` (now an instance method) appends one non-numeric line to the coding system prompt when the nudge is on + tools present + a cap set. Stating the numeric cap up front would anchor it as a target and compound sprawl on the exact tasks that hit the cap, so it carries no number. Compaction-safe (system prompt lives outside `ctx.messages`).
+- **Injection mechanism.** The nudge rides the existing `prepare_next_turn` closure (threshold logic in the `_next_budget_nudge` helper, kept separate from the compaction path). The notice is injected via `PrepareNextTurnResult(messages=…)` into `ctx.messages` only — not `new_messages` — so it's invisible to the trace and the turn count, purely model-facing, exactly like the compaction-summary injection.
+- **Wire role.** The notice is wire-role user (the LLM layer has no mid-conversation system role; Anthropic rejects one), with an explicit "Automatic system notice — not from the user" frame so the model treats it as environment metadata, not a new instruction (the mirror of `_STEER_FRAME`).
+- Config: `[brain.native] turn_budget_nudge` (default on) + `turn_budget_nudge_early_percent = 50` + `turn_budget_nudge_remaining = [15, 5]`. Defensive list parse (string→int coercion, junk dropped). Text-only runs (empty `allowed_tools`, e.g. sleep cycle) are gated out.
+
+**Design decisions:**
+- Anchoring drove the whole shape. Stating "you have N steps" up front tends to turn N into a target, compounding sprawl on exactly the population that hits the cap; the disciplined case rarely hits it because it self-limits. So (B) is primary (surfaces the budget only when actionable — short/common tasks see nothing), the ~50% first fire is early enough to be actionable (≤15/≤5 alone fired too late), and every framing leads with absolute *remaining* rather than percent-used.
+- Injecting into `ctx.messages` (not `new_messages`) keeps turn accounting and the persisted trace untouched — the cap still fires at the same turn with the real `stop_reason`, verified by a test.
+
+**Files added/modified:**
+- `src/istota/brain/native.py` — `_pick_turn_budget_nudge` / `_turn_budget_nudge_message` / `_TURN_BUDGET_FRAME` / `_TURN_BUDGET_UPFRONT`; nudge wired into `prepare_next_turn` via `_next_budget_nudge`; `_extract_system_prompt` static→instance + upfront line.
+- `src/istota/config.py` — three `NativeBrainConfig` fields + defensive parsing.
+- `tests/native/test_turn_budget_nudge.py` — 15 tests (threshold picker, message framing, integration reaches-the-wire / disabled / text-only / cap-honored, upfront-line present/absent).
+- `config/config.example.toml`, `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2` — new knobs.
+- `.claude/rules/brain.md` (new "Turn-budget awareness nudge" section), `.claude/rules/config.md`, `CHANGELOG.md`.
+
 ## 2026-07-24: Degraded-brain visibility on the admin dashboard + reusable NoticeBanner (ISSUE-188)
 
 The admin dashboard aggregated *configured* posture, not *live* posture: when the primary brain was down (usage-limit / not-found) and the fallback was serving traffic, the page still looked healthy — it read `_config.brain` (the static config), so `models.brain_kind` showed the configured primary, the scheduler-health block was green, and nothing said "you're running on the fallback right now." The operator had to infer it from per-task model-note footers or a collapsed briefing. The live signal already existed (`brain/_fallback.get_availability_breaker()` / `primary_brain_unavailable`) — it just wasn't wired to the stats payload. Display-only fix; no change to brain selection or routing.

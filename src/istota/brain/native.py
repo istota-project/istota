@@ -201,6 +201,93 @@ _STEER_FRAME = (
 # cancel-poll cadence.
 _STEER_POLL_INTERVAL_SECONDS = 2.0
 
+# Turn-budget nudge (ISSUE-187 defect 3). The notice is wire-role *user* (the LLM
+# layer has no mid-conversation system role, and Anthropic rejects one), so the
+# frame carries the "this is environment metadata, not a new user instruction"
+# semantics explicitly — the same distinction the steer frame draws in the other
+# direction. The budget is always framed as a *shrinking* resource ("~N
+# remaining"), never an upfront allotment, so the number reads as a ceiling
+# running out rather than a target to spend to (the anchoring pitfall).
+_TURN_BUDGET_FRAME = "[Automatic system notice — not from the user: {body}]"
+
+# Upfront pacing line appended to the coding system prompt when the nudge is on
+# (mechanism A). Deliberately NON-numeric: stating the cap value up front anchors
+# it as a target and compounds sprawl on exactly the tasks that hit the cap.
+_TURN_BUDGET_UPFRONT = (
+    "Work efficiently. If you cannot fully finish the task, produce the best "
+    "deliverable you can rather than leaving the work mid-stream."
+)
+
+
+def _turn_budget_nudge_message(remaining: int, phase: str) -> UserMessage:
+    """Frame a budget notice for injection as an environment note.
+
+    ``phase`` is ``"early"`` (the ~halfway reminder), or ``"late"`` (an
+    absolute-remaining wrap-up / urgent notice, escalating as ``remaining``
+    shrinks). Leads with the absolute steps-remaining so the framing is
+    anchoring-resistant.
+    """
+    if phase == "early":
+        body = (
+            f"you're about halfway through this task's step budget "
+            f"(~{remaining} steps remaining). Keep it in mind: if you can't "
+            f"complete the request, prioritize delivering the best partial answer "
+            f"you can rather than leaving the work mid-stream"
+        )
+    elif remaining <= 5:
+        body = (
+            f"only ~{remaining} steps remain before this task stops "
+            f"automatically. Deliver your best answer now, even if partial"
+        )
+    else:
+        body = (
+            f"~{remaining} steps remain before this task stops automatically. "
+            f"Start wrapping up — if you can't finish, summarize what you have "
+            f"and deliver a partial answer now"
+        )
+    return UserMessage(content=[TextContent(text=_TURN_BUDGET_FRAME.format(body=body))])
+
+
+def _pick_turn_budget_nudge(
+    turns: int,
+    max_turns: int,
+    early_percent: int,
+    remaining_levels: list[int],
+    fired: set[str],
+) -> tuple[int, str] | None:
+    """Decide which (if any) budget threshold to surface this turn.
+
+    Returns ``(remaining, phase)`` for the most urgent unfired threshold that has
+    been crossed, or ``None``. Mutates ``fired`` — every crossed threshold is
+    marked fired (so a less-urgent one that was overtaken can't fire stale
+    later), and each threshold fires at most once. ``turns`` is counted from the
+    loop's ``new_messages`` accumulator (monotonic across compaction), so the
+    same threshold never re-fires after a context shrink.
+    """
+    if not max_turns or max_turns <= 0:
+        return None
+    remaining = max_turns - turns
+    # (urgency_rank, key, phase) — lower rank = more urgent (fewer remaining).
+    crossed: list[tuple[int, str, str]] = []
+    for level in sorted({int(x) for x in remaining_levels}):
+        if remaining <= level:
+            crossed.append((level, f"remaining:{level}", "late"))
+    if 0 < early_percent <= 100:
+        early_turn = -(-max_turns * early_percent // 100)  # ceil
+        if turns >= early_turn:
+            # Least urgent — sort behind every late level.
+            crossed.append((max_turns + 1, "early", "early"))
+    if not crossed:
+        return None
+    unfired = [c for c in crossed if c[1] not in fired]
+    for _, key, _ in crossed:
+        fired.add(key)
+    if not unfired:
+        return None
+    unfired.sort(key=lambda c: c[0])
+    _, _, phase = unfired[0]
+    return remaining, phase
+
 
 def _drain_one_steer(buffer: list) -> list:
     """Pop one buffered steer text and return it framed as a user turn.
@@ -572,10 +659,42 @@ class NativeBrain:
                             )
                         pending_text["value"] = msg.text
 
-        # --- compaction via prepare_next_turn -----------------------------
+        # --- compaction + turn-budget nudge via prepare_next_turn ---------
         compaction_state = {"summary": None, "details": None}
+        # Turn-budget nudge (ISSUE-187 defect 3). Only for tool-bearing tasks with
+        # a cap — a text-only run (empty allowed_tools, e.g. the sleep cycle)
+        # never sees it. ``fired`` tracks crossed thresholds so each surfaces once.
+        budget_nudge_on = (
+            self._config.turn_budget_nudge
+            and bool(self._config.max_turns)
+            and bool(req.allowed_tools)
+        )
+        budget_state: dict = {"fired": set()}
+
+        def _next_budget_nudge(new_messages) -> UserMessage | None:
+            if not budget_nudge_on:
+                return None
+            turns = sum(1 for m in new_messages if isinstance(m, AssistantMessage))
+            picked = _pick_turn_budget_nudge(
+                turns,
+                self._config.max_turns,
+                self._config.turn_budget_nudge_early_percent,
+                self._config.turn_budget_nudge_remaining,
+                budget_state["fired"],
+            )
+            if picked is None:
+                return None
+            remaining, phase = picked
+            logger.debug(
+                "turn_budget_nudge fired remaining=%s phase=%s turns=%s/%s",
+                remaining, phase, turns, self._config.max_turns,
+            )
+            return _turn_budget_nudge_message(remaining, phase)
 
         async def prepare_next_turn(ctx: AgentContext, new_messages):
+            from istota.agent.types import PrepareNextTurnResult
+
+            nudge = _next_budget_nudge(new_messages)
             info = get_model_info(model)
             window = self._config.context_window or info.context_window
             reserve = self._config.compaction_reserve_tokens or derive_reserve_tokens(window)
@@ -583,34 +702,43 @@ class NativeBrain:
                 self._config.compaction_keep_recent_tokens or derive_keep_recent_tokens(window)
             )
             tokens, _ = estimate_context_tokens(ctx.messages)
-            if not should_compact(tokens, window, reserve_tokens=reserve):
-                return None
-            cut = find_cut_point(ctx.messages, keep_recent_tokens=keep_recent)
-            if cut == 0:
-                return None
-            to_compact = ctx.messages[:cut]
-            remaining = ctx.messages[cut:]
-            summary, details = await compact_messages(
-                to_compact,
-                compaction_state["summary"],
-                compaction_state["details"],
-                # Through the retrying provider so a transient 429 during the
-                # summary call is retried, not treated as a failed compaction
-                # (NB-10).
-                provider,
-                model,
-                self._convert_to_llm,
-                # Bound the summary input so the summary request can't overflow.
-                max_input_chars=_compaction_input_chars(window),
-            )
-            compaction_state["summary"] = summary
-            compaction_state["details"] = details
-            summary_msg = CompactionSummaryMessage(
-                summary=summary, tokens_before=tokens, details=details
-            )
-            from istota.agent.types import PrepareNextTurnResult
+            compacted: list | None = None
+            if should_compact(tokens, window, reserve_tokens=reserve):
+                cut = find_cut_point(ctx.messages, keep_recent_tokens=keep_recent)
+                if cut > 0:
+                    to_compact = ctx.messages[:cut]
+                    remaining = ctx.messages[cut:]
+                    summary, details = await compact_messages(
+                        to_compact,
+                        compaction_state["summary"],
+                        compaction_state["details"],
+                        # Through the retrying provider so a transient 429 during
+                        # the summary call is retried, not treated as a failed
+                        # compaction (NB-10).
+                        provider,
+                        model,
+                        self._convert_to_llm,
+                        # Bound the summary input so the request can't overflow.
+                        max_input_chars=_compaction_input_chars(window),
+                    )
+                    compaction_state["summary"] = summary
+                    compaction_state["details"] = details
+                    summary_msg = CompactionSummaryMessage(
+                        summary=summary, tokens_before=tokens, details=details
+                    )
+                    compacted = [summary_msg, *remaining]
 
-            return PrepareNextTurnResult(messages=[summary_msg, *remaining])
+            # Combine: a nudge injects into whichever message list is current
+            # (compacted, or the unchanged context) as a trailing environment
+            # note. Injecting via the returned list keeps it out of new_messages
+            # (invisible to the trace + turn count) — purely model-facing.
+            if nudge is None:
+                if compacted is None:
+                    return None
+                return PrepareNextTurnResult(messages=compacted)
+            base = compacted if compacted is not None else list(ctx.messages)
+            base.append(nudge)
+            return PrepareNextTurnResult(messages=base)
 
         # --- stop conditions ----------------------------------------------
         max_turns = self._config.max_turns
@@ -985,19 +1113,24 @@ class NativeBrain:
             # else: unknown custom message — not renderable, skip.
         return sanitize_tool_pairs(rendered)
 
-    @staticmethod
-    def _extract_system_prompt(req: BrainRequest) -> str:
+    def _extract_system_prompt(self, req: BrainRequest) -> str:
         """Compose the native brain's system prompt.
 
         Tool-bearing tasks (non-empty ``allowed_tools``) get the coding-guidance
         block; a text-only invocation (empty ``allowed_tools``, e.g. the sleep
-        cycle) keeps an empty prompt — no behavioural change to that path. An
-        operator's ``custom_system_prompt_path`` is appended after the base so it
-        still applies.
+        cycle) keeps an empty prompt — no behavioural change to that path. When
+        the turn-budget nudge is enabled the coding block also carries a
+        non-numeric "don't die mid-stream" pacing line (ISSUE-187 mechanism A;
+        compaction-safe since the system prompt lives outside ``ctx.messages``).
+        An operator's ``custom_system_prompt_path`` is appended after the base so
+        it still applies.
         """
         parts: list[str] = []
         if req.allowed_tools:
-            parts.append(CODING_SYSTEM_PROMPT)
+            coding = CODING_SYSTEM_PROMPT
+            if self._config.turn_budget_nudge and self._config.max_turns:
+                coding = f"{coding}\n\n- {_TURN_BUDGET_UPFRONT}"
+            parts.append(coding)
         path = req.custom_system_prompt_path
         if path is not None and Path(path).exists():
             parts.append(Path(path).read_text())

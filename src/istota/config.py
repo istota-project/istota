@@ -694,6 +694,20 @@ class NativeBrainConfig:
     # model can Read it, instead of silently dropping the tail. Default-on;
     # set false to keep the cap-only truncation behaviour.
     bash_spill_full_output: bool = True
+    # Turn-budget awareness nudge (ISSUE-187 defect 3). The loop injects an
+    # environment notice as the run approaches ``max_turns`` so the model paces
+    # itself and delivers a partial answer instead of getting capped mid-plan.
+    # Fires once at ``turn_budget_nudge_early_percent`` of the cap (a "~halfway,
+    # keep this in mind" reminder), then once each as absolute steps-remaining
+    # crosses each value in ``turn_budget_nudge_remaining`` (escalating urgency).
+    # The budget is framed as a *shrinking* resource ("~N remaining"), never as
+    # an upfront allotment, to avoid anchoring the count as a target. Counted
+    # from assistant turns (monotonic across compaction); each threshold fires at
+    # most once. Off via ``turn_budget_nudge=false`` for models/deployments that
+    # mishandle meta-instructions.
+    turn_budget_nudge: bool = True
+    turn_budget_nudge_early_percent: int = 50
+    turn_budget_nudge_remaining: list[int] = field(default_factory=lambda: [15, 5])
 
 
 @dataclass
@@ -1782,6 +1796,15 @@ def load_config(config_path: Path | None = None) -> Config:
             bash_spill_full_output=bool(
                 native_raw.get("bash_spill_full_output", True)
             ),
+            turn_budget_nudge=bool(native_raw.get("turn_budget_nudge", True)),
+            turn_budget_nudge_early_percent=int(
+                native_raw.get("turn_budget_nudge_early_percent", 50)
+            ),
+            turn_budget_nudge_remaining=[
+                int(x)
+                for x in native_raw.get("turn_budget_nudge_remaining", [15, 5])
+                if isinstance(x, (int, float)) or str(x).lstrip("-").isdigit()
+            ],
         )
         overrides_raw = br.get("source_type_overrides", {})
         if not isinstance(overrides_raw, dict):

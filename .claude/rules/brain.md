@@ -436,6 +436,66 @@ tools from the CLI and are byte-unchanged:
   rendering, `--` between non-adjacent groups); `literal` (`re.escape`) matches a
   plain string. Pure-Python, no ripgrep dependency.
 
+### Turn-budget awareness nudge (ISSUE-187 defect 3)
+
+The `max_turns` cap is a hard safety net the model can't see, so a long
+explorative task routinely gets capped mid-plan (the incident: a Lisbon-apartment
+search capped at turn 80 on *"let me move to Otodom and OLX next"* — mid-plan,
+non-empty narration delivered verbatim as the answer). Defects 1–2 (the masking:
+`max_turns`/`loop_detected` collapsed to `completed`; the truncation marker gated
+on an empty result) shipped in `6e4cd4e` and made the cap *visible when hit*. This
+is defect 3 — making the model *pace itself* so it's hit less often, and so a
+capped run produces a deliberate partial deliverable.
+
+Native-only (the CLI brains take prompt + budget from `claude`). Two layered
+mechanisms behind the hard cap, both gated on `[brain.native] turn_budget_nudge`
+(default on) + a set `max_turns` + a **tool-bearing** task (empty `allowed_tools`,
+e.g. the sleep cycle, is untouched):
+
+- **(B) Threshold reminder — the primary mechanism.** As the run nears the cap
+  the loop injects an environment notice so the budget surfaces only when
+  actionable (short/common tasks never see it — zero anchoring, zero overhead).
+  `_pick_turn_budget_nudge(turns, max_turns, early_percent, remaining_levels,
+  fired)` counts assistant turns from the loop's `new_messages` accumulator
+  (monotonic across compaction — matches `_max_turns_stop` exactly, so a
+  threshold never re-fires after a context shrink), and returns the most urgent
+  *unfired* crossed threshold. It fires **once** at `turn_budget_nudge_early_percent`
+  of the cap (a ~halfway "keep it in mind" reminder), then **once each** as
+  absolute steps-remaining crosses each value in `turn_budget_nudge_remaining`
+  (default `[15, 5]`, escalating urgency). Each threshold fires at most once
+  (`fired` set); when several cross on the same turn (a tiny cap) the most urgent
+  wins and the overtaken ones are marked fired so they can't fire stale later.
+  `_turn_budget_nudge_message(remaining, phase)` frames the notice as a
+  **shrinking** resource ("~N steps remaining", anchoring-resistant), leading with
+  absolute remaining, never an upfront allotment.
+- **(A) Upfront pacing line — optional flavoring, NON-numeric.**
+  `_extract_system_prompt` appends one non-numeric line to the coding-system-prompt
+  block ("produce the best deliverable you can rather than leaving the work
+  mid-stream") when the nudge is on + tools present + a cap is set. Stating the
+  numeric cap up front would anchor it as a target and *compound* the sprawl on
+  the exact tasks that hit the cap, so the line carries no number. Compaction-safe
+  (the system prompt lives outside `ctx.messages`).
+
+**Injection mechanism.** The nudge rides the `prepare_next_turn` closure (which
+already receives `(ctx, new_messages)` every turn — no new loop API). The
+threshold logic lives in the `_next_budget_nudge` helper so it doesn't tangle with
+the compaction path; the closure combines them (nudge appends to the compacted
+list, or to a copy of `ctx.messages` on a non-compaction turn). Injecting via the
+returned `PrepareNextTurnResult(messages=…)` puts the notice in `ctx.messages`
+only — **not** `new_messages` — so it's invisible to the execution trace and the
+turn count, purely model-facing, exactly like the compaction-summary injection.
+
+**Wire role.** The notice is wire-role *user* (the LLM layer has no
+mid-conversation system role, and Anthropic rejects one). The `_TURN_BUDGET_FRAME`
+carries the "environment metadata, not a new user instruction" semantics
+explicitly ("Automatic system notice — not from the user: …") — the mirror of the
+`_STEER_FRAME`'s "the user sent this" framing. Between thresholds a compaction may
+fold a prior notice into the summary; the count-from-`new_messages` +
+fire-each-threshold-once design keeps re-fire correct, and the gap is bounded
+until the next threshold. The layered posture: optional non-numeric turn-1 line →
+threshold nudge (~50% / ≤15 / ≤5) → hard `max_turns` cap → unmasked `stop_reason`
++ marker (defects 1–2).
+
 ### Native WebFetch tool (daemon-side, SSRF-hardened)
 
 The native harness's only web-reaching tool is Bash, which runs sandboxed behind
