@@ -61,6 +61,23 @@ class TestBreaker:
         # cooldown elapsed → a fresh open is again a closed→open transition.
         assert b.open("x", 100) is True
 
+    def test_repeat_open_does_not_extend_window(self, monkeypatch):
+        # An already-open breaker re-opened within the window keeps its ORIGINAL
+        # deadline: the cooldown is anchored to the first failure, so a caller
+        # that keeps re-reporting the same unavailability can't hold it open
+        # forever. Window is [0, 100); a re-open at t=90 must not push it out.
+        import istota.brain._fallback as mod
+        clock = [0.0]
+        monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+        b = PrimaryAvailabilityBreaker()
+        assert b.open("x", 100) is True
+        clock[0] = 90.0
+        assert b.open("x", 100) is False           # already open, no re-arm
+        assert b.should_skip("x", 100) is True      # still within original window
+        clock[0] = 101.0
+        # Deadline stayed at 100 (not pushed to 190) → breaker has reopened.
+        assert b.should_skip("x", 100) is False
+
 
 class TestProcessGlobal:
     def test_reset_clears(self):

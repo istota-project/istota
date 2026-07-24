@@ -74,13 +74,19 @@ class PrimaryAvailabilityBreaker:
 
         Returns True iff this call transitioned the breaker from closed→open for
         ``kind`` (so the caller arms exactly one operator alert). A call while it
-        is already open (within cooldown) returns False.
+        is already open (within cooldown) returns False and **leaves the original
+        open timestamp untouched** — a repeated failure within the window does
+        not push the cooldown deadline out. So the window is anchored to the
+        first failure and the breaker reliably reopens for a fresh probe once
+        ``cooldown`` elapses from that first failure, rather than being held open
+        indefinitely by a caller that keeps re-reporting the same unavailability.
         """
         with self._lock:
             now = time.monotonic()
             opened = self._opened_at.get(kind)
             already_open = opened is not None and (now - opened) < cooldown
-            self._opened_at[kind] = now
+            if not already_open:
+                self._opened_at[kind] = now
             return not already_open
 
     def should_skip(self, kind: str, cooldown: float) -> bool:
