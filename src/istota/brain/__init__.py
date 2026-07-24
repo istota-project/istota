@@ -56,7 +56,11 @@ from ._postures import (
 )
 from ._roles import get_role_override, get_role_overrides, set_role_overrides
 from ._types import Brain, BrainConfig, BrainRequest, BrainResult
-from .claude_code import ClaudeCodeBrain, is_usage_limit_error
+from .claude_code import (
+    ClaudeCodeBrain,
+    is_usage_limit_banner,
+    is_usage_limit_error,
+)
 from .native import NativeBrain
 
 logger = logging.getLogger(__name__)
@@ -134,6 +138,7 @@ __all__ = [
     "TRIGGER_STOP_REASONS",
     "TaskPosture",
     "is_portable_alias",
+    "is_usage_limit_banner",
     "is_usage_limit_error",
     "primary_brain_unavailable",
     "report_brain_result",

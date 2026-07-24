@@ -112,12 +112,37 @@ _USAGE_LIMIT_KEYWORDS: tuple[str, ...] = (
 _EXCEEDED_LIMIT_RE = re.compile(r"exceeded[^.]{0,40}?\blimit\b", re.IGNORECASE)
 
 # Claude Code's subscription-limit stem: "You've hit your <scope> limit · resets …".
-# The scope varies — session / weekly / Opus (per the Claude Code docs) — and all
-# three are a persistent "brain unavailable until reset" condition. Anchoring on
-# "hit your … limit" catches every current phrasing (and a future scope word)
-# without enumerating each noun, and the "hit your" anchor keeps a transient
-# "rate limit" from matching.
+# The scope varies — session / weekly / Opus / org's monthly spend (per the
+# Claude Code error docs, https://code.claude.com/docs/en/errors, plus the live
+# "You've hit your org's monthly spend limit · ask your admin to raise it"
+# banner) — and all are a persistent "brain unavailable until reset" condition.
+# Anchoring on "hit your … limit" catches every current phrasing (and a future
+# scope word) without enumerating each noun, and the "hit your" anchor keeps a
+# transient "rate limit" from matching.
 _HIT_LIMIT_RE = re.compile(r"hit your[^.]{0,40}?\blimit\b", re.IGNORECASE)
+
+# Standalone credit-exhaustion banner ("Credit balance is too low", per the docs).
+_CREDIT_BALANCE_LOW_RE = re.compile(r"credit balance is too low", re.IGNORECASE)
+
+# "<scope> limit reached" — the legacy/API banner phrasing ("usage limit
+# reached · resets …"). "reached" (past-tense, adjacent to "limit") is a banner
+# signal a normal answer rarely produces; the length gate in
+# ``is_usage_limit_banner`` guards the residual risk.
+_LIMIT_REACHED_RE = re.compile(r"\blimit reached\b", re.IGNORECASE)
+
+# Claude Code's explicit "this is a server-side capacity throttle, NOT your quota"
+# disclaimer ("API Error: Server is temporarily limiting requests (not your usage
+# limit)", per the docs). It contains the substring "usage limit", so without this
+# guard the broad keyword set below would misread a transient throttle as a
+# persistent usage limit and needlessly trip the fallback breaker.
+_NOT_USAGE_LIMIT_RE = re.compile(r"not your usage limit", re.IGNORECASE)
+
+# A genuine usage-limit *banner* is a short standalone one-liner delivered as the
+# whole result. A real answer that merely quotes a limit word (e.g. a memory
+# extraction summarising a past "usage limit" incident) is longer and is not a
+# banner; this ceiling is what keeps such content off the strict success-frame
+# path (see ``is_usage_limit_banner``).
+_BANNER_MAX_CHARS = 400
 
 
 def is_usage_limit_error(text: str) -> bool:
@@ -126,13 +151,54 @@ def is_usage_limit_error(text: str) -> bool:
     Shared by all three brains to classify a persistent "primary unavailable"
     condition as ``stop_reason="usage_limit"`` (which reroutes to the configured
     fallback brain) rather than a transient retry or a generic error.
+
+    This is the **broad** detector, meant for genuine *error* bodies (native
+    provider error JSON, ``claude`` stderr, a failure result). It matches the
+    keyword set liberally, so it must NOT be run against a *successful* answer —
+    use :func:`is_usage_limit_banner` there instead. A server-side throttle that
+    explicitly says "(not your usage limit)" is excluded so a transient capacity
+    error can't be mistaken for a quota outage.
     """
     if not text:
+        return False
+    if _NOT_USAGE_LIMIT_RE.search(text):
         return False
     low = text.lower()
     if any(keyword in low for keyword in _USAGE_LIMIT_KEYWORDS):
         return True
     return bool(_EXCEEDED_LIMIT_RE.search(text)) or bool(_HIT_LIMIT_RE.search(text))
+
+
+def is_usage_limit_banner(text: str) -> bool:
+    """True iff ``text`` *is* a standalone Claude Code usage-limit / credit banner.
+
+    Stricter than :func:`is_usage_limit_error`, for the paths where ``claude``
+    reports a subscription limit as a **successful** result frame (rc 0, the
+    limit banner as the whole answer). It must not fire on a genuine answer that
+    merely mentions a limit word — e.g. a nightly memory-extraction summarising a
+    conversation *about* a past usage limit, whose successful output otherwise
+    re-classified as ``usage_limit`` and kept the availability breaker armed long
+    after the real limit cleared (the observed feedback loop).
+
+    Robustness comes from matching only the *precise published banner shapes*
+    (`https://code.claude.com/docs/en/errors`) — "You've hit your <scope> limit",
+    "Credit balance is too low", or an explicit "exceeded … limit" — and only
+    when the text is short enough to be a standalone banner rather than a real
+    answer. The broad keyword set is deliberately not consulted here.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped or len(stripped) > _BANNER_MAX_CHARS:
+        return False
+    if _NOT_USAGE_LIMIT_RE.search(stripped):
+        return False
+    return bool(
+        _HIT_LIMIT_RE.search(stripped)
+        or _CREDIT_BALANCE_LOW_RE.search(stripped)
+        or _LIMIT_REACHED_RE.search(stripped)
+        or _EXCEEDED_LIMIT_RE.search(stripped)
+    )
 
 
 def _failure_stop_reason(text: str) -> str:
@@ -513,14 +579,14 @@ class ClaudeCodeBrain:
         # success branch too — otherwise it defaults to stop_reason="completed",
         # never matches the fallback trigger set, and gets delivered as the reply.
         if result.returncode == 0 and output:
-            if is_usage_limit_error(output):
+            if is_usage_limit_banner(output):
                 return BrainResult(
                     success=False, result_text=output, stop_reason="usage_limit",
                 )
             return BrainResult(success=True, result_text=output)
         if result.returncode == 0 and req.result_file and req.result_file.exists():
             file_text = req.result_file.read_text().strip()
-            if is_usage_limit_error(file_text):
+            if is_usage_limit_banner(file_text):
                 return BrainResult(
                     success=False, result_text=file_text, stop_reason="usage_limit",
                 )
@@ -768,10 +834,13 @@ class ClaudeCodeBrain:
             result_text = final_result.text.strip()
             if final_result.success:
                 # `claude -p` reports a session/quota limit as a success result
-                # frame (subtype:"success", the limit text as `result`). Classify
+                # frame (subtype:"success", the limit banner as `result`). Classify
                 # it here so it reroutes to the fallback brain instead of being
                 # delivered as the answer with the default stop_reason="completed".
-                if is_usage_limit_error(result_text):
+                # Use the strict *banner* detector: the broad keyword one would
+                # misread a genuine answer that merely quotes a limit word (e.g. a
+                # memory extraction summarising a past outage) as a fresh outage.
+                if is_usage_limit_banner(result_text):
                     return BrainResult(
                         success=False,
                         result_text=result_text,
@@ -798,7 +867,7 @@ class ClaudeCodeBrain:
         if req.result_file and req.result_file.exists():
             output = req.result_file.read_text()
             if process.returncode == 0:
-                if is_usage_limit_error(output):
+                if is_usage_limit_banner(output):
                     return BrainResult(
                         success=False,
                         result_text=output.strip(),

@@ -15,7 +15,18 @@ from istota.brain._types import BrainRequest, BrainResult
 from istota.brain.claude_code import (
     ClaudeCodeBrain,
     is_transient_api_error,
+    is_usage_limit_banner,
     is_usage_limit_error,
+)
+
+# The real successful nightly memory-extraction output that kept re-arming the
+# availability breaker in prod: a normal answer that *summarises* a past usage
+# limit. It must classify as a successful completion, never usage_limit.
+_MEMORY_EXTRACTION_MENTIONING_LIMIT = (
+    "MEMORIES:\n"
+    "- Primary brain (claude-opus-4-8) hit a usage limit around midnight "
+    "2026-07-23 and stayed down through the morning of 2026-07-24; the fallback "
+    "brain ran on `z-ai/glm-5.2` for all overnight tasks until the limit cleared."
 )
 
 
@@ -66,6 +77,66 @@ class TestIsUsageLimitError:
         # takes precedence at every call site.
         assert is_usage_limit_error(quota) is True
 
+    def test_server_throttle_disclaimer_is_not_usage_limit(self):
+        # Claude Code's server-side capacity throttle explicitly says it is NOT a
+        # usage limit — but the string contains "usage limit", so the broad
+        # keyword set would wrongly match without the disclaimer guard.
+        throttle = (
+            "API Error: Server is temporarily limiting requests "
+            "(not your usage limit)"
+        )
+        assert is_usage_limit_error(throttle) is False
+
+
+class TestIsUsageLimitBanner:
+    """Strict banner detector for the *success-frame* paths — a subscription
+    limit that ``claude`` delivers as the whole result, NOT a real answer that
+    merely quotes a limit word.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # The published Claude Code subscription banners (docs).
+            "You've hit your session limit · resets 3:45pm",
+            "You've hit your weekly limit · resets Mon 12:00am",
+            "You've hit your Opus limit · resets 3:45pm",
+            # The live org spend-limit banner.
+            "You've hit your org's monthly spend limit · ask your admin to raise "
+            "it at claude.ai/settings/usage?from=cc_cli_limit_message",
+            "Credit balance is too low",
+            "You have exceeded your current quota limit",
+        ],
+    )
+    def test_matches_standalone_banner(self, text):
+        assert is_usage_limit_banner(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "Here is your completed answer.",
+            # The prod feedback-loop case: a successful memory extraction that
+            # *summarises* a past usage limit. Must NOT be a banner.
+            _MEMORY_EXTRACTION_MENTIONING_LIMIT,
+            # A short answer that mentions a limit word but is not the banner.
+            "Yep, I'm up — the primary brain hit a usage limit overnight.",
+            # The transient server-throttle disclaimer.
+            "API Error: Server is temporarily limiting requests (not your usage limit)",
+            # Broad keywords alone (billing/quota/monthly limit) are not a banner.
+            "This report covers the billing and quota usage for the monthly limit.",
+        ],
+    )
+    def test_ignores_non_banner(self, text):
+        assert is_usage_limit_banner(text) is False
+
+    def test_long_text_with_real_banner_substring_is_not_banner(self):
+        # Even a verbatim banner quote inside a long answer is not a standalone
+        # banner (length gate) — a real limit arrives as the banner alone.
+        text = "Summary of the incident: " + ("x" * 500) + \
+            " You've hit your session limit · resets 3:45pm"
+        assert is_usage_limit_banner(text) is False
+
 
 def _req() -> BrainRequest:
     return BrainRequest(
@@ -106,6 +177,14 @@ class TestSimplePathClassification:
 
     def test_rc0_normal_output_stays_success(self):
         result = self._run(0, "Here is your completed answer.")
+        assert result.success is True
+        assert result.stop_reason == "completed"
+
+    def test_rc0_memory_extraction_mentioning_limit_stays_success(self):
+        # Regression: a successful nightly memory extraction that *summarises* a
+        # past usage limit must NOT be reclassified as usage_limit — doing so
+        # re-armed the availability breaker long after the real limit cleared.
+        result = self._run(0, _MEMORY_EXTRACTION_MENTIONING_LIMIT)
         assert result.success is True
         assert result.stop_reason == "completed"
 
@@ -155,6 +234,13 @@ class TestStreamingSuccessBranchClassification:
 
     def test_success_frame_normal_stays_success(self):
         result = self._run("Here is your completed answer.")
+        assert result.success is True
+        assert result.stop_reason == "completed"
+
+    def test_success_frame_memory_extraction_mentioning_limit_stays_success(self):
+        # Streaming counterpart of the prod feedback loop: a success result frame
+        # whose text summarises a past usage limit stays a completed success.
+        result = self._run(_MEMORY_EXTRACTION_MENTIONING_LIMIT)
         assert result.success is True
         assert result.stop_reason == "completed"
 

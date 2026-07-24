@@ -55,6 +55,7 @@ from .claude_code import (
     _is_root,
     build_claude_cli_flags,
     is_transient_api_error,
+    is_usage_limit_banner,
     is_usage_limit_error,
 )
 
@@ -912,8 +913,11 @@ class TmuxClaudeBrain:
         # fallback brain. tmux is the subscription-billing brain, so this is the
         # exact case a fallback exists to cover. Not a launch failure, so it never
         # feeds the launch _CircuitBreaker (execute only records that on
-        # stop_reason="fallback").
-        if is_usage_limit_error(result_text):
+        # stop_reason="fallback"). Use the strict *banner* detector, not the broad
+        # keyword one: ``result_text`` is the real assistant answer here, so a
+        # normal reply that merely quotes a limit word (e.g. summarising a past
+        # usage-limit incident) must not be misread as an outage.
+        if is_usage_limit_banner(result_text):
             logger.warning("tmux_brain usage_limit (transcript body)")
             return BrainResult(
                 success=False,
