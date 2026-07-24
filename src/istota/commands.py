@@ -1268,6 +1268,233 @@ async def cmd_more(ctx: CommandContext):
 
 
 # =============================================================================
+# !retry / !resume — user-initiated re-run of a failed/cancelled task
+# =============================================================================
+
+# Interactive source types eligible for a user-initiated retry. A retry is a
+# fresh conversational turn in the same room, so only room-scoped interactive
+# tasks qualify — a scheduled/briefing/heartbeat task retries on its own
+# schedule and isn't something the user re-runs by hand here.
+_RETRYABLE_SOURCE_TYPES = ("talk", "email", "repl", "web")
+
+
+async def _resolve_retry_target(ctx: CommandContext) -> "tuple[db.Task | None, str]":
+    """Resolve the failed/cancelled task a `!retry`/`!resume` targets.
+
+    Returns ``(task, error)``: on success ``task`` is a ``db.Task`` and
+    ``error`` is ``""``; on failure ``task`` is ``None`` and ``error`` is a
+    user-facing message. Mirrors ``!more``/``!steer``: an explicit ``#<id>`` if
+    given, else the most recent failed/cancelled interactive task in the
+    resolved canonical room. Own-task only, unless admin.
+    """
+    config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
+    room_token = db.resolve_room_token(conn, ctx.surface, ctx.conversation_token) \
+        or ctx.conversation_token
+
+    id_str = args.strip().lstrip("#")
+    if id_str:
+        if not id_str.isdigit():
+            return None, (
+                "Usage: `!retry [#<task_id>]` — re-run a failed or cancelled "
+                "task (defaults to the last one in this room)."
+            )
+        task = db.get_task(conn, int(id_str))
+        if task is None:
+            return None, f"Task #{id_str} not found."
+        if task.user_id != user_id and not config.is_admin(user_id):
+            return None, f"Task #{task.id} belongs to another user."
+        if task.source_type not in _RETRYABLE_SOURCE_TYPES:
+            return None, (
+                f"Task #{task.id} is a `{task.source_type}` task — only "
+                "interactive tasks can be retried this way."
+            )
+        if task.status in ("running", "locked", "pending"):
+            return None, (
+                f"Task #{task.id} is still {task.status} — use `!stop` first if "
+                "you want to restart it."
+            )
+        if task.status == "pending_confirmation":
+            return None, (
+                f"Task #{task.id} is awaiting your confirmation — reply normally "
+                "to answer it."
+            )
+        if task.status == "completed":
+            return None, (
+                f"Task #{task.id} completed successfully — there's nothing to retry."
+            )
+        # Only failed/cancelled remain.
+        return task, ""
+
+    placeholders = ",".join("?" * len(_RETRYABLE_SOURCE_TYPES))
+    row = conn.execute(
+        f"""
+        SELECT id FROM tasks
+        WHERE user_id = ? AND conversation_token = ?
+          AND source_type IN ({placeholders})
+          AND status IN ('failed', 'cancelled')
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (user_id, room_token, *_RETRYABLE_SOURCE_TYPES),
+    ).fetchone()
+    if row is None:
+        return None, "No failed or cancelled task in this room to retry."
+    task = db.get_task(conn, row["id"])
+    if task is None:
+        return None, "No failed or cancelled task in this room to retry."
+    return task, ""
+
+
+def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
+    """Create a fresh task copying the retry-relevant fields off ``original``.
+
+    A new row (not a ``set_task_pending_retry`` flip of the old one) keeps the
+    retry out of the automatic backoff / ``attempt_count`` pressure, leaves the
+    failed attempt intact in history with its trace, and shows up as a fresh
+    turn. ``parent_task_id`` keeps the lineage queryable. Delivery-relevant
+    fields (``output_target`` / ``talk_delivery_token`` / ``model`` / ``effort``
+    / ``skill``) are copied so the retry lands on the same surface as the
+    original.
+    """
+    return db.create_task(
+        conn,
+        prompt=prompt,
+        user_id=original.user_id,
+        source_type=original.source_type,
+        conversation_token=original.conversation_token,
+        parent_task_id=original.id,
+        is_group_chat=original.is_group_chat,
+        output_target=original.output_target,
+        talk_delivery_token=original.talk_delivery_token,
+        model=original.model,
+        effort=original.effort,
+        skill=original.skill,
+        skill_args=original.skill_args,
+        priority=original.priority,
+    )
+
+
+def _record_retry_user_turn(
+    conn, task_id: int, original: "db.Task", surface: str,
+) -> None:
+    """Best-effort: store the retry's user turn in the room transcript.
+
+    Body is the *original* clean prompt (never a `!resume` trace injection), so
+    the retry reads as the user re-asking the question and future LLM context
+    sees what was actually asked. ``task_id`` is the new task's id so the row
+    pairs with the eventual assistant turn (``_store_room_turn``). Room surfaces
+    only; mirrors `!steer`'s transcript write."""
+    if surface not in ("talk", "web"):
+        return
+    token = original.conversation_token
+    if not token:
+        return
+    try:
+        if db.get_room(conn, token) is not None:
+            db.add_message(
+                conn, token, role="user", body=original.prompt,
+                origin_surface=surface, task_id=task_id,
+            )
+    except Exception:
+        logger.debug("retry transcript user-row write failed", exc_info=True)
+
+
+def _render_prior_progress(task: "db.Task") -> str | None:
+    """Render a failed task's execution trace as a prior-progress block for
+    `!resume` injection, or ``None`` when there's no usable trace.
+
+    Uses the verbatim Bash invocation (`raw`, per ISSUE-174) when present so the
+    model sees the real command it ran, falling back to the tool description.
+    Returns ``None`` for an absent/empty/corrupt trace so the caller degrades to
+    `!retry` semantics (ISSUE-183: pre-trace failed tasks have no trace)."""
+    if not task.execution_trace:
+        return None
+    try:
+        trace = json.loads(task.execution_trace)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    lines: list[str] = []
+    for entry in trace:
+        etype = entry.get("type")
+        if etype == "tool":
+            raw = entry.get("raw")
+            desc = (entry.get("text") or "").strip()
+            if raw:
+                lines.append(f"- ran: {raw}")
+            elif desc:
+                lines.append(f"- {desc}")
+        elif etype == "text":
+            text = (entry.get("text") or "").strip()
+            if text:
+                lines.append(f"- (was thinking) {text}")
+    if not lines:
+        return None
+    return "\n".join(lines)
+
+
+def _build_resume_prompt(original_prompt: str, progress: str) -> str:
+    """Prepend the prior-progress block to the original prompt for `!resume`.
+
+    Injecting into the stored prompt (rather than a dedicated executor context
+    section) keeps the change to the command layer — it flows through every
+    brain and context path unchanged."""
+    return (
+        "You were previously working on the task below and got part of the way "
+        "through before the attempt ended. Here's what you already did — "
+        "continue from where you left off, and don't repeat these steps unless "
+        "you actually need a result again:\n\n"
+        f"{progress}\n\n"
+        "--- Original request ---\n\n"
+        f"{original_prompt}"
+    )
+
+
+@command(
+    "retry",
+    "Re-run a failed/cancelled task from scratch: `!retry` (last in room) or `!retry #<id>`",
+)
+async def cmd_retry(ctx: CommandContext):
+    task, error = await _resolve_retry_target(ctx)
+    if task is None:
+        return error
+    new_id = _create_retry_task(ctx.conn, task, task.prompt)
+    _record_retry_user_turn(ctx.conn, new_id, task, ctx.surface)
+    ctx.conn.commit()
+    preview = task.prompt[:80] + "..." if len(task.prompt) > 80 else task.prompt
+    return f"Retrying task #{task.id} as #{new_id}: {preview}"
+
+
+@command(
+    "resume",
+    "Re-run a failed/cancelled task, continuing from its prior progress: "
+    "`!resume` or `!resume #<id>`",
+)
+async def cmd_resume(ctx: CommandContext):
+    task, error = await _resolve_retry_target(ctx)
+    if task is None:
+        return error
+    progress = _render_prior_progress(task)
+    if progress is None:
+        # No captured trace to continue from — degrade to a clean re-run.
+        new_id = _create_retry_task(ctx.conn, task, task.prompt)
+        _record_retry_user_turn(ctx.conn, new_id, task, ctx.surface)
+        ctx.conn.commit()
+        return (
+            f"No prior progress was captured for task #{task.id}, so I'm retrying "
+            f"it from scratch as #{new_id}."
+        )
+    resume_prompt = _build_resume_prompt(task.prompt, progress)
+    new_id = _create_retry_task(ctx.conn, task, resume_prompt)
+    _record_retry_user_turn(ctx.conn, new_id, task, ctx.surface)
+    ctx.conn.commit()
+    step_count = progress.count("\n") + 1
+    preview = task.prompt[:80] + "..." if len(task.prompt) > 80 else task.prompt
+    return (
+        f"Resuming task #{task.id} as #{new_id}, continuing from {step_count} "
+        f"prior step(s): {preview}"
+    )
+
+
+# =============================================================================
 # !search command
 # =============================================================================
 

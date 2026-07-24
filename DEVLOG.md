@@ -2,6 +2,30 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-24: `!retry` / `!resume` — user-initiated re-run of failed tasks (ISSUE-189)
+
+When an interactive task (Talk / web chat) fails or is cancelled, the only recovery was the scheduler's automatic backoff retry — which reruns from a blank slate and doesn't fire in every case. There was no `!command` to re-run a failed task on demand, and no way to tell a retry "you already did X, continue from there." The user's only option was to retype the whole prompt and lose the partial progress the failed attempt made (its tool calls and intermediate findings, now persisted on the task row thanks to ISSUE-183).
+
+Added two layered commands sharing one room-scoped resolver, all in `commands.py`. No DB migration, no executor change, no frontend change (autocomplete reads the command registry).
+
+**Key changes:**
+- `_resolve_retry_target` — mirrors `!more`/`!steer`: explicit `#<id>`, else the most recent `failed`/`cancelled` task in the resolved canonical room whose `source_type` is interactive (`talk`/`email`/`repl`/`web`). Own-task-only unless admin. Rejects `running`/`locked`/`pending` (use `!stop` first), `pending_confirmation` (reply normally), and `completed` (nothing to retry).
+- `!retry` — re-runs from scratch. `!resume` — prepends the failed attempt's rendered `execution_trace` (verbatim Bash `raw` per ISSUE-174, else the tool description, plus intermediate text) to the original prompt with a "continue from where you left off" frame.
+- Both create a *new* task (`_create_retry_task` → `db.create_task` with `parent_task_id` + copied delivery fields `output_target`/`talk_delivery_token`/`model`/`effort`/`skill`/`skill_args`). New-row-not-requeue keeps the failed attempt intact in history and out of the automatic backoff/`attempt_count` pressure — matching how a retyped prompt behaves.
+- The retry's user turn is written to the room transcript (`_record_retry_user_turn`) with the *clean* original prompt (never the trace injection), paired to the new task id so `_store_room_turn`'s eventual assistant row completes the turn.
+- `!resume` degrades to `!retry` semantics with a note when the trace is absent/empty/corrupt (pre-ISSUE-183 tasks).
+
+**Design decisions:**
+- Chose new-task-with-`parent_task_id` over `set_task_pending_retry` re-queue: a re-queued row inherits the attempt counter, the backoff schedule, and muddies the `is_rerun` ack semantics; a new task is unambiguous.
+- Chose prepend-to-prompt over a dedicated executor context section — smaller change, flows through every brain and context path unchanged, keeps the injection in the command layer.
+- The automatic retry path (`set_task_pending_retry`) is untouched — no auto-injection of partial context, which could compound a confused transient-failure state.
+- REPL uses `/`-commands not `!`, so `!retry`/`!resume` never reach it — `repl` is an inert member of the interactive-source set (kept for resolver completeness).
+- Skipped copying `attachments` — original task's local temp paths may be cleaned up by retry time, so re-attaching stale paths is riskier than dropping them for v1.
+
+**Files added/modified:**
+- `src/istota/commands.py` — new `!retry`/`!resume` handlers, `_resolve_retry_target`, `_create_retry_task`, `_record_retry_user_turn`, `_render_prior_progress`, `_build_resume_prompt`.
+- `tests/test_commands_retry.py` - 28 tests: target resolution (last-in-room, explicit id, not-yours, wrong status, non-interactive source), field copy, transcript row, resume injection shape + step count + clean-prompt transcript, empty/corrupt-trace degradation.
+
 ## 2026-07-23: Persist interrupted tasks' execution trace for web-chat reload (ISSUE-183)
 
 A cancelled or failed task that had already streamed tool calls and intermediate text showed a **blank agent bubble** when the web chat was reloaded — the live stream during the run had the tools, but the `tasks` row persisted after the run had none of it. The live view and the reloaded view disagreed, and the reloaded view was the one that mattered for history.
