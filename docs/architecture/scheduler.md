@@ -21,22 +21,36 @@ All Nextcloud Talk I/O runs on **one** long-lived asyncio loop on a dedicated da
 ## Main loop
 
 ```python
+recover_orphaned_tasks_on_startup()  # once, under the flock, before any worker spawns
+
 while not shutdown_requested:
     check_briefings()           # every briefing_check_interval (60s)
     check_scheduled_jobs()      # every briefing_check_interval
-    check_sleep_cycles()        # every briefing_check_interval
-    check_channel_sleep_cycles()# every briefing_check_interval
+    check_shared_blocks()       # every briefing_check_interval
+    _run_sleep_cycles()         # off-thread; polled every briefing_check_interval
     poll_emails()               # every email_poll_interval (60s)
     organize_shared_files()     # every shared_file_check_interval (120s)
     poll_tasks_files()          # every tasks_file_poll_interval (30s)
     run_cleanup_checks()        # every briefing_check_interval
     check_briefing_triggers()   # every briefing_check_interval (NC-app trigger files)
     check_heartbeats()          # every heartbeat_check_interval (60s)
+    check_db_health()           # off-thread; every db_health_check_interval (24h)
+    _run_db_backup()            # off-thread; every db_backup_interval (24h)
     pool.dispatch()             # spawn workers for users with pending tasks
-    sleep(poll_interval)        # 2s
+    sleep(poll_interval)        # 2s, sub-ticking pool.dispatch() every dispatch_interval
 ```
 
 Talk polling runs in a separate daemon thread, started at scheduler launch.
+
+### Off-thread periodic checks
+
+Three checks are multi-minute — the DB health sweep and the DB backup snapshot both walk every per-user DB (the backup writing to the rclone FUSE mount, where latency is unbounded), and the nightly sleep cycles make synchronous per-user LLM calls. Run inline they blocked `pool.dispatch()` for their whole duration. `_spawn_background_check(name, fn, inflight)` puts each on a short-lived `bgcheck-<name>` daemon thread, skipping the tick when the previous run under the same name is still alive, so a wedged sweep cannot stack one thread per tick. Exceptions are contained and logged. The interval clocks advance at spawn time (fixed cadence; the in-flight guard prevents overlap), while the *staleness* alert reads the persisted last-run clock, which only advances on a durable OK run.
+
+Because none of the known-long checks runs on the loop thread any more, there are no `LoopWatchdog.suspended()` call sites left — the stall watchdog covers the whole loop.
+
+### Startup orphan recovery
+
+The heartbeat-based stuck-task reclaim *infers* a dead worker and takes up to `worker_stuck_minutes` to do it. A scheduler restart is deterministic instead: the daemon holds a singleton flock, so the moment a fresh instance boots, every `running` / `locked` row belongs to the dead instance. `recover_orphaned_tasks_on_startup` runs once under the flock, before any worker spawns, and resolves each orphan in priority order — `cancel_requested` → `cancelled`; retries exhausted, too old, or an inline-only source (REPL) → `failed`; otherwise back to `pending` with `attempt_count` bumped and every liveness column cleared. Terminal outcomes emit a terminal event frame so a watching web client gets closure instead of a hung spinner; released orphans emit nothing, since the re-run streams its own `task_started`. `pending_confirmation` rows are left alone.
 
 ## Worker pool
 
@@ -102,6 +116,10 @@ Auto-seeded `_module.feeds.run_scheduled` / `_module.money.run_scheduled` rows d
 ## Retry logic
 
 Failed tasks retry with exponential backoff: 1 min, 4 min, 16 min (up to `max_attempts`, default 3). Transient API errors (5xx, 429) get 3 fast retries with 5s delay before counting against task attempts.
+
+**Shutdown collateral is not a failure.** Under systemd's default `KillMode=control-group`, a `systemctl restart` (the auto-update cron issues one per commit) SIGTERMs the whole cgroup, killing an in-flight task's model subprocess while the daemon shuts down gracefully — so the surviving worker recorded the corpse as a failure, permanently so on a final attempt. When `_shutdown_requested` is set *and* the failure text carries a signal-termination marker, the task goes back to `pending` via `db.release_task_for_restart` with **no attempt charged and no backoff**, and its deferred-op files are purged; `fail_ancient_pending_tasks` remains the bound. The client sees a "Scheduler restarting…" progress notice rather than a terminal frame. The unit template also sets `KillMode=mixed`, which converts the same event into the startup orphan-recovery path — this branch is the belt-and-braces half, and the one that ships via auto-update since unit files need an Ansible run.
+
+A related invariant: `worker_pid` is cleared on *every* transition out of `running` (completed, failed, cancelled, pending-retry, restart-release, orphan recovery). It used to survive a failed attempt, so a retry row could carry a dead attempt's PID — and both cancel paths (`!stop`, the web cancel endpoint) signal whatever the row holds, which would eventually land on an unrelated recycled PID.
 
 ## Task event streaming
 

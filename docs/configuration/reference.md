@@ -247,6 +247,21 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 | `auto_recall` | `false` | BM25 auto-recall in prompts |
 | `auto_recall_limit` | `5` | Max recall results |
 
+## `[briefings]`
+
+Module-level settings for the briefings module (per-user content store + archive). All defaulted, so an absent block is the shipped behaviour.
+
+| Setting | Default | Description |
+|---|---|---|
+| `archive_retention_days` | `90` | Prune archived briefing results older than this, on insert (0 = keep forever) |
+| `default_lookback_hours` | `12` | Seeds the `email` / `rss` source window when a source omits it |
+| `max_source_chars` | `5000` | Cap on a single source's gathered text |
+| `shared_block_timezone` | `"UTC"` | Timezone module-owned shared blocks evaluate their cron in. Shared blocks are global (generated once, no per-user timezone), so this is one operator-chosen zone — typically the operator's own, so morning/evening regeneration lines up with their day. An invalid name falls back to UTC at run time. |
+
+## `[[briefing_shared_blocks]]`
+
+Module-owned shared blocks generated once globally under the reserved `__system__` identity and read by any user's briefing through a `shared_block` source. Seeded once into the `shared_block_configs` table, after which the DB is authoritative and admins manage them from the web UI or `istota briefings shared`. Leave unset for the canonical defaults (`world-headlines`, `markets-summary`); an explicit empty list opts out. Only user-agnostic source kinds are allowed (`browse`, `markets`, `email`). See [briefings](../features/briefings.md#shared-curated-content).
+
 ## `[[default_briefings]]`
 
 A canonical shared briefing set, seeded once into each opted-in user (per-user

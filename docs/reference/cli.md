@@ -29,10 +29,12 @@ istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
 istota user show --name USER_ID              # Dump the stored profile row as JSON
 istota user remove --name USER_ID            # Delete a user_profiles row (no other tables touched)
-istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--email-reply-routing origin+thread|origin|thread]
+istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--email-reply-routing origin+thread|origin|thread] [--default-briefings | --no-default-briefings]
 ```
 
 `istota user ensure` has no `-u`/`--user` flag — the user id comes from `--name` (required). `--tz` and `--timezone` are aliases. `--email` takes a bare address and is repeatable (each pass replaces the stored list). Worker caps are `--max-foreground-workers` / `--max-background-workers`.
+
+`--default-briefings` / `--no-default-briefings` controls whether the shared `[[default_briefings]]` set is seeded into this user (on by default). Seeding is one-time per briefing name, so a later opt-in never clobbers briefings the user has edited.
 
 `--default-destination` sets the fallback delivery surface (`talk` | `email` | `ntfy` | `web` | `surface:channel` | comma list). `--route` is repeatable and sets a purpose-keyed override; `PURPOSE` is one of `reply`, `alert`, `log`, `briefing`, `notification`. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).
 
@@ -57,13 +59,40 @@ briefing-source `path`, with no convention-default filename).
 
 ### Briefings
 
+`istota briefings` is the unified tree. Schedule and delivery are framework-owned (`briefing_configs`); content (blocks and their sources) lives in the per-user briefings module DB.
+
 ```bash
-istota briefing ensure -u USER --name NAME --cron CRON [--conversation-token TOKEN] [--output talk|email|ntfy|both] [--component k=v] [--components-json '{…}'] [--disabled]
-istota briefing list   -u USER
-istota briefing delete -u USER --name NAME
+# Schedule + delivery
+istota briefings schedule ensure -u USER --name NAME --cron CRON [--conversation-token TOKEN] [--output talk|email|ntfy|both] [--disabled]
+istota briefings schedule list   -u USER
+istota briefings schedule delete -u USER --name NAME
+
+# Content blocks
+istota briefings blocks list    -u USER [--briefing NAME]
+istota briefings blocks add     -u USER --briefing NAME --title TITLE [--directive TEXT] [--render-mode synthesis|structured] [--options '{…}']
+istota briefings blocks set     -u USER --id BLOCK_ID [--title …] [--directive …] [--render-mode …] [--options '{…}']
+istota briefings blocks reorder -u USER --briefing NAME --ids 3,1,2
+istota briefings blocks remove  -u USER --id BLOCK_ID
+
+# A block's sources
+istota briefings sources list   -u USER --block BLOCK_ID
+istota briefings sources add    -u USER --block BLOCK_ID --kind rss|email|browse|markets|calendar|todos|reminders|notes|shared_block --config '{…}'
+istota briefings sources remove -u USER --id SOURCE_ID
+
+# Module-owned shared blocks (global, admin)
+istota briefings shared list
+istota briefings shared ensure --name NAME --cron CRON [--title …] [--directive …] [--render-mode …] [--trusted] [--disabled] [--source-json '{"kind":"markets","config":{}}']
+istota briefings shared run    --name NAME
+istota briefings shared remove --name NAME
+
+# Archive
+istota briefings archive list -u USER [--briefing NAME] [--limit N]
+istota briefings archive show -u USER --id ARCHIVE_ID
 ```
 
-`ensure` / `list` / `delete` are positional actions. There are no `-n`/`-c` short flags — use `--name` and `--cron` (`-c` is the global `--config`).
+`--source-json` is repeatable. `ensure` / `list` / `delete` are positional actions. There are no `-n`/`-c` short flags — use `--name` and `--cron` (`-c` is the global `--config`).
+
+`istota briefing` (singular) still works as a deprecated shim for `istota briefings schedule` and prints a deprecation notice. Its `--component` / `--components-json` flags are gone — the boolean-component content model is retired, and content is authored as blocks (CLI above, config-authored `[[users.X.briefings.blocks]]`, or the web block editor).
 
 ### Secrets (encrypted store)
 

@@ -22,7 +22,7 @@ istota-skill briefings blocks set --id 3 [--title …] [--directive …] [--rend
 istota-skill briefings blocks reorder --briefing Morning --ids 3,1,2
 istota-skill briefings blocks remove --id 3
 
-# Sources (kind: rss|email|browse|markets|calendar|todos|reminders|notes)
+# Sources (kind: rss|email|browse|markets|calendar|todos|reminders|notes|shared_block)
 istota-skill briefings sources list --block 3
 istota-skill briefings sources add --block 3 --kind email --config '{"mode":"shared","lookback_hours":12}'
 istota-skill briefings sources add --block 3 --kind browse --config '{"preset":"ap"}'
@@ -40,6 +40,7 @@ istota-skill briefings archive show --id 42
 - **rss** — recent entries from a Feeds subscription/category (`feed_ref`).
 - **browse** — a frontpage URL, by preset (`{"preset":"ap"}`) or custom (`{"url":"https://…"}`).
 - **markets** / **calendar** — structured built-ins (rendered verbatim; use `--render-mode structured`).
-- **todos** / **reminders** / **notes** — workspace convention files (override with `{"path":"…"}`).
+- **todos** / **reminders** / **notes** — a workspace file named by `{"path":"…"}`. There is **no** default filename: a source with no path reads nothing and contributes a provenance note. The path resolves relative to the user's own folder, so `shared/…` reaches a bot-shared file and `istota/…` the bot workspace.
+- **shared_block** — pre-made curated content from the shared store (`{"name":"world-headlines","max_age_hours":6}`). Stale or missing content is omitted rather than failing the briefing.
 
-A briefing with no blocks falls back to the legacy component-based generation; adding blocks switches it to the synthesized-block path.
+Blocks are the only content model — the legacy component-based generator is gone. A briefing with no blocks produces nothing and the generation task fails quietly and retries, so give every briefing at least one block.

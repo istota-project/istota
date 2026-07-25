@@ -97,7 +97,9 @@ CalDAV calendars are auto-discovered from Nextcloud and don't need to be configu
 
 ### Briefings
 
-Provision via `istota briefing ensure --user alice --name morning --cron "0 6 * * *" --conversation-token room123 --output both --component calendar=true --component todos=true` or the web UI (`/istota/settings → Briefings`). The `[[users.X.briefings]]` TOML block is a docker-entrypoint shortcut.
+Schedule and delivery are provisioned with `istota briefings schedule ensure --user alice --name morning --cron "0 6 * * *" --conversation-token room123 --output both`, or from the web UI (briefings tab → settings). The `[[users.X.briefings]]` TOML block is a docker-entrypoint shortcut.
+
+Content is an ordered list of **blocks**, each with 1..N sources — the boolean `components` model and its `--component` / `--components-json` flags are retired. Config-authored blocks are seeded **once** into the user's briefings module DB as an editable baseline, after which web edits win and operator re-runs never clobber them.
 
 ```toml
 [[users.alice.briefings]]
@@ -106,14 +108,20 @@ cron = "0 6 * * *"
 conversation_token = "room123"
 output = "both"
 
-[users.alice.briefings.components]
-calendar = true
-todos = true
-markets = true
-news = true
+  [[users.alice.briefings.blocks]]
+  title = "Today"
+  render_mode = "structured"
+
+    [[users.alice.briefings.blocks.sources]]
+    kind = "calendar"
+    config = {}
+
+    [[users.alice.briefings.blocks.sources]]
+    kind = "todos"
+    config = { path = "istota/TODO.md" }
 ```
 
-See [briefings](../features/briefings.md) for details.
+Blocks and sources are also editable from the CLI (`istota briefings blocks|sources …`) and by the bot itself through the `briefings` skill. See [briefings](../features/briefings.md) for details.
 
 ### Delivery routing
 

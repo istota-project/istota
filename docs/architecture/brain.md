@@ -30,13 +30,23 @@ The native loop's machinery lives in sibling packages: `llm/` (the provider abst
 
 ```python
 class Brain(Protocol):
+    model_namespace: str        # "anthropic" | "openai_compat" — the key operator
+                                # alias overrides are resolved under
+
     def execute(self, req: BrainRequest) -> BrainResult: ...
+
+    @property
+    def supports_steering(self) -> bool: ...   # can take a mid-run user turn (`!steer`)
+
     def resolve_alias(self, alias: str) -> tuple[str | None, str | None] | None: ...
     def resolve_model_name(self, name: str | None) -> str: ...
     def list_aliases(self) -> list[tuple[str, str | None, str | None]]: ...
+    def validate_alias_override(self, name: str, target: str) -> list[str]: ...
 ```
 
-Each brain owns its own model namespace. Consumers never reach into a brain module's tables — they go through `make_brain(config.brain)` and call these methods. `resolve_alias` returns `(model_id, effort)` or `None`; `resolve_model_name` collapses any name to a canonical ID; `list_aliases` exposes the merged table for `!models`. `make_brain(config.brain)` constructs the right implementation; unknown `kind` values raise `ValueError` so misconfiguration fails loudly at startup.
+Each brain owns its own model namespace. Consumers never reach into a brain module's tables — they go through `make_brain(config.brain)` and call these methods. `resolve_alias` returns `(model_id, effort)` or `None`; `resolve_model_name` collapses any name to a canonical ID; `list_aliases` exposes the merged table for `!models`; `validate_alias_override` returns human-readable warnings for an operator alias override at config-load time (warnings only — it never fails the load). `make_brain(config.brain)` constructs the right implementation; unknown `kind` values raise `ValueError` so misconfiguration fails loudly at startup.
+
+`supports_steering` gates the `!steer` control channel: the brain must be able to take an additional user turn at a loop boundary mid-run. Only NativeBrain is wired for it today — ClaudeCodeBrain's stdin is closed once the prompt is sent, and TmuxClaudeBrain declares support but is held out of the command layer's allowlist. The executor supplies a `poll_steers` callback only to steering-capable brains; the scheduler drops undrained steers at task finalization.
 
 ## Model identity
 
@@ -64,6 +74,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | `streaming` | True when the executor wants per-event progress callbacks |
 | `on_progress` | Per-event callback receiving `StreamEvent`s (the brain handles filtering) |
 | `cancel_check` | Polled between events; True → kill subprocess, return `cancelled` |
+| `poll_steers` | Drained at loop boundaries for pending `!steer` notes, each injected as a user turn. Supplied only to brains whose `supports_steering` is True |
 | `on_pid` | Called once with subprocess PID immediately after spawn |
 | `sandbox_wrap` | Closure that wraps the brain's raw cmd (e.g. with bubblewrap); brain stays sandbox-agnostic |
 | `result_file` | claude_code-specific fallback file path |
@@ -76,7 +87,7 @@ The dataclass the executor populates per task. The brain treats it as immutable 
 | `result_text` | Final response text (executor reconciles against trace via `_compose_full_result`) |
 | `actions_taken` | JSON-encoded list of tool-use descriptions |
 | `execution_trace` | JSON-encoded `[{"type":"tool"\|"text"\|"cm_boundary", ...}]` |
-| `stop_reason` | `completed` / `cancelled` / `timeout` / `oom` / `transient_api_error` / `error` / `not_found` |
+| `stop_reason` | `completed` / `cancelled` / `timeout` / `oom` / `terminated` / `transient_api_error` / `usage_limit` / `error` / `not_found` / `fallback`. `usage_limit` is a subscription/quota/billing limit — a persistent "brain unavailable" condition, not a retry. `terminated` is death by a signal other than SIGKILL. `fallback` is a tmux launch-level failure. |
 
 ## ClaudeCodeBrain
 
@@ -88,11 +99,27 @@ Wraps the `claude` CLI subprocess. Owns:
 4. **Stream parsing** — line-by-line via `make_stream_parser()` from `_events.py`, dispatching `ResultEvent` → final result, `ToolUseEvent` / `TextEvent` → trace + on_progress, `ContextManagementEvent` → `cm_boundary` marker in trace. The `stream_event` partial frames parse into `TextDeltaEvent` / `ThinkingDeltaEvent` and go to `on_progress` only (never the trace); the trailing whole-block `TextEvent` / `ThinkingEvent` still records the trace and is deduped against the deltas executor-side (text via `_delta_seen`, thinking via `_thinking_seen`). On push surfaces (Talk) the deltas are dropped and `TextEvent` → `progress_text` stands.
 5. **Cancellation** — polls `req.cancel_check()` between events; final re-check after the subprocess exits catches SIGTERM-style external kills.
 6. **Timeout** — `threading.Timer` kills the process after `req.timeout_seconds`; result tagged `stop_reason="timeout"`.
-7. **OOM detection** — returncode `-9` → `stop_reason="oom"`.
-8. **API retry** — wraps single-attempt execution in a 3-attempt loop with 5 s fixed sleep when `is_transient_api_error()` matches (5xx / 429). Retries do NOT count against the task's `attempt_count`.
+7. **Signal deaths** — a negative returncode means the subprocess died on signal `-rc`, checked after the cancellation and timeout branches so `!stop` still reports as a cancellation. `-9` keeps its OOM wording and `stop_reason="oom"` (SIGKILL is the OOM killer's and systemd-oomd's signature); every other signal returns "terminated by \<NAME\> (signal N)" with `stop_reason="terminated"`, a warning, and the trace attached. Previously only `-9` was recognized and every other signal fell to the generic stream-parse catch-all, which is what made a `systemctl restart` mid-task read as an ordinary failure. `is_signal_termination(text)` is the shared marker predicate the scheduler classifies on (the executor drops `stop_reason` at its return boundary, so the scheduler reads failure *text*).
+8. **API retry** — wraps single-attempt execution in a 3-attempt loop with 5 s fixed sleep when `is_transient_api_error()` matches (5xx / 429). Retries do NOT count against the task's `attempt_count`. A quota/billing 429 is classified `usage_limit` *before* the transient check, so it reroutes to the fallback brain instead of being retried.
 9. **Result fallback** — prefers `ResultEvent` → result file → stderr.
 
 `_compose_full_result()` is intentionally NOT in the brain — both brains will produce `(result_text, execution_trace)` and the executor reconciles them (CM-aware composition + terse-result recovery).
+
+## Brain fallback (availability failover)
+
+When the primary brain is **unavailable**, the executor reruns the *same attempt* — no new DB row, no `attempt_count` increment — through a configured fallback brain. Three cooperating pieces:
+
+- **Classification.** Each brain maps "I am unavailable" onto a `stop_reason`. `usage_limit` (a shared `is_usage_limit_error` detector, so it works on CLI output, tmux pane text, and native error bodies) covers subscription/quota/billing exhaustion; `not_found` a missing binary; `fallback` a tmux launch failure.
+- **Portable aliases.** `CANONICAL_ROLES = ("fast", "general", "smart")` is the single source of truth every brain's `DEFAULT_ALIASES` imports. A requested model that is a canonical tier — or a custom alias the operator flagged `portable = true` — re-resolves in the fallback's namespace (model *and* effort). A non-portable pin (`opus`, `claude-opus-4-8`) can't cross the boundary: the fallback's own default is used and the reply carries a one-line italic note naming the dropped pin.
+- **Availability breaker.** A process-global, thread-safe breaker keyed by primary kind. The **trigger set** (reroute this attempt) is `{usage_limit, not_found, fallback}`, plus `transient_api_error` when `fallback_on_transient`. The **cooldown set** (skip the primary entirely on later tasks for `fallback_cooldown_seconds`) is `{usage_limit, not_found}` only — `fallback` is excluded so tmux keeps being probed per task and its own launch circuit breaker decides when to stop. `oom` / `timeout` / `cancelled` / `error` never trigger fallback; they are task outcomes.
+
+Config: `[brain] fallback` (`""` = none; a `tmux_claude` primary still defaults to `claude_code`), `fallback_on_transient`, `fallback_cooldown_seconds`. An unknown kind or a self-fallback is neutralized at config load with one warning. There is a single fallback level — if the fallback is also unavailable the task fails or retries normally.
+
+### Degraded-brain policy for automatic work
+
+The sleep cycle and shared-block synthesis call the primary brain *directly* rather than through the executor's fallback wrapper, so for them "pause on fallback" reduces to detecting unavailability and skipping. Two config-free helpers give them the executor's signal: `primary_brain_unavailable(brain_config)` (consult before a call or batch) and `report_brain_result(result, brain_config)` (feed the outcome back; returns a reason only on the closed→open transition, so exactly one operator alert fires). The breaker is therefore a single shared signal across every brain caller — whichever path first hits the limit opens it and alerts, and the rest skip silently until the cooldown expires.
+
+`brain/_postures.py` declares, for each scheduled or automatic brain-calling task, one of three postures — **skip** (non-essential: sleep cycle, shared-block synthesis, location discovery), **pin** (essential, must not ride the fallback: briefings, per-job pinned scheduled prompts), or **fail_clean** (visible failure beats a silent stub: health OCR, biomarker explainer). A task not listed just routes through the executor's fallback wrapper. The admin dashboard reads the same breaker (`brain_status`) to show whether the primary is degraded and which brain is actually serving.
 
 ## API error helpers
 
@@ -108,6 +135,9 @@ Both are re-exported from `executor` for `scheduler.py` and tests; canonical hom
 ```toml
 [brain]
 kind = "claude_code"  # "claude_code" | "native" | "tmux_claude"
+fallback = "native"               # brain kind to use when the primary is unavailable ("" = none)
+fallback_on_transient = false     # also reroute a persistent transient_api_error
+fallback_cooldown_seconds = 900   # skip an unavailable primary this long (0 = no stickiness)
 
 [brain.native]         # only when kind = "native" (or routed-to)
 provider = "openai_compat"

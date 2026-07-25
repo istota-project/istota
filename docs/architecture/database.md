@@ -11,11 +11,15 @@ Istota uses SQLite with WAL mode for concurrent access. All operations live in `
 | `tasks` | Task queue with full lifecycle: id, status, source_type, user_id, prompt, conversation_token, talk_delivery_token, priority, attempts, `last_heartbeat` (worker-liveness ping for stuck-task reclaim, ISSUE-112), execution trace, model/effort overrides, plus `skill` / `skill_args` for skill-task dispatch |
 | `user_resources` | Per-user folder mounts (`folder`) + internal `shared_file` organizer state |
 | `user_profiles` | Per-user profile fields (display_name, timezone, channels, worker overrides, disabled_skills, disabled_modules, email_addresses, trusted_email_senders) |
-| `briefing_configs` | DB-stored briefing configurations (cron, components, conversation_token, enabled flag) |
+| `briefing_configs` | Briefing schedule + delivery (cron, conversation_token, `output`, enabled flag). Content lives in the per-user briefings module DB, not here |
 | `secrets` | Per-user encrypted credentials (Fernet over scrypt-derived `ISTOTA_SECRET_KEY`) |
 | `google_oauth_tokens` | Google OAuth access/refresh token pairs (Fernet-encrypted at rest) |
+| `web_user_tokens` | Retained user-scoped Nextcloud OAuth pairs for post-as-user Talk mirroring; encrypted with the web-only `ISTOTA_WEB_TOKEN_KEY` (distinct salt + table from `secrets`, so "who can decrypt" stays greppable) |
 | `task_logs` | Structured task-level observability |
-| `istota_kv` | Key-value store for script runtime state |
+| `task_steers` | Mid-run steering notes for a running task (`!steer`): per-task monotonic `seq`, `pending` / `consumed` / `dropped`, plus who steered and from which surface |
+| `istota_kv` | Per-user key-value store for script runtime state |
+| `shared_kv` | Cross-user namespaced JSON store. Reads are open; writes are admin-only and fail closed. Substrate for curated shared briefing content |
+| `_migration_state` | Markers for one-time data migrations, so each runs exactly once |
 
 ### Messaging
 
@@ -46,6 +50,7 @@ The unified Talk/web room-sync model (defined in `schema.sql`) supersedes the de
 | `room_members` | Per-user membership of a shared room; web visibility resolves through this, not the single-owner `rooms.user_id` |
 | `room_dismissals` | Per-user "hide this room" tombstone, cleared by the user's own next inbound |
 | `room_read_state` | Per-surface, per-user read cursors driving unread badges |
+| `message_stars` | Per-user starred messages (Talk has no per-message star API, so this is web-only) |
 | `trusted_email_senders` | Per-user fnmatch allowlist for the email trust gate |
 
 ### Scheduling
@@ -53,8 +58,10 @@ The unified Talk/web room-sync model (defined in `schema.sql`) supersedes the de
 | Table | Purpose |
 |---|---|
 | `scheduled_jobs` | Cron job definitions (synced from CRON.md) |
-| `briefing_configs` | DB-stored briefing configurations |
+| `briefing_configs` | Briefing schedule + delivery per user |
 | `briefing_state` | Last-run timestamps per briefing per user |
+| `shared_block_configs` | Admin-managed definitions of module-owned shared briefing blocks (cron, render mode, trust flag, sources JSON). Seeded once from config, DB-authoritative thereafter |
+| `briefing_shared_block_state` | Last-run timestamps for shared-block generation (global, not per user) |
 | `istota_file_tasks` | Tasks sourced from TASKS.md files (content-hash identity) |
 
 ### Memory
@@ -96,7 +103,7 @@ Invoice timing tables (`invoice_schedule_state`, `invoice_overdue_notified`) liv
 
 ### Location (per-user location.db)
 
-Location tables live in per-user `{workspace}/location/data/location.db` files, not in the framework DB. The module package at `src/istota/location/` provides `resolve_for_user(user_id, config)`.
+Location tables live in a per-user `location.db`, not in the framework DB. The module package at `src/istota/location/` provides `resolve_for_user(user_id, config)`.
 
 | Table | Purpose |
 |---|---|
@@ -107,6 +114,14 @@ Location tables live in per-user `{workspace}/location/data/location.db` files, 
 | `dismissed_clusters` | Clusters the user chose not to save as places |
 
 The two Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) remain in the framework `istota.db` for cross-user dedup.
+
+### Briefings (per-user briefings.db)
+
+Blocks, their sources, and the archive of rendered results live in a per-user `briefings.db`. Schedule and delivery stay framework-owned in `briefing_configs`. Archived results are pruned by `[briefings] archive_retention_days` on insert, and individually deletable from the web reader.
+
+### Module DB storage
+
+The framework `istota.db` and all five per-user module DBs (feeds, health, location, money, briefings) run **WAL on local disk**, at `Config.module_db_path(user_id, module)` — by default `{db_path.parent}/modules/{user}/{module}.db`. Only the `.db` files are local; user-facing workspace files (health uploads, money ledgers, feeds exports) stay on the Nextcloud mount. Module DBs were moved off the mount because WAL's mmap'd `-shm` file SIGBUSes on the rclone FUSE mount, which had forced them onto `journal_mode=DELETE` and left them with no reader/writer concurrency. `python -m istota.db_relocate` is the one-time idempotent migrator; `db_backup` snapshots the now-local DBs back to dated directories on the mount for off-host durability, and `db_restore` copies them back.
 
 ## Key operations
 

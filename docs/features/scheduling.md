@@ -60,6 +60,14 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `skip_log_channel` | no | Suppress log channel output for frequent jobs |
 | `model` | no | Claude model override for this job (e.g. `"claude-sonnet-4-6"`) |
 | `effort` | no | Effort override: `low`, `medium`, `high`, `xhigh`, or `max` |
+| `publish_shared_kv` | no | On success, publish the result text to the shared KV store as `"<namespace>/<key>"` (a bare key means the `briefing_shared_blocks` namespace) |
+| `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
+
+## Publishing to shared content
+
+`publish_shared_kv` lets an admin's job write its result where every user's briefings can read it — the escape hatch for shared content the built-in shared-block generator can't produce (it runs tool-less, while a scheduled `prompt` job gets the full sandbox and tools). Shared-KV writes are admin-only: the job's user must pass the writer check, and an unauthorized or failed publish fails loudly (error log, operator alert, and a job-failure increment that the success path withholds). An empty result is a clean skip, leaving the last-known-good value in place.
+
+Consume the published value with a `shared_block` source on a briefing block. See [briefings](briefings.md#shared-curated-content).
 
 ## Failure handling
 

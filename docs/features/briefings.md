@@ -18,8 +18,7 @@ Source kinds (`kind = …`):
 | `todos` | Pending todo items from a workspace file |
 | `reminders` | A random reminder |
 | `notes` | Recent notes |
-| `shared_block` | A module-owned shared block's pre-made content (see [Shared curated content](#shared-curated-content)) |
-| `kv` | A curated value from the shared (or your own) KV store |
+| `shared_block` | Pre-made curated content from the shared KV store (see [Shared curated content](#shared-curated-content)) |
 
 > The legacy boolean-`components` content model (and its `[briefing_defaults]` expansion) is retired. Existing component-based briefings migrate once into blocks on first touch of the briefings module DB.
 
@@ -100,11 +99,11 @@ enabled = true
 ```
 
 - Generation runs off the dispatch thread (sleep-cycle-style: one non-streaming, no-sandbox model call) under the reserved `__system__` identity, so it needs **no admin configured** and never blocks task processing.
-- Only **user-agnostic** source kinds are allowed: `browse`, `markets`, and `email` (the shared/unowned pool). `rss` (needs a real feeds user), the personal built-ins (`calendar`/`todos`/`reminders`/`notes`), and `kv`/`shared_block` (no chaining) are dropped with a warning.
+- Only **user-agnostic** source kinds are allowed: `browse`, `markets`, and `email` (the shared/unowned pool). `rss` (needs a real feeds user), the personal built-ins (`calendar`/`todos`/`reminders`/`notes`), and `shared_block` (no chaining) are dropped with a warning.
 - If every source fails/empties (a transient AP/Reuters outage), the write is **skipped** and the prior value kept (last-known-good) rather than blanking the section.
 - Omit or set `enabled = false` to disable one; an explicit empty `[[briefing_shared_blocks]]` list opts out entirely.
 
-A briefing consumes a shared block with a `shared_block` source (or the generic `kv` source):
+A briefing consumes a shared block with a `shared_block` source:
 
 ```toml
   [[users.alice.briefings.blocks]]
@@ -150,6 +149,12 @@ The **writer** chooses whether the fetch or the synthesis is shared, via the sto
 
 - **Writes are admin-only** (the `/etc/istota/admins` allowlist), **fail-closed**: on a deployment with a *blank* admins file, no user can write shared content (only module-owned generation, a trusted daemon write, still works). Reads are open to any user.
 - Shared content is **wrapped untrusted by default** (a trusted identity typically relayed web-sourced content), matching the `browse`/`email` posture. Trust is a property of the stored value — set `"trusted": true` in the published JSON to skip the wrap for content you control. A consuming user can never flip it.
+
+## Reading briefings (web)
+
+The briefings tab is a reader for generated briefings, with an archive sidebar for past results (filterable by briefing name from the header, each result deletable from its kebab menu) and a settings page behind the cog for editing blocks, sources, schedule and delivery. Source paths use a searching file picker with an advisory existence check — advisory rather than blocking, because the path resolver is fail-soft, so a not-yet-created file must not trap the editor. Admins additionally get a "Shared blocks" card for the module-owned blocks.
+
+Each generated briefing is archived on delivery and pruned by `[briefings] archive_retention_days` (default 90) on insert, alongside the manual per-result delete.
 
 ## Output format
 

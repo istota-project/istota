@@ -733,6 +733,16 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #     "https://www.googleapis.com/auth/documents.readonly",
 # ]
 
+# Briefings module (per-user content store + archive). All fields defaulted —
+# an absent block is the shipped behaviour.
+# [briefings]
+# archive_retention_days = 90     # prune archived results older than this (0 = keep forever)
+# default_lookback_hours = 12     # seeds the email/rss source window when a source omits it
+# max_source_chars = 5000         # cap on a single source's gathered text
+# shared_block_timezone = "UTC"   # timezone shared (global) blocks evaluate their cron in;
+                                  # typically the operator's own zone so the morning/evening
+                                  # regeneration windows line up with their day
+
 # User configuration
 # Map Nextcloud usernames to their settings
 # Only messages from configured users will be processed
