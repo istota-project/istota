@@ -367,10 +367,10 @@
         <table class="grid users-grid">
           <thead>
             <tr>
-              <th>User</th>
+              <th class="col-user">User</th>
               <th class="num col-total">Total</th>
-              <th>24h activity</th>
-              <th class="num">Failed</th>
+              <th class="col-24h">24h activity</th>
+              <th class="num col-failed">Failed</th>
               <th class="num col-avg">Avg/day</th>
               <th class="col-active">Last active</th>
             </tr>
@@ -419,7 +419,7 @@
                     </div>
                   {/if}
                 </td>
-                <td class="num">
+                <td class="num col-failed">
                   {#if u.tasks_failed_24h > 0}
                     <span class="failed-pill">{u.tasks_failed_24h}</span>
                   {:else}
@@ -874,11 +874,33 @@
 
   /* Per-user 24h breakdown — stacked bar + tag list. */
   .users-grid {
-    min-width: 540px;
+    min-width: 680px;
   }
 
-  .source-cell {
-    min-width: 200px;
+  /* .grid is table-layout: fixed, so a cell min-width is ignored and unsized
+	   columns split the table evenly. Size the narrow columns explicitly and
+	   leave 24h activity auto so it soaks up whatever is left — it carries the
+	   stacked bar plus the per-source chips and needs the room; username and
+	   failure count do not. */
+  .users-grid .col-user {
+    width: 9rem;
+  }
+
+  .users-grid .col-total,
+  .users-grid .col-failed {
+    width: 4.5rem;
+  }
+
+  .users-grid .col-avg {
+    width: 5rem;
+  }
+
+  .users-grid .col-active {
+    width: 9rem;
+  }
+
+  .users-grid .col-24h {
+    width: auto;
   }
 
   .source-summary {
@@ -1124,6 +1146,17 @@
     }
     .users-grid {
       min-width: 0;
+    }
+    /* Tighten the sized columns further so the auto 24h column keeps a usable
+		   share of a phone-width table. */
+    .users-grid .col-user {
+      width: 6.5rem;
+    }
+    .users-grid .col-failed {
+      width: 3.5rem;
+    }
+    .users-grid .col-avg {
+      width: 4rem;
     }
     .kpi-value {
       font-size: 1.1rem;
