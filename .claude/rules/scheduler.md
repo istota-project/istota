@@ -38,13 +38,43 @@ The lock path is the module constant `DAEMON_LOCK_PATH` (default
    - Poll TASKS.md files (every `tasks_file_poll_interval`)
    - Run cleanup checks (every `briefing_check_interval`)
    - Check heartbeats (every `heartbeat_check_interval`)
-   - Sweep SQLite DBs (framework + per-user feeds/health/location/money, all local now) with `PRAGMA quick_check` + self-healing `REINDEX` (every `db_health_check_interval`, default 24h; runs immediately on the first tick of the daemon so a fresh deploy surfaces latent index corruption without waiting a day)
-   - Snapshot local DBs to `{mount}/istota-db-backups/<date>/…` (dated dirs, retention + collapse guard) via the SQLite online-backup API (every `db_backup_interval`, default 24h; off-host durability now that module DBs are local — clock starts at boot, first snapshot after one interval); alerts the operator on any errored/suspect DB and on backup staleness
+   - Sweep SQLite DBs (framework + per-user feeds/health/location/money, all local now) with `PRAGMA quick_check` + self-healing `REINDEX` (every `db_health_check_interval`, default 24h; runs immediately on the first tick of the daemon so a fresh deploy surfaces latent index corruption without waiting a day). Dispatched **off the loop thread** via `_spawn_background_check` — see below
+   - Snapshot local DBs to `{mount}/istota-db-backups/<date>/…` (dated dirs, retention + collapse guard) via the SQLite online-backup API (every `db_backup_interval`, default 24h; off-host durability now that module DBs are local — clock starts at boot, first snapshot after one interval); alerts the operator on any errored/suspect DB and on backup staleness. Also **off the loop thread** (`_run_db_backup` = snapshot + problem alert as one unit)
    - Emit the `scheduler_stats` health line (every `scheduler_stats_interval`, default 60s; first emit after one full interval; `0` disables)
    - Check invoice schedules (every `briefing_check_interval`)
    - `pool.dispatch()`
    - Sleep `poll_interval`
 8. Shutdown workers (`pool.shutdown()`), stop the persistent runtime (`runtime.stop(timeout=10)`), release lock
+
+### Off-thread periodic checks (`_spawn_background_check`, ISSUE-144 Tier 1)
+
+The DB-health sweep and the DB-backup snapshot both walk every per-user DB, and
+the backup writes to the rclone FUSE mount where latency is unbounded. Run
+synchronously they blocked `pool.dispatch()` for their whole duration, and the
+`LoopWatchdog.suspended()` wrapper needed to keep a healthy nightly run from
+paging left the watchdog blind to *real* stalls in the same window. Both now
+run on short-lived daemon threads:
+
+- `_spawn_background_check(name, fn, inflight)` — spawns `fn` on a `bgcheck-<name>`
+  daemon thread, unless the previous run under the same name is still alive (then
+  it logs `background_check_still_running` and skips the tick, so a wedged sweep
+  can't stack one thread per tick). Exceptions are contained and logged as
+  `background_check_failed`; a crashed run frees the slot for the next tick.
+  `inflight` is `run_daemon`'s own `background_checks` dict — loop-local, not
+  process-global, so tests and a re-entered daemon each start clean.
+- `_run_db_backup(config)` — `backup_databases` + `_alert_backup_problems` as one
+  unit, since the alert needs the results of the run that produced it.
+- The interval clocks (`last_db_health_check` / `last_db_backup`) advance at
+  **spawn** time, not completion — fixed cadence, and the in-flight guard is what
+  prevents overlap. The staleness alert is unaffected: it reads the *persisted*
+  clock, which still only advances on a durable OK run.
+- Daemon threads by design — an in-flight snapshot dies with the process at
+  shutdown rather than delaying it. Backups write dated dirs and the restore path
+  sanity-checks them, so a torn snapshot can't clobber the last good one.
+
+The two sleep-cycle checks are still synchronous under `watchdog.suspended()`
+(ISSUE-144 Tier 2, not done): they take a loop-owned connection and stamp
+`last_run` only at the end, so moving them off-thread needs a re-fire guard.
 
 ## Persistent asyncio runtime (`async_runtime.py`)
 
@@ -237,7 +267,7 @@ After task completion, if enabled + `auto_index_conversations`:
 | `main_loop_read_timeout_ms` | 2000ms | `busy_timeout` for the dispatch scan + idle pre-check (read-only). A lock past this raises `OperationalError` → the loop skips the tick (re-dispatches ~0.5s later) instead of blocking 30s and tripping the stall watchdog. Passed as `db.get_db(..., busy_timeout_ms=)`. 0 = keep the 30s connect timeout. Defense-in-depth on top of WAL |
 | `db_backup_enabled` / `db_backup_interval` / `db_backup_dir` / `db_backup_retention` | true / 86400s / "" / 7 | `db_backup.backup_databases(config, today=None)` snapshots the framework DB + every per-user module DB to `db_backup_dir/<YYYY-MM-DD>/…` (default `{nextcloud_mount}/istota-db-backups`) via SQLite's online-backup API — off-host durability now that module DBs left the Nextcloud-synced workspaces. **Dated dirs, not a single overwritten slot** (ISSUE-159): a corrupted/emptied live DB can't clobber the last good copy. `db_backup_retention` keeps the N newest dated dirs (0 = keep all) but never prunes a dir holding the newest *good* copy of any DB (`_prune_old_snapshots` protects it). A **collapse guard** (`_apply_collapse_guard` → `db_relocate._data_row_count`) quarantines a fresh snapshot as `*.suspect` (status `suspect`) when a DB that previously held data comes back empty/unreadable; exact-zero only (framework `tasks` legitimately shrinks under retention cleanup). Backup tree is `0700`/files `0600`. Cold copies are forced to DELETE journal mode (a WAL header would SIGBUS on the FUSE mount if ever opened in place). **Mount-liveness guard** (`_destination_is_durable`): a mount-derived destination is written only when `os.path.ismount` is true — a down rclone FUSE mount reverts to a local dir, and a naive `mkdir` would silently write the "backup" to local disk under the stale mountpoint; the run is skipped instead and the clock left stale. An explicit `db_backup_dir` is trusted without the check. The clock is **persisted** to `{db_path.parent}/.db_backup_last_run` and seeded at boot via `db_backup.last_backup_time`, so it survives restarts. It advances **only when ≥1 DB snapshotted OK** — a fully-errored (or mount-down) run leaves it stale so the staleness alert can fire. The scheduler alerts the operator on any errored/suspect DB (`_alert_backup_problems`) and on **staleness** (`_maybe_alert_backup_stale`: persisted last-run older than `2 × db_backup_interval`; re-armable, gated on a prior successful run so a fresh deploy doesn't false-alarm). Both go through `_send_operator_alert`, which runs `send_notification` on a short-lived daemon thread with a join timeout so a wedged Talk can't stall the dispatch loop (ISSUE-143 class). Force an immediate backup with `python -m istota.db_backup` (ignores the interval; closes the first-run gap after a deploy). Restore via `db_restore` (`python -m istota.db_restore --all`) — copies the newest good cold copy back (or `--date`), clears stale `-wal`/`-shm` sidecars, refuses an empty snapshot without `--force`, and refuses to run while the daemon holds its flock (`_daemon_running`) since a copy over a live WAL DB corrupts it; then `init_db` re-flips WAL |
 | `scheduler_stats_interval` | 60s | One `scheduler_stats threads=… fds=… rss_mb=… tasks_running=… workers_active=…` INFO line per interval on logger `istota.scheduler.stats`, daemon-only. Surfaces resource leaks (ISSUE-101 class) in minutes via `journalctl … \| grep scheduler_stats`. psutil-derived fields (`fds`/`rss_mb`) omitted with a one-time WARN when psutil is unavailable; DB hiccup → `tasks_running=?`. First emit after one full interval. `0` disables. |
-| `loop_stall_alert_seconds` | 180s | Defense-in-depth (ISSUE-143). `LoopWatchdog` runs on its own daemon thread, watches a last-tick timestamp the main loop bumps each iteration (`watchdog.tick()`), and logs an ERROR + fires one operator alert (`send_notification(purpose="alert")` to the first admin/user via `_operator_alert_user`) when the loop hasn't ticked in this long. Re-arms on recovery so a transient stall pages once. `0` disables. |
+| `loop_stall_alert_seconds` | 180s | Defense-in-depth (ISSUE-143). `LoopWatchdog` runs on its own daemon thread, watches a last-tick timestamp the main loop bumps each iteration (`watchdog.tick()`), and logs an ERROR + fires one operator alert (`send_notification(purpose="alert")` to the first admin/user via `_operator_alert_user`) when the loop hasn't ticked in this long. Re-arms on recovery so a transient stall pages once. `0` disables. Known-long in-loop checks wrap themselves in `watchdog.suspended()` so a healthy run doesn't page; after ISSUE-144 Tier 1 only the two sleep-cycle checks still do (the DB health sweep + backup moved off the loop thread and are back under full coverage). |
 | `worker_idle_timeout` | 10s | Cumulative-idle linger before a worker exits. The worker re-checks for work on a fine cadence for up to this long (continuous emptiness) before exiting; resets whenever a task is claimed. (Pre-phase-2 this was effectively capped to ~one `poll_interval` with a single recheck — the knob is now honoured.) |
 | `worker_idle_poll_interval` | 0.5s | Idle re-check cadence inside `_worker_idle_wait`. A follow-up task is claimed within ~one interval instead of waiting a `poll_interval`. A cheap `count_claimable_tasks_for_user_queue` pre-check gates the `claim_task`. 0 or ≥ `worker_idle_timeout` = legacy single coarse-wait + single-recheck. |
 | `max_foreground_workers` | 5 | Instance-level fg worker cap |

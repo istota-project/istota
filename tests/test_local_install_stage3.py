@@ -5,12 +5,34 @@ the three brain branches, asserts the written ``config.toml`` / ``istota.env``
 fields, the DB + workspace bootstrap, and the clobber guard.
 """
 
+import os
 from types import SimpleNamespace
 
 import pytest
 
 from istota import setup_wizard
 from istota.setup_wizard import Answers, render_config_toml, render_env_file
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_path_env():
+    """Keep the wizard's ``ISTOTA_CONFIG_PATH`` write out of the worker process.
+
+    ``setup_wizard._bootstrap`` sets it on ``os.environ`` directly — correct for
+    a one-shot CLI process, but in-process it leaks into every later test in the
+    same xdist worker (it broke ``test_config_path_absent_when_unset``, which
+    asserts the var is unset). Snapshot/restore by hand: ``monkeypatch.delenv``
+    can't help because it records no undo entry when the var starts out absent,
+    which is exactly this case.
+    """
+    saved = os.environ.get("ISTOTA_CONFIG_PATH")
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("ISTOTA_CONFIG_PATH", None)
+        else:
+            os.environ["ISTOTA_CONFIG_PATH"] = saved
 
 
 def _args(**kw):

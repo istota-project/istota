@@ -3005,6 +3005,63 @@ def _maybe_alert_backup_stale(
     return False
 
 
+def _run_db_backup(config: Config) -> None:
+    """Snapshot every local DB, then alert on any errored/suspect result.
+
+    The snapshot and its alert are one unit so the whole thing can be handed to
+    a background thread — the alert has to see the results of the run that
+    produced them, and ``_alert_backup_problems`` is best-effort anyway.
+    """
+    from .db_backup import backup_databases
+
+    results = backup_databases(config)
+    _alert_backup_problems(config, results)
+
+
+def _spawn_background_check(
+    name: str,
+    fn: Callable[[], object],
+    inflight: dict[str, threading.Thread],
+) -> bool:
+    """Run a known-slow periodic check on a short-lived daemon thread.
+
+    The DB-health sweep and the DB-backup snapshot both walk every per-user DB —
+    the backup writes to the rclone FUSE mount, where latency is unbounded. Run
+    synchronously they blocked ``pool.dispatch()`` for their whole duration, and
+    the ``LoopWatchdog.suspended()`` wrapper needed to stop them false-paging
+    left the watchdog blind to *real* stalls in the same window (ISSUE-144).
+
+    ``inflight`` is the caller's own thread registry (``run_daemon`` owns it, so
+    there's no process-global state): a check whose previous run is still going
+    is skipped rather than overlapped, so a wedged sweep can't stack one thread
+    per tick. Exceptions are contained — a crashed run frees the slot for the
+    next tick. Returns True when a thread was spawned.
+
+    Daemon threads by design: an in-flight snapshot dies with the process at
+    shutdown rather than delaying it. Backups write dated dirs and the restore
+    path sanity-checks them, so a torn snapshot can't clobber the last good one.
+    """
+    prev = inflight.get(name)
+    if prev is not None and prev.is_alive():
+        logger.warning(
+            "background_check_still_running name=%s — skipping this tick", name,
+        )
+        return False
+
+    def _run() -> None:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("background_check_failed name=%s err=%s", name, exc)
+
+    thread = threading.Thread(
+        target=_run, name=f"bgcheck-{name}", daemon=True,
+    )
+    inflight[name] = thread
+    thread.start()
+    return True
+
+
 class LoopWatchdog:
     """Defense-in-depth monitor for a stalled scheduler main loop (ISSUE-143).
 
@@ -3017,13 +3074,16 @@ class LoopWatchdog:
     gone silent for longer than ``stall_seconds``. It re-arms once the loop
     recovers, so a transient stall pages once rather than on every check.
 
-    Some loop checks are *known* to block for minutes by design (the nightly
-    sleep cycle runs synchronous LLM extraction per user; the DB-health sweep
-    walks every per-user DB). Those would otherwise trip the watchdog every
-    night. The loop wraps them in ``with watchdog.suspended():`` so the watchdog
-    only fires on *unexpected* stalls — the regressions this is meant to catch.
-    (Those checks do still pause dispatch while they run; moving them off the
-    loop thread is tracked separately.)
+    Some loop checks are *known* to block for minutes by design: the nightly
+    sleep cycle runs synchronous LLM extraction per user. Those would otherwise
+    trip the watchdog every night, so the loop wraps them in ``with
+    watchdog.suspended():`` and the watchdog only fires on *unexpected* stalls —
+    the regressions this is meant to catch. They do still pause dispatch while
+    they run (ISSUE-144 Tier 2).
+
+    The DB-health sweep and the DB-backup snapshot used to be in that set; they
+    now run on background threads via ``_spawn_background_check``, so those two
+    windows are back under full watchdog coverage.
     """
 
     def __init__(self, config: Config, stall_seconds: int):
@@ -4350,6 +4410,10 @@ def run_daemon(
     # Init to "now" (not 0.0) so the first stats line fires after one full
     # interval — avoids a noisy emit during startup while state is hydrating.
     last_stats_check = time.time()
+    # In-flight registry for the slow periodic checks that run off this thread
+    # (ISSUE-144). Loop-local rather than process-global so tests and a
+    # re-entered daemon each get a clean slate.
+    background_checks: dict[str, threading.Thread] = {}
 
     # Signal the launcher (if any) that the pool + pollers are up and the loop
     # is about to start — it starts uvicorn only after this fires.
@@ -4503,33 +4567,27 @@ def run_daemon(
         # once per ``db_health_check_interval`` (default 24h). Self-heals with
         # REINDEX; unrepairable damage is logged at ERROR. Runs immediately on
         # the first tick of a fresh daemon so we don't wait 24h to surface
-        # latent corruption after a deploy.
+        # latent corruption after a deploy. Sweeping every per-user DB takes a
+        # while, so it goes on a background thread — on the loop thread it would
+        # starve dispatch and force a watchdog suspension (ISSUE-144).
         if now - last_db_health_check >= config.scheduler.db_health_check_interval:
-            try:
-                # A full quick_check + REINDEX sweep over every per-user DB can
-                # take a while; suspend the stall watchdog around it.
-                with watchdog.suspended():
-                    check_db_health(config)
-            except Exception as e:  # noqa: BLE001
-                logger.error("Error running DB health checks: %s", e)
+            _spawn_background_check(
+                "db-health", lambda: check_db_health(config), background_checks,
+            )
             last_db_health_check = now
 
         # Snapshot local DBs to the mount for off-host durability (they left the
-        # Nextcloud-synced workspaces when they moved to local disk). Same
-        # watchdog-suspend treatment as the health sweep — a full snapshot over
-        # every per-user DB can take a while.
+        # Nextcloud-synced workspaces when they moved to local disk). Also off
+        # the loop thread: this one writes to the rclone FUSE mount, where a
+        # degraded mount makes the write time unbounded.
         if (
             config.scheduler.db_backup_enabled
             and config.scheduler.db_backup_interval
             and now - last_db_backup >= config.scheduler.db_backup_interval
         ):
-            try:
-                from .db_backup import backup_databases
-                with watchdog.suspended():
-                    backup_results = backup_databases(config)
-                _alert_backup_problems(config, backup_results)
-            except Exception as e:  # noqa: BLE001
-                logger.error("Error running DB backup: %s", e)
+            _spawn_background_check(
+                "db-backup", lambda: _run_db_backup(config), background_checks,
+            )
             last_db_backup = now
 
         # Staleness alert (issue #6): a persisted last-run older than 2x the
