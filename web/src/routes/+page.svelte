@@ -24,6 +24,12 @@
           <div class="feature-desc">Talk to Istota in the app</div>
         </a>
       {/if}
+      {#if user.features.briefings}
+        <a href="{base}/briefings" class="feature-card">
+          <div class="feature-title">Briefings</div>
+          <div class="feature-desc">Your generated briefings and archive</div>
+        </a>
+      {/if}
       {#if user.features.feeds}
         <a href="{base}/feeds" class="feature-card">
           <div class="feature-title">Feeds</div>
