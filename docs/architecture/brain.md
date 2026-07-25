@@ -41,7 +41,7 @@ Each brain owns its own model namespace. Consumers never reach into a brain modu
 
 Every model ID in the codebase resolves through the active brain. Three layers, top to bottom:
 
-1. **Operator role overrides** (`brain/_roles.py`, global) — provider-agnostic. Operators write `[models.roles] smart = "opus-46-high"` in TOML; `set_role_overrides(...)` is called once at config-load time.
+1. **Operator role overrides** (`brain/_roles.py`, global) — **per-namespace**. A role override is stored `role -> namespace -> RoleTarget(model, effort)`; each brain reads its own `model_namespace` (`"anthropic"` / `"openai_compat"`, or the reserved `"*"` for a legacy flat value) via `get_role_override_target(role, namespace)`, so a value written for one namespace never leaks onto another brain's wire. Operators write either a flat `[models.roles] smart = "opus-high"` or a per-namespace `[models.roles.smart]` table (`anthropic = "opus-high"`, `openai_compat = { model = "...", effort = "high" }`); `set_role_overrides(...)` normalizes both once at config-load. Role targets carry effort onto the wire.
 2. **Default role targets** (per-brain, e.g. `claude_code.DEFAULT_ROLE_TARGETS`) — each brain decides what `fast` / `general` / `smart` mean for its namespace if the operator hasn't overridden.
 3. **Provider aliases** (per-brain, e.g. `claude_code.MODEL_ALIASES`) — short names like `opus-high` for `(model_id, effort)` pairs. Brain-specific.
 

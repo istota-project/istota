@@ -76,7 +76,7 @@ from istota.session.retry import classify_error
 from istota.session.usage import TaskUsage
 
 from ._aliases import CANONICAL_ROLES
-from ._roles import get_role_override, get_role_overrides
+from ._roles import get_role_override_target, get_role_overrides
 from ._types import BrainRequest, BrainResult
 from .claude_code import is_usage_limit_error
 
@@ -415,6 +415,12 @@ class NativeBrain:
     # executor wires ``req.poll_steers`` into that callback.
     supports_steering = True
 
+    # This brain speaks an OpenAI-compatible endpoint (OpenRouter in practice).
+    # Operators key an ``[models.roles.<role>]`` sub-table on this string; a
+    # value written here is an endpoint slug and is sent verbatim, never
+    # translated from the Anthropic namespace.
+    model_namespace = "openai_compat"
+
     def __init__(self, config, provider=None):
         self._config = config
         # ``provider`` injectable for tests; production builds from config.
@@ -435,9 +441,12 @@ class NativeBrain:
     def resolve_alias(self, alias):
         if not alias:
             return None
-        target = get_role_override(alias)
-        if target:
-            return (target, None)
+        # 1. Operator-overridden role — read THIS brain's namespace only, so an
+        # anthropic-namespace value (e.g. "opus-46-high") never leaks onto the
+        # OpenRouter wire. The slug passes through verbatim; no translation.
+        rt = get_role_override_target(alias, self.model_namespace)
+        if rt is not None:
+            return (rt.model, rt.effort)
         # A built-in role alias with no operator override resolves to the single
         # model this endpoint is configured for (NB-3). The native brain speaks
         # to one endpoint with one model, so fast/general/smart all mean "the
@@ -465,15 +474,23 @@ class NativeBrain:
         overrides = get_role_overrides()
         listed: list[tuple[str, str | None, str | None]] = []
         seen: set[str] = set()
-        # Built-in roles first: operator override if present, else the native
-        # model. So `!models` shows the truthful resolved table on native.
+        # Built-in roles first: operator override (in THIS brain's namespace) if
+        # present, else the native model. So `!models` shows the truthful
+        # resolved table on native.
         for role in _BUILTIN_ROLE_NAMES:
-            listed.append((role, overrides.get(role) or self._config.model, None))
+            rt = get_role_override_target(role, self.model_namespace)
+            if rt is not None:
+                listed.append((role, rt.model, rt.effort))
+            else:
+                listed.append((role, self._config.model, None))
             seen.add(role)
         # Any custom operator role names beyond the three defaults.
-        for role, target in overrides.items():
-            if role not in seen:
-                listed.append((role, target, None))
+        for role in overrides:
+            if role in seen:
+                continue
+            rt = get_role_override_target(role, self.model_namespace)
+            if rt is not None:
+                listed.append((role, rt.model, rt.effort))
         return listed
 
     def validate_role_override(self, role, target):

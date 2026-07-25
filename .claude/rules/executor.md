@@ -178,8 +178,13 @@ brain when the primary is unavailable. Kept executor-level: brains have no
 - `_resolve_fallback_model_effort(task, config, fallback_brain, effort)` →
   `(model, effort, dropped_pin)`. Empty requested model → fallback's own default
   (no note). `is_portable_alias(raw, config.models.roles)` → re-resolve the
-  intent in the fallback namespace (no note). Non-portable pin → fallback default
-  + `dropped_pin = raw` (INFO log + visible note).
+  intent in the fallback namespace **via `fallback_brain.resolve_alias(raw)`**, so
+  both the model *and its effort* are the fallback namespace's own (a customized
+  `smart` falling back claude_code→native lands on a valid openai_compat slug +
+  effort, not the anthropic value — the role-tier-cross-brain-standardization
+  fix); falls back to `resolve_model_name(raw)` defensively if the pair is empty
+  (no note either way). Non-portable pin → fallback default + `dropped_pin = raw`
+  (INFO log + visible note).
 - `_append_model_note(result_text, dropped_pin, primary_kind, actual_model)` —
   pure string→string, appended after `_compose_full_result` and only on success;
   a single italic line naming the dropped pin and the model actually used

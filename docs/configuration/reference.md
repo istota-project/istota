@@ -175,15 +175,24 @@ Defaults (when no override is set):
 | `general` | Sonnet |
 | `smart` | Opus |
 
-Override in config to rebind:
+A role override is **per model namespace** so one definition covers every brain family: `anthropic` = the CLI brains (`claude_code` / `tmux_claude`), `openai_compat` = native. Two forms, both accepted:
 
 ```toml
+# Flat (namespace-agnostic, resolved by whichever brain runs the task):
 [models.roles]
-smart = "opus-46-high"    # pin smart to Opus 4.6
-deep  = "opus-max"        # define a custom role
+smart = "opus-46-high"    # pin smart to Opus 4.6, effort high
+deep  = "opus-max"        # a custom role
+
+# Per-namespace (define once, correct on every brain):
+[models.roles.smart]
+anthropic     = "opus-high"                                          # CLI brains
+openai_compat = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native endpoint slug
+[models.roles.general]
+anthropic     = "claude-sonnet-4-6"
+openai_compat = "anthropic/claude-sonnet-4.6"                        # bare string = no effort
 ```
 
-Role aliases never carry effort — `smart = "opus-46-high"` resolves the model to claude-opus-4-6 only; effort tracks the top-level `effort` field (or the per-task override) unless the user types the provider alias directly via `!model opus-46-high <prompt>`. Invalid override targets (neither a known alias nor a canonical `claude-*` ID) are warned at config-load time via `Brain.validate_role_override`.
+Role targets **carry effort**: an effort-encoding alias (`opus-high` → high) or an explicit `effort =` on a per-namespace table reaches the wire (explicit wins). A role uses one form (TOML: a key can't be both a string and a table); a per-namespace table missing the active brain's key falls to that brain's code default. Invalid *anthropic* targets (neither a known alias nor a canonical `claude-*` ID) are warned at config-load time via `Brain.validate_role_override`; `openai_compat` slugs are sent verbatim (no alias table to validate against).
 
 ## `[brain]`
 

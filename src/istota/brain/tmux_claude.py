@@ -541,6 +541,11 @@ class TmuxClaudeBrain:
     # a tmux task until then (see the !steer spec, Stage 6).
     supports_steering = True
 
+    # Same `claude` binary + Anthropic model IDs as ClaudeCodeBrain, so it shares
+    # the "anthropic" namespace by delegation (an operator's anthropic role value
+    # covers both CLI brains).
+    model_namespace = ClaudeCodeBrain.model_namespace
+
     def __init__(self, config=None) -> None:
         # Composed, not inherited: we forward the four resolution methods and
         # own execute. The CLI brain holds no per-instance state, so a fresh

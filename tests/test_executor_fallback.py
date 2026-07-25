@@ -26,13 +26,15 @@ from tests.test_executor_streaming import (
 
 
 class _FakeBrain:
-    def __init__(self, kind, result, resolve_map=None):
+    def __init__(self, kind, result, resolve_map=None, resolve_alias_map=None):
         self.kind = kind
         self.result = result
         self.calls = 0
         self.received_reqs = []
         self.resolve_calls = []
         self._resolve_map = resolve_map or {}
+        # name -> (model, effort) — the fallback brain's namespace resolution.
+        self._resolve_alias_map = resolve_alias_map or {}
 
     def execute(self, req):
         self.calls += 1
@@ -44,7 +46,7 @@ class _FakeBrain:
         return self._resolve_map.get(name, (name or "").strip())
 
     def resolve_alias(self, a):
-        return None
+        return self._resolve_alias_map.get(a)
 
     def list_aliases(self):
         return []
@@ -68,6 +70,7 @@ def _run(
     fallback="native",
     fallback_result=None,
     fallback_resolve_map=None,
+    fallback_resolve_alias_map=None,
     task_model="",
     fallback_on_transient=False,
     cooldown=900,
@@ -89,6 +92,7 @@ def _run(
         fallback_result if fallback_result is not None
         else BrainResult(True, "fallback answer", stop_reason="completed", model_used="fb-model"),
         resolve_map=fallback_resolve_map or {"smart": "native-smart-model"},
+        resolve_alias_map=fallback_resolve_alias_map,
     )
 
     def fake_make_brain(bc):
@@ -188,6 +192,19 @@ class TestModelResolution:
         # smart re-resolved in fallback namespace.
         assert "smart" in fb.resolve_calls
         assert fb.received_reqs[0].model == "native-smart-model"
+
+    def test_portable_alias_carries_fallback_effort(self, tmp_path):
+        # When the fallback brain's resolve_alias yields a (slug, effort) pair,
+        # both the slug and its effort reach the fallback request — a customized
+        # smart falling back claude_code→native lands on a valid slug + effort.
+        results, primary, fb, _a = _run(
+            tmp_path,
+            task_model="smart",
+            primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+            fallback_resolve_alias_map={"smart": ("anthropic/claude-opus-4.8", "high")},
+        )
+        assert fb.received_reqs[0].model == "anthropic/claude-opus-4.8"
+        assert fb.received_reqs[0].effort == "high"
 
     def test_non_portable_pin_dropped(self, tmp_path, caplog):
         import logging

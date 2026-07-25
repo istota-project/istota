@@ -33,7 +33,7 @@ from ._events import (
     make_stream_parser,
 )
 from ._aliases import CANONICAL_ROLES
-from ._roles import get_role_overrides
+from ._roles import get_role_override_target, get_role_overrides
 from ._types import BrainRequest, BrainResult
 
 logger = logging.getLogger("istota.brain.claude_code")
@@ -346,19 +346,25 @@ assert set(DEFAULT_ROLE_TARGETS) == set(CANONICAL_ROLES), (
 )
 
 
-def _resolve_target(target: str) -> str:
-    """Translate an override RHS through MODEL_ALIASES to a canonical ID.
+def _resolve_target_with_effort(target: str) -> tuple[str, str | None]:
+    """Translate an override RHS through MODEL_ALIASES to ``(canonical_id, effort)``.
 
-    Operator wrote e.g. ``smart = "opus-46-high"``: this returns
-    ``"claude-opus-4-6"``. Unknown strings pass through unchanged so raw
-    canonical IDs (``"claude-opus-4-8"``) work as override targets too.
+    Operator wrote e.g. ``smart = "opus-high"``: this returns
+    ``("claude-opus-4-8", "high")`` — the alias's effort is preserved (fixing
+    the effort-drop). Unknown strings pass through unchanged with no effort so
+    raw canonical IDs (``"claude-opus-4-8"``) work as override targets too.
     """
     if not target:
-        return target
+        return target, None
     pair = MODEL_ALIASES.get(target.lower())
     if pair is not None and pair[0] is not None:
-        return pair[0]
-    return target
+        return pair[0], pair[1]
+    return target, None
+
+
+def _resolve_target(target: str) -> str:
+    """Translate an override RHS through MODEL_ALIASES to a canonical ID (id only)."""
+    return _resolve_target_with_effort(target)[0]
 
 
 class ClaudeCodeBrain:
@@ -369,6 +375,11 @@ class ClaudeCodeBrain:
     # steering is impossible by construction (see the !steer spec).
     supports_steering = False
 
+    # This brain speaks the Anthropic model namespace. Operators key an
+    # ``[models.roles.<role>]`` sub-table on this string; TmuxClaudeBrain shares
+    # it (same `claude` binary), so an ``anthropic`` value covers both.
+    model_namespace = "anthropic"
+
     # --- Model resolution (Brain Protocol) ---------------------------------
 
     def resolve_alias(
@@ -377,13 +388,17 @@ class ClaudeCodeBrain:
         """Resolve a `!model <alias>` to (model_id, effort).
 
         Roles win over provider aliases (operator override > default role
-        target > MODEL_ALIASES). Returns None for unknown.
+        target > MODEL_ALIASES). Returns None for unknown. A role override's
+        target is resolved through this brain's *own* alias table, and the
+        alias's effort (``opus-high`` → ``high``) is preserved — an explicit
+        ``RoleTarget.effort`` overrides it.
         """
         alias_lower = alias.lower()
-        # 1. Operator-overridden role
-        override = get_role_overrides().get(alias_lower)
-        if override is not None:
-            return (_resolve_target(override), None)
+        # 1. Operator-overridden role (per-namespace, effort-carrying)
+        rt = get_role_override_target(alias_lower, self.model_namespace)
+        if rt is not None:
+            model_id, alias_effort = _resolve_target_with_effort(rt.model)
+            return (model_id, rt.effort or alias_effort)
         # 2. Default role target
         if alias_lower in DEFAULT_ROLE_TARGETS:
             return (DEFAULT_ROLE_TARGETS[alias_lower], None)
@@ -442,12 +457,19 @@ class ClaudeCodeBrain:
         """
         out: list[tuple[str, str | None, str | None]] = []
         seen: set[str] = set()
-        # Roles: defaults merged with overrides; overrides win.
-        roles: dict[str, str] = dict(DEFAULT_ROLE_TARGETS)
-        for role, override in get_role_overrides().items():
-            roles[role] = _resolve_target(override)
+        # Roles: defaults merged with overrides (resolved in this brain's own
+        # namespace, effort preserved); overrides win.
+        roles: dict[str, tuple[str, str | None]] = {
+            role: (target, None) for role, target in DEFAULT_ROLE_TARGETS.items()
+        }
+        for role in get_role_overrides():
+            rt = get_role_override_target(role, self.model_namespace)
+            if rt is not None:
+                model_id, alias_effort = _resolve_target_with_effort(rt.model)
+                roles[role] = (model_id, rt.effort or alias_effort)
         for role in sorted(roles):
-            out.append((role, roles[role], None))
+            model_id, effort = roles[role]
+            out.append((role, model_id, effort))
             seen.add(role)
         for alias, (model, effort) in MODEL_ALIASES.items():
             if alias in seen:

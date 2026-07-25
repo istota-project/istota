@@ -2,6 +2,42 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-24: Role tiers standardized across brain namespaces (per-namespace `[models.roles]`)
+
+Complement to the model-catalog work below: the catalog answers "given a model id, what are its window/price/caps"; this answers the orthogonal "which concrete model does a role tier (`fast`/`general`/`smart`) mean, per brain". The operator override surface — `[models.roles]` → `ModelsConfig.roles: dict[str, str]` — was flat (one role → one raw string), resolved through whichever brain was active. That's single-namespace by construction and fired a real bug in a shipped feature: an operator writing `smart = "opus-46-high"` (an Anthropic alias) had it resolve correctly under the CLI brains but sent verbatim to OpenRouter under the native brain — and the `claude_code → native` availability fallback re-resolves portable role tiers in the fallback namespace, so a customized `smart` failing over sent an invalid id to OpenRouter. Two secondary defects from the same code: role overrides silently dropped their effort (`smart = "opus-high"` → Opus at no effort), and there was no way to say "smart = my expensive model, on both brain families".
+
+Fix: a role override is stored **per model namespace** — `role → namespace → RoleTarget(model, effort)`, where the namespace key is a brain's `model_namespace` (`"anthropic"` for the CLI brains, `"openai_compat"` for native) or the reserved `"*"` for a legacy flat value. Each brain resolves a role in its *own* namespace, so a value written for one can never leak onto another's wire. One `smart` definition carries both an `anthropic` and an `openai_compat` value.
+
+**Key changes:**
+- **Per-namespace override state** (`brain/_roles.py`). New frozen `RoleTarget(model, effort=None)`; `_role_overrides` is now `dict[str, dict[str, RoleTarget]]`. `set_role_overrides` normalizes three input shapes (bare string → `{"*": …}`; `{ns: "str"}`; `{ns: {model, effort}}`), dropping malformed entries with a warning. New `get_role_override_target(role, namespace)` (precedence: per-namespace > `"*"` > None). Removed the single-namespace `get_role_override`.
+- **`model_namespace` on the Brain protocol** (`_types.py`) + each impl: `claude_code` / `tmux_claude` = `"anthropic"` (tmux delegates to the composed CLI brain), `native` = `"openai_compat"`.
+- **Effort-drop fix.** `claude_code` gained `_resolve_target_with_effort`; `resolve_alias` now reads its namespace and preserves the alias's effort (`opus-high` → `high`), with an explicit `RoleTarget.effort` winning. Verified role effort reaches the wire via `!model <role>` / `!room model` (commands.py already captures `resolve_alias`'s effort into `task.effort`) and the fallback path.
+- **Native reads only its namespace** — `resolve_alias`/`list_aliases` use `get_role_override_target(alias, "openai_compat")`, returning the slug + effort verbatim, never the anthropic value. This is the core bug fix.
+- **Config + validation.** `ModelsConfig.roles: dict[str, str | dict]` now holds the *raw* parsed structure (normalization lives only in `set_role_overrides`); the parser preserves nested tables. The config-load validation loop is namespace-aware (flat `"*"` → active brain; `anthropic` → claude_code; `openai_compat` → skipped, native has no alias table); warnings only, never fails load.
+- **Fallback** (`executor._resolve_fallback_model_effort`) re-resolves a portable role via the fallback brain's `resolve_alias` (model *and* effort), so a customized `smart` failing over `claude_code → native` lands on a valid OpenRouter slug + effort.
+- **Ansible (batteries-included).** `istota_models_roles` now ships *populated* with block-style per-namespace defaults carrying explicit per-tier `{model, effort}` (anthropic mirrors the code floors Haiku/Sonnet/Opus; openai_compat → `{{ istota_brain_native_model }}`; smart pins effort high, fast/general model-default) — replacing the old `istota_brain_native_model_{fast,general,smart}` overlay + conditional Jinja and the deleted roles FOOTGUN essay. `config.toml.j2` renders flat `role = "value"` + nested `[models.roles.<role>]` tables; `validate_config.py` gained a namespace-aware shape check.
+
+**Design decisions:**
+- **Namespace *label*, not brain *kind*** — the two CLI brains share `anthropic`, so keying on kind would force duplicate values.
+- **Legacy flat kept as a `"*"` namespace-agnostic value, not auto-expanded** — at config-load we don't know which brain a task will use (`source_type_overrides` route per source type), and expanding an Anthropic alias into an `openai_compat` slug is exactly the translation we refuse. A flat value under native stays the documented pre-per-namespace behavior (no regression).
+- **Code-level `DEFAULT_ROLE_TARGETS` floors retained** — a no-`[models.roles]` deployment is byte-unchanged.
+- **Effort as a first-class shipped default** (operator request) — the default block uses `{model, effort}` on every tier so effort is a visible per-tier knob; empty effort renders as a bare model.
+
+**Files added/modified:**
+- `src/istota/brain/_roles.py` — `RoleTarget`, nested `_role_overrides`, normalizing `set_role_overrides`, `get_role_override_target`; removed `get_role_override`
+- `src/istota/brain/_types.py` — `model_namespace` on the Brain Protocol
+- `src/istota/brain/claude_code.py` — `model_namespace`, `_resolve_target_with_effort`, per-namespace `resolve_alias`/`list_aliases`
+- `src/istota/brain/native.py` — `model_namespace`, per-namespace `resolve_alias`/`list_aliases`
+- `src/istota/brain/tmux_claude.py` — `model_namespace` (delegated)
+- `src/istota/brain/__init__.py` — export `RoleTarget` + `get_role_override_target`, drop `get_role_override`
+- `src/istota/config.py` — raw-structure `ModelsConfig.roles`, nested-table parse, namespace-aware validation
+- `src/istota/executor.py` — `_resolve_fallback_model_effort` resolves via the fallback brain's `resolve_alias`
+- `deploy/ansible/defaults/main.yml` — rewrote Model-selection section, populated `istota_models_roles`, removed the three native-model role vars + FOOTGUN
+- `deploy/ansible/templates/config.toml.j2` — nested per-namespace role rendering
+- `deploy/ansible/files/validate_config.py` — namespace-aware `[models.roles]` shape check
+- `tests/test_brain_roles.py` (new), `tests/test_brain_models.py`, `tests/test_brain_role_contract.py`, `tests/native/test_native_resolution.py`, `tests/test_executor_fallback.py`
+- `config/config.example.toml`, `.claude/rules/brain.md`, `.claude/rules/config.md`, `.claude/rules/executor.md`, `docs/configuration/reference.md`, `docs/architecture/brain.md`
+
 ## 2026-07-24: Model catalog — config-first + live OpenRouter enrichment (ISSUE-182)
 
 The native brain resolved per-model metadata (context window, capabilities, prices) through a hand-maintained bundled catalog (`src/istota/llm/model_catalog.json`). It only knew Anthropic + a few OpenAI ids, some of its data was wrong (context windows especially), and it needed constant updates we didn't want to own. Established during analysis: the catalog is consumed **only** by the native brain, its cost helper, and the config override plumbing — the shipping-default `claude_code`/`tmux_claude` brains never read it (they hand short ids to the `claude` CLI). Native effectively always speaks to OpenRouter, whose `/models` endpoint returns rich per-model metadata for free. Direction: drop the bundled catalog (config-first), add live OpenRouter enrichment.

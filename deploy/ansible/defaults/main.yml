@@ -29,72 +29,56 @@ istota_bot_name: ""
 # Include emissaries.md (constitutional principles) in system prompts
 istota_emissaries_enabled: true
 # =============================================================================
-# Model selection — three knobs that interact
+# Model selection
 # =============================================================================
-# istota_model + istota_effort   set the *default* model/effort for every task
-#                                 (cron jobs, briefings, talk, email, ...). Both
-#                                 are read independently — see the footgun below.
-# istota_models_roles            operator-rebound role aliases (smart/general/
-#                                 fast and custom roles). Affects anything
-#                                 that resolves a name through the active brain.
-#
-# Resolution chain inside the codebase:
-#   1. Per-task overrides (`!model <alias> <prompt>` from Talk) win over
-#      everything else — both model and effort are stored on the task row.
-#   2. Otherwise: istota_model + istota_effort.
-#   3. Otherwise: brain default (the CLI picks).
-#
-# FOOTGUN — provider-alias effort is NOT auto-applied via istota_model:
-#   istota_model: "opus-46-high"  resolves model → claude-opus-4-6, but
-#                                 istota_effort stays "" (= medium default).
-#   To get Opus 4.6 + high effort as the global default you MUST set both:
-#     istota_model: "opus-46-high"
-#     istota_effort: "high"
-#   (or equivalently, `claude-opus-4-6` + `high`).
-#   The Talk-side `!model opus-46-high <prompt>` path encodes both — only
-#   Ansible/TOML config has this split, because the two fields predate
-#   provider aliases.
-# =============================================================================
+# Per-task model+effort resolution, highest precedence first:
+#   1. !model <alias> override (Talk)   2. istota_model / istota_effort (below)
+#   3. role tier, resolved by the active brain   4. brain built-in default
+# Deep reference: .claude/rules/config.md, docs/configuration/native-brain.md
 
-# Default Claude model for every task. Accepts:
-#   - canonical IDs            "claude-opus-4-7", "claude-opus-4-6"
-#   - provider aliases         "opus", "opus-high", "opus-46-high", "sonnet", "haiku"
-#   - role aliases             "smart" (→ Opus 4.7), "general" (→ Sonnet),
-#                              "fast" (→ Haiku), or any custom role you define
-#                              in istota_models_roles
-# Empty = brain default.
+# Global default model + effort ("" = brain default). Separate fields: each
+# accepts a canonical id, a provider alias (opus-high, sonnet), or a role tier
+# (smart/general/fast). A provider alias in istota_model sets only the model —
+# set istota_effort too for a global effort default.
 istota_model: ""
-# Default effort level (Opus 4.7, Opus 4.6, Sonnet 4.6 only): low, medium, high,
-# xhigh (Opus 4.7 only), max (Opus 4.7 only). Empty = model default.
-# Read independently of istota_model — see footgun above.
 istota_effort: ""
 
-# Role aliases — provider-agnostic names that resolve to specific model IDs.
-# Defaults (in code, brain.claude_code.DEFAULT_ROLE_TARGETS):
-#   fast    → claude-haiku-4-5
-#   general → claude-sonnet-4-6
-#   smart   → claude-opus-4-7
-# These are the names internal call sites use when they need to pick a model
-# for a sub-job (e.g. context triage uses "fast", sleep cycle uses "general").
-# `smart` is currently UNUSED by internal code — it exists for `!model smart`
-# from Talk and as a sensible default for any future code path that wants
-# "the best model".
-#
-# Override here to rebind a role for this deployment, e.g.:
-#   istota_models_roles:
-#     smart: opus-46-high   # rebind the user-facing "smart" alias to Opus 4.6
-#     deep:  opus-max       # define a custom role available via !model deep
-#     fast:  haiku          # explicit (matches default; cosmetic only)
-# Values may be canonical IDs or any provider alias from MODEL_ALIASES in the
-# active brain module (resolved at config-load time; the active brain
-# validates overrides on startup and warns on typos / collisions). Empty
-# dict = use code defaults. Operator-defined custom roles are also accepted
-# and surface via `!models` Talk command.
-#
-# NOTE: role aliases never carry effort — `[models.roles] smart = "opus-46-high"`
-# resolves "smart" to model claude-opus-4-6 only; effort stays at istota_effort
-# unless the user types `!model opus-46-high <prompt>` directly.
-istota_models_roles: {}
+# Role tiers — provider-agnostic names (fast/general/smart) defined explicitly
+# per model namespace so ONE definition is correct on every brain family:
+# `anthropic` = the CLI brains (claude_code / tmux_claude), `openai_compat` =
+# native. Each tier is a {model, effort} pair — role targets carry effort now, so
+# effort is a first-class per-tier knob (a `!model smart` / room default / the
+# cross-brain fallback all resolve the tier's effort onto the wire). An empty
+# effort ("") means "model default" and renders as a bare model (no effort flag);
+# smart pins high, fast/general defer to the model. anthropic models mirror the
+# code defaults (Haiku/Sonnet/Opus); openai_compat defaults to the configured
+# native model (istota_brain_native_model) — point a tier at a different model on
+# the same endpoint by editing its openai_compat.model. Add custom roles
+# (deep/cheap) here too; they stay portable. A tier value may also be a bare
+# string (legacy flat, namespace-agnostic) instead of the per-namespace table.
+istota_models_roles:
+  fast:
+    anthropic:
+      model: "claude-haiku-4-5"
+      effort: ""
+    openai_compat:
+      model: "{{ istota_brain_native_model }}"
+      effort: ""
+  general:
+    anthropic:
+      model: "claude-sonnet-4-6"
+      effort: ""
+    openai_compat:
+      model: "{{ istota_brain_native_model }}"
+      effort: ""
+  smart:
+    anthropic:
+      model: "claude-opus-4-8"
+      effort: "high"
+    openai_compat:
+      model: "{{ istota_brain_native_model }}"
+      effort: "high"
+
 # Use config/system-prompt.md instead of Claude Code's default system prompt
 istota_custom_system_prompt: true
 
@@ -176,15 +160,13 @@ istota_brain_native_web_fetch_require_url_provenance: false  # only fetch URLs s
 istota_brain_native_web_fetch_allow_hosts: []     # if non-empty, a host allowlist (suffix match)
 istota_brain_native_web_fetch_block_hosts: []     # always-denied hosts (suffix match)
 istota_brain_native_web_fetch_extra_blocked_cidrs: []  # operator additions to the private/reserved IP blocklist
-# Per-role model overrides for the native brain. Internal subsystems request
-# models by role (fast = conversation selection / routing; general = sleep-cycle
-# extraction, OCR; smart = !model smart / heavy work). Each defaults to
-# istota_brain_native_model; set one to point a role at a different model on the
-# SAME endpoint (e.g. a bigger model for "smart"). All three render into
-# [models.roles]. For custom roles beyond these three, use istota_models_roles.
-istota_brain_native_model_fast: ""                # "" → istota_brain_native_model
-istota_brain_native_model_general: ""             # "" → istota_brain_native_model
-istota_brain_native_model_smart: ""               # "" → istota_brain_native_model
+# Per-role native model overrides are now the openai_compat key of each tier in
+# istota_models_roles (above), which defaults to istota_brain_native_model.
+# MIGRATION: a former `istota_brain_native_model_smart: X` becomes
+#   istota_models_roles.smart.openai_compat: X   (same for fast/general).
+# Point one tier at a bigger/smaller model on the same endpoint by editing that
+# tier's openai_compat value; leaving them at the default routes all three to
+# istota_brain_native_model.
 # Instance-wide provider API key. Never written to config.toml — rendered into
 # the EnvironmentFile as ISTOTA_BRAIN_NATIVE_API_KEY (or set it there directly).
 # Vault this. Per-user keys go through istota_user_secrets (service:

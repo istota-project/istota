@@ -840,15 +840,20 @@ class ModelsConfig:
     The default role mapping (``fast``→Haiku, ``general``→Sonnet,
     ``smart``→Opus for ``ClaudeCodeBrain``) lives on the active brain in
     ``brain.claude_code.DEFAULT_ROLE_TARGETS``. Operators set
-    ``[models.roles]`` in TOML to rebind any role to a different canonical
-    ID or provider alias — e.g., a deployment that wants to stay on Opus
-    4.6 in prod can write ``smart = "opus-46-high"`` here and every call
-    site that reads ``smart`` follows. Role names beyond the three
-    defaults are accepted, so operators can introduce custom roles like
-    ``deep`` or ``cheap``.
+    ``[models.roles]`` in TOML to rebind any role.
+
+    Each role value is the **raw parsed structure** — either a bare string
+    (legacy flat, namespace-agnostic) or a per-namespace table
+    (``{anthropic: "opus-high", openai_compat: {model = "...", effort = "high"}}``)
+    so one definition covers every brain family. Normalization into
+    ``RoleTarget`` objects happens once in ``brain._roles.set_role_overrides``;
+    this field carries the raw shape so ``is_portable_alias`` (which reads only
+    role *names*) and the namespace-aware validation loop can inspect it. Role
+    names beyond the three defaults are accepted (custom roles ``deep`` /
+    ``cheap``); they stay portable across the cross-brain fallback.
     """
 
-    roles: dict[str, str] = field(default_factory=dict)
+    roles: dict[str, str | dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -1883,7 +1888,12 @@ def load_config(config_path: Path | None = None) -> Config:
         roles = models_section.get("roles", {}) if isinstance(models_section, dict) else {}
         if not isinstance(roles, dict):
             roles = {}
-        config.models = ModelsConfig(roles={str(k): str(v) for k, v in roles.items()})
+        # Preserve each role value verbatim: a bare string (legacy flat) or a
+        # per-namespace table stays as-is. set_role_overrides normalizes both
+        # shapes (and drops malformed values with a warning) — keeping the raw
+        # structure here lets the namespace-aware validation loop below and
+        # is_portable_alias (role names only) inspect it.
+        config.models = ModelsConfig(roles={str(k): v for k, v in roles.items()})
 
     if "experimental" in data:
         exp = data["experimental"]
@@ -2225,12 +2235,50 @@ def load_config(config_path: Path | None = None) -> Config:
     # knows its own provider alias namespace) so operators see typos
     # surfaced at startup rather than at task time.
     from .brain import make_brain, set_role_overrides
+    from .brain._roles import LEGACY_NAMESPACE
     if config.models.roles:
         _logger = logging.getLogger("istota.config")
-        _brain = make_brain(config.brain)
-        for _role, _target in config.models.roles.items():
-            for _msg in _brain.validate_role_override(_role, _target):
-                _logger.warning("[models.roles] %s", _msg)
+        _active_brain = make_brain(config.brain)
+        from .brain.claude_code import ClaudeCodeBrain
+        _cli_brain = ClaudeCodeBrain()  # the "anthropic"-namespace validator
+
+        def _validator_for(namespace):
+            # Pick the brain whose alias table validates this namespace. The
+            # legacy flat ("*") is resolved by whichever brain runs the task, so
+            # validate it against the active brain (preserves the pre-per-namespace
+            # shadow/typo warnings). "anthropic" always validates against the CLI
+            # brain even when the active brain is native. Any namespace with no
+            # constructible alias-table brain (openai_compat when native isn't the
+            # active brain) is skipped — native has no alias table anyway.
+            if namespace == LEGACY_NAMESPACE:
+                return _active_brain
+            if namespace == "anthropic":
+                return _cli_brain
+            if namespace == _active_brain.model_namespace:
+                return _active_brain
+            return None
+
+        def _validate_target(role, namespace, model_str):
+            if not isinstance(model_str, str) or not model_str.strip():
+                return
+            brain = _validator_for(namespace)
+            if brain is None:
+                return
+            for _msg in brain.validate_role_override(role, model_str):
+                if namespace == LEGACY_NAMESPACE:
+                    _logger.warning("[models.roles] %s", _msg)
+                else:
+                    _logger.warning("[models.roles] (%s) %s", namespace, _msg)
+
+        for _role, _value in config.models.roles.items():
+            if isinstance(_value, str):
+                _validate_target(_role, LEGACY_NAMESPACE, _value)
+            elif isinstance(_value, dict):
+                for _ns, _target in _value.items():
+                    if isinstance(_target, str):
+                        _validate_target(_role, str(_ns), _target)
+                    elif isinstance(_target, dict):
+                        _validate_target(_role, str(_ns), _target.get("model"))
     set_role_overrides(config.models.roles)
 
     # Per-model capability/window overrides for the native brain (NB-4). Global

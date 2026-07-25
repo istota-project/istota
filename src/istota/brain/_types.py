@@ -136,6 +136,15 @@ class Brain(Protocol):
     ``make_brain(config.brain).resolve_*``.
     """
 
+    # The model namespace this brain resolves role/alias names in. Operators
+    # key a per-namespace role override on this string (``[models.roles.<role>]``
+    # sub-table). ``ClaudeCodeBrain`` / ``TmuxClaudeBrain`` share ``"anthropic"``
+    # (same `claude` binary, same Anthropic model IDs); ``NativeBrain`` uses
+    # ``"openai_compat"`` (its provider label). Keeping this a namespace *label*
+    # rather than the brain *kind* collapses the two CLI brains to one key so an
+    # operator writes an ``anthropic`` value once for both.
+    model_namespace: str
+
     def execute(self, req: BrainRequest) -> BrainResult: ...
 
     @property

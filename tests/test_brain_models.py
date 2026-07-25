@@ -136,8 +136,15 @@ class TestRoleOverrides:
         # Operators may define new roles beyond the default three.
         set_role_overrides({"deep": "opus-46-high"})
         assert brain.resolve_model_name("deep") == OPUS_46
-        # And the brain surfaces it via resolve_alias too.
-        assert brain.resolve_alias("deep") == (OPUS_46, None)
+        # And the brain surfaces it via resolve_alias too — the alias's effort
+        # is now preserved (effort-drop fix): opus-46-high → (OPUS_46, "high").
+        assert brain.resolve_alias("deep") == (OPUS_46, "high")
+
+    def test_flat_override_via_effort_alias_preserves_effort(self, brain):
+        # Effort-drop regression: a flat role override whose target is an
+        # effort-encoding provider alias carries that effort through.
+        set_role_overrides({"smart": "opus-high"})
+        assert brain.resolve_alias("smart") == (OPUS, "high")
 
     def test_override_does_not_mutate_brain_alias_table(self, brain):
         set_role_overrides({"opus": OPUS_46})
@@ -151,9 +158,51 @@ class TestRoleOverrides:
     def test_get_role_overrides_returns_copy(self):
         set_role_overrides({"smart": OPUS_46})
         snapshot = get_role_overrides()
+        # The table is now role -> namespace -> RoleTarget; a flat value lands
+        # under the reserved "*" namespace.
+        assert snapshot["smart"]["*"].model == OPUS_46
         snapshot["smart"] = "tampered"
         # Mutating the returned dict must not bleed back into module state.
-        assert get_role_overrides()["smart"] == OPUS_46
+        assert get_role_overrides()["smart"]["*"].model == OPUS_46
+
+
+class TestPerNamespaceOverrides:
+    """claude_code reads the 'anthropic' namespace value; an openai_compat key
+    on the same role is invisible to it."""
+
+    def test_anthropic_key_resolves(self, brain):
+        set_role_overrides(
+            {
+                "smart": {
+                    "anthropic": "opus-46-high",
+                    "openai_compat": "anthropic/claude-opus-4.8",
+                }
+            }
+        )
+        # The anthropic value resolves through MODEL_ALIASES, effort preserved;
+        # the openai_compat value never touches this brain.
+        assert brain.resolve_alias("smart") == (OPUS_46, "high")
+        assert brain.resolve_model_name("smart") == OPUS_46
+
+    def test_anthropic_inline_table_effort_wins(self, brain):
+        # Explicit RoleTarget.effort overrides the alias-encoded effort.
+        set_role_overrides(
+            {"smart": {"anthropic": {"model": "opus-high", "effort": "max"}}}
+        )
+        assert brain.resolve_alias("smart") == (OPUS, "max")
+
+    def test_missing_anthropic_key_falls_to_default(self, brain):
+        # Only openai_compat set, running claude_code → falls to the code floor.
+        set_role_overrides({"smart": {"openai_compat": "slug/x"}})
+        assert brain.resolve_alias("smart") == (OPUS, None)
+        assert brain.resolve_model_name("smart") == OPUS
+
+    def test_list_aliases_reflects_anthropic_value(self, brain):
+        set_role_overrides(
+            {"smart": {"anthropic": "opus-high", "openai_compat": "slug/x"}}
+        )
+        listed = {a: (m, e) for a, m, e in brain.list_aliases()}
+        assert listed["smart"] == (OPUS, "high")
 
 
 class TestBrainListAliases:
@@ -280,3 +329,60 @@ class TestLoadConfigIntegration:
         with caplog.at_level("WARNING"):
             load_config(config_file)
         assert any("shadows" in r.message.lower() for r in caplog.records)
+
+    def test_per_namespace_table_parses_and_resolves(self, tmp_path):
+        from istota.config import load_config
+
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            "[models.roles.smart]\n"
+            'anthropic = "opus-46-high"\n'
+            'openai_compat = { model = "anthropic/claude-opus-4.8", effort = "high" }\n'
+            "[models.roles.general]\n"
+            'anthropic = "claude-sonnet-4-6"\n'
+            'openai_compat = "anthropic/claude-sonnet-4.6"\n'
+        )
+        config = load_config(config_file)
+        # Raw nested structure preserved on config.models.roles.
+        assert config.models.roles["smart"]["anthropic"] == "opus-46-high"
+        assert config.models.roles["smart"]["openai_compat"] == {
+            "model": "anthropic/claude-opus-4.8",
+            "effort": "high",
+        }
+        # Active (claude_code) brain resolves the anthropic namespace value.
+        active = make_brain(config.brain)
+        assert active.resolve_model_name("smart") == OPUS_46
+        assert active.resolve_alias("smart") == (OPUS_46, "high")
+
+    def test_per_namespace_anthropic_shadow_warns_openai_compat_quiet(
+        self, tmp_path, caplog
+    ):
+        from istota.config import load_config
+
+        config_file = tmp_path / "config.toml"
+        # The anthropic value under a role named after a provider alias warns;
+        # the openai_compat garbage value must not crash or warn (native has no
+        # alias table).
+        config_file.write_text(
+            "[models.roles.opus]\n"
+            'anthropic = "haiku"\n'
+            'openai_compat = "some/endpoint-slug-that-is-not-validated"\n'
+        )
+        with caplog.at_level("WARNING"):
+            config = load_config(config_file)
+        assert any("shadows" in r.message.lower() for r in caplog.records)
+        # Load never fails; the role is applied.
+        assert "opus" in config.models.roles
+
+    def test_is_portable_alias_recognizes_nested_custom_role(self, tmp_path):
+        from istota.brain import is_portable_alias
+        from istota.config import load_config
+
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            "[models.roles.deep]\n"
+            'anthropic = "opus-max"\n'
+            'openai_compat = "anthropic/claude-opus-4.8"\n'
+        )
+        config = load_config(config_file)
+        assert is_portable_alias("deep", config.models.roles) is True

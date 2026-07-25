@@ -511,19 +511,37 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                  from Talk and for any future code path that wants
 #                                  "the best model")
 #
-# Rebind any role to a canonical ID, a provider alias from MODEL_ALIASES, or
-# add a custom role name accessible via `!model <name>` from Talk.
+# Rebind any role to a canonical ID, a provider alias, or a custom role name
+# accessible via `!model <name>` from Talk. Two forms:
 #
-# NOTE: role aliases never carry effort — `smart = "opus-46-high"` resolves
-# `smart` to claude-opus-4-6 only; effort still tracks the top-level `effort`
-# field (or the per-task override) unless the user types the provider alias
-# directly via `!model opus-46-high <prompt>`.
+# 1. Flat (namespace-agnostic) — resolved by whichever brain runs the task:
+#      [models.roles]
+#      smart = "opus-47-high"   # rebind "smart" to Opus 4.7, effort high
+#      deep  = "opus-max"       # a custom role for deep-thinking tasks
 #
-# Example (uncomment to use):
-# [models.roles]
-# smart = "opus-47-high"   # rebind user-facing "smart" alias to Opus 4.7
-# deep  = "opus-max"       # define a custom role for "deep thinking" tasks
-# fast  = "haiku"          # explicit (matches default; cosmetic)
+# 2. Per-namespace (define ONCE, correct on every brain family) — an operator
+#    running a claude_code primary + native fallback, or [brain.source_type_overrides]
+#    routing some source types to native, gives each namespace its own value so
+#    one role never leaks a foreign-namespace string onto the wire:
+#      [models.roles.smart]
+#      anthropic     = "opus-high"                                   # CLI brains (claude_code / tmux_claude)
+#      openai_compat = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native
+#      [models.roles.general]
+#      anthropic     = "claude-sonnet-4-6"
+#      openai_compat = "anthropic/claude-sonnet-4.6"                 # bare string = no effort
+#      [models.roles.fast]
+#      anthropic     = "claude-haiku-4-5"
+#      openai_compat = "anthropic/claude-haiku-4.5"
+#
+# Role targets CARRY EFFORT: an effort-encoding alias (`opus-high` → high) or an
+# explicit `effort =` on a per-namespace table reaches the wire (explicit wins).
+# `anthropic` covers both CLI brains; `openai_compat` is the native endpoint slug
+# (sent verbatim, never translated from the Anthropic namespace).
+#
+# TOML note: a role uses ONE form — a flat `smart = "..."` and a `[models.roles.smart]`
+# table are mutually exclusive (a key can't be both a string and a table). A
+# per-namespace table missing the active brain's key falls to that brain's own
+# code default (Haiku/Sonnet/Opus for CLI; the configured native.model for native).
 
 # ============================================================================
 # Sleep Cycle (nightly memory extraction)

@@ -227,20 +227,31 @@ Built-in role aliases (`fast`/`general`/`smart`) resolve to `native.model` on th
 
 ### `ModelsConfig`
 ```
-roles: dict[str, str] = {}   # operator-rebound role aliases ([models.roles] in TOML)
+roles: dict[str, str | dict] = {}   # raw [models.roles] structure — flat string OR per-namespace table
 ```
-Provider-agnostic role aliases. Defaults (`fast`→Haiku, `general`→Sonnet,
-`smart`→Opus) live in the active brain (e.g.
-`brain.claude_code.DEFAULT_ROLE_TARGETS`). Operators rebind via
-`[models.roles]` — values may be canonical IDs or any provider alias from
-the active brain's `MODEL_ALIASES`. `_apply_user_resources` is followed
-by `set_role_overrides(config.models.roles)` so every consumer that calls
-`brain.resolve_model_name(...)` picks up the operator mapping. Custom
-role names beyond the three defaults are accepted (e.g. `deep`,
-`cheap`). Every wired field that takes a model name (`selection_model`,
-`extraction_model`, `curation_model`, the top-level `model`, per-task
-`model`, `[[jobs]] model`) accepts canonical IDs, provider aliases, or
-role aliases.
+Provider-agnostic role tiers, now **per-namespace** (role-tier-cross-brain-standardization
+spec). `roles` holds the **raw** parsed `[models.roles]` structure: each role
+value is either a bare string (legacy flat, resolved by whichever brain runs the
+task) or a per-namespace table (`{anthropic = "...", openai_compat = "..."|{model, effort}}`)
+so one definition covers every brain family. Defaults (`fast`→Haiku,
+`general`→Sonnet, `smart`→Opus) live in the active brain
+(`brain.claude_code.DEFAULT_ROLE_TARGETS`) as the code floor. Normalization into
+`RoleTarget(model, effort)` objects happens once in
+`brain._roles.set_role_overrides(config.models.roles)` (run late in config load),
+keyed `role -> namespace -> RoleTarget` with the reserved `"*"` namespace for a
+flat value; each brain reads its own namespace via
+`get_role_override_target(role, self.model_namespace)`, so an anthropic value
+never leaks onto the native wire (the cross-namespace bug fix) and a role target
+carries effort onto the wire (the effort-drop fix). Config-load validation is
+namespace-aware (anthropic entries → `claude_code`; flat `"*"` → active brain;
+`openai_compat` → native, no alias table so no warnings); warnings only, never
+fails load. Custom role names (`deep`, `cheap`) are accepted and stay portable
+across the cross-brain fallback. Every wired field that takes a model name
+(`selection_model`, `extraction_model`, `curation_model`, the top-level `model`,
+per-task `model`, `[[jobs]] model`) accepts canonical IDs, provider aliases, or
+role tiers. Backward compatible: a flat `[models.roles] role = "string"`
+deployment is unchanged (now *with* effort where the target encodes it), and a
+no-`[models.roles]` deployment resolves via the code floor byte-for-byte.
 
 ### `ExperimentalConfig`
 ```

@@ -54,7 +54,12 @@ from ._postures import (
     TaskPosture,
     postures_by_name as task_postures_by_name,
 )
-from ._roles import get_role_override, get_role_overrides, set_role_overrides
+from ._roles import (
+    RoleTarget,
+    get_role_override_target,
+    get_role_overrides,
+    set_role_overrides,
+)
 from ._types import Brain, BrainConfig, BrainRequest, BrainResult
 from .claude_code import (
     ClaudeCodeBrain,
@@ -134,6 +139,7 @@ __all__ = [
     "POSTURE_PIN",
     "POSTURE_SKIP",
     "PrimaryAvailabilityBreaker",
+    "RoleTarget",
     "TASK_POSTURES",
     "TRIGGER_STOP_REASONS",
     "TaskPosture",
@@ -154,7 +160,7 @@ __all__ = [
     "ToolUseEvent",
     "effective_fallback_kind",
     "get_availability_breaker",
-    "get_role_override",
+    "get_role_override_target",
     "get_role_overrides",
     "make_brain",
     "make_stream_parser",

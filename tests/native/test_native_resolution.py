@@ -59,6 +59,58 @@ class TestOpenAICompatResolution:
         assert b.resolve_alias("opus") is None
 
 
+class TestPerNamespaceOverrides:
+    """The core cross-namespace bug fix: native reads its OWN namespace value,
+    never the anthropic one, so a foreign-namespace string never hits the wire."""
+
+    def teardown_method(self):
+        set_role_overrides({})
+
+    def test_native_reads_openai_compat_key_not_anthropic(self):
+        # Operator defines smart once, per namespace. Native must resolve to the
+        # openai_compat slug, NOT the anthropic alias (the shipped-feature bug).
+        set_role_overrides(
+            {
+                "smart": {
+                    "anthropic": "opus-46-high",
+                    "openai_compat": "anthropic/claude-opus-4.8",
+                }
+            }
+        )
+        b = _brain("openai_compat", model="fallback-model")
+        assert b.resolve_model_name("smart") == "anthropic/claude-opus-4.8"
+        assert b.resolve_alias("smart") == ("anthropic/claude-opus-4.8", None)
+
+    def test_native_openai_compat_carries_effort(self):
+        set_role_overrides(
+            {"smart": {"openai_compat": {"model": "anthropic/claude-opus-4.8", "effort": "high"}}}
+        )
+        b = _brain("openai_compat", model="m")
+        assert b.resolve_alias("smart") == ("anthropic/claude-opus-4.8", "high")
+
+    def test_anthropic_only_override_falls_to_native_default(self):
+        # A per-namespace table with only the anthropic key, running native →
+        # native misses its namespace, no legacy, falls to its own model floor.
+        set_role_overrides({"smart": {"anthropic": "opus-high"}})
+        b = _brain("openai_compat", model="the-native-model")
+        assert b.resolve_model_name("smart") == "the-native-model"
+
+    def test_legacy_flat_under_native_unchanged(self):
+        # Documented no-regression edge: a flat value is namespace-agnostic, so
+        # native returns it verbatim (correct here — operators set native slugs).
+        set_role_overrides({"smart": "qwen/qwen3.6-35b-a3b"})
+        b = _brain("openai_compat", model="m")
+        assert b.resolve_alias("smart") == ("qwen/qwen3.6-35b-a3b", None)
+
+    def test_list_aliases_reflects_openai_compat_value(self):
+        set_role_overrides(
+            {"smart": {"anthropic": "opus-high", "openai_compat": "slug/x"}}
+        )
+        b = _brain("openai_compat", model="m")
+        listed = {a[0]: (a[1], a[2]) for a in b.list_aliases()}
+        assert listed["smart"] == ("slug/x", None)
+
+
 class TestNativeRoleDefaults:
     """NB-3: built-in role aliases (fast/general/smart) must resolve to the
     configured native model rather than reaching the wire as the literal string

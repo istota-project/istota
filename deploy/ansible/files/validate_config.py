@@ -142,6 +142,47 @@ def main() -> int:
         )
         return 1
 
+    # [models.roles]: a role value is EITHER a bare string (legacy flat) OR a
+    # per-namespace table ({anthropic = "...", openai_compat = "..."|{model,effort}}).
+    # A malformed value (a number, or a namespace table with no model) templates
+    # cleanly and set_role_overrides only WARNs — the role silently has no
+    # override. Fail the play so a typo surfaces at deploy time.
+    models = raw.get("models", {})
+    roles = models.get("roles", {}) if isinstance(models, dict) else {}
+    if roles and not isinstance(roles, dict):
+        print("validate_config: [models.roles] must be a table", file=sys.stderr)
+        return 1
+    for role, value in (roles.items() if isinstance(roles, dict) else []):
+        if isinstance(value, str):
+            continue
+        if isinstance(value, dict):
+            for ns, nsval in value.items():
+                if isinstance(nsval, str):
+                    continue
+                if isinstance(nsval, dict):
+                    model = nsval.get("model")
+                    if not isinstance(model, str) or not model.strip():
+                        print(
+                            f"validate_config: [models.roles.{role}] {ns} table "
+                            "must contain a non-empty 'model' string",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    continue
+                print(
+                    f"validate_config: [models.roles.{role}] {ns} must be a "
+                    "string or a {model, effort} table",
+                    file=sys.stderr,
+                )
+                return 1
+            continue
+        print(
+            f"validate_config: [models.roles] {role} must be a string or a "
+            "per-namespace table",
+            file=sys.stderr,
+        )
+        return 1
+
     sys.path.insert(0, str(cfg_path.parent.parent / "src"))
     try:
         mod = __import__(f"{package}.config", fromlist=["load_config"])

@@ -232,29 +232,30 @@ bot_email = "{{ istota_email_bot_address }}"
 imap_timeout_seconds = {{ istota_email_imap_timeout_seconds }}
 {% endif %}
 
-{# Role aliases (fast/general/smart) → concrete model ids. When the PRIMARY
-   brain is native, default all three to the configured model (each optionally
-   overridable); istota_models_roles then overlays (operator-explicit wins, and
-   can add custom roles). Do NOT populate this for a native *fallback* under a
-   claude_code primary: [models.roles] is global and provider-agnostic, so
-   writing the native model here would override the claude_code primary's own
-   role targets (Haiku/Sonnet/Opus). Native-as-fallback needs no table anyway —
-   NativeBrain defaults un-overridden roles to its configured model, and the
-   fallback path re-resolves portable role names (fast/general/smart) in the
-   fallback namespace on its own. #}
-{% set _roles = {} %}
-{% if istota_brain_kind == 'native' and istota_brain_native_model %}
-{% set _ = _roles.update({'fast': istota_brain_native_model_fast | default('', true) or istota_brain_native_model}) %}
-{% set _ = _roles.update({'general': istota_brain_native_model_general | default('', true) or istota_brain_native_model}) %}
-{% set _ = _roles.update({'smart': istota_brain_native_model_smart | default('', true) or istota_brain_native_model}) %}
-{% endif %}
+{# Role tiers (fast/general/smart + custom) → concrete model targets, resolved
+   per active brain. istota_models_roles is authoritative: a bare-string value is
+   a legacy flat (namespace-agnostic) role; a mapping value is a per-namespace
+   table (anthropic = CLI brains, openai_compat = native) whose values are a bare
+   slug or an inline {model, effort}. Per-namespace resolution makes a native
+   fallback's openai_compat target and a claude_code primary's anthropic target
+   coexist correctly — no clobber, so the old "don't populate for a native
+   fallback" warning is gone. A brain with no matching namespace key falls to its
+   own code default (Haiku/Sonnet/Opus for CLI; native.model for native). #}
 {% if istota_models_roles %}
-{% set _ = _roles.update(istota_models_roles) %}
-{% endif %}
-{% if _roles %}
 [models.roles]
-{% for role, target in _roles.items() %}
+{% for role, target in istota_models_roles.items() if target is string %}
 {{ role }} = "{{ target }}"
+{% endfor %}
+{% for role, target in istota_models_roles.items() if target is mapping %}
+
+[models.roles.{{ role }}]
+{% for ns, nsval in target.items() %}
+{% if nsval is mapping %}
+{{ ns }} = { model = "{{ nsval.model }}"{% if nsval.effort is defined and nsval.effort %}, effort = "{{ nsval.effort }}"{% endif %} }
+{% else %}
+{{ ns }} = "{{ nsval }}"
+{% endif %}
+{% endfor %}
 {% endfor %}
 
 {% endif %}

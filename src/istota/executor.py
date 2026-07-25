@@ -435,6 +435,13 @@ def _resolve_fallback_model_effort(task, config, fallback_brain, effort):
     if not raw:
         return ("", effort, None)
     if is_portable_alias(raw, config.models.roles):
+        # Re-resolve the intent in the fallback brain's own namespace, carrying
+        # its effort too — a customized ``smart`` falling back claude_code→native
+        # must land on a valid openai_compat slug + effort, not the anthropic
+        # value. Fall back to the id-only path defensively if the pair is empty.
+        pair = fallback_brain.resolve_alias(raw)
+        if pair and pair[0]:
+            return (pair[0], pair[1] or effort, None)
         return (fallback_brain.resolve_model_name(raw), effort, None)
     logger.info(
         "fallback_model: non-portable %r dropped; using fallback brain default", raw
