@@ -201,4 +201,52 @@ describe('ClientForm', () => {
     await fireEvent.click(screen.getByText('Cancel'));
     expect(onCancel).toHaveBeenCalled();
   });
+
+  it('lowercases a new key as you type', async () => {
+    // Work entries store the client lowercased, so a mixed-case key matches
+    // none of them and the client's work is silently never billed. Forcing it
+    // in the field means the key you see is the key you get.
+    const onSave = vi.fn();
+    mount({ onSave });
+    const keyInput = screen.getByPlaceholderText('acme') as HTMLInputElement;
+    await fireEvent.input(keyInput, { target: { value: 'AcmeCorp' } });
+    expect(keyInput.value).toBe('acmecorp');
+    await fireEvent.input(screen.getByPlaceholderText('Acme Corp'), {
+      target: { value: 'Acme' },
+    });
+    await fireEvent.click(screen.getByText('Save'));
+    expect(onSave).toHaveBeenCalledWith('acmecorp', expect.anything());
+  });
+
+  it('refuses negative numeric terms', async () => {
+    // The column is TEXT and the loader coerces "-5" back to -5, which renders
+    // a due date before the invoice date.
+    const onSave = vi.fn();
+    mount({ client: row(), onSave });
+    await fireEvent.input(screen.getByPlaceholderText('30'), { target: { value: '-5' } });
+    expect(screen.getByText('Expected 0 days or more')).toBeTruthy();
+    await fireEvent.click(screen.getByText('Save'));
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('still accepts a label as terms', async () => {
+    const onSave = vi.fn();
+    mount({ client: row(), onSave });
+    await fireEvent.input(screen.getByPlaceholderText('30'), { target: { value: 'NET 15' } });
+    await fireEvent.click(screen.getByText('Save'));
+    expect(onSave).toHaveBeenCalledWith('acme', expect.objectContaining({ terms: 'NET 15' }));
+  });
+
+  it('surfaces a legacy schedule instead of silently showing on-demand', () => {
+    // A client migrated from legacy TOML can carry a schedule outside the set;
+    // it was simply never picked up by the scheduler.
+    mount({ client: row({ schedule: 'weekly' }) });
+    expect(screen.getByText(/weekly.*unrecognised/)).toBeTruthy();
+    expect(screen.getByText(/never invoiced automatically/)).toBeTruthy();
+  });
+
+  it('says nothing about schedules for a conforming client', () => {
+    mount({ client: row({ schedule: 'monthly' }) });
+    expect(screen.queryByText(/unrecognised/)).toBeNull();
+  });
 });

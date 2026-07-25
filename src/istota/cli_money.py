@@ -37,6 +37,26 @@ def _print_error(msg: str) -> int:
     return 2
 
 
+def _blocked_by_references(scan_fn, ctx, key: str) -> int | None:
+    """Refuse a delete the shared reference guard blocks, or return None.
+
+    The same guards the web routes enforce. They live in ``config_refs``
+    rather than only in the route so this claim holds on every surface — an
+    agent reaching for ``istota money service remove`` must not be able to
+    unbill a client's work in a way the browser refuses to.
+    """
+    from istota.money import config_refs
+
+    scan = scan_fn(ctx.db_path, ctx.data_dir, key)
+    if scan.scan_failed is not None:
+        return _print_error(
+            f"could not check what references this record: {scan.scan_failed}",
+        )
+    if scan.blocked_reason is not None:
+        return _print_error(scan.blocked_reason)
+    return None
+
+
 # =============================================================================
 # Top-level dispatch
 # =============================================================================
@@ -992,6 +1012,10 @@ def _company_dispatch(args, istota_config) -> int:
     a = args.company_action
     ctx = _load_user_ctx(istota_config, args.user)
     if a == "remove":
+        from istota.money import config_refs
+        blocked = _blocked_by_references(config_refs.entity_references, ctx, args.key)
+        if blocked is not None:
+            return blocked
         ok = config_store.delete_company(ctx.db_path, args.key)
         _print_state("noop" if not ok else "removed", f"company key={args.key}")
         return 0
@@ -1037,6 +1061,10 @@ def _service_dispatch(args, istota_config) -> int:
     a = args.service_action
     ctx = _load_user_ctx(istota_config, args.user)
     if a == "remove":
+        from istota.money import config_refs
+        blocked = _blocked_by_references(config_refs.service_references, ctx, args.key)
+        if blocked is not None:
+            return blocked
         ok = config_store.delete_service(ctx.db_path, args.key)
         _print_state("noop" if not ok else "removed", f"service key={args.key}")
         return 0

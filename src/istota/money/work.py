@@ -460,6 +460,27 @@ def load_work_entries(data_dir: Path) -> list[WorkEntry]:
     return entries
 
 
+def quarantined_years(data_dir: Path) -> dict[str, str]:
+    """Year files under ``data_dir`` holding a row this version can't read.
+
+    Maps file name to the reason recorded by the last read. A caller counting
+    references has to consult this: a skipped row is invisible to
+    ``load_work_entries``, so a reference living in one reads as zero and a
+    guard built on that count fails *open* — which is how deleting the service
+    an unreadable row names would unbill it once someone repairs the row.
+
+    ``_QUARANTINED_YEARS`` is process-local and refreshed per year file on
+    every read, so this is only meaningful immediately after a
+    ``load_work_entries`` call against the same store.
+    """
+    wd = data_dir / "invoices" / "work"
+    return {
+        path.name: reason
+        for path, reason in _QUARANTINED_YEARS.items()
+        if path.parent == wd and reason
+    }
+
+
 def add_work_entry(
     data_dir: Path,
     entry_date: str,

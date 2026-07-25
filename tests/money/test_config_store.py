@@ -733,3 +733,261 @@ class TestValidationRejectsBeforeWriting:
         with pytest.raises(ValueError):
             cs.upsert_service(db_path, "consulting", type="hourly")
         assert "consulting" not in cs.load_invoicing(db_path).services
+
+
+class TestClientKeyIsLowercase:
+    """A mixed-case client key matches no work entry, so its work never bills.
+
+    `add_work_entry` stores `client.lower()` and `build_line_items` looks the
+    client up by the entry's (lowercased) key, so an `Acme` config key silently
+    produces empty invoices. Only clients are constrained — `service` and
+    `entity` are stored verbatim on the entry.
+    """
+
+    def test_mixed_case_client_key_refused_on_create(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="lowercase"):
+            cs.upsert_client(db_path, "Acme", name="Acme Corp")
+        assert "Acme" not in cs.load_invoicing(db_path).clients
+
+    def test_lowercase_client_key_accepted(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        client, state = cs.upsert_client(db_path, "acme", name="Acme Corp")
+        assert (client.key, state) == ("acme", "created")
+
+    def test_existing_mixed_case_client_stays_editable(self, tmp_path):
+        """The rule fires on create only, so a legacy row can still be fixed."""
+        db_path = tmp_path / "money.db"
+        cs.upsert_company(db_path, "main")  # unrelated collection, still mixed-case ok
+        cs.upsert_company(db_path, "Main")
+        with cs._connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO invoicing_clients(key, name) VALUES (?, ?)", ("Legacy", "Legacy"),
+            )
+        client, _ = cs.upsert_client(db_path, "Legacy", name="Renamed")
+        assert client.name == "Renamed"
+
+    def test_entities_and_services_may_be_mixed_case(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.upsert_company(db_path, "MainCo", name="Main Co")
+        cs.upsert_service(db_path, "DesignWork", display_name="Design")
+        cfg = cs.load_invoicing(db_path)
+        assert "MainCo" in cfg.companies
+        assert "DesignWork" in cfg.services
+
+
+class TestUnchangedFieldsAreGrandfathered:
+    """A legacy row with one bad value has to stay editable.
+
+    A form seeds every input from the stored value and sends the lot back, so
+    validating a field the caller didn't change makes such a row permanently
+    unsaveable — and the error names a field the user never touched.
+    """
+
+    def _legacy_service(self, db_path):
+        cs.init_db(db_path)
+        with cs._connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO invoicing_services(key, display_name, rate, type) "
+                "VALUES (?, ?, ?, ?)", ("consulting", "Consulting", 150.0, "hourly"),
+            )
+
+    def test_resending_an_unchanged_bad_type_is_allowed(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        self._legacy_service(db_path)
+        svc, _ = cs.upsert_service(
+            db_path, "consulting", display_name="Renamed", type="hourly", rate=150.0,
+        )
+        assert svc.display_name == "Renamed"
+        assert svc.type == "hourly"
+
+    def test_changing_a_bad_value_to_another_bad_one_is_refused(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        self._legacy_service(db_path)
+        with pytest.raises(ValueError, match="type"):
+            cs.upsert_service(db_path, "consulting", type="weekly")
+
+    def test_legacy_client_schedule_survives_a_rename(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        with cs._connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO invoicing_clients(key, name, schedule) VALUES (?, ?, ?)",
+                ("acme", "Acme", "weekly"),
+            )
+        client, _ = cs.upsert_client(db_path, "acme", name="Acme Corp", schedule="weekly")
+        assert client.name == "Acme Corp"
+
+    def test_legacy_account_survives_a_rename(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        with cs._connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO invoicing_companies(key, name, ar_account) VALUES (?, ?, ?)",
+                ("main", "Main", "assets:ar"),
+            )
+        comp, _ = cs.upsert_company(db_path, "main", name="Main Co", ar_account="assets:ar")
+        assert comp.name == "Main Co"
+        with pytest.raises(ValueError, match="ar_account"):
+            cs.upsert_company(db_path, "main", ar_account="still:not valid")
+
+    def test_a_new_record_gets_no_exemption(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="type"):
+            cs.upsert_service(db_path, "new", type="hourly")
+
+
+class TestTermsAsNumericString:
+    """The column is TEXT and the loader coerces it back, so "-5" *is* -5."""
+
+    def test_negative_numeric_string_refused(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="terms"):
+            cs.upsert_client(db_path, "acme", terms="-5")
+
+    def test_a_label_is_still_accepted(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        client, _ = cs.upsert_client(db_path, "acme", terms="NET 15")
+        assert client.terms == "NET 15"
+
+    def test_a_non_negative_numeric_string_round_trips_as_int(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.upsert_client(db_path, "acme", terms="45")
+        assert cs.load_invoicing(db_path).clients["acme"].terms == 45
+
+
+class TestAccountShapeIsUnicodeAware:
+    """Beancount's own account regex is Unicode; an ASCII-only check locks a
+    non-English ledger out of the account it has been posting to."""
+
+    @pytest.mark.parametrize("account", [
+        "Assets:Forderungen:Müller",
+        "Assets:Accounts-Receivable",
+        "Income:Consulting",
+        "Aktiva:Bank:Girokonto",
+        "Assets:Bank:2024",
+    ])
+    def test_valid_accounts_accepted(self, tmp_path, account):
+        db_path = tmp_path / f"{abs(hash(account))}.db"
+        cs.upsert_company(db_path, "main", ar_account=account)
+
+    @pytest.mark.parametrize("account", [
+        "assets:ar",            # lowercase root
+        "Assets",               # single component
+        "Assets:Bank_Checking",  # underscore
+        "Assets: Bank",         # space
+    ])
+    def test_invalid_accounts_refused(self, tmp_path, account):
+        db_path = tmp_path / f"{abs(hash(account))}.db"
+        with pytest.raises(ValueError, match="ar_account"):
+            cs.upsert_company(db_path, "main", ar_account=account)
+
+    def test_single_letter_commodity_accepted(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        comp, _ = cs.upsert_company(db_path, "main", currency="X")
+        assert comp.currency == "X"
+
+
+class TestLogoStaysInsideTheWorkspace:
+    """The logo is base64-embedded into the PDF, resolved as
+    `accounting_path / logo` — pathlib lets an absolute operand escape."""
+
+    @pytest.mark.parametrize("logo", ["/etc/passwd", "../../secrets.png", "~/private.png"])
+    def test_escaping_paths_refused(self, tmp_path, logo):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="logo"):
+            cs.upsert_company(db_path, "main", logo=logo)
+
+    def test_relative_path_accepted(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        comp, _ = cs.upsert_company(db_path, "main", logo="invoices/logo.png")
+        assert comp.logo == "invoices/logo.png"
+
+
+class TestCreateOnly:
+    """The 409 is decided inside the write transaction, so two concurrent
+    creates can't both pass a pre-check and have the second overwrite."""
+
+    def test_create_only_refuses_an_existing_key(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.upsert_client(db_path, "acme", name="Acme")
+        with pytest.raises(cs.KeyExistsError):
+            cs.upsert_client(db_path, "acme", create_only=True, name="Other")
+        assert cs.load_invoicing(db_path).clients["acme"].name == "Acme"
+
+    def test_create_only_allows_a_fresh_key(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        _, state = cs.upsert_service(db_path, "design", create_only=True, display_name="Design")
+        assert state == "created"
+
+    def test_key_exists_error_is_a_value_error(self, tmp_path):
+        """So an `except ValueError` caller keeps behaving as before."""
+        assert issubclass(cs.KeyExistsError, ValueError)
+
+
+class TestSaveInvoicingSanitizes:
+    """`save_invoicing` is the bulk path the migration and `config import` use.
+
+    It bypassed the per-field validation entirely, so the exact values the
+    granular ops exist to keep out could still land in the store.
+    """
+
+    def test_out_of_set_service_type_is_coerced(self, tmp_path, caplog):
+        db_path = tmp_path / "money.db"
+        cfg = InvoicingConfig(
+            accounting_path="", invoice_output="", next_invoice_number=1,
+            company=CompanyConfig(name="Main", key="main"),
+            clients={}, services={
+                "consulting": ServiceConfig(
+                    key="consulting", display_name="Consulting", rate=150.0, type="hourly",
+                ),
+            },
+        )
+        with caplog.at_level("WARNING"):
+            cs.save_invoicing(db_path, cfg)
+        assert cs.load_invoicing(db_path).services["consulting"].type == "hours"
+        assert "money_config_sanitized" in caplog.text
+
+    def test_out_of_set_client_schedule_is_coerced(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cfg = InvoicingConfig(
+            accounting_path="", invoice_output="", next_invoice_number=1,
+            company=CompanyConfig(name="Main", key="main"),
+            clients={
+                "acme": ClientConfig(key="acme", name="Acme", schedule="weekly"),
+            },
+            services={},
+        )
+        cs.save_invoicing(db_path, cfg)
+        assert cs.load_invoicing(db_path).clients["acme"].schedule == "on-demand"
+
+    def test_a_conforming_config_is_untouched(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cfg = InvoicingConfig(
+            accounting_path="", invoice_output="", next_invoice_number=1,
+            company=CompanyConfig(name="Main", key="main"),
+            clients={"acme": ClientConfig(key="acme", name="Acme", schedule="monthly")},
+            services={
+                "design": ServiceConfig(key="design", display_name="Design", rate=90.0,
+                                        type="flat"),
+            },
+        )
+        cs.save_invoicing(db_path, cfg)
+        loaded = cs.load_invoicing(db_path)
+        assert loaded.clients["acme"].schedule == "monthly"
+        assert loaded.services["design"].type == "flat"
+
+
+class TestInvoicingScalarShapes:
+    def test_default_accounts_are_shape_checked(self):
+        with pytest.raises(ValueError, match="default_ar_account"):
+            cs.check_invoicing_scalars({"default_ar_account": "assets ar"})
+        cs.check_invoicing_scalars({"default_ar_account": "Assets:Accounts-Receivable"})
+
+    def test_currency_is_shape_checked(self):
+        with pytest.raises(ValueError, match="currency"):
+            cs.check_invoicing_scalars({"currency": "us dollars"})
+        cs.check_invoicing_scalars({"currency": "EUR"})
+
+    def test_blank_values_are_a_noop(self):
+        cs.check_invoicing_scalars({"default_ar_account": "", "currency": ""})

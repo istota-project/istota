@@ -536,3 +536,80 @@ class TestOperationalPassthrough:
         assert cli_money.is_operational("list")
         assert not cli_money.is_operational("client")
         assert not cli_money.is_operational("config")
+
+
+class TestCliDeleteGuards:
+    """The reference guards are enforced here too, not only in the web route.
+
+    The skill body tells the agent a referenced service cannot be deleted, and
+    the agent's reach is `istota money service remove` — so the guard has to
+    live below both surfaces or the documented contract is false where it
+    matters most.
+    """
+
+    def test_referenced_service_refused(self, patched_loader):
+        from istota.money.work import add_work_entry
+
+        _run([
+            "money", "service", "add", "--user", "u1", "--key", "dev",
+            "--display-name", "Dev", "--rate", "150",
+        ])
+        add_work_entry(patched_loader.data_dir, "2026-03-01", "acme", "dev", qty=2)
+
+        rc, _, err = _run(["money", "service", "remove", "--user", "u1", "--key", "dev"])
+        assert rc == 2
+        assert "work entr" in err
+        assert "dev" in config_store.load_invoicing(patched_loader.db_path).services
+
+    def test_unreferenced_service_removed(self, patched_loader):
+        _run([
+            "money", "service", "add", "--user", "u1", "--key", "design",
+            "--display-name", "Design", "--rate", "90",
+        ])
+        rc, out, _ = _run(["money", "service", "remove", "--user", "u1", "--key", "design"])
+        assert rc == 0
+        assert "STATE: removed" in out
+
+    def test_referenced_entity_refused(self, patched_loader):
+        _run(["money", "company", "add", "--user", "u1", "--key", "oldco", "--name", "Old"])
+        _run(["money", "company", "add", "--user", "u1", "--key", "newco", "--name", "New"])
+        _run([
+            "money", "client", "add", "--user", "u1", "--key", "acme",
+            "--name", "Acme", "--entity", "oldco",
+        ])
+
+        rc, _, err = _run(["money", "company", "remove", "--user", "u1", "--key", "oldco"])
+        assert rc == 2
+        assert "acme" in err
+        assert "oldco" in config_store.load_invoicing(patched_loader.db_path).companies
+
+    def test_client_remove_is_still_unguarded(self, patched_loader):
+        """The soft case — entries and invoices survive a missing client."""
+        from istota.money.work import add_work_entry
+
+        _run(["money", "client", "add", "--user", "u1", "--key", "acme", "--name", "Acme"])
+        add_work_entry(patched_loader.data_dir, "2026-03-01", "acme", "dev", qty=2)
+
+        rc, out, _ = _run(["money", "client", "remove", "--user", "u1", "--key", "acme"])
+        assert rc == 0
+        assert "STATE: removed" in out
+
+
+class TestCliClientKeyCase:
+    """Work entries store the client lowercased, so a mixed-case config key
+    matches none of them and the client's work is silently never billed."""
+
+    def test_mixed_case_client_key_refused(self, patched_loader):
+        rc, _, err = _run([
+            "money", "client", "add", "--user", "u1", "--key", "Acme", "--name", "Acme",
+        ])
+        assert rc == 2
+        assert "lowercase" in err
+        assert "Acme" not in config_store.load_invoicing(patched_loader.db_path).clients
+
+    def test_lowercase_key_accepted(self, patched_loader):
+        rc, out, _ = _run([
+            "money", "client", "add", "--user", "u1", "--key", "acme", "--name", "Acme",
+        ])
+        assert rc == 0
+        assert "STATE: created" in out

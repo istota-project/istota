@@ -3013,14 +3013,88 @@ const handlers: MockHandler[] = [
     }
 
     const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+    const SERVICE_TYPES = ['hours', 'days', 'flat', 'other'];
+    const CLIENT_SCHEDULES = ['on-demand', 'monthly'];
+    const ACCOUNT_FIELDS = ['ar_account', 'bank_account', 'income_account'];
+
+    /**
+     * Mirror of `config_store`'s value invariants.
+     *
+     * Kept in step with the server deliberately: without it the whole
+     * 400-validation class — the closed sets, the account shapes, the
+     * finite non-negative rate — is invisible under `VITE_MOCK_API=1`, so a
+     * form that mishandles a rejection develops the bug in dev and only shows
+     * it in production.
+     */
+    function isAccount(value: string): boolean {
+      const parts = value.split(':');
+      if (parts.length < 2) return false;
+      return parts.every((part, index) => {
+        if (!/^[^\W_](?:[^\W_]|-)*$/u.test(part)) return false;
+        const first = part[0];
+        if (index === 0) return /\p{L}/u.test(first) && first === first.toUpperCase();
+        return /\p{Nd}/u.test(first) || (/\p{L}/u.test(first) && first === first.toUpperCase());
+      });
+    }
+
+    /** Only the fields actually changed are checked, as the store does. */
+    function validateFields(kind: string, fields: any, current: any | null): string | null {
+      const changed = (name: string) =>
+        name in fields && (!current || fields[name] !== current[name]);
+
+      for (const name of ACCOUNT_FIELDS) {
+        if (!changed(name) || !fields[name]) continue;
+        if (typeof fields[name] !== 'string' || !isAccount(fields[name])) {
+          return `invalid ${name}: ${JSON.stringify(fields[name])} — expected a beancount account like Assets:Accounts-Receivable`;
+        }
+      }
+      if (changed('currency') && fields.currency) {
+        if (!/^[A-Z](?:[A-Z0-9'._-]*[A-Z0-9])?$/.test(fields.currency)) {
+          return `invalid currency: ${JSON.stringify(fields.currency)} — expected a commodity like USD`;
+        }
+      }
+      if (kind === 'service') {
+        if (changed('type') && fields.type && !SERVICE_TYPES.includes(fields.type)) {
+          return `invalid type: ${JSON.stringify(fields.type)} — expected one of ${SERVICE_TYPES.join(', ')}`;
+        }
+        if (changed('rate') && fields.rate != null) {
+          const rate = Number(fields.rate);
+          if (!Number.isFinite(rate) || rate < 0) {
+            return `invalid rate: ${JSON.stringify(fields.rate)} — expected a finite amount >= 0`;
+          }
+        }
+      }
+      if (kind === 'client') {
+        if (changed('schedule') && fields.schedule && !CLIENT_SCHEDULES.includes(fields.schedule)) {
+          return `invalid schedule: ${JSON.stringify(fields.schedule)} — expected one of ${CLIENT_SCHEDULES.join(', ')}`;
+        }
+        if (changed('terms') && fields.terms != null) {
+          const asNumber = Number(String(fields.terms).trim());
+          if (String(fields.terms).trim() === '') {
+            return 'invalid terms: expected a number of days or a label';
+          }
+          if (Number.isInteger(asNumber) && asNumber < 0) {
+            return `invalid terms: ${JSON.stringify(fields.terms)} — expected at least 0`;
+          }
+        }
+      }
+      if (kind === 'company' && changed('logo') && fields.logo) {
+        const value = String(fields.logo).replace(/\\/g, '/');
+        if (value.startsWith('/') || value.startsWith('~') || value.split('/').includes('..')) {
+          return `invalid logo: ${JSON.stringify(fields.logo)} — expected a path inside the accounting folder, like invoices/logo.png`;
+        }
+      }
+      return null;
+    }
 
     /**
      * One CRUD handler for all three config collections.
      *
      * Reproduces the guarantees the pages branch on: 409 on a duplicate
-     * create (create means create), 400 on a malformed key, 404 on a missing
-     * record, and a `references` payload on delete. The per-collection delete
-     * guard is passed in — the asymmetry between them is the point.
+     * create (create means create), 400 on a malformed key or value, 404 on a
+     * missing record (including a `?create=false` PUT), and a `references`
+     * payload on delete. The per-collection delete guard is passed in — the
+     * asymmetry between them is the point.
      */
     function collectionCrud<T extends { key: string }>(opts: {
       kind: string;
@@ -3029,13 +3103,29 @@ const handlers: MockHandler[] = [
       guard?: (row: T) => { error: string; references: any } | null;
       references?: (row: T) => any;
     }) {
+      // PUT on a missing key 404s here unconditionally, which is what the forms
+      // ask for with `?create=false`. The real routes still upsert without it,
+      // for `ensure`-style CLI callers the mock has no equivalent of.
       return (method: string, body: any, itemKey: string | null) => {
         const { kind, rows } = opts;
+        const fieldsOf = (b: any) => {
+          const { key: _ignored, ...rest } = b ?? {};
+          return rest;
+        };
         if (!itemKey) {
           if (method === 'POST') {
             const key = body?.key;
             if (!key || !KEY_RE.test(key)) {
               return { __status: 400, status: 'error', error: 'invalid key' };
+            }
+            // Client keys are lowercase-only: work entries store the client
+            // lowercased, so a mixed-case key matches none of them.
+            if (kind === 'client' && key !== key.toLowerCase()) {
+              return {
+                __status: 400,
+                status: 'error',
+                error: `invalid client key: ${JSON.stringify(key)} — use lowercase.`,
+              };
             }
             if (rows.some((r) => r.key === key)) {
               return {
@@ -3044,6 +3134,8 @@ const handlers: MockHandler[] = [
                 error: `${kind} '${key}' already exists`,
               };
             }
+            const invalid = validateFields(kind, fieldsOf(body), null);
+            if (invalid) return { __status: 400, status: 'error', error: invalid };
             const created = opts.make(key, body);
             rows.push(created);
             return { status: 'ok', state: 'created', [kind]: created };
@@ -3056,6 +3148,8 @@ const handlers: MockHandler[] = [
           return { __status: 404, status: 'error', error: `${kind} '${itemKey}' not found` };
         }
         if (method === 'PUT') {
+          const invalid = validateFields(kind, fieldsOf(body), row);
+          if (invalid) return { __status: 400, status: 'error', error: invalid };
           for (const [k, v] of Object.entries(body ?? {})) {
             if (k === 'key') continue;
             (row as any)[k] = v;
@@ -3084,9 +3178,10 @@ const handlers: MockHandler[] = [
       rows: clientConfigs,
       make: (key, body) => newClient({ ...body, key }),
       // Soft: entries and invoices survive a missing client — only the
-      // display name degrades to the raw key.
+      // display name degrades to the raw key. Matched case-insensitively,
+      // since work entries store the client lowercased.
       references: (row) => ({
-        work_entries: work.filter((w) => w.client === row.key).length,
+        work_entries: work.filter((w) => w.client.toLowerCase() === row.key.toLowerCase()).length,
       }),
     });
 
@@ -3105,24 +3200,40 @@ const handlers: MockHandler[] = [
         currency: body?.currency ?? '',
       }),
       // Strict: a client whose entity vanished silently bills under a
-      // different legal entity on the next generated PDF. Three ways to
-      // depend on one — named explicitly, pinned as the default, or falling
-      // back to it with a blank entity.
+      // different legal entity on the next generated PDF. Four ways to depend
+      // on one — named by a client, pinned by a work entry (which outranks the
+      // client's), stored as the default, or falling back to it with a blank
+      // entity. The effective default is the entity actually resolved to,
+      // which is the first one when the stored default names nothing.
       guard: (row) => {
         const clients = clientConfigs.filter((c) => c.entity === row.key).map((c) => c.key);
-        const isDefault = defaults.default_entity === row.key;
-        const fallbackClients = isDefault ? clientConfigs.filter((c) => !c.entity).length : 0;
-        if (!clients.length && !isDefault && !fallbackClients) return null;
-        return {
-          error: clients.length
-            ? `entity '${row.key}' is used by ${clients.length} client(s): ${clients.join(', ')}`
-            : `entity '${row.key}' is the default entity`,
-          references: {
-            clients,
-            default_entity: isDefault,
-            default_for_clients: fallbackClients,
-          },
+        const pinned = work.filter((w) => w.entity === row.key).length;
+        const storedDefault = defaults.default_entity;
+        const isDefault = storedDefault === row.key;
+        const effectiveDefault = entities.some((e) => e.key === storedDefault)
+          ? storedDefault
+          : (entities[0]?.key ?? '');
+        const fallbackClients =
+          effectiveDefault === row.key ? clientConfigs.filter((c) => !c.entity).length : 0;
+        const references = {
+          clients,
+          work_entries: pinned,
+          default_entity: isDefault,
+          default_for_clients: fallbackClients,
+          quarantined: [],
         };
+        if (!clients.length && !pinned && !isDefault && !fallbackClients) return null;
+        let error: string;
+        if (clients.length) {
+          error = `entity '${row.key}' is used by ${clients.length} client(s): ${clients.join(', ')}`;
+        } else if (pinned) {
+          error = `entity '${row.key}' is pinned by ${pinned} work entr${pinned === 1 ? 'y' : 'ies'}`;
+        } else if (isDefault) {
+          error = `entity '${row.key}' is the default entity`;
+        } else {
+          error = `entity '${row.key}' is the default ${fallbackClients} client(s) bill under — give them an explicit entity first`;
+        }
+        return { error, references };
       },
     });
 
@@ -3143,8 +3254,10 @@ const handlers: MockHandler[] = [
         if (!entries.length) return null;
         const invoices = new Set(entries.filter((w) => w.invoice).map((w) => w.invoice));
         return {
-          error: `service '${row.key}' is used by ${entries.length} work entries`,
-          references: { work_entries: entries.length, invoices: invoices.size },
+          error:
+            `service '${row.key}' is used by ${entries.length} work ` +
+            `entr${entries.length === 1 ? 'y' : 'ies'}`,
+          references: { work_entries: entries.length, invoices: invoices.size, quarantined: [] },
         };
       },
     });

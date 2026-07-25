@@ -301,6 +301,29 @@ export type ClientInput = Partial<Omit<ClientConfigRow, 'key' | 'bundles' | 'sep
 export type EntityInput = Partial<Omit<EntityRow, 'key'>>;
 export type ServiceInput = Partial<Omit<ServiceRow, 'key'>>;
 
+/**
+ * The record-key rule, mirroring `config_store._KEY_RE`.
+ *
+ * Defined once here and imported by every form: a change to the rule (the
+ * lowercase client requirement below arrived that way) otherwise has to be
+ * chased through each of them, and a form that drifts rejects a key the
+ * server accepts or vice versa.
+ */
+export const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export const KEY_HINT = 'Letters, digits, - and _ only';
+
+/**
+ * Client keys are lowercase-only, unlike entities and services.
+ *
+ * `add_work_entry` stores the client lowercased, so a mixed-case key matches
+ * no work entry and every one of that client's rows is skipped at invoice
+ * time — the work is silently never billed. The form lowercases as you type so
+ * the key you see is the key you get; the server rejects the rest.
+ */
+export function normalizeClientKey(value: string): string {
+  return value.toLowerCase();
+}
+
 /** Counts of what pointed at a record — carried on delete responses and 409s. */
 export interface ConfigReferences {
   work_entries?: number;
@@ -309,6 +332,11 @@ export interface ConfigReferences {
   default_entity?: boolean;
   /** Clients with a blank entity — they bill under whichever one is default. */
   default_for_clients?: number;
+  /**
+   * Year files holding a row this version can't read. Non-empty means the
+   * counts above are lower bounds, so the two strict deletes refuse.
+   */
+  quarantined?: string[];
 }
 
 export interface ConfigDeleteResponse {
@@ -341,6 +369,18 @@ function writeJson<T>(path: string, method: string, body: unknown): Promise<T> {
   });
 }
 
+/**
+ * PUT a record that must already exist.
+ *
+ * The routes upsert by default, for `ensure`-style CLI callers. The forms only
+ * ever edit a record they just loaded, so `?create=false` makes a key another
+ * tab deleted meanwhile a 404 instead of resurrecting a partial record built
+ * from this form's fields plus defaults for everything the form doesn't show.
+ */
+function updateExisting<T>(path: string, body: unknown): Promise<T> {
+  return writeJson<T>(`${path}?create=false`, 'PUT', body);
+}
+
 export async function createClient(
   key: string,
   input: ClientInput,
@@ -352,7 +392,7 @@ export async function updateClient(
   key: string,
   input: ClientInput,
 ): Promise<{ status: string; client: ClientConfigRow }> {
-  return writeJson(`/config/clients/${encodeURIComponent(key)}`, 'PUT', input);
+  return updateExisting(`/config/clients/${encodeURIComponent(key)}`, input);
 }
 
 export async function deleteClient(key: string): Promise<ConfigDeleteResponse> {
@@ -370,7 +410,7 @@ export async function updateEntity(
   key: string,
   input: EntityInput,
 ): Promise<{ status: string; company: EntityRow }> {
-  return writeJson(`/config/companies/${encodeURIComponent(key)}`, 'PUT', input);
+  return updateExisting(`/config/companies/${encodeURIComponent(key)}`, input);
 }
 
 export async function deleteEntity(key: string): Promise<ConfigDeleteResponse> {
@@ -388,7 +428,7 @@ export async function updateService(
   key: string,
   input: ServiceInput,
 ): Promise<{ status: string; service: ServiceRow }> {
-  return writeJson(`/config/services/${encodeURIComponent(key)}`, 'PUT', input);
+  return updateExisting(`/config/services/${encodeURIComponent(key)}`, input);
 }
 
 export async function deleteService(key: string): Promise<ConfigDeleteResponse> {

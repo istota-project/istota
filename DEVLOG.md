@@ -2,6 +2,51 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Review pass on invoicing-config editing — every delete guard failed open
+
+Two-agent review of the clients/entities/services commit. The headline: **all three delete guards were reachable in a state where they reported zero references and allowed the delete**, each for a different reason, and the three reasons share one root cause — the guard re-derived what invoicing resolves instead of asking the resolver.
+
+The entity guard read `stored_default or cfg.default_entity` as "the entity blank-entity clients fall back to." What `resolve_entity` actually falls back to is `config.company`, and `load_invoicing` computes that as `companies.get(default_entity)` *or, when that misses,* the first company. A stored default naming no company isn't exotic — migrating a legacy TOML that has clients but no `[companies]` block hydrates `default_entity = "default"` and persists it. So on an ordinary migrated config the guard reported `default_for_clients: 0` for the one entity every client really billed under, deleted it, and the next invoice carried a blank legal entity. Fix is one line (`cfg.company.key`), but it only became findable by reading the resolver rather than the config dataclass.
+
+Second: the entity scan never looked at work entries, even though `resolve_entity` checks `entry.entity` **first**, ahead of the client's. An entry pinned to an entity re-billed under a different one the moment that entity went away, with the guard reporting nothing.
+
+Third, and the subtlest: a quarantined year file. `_load_year` *skips* an unreadable row rather than raising — that was last session's deliberate choice, so the row can't be destroyed by the next write — which means it is also invisible to a reference count. The fail-closed `try/except` around the scan never fires, because nothing throws. So deleting the service that an unreadable row names was permitted, and once a human repaired the row, `build_line_items` would skip it for an unknown service and the work would go unbilled. The quarantine mechanism protected the row from a *write* and left it exposed to a *config delete*. Now `work.quarantined_years()` exposes the signal and the two strict deletes refuse; the client delete reports it and proceeds, because that delete destroys nothing.
+
+**The client-key case bug is the clearest example of "a browser form changes the threat model."** Work entries are stored with `client.lower()`; config keys were unconstrained. A client keyed `Acme` therefore matched none of its own entries, `build_line_items` skipped every one, and invoice generation returned an empty list — no error, no warning, the work simply never billed. Reachable before only by an operator hand-typing `--key Acme`; the new form makes it a normal path. Keys are now lowercase-only for clients (entities and services store verbatim on the entry, so they stay unconstrained), enforced on create so legacy rows remain editable, and lowercased as-you-type so the key you see is the key you get.
+
+**The validation-scope rule needed a third position, not one of the two obvious ones.** Validating the merged record makes a legacy non-conforming row permanently unsaveable. Validating every *passed* field — what shipped — is nearly as bad in practice, because a form seeds each input from the stored value and sends the lot back: renaming a service typed `hourly` 400s on a field the user never touched, and the dropdown has no matching option to explain why. The rule is now "validate only fields whose value differs from what's stored," computed inside the write transaction against the stored row. Changing such a field still has to produce a valid value, so it grandfathers only what's already on disk. The forms cooperate by surfacing an out-of-set `type`/`schedule` as its own `(unrecognised)` option with a warning, rather than silently rendering "Hourly" for a record that isn't.
+
+**Where I went further than the finding asked.** The review flagged that `skill.md` told the agent a referenced service can't be deleted while the CLI it names two lines earlier deletes it unguarded, and suggested narrowing the sentence. Narrowing documents the hole. The guards moved to a new `money/config_refs.py` and the CLI `remove` paths call them, so the claim is true on both surfaces — which matters precisely because the agent's reach is the CLI, not the browser. They live outside `config_store` because the references being counted aren't in the config DB at all: work entries are TOML in the user's workspace, so the scan needs a `data_dir` the store never sees.
+
+**`save_invoicing` sanitizes rather than raises.** It's the bulk path used by the legacy-TOML migration and `config import`, and it bypassed the per-field validation entirely — so the exact values the granular ops exist to keep out could still land. Raising would strand a user mid-migration on data that's been in their TOML for a year. Each coercion lands on the behaviour that value *already had* (`entry_line_item` has no branch for `hourly` so it billed as hours; `check_scheduled_invoices` only ever acted on `monthly`), so the WARNING is the whole delta: it turns a silent mis-billing into something an operator can see.
+
+**Also fixed, pre-existing and newly browser-reachable.** The invoice HTML interpolated every user string unescaped — an ampersand in a company name was enough to disturb the PDF. And `accounting_path / entity.logo` follows pathlib semantics, so an absolute logo replaced the left-hand side and got base64-embedded into the invoice; refused at write and ignored at render. Separately, the account regex was ASCII-only and rejected `Assets:Forderungen:Müller`, which beancount itself accepts — an English-only check locking a non-English ledger out of an account it had been posting to all along.
+
+The mock API now mirrors the value invariants. Without that the whole 400-validation class is invisible in dev, which is how a form mishandling a rejection would develop the bug locally and only show it in production.
+
+**Key changes:**
+- `config_refs.py` — shared reference guards (service / entity / client), used by both the web routes and `istota money company|service remove`.
+- Entity guard reads the resolver's own fallback, counts work-entry pins, and refuses on a quarantined year.
+- Client keys lowercase-only; `terms` as a numeric string obeys the same `>= 0` rule as an int; account/commodity shapes are Unicode-aware.
+- Validation skips fields equal to what's stored, so a legacy row stays editable; forms surface unrecognised enum values instead of hiding them.
+- `save_invoicing` sanitizes out-of-set enums and non-finite rates with a warning.
+- Create-collision decided inside the write transaction (`KeyExistsError`); `?create=false` PUT; an unparseable body is a 400 rather than a silent defaults-only write; `PUT /config/invoicing` shape-checked.
+- Invoice HTML escapes every interpolated string; entity logos confined to the accounting folder at write and render.
+- Blank service rate omitted rather than stored as 0 (it would reprice past invoices to nothing).
+- Key regex and the client-lowercase rule exported once from the web API module instead of restated per form.
+
+**Files added/modified:**
+- `src/istota/money/config_refs.py` — new; the three reference scans and their refusal reasons
+- `src/istota/money/config_store.py` — unchanged-field validation scope, lowercase client keys, Unicode accounts, numeric-string terms, logo confinement, `create_only`, `save_invoicing` sanitation, scalar checks
+- `src/istota/money/routes.py` — guards via `config_refs`, strict body parsing, `?create=false`, hardened scalar PUT
+- `src/istota/money/work.py` — `quarantined_years()` exposes the skipped-row signal
+- `src/istota/money/core/invoicing.py` — HTML escaping throughout, `_resolve_logo`
+- `src/istota/cli_money.py` — reference guards on `company|service remove`
+- `web/src/lib/money/api.ts` — shared key rules, `?create=false` updates, widened references type
+- `web/src/lib/components/money/{Client,Entity,Service}Form.svelte` — legacy-value options, lowercase key, blank-rate omission, logo validation
+- `web/vite-mock-api.ts` — mirrors the value invariants and the corrected guards
+- Tests: `tests/money/test_config_refs.py` (new), plus additions to `test_config_store.py`, `test_routes_config.py`, `test_invoicing.py`, `test_cli_money.py`, and new `{Entity,Service}Form.svelte.test.ts`
+
 ## 2026-07-25: Review pass on the work-entry feature — the identity fix was half-applied
 
 Two-agent review of the work-tracking commit. The headline finding is the one worth remembering: **the uid fix was applied to the web mutation path but not to the one index-addressed operation with money attached.**

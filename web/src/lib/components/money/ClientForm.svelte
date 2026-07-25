@@ -1,6 +1,13 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { ClientConfigRow, ClientInput, EntityRow } from '$lib/money/api';
+  import {
+    KEY_RE,
+    KEY_HINT,
+    normalizeClientKey,
+    type ClientConfigRow,
+    type ClientInput,
+    type EntityRow,
+  } from '$lib/money/api';
   import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
   import { SettingsField } from '$lib/components/settings';
 
@@ -61,10 +68,27 @@
   let advancedOpen = $state(false);
   let open = $state(true);
 
-  const scheduleOptions: SelectOption[] = [
+  const KNOWN_SCHEDULES = ['on-demand', 'monthly'];
+  const baseScheduleOptions: SelectOption[] = [
     { value: 'on-demand', label: 'On demand' },
     { value: 'monthly', label: 'Monthly' },
   ];
+
+  // A client migrated from legacy TOML can carry a schedule outside the set
+  // (it was simply never picked up by the scheduler). Surfacing it as its own
+  // option keeps the record editable and shows the user what it actually says,
+  // instead of the dropdown reading "On demand" for a record that doesn't.
+  const legacySchedule = untrack(() =>
+    client?.schedule && !KNOWN_SCHEDULES.includes(client.schedule) ? client.schedule : '',
+  );
+  const scheduleOptions: SelectOption[] = legacySchedule
+    ? [...baseScheduleOptions, { value: legacySchedule, label: `${legacySchedule} (unrecognised)` }]
+    : baseScheduleOptions;
+  const scheduleWarning = $derived(
+    legacySchedule && schedule === legacySchedule
+      ? `"${legacySchedule}" is not a schedule — this client is never invoiced automatically.`
+      : '',
+  );
 
   const entityOptions = $derived.by<SelectOption[]>(() => {
     const opts: SelectOption[] = [
@@ -79,11 +103,20 @@
     return opts;
   });
 
-  const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-  const keyError = $derived(
-    !isEdit && key && !KEY_RE.test(key) ? 'Letters, digits, - and _ only' : '',
+  const keyError = $derived(!isEdit && key && !KEY_RE.test(key) ? KEY_HINT : '');
+  // A numeric terms value is a day count either way: the column is TEXT and
+  // the loader coerces "-5" back to -5, which renders a due date before the
+  // invoice date. Caught here as well as server-side so the message lands on
+  // the field.
+  const termsError = $derived.by(() => {
+    const trimmed = terms.trim();
+    if (!trimmed) return '';
+    const asNumber = Number(trimmed);
+    return Number.isInteger(asNumber) && asNumber < 0 ? 'Expected 0 days or more' : '';
+  });
+  const canSave = $derived(
+    !!name.trim() && (isEdit || (!!key && !keyError)) && !termsError && !saving,
   );
-  const canSave = $derived(!!name.trim() && (isEdit || (!!key && !keyError)) && !saving);
 
   /** A blank numeric field means "leave it alone", not zero. */
   function intOrOmit(raw: string): number | undefined {
@@ -163,8 +196,18 @@
         <small>The key is the identity — work entries reference it by name.</small>
       </div>
     {:else}
-      <SettingsField label="Key" hint="Short identifier used by work entries." error={keyError}>
-        <input type="text" bind:value={key} placeholder="acme" autocomplete="off" />
+      <SettingsField
+        label="Key"
+        hint="Short identifier used by work entries. Lowercase."
+        error={keyError}
+      >
+        <input
+          type="text"
+          value={key}
+          oninput={(e) => (key = normalizeClientKey(e.currentTarget.value))}
+          placeholder="acme"
+          autocomplete="off"
+        />
       </SettingsField>
     {/if}
 
@@ -180,7 +223,11 @@
       <textarea rows="3" bind:value={address}></textarea>
     </SettingsField>
 
-    <SettingsField label="Terms" hint="A number of days, or a label like NET 15.">
+    <SettingsField
+      label="Terms"
+      hint="A number of days, or a label like NET 15."
+      error={termsError}
+    >
       <input type="text" bind:value={terms} placeholder="30" />
     </SettingsField>
 
@@ -192,7 +239,7 @@
       <input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
     </SettingsField>
 
-    <SettingsField label="Schedule">
+    <SettingsField label="Schedule" hint={scheduleWarning}>
       <Select bind:value={schedule} options={scheduleOptions} fullWidth ariaLabel="Schedule" />
     </SettingsField>
 

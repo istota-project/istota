@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { ServiceRow, ServiceInput } from '$lib/money/api';
+  import { KEY_RE, KEY_HINT, type ServiceRow, type ServiceInput } from '$lib/money/api';
   import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
   import { SettingsField } from '$lib/components/settings';
 
@@ -32,26 +32,40 @@
   let incomeAccount = $state(untrack(() => service?.income_account ?? ''));
   let open = $state(true);
 
-  const typeOptions: SelectOption[] = [
+  const KNOWN_TYPES = ['hours', 'days', 'flat', 'other'];
+  const baseTypeOptions: SelectOption[] = [
     { value: 'hours', label: 'Hourly' },
     { value: 'days', label: 'Daily' },
     { value: 'flat', label: 'Flat rate' },
     { value: 'other', label: 'Variable (per entry)' },
   ];
 
+  // A service migrated from legacy TOML can carry a type outside the set (it
+  // billed as hours, silently). Showing it as its own option means the value
+  // is visible and re-saving it is a no-op the server grandfathers, instead of
+  // the dropdown quietly reading "Hourly" for a record that isn't.
+  const legacyType = untrack(() =>
+    service?.type && !KNOWN_TYPES.includes(service.type) ? service.type : '',
+  );
+  const typeOptions: SelectOption[] = legacyType
+    ? [...baseTypeOptions, { value: legacyType, label: `${legacyType} (unrecognised)` }]
+    : baseTypeOptions;
+
   const rateLabel = $derived(
     type === 'days' ? 'Rate per day' : type === 'flat' ? 'Flat rate' : 'Rate per hour',
   );
 
-  const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-  const keyError = $derived(
-    !isEdit && key && !KEY_RE.test(key) ? 'Letters, digits, - and _ only' : '',
-  );
+  const keyError = $derived(!isEdit && key && !KEY_RE.test(key) ? KEY_HINT : '');
   const rateError = $derived.by(() => {
     if (type === 'other' || !rate.trim()) return '';
     const parsed = Number(rate.trim());
     return Number.isFinite(parsed) && parsed >= 0 ? '' : 'Expected an amount of 0 or more';
   });
+  const typeWarning = $derived(
+    legacyType && type === legacyType
+      ? `"${legacyType}" is not a billing type — it bills as hours. Pick one to fix it.`
+      : '',
+  );
   const canSave = $derived(
     !!displayName.trim() && (isEdit || (!!key && !keyError)) && !rateError && !saving,
   );
@@ -63,9 +77,12 @@
       type,
       income_account: incomeAccount.trim(),
     };
-    // An "other" service prices off each work entry, so the form shows no
-    // rate box — leave whatever is stored alone rather than zeroing it.
-    if (type !== 'other') data.rate = Number(rate.trim() || 0);
+    // Omit rather than zero when the box is blank. An "other" service prices
+    // off each work entry so the box isn't shown at all, and a cleared box on
+    // any other type would store 0 — which, because the invoice list rebuilds
+    // totals from live config, silently reprices every past invoice carrying
+    // this service to nothing.
+    if (type !== 'other' && rate.trim()) data.rate = Number(rate.trim());
     onSave(isEdit ? (service as ServiceRow).key : key.trim(), data);
   }
 
@@ -105,7 +122,7 @@
       <input type="text" bind:value={displayName} placeholder="Consulting" />
     </SettingsField>
 
-    <SettingsField label="Type">
+    <SettingsField label="Type" hint={typeWarning}>
       <Select bind:value={type} options={typeOptions} fullWidth ariaLabel="Service type" />
     </SettingsField>
 

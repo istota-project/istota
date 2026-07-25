@@ -529,3 +529,306 @@ class TestEmptyConfigBootstrap:
         _seed_business(client)
         body = client.get(f"{API}/business-settings").json()
         assert body["defaults"]["currency"] == "USD"
+
+
+# =============================================================================
+# Delete guards — the fail-open cases
+# =============================================================================
+
+
+def _seed_work(ctx, **kwargs):
+    from istota.money.work import add_work_entry
+
+    defaults = dict(entry_date="2026-03-01", client="acme", service="dev", qty=3)
+    defaults.update(kwargs)
+    return add_work_entry(ctx.data_dir, **defaults)
+
+
+def _quarantine_year(ctx, year: int = 2026) -> None:
+    """Write a year file whose second row the loader can't model.
+
+    `_load_year` skips such a row and records the year as quarantined — it
+    does not raise — so the row is invisible to a reference count and a guard
+    built on that count fails open.
+    """
+    work_dir = ctx.data_dir / "invoices" / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / f"{year}.toml").write_text(
+        "[[entries]]\n"
+        'date = 2026-03-01\nclient = "acme"\nservice = "dev"\nqty = 1\n\n'
+        "[[entries]]\n"
+        'date = 2026-03-02\nclient = "acme"\n'  # no service — unreadable
+    )
+
+
+class TestEntityGuardCountsWorkEntries:
+    """`resolve_entity` checks `entry.entity` *before* the client's, so an
+    entry pinned to an entity re-bills under a different one if it vanishes."""
+
+    def test_pinned_entry_blocks_delete(self, ctx, client):
+        config_store.upsert_company(ctx.db_path, "oldco", name="Old Co")
+        config_store.upsert_company(ctx.db_path, "newco", name="New Co")
+        _seed_work(ctx, entity="oldco")
+
+        resp = client.delete("/istota/api/money/config/companies/oldco")
+        assert resp.status_code == 409
+        assert "pinned" in resp.json()["error"]
+        assert resp.json()["references"]["work_entries"] == 1
+        assert "oldco" in config_store.load_invoicing(ctx.db_path).companies
+
+    def test_unpinned_entity_still_deletable(self, ctx, client):
+        config_store.upsert_company(ctx.db_path, "first", name="First")
+        config_store.upsert_company(ctx.db_path, "spare", name="Spare")
+        _seed_work(ctx, entity="first")
+
+        resp = client.delete("/istota/api/money/config/companies/spare")
+        assert resp.status_code == 200
+
+
+class TestEntityGuardUsesTheRealDefault:
+    """A stored `default_entity` naming no company is an ordinary outcome of
+    migrating a TOML with clients but no `[companies]` block. `load_invoicing`
+    then falls back to the *first* company, so that is the entity blank-entity
+    clients really bill under — trusting the stale scalar let it be deleted."""
+
+    def test_dangling_stored_default_still_protects_the_real_fallback(self, ctx, client):
+        config_store.upsert_company(ctx.db_path, "acme", name="Acme LLC")
+        config_store.upsert_client(ctx.db_path, "globex", name="Globex", entity="")
+        cfg = config_store.load_invoicing(ctx.db_path)
+        cfg.default_entity = "nonexistent"
+        config_store.save_invoicing(ctx.db_path, cfg, replace_collections=False)
+
+        # Precondition: the config still resolves invoices to `acme`.
+        assert config_store.load_invoicing(ctx.db_path).company.key == "acme"
+
+        resp = client.delete("/istota/api/money/config/companies/acme")
+        assert resp.status_code == 409
+        assert resp.json()["references"]["default_for_clients"] == 1
+        assert "acme" in config_store.load_invoicing(ctx.db_path).companies
+
+    def test_a_fresh_users_only_entity_is_still_deletable(self, ctx, client):
+        """No clients means nothing falls back to it — bootstrapping works."""
+        config_store.upsert_company(ctx.db_path, "main", name="Main")
+        resp = client.delete("/istota/api/money/config/companies/main")
+        assert resp.status_code == 200
+
+
+class TestGuardsFailClosedOnQuarantine:
+    """A row the loader skipped is invisible to the count, so a guard built on
+    it reads zero. The strict deletes refuse; the soft client delete doesn't."""
+
+    def test_service_delete_refused(self, ctx, client):
+        config_store.upsert_service(ctx.db_path, "consulting", display_name="Consulting")
+        _quarantine_year(ctx)
+
+        resp = client.delete("/istota/api/money/config/services/consulting")
+        assert resp.status_code == 409
+        assert "can't read" in resp.json()["error"]
+        assert resp.json()["references"]["quarantined"] == ["2026.toml"]
+        assert "consulting" in config_store.load_invoicing(ctx.db_path).services
+
+    def test_entity_delete_refused(self, ctx, client):
+        config_store.upsert_company(ctx.db_path, "spare", name="Spare")
+        config_store.upsert_company(ctx.db_path, "main", name="Main")
+        _quarantine_year(ctx)
+
+        resp = client.delete("/istota/api/money/config/companies/spare")
+        assert resp.status_code == 409
+        assert "can't read" in resp.json()["error"]
+
+    def test_client_delete_still_allowed(self, ctx, client):
+        """It destroys nothing, so refusing would strand the user."""
+        config_store.upsert_client(ctx.db_path, "acme", name="Acme")
+        _quarantine_year(ctx)
+
+        resp = client.delete("/istota/api/money/config/clients/acme")
+        assert resp.status_code == 200
+        assert "acme" not in config_store.load_invoicing(ctx.db_path).clients
+
+    def test_a_clean_store_reports_no_quarantine(self, ctx, client):
+        config_store.upsert_service(ctx.db_path, "design", display_name="Design")
+        _seed_work(ctx, service="dev")
+
+        resp = client.delete("/istota/api/money/config/services/design")
+        assert resp.status_code == 200
+        assert resp.json()["references"]["quarantined"] == []
+
+
+class TestClientReferenceCountIsCaseInsensitive:
+    def test_legacy_mixed_case_key_counts_its_entries(self, ctx, client):
+        config_store.init_db(ctx.db_path)
+        with config_store._connect(ctx.db_path) as conn:
+            conn.execute(
+                "INSERT INTO invoicing_clients(key, name) VALUES (?, ?)", ("Acme", "Acme"),
+            )
+        _seed_work(ctx, client="acme")
+
+        resp = client.delete("/istota/api/money/config/clients/Acme")
+        assert resp.status_code == 200
+        assert resp.json()["references"]["work_entries"] == 1
+
+
+class TestClientKeyCaseOnCreate:
+    def test_mixed_case_key_is_a_400(self, client):
+        resp = client.post(
+            "/istota/api/money/config/clients", json={"key": "Acme", "name": "Acme"},
+        )
+        assert resp.status_code == 400
+        assert "lowercase" in resp.json()["error"]
+
+    def test_lowercase_key_accepted(self, client):
+        resp = client.post(
+            "/istota/api/money/config/clients", json={"key": "acme", "name": "Acme"},
+        )
+        assert resp.status_code == 200
+
+
+# =============================================================================
+# Body handling + PUT semantics
+# =============================================================================
+
+
+class TestMalformedBody:
+    """Reading an unparseable body as `{}` turned a broken request into a
+    silent write that created a defaults-only record and answered 200."""
+
+    def test_put_rejects_non_json(self, ctx, client):
+        resp = client.put(
+            "/istota/api/money/config/clients/ghost",
+            content="not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 400
+        assert "ghost" not in config_store.load_invoicing(ctx.db_path).clients
+
+    def test_put_rejects_a_json_array(self, client):
+        resp = client.put("/istota/api/money/config/clients/ghost", json=[1, 2])
+        assert resp.status_code == 400
+
+    def test_post_rejects_non_json(self, client):
+        resp = client.post(
+            "/istota/api/money/config/services",
+            content="{oops",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 400
+
+    def test_invoicing_put_rejects_non_json(self, client):
+        resp = client.put(
+            "/istota/api/money/config/invoicing",
+            content="not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 400
+
+    def test_an_empty_body_is_a_noop_update(self, ctx, client):
+        config_store.upsert_client(ctx.db_path, "acme", name="Acme")
+        resp = client.put("/istota/api/money/config/clients/acme", content="")
+        assert resp.status_code == 200
+        assert config_store.load_invoicing(ctx.db_path).clients["acme"].name == "Acme"
+
+
+class TestPutCreateFalse:
+    """The forms only ever PUT a record they loaded; a key another tab deleted
+    should 404 rather than resurrect as a partial record."""
+
+    def test_missing_key_404s(self, ctx, client):
+        resp = client.put(
+            "/istota/api/money/config/clients/ghost?create=false", json={"name": "Ghost"},
+        )
+        assert resp.status_code == 404
+        assert "ghost" not in config_store.load_invoicing(ctx.db_path).clients
+
+    def test_entity_and_service_honour_it_too(self, client):
+        assert client.put(
+            "/istota/api/money/config/companies/ghost?create=false", json={"name": "G"},
+        ).status_code == 404
+        assert client.put(
+            "/istota/api/money/config/services/ghost?create=false", json={"display_name": "G"},
+        ).status_code == 404
+
+    def test_default_still_upserts_for_ensure_callers(self, ctx, client):
+        resp = client.put("/istota/api/money/config/clients/fresh", json={"name": "Fresh"})
+        assert resp.status_code == 200
+        assert "fresh" in config_store.load_invoicing(ctx.db_path).clients
+
+
+class TestPutSurfacesStoreErrors:
+    """The `except ValueError` blocks on the PUT handlers were untested."""
+
+    def test_service_type(self, ctx, client):
+        config_store.upsert_service(ctx.db_path, "dev", display_name="Dev")
+        resp = client.put("/istota/api/money/config/services/dev", json={"type": "hourly"})
+        assert resp.status_code == 400
+        assert "hourly" in resp.json()["error"]
+
+    def test_client_schedule(self, ctx, client):
+        config_store.upsert_client(ctx.db_path, "acme", name="Acme")
+        resp = client.put("/istota/api/money/config/clients/acme", json={"schedule": "weekly"})
+        assert resp.status_code == 400
+
+    def test_company_account(self, ctx, client):
+        config_store.upsert_company(ctx.db_path, "main", name="Main")
+        resp = client.put(
+            "/istota/api/money/config/companies/main", json={"ar_account": "assets ar"},
+        )
+        assert resp.status_code == 400
+
+    def test_company_logo_escape(self, ctx, client):
+        config_store.upsert_company(ctx.db_path, "main", name="Main")
+        resp = client.put(
+            "/istota/api/money/config/companies/main", json={"logo": "/etc/passwd"},
+        )
+        assert resp.status_code == 400
+        assert config_store.load_invoicing(ctx.db_path).companies["main"].logo == ""
+
+
+class TestUnknownKeysNamedPerCollection:
+    def test_entity(self, client):
+        resp = client.post(
+            "/istota/api/money/config/companies", json={"key": "main", "nmae": "Main"},
+        )
+        assert resp.status_code == 400
+        assert "nmae" in resp.json()["error"]
+
+    def test_service(self, client):
+        resp = client.post(
+            "/istota/api/money/config/services", json={"key": "dev", "raet": 1},
+        )
+        assert resp.status_code == 400
+        assert "raet" in resp.json()["error"]
+
+
+class TestInvoicingScalarHardening:
+    def test_non_integer_invoice_number_refused(self, ctx, client):
+        resp = client.put(
+            "/istota/api/money/config/invoicing", json={"next_invoice_number": "lots"},
+        )
+        assert resp.status_code == 400
+        assert config_store.load_invoicing(ctx.db_path).next_invoice_number == 1
+
+    def test_unknown_default_entity_refused(self, ctx, client):
+        resp = client.put(
+            "/istota/api/money/config/invoicing", json={"default_entity": "nope"},
+        )
+        assert resp.status_code == 400
+
+    def test_known_default_entity_accepted(self, ctx, client):
+        config_store.upsert_company(ctx.db_path, "main", name="Main")
+        resp = client.put(
+            "/istota/api/money/config/invoicing", json={"default_entity": "main"},
+        )
+        assert resp.status_code == 200
+        assert config_store.load_invoicing(ctx.db_path).default_entity == "main"
+
+    def test_malformed_default_account_refused(self, client):
+        resp = client.put(
+            "/istota/api/money/config/invoicing", json={"default_ar_account": "assets ar"},
+        )
+        assert resp.status_code == 400
+
+    def test_zero_invoice_number_refused(self, client):
+        resp = client.put(
+            "/istota/api/money/config/invoicing", json={"next_invoice_number": 0},
+        )
+        assert resp.status_code == 400

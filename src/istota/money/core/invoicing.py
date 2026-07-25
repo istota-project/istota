@@ -8,6 +8,7 @@ at invoice time — income is recognized when payment is recorded (cash-basis).
 from __future__ import annotations
 
 import base64
+import html
 import logging
 import mimetypes
 import re
@@ -123,6 +124,30 @@ def _parse_company_data(key: str, company_data: dict) -> CompanyConfig:
 # =============================================================================
 # Entity / account resolution
 # =============================================================================
+
+
+def _resolve_logo(accounting_path: Path, logo: str) -> Path | None:
+    """Resolve an entity logo, refusing anything outside the accounting folder.
+
+    ``accounting_path / logo`` follows pathlib semantics, so an absolute
+    ``logo`` replaces the left-hand side outright and the file is then
+    base64-embedded into the PDF. The store rejects such a value at write time;
+    this is the read-side half, covering rows written before that check and any
+    other writer.
+    """
+    if not logo:
+        return None
+    candidate = accounting_path / logo
+    try:
+        root = accounting_path.resolve()
+        resolved = candidate.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        logger.warning(
+            "invoice_logo_outside_workspace logo=%r — ignored", logo,
+        )
+        return None
+    return resolved if resolved.exists() else None
 
 
 def resolve_entity(
@@ -406,11 +431,7 @@ def generate_invoices_for_period(
 
         entity = config.companies.get(entity_key, config.company)
 
-        logo_path = None
-        if entity.logo:
-            logo_path = accounting_path / entity.logo
-            if not logo_path.exists():
-                logo_path = None
+        logo_path = _resolve_logo(accounting_path, entity.logo)
 
         groups = group_entries_by_bundle(client_entity_entries, client_config)
 
@@ -551,15 +572,33 @@ def _embed_logo(logo_path: Path) -> str:
 
 
 def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> str:
-    """Generate HTML for an invoice, suitable for PDF conversion."""
+    """Generate HTML for an invoice, suitable for PDF conversion.
+
+    Every interpolated string is HTML-escaped. These are names, addresses and
+    descriptions the user typed — into the CLI once, and into a browser form
+    since — so an unescaped ``&`` in a company name is enough to garble the
+    rendered PDF, and a stray tag is enough to restyle it.
+    """
+    esc = html.escape
+    company_name = esc(invoice.company.name)
+    company_address = esc(invoice.company.address)
+    client_name = esc(invoice.client.name)
+    client_address = esc(invoice.client.address)
+    client_email = esc(invoice.client.email)
+    group_name = esc(invoice.group_name) if invoice.group_name else ""
+    number = esc(str(invoice.number))
+
     items_html = ""
     has_discounts = any(item.discount > 0 for item in invoice.items)
     for item in invoice.items:
-        desc_html = f"<br><span class='item-desc'>{item.description}</span>" if item.description else ""
+        desc_html = (
+            f"<br><span class='item-desc'>{esc(item.description)}</span>"
+            if item.description else ""
+        )
         discount_cell = f'<td class="right">${item.discount:,.2f}</td>' if has_discounts else ""
         items_html += f"""
         <tr>
-            <td>{item.display_name}{desc_html}</td>
+            <td>{esc(item.display_name)}{desc_html}</td>
             <td class="right">{item.quantity:.2f}</td>
             <td class="right">${item.rate:,.2f}</td>
             {discount_cell}
@@ -571,19 +610,22 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
         payment_html = f"""
     <div class="payment">
         <div class="section-label">Payment Instructions</div>
-        <div style="white-space: pre-line;">{invoice.company.payment_instructions}</div>
+        <div style="white-space: pre-line;">{esc(invoice.company.payment_instructions)}</div>
     </div>"""
 
-    group_label = f" - {invoice.group_name}" if invoice.group_name else ""
+    group_label = f" - {group_name}" if group_name else ""
     discount_header = '<th class="right">Discount</th>' if has_discounts else ""
     total_colspan = 4 if has_discounts else 3
-    due_text = invoice.due_date.strftime("%B %d, %Y") if invoice.due_date else str(invoice.client.terms)
+    due_text = (
+        invoice.due_date.strftime("%B %d, %Y")
+        if invoice.due_date else esc(str(invoice.client.terms))
+    )
 
     return f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Invoice {invoice.number}</title>
+    <title>Invoice {number}</title>
     <style>
         @page {{ size: letter; margin: 0.75in; }}
         body {{ font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 11pt; color: #333; margin: 0; padding: 0; }}
@@ -611,12 +653,12 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
 <body>
     <div class="header">
         <div>
-            {f'<img class="company-logo" src="{_embed_logo(logo_path)}" alt="{invoice.company.name}">' if logo_path and logo_path.exists() else f'<div class="company-name">{invoice.company.name}</div>'}
-            <div style="white-space: pre-line; color: #666; margin-top: 4px;">{invoice.company.address}</div>
+            {f'<img class="company-logo" src="{_embed_logo(logo_path)}" alt="{company_name}">' if logo_path and logo_path.exists() else f'<div class="company-name">{company_name}</div>'}
+            <div style="white-space: pre-line; color: #666; margin-top: 4px;">{company_address}</div>
         </div>
         <div class="invoice-meta">
             <div class="invoice-title">INVOICE</div>
-            <div class="meta-row"><span class="meta-label">Number:</span> {invoice.number}</div>
+            <div class="meta-row"><span class="meta-label">Number:</span> {number}</div>
             <div class="meta-row"><span class="meta-label">Date:</span> {invoice.date.strftime("%B %d, %Y")}</div>
             <div class="meta-row"><span class="meta-label">Terms:</span> {due_text}</div>
         </div>
@@ -625,12 +667,12 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
     <div class="addresses">
         <div class="address-block">
             <div class="section-label">Bill To</div>
-            <div><strong>{invoice.client.name}</strong></div>
-            <div style="white-space: pre-line;">{invoice.client.address}</div>
-            {f'<div>{invoice.client.email}</div>' if invoice.client.email else ''}
+            <div><strong>{client_name}</strong></div>
+            <div style="white-space: pre-line;">{client_address}</div>
+            {f'<div>{client_email}</div>' if client_email else ''}
         </div>
         <div class="address-block" style="text-align: right;">
-            {f'<div class="section-label">Reference</div><div>{invoice.group_name}</div>' if invoice.group_name else ''}
+            {f'<div class="section-label">Reference</div><div>{group_name}</div>' if group_name else ''}
         </div>
     </div>
 

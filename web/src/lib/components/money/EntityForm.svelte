@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { EntityRow, EntityInput } from '$lib/money/api';
+  import { KEY_RE, KEY_HINT, type EntityRow, type EntityInput } from '$lib/money/api';
   import { Modal, Button } from '$lib/components/ui';
   import { SettingsField } from '$lib/components/settings';
 
@@ -39,11 +39,22 @@
   let currency = $state(untrack(() => entity?.currency ?? ''));
   let open = $state(true);
 
-  const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-  const keyError = $derived(
-    !isEdit && key && !KEY_RE.test(key) ? 'Letters, digits, - and _ only' : '',
+  const keyError = $derived(!isEdit && key && !KEY_RE.test(key) ? KEY_HINT : '');
+  // The logo is base64-embedded into the invoice, resolved against the
+  // accounting folder — an absolute path or a `..` climb would reach outside
+  // it. Rejected server-side too; this puts the message on the field.
+  const logoError = $derived.by(() => {
+    const value = logo.trim().replace(/\\/g, '/');
+    if (!value) return '';
+    const escapes =
+      value.startsWith('/') || value.startsWith('~') || /^[A-Za-z]:/.test(value)
+        ? true
+        : value.split('/').includes('..');
+    return escapes ? 'Expected a path inside the accounting folder' : '';
+  });
+  const canSave = $derived(
+    !!name.trim() && (isEdit || (!!key && !keyError)) && !logoError && !saving,
   );
-  const canSave = $derived(!!name.trim() && (isEdit || (!!key && !keyError)) && !saving);
 
   function handleSave() {
     if (!canSave) return;
@@ -109,8 +120,12 @@
       <textarea rows="3" bind:value={paymentInstructions}></textarea>
     </SettingsField>
 
-    <SettingsField label="Logo path" hint="Path to an image on the server.">
-      <input type="text" bind:value={logo} />
+    <SettingsField
+      label="Logo path"
+      hint="Relative to your accounting folder, e.g. invoices/logo.png."
+      error={logoError}
+    >
+      <input type="text" bind:value={logo} placeholder="invoices/logo.png" />
     </SettingsField>
 
     <SettingsField label="A/R account">

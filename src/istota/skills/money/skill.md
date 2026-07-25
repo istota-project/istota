@@ -133,20 +133,27 @@ from the serializer:
 
 These are managed with the operator CLI (`istota money client|company|service
 add|update|remove|list -u USER`) or from the web UI — the Clients tab and the
-money settings page. Three rules to know before proposing a change:
+money settings page. Both surfaces enforce the same rules; four to know before
+proposing a change:
 
 - **Two fields are closed sets.** A service's `type` is `hours`, `days`, `flat`
   or `other`; a client's `schedule` is `on-demand` or `monthly`. A value outside
   either set is now rejected rather than stored — `--type hourly` used to be
   accepted and then silently billed as hours, and `--schedule weekly` was
-  accepted and then never fired.
+  accepted and then never fired. An existing record that already holds such a
+  value stays editable: only a field you actually change is checked.
 - **A service any work entry names cannot be deleted.** Removing it would
   unbill that work *and* shrink the rendered total of every past invoice
   containing such an entry, since invoice totals are rebuilt from live config.
   Reassign or remove the entries first. An entity is likewise protected while a
-  client bills under it or it is the configured default. Deleting a *client* is
-  allowed — its entries and invoices survive, showing the raw key instead of a
-  name.
+  client names it, a work entry pins it, or it is the entity blank-entity
+  clients bill under. Deleting a *client* is allowed — its entries and invoices
+  survive, showing the raw key instead of a name. If a year file holds a row
+  this version can't read, the two strict deletes refuse rather than counting
+  it as zero: fix the row first.
+- **Client keys are lowercase.** Work entries store the client lowercased, so a
+  mixed-case key matches no entry and that client's work is never billed. Entity
+  and service keys are unconstrained.
 - **The key is the identity and cannot be renamed.** Work entries reference
   clients and services by key, and clients reference entities by key. To change
   one, create the new record, repoint what refers to it, then delete the old.

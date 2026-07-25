@@ -1200,3 +1200,107 @@ class TestInvoiceNumberStampingIsUidAddressed:
             accounting_path=tmp_path, data_dir=tmp_path,
         )
         assert load_work_entries(tmp_path)[0].invoice == "INV-000999"
+
+
+class TestInvoiceHtmlEscaping:
+    """Names, addresses and descriptions are user input — typed into the CLI
+    once, and into a browser form since. An unescaped `&` in a company name is
+    enough to garble the rendered PDF; a stray tag is enough to restyle it."""
+
+    def _invoice(self, **overrides):
+        client = ClientConfig(
+            key="acme", name=overrides.get("client_name", "Acme Corp"), terms=30,
+            address=overrides.get("client_address", ""),
+            email=overrides.get("client_email", ""),
+        )
+        company = CompanyConfig(
+            name=overrides.get("company_name", "My Co"),
+            address=overrides.get("company_address", ""),
+            payment_instructions=overrides.get("payment_instructions", ""),
+        )
+        items = [InvoiceLineItem(
+            display_name=overrides.get("item_name", "Dev"),
+            description=overrides.get("item_desc", ""),
+            quantity=8, rate=150, discount=0, amount=1200,
+        )]
+        return Invoice(
+            number="INV-000001", date=date(2026, 3, 1), due_date=date(2026, 3, 31),
+            client=client, company=company, items=items, total=1200,
+            group_name=overrides.get("group_name", ""),
+        )
+
+    def test_ampersand_in_company_name_is_escaped(self):
+        html = generate_invoice_html(self._invoice(company_name="Smith & Jones"))
+        assert "Smith &amp; Jones" in html
+        assert "Smith & Jones" not in html
+
+    def test_tags_do_not_reach_the_document(self):
+        html = generate_invoice_html(self._invoice(
+            client_name="<script>alert(1)</script>",
+            item_desc="<b>bold</b>",
+            payment_instructions="<style>*{display:none}</style>",
+            group_name="<i>ref</i>",
+        ))
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+        assert "<b>bold</b>" not in html
+        assert "<style>*{display:none}</style>" not in html
+        assert "<i>ref</i>" not in html
+
+    def test_quotes_in_a_logo_alt_attribute_are_escaped(self, tmp_path):
+        logo = tmp_path / "logo.png"
+        logo.write_bytes(b"\x89PNG\r\n")
+        html = generate_invoice_html(self._invoice(company_name='Co" onerror="x'), logo)
+        assert 'onerror="x' not in html
+
+    def test_ordinary_text_is_unchanged(self):
+        html = generate_invoice_html(self._invoice(
+            company_name="My Co", client_name="Acme Corp", item_name="Development",
+        ))
+        assert "My Co" in html
+        assert "Acme Corp" in html
+        assert "Development" in html
+
+
+class TestLogoStaysInsideAccountingPath:
+    """`accounting_path / logo` follows pathlib semantics, so an absolute logo
+    replaces the left-hand side and the file is base64-embedded into the PDF."""
+
+    def test_absolute_path_is_ignored(self, tmp_path):
+        from istota.money.core.invoicing import _resolve_logo
+
+        outside = tmp_path / "secret.png"
+        outside.write_bytes(b"x")
+        accounting = tmp_path / "accounting"
+        accounting.mkdir()
+        assert _resolve_logo(accounting, str(outside)) is None
+
+    def test_parent_climb_is_ignored(self, tmp_path):
+        from istota.money.core.invoicing import _resolve_logo
+
+        outside = tmp_path / "secret.png"
+        outside.write_bytes(b"x")
+        accounting = tmp_path / "accounting"
+        accounting.mkdir()
+        assert _resolve_logo(accounting, "../secret.png") is None
+
+    def test_relative_path_inside_resolves(self, tmp_path):
+        from istota.money.core.invoicing import _resolve_logo
+
+        accounting = tmp_path / "accounting"
+        (accounting / "invoices").mkdir(parents=True)
+        logo = accounting / "invoices" / "logo.png"
+        logo.write_bytes(b"x")
+        assert _resolve_logo(accounting, "invoices/logo.png") == logo.resolve()
+
+    def test_missing_file_is_none(self, tmp_path):
+        from istota.money.core.invoicing import _resolve_logo
+
+        accounting = tmp_path / "accounting"
+        accounting.mkdir()
+        assert _resolve_logo(accounting, "invoices/nope.png") is None
+
+    def test_blank_is_none(self, tmp_path):
+        from istota.money.core.invoicing import _resolve_logo
+
+        assert _resolve_logo(tmp_path, "") is None
