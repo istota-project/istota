@@ -8,6 +8,7 @@ at invoice time — income is recognized when payment is recorded (cash-basis).
 from __future__ import annotations
 
 import base64
+import logging
 import mimetypes
 import re
 from datetime import date, timedelta
@@ -25,6 +26,8 @@ from .models import (
     ServiceConfig,
     WorkEntry,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -343,7 +346,17 @@ def generate_invoices_for_period(
     generated PDFs (a year subdirectory is appended).  Otherwise falls back to
     ``accounting_path / config.invoice_output`` for backward compatibility.
     """
-    from istota.money.work import get_uninvoiced_entries, assign_invoice_number
+    from istota.money.work import (
+        assign_invoice_number_by_uids,
+        backfill_work_ids,
+        get_uninvoiced_entries,
+    )
+
+    if not dry_run:
+        # Stamping is uid-addressed (see below), so every entry we might bill
+        # needs one. Reading never stamps, and a hand-added entry can arrive
+        # without a uid at any time, so make sure before we resolve anything.
+        backfill_work_ids(data_dir)
 
     entries = get_uninvoiced_entries(data_dir, client=client_filter, period=period)
     if not entries:
@@ -442,9 +455,24 @@ def generate_invoices_for_period(
                 generate_invoice_pdf(html, pdf_path)
                 summary["file"] = str(pdf_path)
 
-                entry_indices = [e.id for e in billable_entries if e.id is not None]
-                if entry_indices:
-                    assign_invoice_number(data_dir, entry_indices, number_str)
+                # By uid, never by display index: the entries were resolved
+                # before the PDF render above, and any concurrent insert has
+                # since shifted every index past it.
+                entry_uids = [e.uid for e in billable_entries if e.uid]
+                stamped = (
+                    assign_invoice_number_by_uids(data_dir, entry_uids, number_str)
+                    if entry_uids
+                    else 0
+                )
+                if stamped != len(billable_entries):
+                    # An entry on a rendered PDF that didn't get stamped will
+                    # be picked up as uninvoiced again next run and billed
+                    # twice. Loud, because nothing downstream can detect it.
+                    logger.error(
+                        "invoice_stamp_incomplete invoice=%s client=%s expected=%d stamped=%d — "
+                        "entries on this invoice may be re-billed; reconcile by hand",
+                        number_str, client_key, len(billable_entries), stamped,
+                    )
 
             results.append(summary)
             invoice_number += 1

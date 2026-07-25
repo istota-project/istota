@@ -1,6 +1,11 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { WorkEntryRow, WorkEntryInput, ClientRow, ServiceRow } from '$lib/money/api';
+  import type { WorkEntryRow, ClientRow, ServiceRow } from '$lib/money/api';
+  import {
+    buildWorkEntryPayload,
+    quantityFieldFor,
+    type WorkEntrySavePayload,
+  } from '$lib/money/workEntryPayload';
   import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
 
   interface Props {
@@ -8,7 +13,7 @@
     entry?: WorkEntryRow | null;
     clients?: ClientRow[];
     services?: ServiceRow[];
-    onSave: (data: WorkEntryInput) => void;
+    onSave: (data: WorkEntrySavePayload) => void;
     onCancel: () => void;
     error?: string;
     saving?: boolean;
@@ -27,7 +32,21 @@
   // The form is mounted fresh each time it opens, so the initial props are
   // the whole story — the local fields below deliberately don't track them.
   const isEdit = untrack(() => !!entry);
-  const today = new Date().toISOString().slice(0, 10);
+  // The service the entry arrived with: switching away from it is the one
+  // case where clearing the other quantity field is right. See buildWorkEntryPayload.
+  const initialService = untrack(() => entry?.service ?? '');
+  // Local, not UTC: toISOString() renders the *UTC* date, so a user west of
+  // Greenwich logging work in the evening got tomorrow pre-filled onto a
+  // billable record — and the list below renders dates in local time, so the
+  // field visibly disagreed with "today".
+  const today = localToday();
+
+  function localToday(): string {
+    const now = new Date();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${now.getFullYear()}-${month}-${day}`;
+  }
 
   let date = $state(untrack(() => entry?.date ?? today));
   let client = $state(untrack(() => entry?.client ?? ''));
@@ -64,12 +83,7 @@
   const selectedClient = $derived(clients.find((c) => c.key === client) ?? null);
 
   /** Which quantity field the service's rate rule actually reads. */
-  const wants = $derived.by<'qty' | 'amount' | 'none'>(() => {
-    const type = selectedService?.type ?? 'hours';
-    if (type === 'flat') return 'none';
-    if (type === 'other') return 'amount';
-    return 'qty';
-  });
+  const wants = $derived(quantityFieldFor(selectedService?.type));
 
   const entityOptions = $derived.by<SelectOption[]>(() => {
     const keys = new Set<string>();
@@ -136,16 +150,20 @@
 
   function handleSave() {
     if (!canSave) return;
-    onSave({
-      date,
-      client,
-      service,
-      qty: wants === 'qty' ? num(qty) : null,
-      amount: wants === 'amount' ? num(amount) : null,
-      discount: num(discount) ?? 0,
-      description: description.trim(),
-      entity,
-    });
+    onSave(
+      buildWorkEntryPayload({
+        date,
+        client,
+        service,
+        initialService,
+        wants,
+        qty: num(qty),
+        amount: num(amount),
+        discount: num(discount) ?? 0,
+        description: description.trim(),
+        entity,
+      }),
+    );
   }
 
   function handleOpenChange(next: boolean) {

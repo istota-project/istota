@@ -398,17 +398,17 @@
 
   .inv-status.status-posted {
     color: var(--status-warn-fg);
-    background: rgba(232, 184, 74, 0.12);
+    background: var(--status-warn-bg);
   }
 
   .inv-status.status-paid {
     color: var(--status-success-fg);
-    background: rgba(74, 219, 192, 0.12);
+    background: var(--status-success-bg);
   }
 
   .inv-status.status-draft {
     color: var(--text-muted);
-    background: rgba(136, 136, 136, 0.12);
+    background: var(--surface-badge);
   }
 
   .inv-amount {

@@ -2951,6 +2951,14 @@ const handlers: MockHandler[] = [
       return Math.round((subtotal - w.discount) * 100) / 100;
     }
 
+    function workEtag(w: Work): string {
+      // Cheap content hash — enough for the mock's conflict path.
+      const body = `${w.date}|${w.client}|${w.service}|${w.qty}|${w.amount}|${w.discount}|${w.description}|${w.entity}`;
+      let hash = 0;
+      for (let i = 0; i < body.length; i++) hash = (hash * 31 + body.charCodeAt(i)) | 0;
+      return (hash >>> 0).toString(16);
+    }
+
     function workRow(w: Work, index: number) {
       const svc = SERVICES[w.service];
       const warnings: string[] = [];
@@ -2959,8 +2967,7 @@ const handlers: MockHandler[] = [
       return {
         ...w,
         index,
-        // Cheap content hash — enough for the mock's conflict path.
-        etag: `${w.date}-${w.qty}-${w.amount}-${w.discount}-${w.description}`.length.toString(16),
+        etag: workEtag(w),
         client_name: CLIENT_NAMES[w.client] ?? w.client,
         service_name: svc?.display_name ?? w.service,
         service_type: svc?.type ?? '',
@@ -2985,6 +2992,17 @@ const handlers: MockHandler[] = [
         const entry = work[idx];
         if (entry.invoice) {
           return { __status: 409, status: 'error', error: 'entry is invoiced' };
+        }
+        // Optimistic concurrency: without this the conflict banner and its
+        // reload path have no dev-mode route at all.
+        const sentEtag = method === 'DELETE' ? q.get('etag') : body?.etag;
+        if (sentEtag && sentEtag !== workEtag(entry)) {
+          return {
+            __status: 409,
+            status: 'error',
+            error: 'entry changed',
+            entry: workRow(entry, idx + 1),
+          };
         }
         if (method === 'DELETE') {
           work.splice(idx, 1);

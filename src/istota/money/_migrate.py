@@ -551,8 +551,10 @@ def backfill_work_entry_ids(ctx: UserContext) -> int:
     The work-entry counterpart of :func:`backfill_transaction_ids`, and the
     thing that makes the web UI's uid-addressed edits safe. Unlike the ledger
     backfill this carries no sentinel — a hand-added entry with no ``uid`` can
-    show up at any time, and re-running is how that self-heals. Cheap: it only
-    writes when something is missing an id.
+    show up at any time, and re-running is how that self-heals. Cheap: the
+    "is anything missing?" check is a lock-free read, so the common no-op case
+    doesn't contend with a concurrent ``invoice generate`` — this runs on every
+    money web request and every skill invocation.
 
     Never fatal — a failure here must not stop a money command from running.
     """

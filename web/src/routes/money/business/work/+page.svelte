@@ -10,12 +10,12 @@
     getBusinessSettings,
     ApiError,
     type WorkEntryRow,
-    type WorkEntryInput,
     type WorkTotals,
     type WorkStatusFilter,
     type ClientRow,
     type ServiceRow,
   } from '$lib/money/api';
+  import type { WorkEntrySavePayload } from '$lib/money/workEntryPayload';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import {
     Button,
@@ -86,7 +86,13 @@
     knownYears = [...years].sort().reverse();
   }
 
+  // Four filters change independently and each fires a load; without a
+  // sequence guard a slow earlier response lands after a newer one and shows
+  // rows for a filter you already left.
+  let loadSeq = 0;
+
   async function load() {
+    const seq = ++loadSeq;
     loading = true;
     error = '';
     try {
@@ -95,13 +101,15 @@
         period: periodFilter || undefined,
         status: statusFilter,
       });
+      if (seq !== loadSeq) return;
       entries = resp.entries;
       totals = resp.totals;
       rememberYears(resp.entries);
     } catch (e) {
+      if (seq !== loadSeq) return;
       error = e instanceof Error ? e.message : 'Failed to load work entries';
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
@@ -156,7 +164,7 @@
     return e instanceof ApiError && e.status === 409;
   }
 
-  async function handleSave(data: WorkEntryInput) {
+  async function handleSave(data: WorkEntrySavePayload) {
     saving = true;
     formError = '';
     const target = editing;
@@ -217,13 +225,14 @@
 
   function menuItems(entry: WorkEntryRow): KebabItem[] {
     const busy = busyUid === entry.uid;
-    if (entry.invoice) {
-      return [
-        { label: 'Invoiced — void the invoice to edit', onSelect: () => {}, disabled: true },
-        { label: `View invoice ${entry.invoice}`, onSelect: viewInvoice },
-      ];
-    }
-    if (!entry.uid) {
+    // `editable` is the server's decision; invoice/uid only pick the reason.
+    if (!entry.editable) {
+      if (entry.invoice) {
+        return [
+          { label: 'Invoiced — void the invoice to edit', onSelect: () => {}, disabled: true },
+          { label: `View invoice ${entry.invoice}`, onSelect: viewInvoice },
+        ];
+      }
       return [
         {
           label: 'No stable id — run `money work backfill-ids`',
@@ -371,7 +380,12 @@
             class:status-posted={statusOf(entry) === 'posted'}
             class:status-draft={statusOf(entry) === 'draft'}>{statusLabel(entry)}</span
           >
-          <span class="work-amount">
+          <span
+            class="work-amount"
+            title={entry.invoice
+              ? 'Computed at the current rate — the invoice is the record of what was billed.'
+              : undefined}
+          >
             {entry.computed_amount != null ? `$${formatAmount(entry.computed_amount)}` : '—'}
           </span>
           <KebabMenu items={menuItems(entry)} />
@@ -592,17 +606,17 @@
 
   .work-status.status-posted {
     color: var(--status-warn-fg);
-    background: rgba(232, 184, 74, 0.12);
+    background: var(--status-warn-bg);
   }
 
   .work-status.status-paid {
     color: var(--status-success-fg);
-    background: rgba(74, 219, 192, 0.12);
+    background: var(--status-success-bg);
   }
 
   .work-status.status-draft {
     color: var(--text-muted);
-    background: rgba(136, 136, 136, 0.12);
+    background: var(--surface-badge);
   }
 
   .work-amount {

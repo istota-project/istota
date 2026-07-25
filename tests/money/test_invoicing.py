@@ -1118,3 +1118,85 @@ class TestSetNextInvoiceNumber:
         config_store.set_next_invoice_number(db_path, 239)
 
         assert config_store.load_invoicing(db_path).next_invoice_number == 239
+
+
+class TestInvoiceNumberStampingIsUidAddressed:
+    """Invoice numbers must be stamped by uid, not by display index.
+
+    ``generate_invoices_for_period`` reads uninvoiced entries outside any
+    lock, renders PDFs (seconds), then stamps. Display indices shift whenever
+    another writer — the web Work tab above all — inserts an earlier-dated
+    entry in that window, so an index-addressed stamp lands on the wrong row:
+    one client's entry gets another's invoice number, and the entry actually
+    on the rendered PDF stays uninvoiced and gets billed again next run.
+    """
+
+    def _config(self, tmp_path):
+        config_file = tmp_path / "invoicing.toml"
+        config_file.write_text(
+            f'accounting_path = "{tmp_path}"\n'
+            'invoice_output = "invoices"\n'
+            'next_invoice_number = 1\n\n'
+            '[company]\nname = "My Co"\n\n'
+            '[clients.acme]\nname = "Acme Corp"\nterms = 30\n\n'
+            '[services.dev]\ndisplay_name = "Development"\nrate = 150\ntype = "hours"\n'
+            'income_account = "Income:Dev"\n'
+        )
+        return config_file
+
+    def test_concurrent_insert_does_not_misstamp(self, tmp_path, monkeypatch):
+        from istota.money.core import invoicing as invoicing_mod
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry, load_work_entries
+
+        config_file = self._config(tmp_path)
+        config = parse_invoicing_config(config_file)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
+
+        def fake_pdf(html, output_path):
+            # Simulates the web Work tab adding a backdated entry while the
+            # PDF renders — every display index after it shifts by one.
+            add_work_entry(tmp_path, "2026-03-01", "hooli", "dev", qty=1)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"%PDF-1.4")
+
+        monkeypatch.setattr(invoicing_mod, "generate_invoice_html", lambda *a, **k: "<html></html>")
+        monkeypatch.setattr(invoicing_mod, "generate_invoice_pdf", fake_pdf)
+
+        results = generate_invoices_for_period(
+            config=config, config_path=config_file,
+            accounting_path=tmp_path, data_dir=tmp_path,
+        )
+        assert len(results) == 1
+
+        by_client = {e.client: e for e in load_work_entries(tmp_path)}
+        assert by_client["acme"].invoice == "INV-000001"
+        assert by_client["hooli"].invoice == ""
+
+    def test_entry_invoiced_mid_render_is_not_restamped(self, tmp_path, monkeypatch):
+        from istota.money.core import invoicing as invoicing_mod
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import (
+            add_work_entry,
+            assign_invoice_number_by_uids,
+            load_work_entries,
+        )
+
+        config_file = self._config(tmp_path)
+        config = parse_invoicing_config(config_file)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
+        uid = load_work_entries(tmp_path)[0].uid
+
+        def fake_pdf(html, output_path):
+            assign_invoice_number_by_uids(tmp_path, [uid], "INV-000999")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"%PDF-1.4")
+
+        monkeypatch.setattr(invoicing_mod, "generate_invoice_html", lambda *a, **k: "<html></html>")
+        monkeypatch.setattr(invoicing_mod, "generate_invoice_pdf", fake_pdf)
+
+        generate_invoices_for_period(
+            config=config, config_path=config_file,
+            accounting_path=tmp_path, data_dir=tmp_path,
+        )
+        assert load_work_entries(tmp_path)[0].invoice == "INV-000999"

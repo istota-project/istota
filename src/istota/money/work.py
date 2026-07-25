@@ -30,6 +30,7 @@ import fcntl
 import hashlib
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -56,6 +57,22 @@ _PROTECTED_FIELDS = frozenset({"uid", "id", "extra"})
 
 class WorkStoreLocked(RuntimeError):
     """Raised when the work-entry write lock can't be acquired in time."""
+
+
+class WorkFileQuarantined(RuntimeError):
+    """Raised when a write would drop a row the loader couldn't read.
+
+    A write rewrites the whole year file from the loaded list, so a row that
+    was skipped on read would be silently deleted. Reads degrade (the other
+    entries load); writes to that year fail until a human fixes the row.
+    """
+
+
+# Year files whose last read skipped at least one entry, and the reason. A read
+# always precedes a write inside the lock, so this is current by the time
+# _save_year consults it. Process-local; a stale entry only ever refuses a
+# write it could have allowed, which is the safe direction.
+_QUARANTINED_YEARS: dict[Path, str] = {}
 
 
 @dataclass
@@ -132,26 +149,98 @@ def _parse_date(s: str) -> date:
     return date(int(parts[0]), int(parts[1]), int(parts[2]))
 
 
+def _coerce_date(value) -> date | None:
+    """Read a date field written as a TOML date, datetime, or quoted string."""
+    if isinstance(value, datetime):
+        # A TOML datetime is a `date` subclass whose isoformat() carries a time
+        # component — narrow it so downstream string comparisons still work.
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return _parse_date(value.strip())
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _coerce_number(value) -> float | int | None:
+    """Read a numeric field, tolerating a quoted number. None if unusable."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_text(value) -> str | None:
+    """Read a string field, stringifying a bare scalar. None if unusable."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _format_num(value)
+    return None
+
+
 def _load_year(path: Path) -> list[WorkEntry]:
+    """Load one year file, skipping rows the loader can't model.
+
+    These files are hand-editable, and a plausible mistake — a quoted date,
+    a quoted number — used to load as the wrong type and surface three layers
+    later as an ``AttributeError`` from ``.isoformat()`` or a ``TypeError``
+    from the sort, taking down every reader of the store. Coercible values are
+    coerced; a row missing a usable date/client/service is skipped and its year
+    marked quarantined, so the rest of the year stays readable and no write can
+    silently delete the row we couldn't read.
+    """
     if not path.exists():
+        _QUARANTINED_YEARS.pop(path, None)
         return []
     data = tomli.loads(path.read_text())
     entries = []
-    for raw in data.get("entries", []):
+    skipped: list[str] = []
+    for position, raw in enumerate(data.get("entries", []), 1):
+        entry_date = _coerce_date(raw.get("date"))
+        client = _coerce_text(raw.get("client"))
+        service = _coerce_text(raw.get("service"))
+        if entry_date is None or client is None or service is None:
+            skipped.append(f"entry #{position} (uid={raw.get('uid') or '?'})")
+            logger.error(
+                "work_entry_unreadable file=%s position=%d date=%r client=%r service=%r — "
+                "skipped; fix the row by hand (writes to this year are refused until then)",
+                path.name, position, raw.get("date"), raw.get("client"), raw.get("service"),
+            )
+            continue
+        # An unusable optional number is dropped rather than skipping the whole
+        # row: a $0 line on the Work tab is something a human notices, a
+        # billable entry that silently vanished is not.
+        qty = _coerce_number(raw["qty"]) if raw.get("qty") is not None else None
+        amount = _coerce_number(raw["amount"]) if raw.get("amount") is not None else None
+        discount = _coerce_number(raw.get("discount", 0))
         entries.append(WorkEntry(
-            date=raw["date"],
-            client=raw["client"],
-            service=raw["service"],
-            qty=raw.get("qty"),
-            amount=raw.get("amount"),
-            discount=raw.get("discount", 0),
-            description=raw.get("description", ""),
-            entity=raw.get("entity", ""),
-            invoice=raw.get("invoice", ""),
-            paid_date=raw.get("paid_date"),
-            uid=raw.get("uid", ""),
+            date=entry_date,
+            client=client,
+            service=service,
+            qty=qty,
+            amount=amount,
+            discount=0 if discount is None else discount,
+            description=_coerce_text(raw.get("description", "")) or "",
+            entity=_coerce_text(raw.get("entity", "")) or "",
+            invoice=_coerce_text(raw.get("invoice", "")) or "",
+            paid_date=_coerce_date(raw.get("paid_date")),
+            uid=_coerce_text(raw.get("uid", "")) or "",
             extra={k: v for k, v in raw.items() if k not in _KNOWN_ENTRY_KEYS},
         ))
+    if skipped:
+        _QUARANTINED_YEARS[path] = ", ".join(skipped)
+    else:
+        _QUARANTINED_YEARS.pop(path, None)
     return entries
 
 
@@ -161,8 +250,48 @@ def _format_num(n: float) -> str:
     return str(n)
 
 
+_TOML_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+# Bare TOML keys are letters, digits, underscores and dashes. Anything else —
+# a space, a dot, a quote — has to be written as a quoted key or the file
+# fails to parse on the next read.
+_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _escape(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    """Escape a string for a TOML basic string.
+
+    Every control character has to be escaped, not just the newline: a bare
+    CR (or tab, or NUL) inside a basic string makes the whole year file
+    unparseable, which takes down every reader including invoicing. The web
+    routes put arbitrary user strings on this path, so partial escaping was a
+    persisted-corruption bug rather than a cosmetic one.
+    """
+    out = []
+    for ch in s:
+        esc = _TOML_ESCAPES.get(ch)
+        if esc is not None:
+            out.append(esc)
+        elif ch < "\x20" or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _format_toml_key(key: str) -> str:
+    """Render an ``extra`` key, quoting it when it can't be written bare."""
+    if _BARE_KEY_RE.match(key):
+        return key
+    return f'"{_escape(key)}"'
 
 
 def _format_toml_value(value) -> str | None:
@@ -221,7 +350,7 @@ def _serialize_entry(entry: WorkEntry) -> str:
                 key, type(entry.extra[key]).__name__,
             )
             continue
-        lines.append(f"{key} = {rendered}")
+        lines.append(f"{_format_toml_key(key)} = {rendered}")
     return "\n".join(lines)
 
 
@@ -235,14 +364,43 @@ def entry_etag(entry: WorkEntry) -> str:
     return hashlib.sha256(_serialize_entry(entry).encode()).hexdigest()[:12]
 
 
+def _render_year(entries: list[WorkEntry]) -> str:
+    """Serialize a year's entries, sorted by date. Empty list renders as ''."""
+    if not entries:
+        return ""
+    entries.sort(key=lambda e: e.date)
+    return "\n\n".join(_serialize_entry(e) for e in entries) + "\n"
+
+
 def _save_year(path: Path, entries: list[WorkEntry]) -> None:
+    text = _render_year(entries)
+
+    if _QUARANTINED_YEARS.get(path):
+        # A write rewrites the whole file, so the row we couldn't read would be
+        # deleted. A write that changes nothing visible (this year wasn't the
+        # target — _save_entries rewrites every year it knows about) just skips
+        # the file; one that would change something is refused.
+        if text == _render_year(_load_year(path)):
+            return
+        raise WorkFileQuarantined(
+            f"{path.name} has an entry this version can't read "
+            f"({_QUARANTINED_YEARS.get(path)}); writing would delete it. "
+            "Fix the row by hand and retry."
+        )
+
     if not entries:
         if path.exists():
             path.unlink()
         return
-    entries.sort(key=lambda e: e.date)
-    blocks = [_serialize_entry(e) for e in entries]
-    text = "\n\n".join(blocks) + "\n"
+    # Parse what we're about to write. The serializer is hand-rolled string
+    # building, so a field it doesn't escape correctly produces a file that
+    # loads back as a TOMLDecodeError — and by then it's on disk, taking down
+    # every reader of that year until someone hand-repairs it. Failing the
+    # write instead keeps the last good file and surfaces the bug at its source.
+    try:
+        tomli.loads(text)
+    except tomli.TOMLDecodeError as e:
+        raise ValueError(f"refusing to write unparseable work file {path.name}: {e}") from e
     # Atomic write: a crash (or a half-written FUSE/rclone flush) mid-write
     # must not leave a truncated or partial year file. Write to a temp file
     # in the same dir, then os.replace (atomic rename on the same fs).
@@ -256,7 +414,12 @@ def _save_year(path: Path, entries: list[WorkEntry]) -> None:
 
 
 def _load_all(data_dir: Path) -> list[WorkEntry]:
-    wd = _work_dir(data_dir)
+    # Reading must not create the store. ensure_initialised runs a backfill on
+    # every money request, and that used to mkdir invoices/work/ (plus a lock
+    # anchor) on the Nextcloud mount for users who never touch invoicing.
+    wd = data_dir / "invoices" / "work"
+    if not wd.is_dir():
+        return []
     all_entries = []
     for f in sorted(wd.glob("*.toml")):
         try:
@@ -454,16 +617,24 @@ def remove_work_entry_by_uid(
         return WorkMutationResult("ok", entry)
 
 
-def backfill_work_ids(data_dir: Path) -> int:
+def backfill_work_ids(data_dir: Path, *, timeout_seconds: float = 10.0) -> int:
     """Stamp a ``uid`` on every entry that lacks one. Returns the count stamped.
 
     Idempotent, and safe to run from ``ensure_initialised`` on every entry
     point: it only writes when something is actually missing an id, so a
-    fully-backfilled store costs one read. Unlike the ledger's equivalent
-    this carries no sentinel — a hand-added entry with no ``uid`` can appear
-    at any time, and re-running is how that self-heals.
+    fully-backfilled store costs one lock-free read. That pre-check matters —
+    ``ensure_initialised`` runs on every money web request and every skill
+    invocation, so taking the exclusive write lock first put a plain
+    ``GET /work`` in contention with ``invoice generate`` and made it wait out
+    the lock timeout. Unlike the ledger's equivalent this carries no sentinel —
+    a hand-added entry with no ``uid`` can appear at any time, and re-running
+    is how that self-heals.
     """
-    with _work_lock(data_dir):
+    if not any(not e.uid for e in _load_all(data_dir)):
+        return 0
+    with _work_lock(data_dir, timeout_seconds=timeout_seconds):
+        # Re-read under the lock: another writer may have stamped these while
+        # we were deciding, and its entries are the ones we must not clobber.
         entries = load_work_entries(data_dir)
         missing = [e for e in entries if not e.uid]
         if not missing:
@@ -507,12 +678,56 @@ def get_uninvoiced_entries(
     return result
 
 
+def assign_invoice_number_by_uids(
+    data_dir: Path,
+    uids: list[str],
+    invoice_number: str,
+) -> int:
+    """Stamp an invoice number on the entries with these ``uid``s. Returns count.
+
+    The uid-addressed form of :func:`assign_invoice_number`, and the one
+    invoice generation uses. Generation resolves its billable entries, renders
+    PDFs (seconds), and only then stamps — a window in which any other writer
+    (the web Work tab above all) can insert an earlier-dated entry and shift
+    every display index. An index-addressed stamp then lands on the wrong row:
+    one client's entry takes another's invoice number, and the entry actually
+    on the rendered PDF stays uninvoiced and is billed again next run.
+
+    Entries that already carry an invoice are skipped, so a concurrent stamp
+    wins rather than being overwritten.
+    """
+    wanted = [u for u in uids if u]
+    if not wanted:
+        return 0
+    with _work_lock(data_dir):
+        entries = load_work_entries(data_dir)
+        count = 0
+        seen: set[str] = set()
+        for uid in wanted:
+            if uid in seen:
+                continue
+            seen.add(uid)
+            entry = _find_by_uid(entries, uid)
+            if entry is None or entry.invoice:
+                continue
+            entry.invoice = invoice_number
+            count += 1
+        if count:
+            _save_entries(data_dir, entries)
+        return count
+
+
 def assign_invoice_number(
     data_dir: Path,
     indices: list[int],
     invoice_number: str,
 ) -> int:
-    """Stamp invoice number on entries at given display indices. Returns count."""
+    """Stamp invoice number on entries at given display indices. Returns count.
+
+    Index-addressed, so only safe when the caller resolved the indices and
+    stamps immediately. Anything holding a reference across time — invoice
+    generation, the web UI — must use :func:`assign_invoice_number_by_uids`.
+    """
     if not indices:
         return 0
     with _work_lock(data_dir):

@@ -10,6 +10,8 @@ fed by the istota config attached to ``request.app.state.istota_config``.
 from __future__ import annotations
 
 import logging
+import math
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -682,13 +684,28 @@ _WORK_WRITABLE_FIELDS = (
 
 _WORK_STATUSES = ("uninvoiced", "invoiced", "paid", "all")
 
+# Free-text fields, and the subset that must carry an actual value. The store
+# writes these into a TOML basic string, so a non-string here is a traceback
+# rather than the documented error envelope.
+_WORK_STRING_FIELDS = ("client", "service", "description", "entity")
+_WORK_REQUIRED_STRING_FIELDS = ("client", "service")
+
+# Control characters other than newline. The serializer escapes these now, but
+# there's no legitimate reason for one to arrive in a work entry, and refusing
+# at the boundary keeps the corruption class dead even if the escaping regresses.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+
 
 def _work_row(entry, config) -> dict:
     """Enrich a stored work entry into the web row shape.
 
     ``computed_amount`` runs the same rate resolution invoice generation does
-    (``entry_line_item``), so the list shows the number that will actually
-    appear on the invoice.
+    (``entry_line_item``), so for an uninvoiced entry it is the number that
+    will actually appear on the invoice. For an *invoiced* one it is a
+    reconstruction at today's rate: nothing stores what an entry was billed
+    for (the invoice list re-derives its totals the same way), so a rate change
+    retroactively reprices historical rows. The UI marks those as computed at
+    the current rate rather than presenting them as the billed figure.
     """
     from istota.money.core.invoicing import entry_line_item
     from istota.money.work import entry_etag
@@ -813,6 +830,22 @@ def _coerce_work_fields(body: dict) -> tuple[dict, str | None]:
         except ValueError:
             return {}, "invalid date format — use YYYY-MM-DD"
 
+    for key in _WORK_STRING_FIELDS:
+        if key not in fields:
+            continue
+        value = fields[key]
+        if not isinstance(value, str):
+            return {}, f"invalid {key}"
+        if _CONTROL_CHARS_RE.search(value):
+            return {}, f"invalid {key} — control characters are not allowed"
+        if key in _WORK_REQUIRED_STRING_FIELDS:
+            # Normalize here so create and update agree: a blank client was
+            # refused on create and silently stored on update.
+            value = value.strip()
+            if not value:
+                return {}, f"{key} is required"
+        fields[key] = value
+
     for key in ("qty", "amount", "discount"):
         if key not in fields:
             continue
@@ -828,9 +861,15 @@ def _coerce_work_fields(body: dict) -> tuple[dict, str | None]:
             return {}, f"invalid {key}"
         if not isinstance(value, (int, float)):
             try:
-                fields[key] = float(value)
+                value = float(value)
             except (TypeError, ValueError):
                 return {}, f"invalid {key}"
+        # NaN / ±inf reach here from a JSON literal, from float("inf"), and
+        # from an overflowing "1e400" — all of which blow up in the
+        # serializer's int() conversion rather than storing anything sane.
+        if isinstance(value, float) and not math.isfinite(value):
+            return {}, f"invalid {key}"
+        fields[key] = value
 
     return fields, None
 
@@ -900,9 +939,11 @@ async def api_work_create(
     if err:
         return JSONResponse({"status": "error", "error": err}, status_code=400)
 
+    # _coerce_work_fields has already stripped and non-empty-checked these;
+    # what's left is the "absent from the body entirely" case.
     entry_date = fields.get("date")
-    client_key = (fields.get("client") or "").strip()
-    service_key = (fields.get("service") or "").strip()
+    client_key = fields.get("client", "")
+    service_key = fields.get("service", "")
     if not entry_date or not client_key or not service_key:
         return JSONResponse(
             {"status": "error", "error": "date, client and service are required"},
@@ -983,8 +1024,11 @@ async def api_work_update(
     if not result.ok:
         return _work_mutation_error(result, config)
 
-    row = _work_entry_response(data_dir, uid, config)
-    return {"status": "ok", "entry": row}
+    # The mutation result carries the entry re-read *inside* the write lock,
+    # with a display index that already accounts for a date move. Re-reading
+    # here instead would return None if the entry vanished in between, and the
+    # declared client type has no null case.
+    return {"status": "ok", "entry": _work_row(result.entry, config)}
 
 
 @router.delete("/work/{uid}")

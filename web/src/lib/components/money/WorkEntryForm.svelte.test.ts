@@ -114,16 +114,44 @@ describe('WorkEntryForm', () => {
     expect(screen.getByText('Days')).toBeTruthy();
   });
 
-  it('sends only the quantity field its service actually uses', async () => {
+  it('leaves a quantity field it never rendered alone', async () => {
+    // The form shows no Hours/Amount box for a flat service, so it has no
+    // user input for either — sending null would wipe stored values the user
+    // never saw, let alone edited.
     const onSave = vi.fn();
     mount({ entry: row({ service: 'retainer', service_type: 'flat', qty: 99 }), onSave });
     await fireEvent.click(screen.getByText('Save'));
 
     expect(onSave).toHaveBeenCalledTimes(1);
     const payload = onSave.mock.calls[0][0];
-    expect(payload.qty).toBeNull();
-    expect(payload.amount).toBeNull();
+    expect(payload.qty).toBeUndefined();
+    expect(payload.amount).toBeUndefined();
     expect(payload.service).toBe('retainer');
+  });
+
+  it('preserves an amount on an hours entry priced by the amount fallback', async () => {
+    // `entry_line_item` falls back to `amount` when an hours/days entry has no
+    // qty (the `work add -a 500 -s dev` shape). The form prices it correctly
+    // in the preview, so saving must not zero it.
+    const onSave = vi.fn();
+    mount({ entry: row({ qty: null, amount: 500 }), onSave });
+    expect(screen.getByText('1 × $500.00 = $500.00')).toBeTruthy();
+
+    await fireEvent.click(screen.getByText('Save'));
+    expect(onSave.mock.calls[0][0].amount).toBeUndefined();
+  });
+
+  it('preserves an amount when the service list failed to load', async () => {
+    // loadConfig is best-effort: on failure every entry reads as the default
+    // hours type, which used to make an edit null out an `other` entry's amount.
+    const onSave = vi.fn();
+    mount({
+      services: [],
+      entry: row({ service: 'expenses', service_type: 'other', qty: null, amount: 320 }),
+      onSave,
+    });
+    await fireEvent.click(screen.getByText('Save'));
+    expect(onSave.mock.calls[0][0].amount).toBeUndefined();
   });
 
   it('parses numeric fields out of the text inputs', async () => {
@@ -192,5 +220,28 @@ describe('WorkEntryForm keyboard', () => {
     const trigger = screen.getByLabelText('Service');
     await fireEvent.keyDown(trigger, { key: 'Enter' });
     expect(onSave).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkEntryForm default date', () => {
+  it('defaults to the local date, not the UTC one', () => {
+    // Pick an hour that falls on a different UTC *day* than local, whichever
+    // side of Greenwich the runner sits on: late evening for a western
+    // offset, early morning for an eastern one.
+    const offsetMinutes = new Date(2026, 2, 1).getTimezoneOffset();
+    const hour = offsetMinutes > 0 ? 23 : 1;
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 2, 1, hour, 30, 0));
+      if (offsetMinutes !== 0) {
+        // Guard the guard: this only tests anything if the two disagree.
+        expect(new Date().toISOString().slice(0, 10)).not.toBe('2026-03-01');
+      }
+      mount();
+      expect(screen.getByDisplayValue('2026-03-01')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

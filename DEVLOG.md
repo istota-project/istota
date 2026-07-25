@@ -2,6 +2,50 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Review pass on the work-entry feature — the identity fix was half-applied
+
+Two-agent review of the work-tracking commit. The headline finding is the one worth remembering: **the uid fix was applied to the web mutation path but not to the one index-addressed operation with money attached.**
+
+`generate_invoices_for_period` reads uninvoiced entries with no lock, holds them across PDF rendering (seconds), then calls `assign_invoice_number(data_dir, [e.id], number)` — which re-loads inside the lock and stamps `entries[idx-1]`. Every display index has shifted by then if anything was inserted. The reproduction: a backdated entry added during the render put `INV-000001` on another client's row and left the entry actually printed on the PDF uninvoiced, so it gets billed again next run. Before this feature the only concurrent writer was the agent or the CLI; shipping a web editor is precisely what opens the window. The previous session wrote a CHANGELOG bullet claiming this class of bug was fixed — it was fixed in one of the two places it lives.
+
+Fix is `assign_invoice_number_by_uids`, plus a `backfill_work_ids` at the top of generation (a hand-added entry can have no uid, and silently skipping it would be worse than the race it replaces) and an ERROR log when the stamped count doesn't match the billable count — nothing downstream can detect a double-billing. The index-addressed `assign_invoice_number` stays for resolve-and-stamp-immediately callers and for test setup.
+
+**The serializer is the other soft spot, and it got two guards rather than one.** `_escape` handled `\`, `"` and `\n` and nothing else. The new routes are the first caller feeding it arbitrary user strings, so a description containing a CR wrote a raw control character into a TOML basic string: the write succeeds, then every subsequent read of that year raises `TOMLDecodeError` — the work list, invoicing, everything — with no product path back. Now it escapes the full control set, *and* `_save_year` parses its own output before `os.replace`. The second guard is the durable one: it makes "a serializer bug cannot persist an unreadable file" true by construction rather than by having thought of every character. Same class, second instance: `extra` keys were re-emitted bare, so a hand-written `"my key" = 1` came back unquoted and broke the next read.
+
+**Where the fix needed more care than the finding suggested.** The review asked for type validation in `_load_year` (a quoted date loads as `str` and surfaces three layers later as `AttributeError` from `.isoformat()`, killing every reader). Coercing is easy; *skipping* an unusable row is the trap — a write rewrites the whole year from the loaded list, so a skipped row would be silently deleted, which is worse than the outage it fixes. Hence `_QUARANTINED_YEARS`: a year with a skipped row stays readable, and `_save_year` refuses a write that would change its visible content while silently skipping one that wouldn't (`_save_entries` rewrites every year it knows about, not just the target — an unrelated write to next year must not trip on this one). An unusable *optional* number drops the field and keeps the entry: a visible $0 row is something a human notices, a vanished billable entry is not.
+
+**Frontend: the payload rule moved out of the component.** The edit form nulled whichever of `qty`/`amount` the resolved service didn't want, which zeroed an hours entry priced by the `amount` fallback — and, when the client/service fetch failed (it's caught and swallowed), every entry read as the default hours type, so editing an `other` entry wiped its amount. The rule is now `buildWorkEntryPayload`: send what the form rendered, omit what it didn't, clear only when the user actually changed the service. It lives in its own module because the interesting branch (service changed) can't be driven through the bits-ui `Select` in jsdom — the dropdown renders through a portal and doesn't open on a synthetic click. Extracting it bought real coverage; testing it through the component would have meant no coverage at all.
+
+Also worth noting for future frontend work: the local-vs-UTC date test picks its hour from the runner's own offset, so it means something east or west of Greenwich. I verified it fails against the old `toISOString()` line rather than trusting that it would.
+
+**Deliberately not "fixed":** `computed_amount` reprices invoiced rows at today's rate, which the review flagged as a defect. But nothing stores what an entry was billed for — the invoice list re-derives its totals the same way — so a `billed_amount` field would be fiction. The honest fix was to correct the docstring's claim and mark those figures in the UI as current-rate reconstructions with the invoice as the record. Recovering the historical rate would need invoices to store their own line items, which is a data-model change, not a bug fix.
+
+Everything landed test-first; the invoice-misstamping and `\r`-corruption tests both reproduced the real failure before the fix went in.
+
+**Key changes:**
+- `assign_invoice_number_by_uids`; invoice generation stamps by uid and reports an incomplete stamp loudly.
+- `_escape` covers the full TOML control set; `_save_year` validates its own output before replacing the file; `extra` keys are quoted when they can't be written bare.
+- `_load_year` coerces quoted dates/numbers and narrows a TOML datetime; unreadable rows are skipped and their year quarantined against destructive writes.
+- `backfill_work_ids` does its no-op check lock-free; reading no longer creates the store directory.
+- Work routes validate string field types, reject control characters, and agree between create and update on a blank client/service; non-finite numbers are refused instead of raising.
+- `PATCH /work/{uid}` returns the entry re-read inside the write lock, so the response can never be null.
+- `buildWorkEntryPayload` — new module owning the send-what-was-rendered rule; form date defaults to local, not UTC.
+- Work list guards against out-of-order filter responses; menu affordances read the server's `editable` flag; money status chips use the semantic theme tokens.
+- Mock API enforces the etag, so the conflict path has a dev-mode route.
+
+**Files added/modified:**
+- `src/istota/money/work.py` — uid-addressed stamping, escaping + write validation, loader coercion + quarantine, lock-free backfill check
+- `src/istota/money/core/invoicing.py` — stamp by uid, backfill first, log an incomplete stamp
+- `src/istota/money/routes.py` — field-type/control-char/non-finite validation, PATCH response from the locked read
+- `src/istota/money/_migrate.py` — docstring correction for the backfill's new cost profile
+- `web/src/lib/money/workEntryPayload.ts` (+ test) — the payload rule, extracted
+- `web/src/lib/components/money/WorkEntryForm.svelte` — uses the rule; local default date
+- `web/src/routes/money/business/work/+page.svelte` — load sequence guard, `editable`, tooltip, colour tokens
+- `web/src/routes/money/business/invoices/+page.svelte` — colour tokens
+- `web/vite-mock-api.ts` — real etag + 409 conflict path
+- `tests/money/test_work.py`, `test_invoicing.py`, `test_routes_work.py` — 20 new tests
+- `.claude/rules/skills.md` — uid-addressed invoicing contract, serializer guards, loader/quarantine behaviour
+
 ## 2026-07-25: Work entries in the web UI, and giving them a stable identity
 
 Implemented the money work-tracking spec. Work entries are the input side of invoicing — a day of work against a configured service — and the web UI could only see them once they'd landed on an invoice. Adding one meant asking the bot or running the CLI. Now there's a **Work** tab under Business with full CRUD.

@@ -1,15 +1,18 @@
 """Tests for money.work module."""
 
+import time
 from datetime import date
 
 import pytest
 
 from istota.money.work import (
+    WorkFileQuarantined,
     WorkStoreLocked,
     _work_dir,
     _work_lock,
     add_work_entry,
     assign_invoice_number,
+    assign_invoice_number_by_uids,
     backfill_work_ids,
     clear_invoice_payment,
     entry_etag,
@@ -748,3 +751,282 @@ class TestUnknownKeyRoundTrip:
             'note = "x"',
         ])
         assert entry_etag(load_work_entries(data_dir)[0]) != plain
+
+
+class TestSerializerControlCharacters:
+    """A control character in a string field must never poison the year file.
+
+    The web routes put arbitrary JSON strings on the write path, and a bare
+    CR/tab/NUL inside a TOML basic string makes the whole year unreadable —
+    every subsequent load, including invoicing's, raises TOMLDecodeError.
+    """
+
+    def test_carriage_return_round_trips(self, data_dir):
+        add_work_entry(
+            data_dir, "2026-03-01", "acme", "dev", qty=8,
+            description="line one\r\nline two",
+        )
+        entries = load_work_entries(data_dir)
+        assert entries[0].description == "line one\r\nline two"
+
+    @pytest.mark.parametrize("raw", ["a\rb", "a\tb", "a\x00b", "a\x1fb", "a\x7fb", "a\bb"])
+    def test_control_characters_round_trip(self, data_dir, raw):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=1, description=raw)
+        assert load_work_entries(data_dir)[0].description == raw
+
+    def test_control_character_in_extra_round_trips(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=1)
+        entries = load_work_entries(data_dir)
+        entries[0].extra["note"] = "a\rb"
+        from istota.money.work import _save_entries
+        _save_entries(data_dir, entries)
+        assert load_work_entries(data_dir)[0].extra["note"] == "a\rb"
+
+    def test_unwritable_year_file_is_never_persisted(self, data_dir, monkeypatch):
+        """A serializer bug must fail the write, not leave an unparseable file."""
+        import istota.money.work as work_mod
+
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=1)
+        good = (data_dir / "invoices" / "work" / "2026.toml").read_text()
+
+        monkeypatch.setattr(work_mod, "_serialize_entry", lambda e: "[[entries]]\nnot toml =")
+        with pytest.raises(ValueError):
+            add_work_entry(data_dir, "2026-03-02", "beta", "dev", qty=1)
+
+        assert (data_dir / "invoices" / "work" / "2026.toml").read_text() == good
+
+
+class TestExtraKeyQuoting:
+    """A hand-edited quoted key must survive the next write.
+
+    ``extra`` keys were re-emitted bare, so ``"my key" = 1`` came back as
+    ``my key = 1`` and the file failed to parse on the following read.
+    """
+
+    def test_quoted_extra_key_round_trips(self, data_dir):
+        _write_raw_year(data_dir, 2026, [
+            'uid = "aaa"', 'date = 2026-03-01', 'client = "acme"', 'service = "dev"',
+            '"my key" = "hello"',
+        ])
+        add_work_entry(data_dir, "2026-03-05", "beta", "dev", qty=1)
+
+        entries = load_work_entries(data_dir)
+        acme = [e for e in entries if e.client == "acme"][0]
+        assert acme.extra["my key"] == "hello"
+
+    def test_dotted_extra_key_does_not_nest_on_write(self, data_dir):
+        _write_raw_year(data_dir, 2026, [
+            'uid = "aaa"', 'date = 2026-03-01', 'client = "acme"', 'service = "dev"',
+            '"a.b" = 1',
+        ])
+        add_work_entry(data_dir, "2026-03-05", "beta", "dev", qty=1)
+        acme = [e for e in load_work_entries(data_dir) if e.client == "acme"][0]
+        assert acme.extra["a.b"] == 1
+
+
+class TestAssignInvoiceNumberByUids:
+    def test_stamps_by_uid(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        uid = load_work_entries(data_dir)[0].uid
+        assert assign_invoice_number_by_uids(data_dir, [uid], "INV-000001") == 1
+        assert load_work_entries(data_dir)[0].invoice == "INV-000001"
+
+    def test_hits_right_entry_after_index_shift(self, data_dir):
+        add_work_entry(data_dir, "2026-03-10", "acme", "dev", qty=8)
+        uid = load_work_entries(data_dir)[0].uid
+        # Something inserts an earlier-dated entry: every display index shifts.
+        add_work_entry(data_dir, "2026-03-01", "hooli", "dev", qty=1)
+
+        assert assign_invoice_number_by_uids(data_dir, [uid], "INV-000001") == 1
+        by_client = {e.client: e for e in load_work_entries(data_dir)}
+        assert by_client["acme"].invoice == "INV-000001"
+        assert by_client["hooli"].invoice == ""
+
+    def test_skips_already_invoiced(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        uid = load_work_entries(data_dir)[0].uid
+        assign_invoice_number_by_uids(data_dir, [uid], "INV-000001")
+        assert assign_invoice_number_by_uids(data_dir, [uid], "INV-000002") == 0
+        assert load_work_entries(data_dir)[0].invoice == "INV-000001"
+
+    def test_unknown_uid_ignored(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assert assign_invoice_number_by_uids(data_dir, ["nope"], "INV-000001") == 0
+        assert load_work_entries(data_dir)[0].invoice == ""
+
+    def test_empty_uid_is_not_addressable(self, data_dir):
+        _write_raw_year(data_dir, 2026, [
+            'date = 2026-03-01', 'client = "acme"', 'service = "dev"', 'qty = 8',
+        ])
+        assert assign_invoice_number_by_uids(data_dir, [""], "INV-000001") == 0
+
+    def test_empty_list(self, data_dir):
+        assert assign_invoice_number_by_uids(data_dir, [], "INV-000001") == 0
+
+
+class TestLoaderCoercion:
+    """A hand-edited year file must degrade one row, not the whole store.
+
+    These files are deliberately hand-editable and the web UI turns any load
+    failure into a 500 with no diagnostic, so the loader takes the plausible
+    mistakes (a quoted date, a quoted number) rather than handing a string to
+    code that will call ``.isoformat()`` on it three layers later.
+    """
+
+    def test_quoted_date_is_coerced(self, data_dir):
+        _write_raw_year(data_dir, 2026, [
+            'uid = "aaa"', 'date = "2026-01-05"', 'client = "acme"', 'service = "dev"',
+        ])
+        assert load_work_entries(data_dir)[0].date == date(2026, 1, 5)
+
+    def test_quoted_paid_date_is_coerced(self, data_dir):
+        _write_raw_year(data_dir, 2026, [
+            'uid = "aaa"', 'date = 2026-01-05', 'client = "acme"', 'service = "dev"',
+            'paid_date = "2026-02-01"',
+        ])
+        assert load_work_entries(data_dir)[0].paid_date == date(2026, 2, 1)
+
+    def test_datetime_date_is_narrowed(self, data_dir):
+        _write_raw_year(data_dir, 2026, [
+            'uid = "aaa"', 'date = 2026-01-05T09:30:00', 'client = "acme"', 'service = "dev"',
+        ])
+        loaded = load_work_entries(data_dir)[0].date
+        assert loaded == date(2026, 1, 5)
+        assert loaded.isoformat() == "2026-01-05"
+
+    def test_quoted_numbers_are_coerced(self, data_dir):
+        _write_raw_year(data_dir, 2026, [
+            'uid = "aaa"', 'date = 2026-01-05', 'client = "acme"', 'service = "dev"',
+            'qty = "8"', 'amount = "500.50"', 'discount = "10"',
+        ])
+        e = load_work_entries(data_dir)[0]
+        assert (e.qty, e.amount, e.discount) == (8.0, 500.5, 10.0)
+
+    def test_unusable_number_is_dropped_but_the_entry_survives(self, data_dir):
+        # A vanished billable entry is worse than a visible $0 one — the
+        # zero is something a human notices on the Work tab.
+        _write_raw_year(data_dir, 2026, [
+            'uid = "aaa"', 'date = 2026-01-05', 'client = "acme"', 'service = "dev"',
+            'qty = "eight"',
+        ])
+        entries = load_work_entries(data_dir)
+        assert len(entries) == 1
+        assert entries[0].qty is None
+
+    def test_unusable_date_skips_only_that_entry(self, data_dir):
+        work_dir = data_dir / "invoices" / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "2026.toml").write_text(
+            "[[entries]]\n"
+            'uid = "bad"\ndate = "not-a-date"\nclient = "acme"\nservice = "dev"\n'
+            "\n[[entries]]\n"
+            'uid = "good"\ndate = 2026-01-05\nclient = "acme"\nservice = "dev"\nqty = 2\n'
+        )
+        entries = load_work_entries(data_dir)
+        assert [e.uid for e in entries] == ["good"]
+
+    def test_missing_required_key_skips_only_that_entry(self, data_dir):
+        work_dir = data_dir / "invoices" / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "2026.toml").write_text(
+            "[[entries]]\n"
+            'uid = "bad"\ndate = 2026-01-04\nservice = "dev"\n'
+            "\n[[entries]]\n"
+            'uid = "good"\ndate = 2026-01-05\nclient = "acme"\nservice = "dev"\n'
+        )
+        assert [e.uid for e in load_work_entries(data_dir)] == ["good"]
+
+    def _quarantined_year(self, data_dir):
+        work_dir = data_dir / "invoices" / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "2026.toml").write_text(
+            "[[entries]]\n"
+            'uid = "bad"\ndate = "not-a-date"\nclient = "acme"\nservice = "dev"\n'
+            "\n[[entries]]\n"
+            'uid = "good"\ndate = 2026-01-05\nclient = "acme"\nservice = "dev"\nqty = 2\n'
+        )
+        return work_dir / "2026.toml"
+
+    def test_a_write_to_a_year_with_a_skipped_entry_is_refused(self, data_dir):
+        """Dropping a row on read must never delete it on the next write.
+
+        The whole year is rewritten from the loaded list, so a row we couldn't
+        model would vanish. Reads degrade; writes to that year fail loudly
+        until a human fixes the row.
+        """
+        path = self._quarantined_year(data_dir)
+        before = path.read_text()
+
+        with pytest.raises(WorkFileQuarantined):
+            add_work_entry(data_dir, "2026-01-06", "beta", "dev", qty=1)
+
+        assert path.read_text() == before
+
+    def test_a_year_with_a_skipped_entry_is_still_readable(self, data_dir):
+        self._quarantined_year(data_dir)
+        assert [e.uid for e in load_work_entries(data_dir)] == ["good"]
+
+    def test_another_year_is_still_writable(self, data_dir):
+        path = self._quarantined_year(data_dir)
+        before = path.read_text()
+        add_work_entry(data_dir, "2027-01-06", "beta", "dev", qty=1)
+        assert path.read_text() == before
+        assert any(e.client == "beta" for e in load_work_entries(data_dir))
+
+    def test_a_year_with_only_a_skipped_entry_is_not_deleted(self, data_dir):
+        work_dir = data_dir / "invoices" / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        path = work_dir / "2026.toml"
+        path.write_text(
+            "[[entries]]\n"
+            'uid = "bad"\ndate = "not-a-date"\nclient = "acme"\nservice = "dev"\n'
+        )
+        # The year loads as empty, and an empty year file is normally unlinked.
+        with pytest.raises(WorkFileQuarantined):
+            add_work_entry(data_dir, "2026-01-06", "beta", "dev", qty=1)
+        assert path.exists()
+
+
+class TestBackfillDoesNotLockWhenIdle:
+    """A no-op backfill must not take the exclusive write lock.
+
+    ``ensure_initialised`` runs it on every money web request and every skill
+    invocation, so locking first meant a plain ``GET /work`` contended with
+    ``invoice generate`` — and waited out a 10s timeout when it lost.
+    """
+
+    def test_no_op_backfill_does_not_wait_for_the_lock(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        with _work_lock(data_dir):
+            started = time.monotonic()
+            assert backfill_work_ids(data_dir) == 0
+            assert time.monotonic() - started < 1.0
+
+    def test_backfill_still_stamps_when_something_is_missing(self, data_dir):
+        _write_raw_year(data_dir, 2026, [
+            'date = 2026-03-01', 'client = "acme"', 'service = "dev"',
+        ])
+        assert backfill_work_ids(data_dir) == 1
+        assert load_work_entries(data_dir)[0].uid
+
+    def test_backfill_reports_contention_when_it_has_work_to_do(self, data_dir):
+        _write_raw_year(data_dir, 2026, [
+            'date = 2026-03-01', 'client = "acme"', 'service = "dev"',
+        ])
+        with _work_lock(data_dir):
+            with pytest.raises(WorkStoreLocked):
+                backfill_work_ids(data_dir, timeout_seconds=0.1)
+
+
+class TestReadingDoesNotCreateTheStore:
+    def test_load_does_not_create_the_work_dir(self, data_dir):
+        assert load_work_entries(data_dir) == []
+        assert not (data_dir / "invoices" / "work").exists()
+
+    def test_no_op_backfill_does_not_create_the_work_dir(self, data_dir):
+        assert backfill_work_ids(data_dir) == 0
+        assert not (data_dir / "invoices" / "work").exists()
+
+    def test_writing_still_creates_it(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=1)
+        assert (data_dir / "invoices" / "work" / "2026.toml").exists()

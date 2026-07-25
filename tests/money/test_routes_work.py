@@ -556,3 +556,132 @@ class TestDatePreservation:
             json={"date": "2026-03-01", "client": "acme", "service": "dev", "qty": 1},
         )
         assert load_work_entries(tmp_path)[0].date == date(2026, 3, 1)
+
+
+class TestFieldTypeValidation:
+    """Every writable field is validated before it reaches the serializer.
+
+    The store's TOML writer is hand-rolled string building, so an unexpected
+    type produces a traceback (500) instead of the documented error envelope —
+    and, for a string that reaches ``_escape``, a persisted corrupt file.
+    """
+
+    @pytest.mark.parametrize("field", ["client", "service", "description", "entity"])
+    def test_create_rejects_non_string_field(self, make_client, field):
+        body = {"date": "2026-03-01", "client": "acme", "service": "dev", field: 123}
+        resp = make_client().post("/api/money/work", json=body)
+        assert resp.status_code == 400
+        assert resp.json()["status"] == "error"
+
+    @pytest.mark.parametrize("field", ["client", "service", "description", "entity"])
+    def test_update_rejects_non_string_field(self, make_client, tmp_path, field):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8, description="orig")
+        uid = _uid_of(tmp_path, "orig")
+        resp = make_client().patch(f"/api/money/work/{uid}", json={field: 5})
+        assert resp.status_code == 400
+        assert resp.json()["status"] == "error"
+
+    @pytest.mark.parametrize("field", ["client", "service"])
+    def test_update_rejects_null_required_field(self, make_client, tmp_path, field):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8, description="orig")
+        uid = _uid_of(tmp_path, "orig")
+        resp = make_client().patch(f"/api/money/work/{uid}", json={field: None})
+        assert resp.status_code == 400
+
+    @pytest.mark.parametrize("field", ["client", "service"])
+    def test_update_rejects_blank_required_field(self, make_client, tmp_path, field):
+        """POST already refuses a blank client/service; PATCH must agree."""
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8, description="orig")
+        uid = _uid_of(tmp_path, "orig")
+        resp = make_client().patch(f"/api/money/work/{uid}", json={field: "   "})
+        assert resp.status_code == 400
+
+    @pytest.mark.parametrize("raw", ["NaN", "Infinity", "-Infinity"])
+    def test_create_rejects_non_finite_number(self, make_client, raw):
+        resp = make_client().post(
+            "/api/money/work",
+            content=(
+                '{"date": "2026-03-01", "client": "acme", "service": "dev", '
+                f'"qty": {raw}}}'
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.parametrize("raw", ["inf", "nan", "1e400"])
+    def test_create_rejects_non_finite_string_number(self, make_client, raw):
+        resp = make_client().post(
+            "/api/money/work",
+            json={"date": "2026-03-01", "client": "acme", "service": "dev", "qty": raw},
+        )
+        assert resp.status_code == 400
+
+    def test_control_character_is_rejected(self, make_client, tmp_path):
+        """Defence in depth: the store escapes it, the API refuses it outright."""
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8, description="orig")
+        uid = _uid_of(tmp_path, "orig")
+        client = make_client()
+        resp = client.patch(f"/api/money/work/{uid}", json={"description": "a\rb"})
+        assert resp.status_code == 400
+        # And the store is still readable.
+        assert client.get("/api/money/work").status_code == 200
+
+    def test_newline_is_still_allowed(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8, description="orig")
+        uid = _uid_of(tmp_path, "orig")
+        resp = make_client().patch(
+            f"/api/money/work/{uid}", json={"description": "line one\nline two"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["entry"]["description"] == "line one\nline two"
+
+    def test_valid_strings_still_accepted(self, make_client, tmp_path):
+        resp = make_client().post(
+            "/api/money/work",
+            json={
+                "date": "2026-03-01", "client": "acme", "service": "dev",
+                "qty": 4, "description": "Fine — with an em dash", "entity": "",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["entry"]["description"] == "Fine — with an em dash"
+
+
+class TestUpdateResponseShape:
+    """PATCH must always return the entry it just wrote.
+
+    The response was re-read outside the write lock, so a concurrent delete
+    produced `{"status": "ok", "entry": null}` — which the declared client
+    type forbids and the create path explicitly refuses.
+    """
+
+    def test_update_returns_the_written_entry(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8, description="orig")
+        uid = _uid_of(tmp_path, "orig")
+        resp = make_client().patch(f"/api/money/work/{uid}", json={"qty": 4})
+        assert resp.status_code == 200
+        entry = resp.json()["entry"]
+        assert entry is not None
+        assert entry["uid"] == uid
+        assert entry["qty"] == 4
+        assert entry["computed_amount"] == 600.0
+
+    def test_update_returns_a_fresh_display_index_after_a_date_move(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=1, description="mover")
+        add_work_entry(tmp_path, "2026-03-20", "acme", "dev", qty=1, description="other")
+        uid = _uid_of(tmp_path, "mover")
+        resp = make_client().patch(f"/api/money/work/{uid}", json={"date": "2026-03-30"})
+        assert resp.json()["entry"]["index"] == 2
+
+    def test_update_does_not_re_read_outside_the_lock(self, make_client, tmp_path, monkeypatch):
+        import istota.money.routes as routes_mod
+
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8, description="orig")
+        uid = _uid_of(tmp_path, "orig")
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("the mutation result already carries the fresh entry")
+
+        monkeypatch.setattr(routes_mod, "_work_entry_response", _boom)
+        resp = make_client().patch(f"/api/money/work/{uid}", json={"qty": 2})
+        assert resp.status_code == 200
