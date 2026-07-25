@@ -124,25 +124,30 @@
     expandedJobs = { ...expandedJobs, [id]: !expandedJobs[id] };
   }
 
-  // Source colours — semantic, kept in sync with classifyClass below.
-  // Greys for automated noise (scheduled / briefing / heartbeat) and
-  // brighter colours for the interactive sources we actually care about.
+  // Source colours — a categorical palette: the hue identifies *which* source,
+  // it carries no severity meaning. Hues are spread roughly evenly around the
+  // wheel so adjacent stack segments stay tellable apart, at a mid lightness
+  // that holds up as a fill on both the dark and light backgrounds. Red is left
+  // free so it keeps meaning "failed" everywhere else on the page.
   const SOURCE_COLOR: Record<string, string> = {
-    talk: '#6c8ebf',
-    email: '#d6a000',
-    cli: '#6eb884',
-    tasks_file: '#a78bd6',
-    scheduled: '#444',
-    briefing: '#555',
-    heartbeat: '#3a3a3a',
-    subtask: '#666',
+    talk: '#4a8ff0', // blue
+    web: '#a86ef0', // purple
+    email: '#f08c2e', // orange
+    cli: '#1fb98a', // spring green
+    repl: '#ee5f9e', // pink
+    istota_file: '#c9a017', // gold
+    tasks_file: '#c9a017', // legacy alias for istota_file
+    scheduled: '#1fb6cf', // cyan
+    briefing: '#7a7af0', // indigo
+    heartbeat: '#6fbf3a', // green
+    subtask: '#c2703f', // copper
   };
 
   function sourceColor(name: string): string {
-    return SOURCE_COLOR[name] ?? '#777';
+    return SOURCE_COLOR[name] ?? '#8a93a0';
   }
 
-  const INTERACTIVE_SOURCES = new Set(['talk', 'email', 'tasks_file', 'cli']);
+  const INTERACTIVE_SOURCES = new Set(['talk', 'web', 'email', 'repl', 'istota_file', 'cli']);
 
   interface SourceSegment {
     source: string;
