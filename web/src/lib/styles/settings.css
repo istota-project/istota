@@ -52,7 +52,7 @@
 
 .settings .dirty-badge {
   font-size: var(--text-xs);
-  color: #d6a000;
+  color: var(--status-warn-fg);
 }
 
 /* Banners are unscoped so they work both inside .settings wrappers and in
@@ -66,11 +66,11 @@
 }
 .banner.error {
   background: rgba(204, 102, 102, 0.15);
-  color: #e88;
+  color: var(--status-danger-fg);
 }
 .banner.info {
   background: rgba(110, 184, 132, 0.15);
-  color: #8d8;
+  color: var(--status-success-fg);
 }
 
 .settings .placeholder {
@@ -146,10 +146,10 @@
   color: var(--text-muted);
 }
 .settings .status-pill.status-configured {
-  color: #6eb884;
+  color: var(--status-success-fg);
 }
 .settings .status-pill.status-partial {
-  color: #d6a000;
+  color: var(--status-warn-fg);
 }
 .settings .status-pill.status-missing {
   color: var(--text-dim);
@@ -228,12 +228,12 @@
 
 .settings .flash {
   font-size: var(--text-xs);
-  color: #6eb884;
+  color: var(--status-success-fg);
 }
 
 .settings .field-error {
   font-size: var(--text-xs);
-  color: #e88;
+  color: var(--status-danger-fg);
 }
 
 .settings .table-scroll {
@@ -294,7 +294,7 @@
 }
 
 .settings .icon-btn.danger:hover:not(:disabled) {
-  color: #e88;
+  color: var(--status-danger-fg);
 }
 
 .settings .icon-btn:disabled {

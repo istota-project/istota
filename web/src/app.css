@@ -27,6 +27,21 @@
   /* Amber terminal accent — the bot's identity color + highlights (links). */
   --accent-amber: #f5a623;
 
+  /* Status severities — the standardized chip/badge palette. `-fg` is the text
+	   color for a bare status label; `-bg` is the fill for a filled chip, which
+	   pairs with the same `-fg`. Four severities only; a categorical palette (the
+	   encounter-type badges, the admin source colors) is a separate concern and
+	   deliberately does NOT collapse into these. Both themes define every token,
+	   so a chip built on them needs no per-page light override. */
+  --status-danger-fg: #ee8888;
+  --status-danger-bg: #4a2020;
+  --status-warn-fg: #e6b96b;
+  --status-warn-bg: #3a3017;
+  --status-success-fg: #9bd6a6;
+  --status-success-bg: #204028;
+  --status-info-fg: #9cc7f8;
+  --status-info-bg: #20384a;
+
   /* Map colors */
   --map-path: #4a9eff;
   --map-current: #4aff7f;
@@ -82,6 +97,17 @@
   --accent-hover: #000000;
   /* Darker amber so the bot's accent stays legible on a light surface. */
   --accent-amber: #b9740a;
+
+  /* Status severities — darkened foregrounds that hold contrast on white, and
+	   pale tinted fills in place of the dark-theme blocks. */
+  --status-danger-fg: #c0271d;
+  --status-danger-bg: #f7dada;
+  --status-warn-fg: #946a00;
+  --status-warn-bg: #f6eccd;
+  --status-success-fg: #15803d;
+  --status-success-bg: #d7ecdd;
+  --status-info-fg: #2563b0;
+  --status-info-bg: #dbe9fb;
 
   /* Map colors — keep the path/current hues; soften the place overlay. */
   --map-place-fill: rgba(0, 0, 0, 0.05);

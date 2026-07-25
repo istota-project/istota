@@ -131,8 +131,8 @@
 <style>
   :global(.error-badge) {
     background: var(--surface-card);
-    color: #d46ab5;
-    border: 1px solid #5a1f1f;
+    color: var(--status-danger-fg);
+    border: 1px solid var(--status-danger-bg);
     border-radius: var(--radius-pill);
     padding: 0.2rem 0.55rem;
     font-size: var(--text-xs);
@@ -240,10 +240,6 @@
   }
 
   /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light'] .error-badge) {
-    color: #c0271d;
-    border-color: #f0caca;
-  }
   :global(:root[data-theme='light']) .error-panel {
     background: #f7dada;
     border-bottom-color: #f0caca;

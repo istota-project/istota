@@ -583,11 +583,11 @@
   .badge.status-overdue,
   .badge.status-expired {
     background: hsla(0, 60%, 55%, 0.28);
-    color: #ff9d96;
+    color: var(--status-danger-fg);
   }
   .badge.status-due_soon {
     background: hsla(35, 60%, 60%, 0.22);
-    color: #e6b96b;
+    color: var(--status-warn-fg);
   }
   .badge.status-series_incomplete {
     background: hsla(280, 45%, 65%, 0.22);
@@ -595,7 +595,7 @@
   }
   .badge.status-up_to_date {
     background: hsla(145, 40%, 55%, 0.22);
-    color: #9bd6a6;
+    color: var(--status-success-fg);
   }
   .badge.status-never_recorded,
   .badge.status-recorded,
@@ -721,18 +721,8 @@
   :global(:root[data-theme='light']) .card:hover {
     border-color: var(--border-default);
   }
-  :global(:root[data-theme='light']) .badge.status-overdue,
-  :global(:root[data-theme='light']) .badge.status-expired {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .badge.status-due_soon {
-    color: #946a00;
-  }
   :global(:root[data-theme='light']) .badge.status-series_incomplete {
     color: #7c3aed;
-  }
-  :global(:root[data-theme='light']) .badge.status-up_to_date {
-    color: #15803d;
   }
   :global(:root[data-theme='light']) .msg.error {
     color: #c0271d;

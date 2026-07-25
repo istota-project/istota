@@ -2,6 +2,46 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Standardized status chip palette (`--status-*` tokens)
+
+Started from one visual bug — the effort chip beside the default model on the admin page rendered a heavy dark-blue block on light theme — and the answer to "is it the same blue as dark theme?" was yes: `background: #6c8ebf; color: #000`, hardcoded, no theme override at all. Auditing the rest of the app for the same class turned up a second instance and, underneath it, the reason the class keeps recurring.
+
+Every page had been inventing its own severity colors and then hand-writing a light-theme override for each one. Dark theme carried roughly ten different reds (`#c66`, `#e88`, `#f0a`, `#f08c8c`, `#ff9d96`, `#f0a09c`, `#f8a09c`, `#ff5a5a`, `#d46ab5`, `#ff9b5a`), six ambers and five greens for what were semantically four states. Light theme had already converged organically on `#c0271d` / `#946a00` / `#15803d` / `#2563b0` across a dozen files — the tokens existed in practice, nobody had written them down. The clincher: `briefings/settings` already referenced `var(--color-success, #2a8)` and `var(--color-warning, #b80)`, tokens **never defined anywhere**, so it had been silently rendering the hardcoded fallbacks with no light variant at all.
+
+So the fix isn't the chip, it's the missing vocabulary. Four severities in `app.css`, each with a `-fg` (bare label text) and a `-bg` (filled-chip fill that pairs with the same `-fg`), defined in **both** theme blocks. A chip built on them needs no per-page override, which is what makes the class stop recurring rather than getting patched again next time.
+
+Migrating the existing chips onto the tokens let the paired light overrides be deleted outright — that's where the net −64 lines comes from, and the admin page lost its light-override block entirely.
+
+Three judgement calls worth recording:
+
+- **Categorical palettes deliberately do not collapse into the severities.** The eight encounter-type badges (visit / procedure / imaging / dental / …), the admin `SOURCE_COLOR` chart constants, and the purple `series_incomplete` immunization status are hues that *encode distinct categories*, not a severity ranking. Folding them into four status colors would destroy information to satisfy a consistency rule. They keep their existing hardcoded values and light overrides. The tokens are a severity scale, and the comment in `app.css` says so, because the obvious next move for a future reader is to "finish the job" by absorbing them.
+- **`.flag-C` stays a solid saturated red** rather than becoming a tinted danger chip like `.flag-H`. Critical is a step above High in the bloodwork flag ladder, and the solid fill is what carries that. It only ever needed the light value it was missing (`#b3261e` instead of the near-black `#6b0000` block).
+- **The effort chip mapped to `info`, not a severity.** It labels a reasoning-effort level, which is informational; it only looked severity-ish because it happened to be blue.
+
+The second bug the audit found was `.flag-C` in all three bloodwork pages: `#6b0000` fill, white text, no light rule. `.flag-H` and `.flag-L` had been remapped in some earlier light-theme sweep and C was simply skipped — the same oversight as the effort chip, in a spot nobody looks at unless a value is actually critical.
+
+Scope held to chips/badges/pills/flags, since that was the ask. Plain message text (`.msg.error`, `.center-msg.error`, `.attach-error`, ~20 rules) still hardcodes a red with a paired light override. Those render correctly in both themes so they're not broken, but they'd collapse onto `--status-danger-fg` identically and remove another ~20 overrides — left as a follow-up rather than silently widening the diff.
+
+Verification: `svelte-check` 0 errors / 0 warnings across 4708 files, production build succeeds, prettier clean. Re-ran the audit script that found the originals (filled chip with a hardcoded background and no light-theme counterpart) — 0 remaining, down from 3.
+
+**Key changes:**
+- Added `--status-{danger,warn,success,info}-{fg,bg}` to both theme blocks in `app.css` — the first semantic color tokens in the app.
+- Fixed `.flag-C` (critical bloodwork value) rendering a near-black block on light theme in all three bloodwork pages.
+- Fixed the admin effort chip rendering the dark-theme blue on light theme.
+- Migrated severity chips/badges/pills across 14 files onto the tokens, deleting the now-redundant per-page light overrides.
+- Defined the two orphan `--color-success` / `--color-warning` references that had never resolved to anything.
+- Left categorical palettes (encounter types, source colors, `series_incomplete`) on their own hues by design.
+
+**Files added/modified:**
+- `web/src/app.css` — the `--status-*` token set, dark + light
+- `web/src/lib/styles/settings.css` — status pills, dirty badge, banners, flash, field errors onto tokens (had *no* light overrides before)
+- `web/src/routes/admin/+page.svelte` — effort chip, failed pills, KPI/error text, status dots; whole light-override block removed
+- `web/src/routes/health/bloodwork/{,marker/,panel/}+page.svelte` — flag H/L/C, draft badge
+- `web/src/routes/health/{history/encounter,history/import,immunizations,immunizations/import,immunizations/vaccine}/+page.svelte` — status + confidence badges
+- `web/src/routes/money/{+layout,settings/+page,business/invoices/+page}.svelte` — error badge, login status, invoice status
+- `web/src/routes/briefings/settings/+page.svelte` — path hint colors (the orphan token refs)
+- `AGENTS.md` — Web UI section notes the token set
+
 ## 2026-07-25: Sleep cycles off the dispatch thread (ISSUE-144 Tier 2)
 
 Finished what the Tier 1 entry below deferred: the per-user and per-channel sleep cycles now run on the same off-thread mechanism as the DB checks. The loop has no known-long synchronous check left and `run_daemon` holds no `watchdog.suspended()` call sites, so the stall watchdog covers the entire loop — the end state ISSUE-144 asked for.

@@ -1530,11 +1530,11 @@
   }
 
   .path-ok {
-    color: var(--color-success, #2a8);
+    color: var(--status-success-fg);
   }
 
   .path-warn {
-    color: var(--color-warning, #b80);
+    color: var(--status-warn-fg);
   }
 
   .add-block {

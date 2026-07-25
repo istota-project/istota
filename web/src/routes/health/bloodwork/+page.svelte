@@ -385,8 +385,8 @@
     font-size: var(--text-xs);
     padding: 0 0.4rem;
     border-radius: var(--radius-pill);
-    background: #3a3017;
-    color: #e6b96b;
+    background: var(--status-warn-bg);
+    color: var(--status-warn-fg);
   }
   .muted {
     color: var(--text-muted);
@@ -640,12 +640,15 @@
   }
   tbody td.flag-H {
     background: rgba(204, 102, 102, 0.22);
-    color: #f8a09c;
+    color: var(--status-danger-fg);
   }
   tbody td.flag-L {
     background: rgba(122, 163, 216, 0.22);
-    color: #9cc7f8;
+    color: var(--status-info-fg);
   }
+  /* Critical is a step above High, so it keeps a solid saturated fill rather
+	   than the tinted cell — but it needs a light-theme value of its own, or the
+	   near-black block lands on a white table. */
   tbody td.flag-C {
     background: #6b0000;
     color: #fff;
@@ -684,15 +687,8 @@
   :global(:root[data-theme='light']) .msg.error {
     color: #c0271d;
   }
-  :global(:root[data-theme='light']) .badge {
-    background: #f6eccd;
-    color: #8a6400;
-  }
-  :global(:root[data-theme='light']) tbody td.flag-H {
-    color: #b3261e;
-  }
-  :global(:root[data-theme='light']) tbody td.flag-L {
-    color: #1d5fc4;
+  :global(:root[data-theme='light']) tbody td.flag-C {
+    background: #b3261e;
   }
 
   @media (max-width: 768px) {

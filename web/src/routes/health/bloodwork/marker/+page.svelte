@@ -643,13 +643,16 @@
     font-weight: 500;
   }
   .flag-H {
-    background: #4a2020;
-    color: #f8a09c;
+    background: var(--status-danger-bg);
+    color: var(--status-danger-fg);
   }
   .flag-L {
-    background: #20384a;
-    color: #9cc7f8;
+    background: var(--status-info-bg);
+    color: var(--status-info-fg);
   }
+  /* Critical is a step above High, so it keeps a solid saturated fill rather
+	   than the tinted chip — but it needs a light-theme value of its own, or the
+	   near-black block lands on a white card. */
   .flag-C {
     background: #6b0000;
     color: #fff;
@@ -688,13 +691,8 @@
   :global(:root[data-theme='light']) .alert .error-text {
     color: #c0271d;
   }
-  :global(:root[data-theme='light']) .flag-H {
-    background: #f7dada;
-    color: #b3261e;
-  }
-  :global(:root[data-theme='light']) .flag-L {
-    background: #dbe9fb;
-    color: #1d5fc4;
+  :global(:root[data-theme='light']) .flag-C {
+    background: #b3261e;
   }
   :global(:root[data-theme='light']) .msg.error {
     color: #c0271d;

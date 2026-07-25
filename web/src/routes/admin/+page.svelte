@@ -742,13 +742,13 @@
     flex-shrink: 0;
   }
   .dot-ok {
-    background: #4aff7f;
+    background: var(--status-success-fg);
   }
   .dot-bad {
-    background: #ff5a5a;
+    background: var(--status-danger-fg);
   }
   .dot-warn {
-    background: #f5a623;
+    background: var(--status-warn-fg);
   }
   .dot-mute {
     background: var(--text-dim);
@@ -813,7 +813,7 @@
   }
 
   .kpi-warn .kpi-value {
-    color: #ff9b5a;
+    color: var(--status-warn-fg);
   }
 
   /* Source distribution bars (horizontal, one per source_type). */
@@ -860,7 +860,7 @@
 
   .failed-inline {
     margin-left: 0.4rem;
-    color: #ff9b5a;
+    color: var(--status-danger-fg);
     font-size: var(--text-xs);
   }
 
@@ -923,7 +923,7 @@
     display: inline-block;
     padding: 0.05rem 0.4rem;
     background: rgba(255, 90, 90, 0.15);
-    color: #ff9b5a;
+    color: var(--status-danger-fg);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
   }
@@ -954,7 +954,7 @@
   .row-error td:first-child::before {
     content: '!';
     display: inline-block;
-    color: #ff9b5a;
+    color: var(--status-danger-fg);
     margin-right: 0.4rem;
     font-weight: 700;
   }
@@ -982,7 +982,7 @@
   .error-row pre {
     margin: 0;
     font-size: var(--text-xs);
-    color: #ff9b5a;
+    color: var(--status-danger-fg);
     white-space: pre-wrap;
   }
 
@@ -1003,7 +1003,7 @@
   }
 
   .module-warn {
-    border-color: #663520;
+    border-color: var(--status-warn-bg);
   }
 
   .module-name {
@@ -1094,8 +1094,8 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     border-radius: var(--radius-pill);
-    background: #6c8ebf;
-    color: #000;
+    background: var(--status-info-bg);
+    color: var(--status-info-fg);
   }
 
   .overrides {
@@ -1157,25 +1157,8 @@
     }
   }
 
-  /* Light theme overrides — dark rules above untouched. JS chart/dot color
-	   constants (SOURCE_COLOR, .dot-ok/.dot-bad fills) are data-viz on their own
-	   colored swatches and are left as-is. Only CSS text/borders fixed here. */
-  :global(:root[data-theme='light']) .kpi-warn .kpi-value {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .failed-inline {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .failed-pill {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .row-error td:first-child::before {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .error-row pre {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .module-warn {
-    border-color: #e3c08a;
-  }
+  /* No light-theme override block: every status color on this page now comes
+	   from the --status-* tokens, which define both themes. The JS chart color
+	   constants (SOURCE_COLOR) stay hardcoded — they are a categorical data-viz
+	   palette on their own colored swatches, not a severity scale. */
 </style>

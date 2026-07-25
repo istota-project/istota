@@ -525,8 +525,8 @@
   }
 
   .login-status[data-kind='ok'] {
-    color: #6eb884;
-    border-color: #2d4a32;
+    color: var(--status-success-fg);
+    border-color: var(--status-success-bg);
   }
 
   .login-status[data-kind='auth'],
@@ -549,8 +549,4 @@
   }
 
   /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .login-status[data-kind='ok'] {
-    color: #15803d;
-    border-color: #b6e0c2;
-  }
 </style>

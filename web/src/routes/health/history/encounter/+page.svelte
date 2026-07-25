@@ -452,15 +452,15 @@
   }
   .badge.status-active {
     background: hsla(0, 55%, 60%, 0.22);
-    color: #f0a09c;
+    color: var(--status-danger-fg);
   }
   .badge.status-chronic {
     background: hsla(35, 60%, 60%, 0.22);
-    color: #e6b96b;
+    color: var(--status-warn-fg);
   }
   .badge.status-resolved {
     background: hsla(145, 40%, 55%, 0.18);
-    color: #9bd6a6;
+    color: var(--status-success-fg);
   }
 
   .form {
@@ -546,15 +546,6 @@
   }
   :global(:root[data-theme='light']) .related li a:hover {
     border-color: var(--border-default);
-  }
-  :global(:root[data-theme='light']) .badge.status-active {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .badge.status-chronic {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .badge.status-resolved {
-    color: #15803d;
   }
   :global(:root[data-theme='light']) .msg.error {
     color: #c0271d;

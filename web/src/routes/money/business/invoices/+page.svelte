@@ -397,12 +397,12 @@
   }
 
   .inv-status.status-posted {
-    color: #e8b84a;
+    color: var(--status-warn-fg);
     background: rgba(232, 184, 74, 0.12);
   }
 
   .inv-status.status-paid {
-    color: #4adbc0;
+    color: var(--status-success-fg);
     background: rgba(74, 219, 192, 0.12);
   }
 
@@ -497,12 +497,6 @@
   }
 
   /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .inv-status.status-posted {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .inv-status.status-paid {
-    color: #0d8f7e;
-  }
   :global(:root[data-theme='light']) .detail-discount {
     color: #a3157e;
   }

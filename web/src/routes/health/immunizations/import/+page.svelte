@@ -586,15 +586,15 @@
   }
   .badge.conf-high {
     background: hsla(145, 40%, 55%, 0.22);
-    color: #9bd6a6;
+    color: var(--status-success-fg);
   }
   .badge.conf-medium {
     background: hsla(35, 60%, 60%, 0.22);
-    color: #e6b96b;
+    color: var(--status-warn-fg);
   }
   .badge.conf-low {
     background: hsla(0, 60%, 55%, 0.28);
-    color: #ff9d96;
+    color: var(--status-danger-fg);
   }
   .badge.conf-manual {
     background: hsla(220, 8%, 60%, 0.18);
@@ -617,14 +617,5 @@
   }
   :global(:root[data-theme='light']) .msg.warn {
     color: #946a00;
-  }
-  :global(:root[data-theme='light']) .badge.conf-high {
-    color: #15803d;
-  }
-  :global(:root[data-theme='light']) .badge.conf-medium {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .badge.conf-low {
-    color: #c0271d;
   }
 </style>
