@@ -229,7 +229,7 @@ class TestVisibleNote:
         )
         _s, result, _a2, _t = results[0]
         assert "the real answer" in result
-        assert "Model note" in result
+        assert "Ran on" in result
         assert "opus-high" in result
         assert "native-x" in result
 
@@ -240,7 +240,7 @@ class TestVisibleNote:
             primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
             fallback_result=BrainResult(True, "answer", stop_reason="completed", model_used="native-smart-model"),
         )
-        assert "Model note" not in results[0][1]
+        assert "Ran on" not in results[0][1]
 
     def test_no_note_for_default_model(self, tmp_path):
         results, primary, fb, _a = _run(
@@ -248,7 +248,7 @@ class TestVisibleNote:
             task_model="",
             primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
         )
-        assert "Model note" not in results[0][1]
+        assert "Ran on" not in results[0][1]
 
     def test_no_note_on_failed_fallback(self, tmp_path):
         results, primary, fb, _a = _run(
@@ -259,7 +259,7 @@ class TestVisibleNote:
         )
         _s, result, _a2, _t = results[0]
         assert _s is False
-        assert "Model note" not in result
+        assert "Ran on" not in result
 
 
 class TestStickiness:

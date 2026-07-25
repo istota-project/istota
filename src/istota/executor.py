@@ -549,11 +549,7 @@ def _append_model_note(result_text, dropped_pin, primary_kind, actual_model):
     # inherit italics onto the emoji and the model IDs). Asterisk emphasis
     # (not underscore) because `primary_kind`/model IDs can contain `_`
     # (e.g. `claude_code`), which would confuse underscore delimiters.
-    note = (
-        f"⚠️ *Model note:* `{dropped_pin}` *isn't available on the fallback "
-        f"brain ({primary_kind} unavailable), so this ran on* `{model_str}` "
-        f"*instead.*"
-    )
+    note = f"⚠️ *Ran on* `{model_str}` *(*`{dropped_pin}` *unavailable).*"
     return f"{result_text}\n\n{note}"
 
 
