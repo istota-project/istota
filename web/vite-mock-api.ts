@@ -1034,6 +1034,7 @@ interface MockEntry {
   url: string;
   content: string;
   images: string[];
+  duplicate_image_count: number;
   feed: MockFeedSource;
   status: 'read' | 'unread';
   starred: boolean;
@@ -1157,6 +1158,14 @@ function generateMockEntries(): MockEntry[] {
       images.push(`https://picsum.photos/seed/feed-${i}/800/500`);
     }
 
+    // Every 8th image post stands in for a reblog whose picture the server
+    // suppressed as a recent repeat — one of them loses its only image, so
+    // both the badge and the image-less-image-post case are visible in dev.
+    const duplicateImageCount = images.length > 0 && i % 8 === 4 ? 1 : 0;
+    if (duplicateImageCount && images.length === 1) {
+      images.length = 0;
+    }
+
     const title = `${sampleTitles[i % sampleTitles.length]} (#${total - i})`;
     const snippet = sampleSnippets[i % sampleSnippets.length];
 
@@ -1166,6 +1175,7 @@ function generateMockEntries(): MockEntry[] {
       url: `${feed.site_url}/posts/${i + 1}`,
       content: `<p>${snippet}</p><p>This is mock content number ${i + 1}, served by the dev mock API.</p>`,
       images,
+      duplicate_image_count: duplicateImageCount,
       feed,
       // First ~25% unread, rest read — gives the Unseen filter something to do.
       status: i < total * 0.25 ? 'unread' : 'read',

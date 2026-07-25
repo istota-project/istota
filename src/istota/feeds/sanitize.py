@@ -121,6 +121,26 @@ _RESIZE_QUERY_KEYS = frozenset(
 
 _IMG_EXT_RE = re.compile(r"\.(jpe?g|png|gif|webp|avif|bmp|svg|tiff?)$", re.IGNORECASE)
 
+# Tumblr's NPF media URLs put the rendered size in the *path*, not the query,
+# and serve the same file from numbered CDN shards:
+#
+#   https://64.media.tumblr.com/<media-key>/<post-key>-NN/s500x750/<hash>.jpg
+#          └ shard                                        └ size    └ content hash
+#
+# Neither the shard nor the size changes which picture it is, so both are
+# normalised away. The filename is a content hash, which is what actually
+# identifies the image (ISSUE-162).
+_TUMBLR_MEDIA_HOST_RE = re.compile(r"^(?:\d+\.)?media\.tumblr\.com$", re.IGNORECASE)
+_TUMBLR_SIZE_SEGMENT_RE = re.compile(r"^s(\d+)x(\d+)$", re.IGNORECASE)
+
+
+def _tumblr_identity(netloc: str, path: str) -> str:
+    """Canonical ``media.tumblr.com`` path with the size segment removed."""
+    segments = [
+        seg for seg in path.split("/") if not _TUMBLR_SIZE_SEGMENT_RE.match(seg)
+    ]
+    return "media.tumblr.com" + "/".join(segments)
+
 
 def image_identity(url: str) -> str:
     """A dedup key that treats resolution variants of one image as equal.
@@ -128,20 +148,30 @@ def image_identity(url: str) -> str:
     For a URL whose path ends in an image extension, the identity is
     ``netloc + path`` — the query string (width, quality, CDN signature) is
     ignored, so ``…/3049.jpg?width=140`` and ``…/3049.jpg?width=700`` collapse.
+    Tumblr media URLs additionally drop the CDN shard and the ``/sWxH/`` size
+    segment, which are the two axes a reblogged photo varies on.
     For anything else (e.g. ``image.php?id=1``) the full URL is the identity,
     so images distinguished purely by query are not wrongly merged.
     """
     if not url:
         return url
     parsed = urlparse(url)
+    if _TUMBLR_MEDIA_HOST_RE.match(parsed.netloc):
+        return _tumblr_identity(parsed.netloc, parsed.path)
     if _IMG_EXT_RE.search(parsed.path):
         return f"{parsed.netloc}{parsed.path}"
     return url
 
 
 def _url_width(url: str) -> int:
-    """Best-effort pixel width from a resize query param (0 if absent)."""
-    query = parse_qs(urlparse(url).query)
+    """Best-effort pixel width for an image URL (0 when unknown).
+
+    Reads a resize query param (``width=`` / ``w=``) or, for tumblr media
+    URLs, the ``/sWxH/`` path segment — so the largest rendition wins when
+    variants of one photo collapse.
+    """
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
     for key in ("width", "w"):
         values = query.get(key)
         if values:
@@ -149,6 +179,11 @@ def _url_width(url: str) -> int:
                 return int(values[0])
             except (ValueError, TypeError):
                 continue
+    if _TUMBLR_MEDIA_HOST_RE.match(parsed.netloc):
+        for seg in parsed.path.split("/"):
+            match = _TUMBLR_SIZE_SEGMENT_RE.match(seg)
+            if match:
+                return int(match.group(1))
     return 0
 
 

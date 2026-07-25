@@ -2,6 +2,34 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Repeat-image suppression in the feed reader (ISSUE-162)
+
+Tumblr feeds painted the same photo over and over — a reblog wave sends one picture through every blog you follow. Sampling showed ~4.6% of stored image instances were exact-URL duplicates. Two distinct mechanisms, fixed in two layers.
+
+**Layer 1 — ingest.** The provider walks a post's own `content` *plus* every `trail` entry's blocks, so a reblog-with-commentary listed its photo twice inside one entry. Rather than a tumblr-specific normalizer, folded tumblr into the existing image-identity helper the RSS path already uses (the issue's own "these should converge" note): `image_identity` now strips the CDN shard (`NN.media.tumblr.com` → `media.tumblr.com`) and the `/sWxH/` size segment, keying on the remaining `<media-key>/…/<content-hash>` path, and `_url_width` reads that size segment so `dedupe_image_variants` keeps the largest rendition. The provider then just calls `dedupe_image_variants`. Declined the media-key-alone stretch (measured +27 of 17,986 — could merge genuinely different crops).
+
+**Layer 2 — cross-entry, bounded.** A reblog is a legitimately distinct entry, so entries are never dropped and rows are never mutated; only the repeated *tile* is suppressed. Computed server-side at read time rather than as client session state, so it survives paging and reloads.
+
+The rule is a function of two entries alone — *an image on E is hidden when another entry carries the same image and is newer than E by no more than the window* — which is what makes it page-stable and idempotent: no seen-ledger, no "already served" state, the newest carrier always keeps the tile, ties break by id. Explicitly bounded per the issue: an all-time index would silently hide an image resurfacing months later and grow without limit.
+
+Design points worth remembering:
+- **`seen_ts` is epoch seconds, not the ISO string.** Entry timestamps are normally ISO UTC from the poller, but the RSS path falls back to whatever the feed shipped (RFC 822 shows up), so string range comparison would be wrong. `parse_seen_ts` handles ISO/`Z`/naive/RFC822 and returns None otherwise; an undated entry is simply skipped (it can't be windowed either way).
+- **Owner lookup is scoped to the slice being rendered** — feed, category, *and* starred. Browsing one blog must not blank a tile because a different blog reblogged it later, and a starred post must keep the picture you starred it for.
+- **Read state is deliberately not a scope.** The reader marks entries read as you scroll; scoping on status would make suppressed images pop back into view mid-scroll. There's a regression test for this and for the starred case.
+- The payload reports `duplicate_image_count` instead of silently shrinking `images` — the card renders "N repeats hidden", and the count keeps an all-suppressed post on the image side of the image/text toggle instead of letting it drift into the text view.
+- Known cosmetic edge: suppression orders by published/fetched time, so under a `created_at` sort the carrier that keeps the tile can render after the one that lost it. The note wording ("a more recent post") stays true; not worth ordering-aware suppression.
+
+Benchmarked ~8ms per 500-entry page against a 10k-row index, and verified end-to-end at that scale that cross-shard/cross-size repeats are actually caught (24 of an expected 24). TDD throughout: normalizer and provider tests written and confirmed failing first, then the DB/route layers. Full suite green (8187 passed).
+
+**Files added/modified:**
+- `src/istota/feeds/image_dedupe.py` — new: `parse_seen_ts`, `entry_seen_ts`, `PageEntry`, `plan_suppression`, `DEFAULT_WINDOW_DAYS`
+- `src/istota/feeds/sanitize.py` — tumblr-aware `image_identity` + size-segment width
+- `src/istota/feeds/providers/tumblr.py` — dedupe collected images
+- `src/istota/feeds/db.py` — schema v3 `entry_images` + `idx_entry_images_key`, `_migrate_v2_to_v3` backfill, `_index_entry_images` in `insert_entries`, `image_key_owners` (chunked IN), window setting accessors
+- `src/istota/feeds/routes.py` — `_plan_image_suppression`, filtered `images` + `duplicate_image_count`, config get/put/validate for the window
+- `web/src/lib/api.ts`, `web/src/lib/components/FeedCard.svelte`, `FeedReader.svelte`, `web/src/routes/feeds/+page.svelte`, `web/src/routes/feeds/settings/+page.svelte`, `web/vite-mock-api.ts`
+- `tests/test_feeds_image_dedupe.py`, `tests/test_feeds_providers_tumblr.py` (new); `tests/test_feeds_sanitize.py`, `tests/test_feeds_db.py`, `tests/test_feeds_routes.py`
+
 ## 2026-07-25: Delete archived briefing results from the web reader
 
 The briefings reader could list and read generated briefings but never remove one — the only prune path was the age-based `archive_retention_days` sweep. Added a per-result delete affordance, end-to-end (it was missing at every layer: DB, route, api client, UI).

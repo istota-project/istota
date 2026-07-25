@@ -127,8 +127,8 @@ class TestGetFeeds:
         body = client.get("/istota/api/feeds").json()
         entry = body["entries"][0]
         expected = {
-            "id", "title", "url", "content", "images", "feed",
-            "status", "starred", "starred_at",
+            "id", "title", "url", "content", "images", "duplicate_image_count",
+            "feed", "status", "starred", "starred_at",
             "published_at", "created_at",
         }
         assert set(entry.keys()) == expected
@@ -592,3 +592,246 @@ class TestOpml:
         assert "opml" in resp.text.lower()
         assert "tumblr:nemfrog" in resp.text
         assert "attachment" in resp.headers.get("content-disposition", "")
+
+
+# ---------------------------------------------------------------------------
+# GET /feeds — cross-entry image suppression (ISSUE-162)
+# ---------------------------------------------------------------------------
+
+
+IMG = "https://64.media.tumblr.com/aaa/bbb-01/s500x750/hash.jpg"
+IMG_BIG = "https://72.media.tumblr.com/aaa/bbb-01/s1280x1920/hash.jpg"
+OTHER_IMG = "https://64.media.tumblr.com/ccc/ddd-01/s500x750/other.jpg"
+
+
+def _seed_reblog_pair(ctx, *, older_published: str, newer_published: str,
+                      same_feed: bool = True, window_days: int | None = None):
+    """Two entries carrying the same picture, newest first by publication."""
+    feeds_db.init_db(ctx.db_path)
+    with feeds_db.connect(ctx.db_path) as conn:
+        cat_id = feeds_db.upsert_category(conn, "art", "Art")
+        feed_a = feeds_db.upsert_feed(
+            conn, url="tumblr:a", title="A", site_url=None,
+            source_type="tumblr", category_id=cat_id, poll_interval_minutes=60,
+        )
+        feed_b = feed_a if same_feed else feeds_db.upsert_feed(
+            conn, url="tumblr:b", title="B", site_url=None,
+            source_type="tumblr", category_id=None, poll_interval_minutes=60,
+        )
+        feeds_db.insert_entries(conn, feed_a, [
+            EntryRecord(
+                id=0, feed_id=feed_a, guid="newer", title="Newer", url=None,
+                author=None, content_html=None, content_text=None,
+                image_urls=[IMG_BIG], published_at=newer_published,
+                fetched_at=newer_published, status="unread",
+            ),
+        ])
+        feeds_db.insert_entries(conn, feed_b, [
+            EntryRecord(
+                id=0, feed_id=feed_b, guid="older", title="Older", url=None,
+                author=None, content_html=None, content_text=None,
+                image_urls=[IMG, OTHER_IMG], published_at=older_published,
+                fetched_at=older_published, status="unread",
+            ),
+        ])
+        if window_days is not None:
+            feeds_db.set_image_dedupe_window_days(conn, window_days)
+        conn.commit()
+    return {"feed_a": feed_a, "feed_b": feed_b, "cat_id": cat_id}
+
+
+def _by_title(body) -> dict:
+    return {e["title"]: e for e in body["entries"]}
+
+
+class TestImageSuppression:
+    def test_repeat_inside_window_is_hidden_on_the_older_entry(self, ctx, client):
+        _seed_reblog_pair(
+            ctx,
+            newer_published="2026-07-16T10:00:00+00:00",
+            older_published="2026-07-14T10:00:00+00:00",
+        )
+        entries = _by_title(client.get("/istota/api/feeds").json())
+
+        # Both entries still render — only the repeated tile goes.
+        assert set(entries) == {"Newer", "Older"}
+        assert entries["Newer"]["images"] == [IMG_BIG]
+        assert entries["Newer"]["duplicate_image_count"] == 0
+        assert entries["Older"]["images"] == [OTHER_IMG]
+        assert entries["Older"]["duplicate_image_count"] == 1
+
+    def test_repeat_outside_window_renders(self, ctx, client):
+        _seed_reblog_pair(
+            ctx,
+            newer_published="2026-07-16T10:00:00+00:00",
+            older_published="2026-05-01T10:00:00+00:00",
+        )
+        entries = _by_title(client.get("/istota/api/feeds").json())
+
+        assert entries["Older"]["images"] == [IMG, OTHER_IMG]
+        assert entries["Older"]["duplicate_image_count"] == 0
+
+    def test_window_zero_disables_suppression(self, ctx, client):
+        _seed_reblog_pair(
+            ctx,
+            newer_published="2026-07-16T10:00:00+00:00",
+            older_published="2026-07-14T10:00:00+00:00",
+            window_days=0,
+        )
+        entries = _by_title(client.get("/istota/api/feeds").json())
+
+        assert entries["Older"]["images"] == [IMG, OTHER_IMG]
+        assert entries["Older"]["duplicate_image_count"] == 0
+
+    def test_configured_window_is_honoured(self, ctx, client):
+        _seed_reblog_pair(
+            ctx,
+            newer_published="2026-07-16T10:00:00+00:00",
+            older_published="2026-06-20T10:00:00+00:00",  # 26 days
+            window_days=30,
+        )
+        entries = _by_title(client.get("/istota/api/feeds").json())
+
+        assert entries["Older"]["images"] == [OTHER_IMG]
+
+    def test_feed_filter_scopes_the_lookup(self, ctx, client):
+        """Viewing one blog must not hide tiles because of another blog."""
+        ids = _seed_reblog_pair(
+            ctx,
+            newer_published="2026-07-16T10:00:00+00:00",
+            older_published="2026-07-14T10:00:00+00:00",
+            same_feed=False,
+        )
+        entries = _by_title(
+            client.get(f"/istota/api/feeds?feed_id={ids['feed_b']}").json()
+        )
+
+        assert set(entries) == {"Older"}
+        assert entries["Older"]["images"] == [IMG, OTHER_IMG]
+        assert entries["Older"]["duplicate_image_count"] == 0
+
+    def test_category_filter_scopes_the_lookup(self, ctx, client):
+        ids = _seed_reblog_pair(
+            ctx,
+            newer_published="2026-07-16T10:00:00+00:00",
+            older_published="2026-07-14T10:00:00+00:00",
+            same_feed=False,
+        )
+        # Only feed A is in the category, so within that view nothing repeats.
+        entries = _by_title(
+            client.get(f"/istota/api/feeds?category_id={ids['cat_id']}").json()
+        )
+
+        assert set(entries) == {"Newer"}
+        assert entries["Newer"]["images"] == [IMG_BIG]
+
+    def test_owner_outside_the_page_still_suppresses(self, ctx, client):
+        """Paging must not resurrect a tile the previous page already showed."""
+        _seed_reblog_pair(
+            ctx,
+            newer_published="2026-07-16T10:00:00+00:00",
+            older_published="2026-07-14T10:00:00+00:00",
+        )
+        body = client.get("/istota/api/feeds?limit=1&offset=1").json()
+
+        assert [e["title"] for e in body["entries"]] == ["Older"]
+        assert body["entries"][0]["images"] == [OTHER_IMG]
+
+    def test_read_state_does_not_change_suppression(self, ctx, client):
+        """Marking the newer entry read (as the reader does while scrolling)
+        must not make the hidden tile pop back into view."""
+        _seed_reblog_pair(
+            ctx,
+            newer_published="2026-07-16T10:00:00+00:00",
+            older_published="2026-07-14T10:00:00+00:00",
+        )
+        with feeds_db.connect(ctx.db_path) as conn:
+            newer = next(
+                e for e in feeds_db.list_entries(conn) if e.guid == "newer"
+            )
+            feeds_db.update_entry_status(conn, [newer.id], "read")
+            conn.commit()
+
+        entries = _by_title(client.get("/istota/api/feeds?status=unread").json())
+
+        assert set(entries) == {"Older"}
+        assert entries["Older"]["images"] == [OTHER_IMG]
+
+    def test_starred_view_keeps_the_image_you_starred(self, ctx, client):
+        """A starred post must not lose its picture to an unstarred repeat."""
+        _seed_reblog_pair(
+            ctx,
+            newer_published="2026-07-16T10:00:00+00:00",
+            older_published="2026-07-14T10:00:00+00:00",
+        )
+        with feeds_db.connect(ctx.db_path) as conn:
+            older = next(
+                e for e in feeds_db.list_entries(conn) if e.guid == "older"
+            )
+            feeds_db.update_entry_starred(conn, [older.id], True)
+            conn.commit()
+
+        entries = _by_title(client.get("/istota/api/feeds?starred=1").json())
+
+        assert set(entries) == {"Older"}
+        assert entries["Older"]["images"] == [IMG, OTHER_IMG]
+        assert entries["Older"]["duplicate_image_count"] == 0
+
+
+class TestImageDedupeWindowConfig:
+    def test_get_config_reports_the_window(self, ctx, client):
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feeds_db.set_image_dedupe_window_days(conn, 21)
+            conn.commit()
+
+        settings = client.get("/istota/api/feeds/config").json()["config"]["settings"]
+        assert settings["image_dedupe_window_days"] == 21
+
+    def test_put_config_round_trips_the_window(self, ctx, client):
+        _seed(ctx)
+        resp = client.put(
+            "/istota/api/feeds/config",
+            json={"config": {
+                "settings": {"image_dedupe_window_days": 7},
+                "categories": [],
+                "feeds": [],
+            }},
+        )
+        assert resp.status_code == 200
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_image_dedupe_window_days(conn) == 7
+
+    def test_put_config_accepts_zero_as_off(self, ctx, client):
+        _seed(ctx)
+        client.put(
+            "/istota/api/feeds/config",
+            json={"config": {
+                "settings": {"image_dedupe_window_days": 0},
+                "categories": [], "feeds": [],
+            }},
+        )
+        with feeds_db.connect(ctx.db_path) as conn:
+            assert feeds_db.get_image_dedupe_window_days(conn) == 0
+
+    def test_put_config_rejects_a_non_int_window(self, ctx, client):
+        _seed(ctx)
+        resp = client.put(
+            "/istota/api/feeds/config",
+            json={"config": {
+                "settings": {"image_dedupe_window_days": "soon"},
+                "categories": [], "feeds": [],
+            }},
+        )
+        assert resp.status_code == 400
+
+    def test_put_config_rejects_a_negative_window(self, ctx, client):
+        _seed(ctx)
+        resp = client.put(
+            "/istota/api/feeds/config",
+            json={"config": {
+                "settings": {"image_dedupe_window_days": -1},
+                "categories": [], "feeds": [],
+            }},
+        )
+        assert resp.status_code == 400

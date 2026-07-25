@@ -343,7 +343,10 @@
 
   let filteredEntries = $derived(
     entries.filter((e) => {
-      const isImage = e.images.length > 0;
+      // An entry whose only images were suppressed as repeats is still an
+      // image post — keep it on the image side of the toggle rather than
+      // letting it drift into the text view.
+      const isImage = e.images.length > 0 || (e.duplicate_image_count ?? 0) > 0;
       if (isImage && !$showImages) return false;
       if (!isImage && !$showText) return false;
       return true;
@@ -665,6 +668,12 @@
     background: var(--surface-badge);
     padding: 0.1rem 0.4rem;
     border-radius: 0.2rem;
+  }
+
+  .feed-grid :global(.repeat-note) {
+    font-size: var(--text-xs);
+    opacity: 0.7;
+    white-space: nowrap;
   }
 
   .feed-grid :global(.meta-link) {

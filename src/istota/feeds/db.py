@@ -15,18 +15,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
+from istota.feeds.image_dedupe import entry_seen_ts
 from istota.feeds.models import (
     CategoryRecord,
     EntryRecord,
     FeedRecord,
     parse_image_urls,
 )
+from istota.feeds.sanitize import image_identity
 
 
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA_SQL = """
@@ -77,6 +79,22 @@ CREATE INDEX IF NOT EXISTS idx_entries_published
 CREATE INDEX IF NOT EXISTS idx_entries_starred
     ON feed_entries(starred) WHERE starred = 1;
 
+-- Normalised image keys per entry, for the reader's cross-entry image
+-- suppression (ISSUE-162). Derived data: rebuildable from feed_entries at
+-- any time, and deliberately a side table so entry rows stay untouched.
+-- ``seen_ts`` is epoch seconds (published date, else fetch time) so the
+-- look-back window is an exact integer range scan rather than string
+-- comparison over mixed date formats.
+CREATE TABLE IF NOT EXISTS entry_images (
+    entry_id INTEGER NOT NULL REFERENCES feed_entries(id) ON DELETE CASCADE,
+    image_key TEXT NOT NULL,
+    seen_ts INTEGER NOT NULL,
+    PRIMARY KEY (entry_id, image_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entry_images_key
+    ON entry_images(image_key, seen_ts DESC);
+
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -103,8 +121,48 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Add ``entry_images`` and backfill it from existing entries.
+
+    One pass over every entry that stored images. Cheap enough to run inline
+    (a heavy image reader holds tens of thousands of image instances), and the
+    table is pure derived data, so a partial backfill would only weaken
+    suppression, never corrupt anything.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entry_images (
+            entry_id INTEGER NOT NULL REFERENCES feed_entries(id) ON DELETE CASCADE,
+            image_key TEXT NOT NULL,
+            seen_ts INTEGER NOT NULL,
+            PRIMARY KEY (entry_id, image_key)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entry_images_key "
+        "ON entry_images(image_key, seen_ts DESC)"
+    )
+    rows = conn.execute(
+        "SELECT id, image_urls, published_at, fetched_at FROM feed_entries "
+        "WHERE image_urls IS NOT NULL AND image_urls != ''"
+    ).fetchall()
+    indexed = 0
+    for row in rows:
+        indexed += _index_entry_images(
+            conn,
+            entry_id=row["id"],
+            image_urls=parse_image_urls(row["image_urls"]),
+            published_at=row["published_at"],
+            fetched_at=row["fetched_at"],
+        )
+    if indexed:
+        logger.info("feeds_db_image_index_backfilled keys=%s", indexed)
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (2, _migrate_v1_to_v2),
+    (3, _migrate_v2_to_v3),
 ]
 
 
@@ -357,6 +415,7 @@ def delete_feed(conn: sqlite3.Connection, url: str) -> None:
 
 
 _DEFAULT_INTERVAL_KEY = "feeds_settings.default_poll_interval_minutes"
+_IMAGE_DEDUPE_WINDOW_KEY = "feeds_settings.image_dedupe_window_days"
 
 
 def get_default_poll_interval(conn: sqlite3.Connection) -> int | None:
@@ -386,6 +445,40 @@ def set_default_poll_interval(
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
             (_DEFAULT_INTERVAL_KEY, str(minutes)),
+        )
+
+
+def get_image_dedupe_window_days(conn: sqlite3.Connection) -> int | None:
+    """Read the user-set image-suppression look-back window. ``None`` if unset.
+
+    ``0`` is a real value meaning "off", distinct from unset (which falls back
+    to :data:`istota.feeds.image_dedupe.DEFAULT_WINDOW_DAYS`).
+    """
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = ?",
+        (_IMAGE_DEDUPE_WINDOW_KEY,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return None
+
+
+def set_image_dedupe_window_days(
+    conn: sqlite3.Connection, days: int | None,
+) -> None:
+    """Set or clear the image-suppression look-back window."""
+    if days is None:
+        conn.execute(
+            "DELETE FROM schema_meta WHERE key = ?",
+            (_IMAGE_DEDUPE_WINDOW_KEY,),
+        )
+    else:
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
+            (_IMAGE_DEDUPE_WINDOW_KEY, str(int(days))),
         )
 
 
@@ -427,7 +520,109 @@ def insert_entries(
         )
         if cur.rowcount:
             inserted += 1
+            _index_entry_images(
+                conn,
+                entry_id=cur.lastrowid,
+                image_urls=item.image_urls or [],
+                published_at=item.published_at,
+                fetched_at=item.fetched_at,
+            )
     return inserted
+
+
+def _index_entry_images(
+    conn: sqlite3.Connection,
+    *,
+    entry_id: int,
+    image_urls: list[str],
+    published_at: str | None,
+    fetched_at: str | None,
+) -> int:
+    """Record this entry's normalised image keys. Returns rows written.
+
+    Skipped entirely for an entry with no parseable timestamp — the look-back
+    window can't be evaluated against it, so indexing it would only produce
+    rows nothing can ever use.
+    """
+    if not image_urls:
+        return 0
+    seen_ts = entry_seen_ts(published_at, fetched_at)
+    if seen_ts is None:
+        return 0
+    keys = {image_identity(url) for url in image_urls if url}
+    if not keys:
+        return 0
+    conn.executemany(
+        "INSERT OR IGNORE INTO entry_images(entry_id, image_key, seen_ts) "
+        "VALUES (?, ?, ?)",
+        [(entry_id, key, seen_ts) for key in sorted(keys)],
+    )
+    return len(keys)
+
+
+# SQLite's default host-parameter ceiling is 999 on older builds; chunk well
+# under it so a wide page of images can't blow up the owners lookup.
+_KEY_CHUNK = 400
+
+
+def image_key_owners(
+    conn: sqlite3.Connection,
+    keys: list[str],
+    *,
+    min_ts: int,
+    max_ts: int,
+    feed_id: int | None = None,
+    category_id: int | None = None,
+    starred: bool | None = None,
+) -> list[tuple[str, int, int]]:
+    """Entries carrying any of ``keys`` with ``seen_ts`` in ``[min_ts, max_ts]``.
+
+    Returns ``(image_key, entry_id, seen_ts)`` rows for
+    :func:`istota.feeds.image_dedupe.plan_suppression`.
+
+    ``feed_id`` / ``category_id`` / ``starred`` scope the lookup to the same
+    slice of the reader the caller is rendering, so a tile is only ever hidden
+    because something the user can actually see already showed it — browsing
+    one blog doesn't blank an image because a different blog reblogged it, and
+    a starred post keeps the picture you starred it for. Read state is
+    deliberately *not* a scope: marking entries read as you scroll would
+    otherwise make suppressed images pop back into view mid-scroll.
+    """
+    if not keys:
+        return []
+
+    clauses = ["ei.seen_ts BETWEEN ? AND ?"]
+    scope_params: list = [min_ts, max_ts]
+    if feed_id:
+        clauses.append("e.feed_id = ?")
+        scope_params.append(feed_id)
+    if category_id:
+        clauses.append("f.category_id = ?")
+        scope_params.append(category_id)
+    if starred is not None:
+        clauses.append("e.starred = ?")
+        scope_params.append(1 if starred else 0)
+    where = " AND ".join(clauses)
+
+    out: list[tuple[str, int, int]] = []
+    unique_keys = list(dict.fromkeys(keys))
+    for start in range(0, len(unique_keys), _KEY_CHUNK):
+        chunk = unique_keys[start:start + _KEY_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT ei.image_key, ei.entry_id, ei.seen_ts
+            FROM entry_images ei
+            JOIN feed_entries e ON e.id = ei.entry_id
+            LEFT JOIN feeds f ON f.id = e.feed_id
+            WHERE ei.image_key IN ({placeholders}) AND {where}
+            """,
+            (*chunk, *scope_params),
+        ).fetchall()
+        out.extend(
+            (r["image_key"], int(r["entry_id"]), int(r["seen_ts"])) for r in rows
+        )
+    return out
 
 
 def list_entries(

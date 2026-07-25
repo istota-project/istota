@@ -57,7 +57,7 @@ src/istota/
 ├── nextcloud_client.py   # OCS + WebDAV plumbing
 ├── storage.py            # Bot-managed Nextcloud storage
 ├── briefings/            # Block/source briefings module — DB, source resolvers, generation, reader/settings routes, migration
-├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML
+├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe (repeat-image suppression)
 ├── health/               # Body stats, bloodwork, biomarker trends, encounters, immunizations, Garmin, OCR
 ├── location/             # Per-user location.db module (pings, places, visits, state, migration)
 ├── location_logic.py     # Place stats / cluster discovery (shared web ⇄ skill)

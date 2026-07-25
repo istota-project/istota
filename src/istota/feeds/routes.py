@@ -12,6 +12,8 @@ host overrides ``require_auth`` and ``verify_origin`` via
 from __future__ import annotations
 
 import asyncio
+import logging
+import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi import File as FastAPIFile
@@ -20,11 +22,21 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from istota.feeds import db as feeds_db
 from istota.feeds._loader import UserNotFoundError, resolve_for_user
 from istota.feeds._migrate import ensure_initialised
+from istota.feeds.image_dedupe import (
+    DEFAULT_WINDOW_DAYS,
+    PageEntry,
+    entry_seen_ts,
+    plan_suppression,
+)
 from istota.feeds.models import (
     FeedsContext,
     default_poll_interval_for,
     detect_source_type,
 )
+from istota.feeds.sanitize import image_identity
+
+
+logger = logging.getLogger("istota.feeds.routes")
 
 
 # ---------------------------------------------------------------------------
@@ -103,15 +115,23 @@ def _map_feed(feed, cat_by_id: dict) -> dict:
     }
 
 
-def _map_entry(entry, feed_by_id: dict, cat_by_id: dict) -> dict:
+def _map_entry(
+    entry, feed_by_id: dict, cat_by_id: dict, suppressed: set[str] | None = None,
+) -> dict:
     feed = feed_by_id.get(entry.feed_id)
     cat = cat_by_id.get(feed.category_id) if feed else None
+    hidden = suppressed or set()
+    images = [url for url in (entry.image_urls or []) if url not in hidden]
     return {
         "id": entry.id,
         "title": entry.title or "",
         "url": entry.url or "",
         "content": entry.content_html or "",
-        "images": list(entry.image_urls or []),
+        "images": images,
+        # Images dropped because a newer entry already showed them. Reported
+        # rather than silently omitted so the reader can still treat the entry
+        # as an image post and say what it hid (ISSUE-162).
+        "duplicate_image_count": len(entry.image_urls or []) - len(images),
         "feed": {
             "id": feed.id if feed else 0,
             "title": (feed.title or feed.url) if feed else "",
@@ -187,17 +207,83 @@ async def api_feeds(
                 category_id=category_id or None,
                 starred=starred_filter,
             )
-        return cats, feeds, entries, total
+            suppressed = _plan_image_suppression(
+                conn, entries,
+                feed_id=feed_id or None,
+                category_id=category_id or None,
+                starred=starred_filter,
+            )
+        return cats, feeds, entries, total, suppressed
 
-    cats, feeds, entries, total = await asyncio.to_thread(_query)
+    cats, feeds, entries, total, suppressed = await asyncio.to_thread(_query)
     cat_by_id = {c.id: c for c in cats}
     feed_by_id = {f.id: f for f in feeds}
 
     return {
         "feeds": [_map_feed(f, cat_by_id) for f in feeds],
-        "entries": [_map_entry(e, feed_by_id, cat_by_id) for e in entries],
+        "entries": [
+            _map_entry(e, feed_by_id, cat_by_id, suppressed.get(e.id))
+            for e in entries
+        ],
         "total": total,
     }
+
+
+def _plan_image_suppression(
+    conn,
+    entries: list,
+    *,
+    feed_id: int | None,
+    category_id: int | None,
+    starred: bool | None = None,
+) -> dict[int, set[str]]:
+    """Decide which image tiles this page should hide (ISSUE-162).
+
+    A reblog wave repeats the same picture across nearby entries; the newest
+    carrier keeps the tile and the rest drop it, bounded by the user's
+    look-back window. Purely a read-time display decision — nothing is
+    written, and entries are never dropped.
+
+    Best-effort: any failure returns "suppress nothing" so a reader page can
+    never fail on a cosmetic feature.
+    """
+    window_days = feeds_db.get_image_dedupe_window_days(conn)
+    if window_days is None:
+        window_days = DEFAULT_WINDOW_DAYS
+    if window_days <= 0:
+        return {}
+
+    page = [
+        PageEntry(
+            entry_id=e.id,
+            seen_ts=entry_seen_ts(e.published_at, e.fetched_at),
+            image_urls=list(e.image_urls or []),
+        )
+        for e in entries
+        if e.image_urls
+    ]
+    dated = [p for p in page if p.seen_ts is not None]
+    if not dated:
+        return {}
+
+    keys = [image_identity(url) for p in dated for url in p.image_urls]
+    window_seconds = window_days * 86400
+    try:
+        owners = feeds_db.image_key_owners(
+            conn,
+            keys,
+            # Only owners newer than the oldest entry on the page can suppress
+            # anything, and only up to one window past the newest.
+            min_ts=min(p.seen_ts for p in dated),
+            max_ts=max(p.seen_ts for p in dated) + window_seconds,
+            feed_id=feed_id,
+            category_id=category_id,
+            starred=starred,
+        )
+    except sqlite3.Error as exc:  # pragma: no cover - defensive
+        logger.warning("feeds image suppression skipped: %s", exc)
+        return {}
+    return plan_suppression(dated, owners, window_days=window_days)
 
 
 @router.put("/entries/batch")
@@ -356,9 +442,12 @@ async def api_get_config(ctx: FeedsContext = Depends(get_user_context)):
             cats = feeds_db.list_categories(conn)
             feeds = feeds_db.list_feeds(conn)
             default_interval = feeds_db.get_default_poll_interval(conn)
+            image_dedupe_window = feeds_db.get_image_dedupe_window_days(conn)
             total_entries = feeds_db.count_entries(conn)
             unread = feeds_db.count_entries(conn, status="unread")
-        cfg = _config_payload_from_db(cats, feeds, default_interval)
+        cfg = _config_payload_from_db(
+            cats, feeds, default_interval, image_dedupe_window,
+        )
         diagnostics = {
             "total_feeds": len(feeds),
             "total_entries": total_entries,
@@ -506,15 +595,27 @@ def _validate_feeds_config(cfg: dict) -> str | None:
         interval = settings.get("default_poll_interval_minutes")
         if interval is not None and not isinstance(interval, int):
             return "settings.default_poll_interval_minutes must be int"
+        window = settings.get("image_dedupe_window_days")
+        if window is not None:
+            # bool is an int subclass — reject it explicitly so a stray true
+            # doesn't silently become a 1-day window.
+            if isinstance(window, bool) or not isinstance(window, int):
+                return "settings.image_dedupe_window_days must be int"
+            if window < 0:
+                return "settings.image_dedupe_window_days must be >= 0"
     return None
 
 
-def _config_payload_from_db(cats, feeds, default_interval) -> dict:
+def _config_payload_from_db(
+    cats, feeds, default_interval, image_dedupe_window=None,
+) -> dict:
     """Project DB rows to the wire shape the settings page expects."""
     cat_by_id = {c.id: c for c in cats}
     settings: dict = {}
     if default_interval is not None:
         settings["default_poll_interval_minutes"] = default_interval
+    if image_dedupe_window is not None:
+        settings["image_dedupe_window_days"] = image_dedupe_window
     feed_payload: list[dict] = []
     for f in feeds:
         entry: dict = {"url": f.url}
@@ -576,6 +677,15 @@ def _apply_config_to_db(ctx: FeedsContext, payload: dict) -> dict:
         except (TypeError, ValueError):
             explicit_default = None
         feeds_db.set_default_poll_interval(conn, explicit_default)
+
+        # 0 is meaningful here ("never suppress"), so only an absent/blank
+        # value clears the setting back to the default window.
+        window_raw = (payload.get("settings") or {}).get("image_dedupe_window_days")
+        try:
+            window = None if window_raw in (None, "") else int(window_raw)
+        except (TypeError, ValueError):
+            window = None
+        feeds_db.set_image_dedupe_window_days(conn, window)
 
         payload_urls: set[str] = set()
         for f in payload.get("feeds") or []:

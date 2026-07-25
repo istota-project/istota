@@ -95,6 +95,67 @@ class TestInitDb:
 
         feeds_db.init_db(path)  # second run is a no-op
 
+    def test_v2_to_v3_backfills_the_image_key_index(self, tmp_path):
+        """A v2 DB gains ``entry_images``, backfilled from stored entries."""
+        import json
+        import sqlite3
+
+        from istota.feeds.sanitize import image_identity
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)  # current schema…
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="tumblr:a", title="A", site_url=None,
+                source_type="tumblr", category_id=None,
+                poll_interval_minutes=60,
+            )
+            conn.commit()
+
+        # …then rewind to v2: drop the index table and the version marker so
+        # init_db replays the migration over pre-existing entry rows.
+        url = "https://64.media.tumblr.com/aaa/bbb-01/s500x750/hash.jpg"
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("DROP TABLE IF EXISTS entry_images")
+            conn.execute(
+                "INSERT INTO feed_entries(feed_id, guid, image_urls, "
+                "published_at, fetched_at, status) VALUES (?,?,?,?,?,?)",
+                (
+                    feed_id, "p1", json.dumps([url, url]),
+                    "2026-07-16T10:00:00+00:00",
+                    "2026-07-16T11:00:00+00:00", "unread",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO feed_entries(feed_id, guid, image_urls, "
+                "published_at, fetched_at, status) VALUES (?,?,?,?,?,?)",
+                (feed_id, "p2", None, None, "2026-07-16T11:00:00+00:00", "unread"),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version','2')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            rows = conn.execute(
+                "SELECT image_key, seen_ts FROM entry_images"
+            ).fetchall()
+            version = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = 'version'"
+            ).fetchone()["value"]
+        # The duplicate URL inside one entry collapses to a single key row,
+        # and the image-less entry contributes nothing.
+        assert [r["image_key"] for r in rows] == [image_identity(url)]
+        assert rows[0]["seen_ts"] > 0
+        assert version == str(feeds_db.SCHEMA_VERSION)
+
+        feeds_db.init_db(path)  # replaying is a no-op
+
 
 class TestCategories:
     def test_upsert_and_lookup(self, tmp_path):
@@ -447,3 +508,191 @@ class TestMarkAsRead:
                 pass
             else:
                 raise AssertionError("expected ValueError")
+
+
+class TestEntryImageIndex:
+    """The ``entry_images`` key index backing cross-entry image suppression
+    (ISSUE-162). Populated at insert, backfilled by the v2→v3 migration,
+    cascaded away with its entry.
+    """
+
+    def _seed_two_feeds(self, tmp_path):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            cat_id = feeds_db.upsert_category(conn, "art", "Art")
+            a = feeds_db.upsert_feed(
+                conn, url="tumblr:a", title="A", site_url=None,
+                source_type="tumblr", category_id=cat_id,
+                poll_interval_minutes=60,
+            )
+            b = feeds_db.upsert_feed(
+                conn, url="tumblr:b", title="B", site_url=None,
+                source_type="tumblr", category_id=None,
+                poll_interval_minutes=60,
+            )
+            conn.commit()
+        return path, a, b, cat_id
+
+    def _entry(self, feed_id, guid, urls, published_at):
+        return EntryRecord(
+            id=0, feed_id=feed_id, guid=guid, title=guid, url=None,
+            author=None, content_html=None, content_text=None,
+            image_urls=urls, published_at=published_at,
+            fetched_at="2026-07-16T00:00:00+00:00",
+        )
+
+    def test_insert_records_normalised_keys(self, tmp_path):
+        from istota.feeds.sanitize import image_identity
+
+        path, feed_id, _, _ = self._seed_two_feeds(tmp_path)
+        url = "https://64.media.tumblr.com/aaa/bbb-01/s500x750/hash.jpg"
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [
+                self._entry(feed_id, "p1", [url], "2026-07-16T10:00:00+00:00"),
+            ])
+            conn.commit()
+            rows = conn.execute(
+                "SELECT image_key, seen_ts FROM entry_images"
+            ).fetchall()
+        assert [r["image_key"] for r in rows] == [image_identity(url)]
+        assert rows[0]["seen_ts"] > 0
+
+    def test_entry_without_images_indexes_nothing(self, tmp_path):
+        path, feed_id, _, _ = self._seed_two_feeds(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [
+                self._entry(feed_id, "p1", [], "2026-07-16T10:00:00+00:00"),
+            ])
+            conn.commit()
+            count = conn.execute(
+                "SELECT COUNT(*) c FROM entry_images"
+            ).fetchone()["c"]
+        assert count == 0
+
+    def test_ignored_duplicate_guid_does_not_reindex(self, tmp_path):
+        path, feed_id, _, _ = self._seed_two_feeds(tmp_path)
+        url = "https://64.media.tumblr.com/aaa/bbb-01/s500x750/hash.jpg"
+        item = self._entry(feed_id, "p1", [url], "2026-07-16T10:00:00+00:00")
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [item])
+            feeds_db.insert_entries(conn, feed_id, [item])
+            conn.commit()
+            count = conn.execute(
+                "SELECT COUNT(*) c FROM entry_images"
+            ).fetchone()["c"]
+        assert count == 1
+
+    def test_variants_within_one_entry_collapse_to_one_row(self, tmp_path):
+        path, feed_id, _, _ = self._seed_two_feeds(tmp_path)
+        urls = [
+            "https://64.media.tumblr.com/aaa/bbb-01/s500x750/hash.jpg",
+            "https://72.media.tumblr.com/aaa/bbb-01/s1280x1920/hash.jpg",
+        ]
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [
+                self._entry(feed_id, "p1", urls, "2026-07-16T10:00:00+00:00"),
+            ])
+            conn.commit()
+            count = conn.execute(
+                "SELECT COUNT(*) c FROM entry_images"
+            ).fetchone()["c"]
+        assert count == 1
+
+    def test_deleting_a_feed_cascades_the_index(self, tmp_path):
+        path, feed_id, _, _ = self._seed_two_feeds(tmp_path)
+        url = "https://64.media.tumblr.com/aaa/bbb-01/s500x750/hash.jpg"
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [
+                self._entry(feed_id, "p1", [url], "2026-07-16T10:00:00+00:00"),
+            ])
+            conn.commit()
+            feeds_db.delete_feed(conn, "tumblr:a")
+            conn.commit()
+            count = conn.execute(
+                "SELECT COUNT(*) c FROM entry_images"
+            ).fetchone()["c"]
+        assert count == 0
+
+    def test_image_key_owners_filters_by_window_and_scope(self, tmp_path):
+        from istota.feeds.image_dedupe import parse_seen_ts
+        from istota.feeds.sanitize import image_identity
+
+        path, feed_a, feed_b, cat_id = self._seed_two_feeds(tmp_path)
+        url = "https://64.media.tumblr.com/aaa/bbb-01/s500x750/hash.jpg"
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_a, [
+                self._entry(feed_a, "a1", [url], "2026-07-16T10:00:00+00:00"),
+            ])
+            feeds_db.insert_entries(conn, feed_b, [
+                self._entry(feed_b, "b1", [url], "2026-07-15T10:00:00+00:00"),
+            ])
+            conn.commit()
+            key = image_identity(url)
+            lo = parse_seen_ts("2026-07-01T00:00:00+00:00")
+            hi = parse_seen_ts("2026-08-01T00:00:00+00:00")
+
+            everything = feeds_db.image_key_owners(
+                conn, [key], min_ts=lo, max_ts=hi,
+            )
+            by_feed = feeds_db.image_key_owners(
+                conn, [key], min_ts=lo, max_ts=hi, feed_id=feed_a,
+            )
+            by_category = feeds_db.image_key_owners(
+                conn, [key], min_ts=lo, max_ts=hi, category_id=cat_id,
+            )
+            narrow = feeds_db.image_key_owners(
+                conn, [key],
+                min_ts=parse_seen_ts("2026-07-16T00:00:00+00:00"),
+                max_ts=hi,
+            )
+
+        assert len(everything) == 2
+        assert len(by_feed) == 1
+        assert len(by_category) == 1  # only feed A is in the category
+        assert len(narrow) == 1  # the 07-15 owner falls outside the range
+        assert all(k == key for k, _, _ in everything)
+
+    def test_image_key_owners_empty_keys_short_circuits(self, tmp_path):
+        path, _, _, _ = self._seed_two_feeds(tmp_path)
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.image_key_owners(
+                conn, [], min_ts=0, max_ts=1,
+            ) == []
+
+    def test_image_key_owners_chunks_large_key_lists(self, tmp_path):
+        """More keys than SQLite's variable limit must not raise."""
+        from istota.feeds.sanitize import image_identity
+
+        path, feed_id, _, _ = self._seed_two_feeds(tmp_path)
+        urls = [
+            f"https://64.media.tumblr.com/k{i}/p-01/s500x750/hash{i}.jpg"
+            for i in range(1200)
+        ]
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [
+                self._entry(feed_id, "p1", urls, "2026-07-16T10:00:00+00:00"),
+            ])
+            conn.commit()
+            owners = feeds_db.image_key_owners(
+                conn, [image_identity(u) for u in urls],
+                min_ts=0, max_ts=2 ** 40,
+            )
+        assert len(owners) == 1200
+
+
+class TestImageDedupeWindowSetting:
+    def test_defaults_to_none_and_round_trips(self, tmp_path):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.get_image_dedupe_window_days(conn) is None
+            feeds_db.set_image_dedupe_window_days(conn, 30)
+            conn.commit()
+            assert feeds_db.get_image_dedupe_window_days(conn) == 30
+            feeds_db.set_image_dedupe_window_days(conn, 0)
+            conn.commit()
+            assert feeds_db.get_image_dedupe_window_days(conn) == 0
+            feeds_db.set_image_dedupe_window_days(conn, None)
+            conn.commit()
+            assert feeds_db.get_image_dedupe_window_days(conn) is None

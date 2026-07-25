@@ -33,7 +33,60 @@ class TestImageIdentity:
         assert image_identity(a) != image_identity(b)
 
 
+class TestTumblrImageIdentity:
+    """Tumblr NPF media URLs vary by CDN shard and rendered size.
+
+    ``https://64.media.tumblr.com/<media-key>/<post-key>-NN/s500x750/<hash>.jpg``
+    — the leading ``64.`` is a shard and ``s500x750`` a size segment; the
+    filename is a content hash. Neither the shard nor the size changes which
+    picture it is (ISSUE-162).
+    """
+
+    BASE = "media.tumblr.com/aaa111/bbb222-01/{size}/deadbeef.jpg"
+
+    def test_shard_and_size_variants_share_identity(self):
+        a = "https://64." + self.BASE.format(size="s500x750")
+        b = "https://72." + self.BASE.format(size="s1280x1920")
+        assert image_identity(a) == image_identity(b)
+
+    def test_shardless_host_matches_sharded(self):
+        a = "https://64." + self.BASE.format(size="s500x750")
+        b = "https://" + self.BASE.format(size="s500x750")
+        assert image_identity(a) == image_identity(b)
+
+    def test_distinct_content_hashes_differ(self):
+        a = "https://64.media.tumblr.com/aaa111/bbb222-01/s500x750/deadbeef.jpg"
+        b = "https://64.media.tumblr.com/aaa111/bbb222-01/s500x750/cafebabe.jpg"
+        assert image_identity(a) != image_identity(b)
+
+    def test_media_key_alone_does_not_merge(self):
+        # Deliberate non-goal: same media-key, different content hash stays
+        # distinct (could be a different crop/edit). See ISSUE-162.
+        a = "https://64.media.tumblr.com/aaa111/bbb222-01/s500x750/deadbeef.jpg"
+        b = "https://64.media.tumblr.com/aaa111/ccc333-02/s640x960/cafebabe.jpg"
+        assert image_identity(a) != image_identity(b)
+
+    def test_query_string_ignored(self):
+        a = "https://64." + self.BASE.format(size="s500x750")
+        b = "https://64." + self.BASE.format(size="s500x750") + "?v=2"
+        assert image_identity(a) == image_identity(b)
+
+    def test_non_tumblr_host_with_size_shaped_segment_untouched(self):
+        # A path segment that merely *looks* like a tumblr size segment must
+        # not be stripped on some other host.
+        a = "https://cdn.example.com/s500x750/one.jpg"
+        b = "https://cdn.example.com/s100x100/one.jpg"
+        assert image_identity(a) != image_identity(b)
+
+
 class TestDedupeImageVariants:
+    def test_collapses_tumblr_size_variants_keeping_largest(self):
+        small = "https://64.media.tumblr.com/aaa/bbb-01/s250x400/hash.jpg"
+        large = "https://72.media.tumblr.com/aaa/bbb-01/s1280x1920/hash.jpg"
+        assert dedupe_image_variants([small, large]) == [large]
+        # Order of arrival must not change which one wins.
+        assert dedupe_image_variants([large, small]) == [large]
+
     def test_collapses_variants_keeping_widest(self):
         urls = [
             "https://i.guim.co.uk/img/media/abc/master/3049.jpg?width=140&s=aaa",

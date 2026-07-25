@@ -56,6 +56,10 @@
   const feedSlug = $derived(entry.feed.title.toLowerCase().replace(/[^a-z0-9-]/g, '-'));
   const isImage = $derived(entry.images.length > 0);
   const hiddenCount = $derived(Math.max(0, entry.images.length - maxGrid));
+  // Images the server withheld because a newer entry already showed them
+  // (reblog of a picture you just scrolled past). Noted rather than silent,
+  // so a card that lost all its images doesn't just look empty.
+  const repeatCount = $derived(entry.duplicate_image_count ?? 0);
   const galleryCount = $derived(Math.min(entry.images.length, maxGrid));
   const permalink = $derived(entry.url || entry.feed.site_url || '');
 
@@ -170,6 +174,11 @@
       <Star size={14} fill={entry.starred ? 'currentColor' : 'none'} />
     </button>
     <span class="feed-name">{entry.feed.title}</span>
+    {#if repeatCount > 0}
+      <span class="repeat-note" title="Already shown by a more recent post">
+        {repeatCount} repeat{repeatCount > 1 ? 's' : ''} hidden
+      </span>
+    {/if}
     {#if entry.published_at}
       {#if permalink}
         <a href={permalink} class="meta-link">

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The feed reader stops painting the same picture twice as reblogs of one photo work their way through the blogs you follow. A repeat inside a single post is gone, and across posts a picture a more recent entry already showed is hidden on the older ones — the post still appears, with a note saying how many repeats were hidden. Suppression is bounded to a recent look-back window (adjustable in Feed settings, and switchable off) and to the view you're in, so an image resurfacing much later still shows and browsing one blog never hides a tile because of another.
+
 ## [0.35.0] - 2026-07-24
 
 Breaking changes this release:

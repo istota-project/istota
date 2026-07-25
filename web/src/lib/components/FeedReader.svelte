@@ -206,6 +206,13 @@
           </div>
         {/if}
 
+        {#if (entry.duplicate_image_count ?? 0) > 0}
+          <p class="repeat-note">
+            {entry.duplicate_image_count} image{entry.duplicate_image_count > 1 ? 's' : ''} hidden — already
+            shown by a more recent post.
+          </p>
+        {/if}
+
         {#if entry.content}
           <div class="reader-content">{@html entry.content}</div>
         {/if}
@@ -347,6 +354,13 @@
   }
 
   /* Body copy mirrors the card .excerpt (--text-secondary + #aaa links). */
+  .repeat-note {
+    margin: 0 0 1rem;
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
   .reader-content {
     color: var(--text-secondary);
     line-height: 1.6;

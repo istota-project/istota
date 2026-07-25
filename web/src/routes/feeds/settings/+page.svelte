@@ -383,6 +383,30 @@
           }}
         />
       </SettingsField>
+      <SettingsField
+        label="Hide repeated images seen in the last (days)"
+        hint="A reblog of a picture you scrolled past recently shows the post but not the image again. 0 turns it off; blank uses the default (14)."
+      >
+        <input
+          type="number"
+          min="0"
+          value={config.settings.image_dedupe_window_days ?? ''}
+          placeholder="14"
+          oninput={(e) => {
+            const v = (e.currentTarget as HTMLInputElement).value;
+            const next = { ...config.settings };
+            if (v === '') {
+              delete next.image_dedupe_window_days;
+            } else {
+              const n = Number(v);
+              if (Number.isInteger(n) && n >= 0) {
+                next.image_dedupe_window_days = n;
+              }
+            }
+            config.settings = next;
+          }}
+        />
+      </SettingsField>
     </SettingsCard>
 
     <SettingsCard title="Categories ({config.categories.length})">

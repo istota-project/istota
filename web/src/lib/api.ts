@@ -163,6 +163,8 @@ export interface FeedEntry {
   url: string;
   content: string;
   images: string[];
+  /** Images the server hid because a newer entry already showed them. */
+  duplicate_image_count: number;
   feed: Feed;
   status: string;
   starred: boolean;
@@ -242,6 +244,8 @@ export interface FeedsConfigFeed {
 
 export interface FeedsConfigSettings {
   default_poll_interval_minutes?: number;
+  /** Look-back window for hiding repeated images; 0 disables. */
+  image_dedupe_window_days?: number;
 }
 
 export interface FeedsConfigPayload {

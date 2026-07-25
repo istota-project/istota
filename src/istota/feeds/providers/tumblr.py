@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import requests
 
 from istota.feeds.models import FetchedItem
+from istota.feeds.sanitize import dedupe_image_variants
 
 
 PROVIDER_NAME = "tumblr"
@@ -60,7 +61,9 @@ def fetch(identifier: str, *, api_key: str = "", limit: int = 50) -> list[Fetche
             except (ValueError, TypeError):
                 published_iso = None
 
-        # NPF content blocks plus reblog trail.
+        # NPF content blocks plus reblog trail. A reblog-with-commentary
+        # repeats the original's photos in both places, so the collected
+        # images are de-duplicated below (ISSUE-162).
         all_blocks = list(post.get("content", []))
         for trail_entry in post.get("trail", []):
             all_blocks.extend(trail_entry.get("content", []))
@@ -83,7 +86,7 @@ def fetch(identifier: str, *, api_key: str = "", limit: int = 50) -> list[Fetche
             title=(title[:200] if title else None),
             url=post_url,
             content_text=("\n".join(text_parts) if text_parts else None),
-            image_urls=image_urls,
+            image_urls=dedupe_image_variants(image_urls),
             author=identifier,
             published_at=published_iso,
         ))
