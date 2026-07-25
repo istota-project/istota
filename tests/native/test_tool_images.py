@@ -102,13 +102,22 @@ class TestBrainGatesOnVision:
         )
 
     def test_render_tool_images_true_for_vision_model(self, tmp_path):
-        provider = MockProvider(
-            [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
-        )
-        NativeBrain(
-            NativeBrainConfig(model="claude-sonnet-4-6"), provider=provider
-        ).execute(self._req(tmp_path, "claude-sonnet-4-6"))
-        assert provider.calls[0]["render_tool_images"] is True
+        # Vision capability now comes from config/fetched, not a bundled catalog.
+        from istota.llm.catalog import set_model_overrides
+
+        overrides = {"claude-sonnet-4-6": {"supports_vision": True}}
+        set_model_overrides(overrides)
+        try:
+            provider = MockProvider(
+                [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
+            )
+            NativeBrain(
+                NativeBrainConfig(model="claude-sonnet-4-6", model_overrides=overrides),
+                provider=provider,
+            ).execute(self._req(tmp_path, "claude-sonnet-4-6"))
+            assert provider.calls[0]["render_tool_images"] is True
+        finally:
+            set_model_overrides({})
 
     def test_render_tool_images_false_for_unknown_model(self, tmp_path):
         provider = MockProvider(

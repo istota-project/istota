@@ -2,6 +2,34 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-24: Model catalog — config-first + live OpenRouter enrichment (ISSUE-182)
+
+The native brain resolved per-model metadata (context window, capabilities, prices) through a hand-maintained bundled catalog (`src/istota/llm/model_catalog.json`). It only knew Anthropic + a few OpenAI ids, some of its data was wrong (context windows especially), and it needed constant updates we didn't want to own. Established during analysis: the catalog is consumed **only** by the native brain, its cost helper, and the config override plumbing — the shipping-default `claude_code`/`tmux_claude` brains never read it (they hand short ids to the `claude` CLI). Native effectively always speaks to OpenRouter, whose `/models` endpoint returns rich per-model metadata for free. Direction: drop the bundled catalog (config-first), add live OpenRouter enrichment.
+
+**Key changes:**
+- **Config-first resolution.** `get_model_info` is now a pure, synchronous three-layer chain: operator `[brain.native.model_overrides]` (partial, merged on top) > live-fetched OpenRouter catalog (`_FETCHED`) > conservative `_DEFAULT` (`context_window=200_000`, zero price). Deleted `model_catalog.json` + its loader (`_CATALOG_PATH`/`_load_catalog`/`_CATALOG`). Added `_FETCHED` + `set_fetched_catalog`; the returned `id` is always the queried id (so a default miss never leaks the `"unknown"` sentinel).
+- **OpenRouter parse/fetch/cache** (new `openrouter_catalog.py`). `parse_openrouter_models` (pure): per-token USD → per-mtok, `input_modalities`→vision, `supported_parameters` `reasoning`→thinking, `tools`→tools (default-true when absent); skips entries missing a positive `context_length` and drops non-numeric prices to 0.0, never raising. `fetch_openrouter_catalog` GETs `{base_url}/models` (public; Bearer if a key is given). Disk cache stores the *parsed* `ModelInfo` fields (not the raw payload → immune to upstream schema drift), TTL-gated with a stale-fallback read.
+- **NativeBrain wiring.** `_ensure_fetched_catalog` runs once at the top of the async run when `base_url` contains `openrouter.ai` and `model_catalog_fetch` is on: fresh disk cache → live fetch (+write) → stale cache → leave the 200k default. Never fatal (wrapped in try/except). A process-global `threading.Lock` + `_CATALOG_FETCHED_AT` guard mean at most one fetch per process per TTL (no worker-thread stampede) — held across the fetch (simple; the first-use window is tiny). Cache dir = `db_path.parent` resolved from `ISTOTA_DB_PATH` in the per-task env; absent → in-memory + live-fetch only, no disk cache.
+- Config: `[brain.native] model_catalog_fetch` (default true) + `model_catalog_cache_ttl_hours` (default 24).
+- A non-OpenRouter native endpoint (local vLLM/Ollama, direct Anthropic we don't run) is never fetched — it declares its window via `context_window` / a `model_overrides` entry, else gets the 200k default. Documented as the contract in the example + Ansible config.
+
+**Design decisions:**
+- **Drop the bundled JSON entirely** rather than keep a minimal Anthropic-pins file — with direct-Anthropic native not deployed, those entries had no consumer. Any future non-OpenRouter native deployment declares its window in config.
+- **Default window 200k, not a small local-safe value** — zero regression for existing paths; overflow from an over-large window is recoverable (≤2 compact-and-retry), premature compaction from an under-large one is merely wasteful. The asymmetry doesn't justify degrading the common case with a guess for a deployment we don't run.
+- **Key the fetch strictly on `openrouter.ai`** — only OpenRouter returns the rich shape; direct Anthropic/OpenAI `/v1/models` return ids only.
+- **Fetch in NativeBrain, cached to disk, lazy** — not eager at daemon startup (would couple boot to an external endpoint) and not on the persistent runtime; the disk cache covers `serve`/CLI one-shots uniformly.
+- Removing the bundled catalog made `get_model_info` return the conservative default for previously-"known" ids, so four native capability-gate tests were updated to declare thinking/vision the honest new way — via a `model_overrides` entry.
+
+**Files added/modified:**
+- `src/istota/llm/catalog.py` — rewrote for the override>fetched>default chain; deleted the bundled-file loader; added `_FETCHED` + `set_fetched_catalog`
+- `src/istota/llm/model_catalog.json` — **deleted**
+- `src/istota/llm/openrouter_catalog.py` — **new**: parse + fetch + disk-cache helpers
+- `src/istota/brain/native.py` — `_ensure_fetched_catalog`/`_ensure_fetched_catalog_inner`, process-global fetch guard + `_reset_catalog_fetch_state` test hook, call in `execute`
+- `src/istota/config.py` — `NativeBrainConfig.model_catalog_fetch` / `model_catalog_cache_ttl_hours` + parse
+- `src/istota/session/usage.py` — cost-source docstring reworded (no bundled catalog)
+- `tests/native/test_llm_catalog.py`, `test_openrouter_catalog.py` (new), `test_native_catalog_fetch.py` (new), `test_reasoning_effort.py`, `test_tool_images.py`, `tests/test_config.py`
+- `.claude/rules/brain.md`, `.claude/rules/config.md`, `config/config.example.toml`, `deploy/ansible/defaults/main.yml`, `deploy/ansible/templates/config.toml.j2`, `docs/configuration/native-brain.md`
+
 ## 2026-07-24: Native-brain turn-budget awareness nudge (ISSUE-187 defect 3)
 
 The native brain's `max_turns` cap is a hard safety net the model can't see, so a long explorative task routinely gets capped mid-plan and delivers its last narration verbatim as if it were the answer (the incident: a Lisbon-apartment search capped at turn 80 on "let me move to Otodom and OLX next"). Defects 1–2 (the `stop_reason` masking + the truncation marker gated on an empty result) already shipped in `6e4cd4e`, making the cap *visible when hit*. This closes defect 3 — making the model *pace itself* so it's hit less often, and so a capped run produces a deliberate partial deliverable. Native-only; the CLI brains take their budget from `claude` and are unchanged.

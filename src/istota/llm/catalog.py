@@ -1,26 +1,33 @@
-"""Bundled model metadata catalog.
+"""Per-model metadata resolution (config-first + live enrichment).
 
 Compaction needs a per-model context window; cost telemetry needs per-model
-pricing. We bundle the catalog rather than fetching it — model *identity* stays
-pinned in the brain (see ``.claude/rules/brain.md``); this only *describes* the
-pinned identity (window, max output, capabilities, price).
+pricing. There is no longer a bundled, hand-maintained catalog file — it went
+stale and only a handful of native deployments would ever read it. Model
+*identity* stays pinned in the brain (see ``.claude/rules/brain.md``); this only
+*describes* the pinned identity (window, max output, capabilities, price).
 
-Prior art: Crush's catwalk provider catalog. We adopt the embedded layer only;
-remote sync is deferred. Operators can override per-model metadata from config
-without a code change.
+Consumed **only** by ``NativeBrain`` (``brain/native.py``), its cost helper
+(``session/usage.py``), and the config override plumbing (``config.py``). The
+default brains (``claude_code`` / ``tmux_claude``) never read it — they hand
+short model ids to the ``claude`` CLI, which owns its own metadata.
 
-Entries load from the bundled ``model_catalog.json`` at import. Unknown models
-fall back to ``_DEFAULT`` (conservative window, zero price → cost surfaces as
-unknown rather than wrong). Prices in the bundled file are 0.0 for the pinned
-Anthropic models; populate them via operator config when cost telemetry
-matters.
+Resolution is a three-layer chain, ``get_model_info`` staying pure + synchronous:
+
+    operator model_overrides / context_window   (highest — partial, merged on top)
+            ▼
+    live-fetched catalog (_FETCHED)              (OpenRouter, installed by NativeBrain)
+            ▼
+    conservative default (_DEFAULT)              (unknowns; context_window = 200_000)
+
+For the real deployment shape (native → OpenRouter) the fetched layer supplies
+correct, self-updating window/capabilities/prices. For anything else (a local
+vLLM/Ollama, a direct-Anthropic native we don't run), metadata comes from
+operator config (``[brain.native.model_overrides]`` / ``context_window``) or the
+default — never from a bundled file that can be wrong. A non-OpenRouter native
+deployment declares its window in config; that is the documented contract.
 """
 
-import json
 from dataclasses import dataclass, fields, replace
-from pathlib import Path
-
-_CATALOG_PATH = Path(__file__).with_name("model_catalog.json")
 
 
 @dataclass(frozen=True)
@@ -39,30 +46,29 @@ class ModelInfo:
     supports_thinking: bool = False
 
 
+# The real floor for an unknown model — no bundled catalog sits above it now.
+# 200k is a pure last-resort that OpenRouter enrichment covers in practice, and
+# keeping it at 200k means zero regression versus the old bundled Anthropic
+# entries. A local/self-hosted native deployment sets ``context_window`` (or a
+# ``model_overrides`` entry). Overflow from an over-large window is recoverable
+# (≤2 compact-and-retry); premature compaction from an under-large one is merely
+# wasteful. Zero price → cost surfaces as unknown rather than wrong.
 _DEFAULT = ModelInfo(id="unknown", context_window=200_000, max_output_tokens=16384)
-
-
-def _load_catalog() -> dict[str, ModelInfo]:
-    raw = json.loads(_CATALOG_PATH.read_text())
-    catalog: dict[str, ModelInfo] = {}
-    for model_id, fields in raw.items():
-        catalog[model_id] = ModelInfo(id=model_id, **fields)
-    return catalog
-
-
-_CATALOG: dict[str, ModelInfo] = _load_catalog()
 
 # Fields an operator override may set (everything but the id, which is the key).
 _OVERRIDABLE_FIELDS = {f.name for f in fields(ModelInfo)} - {"id"}
 
 # Operator-supplied per-model overrides ([brain.native.model_overrides]).
-# Rebound atomically by set_model_overrides; merged over the bundled entry (or
-# the conservative default) in get_model_info. This is the NB-4 lever: a
-# non-Anthropic reasoning/vision model or a small-window local model that the
-# bundled catalog doesn't know can declare its real capabilities/window without
-# a code change, instead of being silently degraded to no-thinking / no-vision /
-# 200k.
+# Rebound atomically by set_model_overrides; merged over the fetched entry (or
+# the conservative default) in get_model_info. This is the NB-4 lever: a model
+# no live catalog knows — or a single wrong field on one it does — can declare
+# its real capabilities/window without a code change.
 _OVERRIDES: dict[str, dict] = {}
+
+# Live-fetched catalog layer (e.g. OpenRouter). Populated by NativeBrain when it
+# talks to an OpenRouter endpoint; empty otherwise (→ _DEFAULT). Sits below
+# operator overrides, above _DEFAULT.
+_FETCHED: dict[str, ModelInfo] = {}
 
 
 def set_model_overrides(overrides: dict | None) -> None:
@@ -85,12 +91,29 @@ def set_model_overrides(overrides: dict | None) -> None:
     _OVERRIDES = next_overrides
 
 
+def set_fetched_catalog(entries: dict[str, ModelInfo] | None) -> None:
+    """Install (or clear) the live-fetched catalog layer (e.g. OpenRouter).
+
+    Rebinds atomically so a concurrent reader sees a coherent table. ``None`` /
+    ``{}`` clears the layer, dropping resolution back to operator overrides over
+    the conservative default. Sits below operator overrides, above ``_DEFAULT``.
+    """
+    global _FETCHED
+    if not entries:
+        _FETCHED = {}
+        return
+    _FETCHED = {k: v for k, v in entries.items() if isinstance(v, ModelInfo)}
+
+
 def get_model_info(model_id: str) -> ModelInfo:
     """Return metadata for ``model_id``: operator override merged over the
-    bundled entry (or the conservative default when the model is unknown)."""
-    base = _CATALOG.get(model_id)
+    live-fetched entry (or the conservative default when the model is unknown).
+
+    The returned ``id`` is always ``model_id`` (``_DEFAULT.id == "unknown"``, so
+    a miss would otherwise leak the sentinel id to the caller).
+    """
+    base = _FETCHED.get(model_id) or _DEFAULT
     override = _OVERRIDES.get(model_id)
     if override is None:
-        return base if base is not None else _DEFAULT
-    src = base if base is not None else _DEFAULT
-    return replace(src, id=model_id, **override)
+        return base if base.id == model_id else replace(base, id=model_id)
+    return replace(base, id=model_id, **override)

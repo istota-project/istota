@@ -133,8 +133,22 @@ features = []
 #                                            #   = no reasoning_effort field. Per-task
 #                                            #   effort (e.g. !model opus-high) overrides.
 # base_url = "https://api.anthropic.com/v1"  # any OpenAI-compatible endpoint
+# context_window = 0                         # 0 = resolve from the live-fetched
+#                                            #   OpenRouter catalog (below) or the
+#                                            #   conservative 200k default. A NON-
+#                                            #   OpenRouter native endpoint (local
+#                                            #   vLLM/Ollama) SHOULD set its real
+#                                            #   window here (or a model_overrides
+#                                            #   entry) — nothing fetches it.
 # max_turns = 100                            # hard cap on assistant turns/task
 # max_tokens = 16384                         # per-completion output cap
+# model_catalog_fetch = true                 # when base_url is OpenRouter, fetch its
+#                                            #   public model list once/process for real
+#                                            #   window / capabilities / prices (self-
+#                                            #   updating; disk-cached). No effect for a
+#                                            #   non-OpenRouter endpoint. Fetch failure is
+#                                            #   never fatal (stale cache → 200k default).
+# model_catalog_cache_ttl_hours = 24         # disk-cache freshness for the fetch above
 # turn_budget_nudge = true                   # pace the model as it nears max_turns: inject an
 #                                            #   environment notice so a long tool-bearing run
 #                                            #   delivers a partial answer instead of getting

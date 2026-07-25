@@ -146,9 +146,16 @@ istota_brain_native_effort: "high"                # default effort: low/medium/h
                                                   #   model; xhigh/max fold to high over the compat endpoint.
 istota_brain_native_base_url: "https://openrouter.ai/api/v1"
 istota_brain_native_extra_headers: {}             # dict of extra HTTP headers (openai_compat)
-istota_brain_native_context_window: 1000000       # 0 = resolve from bundled model catalog
+istota_brain_native_context_window: 0             # 0 = resolve from the live-fetched OpenRouter
+                                                  #   catalog / conservative 200k default. A NON-
+                                                  #   OpenRouter endpoint SHOULD set its real window.
 istota_brain_native_max_turns: 100                # hard cap on assistant turns per task
 istota_brain_native_max_tokens: 32000             # per-completion output cap
+istota_brain_native_model_catalog_fetch: true     # when base_url is OpenRouter, fetch its public
+                                                  #   model list for real window/capabilities/prices
+                                                  #   (self-updating, disk-cached, never fatal). No
+                                                  #   effect for a non-OpenRouter endpoint.
+istota_brain_native_model_catalog_cache_ttl_hours: 24  # disk-cache freshness for the fetch above
 istota_brain_native_bash_spill_full_output: true  # spill over-cap Bash output to a temp file named in the result
 istota_brain_native_turn_budget_nudge: true       # nudge the model to pace itself as it nears max_turns
 istota_brain_native_turn_budget_nudge_early_percent: 50   # first (~halfway) reminder fires at this % of the cap

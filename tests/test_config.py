@@ -760,6 +760,35 @@ context_window = 32000
         finally:
             set_model_overrides({})
 
+    def test_native_model_catalog_fetch_defaults(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[brain]
+kind = "native"
+
+[brain.native]
+model = "anthropic/claude-opus-4.8"
+base_url = "https://openrouter.ai/api/v1"
+""")
+        cfg = load_config(config_file)
+        assert cfg.brain.native.model_catalog_fetch is True
+        assert cfg.brain.native.model_catalog_cache_ttl_hours == 24.0
+
+    def test_native_model_catalog_fetch_overrides(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[brain]
+kind = "native"
+
+[brain.native]
+model = "local/model"
+model_catalog_fetch = false
+model_catalog_cache_ttl_hours = 6
+""")
+        cfg = load_config(config_file)
+        assert cfg.brain.native.model_catalog_fetch is False
+        assert cfg.brain.native.model_catalog_cache_ttl_hours == 6.0
+
     def test_load_without_sleep_cycle(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("""

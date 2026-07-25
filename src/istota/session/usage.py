@@ -4,9 +4,10 @@
 The native brain accumulates a ``TaskUsage`` across every turn and attaches it to
 ``BrainResult.usage``. Cost prefers the provider's own reported figure when the
 endpoint returns one (OpenRouter's ``usage.cost``, real charged cost with markup);
-otherwise it falls back to the bundled model catalog (item 1). When neither is
-available — no reported cost and a catalog price of 0.0 (the default for the
-pinned Anthropic IDs) — cost surfaces as 0.0, unknown rather than wrong.
+otherwise it falls back to the model catalog's per-mtok prices (which, for an
+OpenRouter deployment, are the live-fetched real prices). When neither is
+available — no reported cost and a catalog price of 0.0 (the conservative default
+for an unknown model) — cost surfaces as 0.0, unknown rather than wrong.
 
 Distillation sub-agents (item 4, deferred) roll their usage into the parent via
 ``merge``, mirroring Crush's ``updateParentSessionCost()``.

@@ -87,6 +87,11 @@ base_url = "{{ istota_brain_native_base_url | default('https://api.anthropic.com
 context_window = {{ istota_brain_native_context_window | default(0, true) }}
 max_turns = {{ istota_brain_native_max_turns | default(100, true) }}
 max_tokens = {{ istota_brain_native_max_tokens | default(16384, true) }}
+# When base_url is OpenRouter, fetch its public model list once/process for real
+# per-model window / capabilities / prices (self-updating, disk-cached, never
+# fatal). No effect for a non-OpenRouter endpoint — set context_window there.
+model_catalog_fetch = {{ istota_brain_native_model_catalog_fetch | default(true, true) | lower }}
+model_catalog_cache_ttl_hours = {{ istota_brain_native_model_catalog_cache_ttl_hours | default(24, true) }}
 # Spill full over-cap Bash output to a task-scoped temp file (named in the tool
 # result) instead of dropping the tail; default on.
 bash_spill_full_output = {{ istota_brain_native_bash_spill_full_output | default(true, true) | lower }}

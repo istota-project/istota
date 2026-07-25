@@ -345,6 +345,27 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
   usage on `total_tokens > 0 or cost_usd is not None`, so a costed zero-token
   turn isn't dropped. Non-OpenRouter endpoints are unchanged (no request param;
   catalog pricing).
+- **Model catalog (config-first + live OpenRouter enrichment, ISSUE-182).** Per-
+  model metadata (`context_window`, `supports_thinking`/`supports_vision`, prices)
+  resolves through `llm.catalog.get_model_info` — a pure, synchronous three-layer
+  chain: operator `[brain.native.model_overrides]` (partial, merged on top) >
+  live-fetched OpenRouter catalog (`_FETCHED`) > conservative `_DEFAULT`
+  (`context_window=200_000`, zero price). **There is no bundled catalog file** —
+  `model_catalog.json` was deleted. When `base_url` contains `openrouter.ai` and
+  `[brain.native] model_catalog_fetch` is on, `NativeBrain._ensure_fetched_catalog`
+  (called once at the top of the async run) fetches OpenRouter's public
+  `GET /models` list, parses it (`llm.openrouter_catalog.parse_openrouter_models`
+  — per-token USD → per-mtok, `input_modalities`→vision, `supported_parameters`
+  `reasoning`→thinking), and installs it via `catalog.set_fetched_catalog`. The
+  fetch is lazy, disk-cached (`{db_path.parent}/openrouter_models.json`, TTL
+  `model_catalog_cache_ttl_hours`, parsed-fields not raw payload so upstream drift
+  can't poison a read), and **never fatal**: fresh cache → live fetch → stale
+  cache → 200k default. A process-global lock + `_CATALOG_FETCHED_AT` guard mean
+  at most one fetch per process per TTL (no worker-thread stampede). A
+  non-OpenRouter native endpoint (local vLLM/Ollama, direct Anthropic we don't
+  run) is never fetched — it sets `context_window` (or a `model_overrides` entry)
+  as the documented contract, else it gets the 200k default (overflow is
+  recoverable; premature compaction is merely wasteful).
 - **Overflow recovery.** A mid-task context-length error triggers a bounded
   (≤2) force-compact + `run_agent_loop_continue`, sharing the wall-clock deadline
   via `_run_loop_once`. `_build_recovery_context` force-compacts (aggressive

@@ -653,8 +653,9 @@ class NativeBrainConfig:
     - ``base_url`` / ``api_key`` / ``extra_headers`` — for ``openai_compat``.
       ``api_key`` is populated from the ``ISTOTA_BRAIN_NATIVE_API_KEY`` env
       override (kept out of the TOML file).
-    - ``context_window`` — 0 resolves from the bundled model catalog; set to
-      override per deployment.
+    - ``context_window`` — 0 resolves from the live-fetched (OpenRouter) catalog
+      or the conservative 200k default; set to override per deployment (the
+      documented contract for a non-OpenRouter native endpoint).
     - ``max_turns`` — hard cap on assistant turns per task (loop backstop).
     - ``max_tokens`` — per-completion output cap.
     """
@@ -665,15 +666,16 @@ class NativeBrainConfig:
     base_url: str = "https://api.anthropic.com/v1"
     api_key: str = ""  # from ISTOTA_BRAIN_NATIVE_API_KEY at load time
     extra_headers: dict = field(default_factory=dict)
-    context_window: int = 0  # 0 = resolve from istota.llm.catalog
+    context_window: int = 0  # 0 = resolve from fetched catalog / 200k default
     max_turns: int = 100
     max_tokens: int = 16384
     # Per-model capability/window overrides ([brain.native.model_overrides]).
     # Maps a model id to a partial ModelInfo (context_window, supports_thinking,
     # supports_vision, max_output_tokens, prices). Lets a non-Anthropic
-    # reasoning/vision model or a small-window local model the bundled catalog
-    # doesn't know declare its real capabilities instead of being degraded to
-    # the conservative default (NB-4).
+    # reasoning/vision model or a small-window local model no live catalog
+    # knows declare its real capabilities instead of being degraded to the
+    # conservative default (NB-4). Also corrects a single wrong field on a
+    # fetched (OpenRouter) model.
     model_overrides: dict = field(default_factory=dict)
     # Compaction sizing. 0 = derive from the model's context window (so a small-
     # window local model compacts sensibly instead of using the Anthropic-sized
@@ -708,6 +710,16 @@ class NativeBrainConfig:
     turn_budget_nudge: bool = True
     turn_budget_nudge_early_percent: int = 50
     turn_budget_nudge_remaining: list[int] = field(default_factory=lambda: [15, 5])
+    # Live model-catalog enrichment from OpenRouter (ISSUE-182). When the brain
+    # talks to an OpenRouter endpoint (``base_url`` contains ``openrouter.ai``),
+    # it fetches OpenRouter's public model list once per process (disk-cached
+    # with the TTL below) and installs the real window/capabilities/prices into
+    # the catalog. No effect for non-OpenRouter endpoints — those resolve
+    # metadata from ``model_overrides`` / ``context_window`` / the conservative
+    # default. Fetch failure is never fatal (falls back to stale cache, then
+    # default). Off via ``model_catalog_fetch = false``.
+    model_catalog_fetch: bool = True
+    model_catalog_cache_ttl_hours: float = 24.0
 
 
 @dataclass
@@ -1805,6 +1817,10 @@ def load_config(config_path: Path | None = None) -> Config:
                 for x in native_raw.get("turn_budget_nudge_remaining", [15, 5])
                 if isinstance(x, (int, float)) or str(x).lstrip("-").isdigit()
             ],
+            model_catalog_fetch=bool(native_raw.get("model_catalog_fetch", True)),
+            model_catalog_cache_ttl_hours=float(
+                native_raw.get("model_catalog_cache_ttl_hours", 24.0)
+            ),
         )
         overrides_raw = br.get("source_type_overrides", {})
         if not isinstance(overrides_raw, dict):

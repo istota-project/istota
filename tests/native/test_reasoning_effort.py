@@ -151,8 +151,19 @@ class TestThinkingParse:
 
 
 class TestCapabilityGate:
-    def _brain(self, provider, model, effort, tmp_path):
-        config = NativeBrainConfig(model=model)
+    def teardown_method(self):
+        from istota.llm.catalog import set_model_overrides
+
+        set_model_overrides({})
+
+    def _brain(self, provider, model, effort, tmp_path, *, supports_thinking=False):
+        # Capability now comes from config (model_overrides), not a bundled
+        # catalog — declare thinking support explicitly where the test needs it.
+        overrides = {model: {"supports_thinking": True}} if supports_thinking else {}
+        config = NativeBrainConfig(model=model, model_overrides=overrides)
+        from istota.llm.catalog import set_model_overrides
+
+        set_model_overrides(overrides)
         brain = NativeBrain(config, provider=provider)
         return brain.execute(_req("hi", tmp_path, model=model, effort=effort))
 
@@ -160,7 +171,7 @@ class TestCapabilityGate:
         provider = MockProvider(
             [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
         )
-        self._brain(provider, "claude-sonnet-4-6", "high", tmp_path)
+        self._brain(provider, "claude-sonnet-4-6", "high", tmp_path, supports_thinking=True)
         assert provider.calls[0]["reasoning_effort"] == "high"
 
     def test_raw_tier_forwarded_provider_maps_it(self, tmp_path):
@@ -169,14 +180,14 @@ class TestCapabilityGate:
         provider = MockProvider(
             [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
         )
-        self._brain(provider, "claude-sonnet-4-6", "xhigh", tmp_path)
+        self._brain(provider, "claude-sonnet-4-6", "xhigh", tmp_path, supports_thinking=True)
         assert provider.calls[0]["reasoning_effort"] == "xhigh"
 
     def test_effort_dropped_on_non_thinking_model(self, tmp_path):
         provider = MockProvider(
             [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
         )
-        # haiku-4-5 has supports_thinking=False in the bundled catalog
+        # unknown to the catalog + no override → conservative default (no thinking)
         self._brain(provider, "claude-haiku-4-5", "high", tmp_path)
         assert provider.calls[0]["reasoning_effort"] is None
 
@@ -195,10 +206,16 @@ class TestCapabilityGate:
         assert provider.calls[0]["reasoning_effort"] is None
 
     def test_config_effort_used_when_request_effort_empty(self, tmp_path):
+        from istota.llm.catalog import set_model_overrides
+
         provider = MockProvider(
             [AssistantMessage(content=[TextContent(text="ok")], stop_reason="end_turn")]
         )
-        config = NativeBrainConfig(model="claude-sonnet-4-6", effort="medium")
+        overrides = {"claude-sonnet-4-6": {"supports_thinking": True}}
+        set_model_overrides(overrides)
+        config = NativeBrainConfig(
+            model="claude-sonnet-4-6", effort="medium", model_overrides=overrides
+        )
         brain = NativeBrain(config, provider=provider)
         brain.execute(_req("hi", tmp_path, model="claude-sonnet-4-6", effort=""))
         assert provider.calls[0]["reasoning_effort"] == "medium"
