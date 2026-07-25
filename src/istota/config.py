@@ -835,25 +835,26 @@ class BriefingsModuleConfig:
 
 @dataclass
 class ModelsConfig:
-    """Operator-controlled model role aliases.
+    """Operator-controlled model alias registry (``[models.aliases]``).
 
-    The default role mapping (``fast``→Haiku, ``general``→Sonnet,
-    ``smart``→Opus for ``ClaudeCodeBrain``) lives on the active brain in
-    ``brain.claude_code.DEFAULT_ROLE_TARGETS``. Operators set
-    ``[models.roles]`` in TOML to rebind any role.
+    One operator-visible table covering **both** the portable tiers
+    (``fast``/``general``/``smart``) and the provider shortcuts
+    (``opus``/``sonnet``/``haiku``). The shipped default set lives on the active
+    brain in ``brain.claude_code.DEFAULT_ALIASES`` as the overridable floor;
+    operators overlay any name here.
 
-    Each role value is the **raw parsed structure** — either a bare string
+    Each alias value is the **raw parsed structure** — either a bare string
     (legacy flat, namespace-agnostic) or a per-namespace table
-    (``{anthropic: "opus-high", openai_compat: {model = "...", effort = "high"}}``)
-    so one definition covers every brain family. Normalization into
-    ``RoleTarget`` objects happens once in ``brain._roles.set_role_overrides``;
-    this field carries the raw shape so ``is_portable_alias`` (which reads only
-    role *names*) and the namespace-aware validation loop can inspect it. Role
-    names beyond the three defaults are accepted (custom roles ``deep`` /
-    ``cheap``); they stay portable across the cross-brain fallback.
+    (``{anthropic: "opus", openai_compat: {model = "...", effort = "high"}}``)
+    so one definition covers every brain family. A reserved ``portable = true``
+    key inside a table marks a custom alias as a cross-brain intent.
+    Normalization into ``RoleTarget`` objects happens once in
+    ``brain._roles.set_alias_overrides``; this field carries the raw shape so the
+    namespace-aware validation loop can inspect it. Effort is an orthogonal
+    ``:effort`` modifier on any reference, never baked into an alias name.
     """
 
-    roles: dict[str, str | dict] = field(default_factory=dict)
+    aliases: dict[str, str | dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -1879,21 +1880,29 @@ def load_config(config_path: Path | None = None) -> Config:
             fallback_cooldown_seconds=int(br.get("fallback_cooldown_seconds", 900)),
         )
 
-    # [models] table — operator-controlled role aliases. The mapping is
-    # parsed here, then applied globally below via brain._roles.set_role_overrides
+    # [models] table — operator-controlled alias registry. The mapping is
+    # parsed here, then applied globally below via brain._roles.set_alias_overrides
     # after every other config layer has settled. Each brain consults the
-    # global override table inside its own resolve_alias() call.
+    # global override table inside its own resolve_alias() call. The old
+    # [models.roles] key is a HARD RENAME — no longer read; a stale one still
+    # present logs a one-time migration WARNING (detection only, not honoured).
     if "models" in data:
         models_section = data["models"]
-        roles = models_section.get("roles", {}) if isinstance(models_section, dict) else {}
-        if not isinstance(roles, dict):
-            roles = {}
-        # Preserve each role value verbatim: a bare string (legacy flat) or a
-        # per-namespace table stays as-is. set_role_overrides normalizes both
+        if not isinstance(models_section, dict):
+            models_section = {}
+        aliases = models_section.get("aliases", {})
+        if not isinstance(aliases, dict):
+            aliases = {}
+        if "roles" in models_section:
+            logging.getLogger("istota.config").warning(
+                "[models.roles] is ignored — rename it to [models.aliases]. "
+                "The old key no longer configures anything."
+            )
+        # Preserve each alias value verbatim: a bare string (legacy flat) or a
+        # per-namespace table stays as-is. set_alias_overrides normalizes both
         # shapes (and drops malformed values with a warning) — keeping the raw
-        # structure here lets the namespace-aware validation loop below and
-        # is_portable_alias (role names only) inspect it.
-        config.models = ModelsConfig(roles={str(k): v for k, v in roles.items()})
+        # structure here lets the namespace-aware validation loop below inspect it.
+        config.models = ModelsConfig(aliases={str(k): v for k, v in aliases.items()})
 
     if "experimental" in data:
         exp = data["experimental"]
@@ -2234,9 +2243,9 @@ def load_config(config_path: Path | None = None) -> Config:
     # Per-entry semantic validation is delegated to the active brain (it
     # knows its own provider alias namespace) so operators see typos
     # surfaced at startup rather than at task time.
-    from .brain import make_brain, set_role_overrides
-    from .brain._roles import LEGACY_NAMESPACE
-    if config.models.roles:
+    from .brain import make_brain, set_alias_overrides
+    from .brain._roles import LEGACY_NAMESPACE, PORTABLE_KEY
+    if config.models.aliases:
         _logger = logging.getLogger("istota.config")
         _active_brain = make_brain(config.brain)
         from .brain.claude_code import ClaudeCodeBrain
@@ -2258,28 +2267,32 @@ def load_config(config_path: Path | None = None) -> Config:
                 return _active_brain
             return None
 
-        def _validate_target(role, namespace, model_str):
+        def _validate_target(name, namespace, model_str):
             if not isinstance(model_str, str) or not model_str.strip():
                 return
             brain = _validator_for(namespace)
             if brain is None:
                 return
-            for _msg in brain.validate_role_override(role, model_str):
+            for _msg in brain.validate_alias_override(name, model_str):
                 if namespace == LEGACY_NAMESPACE:
-                    _logger.warning("[models.roles] %s", _msg)
+                    _logger.warning("[models.aliases] %s", _msg)
                 else:
-                    _logger.warning("[models.roles] (%s) %s", namespace, _msg)
+                    _logger.warning("[models.aliases] (%s) %s", namespace, _msg)
 
-        for _role, _value in config.models.roles.items():
+        for _name, _value in config.models.aliases.items():
             if isinstance(_value, str):
-                _validate_target(_role, LEGACY_NAMESPACE, _value)
+                _validate_target(_name, LEGACY_NAMESPACE, _value)
             elif isinstance(_value, dict):
                 for _ns, _target in _value.items():
+                    # ``portable = true`` is a reserved flag, not a namespace —
+                    # skip it in the validation loop (set_alias_overrides records it).
+                    if str(_ns).lower() == PORTABLE_KEY:
+                        continue
                     if isinstance(_target, str):
-                        _validate_target(_role, str(_ns), _target)
+                        _validate_target(_name, str(_ns), _target)
                     elif isinstance(_target, dict):
-                        _validate_target(_role, str(_ns), _target.get("model"))
-    set_role_overrides(config.models.roles)
+                        _validate_target(_name, str(_ns), _target.get("model"))
+    set_alias_overrides(config.models.aliases)
 
     # Per-model capability/window overrides for the native brain (NB-4). Global
     # like the role overrides — every get_model_info consumer (compaction sizing,

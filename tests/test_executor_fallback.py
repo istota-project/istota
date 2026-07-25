@@ -51,7 +51,7 @@ class _FakeBrain:
     def list_aliases(self):
         return []
 
-    def validate_role_override(self, r, t):
+    def validate_alias_override(self, r, t):
         return []
 
 

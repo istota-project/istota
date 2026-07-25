@@ -11,10 +11,11 @@ brain/
 ├── __init__.py     # Brain Protocol re-exports + make_brain factory
 ├── _types.py       # BrainRequest, BrainResult, BrainConfig, Brain Protocol
 ├── _events.py      # StreamEvent types + Claude Code stream-json parser
-├── _roles.py       # Global operator role-override state (provider-agnostic)
+├── _aliases.py     # CANONICAL_ROLES, EFFORT_LEVELS, split_effort, is_portable_alias
+├── _roles.py       # Global operator alias-override state (provider-agnostic)
 ├── claude_code.py  # ClaudeCodeBrain — wraps the `claude` CLI subprocess +
 │                   # owns the Anthropic model namespace (canonical IDs,
-│                   # MODEL_ALIASES, DEFAULT_ROLE_TARGETS, resolver methods)
+│                   # DEFAULT_ALIASES, resolver methods)
 ├── native.py       # NativeBrain — drives Istota's in-process agent loop
 └── tmux_claude.py  # TmuxClaudeBrain — drives the interactive `claude` TUI in a
                     # detached tmux session; delegates model resolution to a
@@ -39,13 +40,12 @@ Each brain owns its own model namespace. Consumers never reach into a brain modu
 
 ## Model identity
 
-Every model ID in the codebase resolves through the active brain. Three layers, top to bottom:
+Every model ID in the codebase resolves through the active brain. Effort is an orthogonal **`:effort` modifier** on any reference — `split_effort(raw)` (in `brain/_aliases.py`) peels a trailing `:<effort>` ∈ `low|medium|high|xhigh|max` (`opus:high`, `smart:low`, `claude-opus-4-8:xhigh`); every brain's resolver applies it first. Then two layers, top to bottom:
 
-1. **Operator role overrides** (`brain/_roles.py`, global) — **per-namespace**. A role override is stored `role -> namespace -> RoleTarget(model, effort)`; each brain reads its own `model_namespace` (`"anthropic"` / `"openai_compat"`, or the reserved `"*"` for a legacy flat value) via `get_role_override_target(role, namespace)`, so a value written for one namespace never leaks onto another brain's wire. Operators write either a flat `[models.roles] smart = "opus-high"` or a per-namespace `[models.roles.smart]` table (`anthropic = "opus-high"`, `openai_compat = { model = "...", effort = "high" }`); `set_role_overrides(...)` normalizes both once at config-load. Role targets carry effort onto the wire.
-2. **Default role targets** (per-brain, e.g. `claude_code.DEFAULT_ROLE_TARGETS`) — each brain decides what `fast` / `general` / `smart` mean for its namespace if the operator hasn't overridden.
-3. **Provider aliases** (per-brain, e.g. `claude_code.MODEL_ALIASES`) — short names like `opus-high` for `(model_id, effort)` pairs. Brain-specific.
+1. **Operator alias overrides** (`brain/_roles.py`, global) — **per-namespace**. An override is stored `name -> namespace -> RoleTarget(model, effort)`; each brain reads its own `model_namespace` (`"anthropic"` / `"openai_compat"`, or the reserved `"*"` for a legacy flat value) via `get_alias_override_target(name, namespace)`, so a value written for one namespace never leaks onto another brain's wire. Operators write either a flat `[models.aliases] smart = "opus:high"` or a per-namespace `[models.aliases.smart]` table (`anthropic = "opus:high"`, `openai_compat = { model = "...", effort = "high" }`), with an optional reserved `portable = true` sibling; `set_alias_overrides(...)` normalizes both once at config-load.
+2. **Shipped defaults** — the unified `DEFAULT_ALIASES` (per-brain, e.g. `claude_code.DEFAULT_ALIASES`): one table holding both the portable tiers (`fast`/`general`/`smart`) and the provider shortcuts (`opus`/`sonnet`/`haiku`/`default`), base names only. It is the code floor the operator's `[models.aliases]` overlays. A canonical `claude-*` id not in the table passes through.
 
-`Brain.validate_role_override(role, target)` warns on typos and provider-alias collisions at config-load time. ClaudeCodeBrain pins to versioned IDs: `OPUS = "claude-opus-4-8"` (current default Opus), with prior versions kept for production pinning — `OPUS_47 = "claude-opus-4-7"` (`opus-47` / `opus-47-high` aliases), `OPUS_46 = "claude-opus-4-6"`, `SONNET = "claude-sonnet-4-6"`, `HAIKU = "claude-haiku-4-5"`. Bare alias names (`opus`, `sonnet`, `haiku`) always resolve to the current-latest constant, so bumping `OPUS` ripples through every consumer automatically.
+`Brain.validate_alias_override(name, target)` warns on typos and shortcut-name collisions at config-load time. ClaudeCodeBrain pins to versioned IDs, base names only: `OPUS = "claude-opus-4-8"` (current default Opus), `SONNET = "claude-sonnet-5"`, `HAIKU = "claude-haiku-4-5"`. A prior-version pin is the canonical id + modifier (`claude-opus-4-7:high`, via the `claude-*` passthrough). Bare shortcuts (`opus`, `sonnet`, `haiku`) always resolve to the current-latest constant, so bumping `OPUS` ripples through every consumer automatically. The old `[models.roles]` key is a hard rename to `[models.aliases]` (a stale one logs a migration warning); the old effort-in-name forms (`opus-high`, `opus-46`) no longer resolve.
 
 ## BrainRequest
 

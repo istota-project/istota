@@ -6,7 +6,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, UserConfig
-from istota.brain import set_role_overrides
+from istota.brain import set_alias_overrides
 from istota.cron_loader import (
     CronJob,
     _validate_model,
@@ -1385,26 +1385,31 @@ class TestSyncPromotesSkillCommand:
 class TestValidateModel:
     """`_validate_model` should warn only on real typos.
 
-    The brain-scoped model namespace refactor introduced provider aliases
-    (``opus-high``, ``opus-46``) and role aliases (``smart``, ``general``,
-    ``fast``) — both must pass through silently. Operator-defined custom
-    roles via [models.roles] also count as known.
+    The unified alias registry provides provider shortcuts (``opus``), role
+    tiers (``smart``, ``general``, ``fast``), and an optional ``:effort``
+    modifier (``opus:high``) — all must pass through silently. Operator-defined
+    custom aliases via [models.aliases] also count as known.
     """
 
     @pytest.fixture(autouse=True)
-    def _reset_role_overrides(self):
-        set_role_overrides({})
+    def _reset_alias_overrides(self):
+        set_alias_overrides({})
         yield
-        set_role_overrides({})
+        set_alias_overrides({})
 
     def test_canonical_id_passes_silently(self, caplog):
         with caplog.at_level("WARNING"):
             _validate_model("job", "alice", "claude-opus-4-7")
         assert not caplog.records
 
-    def test_provider_alias_passes_silently(self, caplog):
+    def test_shortcut_passes_silently(self, caplog):
         with caplog.at_level("WARNING"):
-            _validate_model("job", "alice", "opus-high")
+            _validate_model("job", "alice", "opus")
+        assert not caplog.records
+
+    def test_effort_modifier_passes_silently(self, caplog):
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "opus:high")
         assert not caplog.records
 
     def test_role_alias_passes_silently(self, caplog):
@@ -1414,10 +1419,16 @@ class TestValidateModel:
             _validate_model("job", "alice", "fast")
         assert not caplog.records
 
-    def test_operator_custom_role_passes_silently(self, caplog):
-        set_role_overrides({"deep": "opus-46-high"})
+    def test_operator_custom_alias_passes_silently(self, caplog):
+        set_alias_overrides({"deep": "opus:max"})
         with caplog.at_level("WARNING"):
             _validate_model("job", "alice", "deep")
+        assert not caplog.records
+
+    def test_operator_custom_alias_with_effort_modifier_passes_silently(self, caplog):
+        set_alias_overrides({"deep": "opus:max"})
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "deep:high")
         assert not caplog.records
 
     def test_unknown_string_warns(self, caplog):

@@ -1039,7 +1039,7 @@ class TestPollTalkConversations:
     async def test_model_prefix_overrides_task_model_and_effort(self, make_config):
         config = make_config()
 
-        msg = _msg(id=102, actor_id="alice", message="!model opus-high draft a spec for X")
+        msg = _msg(id=102, actor_id="alice", message="!model opus:high draft a spec for X")
 
         with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
             mock_instance = MockClient.return_value

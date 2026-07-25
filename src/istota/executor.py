@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading  # noqa: F401  — kept for `mock.patch("istota.executor.threading.Timer")` compat
 import time  # noqa: F401  — kept for `mock.patch("istota.executor.time.sleep")` compat
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -42,9 +42,11 @@ from .brain import (
     ToolEndEvent,
     ToolProgressEvent,
     ToolUseEvent,
+    CANONICAL_ROLES,
     is_portable_alias,
     make_brain,
 )
+from .brain._roles import PORTABLE_KEY
 from .brain._fallback import (
     COOLDOWN_STOP_REASONS,
     TRIGGER_STOP_REASONS,
@@ -421,20 +423,46 @@ def _native_with_user_key(native_config, config: Config, user_id: str):
 # the same-attempt/no-increment rerun already lives here.
 
 
+def config_alias_portable_names(config) -> set[str]:
+    """The portable alias names for the cross-brain fallback check.
+
+    The canonical tiers (``fast``/``general``/``smart``) plus any custom alias an
+    operator flagged ``portable = true`` in ``[models.aliases]``. A shortcut
+    (``opus``) or canonical id is deliberately absent — it pins one provider and
+    can't cross the boundary. Derived from the config's raw alias mapping so it's
+    independent of global load-order state.
+    """
+    def _truthy(raw):
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"true", "1", "yes", "on"}
+        return False
+
+    names = set(CANONICAL_ROLES)
+    aliases = getattr(getattr(config, "models", None), "aliases", None) or {}
+    for name, value in aliases.items():
+        if isinstance(value, Mapping):
+            for key, raw in value.items():
+                if str(key).lower() == PORTABLE_KEY and _truthy(raw):
+                    names.add(str(name).strip().lower())
+    return names
+
+
 def _resolve_fallback_model_effort(task, config, fallback_brain, effort):
     """Resolve (model, effort, dropped_pin) for a fallback brain run.
 
-    A portable role tier (fast/general/smart + operator custom roles) is
-    re-resolved in the fallback brain's namespace — the *intent* crosses the
-    provider boundary. A non-portable pin (provider alias / canonical ID) can't
-    cross, so the fallback uses its own default and the requested name is
-    returned as ``dropped_pin`` (for the visible note + the INFO log). An empty
-    requested model → the fallback's own default, no note.
+    A portable intent (tier fast/general/smart + operator ``portable = true``
+    custom aliases) is re-resolved in the fallback brain's namespace — the intent
+    crosses the provider boundary. A non-portable pin (provider shortcut /
+    canonical ID) can't cross, so the fallback uses its own default and the
+    requested name is returned as ``dropped_pin`` (for the visible note + the
+    INFO log). An empty requested model → the fallback's own default, no note.
     """
     raw = (task.model or "").strip() or config.model
     if not raw:
         return ("", effort, None)
-    if is_portable_alias(raw, config.models.roles):
+    if is_portable_alias(raw, config_alias_portable_names(config)):
         # Re-resolve the intent in the fallback brain's own namespace, carrying
         # its effort too — a customized ``smart`` falling back claude_code→native
         # must land on a valid openai_compat slug + effort, not the anthropic

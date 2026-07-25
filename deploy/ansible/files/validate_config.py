@@ -142,42 +142,53 @@ def main() -> int:
         )
         return 1
 
-    # [models.roles]: a role value is EITHER a bare string (legacy flat) OR a
-    # per-namespace table ({anthropic = "...", openai_compat = "..."|{model,effort}}).
-    # A malformed value (a number, or a namespace table with no model) templates
-    # cleanly and set_role_overrides only WARNs — the role silently has no
-    # override. Fail the play so a typo surfaces at deploy time.
+    # [models.aliases]: an alias value is EITHER a bare string (legacy flat) OR a
+    # per-namespace table ({anthropic = "...", openai_compat = "..."|{model,effort}}),
+    # with an optional reserved ``portable = true`` boolean sibling of the
+    # namespace keys. A malformed value (a number, or a namespace table with no
+    # model) templates cleanly and set_alias_overrides only WARNs — the alias
+    # silently has no override. Fail the play so a typo surfaces at deploy time.
     models = raw.get("models", {})
-    roles = models.get("roles", {}) if isinstance(models, dict) else {}
-    if roles and not isinstance(roles, dict):
-        print("validate_config: [models.roles] must be a table", file=sys.stderr)
+    aliases = models.get("aliases", {}) if isinstance(models, dict) else {}
+    if aliases and not isinstance(aliases, dict):
+        print("validate_config: [models.aliases] must be a table", file=sys.stderr)
         return 1
-    for role, value in (roles.items() if isinstance(roles, dict) else []):
+    for alias, value in (aliases.items() if isinstance(aliases, dict) else []):
         if isinstance(value, str):
             continue
         if isinstance(value, dict):
             for ns, nsval in value.items():
+                # ``portable = true`` is a reserved flag, not a namespace.
+                if str(ns).lower() == "portable":
+                    if not isinstance(nsval, bool):
+                        print(
+                            f"validate_config: [models.aliases.{alias}] portable "
+                            "must be a boolean",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    continue
                 if isinstance(nsval, str):
                     continue
                 if isinstance(nsval, dict):
                     model = nsval.get("model")
                     if not isinstance(model, str) or not model.strip():
                         print(
-                            f"validate_config: [models.roles.{role}] {ns} table "
+                            f"validate_config: [models.aliases.{alias}] {ns} table "
                             "must contain a non-empty 'model' string",
                             file=sys.stderr,
                         )
                         return 1
                     continue
                 print(
-                    f"validate_config: [models.roles.{role}] {ns} must be a "
+                    f"validate_config: [models.aliases.{alias}] {ns} must be a "
                     "string or a {model, effort} table",
                     file=sys.stderr,
                 )
                 return 1
             continue
         print(
-            f"validate_config: [models.roles] {role} must be a string or a "
+            f"validate_config: [models.aliases] {alias} must be a string or a "
             "per-namespace table",
             file=sys.stderr,
         )

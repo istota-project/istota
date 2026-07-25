@@ -163,36 +163,44 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 
 There is no `[skills]` config section. Skill disclosure is single-axis (a skill is either eager or a menu entry the model loads on demand) with no config knobs. A stale `[skills]` block only logs a warning at load time.
 
-## `[models.roles]`
+## `[models.aliases]`
 
-Provider-agnostic role aliases that map to brain-specific model identifiers. Used by `!model <role> <prompt>` in Talk and by internal subsystems (`fast` for triage/classification, `general` for sleep cycle, `smart` is user-facing only).
+The operator-visible model alias registry — one table holding **both** the portable tiers and the provider shortcuts, overlaying the code-shipped defaults (`brain.claude_code.DEFAULT_ALIASES`). Used by `!model <name> <prompt>` in Talk/web and by internal subsystems (`fast` for triage/classification, `general` for sleep cycle, `smart` is user-facing only).
 
-Defaults (when no override is set):
+Shipped defaults (base names, no baked effort):
 
-| Role | Default target |
+| Alias | Default target |
 |---|---|
 | `fast` | Haiku |
 | `general` | Sonnet |
 | `smart` | Opus |
+| `opus` / `sonnet` / `haiku` | current-latest of each |
+| `default` | no override (brain/config default) |
 
-A role override is **per model namespace** so one definition covers every brain family: `anthropic` = the CLI brains (`claude_code` / `tmux_claude`), `openai_compat` = native. Two forms, both accepted:
+Effort is an orthogonal **`:effort` modifier** appended to any reference (`opus:high`, `smart:low`, `claude-opus-4-8:xhigh`) — never baked into a name. An alias override is **per model namespace** so one definition covers every brain family: `anthropic` = the CLI brains (`claude_code` / `tmux_claude`), `openai_compat` = native. Two forms, both accepted:
 
 ```toml
 # Flat (namespace-agnostic, resolved by whichever brain runs the task):
-[models.roles]
-smart = "opus-46-high"    # pin smart to Opus 4.6, effort high
-deep  = "opus-max"        # a custom role
+[models.aliases]
+smart = "claude-opus-4-6:high"   # pin smart to Opus 4.6, effort high
+deep  = "opus:max"               # a custom alias
 
 # Per-namespace (define once, correct on every brain):
-[models.roles.smart]
-anthropic     = "opus-high"                                          # CLI brains
+[models.aliases.smart]
+anthropic     = "opus:high"                                          # CLI brains
 openai_compat = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native endpoint slug
-[models.roles.general]
-anthropic     = "claude-sonnet-4-6"
+[models.aliases.general]
+anthropic     = "claude-sonnet-5"
 openai_compat = "anthropic/claude-sonnet-4.6"                        # bare string = no effort
+[models.aliases.deep]
+anthropic     = "opus:max"
+openai_compat = "anthropic/claude-opus-4.8"
+portable      = true                                                # a cross-brain custom tier
 ```
 
-Role targets **carry effort**: an effort-encoding alias (`opus-high` → high) or an explicit `effort =` on a per-namespace table reaches the wire (explicit wins). A role uses one form (TOML: a key can't be both a string and a table); a per-namespace table missing the active brain's key falls to that brain's code default. Invalid *anthropic* targets (neither a known alias nor a canonical `claude-*` ID) are warned at config-load time via `Brain.validate_role_override`; `openai_compat` slugs are sent verbatim (no alias table to validate against).
+Alias targets **carry effort**: a `:effort` modifier on the target (`opus:high` → high) or an explicit `effort =` on a per-namespace table reaches the wire (explicit wins). An alias uses one form (TOML: a key can't be both a string and a table); a per-namespace table missing the active brain's key falls to that brain's code default. A custom alias is a non-portable pin unless flagged `portable = true` (then it re-resolves across the cross-brain fallback boundary like the built-in tiers). Invalid *anthropic* targets (neither a known alias nor a canonical `claude-*` ID) are warned at config-load time via `Brain.validate_alias_override`; `openai_compat` slugs are sent verbatim (no alias table to validate against).
+
+The old `[models.roles]` key is a **hard rename** to `[models.aliases]` — no longer read; a stale one present logs a one-time migration warning. The old effort-in-name forms (`opus-high`, `opus-46`) no longer resolve.
 
 ## `[brain]`
 

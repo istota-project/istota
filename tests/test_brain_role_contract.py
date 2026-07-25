@@ -10,7 +10,7 @@ import pytest
 
 from istota.brain import KNOWN_BRAIN_KINDS
 from istota.brain._aliases import CANONICAL_ROLES
-from istota.brain._roles import set_role_overrides
+from istota.brain._roles import set_alias_overrides
 from istota.brain.claude_code import ClaudeCodeBrain
 from istota.brain.native import NativeBrain
 from istota.brain.tmux_claude import TmuxClaudeBrain
@@ -65,17 +65,17 @@ class TestSharedDefaultBlockResolves:
     canonical role in its own namespace to a valid, non-role model string."""
 
     def teardown_method(self):
-        set_role_overrides({})
+        set_alias_overrides({})
 
     def test_default_block_resolves_per_namespace(self):
-        set_role_overrides(
+        set_alias_overrides(
             {
                 "smart": {
-                    "anthropic": "opus-high",
+                    "anthropic": "opus:high",
                     "openai_compat": {"model": "anthropic/claude-opus-4.8", "effort": "high"},
                 },
                 "general": {
-                    "anthropic": "claude-sonnet-4-6",
+                    "anthropic": "claude-sonnet-5",
                     "openai_compat": "anthropic/claude-sonnet-4.6",
                 },
                 "fast": {

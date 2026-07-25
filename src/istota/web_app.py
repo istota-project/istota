@@ -874,7 +874,7 @@ def _admin_models_section() -> dict:
 
     Shows the active brain kind, the effective default model/effort, and how the
     portable role aliases (``fast``/``general``/``smart``) resolve right now
-    (reflecting any operator ``[models.roles]`` overrides). ``endpoint`` /
+    (reflecting any operator ``[models.aliases]`` overrides). ``endpoint`` /
     ``provider`` are only populated for the native brain, which talks to a
     configurable OpenAI-compatible endpoint. Best-effort: any failure returns an
     ``error`` string rather than aborting the whole stats payload.

@@ -8,10 +8,10 @@ aliases like ``smart`` map to a real model. Consumers never reach into a
 brain module's tables; they go through ``make_brain(config.brain)`` and
 call ``.resolve_alias`` / ``.resolve_model_name`` / ``.list_aliases``.
 
-Operator role overrides (``[models.roles]`` TOML) are provider-agnostic
+Operator alias overrides (``[models.aliases]`` TOML) are provider-agnostic
 and live globally in ``_roles.py`` — each brain consults the override
 table at resolution time and routes the override target through its own
-provider alias map.
+alias table.
 
 Phase 1 ships a single brain (ClaudeCodeBrain) that wraps the `claude`
 CLI. Future phases add direct-HTTP brains (OpenRouter, Anthropic) without
@@ -35,7 +35,7 @@ from ._events import (
 import dataclasses
 import logging
 
-from ._aliases import CANONICAL_ROLES, is_portable_alias
+from ._aliases import CANONICAL_ROLES, EFFORT_LEVELS, is_portable_alias, split_effort
 from ._fallback import (
     COOLDOWN_STOP_REASONS,
     PrimaryAvailabilityBreaker,
@@ -56,9 +56,10 @@ from ._postures import (
 )
 from ._roles import (
     RoleTarget,
-    get_role_override_target,
-    get_role_overrides,
-    set_role_overrides,
+    get_alias_override_target,
+    get_alias_overrides,
+    get_portable_alias_names,
+    set_alias_overrides,
 )
 from ._types import Brain, BrainConfig, BrainRequest, BrainResult
 from .claude_code import (
@@ -131,6 +132,7 @@ __all__ = [
     "BrainResult",
     "CANONICAL_ROLES",
     "ClaudeCodeBrain",
+    "EFFORT_LEVELS",
     "COOLDOWN_STOP_REASONS",
     "ContextManagementEvent",
     "KNOWN_BRAIN_KINDS",
@@ -159,13 +161,15 @@ __all__ = [
     "ToolProgressEvent",
     "ToolUseEvent",
     "effective_fallback_kind",
+    "get_alias_override_target",
+    "get_alias_overrides",
     "get_availability_breaker",
-    "get_role_override_target",
-    "get_role_overrides",
+    "get_portable_alias_names",
     "make_brain",
     "make_stream_parser",
     "parse_stream_line",
     "resolve_brain_kind",
-    "set_role_overrides",
+    "set_alias_overrides",
+    "split_effort",
     "task_postures_by_name",
 ]

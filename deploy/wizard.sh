@@ -662,7 +662,7 @@ api_key = \"$_WIZ_BRAIN_NATIVE_API_KEY\"
             local _role_general="${_WIZ_BRAIN_ROLE_GENERAL:-$_WIZ_BRAIN_NATIVE_MODEL}"
             local _role_smart="${_WIZ_BRAIN_ROLE_SMART:-$_WIZ_BRAIN_NATIVE_MODEL}"
             brain_block+="
-[models.roles]
+[models.aliases]
 fast = \"$_role_fast\"
 general = \"$_role_general\"
 smart = \"$_role_smart\"

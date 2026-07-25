@@ -136,8 +136,8 @@ class Brain(Protocol):
     ``make_brain(config.brain).resolve_*``.
     """
 
-    # The model namespace this brain resolves role/alias names in. Operators
-    # key a per-namespace role override on this string (``[models.roles.<role>]``
+    # The model namespace this brain resolves alias names in. Operators
+    # key a per-namespace alias override on this string (``[models.aliases.<name>]``
     # sub-table). ``ClaudeCodeBrain`` / ``TmuxClaudeBrain`` share ``"anthropic"``
     # (same `claude` binary, same Anthropic model IDs); ``NativeBrain`` uses
     # ``"openai_compat"`` (its provider label). Keeping this a namespace *label*
@@ -162,10 +162,11 @@ class Brain(Protocol):
     def resolve_alias(self, alias: str) -> tuple[str | None, str | None] | None:
         """Resolve a ``!model <alias>`` name to ``(model_id, effort)`` or None.
 
-        Roles (``fast``/``general``/``smart`` plus operator-defined custom
-        roles) take precedence over provider aliases. Roles always carry
-        ``effort=None`` since they don't connote an effort tier; provider
-        aliases like ``opus-high`` carry an explicit effort.
+        Accepts an optional orthogonal ``:effort`` modifier on any reference
+        (``opus:high``, ``smart:low``, ``claude-opus-4-8:xhigh``): the base name
+        resolves through the brain's alias table (tiers + shortcuts + canonical
+        passthrough) and the modifier's effort wins over the entry's own default
+        effort. Returns None for an unknown name.
         """
         ...
 
@@ -182,10 +183,10 @@ class Brain(Protocol):
         """Return the merged alias table (roles + provider aliases) for display."""
         ...
 
-    def validate_role_override(self, role: str, target: str) -> list[str]:
-        """Return human-readable warnings for an operator role override.
+    def validate_alias_override(self, name: str, target: str) -> list[str]:
+        """Return human-readable warnings for an operator alias override.
 
-        Called once per ``[models.roles]`` entry at config-load time so the
+        Called once per ``[models.aliases]`` entry at config-load time so the
         operator sees obvious typos in their logs immediately, rather than
         finding out at runtime when a task fails. Empty list = no warnings.
         Brains that don't care about this can return ``[]``.

@@ -96,11 +96,12 @@ def _validate_model(name: str, user_id: str, model: str) -> None:
 
     Catches obvious typos (no canonical prefix, embedded whitespace) without
     hardcoding a model allowlist that goes stale every release. Provider
-    aliases (``opus-high``), role aliases (``smart``), and operator-defined
-    custom roles are all accepted: anything that the active brain or the
-    operator role-override table knows about passes silently.
+    shortcuts (``opus``), role tiers (``smart``), an optional ``:effort``
+    modifier (``opus:high``), and operator-defined custom aliases are all
+    accepted: anything the active brain or the operator alias-override table
+    knows about passes silently.
     """
-    from .brain import BrainConfig, get_role_overrides, make_brain
+    from .brain import BrainConfig, get_alias_overrides, make_brain, split_effort
 
     if any(c.isspace() for c in model):
         logger.warning(
@@ -118,7 +119,9 @@ def _validate_model(name: str, user_id: str, model: str) -> None:
     brain = make_brain(BrainConfig())
     if brain.resolve_alias(model) is not None:
         return
-    if model.lower() in get_role_overrides():
+    # Custom operator alias (strip any :effort modifier) known to the override
+    # table but not to the default brain's own table.
+    if split_effort(model)[0].lower() in get_alias_overrides():
         return
 
     logger.warning(

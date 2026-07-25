@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from . import db
-from .brain import Brain, make_brain
+from .brain import Brain, EFFORT_LEVELS, make_brain
 from .memory import search as memory_search_mod
 from .config import Config
 from .nextcloud_client import ocs_get
@@ -124,11 +124,12 @@ def parse_command(content: str) -> tuple[str, str] | None:
 class ModelPrefix:
     """Result of parsing a `!model` prefix.
 
-    `unknown_alias` is set when the prefix matched but the alias wasn't in
-    `MODEL_ALIASES` (or no alias was supplied) — caller posts a usage message.
-    Otherwise `model`/`effort` carry the override (both may be None for the
-    explicit "default" alias) and `remainder` is the prompt with the prefix
-    stripped.
+    `unknown_alias` is set when the prefix matched but the alias didn't resolve
+    (or no alias was supplied) — caller posts a usage message. An optional
+    ``:effort`` modifier (`opus:high`, `smart:low`) is handled by the brain's
+    ``resolve_alias``. Otherwise `model`/`effort` carry the override (both may be
+    None for the explicit "default" alias) and `remainder` is the prompt with
+    the prefix stripped.
     """
 
     model: str | None
@@ -505,12 +506,22 @@ async def cmd_models(ctx: CommandContext):
         else:
             target = f"`{model}`"
         lines.append(f"- `{alias}` → {target}")
+    lines.append("")
+    lines.append(
+        "Append `:low|:medium|:high|:xhigh|:max` to any name to set effort, "
+        "e.g. `!model opus:high`."
+    )
     return "\n".join(lines)
 
 
-# Effort levels the CLI brains accept. `!room effort <level>` validates against
-# this set; the brain silently drops effort for models that don't support it.
+# Effort levels the CLI brains accept — the set is the single source of truth in
+# ``brain._aliases.EFFORT_LEVELS`` (imported at top); this ordered tuple is just
+# the display order for usage messages. `!room effort <level>` validates against
+# it; the brain silently drops effort for models that don't support it.
 _EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+assert set(_EFFORT_LEVELS) == set(EFFORT_LEVELS), (
+    "commands._EFFORT_LEVELS drifted from brain._aliases.EFFORT_LEVELS"
+)
 
 
 def _room_effort_usage() -> str:

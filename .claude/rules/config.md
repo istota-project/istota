@@ -223,35 +223,39 @@ protocol, ClaudeCodeBrain, NativeBrain, and `NativeBrainConfig` fields.
 - `bash_spill_full_output: bool = True` (`[brain.native]`) — when the native Bash tool's output exceeds the per-tool cap, spill the full captured output to a task-scoped temp file (under `ISTOTA_DEFERRED_DIR` → `ToolEnv.deferred_dir`, fallback system temp) and name it in the result so the model can `Read` it, instead of silently dropping the tail. Best-effort (degrades to cap-only on I/O error); skipped when the call sets `exclude_from_context`. See `.claude/rules/brain.md` "Native-brain coding enhancements".
 - `turn_budget_nudge: bool = True` / `turn_budget_nudge_early_percent: int = 50` / `turn_budget_nudge_remaining: list[int] = [15, 5]` (`[brain.native]`) — turn-budget awareness nudge (ISSUE-187 defect 3). On a **tool-bearing** run with a `max_turns` cap, the loop injects an environment notice as the run approaches the cap so the model paces itself and delivers a partial answer instead of getting capped mid-plan. Fires once at `early_percent` of the cap (a "~halfway, keep it in mind" reminder), then once each as absolute steps-remaining crosses each level in `turn_budget_nudge_remaining` (escalating urgency). Counted from assistant turns (monotonic across compaction); each threshold fires at most once. Also gates a non-numeric upfront pacing line in the coding system prompt (mechanism A). Text-only runs (empty `allowed_tools`, e.g. the sleep cycle) never see it. Off for models that mishandle meta-instructions. See `.claude/rules/brain.md` "Turn-budget awareness nudge".
 
-Built-in role aliases (`fast`/`general`/`smart`) resolve to `native.model` on the native brain unless remapped via `[models.roles]` (NB-3) — so stock config's `extraction_model`/`curation_model = "general"` never reaches the wire as a literal alias string.
+Built-in role aliases (`fast`/`general`/`smart`) resolve to `native.model` on the native brain unless remapped via `[models.aliases]` (NB-3) — so stock config's `extraction_model`/`curation_model = "general"` never reaches the wire as a literal alias string.
 
 ### `ModelsConfig`
 ```
-roles: dict[str, str | dict] = {}   # raw [models.roles] structure — flat string OR per-namespace table
+aliases: dict[str, str | dict] = {}   # raw [models.aliases] structure — flat string OR per-namespace table
 ```
-Provider-agnostic role tiers, now **per-namespace** (role-tier-cross-brain-standardization
-spec). `roles` holds the **raw** parsed `[models.roles]` structure: each role
-value is either a bare string (legacy flat, resolved by whichever brain runs the
-task) or a per-namespace table (`{anthropic = "...", openai_compat = "..."|{model, effort}}`)
-so one definition covers every brain family. Defaults (`fast`→Haiku,
-`general`→Sonnet, `smart`→Opus) live in the active brain
-(`brain.claude_code.DEFAULT_ROLE_TARGETS`) as the code floor. Normalization into
-`RoleTarget(model, effort)` objects happens once in
-`brain._roles.set_role_overrides(config.models.roles)` (run late in config load),
-keyed `role -> namespace -> RoleTarget` with the reserved `"*"` namespace for a
-flat value; each brain reads its own namespace via
-`get_role_override_target(role, self.model_namespace)`, so an anthropic value
-never leaks onto the native wire (the cross-namespace bug fix) and a role target
-carries effort onto the wire (the effort-drop fix). Config-load validation is
-namespace-aware (anthropic entries → `claude_code`; flat `"*"` → active brain;
-`openai_compat` → native, no alias table so no warnings); warnings only, never
-fails load. Custom role names (`deep`, `cheap`) are accepted and stay portable
-across the cross-brain fallback. Every wired field that takes a model name
+The operator-visible model alias registry (centralized-model-alias-registry spec):
+one table holding **both** the portable tiers (`fast`/`general`/`smart`) and the
+provider shortcuts (`opus`/`sonnet`/`haiku`), **per-namespace**. `aliases` holds
+the **raw** parsed `[models.aliases]` structure: each value is either a bare
+string (legacy flat, resolved by whichever brain runs the task) or a per-namespace
+table (`{anthropic = "...", openai_compat = "..."|{model, effort}}`, plus an
+optional reserved `portable = true` sibling) so one definition covers every brain
+family. The shipped default set (`fast`→Haiku, `general`→Sonnet, `smart`→Opus,
+`opus`/`sonnet`/`haiku` shortcuts) lives on the active brain
+(`brain.claude_code.DEFAULT_ALIASES`) as the overridable code floor. Effort is an
+orthogonal `:effort` modifier on any reference (`opus:high`), never baked into a
+name. Normalization into `RoleTarget(model, effort)` objects happens once in
+`brain._roles.set_alias_overrides(config.models.aliases)` (run late in config
+load), keyed `name -> namespace -> RoleTarget` with the reserved `"*"` namespace
+for a flat value; each brain reads its own namespace via
+`get_alias_override_target(name, self.model_namespace)`, so an anthropic value
+never leaks onto the native wire. Config-load validation is namespace-aware
+(anthropic entries → `claude_code` via `validate_alias_override`; flat `"*"` →
+active brain; `openai_compat` → native, no alias table so no warnings; the
+`portable` key is skipped); warnings only, never fails load. Custom alias names
+(`deep`, `cheap`) are accepted; a custom alias is a non-portable pin unless
+flagged `portable = true`. Every wired field that takes a model name
 (`selection_model`, `extraction_model`, `curation_model`, the top-level `model`,
-per-task `model`, `[[jobs]] model`) accepts canonical IDs, provider aliases, or
-role tiers. Backward compatible: a flat `[models.roles] role = "string"`
-deployment is unchanged (now *with* effort where the target encodes it), and a
-no-`[models.roles]` deployment resolves via the code floor byte-for-byte.
+per-task `model`, `[[jobs]] model`) accepts canonical IDs, shortcuts, tiers, or
+any of them + a `:effort` modifier. **Hard rename:** `[models.roles]` is no longer
+read — a stale one logs a one-time migration WARNING and does not populate
+`aliases`; a no-`[models.aliases]` deployment resolves via the code floor.
 
 ### `ExperimentalConfig`
 ```

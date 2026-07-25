@@ -50,7 +50,7 @@ class TestRegistration:
             "resolve_alias",
             "resolve_model_name",
             "list_aliases",
-            "validate_role_override",
+            "validate_alias_override",
         ):
             assert callable(getattr(brain, method))
 
@@ -80,7 +80,7 @@ class TestModelResolutionDelegation:
         self.reference = ClaudeCodeBrain()
 
     def test_resolve_alias_matches_claude_code(self):
-        for alias in ("opus", "opus-high", "sonnet", "haiku", "smart", "bogus"):
+        for alias in ("opus", "opus:high", "sonnet", "haiku", "smart", "smart:low", "bogus"):
             assert self.brain.resolve_alias(alias) == self.reference.resolve_alias(alias)
 
     def test_resolve_model_name_matches_claude_code(self):
@@ -90,9 +90,9 @@ class TestModelResolutionDelegation:
     def test_list_aliases_matches_claude_code(self):
         assert self.brain.list_aliases() == self.reference.list_aliases()
 
-    def test_validate_role_override_matches_claude_code(self):
-        assert self.brain.validate_role_override("smart", "opus-high") == (
-            self.reference.validate_role_override("smart", "opus-high")
+    def test_validate_alias_override_matches_claude_code(self):
+        assert self.brain.validate_alias_override("smart", "opus:high") == (
+            self.reference.validate_alias_override("smart", "opus:high")
         )
 
 

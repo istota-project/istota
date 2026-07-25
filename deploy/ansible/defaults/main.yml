@@ -5,10 +5,8 @@
 # Override individual variables below to diverge from namespace where needed
 istota_namespace: "istota"
 
-# Python package name - always "istota" regardless of namespace
-# Used for Python module imports (python -m istota.scheduler, from istota.db, etc.)
-# Env vars are not derived from this; they always use the literal ISTOTA_ prefix
-# (e.g. ISTOTA_DEVELOPER_GITLAB_TOKEN). See deploy/ansible/templates/secrets.env.j2.
+# Python package name (module imports). Always "istota" regardless of namespace.
+# Env vars use the literal ISTOTA_ prefix, not derived from this.
 istota_package: "istota"
 
 # Update mode - skip full installation, just pull code and update config
@@ -28,49 +26,40 @@ istota_group: "{{ istota_namespace }}"
 istota_bot_name: ""
 # Include emissaries.md (constitutional principles) in system prompts
 istota_emissaries_enabled: true
-# =============================================================================
-# Model selection
-# =============================================================================
-# Per-task model+effort resolution, highest precedence first:
-#   1. !model <alias> override (Talk)   2. istota_model / istota_effort (below)
-#   3. role tier, resolved by the active brain   4. brain built-in default
-# Deep reference: .claude/rules/config.md, docs/configuration/native-brain.md
 
-# Global default model + effort ("" = brain default). Separate fields: each
-# accepts a canonical id, a provider alias (opus-high, sonnet), or a role tier
-# (smart/general/fast). A provider alias in istota_model sets only the model —
-# set istota_effort too for a global effort default.
+# Model selection. Per-task model+effort precedence: !model override (Talk) >
+# istota_model/istota_effort > role tier (resolved by the active brain) > brain
+# default. See .claude/rules/config.md, docs/configuration/native-brain.md.
+
+# Global default model + effort ("" = brain default). Each accepts a canonical
+# id, a shortcut (opus/sonnet/haiku), or a role tier (smart/general/fast), plus an
+# optional orthogonal :effort modifier (opus:high). istota_effort still works too.
 istota_model: ""
 istota_effort: ""
 
-# Role tiers — provider-agnostic names (fast/general/smart) defined explicitly
-# per model namespace so ONE definition is correct on every brain family:
-# `anthropic` = the CLI brains (claude_code / tmux_claude), `openai_compat` =
-# native. Each tier is a {model, effort} pair — role targets carry effort now, so
-# effort is a first-class per-tier knob (a `!model smart` / room default / the
-# cross-brain fallback all resolve the tier's effort onto the wire). An empty
-# effort ("") means "model default" and renders as a bare model (no effort flag);
-# smart pins high, fast/general defer to the model. anthropic models mirror the
-# code defaults (Haiku/Sonnet/Opus); openai_compat defaults to the configured
-# native model (istota_brain_native_model) — point a tier at a different model on
-# the same endpoint by editing its openai_compat.model. Add custom roles
-# (deep/cheap) here too; they stay portable. A tier value may also be a bare
-# string (legacy flat, namespace-agnostic) instead of the per-namespace table.
-istota_models_roles:
+# Model alias registry ([models.aliases]) — one operator-visible table overlaying
+# the code-shipped defaults (tiers fast/general/smart + shortcuts opus/sonnet/haiku).
+# Aliases are per model namespace so one definition works on every brain:
+# `anthropic` = the CLI brains (claude_code / tmux_claude), `openai_compat` = native.
+# Each entry is a {model, effort} pair; empty effort ("") means model default.
+# openai_compat defaults to istota_brain_native_model. Custom aliases stay a pin
+# unless flagged `portable: true`. An entry may also be a bare string (legacy flat,
+# namespace-agnostic). Effort is the orthogonal :effort modifier, never a name.
+istota_models_aliases:
   fast:
     anthropic:
       model: "claude-haiku-4-5"
       effort: ""
     openai_compat:
       model: "{{ istota_brain_native_model }}"
-      effort: ""
+      effort: "low"
   general:
     anthropic:
-      model: "claude-sonnet-4-6"
+      model: "claude-sonnet-5"
       effort: ""
     openai_compat:
       model: "{{ istota_brain_native_model }}"
-      effort: ""
+      effort: "medium"
   smart:
     anthropic:
       model: "claude-opus-4-8"
@@ -82,74 +71,45 @@ istota_models_roles:
 # Use config/system-prompt.md instead of Claude Code's default system prompt
 istota_custom_system_prompt: true
 
-# Brain — selects which model-invocation backend the executor uses.
+# Brain — selects the model-invocation backend:
 #   "claude_code" (default) wraps the headless `claude -p` CLI subprocess.
-#   "native"                runs istota's own in-process agent loop against an
-#                           OpenAI-compatible (or Claude-CLI) provider.
-#   "tmux_claude"           drives the interactive `claude` TUI in a detached
-#                           tmux session (prompt injection + Stop-hook sentinel
-#                           + transcript parse). Same `claude` binary + auth as
-#                           claude_code; requires `tmux` on the host. Prototype
-#                           maturity — keep claude_code as the fallback and roll
-#                           out gradually via istota_brain_source_type_overrides
-#                           before making it the instance default.
-# All three coexist behind the Brain protocol (src/istota/brain/); swapping
-# backends doesn't touch executor orchestration (memory, skills, sandbox,
-# deferred DB writes). Full operator runbook: docs/configuration/native-brain.md.
-# Switch + redeploy: set istota_brain_kind, or route one source_type via the
-# overrides map below.
+#   "native"      runs istota's in-process agent loop against an OpenAI-compatible provider.
+#   "tmux_claude" drives the interactive `claude` TUI in a detached tmux session (needs tmux).
+# All coexist behind the Brain protocol (src/istota/brain/). Runbook: docs/configuration/native-brain.md.
 istota_brain_kind: "claude_code"
 
-# --- Brain fallback (availability failover, [brain] fallback_*) ---------------
-# When the primary brain (istota_brain_kind) is unavailable — subscription usage
-# limit, missing binary, or tmux launch failure — run the task on the fallback
-# brain with that brain's own configured settings. The motivating case: a
-# claude_code subscription hitting its usage limit, failing over to a metered
-# native endpoint. A portable role tier (fast/general/smart) carries across the
-# provider boundary; a provider-specific model pin drops to the fallback's own
-# default (logged + a visible note appended to the reply). "" = no fallback (a
-# tmux_claude primary still falls back to claude_code by default). Single level
-# only — if the fallback is also down, the task fails/retries normally.
+# Brain fallback ([brain] fallback_*). When the primary brain is unavailable
+# (usage limit, missing binary, tmux launch failure) run the task on the fallback
+# brain with its own settings. Portable role tiers cross the provider boundary; a
+# provider-specific pin drops to the fallback's default (with a visible note).
+# "" = no fallback (tmux_claude still falls back to claude_code). Single level only.
 istota_brain_fallback: ""                       # "" | "claude_code" | "native" | "tmux_claude"
 istota_brain_fallback_on_transient: true        # also reroute a persistent transient_api_error
-istota_brain_fallback_cooldown_seconds: 3600    # skip an unavailable primary this long; 0 disables stickiness
+istota_brain_fallback_cooldown_seconds: 3600    # skip an unavailable primary this long; 0 disables
 
-# --- Native brain ([brain.native]) -------------------------------------------
-# Only emitted to config.toml when istota_brain_kind == "native", when
-# istota_brain_fallback == "native" (the availability-failover brain), OR a
-# source_type_overrides entry routes some task type to "native". Defaults match
-# the code defaults (NativeBrainConfig), so most operators only set model +
-# base_url + the API key. Note: istota_brain_native_model defaults to "" — a
-# fallback = "native" with no model set resolves to an empty model id (400 on
-# failover), so pin istota_brain_native_model whenever native is primary OR
-# fallback.
+# Native brain ([brain.native]). Emitted to config.toml only when native is the
+# kind, the fallback, or a source_type_overrides target. Defaults match the code;
+# most operators set model + base_url + the API key. Pin istota_brain_native_model
+# whenever native is primary OR fallback (an empty model id 400s on failover).
 istota_brain_native_provider: "openai_compat"     # only provider currently
-istota_brain_native_model: "z-ai/glm-5.2"         # explicit id (openai_compat has no aliasing)
-istota_brain_native_effort: "high"                # default effort: low/medium/high/xhigh/max ("" = none).
-                                                  #   Sent as reasoning_effort only to a thinking-capable
-                                                  #   model; xhigh/max fold to high over the compat endpoint.
+istota_brain_native_model: "z-ai/glm-5.2"         # explicit id (no aliasing)
+istota_brain_native_effort: "high"                # low/medium/high/xhigh/max ("" = none); sent only to thinking-capable models
 istota_brain_native_base_url: "https://openrouter.ai/api/v1"
-istota_brain_native_extra_headers: {}             # dict of extra HTTP headers (openai_compat)
-istota_brain_native_context_window: 0             # 0 = resolve from the live-fetched OpenRouter
-                                                  #   catalog / conservative 200k default. A NON-
-                                                  #   OpenRouter endpoint SHOULD set its real window.
+istota_brain_native_extra_headers: {}             # extra HTTP headers (openai_compat)
+istota_brain_native_context_window: 0             # 0 = resolve from OpenRouter catalog / 200k default; set real window for non-OpenRouter
 istota_brain_native_max_turns: 100                # hard cap on assistant turns per task
 istota_brain_native_max_tokens: 32000             # per-completion output cap
-istota_brain_native_model_catalog_fetch: true     # when base_url is OpenRouter, fetch its public
-                                                  #   model list for real window/capabilities/prices
-                                                  #   (self-updating, disk-cached, never fatal). No
-                                                  #   effect for a non-OpenRouter endpoint.
+istota_brain_native_model_catalog_fetch: true     # fetch OpenRouter model list for real window/capabilities/prices (no-op off OpenRouter)
 istota_brain_native_model_catalog_cache_ttl_hours: 24  # disk-cache freshness for the fetch above
 istota_brain_native_bash_spill_full_output: true  # spill over-cap Bash output to a temp file named in the result
 istota_brain_native_turn_budget_nudge: true       # nudge the model to pace itself as it nears max_turns
 istota_brain_native_turn_budget_nudge_early_percent: 50   # first (~halfway) reminder fires at this % of the cap
 istota_brain_native_turn_budget_nudge_remaining: [15, 5]  # escalating late fires at these absolute steps-remaining
-istota_brain_native_prompt_caching: ""            # cache_control breakpoints. "" = derive from base_url
-                                                  #   (ON for api.anthropic.com, OFF otherwise). Set true/false
-                                                  #   to force; a plain-OpenAI / local endpoint needs false.
-# Native-brain daemon-side WebFetch tool ([brain.native.web_fetch]). Runs in the
-# daemon (host netns), credential-free and SSRF-hardened — not gated by the bwrap
-# CONNECT allowlist. Safe defaults; only enabled/allow_http commonly change.
+istota_brain_native_prompt_caching: ""            # "" = derive from base_url (ON for api.anthropic.com); set true/false to force
+
+# Native-brain WebFetch tool ([brain.native.web_fetch]). Runs in the daemon
+# (host netns), credential-free and SSRF-hardened, not gated by the bwrap CONNECT
+# allowlist. Safe defaults; only enabled/allow_http commonly change.
 istota_brain_native_web_fetch_enabled: true       # master switch; false omits the tool
 istota_brain_native_web_fetch_allow_http: false   # permit cleartext http:// (off = HTTPS only)
 istota_brain_native_web_fetch_timeout_seconds: 20 # total wall-clock per fetch
@@ -160,49 +120,29 @@ istota_brain_native_web_fetch_require_url_provenance: false  # only fetch URLs s
 istota_brain_native_web_fetch_allow_hosts: []     # if non-empty, a host allowlist (suffix match)
 istota_brain_native_web_fetch_block_hosts: []     # always-denied hosts (suffix match)
 istota_brain_native_web_fetch_extra_blocked_cidrs: []  # operator additions to the private/reserved IP blocklist
-# Per-role native model overrides are now the openai_compat key of each tier in
-# istota_models_roles (above), which defaults to istota_brain_native_model.
-# MIGRATION: a former `istota_brain_native_model_smart: X` becomes
-#   istota_models_roles.smart.openai_compat: X   (same for fast/general).
-# Point one tier at a bigger/smaller model on the same endpoint by editing that
-# tier's openai_compat value; leaving them at the default routes all three to
-# istota_brain_native_model.
-# Instance-wide provider API key. Never written to config.toml — rendered into
-# the EnvironmentFile as ISTOTA_BRAIN_NATIVE_API_KEY (or set it there directly).
-# Vault this. Per-user keys go through istota_user_secrets (service:
-# native_brain, key: api_key) instead, and overlay this instance key per user.
+
+# Per-tier native model overrides live in each tier's openai_compat key in
+# istota_models_aliases (above), defaulting to istota_brain_native_model.
+# Instance-wide provider API key — never written to config.toml; rendered into
+# the EnvironmentFile as ISTOTA_BRAIN_NATIVE_API_KEY. Vault this. Per-user keys
+# go through istota_user_secrets (service: native_brain, key: api_key).
 istota_brain_native_api_key: ""
 
-# --- Per-source-type brain routing ([brain.source_type_overrides]) -----------
-# Gradual-rollout knob: map a task source_type to a brain kind, overriding
-# istota_brain_kind for matching tasks (e.g. move cron/heartbeat to native while
-# interactive talk/email stays on claude_code). Unknown kinds are logged and
-# ignored, never wedging a task. Examples:
+# Per-source-type brain routing ([brain.source_type_overrides]). Map a task
+# source_type to a brain kind, overriding istota_brain_kind for matching tasks
+# (e.g. cron/heartbeat on native while talk/email stays on claude_code). Example:
 #   istota_brain_source_type_overrides:
 #     scheduled: native
 #     heartbeat: native
-# To start a tmux_claude rollout on cron jobs only, leaving everything else on
-# claude_code:
-#   istota_brain_source_type_overrides:
-#     scheduled: tmux_claude
 istota_brain_source_type_overrides: {}
 
-# --- Tmux-driven interactive-TUI brain ([brain.tmux]) ------------------------
-# Only emitted to config.toml when istota_brain_kind == "tmux_claude", when
-# istota_brain_fallback == "tmux_claude", OR a source_type_overrides entry
-# routes to "tmux_claude". Drives the interactive
-# `claude` TUI in a detached tmux session to keep traffic on subscription
-# billing (vs the metered Agent-SDK credit headless `claude -p` draws from after
-# 2026-06-15). claude_code stays the automatic fallback (a launch failure reruns
-# the task headless; a process-global circuit breaker trips after repeated
-# launch failures, alerts the operator, and degrades to headless for a cooldown).
-# A full switch routes EVERY source type through it. Requires tmux on the host
-# (already present). Operator runbook: .claude/rules/brain.md "TmuxClaudeBrain".
-#
-# All fields default in code to the prototype's pinned values; override only when
-# needed. The marker lists are pane-text heuristics pinned to a claude CLI
-# version (istota_brain_tmux_cli_version_pin) — a CLI reword that breaks readiness
-# detection is a config hotfix (set the relevant marker var), not a code release.
+# Tmux-driven interactive-TUI brain ([brain.tmux]). Emitted to config.toml only
+# when tmux_claude is the kind, the fallback, or a source_type_overrides target.
+# Drives the interactive `claude` TUI in a detached tmux session to keep traffic
+# on subscription billing; claude_code stays the automatic fallback. Needs tmux
+# on the host. Runbook: .claude/rules/brain.md "TmuxClaudeBrain". All fields
+# default in code to the prototype's pinned values; the marker lists are pane-text
+# heuristics pinned to a CLI version (override on a CLI reword, no code release).
 istota_brain_tmux_fallback_trip_threshold: 5       # launch failures before the circuit opens
 istota_brain_tmux_fallback_cooldown_seconds: 300   # seconds the circuit stays open
 istota_brain_tmux_ready_timeout_seconds: 30        # REPL-ready deadline
@@ -324,7 +264,7 @@ istota_email_imap_timeout_seconds: 30  # socket timeout for IMAP connections
 # Conversation context settings
 istota_conversation_enabled: true               # false = no conversation context at all
 istota_conversation_lookback_count: 25           # max messages to fetch from DB/cache
-istota_conversation_selection_model: "fast"      # role alias (resolves to Haiku by default); operator-overridable via istota_models_roles
+istota_conversation_selection_model: "fast"      # role alias (resolves to Haiku by default); operator-overridable via istota_models_aliases
 istota_conversation_selection_timeout: 30.0      # timeout for triage model call
 istota_conversation_skip_selection_threshold: 3  # skip triage if history <= this count
 istota_conversation_use_selection: true           # false = include all fetched messages, no LLM triage
@@ -343,12 +283,9 @@ istota_conversation_talk_context_limit: 100      # max messages to fetch from Ta
 # Deployed as /etc/<namespace>/admins (root-owned, not editable by service user or Claude)
 istota_admin_users: []
 
-# Instance-wide disabled skills (list of skill names to exclude from selection)
-# This controls prompt selection only — whether the bot considers a skill when
-# building prompts. Feature flags like browser_enabled, developer_enabled, etc.
-# control infrastructure (deploying containers, configuring services, setting
-# env vars). Both layers are needed: a feature flag deploys the backend, while
-# disabled_skills prevents the skill doc from being loaded into prompts.
+# Instance-wide disabled skills — skill names excluded from prompt selection.
+# Orthogonal to feature flags (browser_enabled, developer_enabled): a flag
+# deploys the backend, disabled_skills keeps the skill doc out of prompts.
 # Example: ["browse", "whisper"]
 istota_disabled_skills: []
 
@@ -359,27 +296,13 @@ istota_disabled_skills: []
 # Example: ["money_tax", "money_wash_sales"]
 istota_experimental_features: []
 
-# Users configuration (dict of user_id -> user config).
-#
-# After the modules / connected services refactor and the Resources sunset,
-# the data model is split three ways:
-#
-#   * Profile fields           → user_profiles DB table (`istota user ensure`)
-#   * Folder mounts (paths only) → user_resources DB table (`istota resource ensure`)
-#   * Briefings                → briefing_configs DB table (`istota briefings schedule ensure`)
-#   * Tier-2 credentials       → encrypted secrets table (`istota secret ensure`,
-#                                see `istota_user_secrets` below)
-#   * Module opt-outs          → `disabled_modules:` list
-#
-# The only declarable resource type is `folder` — an out-of-workspace path
-# mounted into the sandbox (a cross-user share, an absolute path elsewhere).
-# The other path-shaped types (calendar, todo_file, notes_folder,
-# email_folder, reminders_file) were retired: calendars are CalDAV-discovered,
-# todo/reminders/notes are read by workspace convention ({bot_dir}/TODO.md,
-# reminders.md, NOTES.md), and email folders have no consumer. Retired module/
-# credential-shaped types (feeds, money, monarch, karakeep, overland) are
-# auto-cleaned from user_resources on scheduler startup; their values live in
-# the secrets table.
+# Users configuration (dict of user_id -> user config). The data model is split:
+#   * Profile fields   → user_profiles table (`istota user ensure`)
+#   * Folder mounts    → user_resources table (`istota resource ensure`)
+#   * Briefings        → briefing_configs table (`istota briefings schedule ensure`)
+#   * Tier-2 creds     → encrypted secrets table (`istota secret ensure`, see istota_user_secrets)
+#   * Module opt-outs  → `disabled_modules:` list
+# `folder` is the only declarable resource type (an out-of-workspace sandbox mount).
 #
 # Example:
 # istota_users:
@@ -486,31 +409,19 @@ istota_users: {}
 #     - { service: feeds,    key: tumblr_api_key, value: "{{ vault_alice_tumblr_api_key }}" }
 istota_user_secrets: {}
 
-# Canonical shared briefing set, seeded once into each opted-in user
-# (per-user `default_briefings: true`, the default). Rendered into the
-# top-level [[default_briefings]] config section. Each entry has the same
-# name/cron/output/blocks shape as a per-user briefing; content is blocks-only.
-# Seed-once: a user's later web edits win and re-runs never clobber them.
+# Canonical shared briefing set, seeded once into each opted-in user (per-user
+# `default_briefings: true`, the default). Rendered into [[default_briefings]];
+# blocks-only, same name/cron/output/blocks shape as a per-user briefing. Users'
+# later web edits win and re-runs never clobber them.
 #
-# The default set below is a weekday morning + evening briefing. Headlines
-# and Markets are read from the module-owned shared blocks (`world-headlines` /
-# `markets-summary`, see istota_briefing_shared_blocks) via `shared_block`
-# sources, so the browse/markets fetch + synthesis happens ONCE globally per
-# window instead of per user. The shared blocks are scheduled to regenerate
-# shortly before each briefing window (see their crons below), so both the
-# morning and evening briefings read fresh content by default. Notes:
-#   * A `shared_block` consuming block is `structured` — the shared text is
-#     already synthesized/formatted, so it is spliced in verbatim (no per-user
-#     re-synthesis). `max_age_hours` gates freshness: a shared block older than
-#     the window (e.g. the morning generation seen at evening) is omitted, so a
-#     stale block never leaks across windows.
-#   * The Headlines block needs the headless browser and is omitted until the
-#     shared block's first generation — both harmless soft-degrades (empty ->
-#     omitted).
-#   * The Calendar block reads the user's CalDAV calendars (discovered from
-#     Nextcloud); with none available it soft-degrades (empty -> omitted).
-#   * News-newsletter/reminders/todos blocks are not seeded — add them per user.
-# Set to [] to seed nothing.
+# The default set is a weekday morning + evening briefing. Headlines and Markets
+# read the module-owned shared blocks (world-headlines / markets-summary, see
+# istota_briefing_shared_blocks) via `shared_block` sources, so the browse/markets
+# fetch + synthesis happens once globally per window rather than per user. A
+# `shared_block` block is `structured` (spliced verbatim); `max_age_hours` gates
+# freshness so a stale block never leaks across windows. Headlines (needs the
+# headless browser) and Calendar (needs CalDAV) soft-degrade to omitted when
+# unavailable. Set to [] to seed nothing.
 istota_default_briefings:
   - name: "morning"
     cron: "0 6 * * 1-5"
@@ -552,23 +463,14 @@ istota_default_briefings:
             config: {}
 
 # Module-owned shared briefing blocks (shared-kv-curated-content). Generated
-# globally by the scheduler (no user, UTC cron) and written into the shared_kv
-# store; per-user briefings read them via a `shared_block` source, so the N-way
-# frontpage fetch + synthesis collapses to one generation total. Mirrors the
-# batteries-included DEFAULT_SHARED_BLOCKS in config.py — set to [] to disable,
-# or override per deployment. Allowed source kinds are user-agnostic only:
-# browse / markets / email (the shared/unowned pool). `world-headlines` needs
-# the headless browser (soft-degrades when off); `markets-summary` needs only
-# yfinance.
-#
-# Crons fire TWICE daily, ~15 min before the default briefing windows (06:00 /
-# 18:00) so both the morning and evening briefings read fresh content — the
-# consuming `shared_block` sources gate on `max_age_hours` (6h), so each window
-# reads its own just-generated copy and never the other window's stale one. The
-# crons are UTC (global) while briefing crons are per-user TZ; align these to
-# your users' timezone, or run each block more often, if your window differs.
-# markets-summary is regenerated per window too so it picks up the correct
-# morning (pre-market) vs evening (close) mode at generation time.
+# globally by the scheduler (no user, UTC cron) into the shared_kv store; per-user
+# briefings read them via a `shared_block` source, collapsing the N-way fetch +
+# synthesis to one generation. Mirrors DEFAULT_SHARED_BLOCKS in config.py; [] to
+# disable. Allowed source kinds are user-agnostic: browse / markets / email.
+# Crons fire twice daily ~15 min before the default briefing windows (06:00 /
+# 18:00); consuming sources gate on max_age_hours (6h) so each window reads its
+# own fresh copy. Crons are UTC while briefing crons are per-user TZ — align these
+# to your users' timezone if your windows differ.
 istota_briefing_shared_blocks:
   - name: "world-headlines"
     cron: "45 5,17 * * *"
@@ -594,12 +496,9 @@ istota_briefing_shared_blocks:
       - kind: "markets"
         config: {}
 
-# Timezone shared briefing block jobs evaluate their cron in. Shared blocks are
-# generated once globally (no per-user timezone), so this is a single
-# operator-chosen zone — set it to the operator's local zone (e.g.
-# "America/Los_Angeles") so the morning/evening regeneration windows line up
-# with their day. Defaults to "UTC" (the historical behaviour). Maps to
-# [briefings] shared_block_timezone in config.toml.
+# Timezone shared briefing block crons evaluate in (single operator-chosen zone,
+# since blocks are generated globally). Set to the operator's local zone so the
+# regeneration windows line up. Maps to [briefings] shared_block_timezone.
 istota_briefing_shared_tz: "UTC"
 
 # rclone remote name for Nextcloud
@@ -615,13 +514,10 @@ istota_rclone_password_obscured: ""
 istota_use_nextcloud_mount: true
 istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
 
-# Money integration. The skill is in-process — no separate service. Per-
-# user Monarch credentials are stored in the encrypted secrets table; see
-# `istota_user_secrets` above. Workspace layout is auto-derived from the
-# user's istota workspace (data_dir = {workspace}/money, ledgers default
-# to a single 'main' beancount file at {data_dir}/ledgers/main.beancount).
-# Per-user `[[resources]] type = "money"` is no longer used; the loader
-# synthesizes the UserContext from the workspace.
+# Money integration is in-process (no separate service). Per-user Monarch
+# credentials live in the encrypted secrets table (see istota_user_secrets).
+# Workspace layout is auto-derived (data_dir = {workspace}/money, ledgers at
+# {data_dir}/ledgers/main.beancount).
 
 # Browser container settings (for web browsing skill)
 istota_browser_enabled: false
@@ -634,14 +530,11 @@ istota_browser_shm_size: "2gb"
 istota_browser_cpu_limit: "{{ ansible_facts['processor_vcpus'] }}"
 istota_browser_memory_limit: "3G"
 
-# Browser auto-heal watchdog (ISSUE-143, ISSUE-149). A cron.d job runs the
-# watchdog on `watchdog_cron`; it restarts the container only after `debounce`
-# consecutive unhealthy reads, and stops flapping (paging once) after
+# Browser auto-heal watchdog. A cron.d job restarts the container after
+# `debounce` consecutive unhealthy reads, and stops flapping (paging once) after
 # `crashloop_max` restarts within `crashloop_window` seconds. A second cron line
-# does the scheduled daily restart and clears crash-loop state. cron.d (not a
-# systemd timer) keeps the watchdog consistent with the other scheduled jobs
-# (update, backup). The debounce counts reads, not seconds, so it's independent
-# of the cron cadence; cron's 1-minute floor only bounds detection latency.
+# does the daily restart and clears crash-loop state. Debounce counts reads, not
+# seconds, so it's independent of the cron cadence.
 istota_browser_watchdog_cron: "* * * * *"     # cron schedule for the health check (1-min floor)
 istota_browser_watchdog_debounce: 2           # consecutive unhealthy reads before restart
 istota_browser_watchdog_crashloop_max: 5      # restarts allowed within the window
@@ -680,15 +573,11 @@ istota_devbox_block_rfc1918: true
 # container is named "{{ istota_devbox_container_prefix }}{{ user_id }}".
 istota_devbox_users: []
 
-# Devbox credential proxy. One systemd unit per devbox user listens on
-# a per-user Unix socket under /var/run/{namespace}/<user>/sock. The
-# compose template bind-mounts that per-user directory into the
-# container at /run/istota-cred (directory, not file — so daemon
-# restarts don't strand the container against a dead inode). Container-
-# side shims (gitlab-api, github-api, gh, glab, git-credential-istota)
-# connect to /run/istota-cred/sock and the daemon injects the configured
-# developer.{gitlab,github}_token server-side. Tokens never enter the
-# container. Defaults on when devbox is on.
+# Devbox credential proxy. One systemd unit per devbox user listens on a per-user
+# Unix socket, bind-mounted into the container at /run/istota-cred. Container-side
+# shims (gitlab-api, github-api, gh, glab, git-credential-istota) connect to it and
+# the daemon injects developer.{gitlab,github}_token server-side — tokens never
+# enter the container. Defaults on when devbox is on.
 istota_devbox_proxy_enabled: true
 istota_devbox_proxy_socket_dir: "/var/run/{{ istota_namespace }}"
 # Empty string → audit lines go to the journal only. Set to an absolute
@@ -698,13 +587,11 @@ istota_devbox_proxy_audit_log: ""
 # the devbox proxy.
 istota_developer_api_timeout_seconds: 30
 
-# Docker-API allowlist proxy. One systemd unit per devbox user listens on
-# {{ istota_docker_proxy_socket_dir }}/<user>.sock and forwards only
+# Docker-API allowlist proxy. One systemd unit per devbox user forwards only
 # exec/cp/inspect/restart on the user's own container, refusing
-# create/run/build/privileged/host-mount. The executor binds this socket into
-# the bwrap sandbox at /var/run/docker.sock instead of the root-equivalent raw
-# socket. Defaults on when devbox is on. Mapped to [devbox] api_proxy_* in
-# config.toml.
+# create/run/build/privileged/host-mount. The executor binds this socket into the
+# sandbox at /var/run/docker.sock instead of the raw socket. Defaults on when
+# devbox is on. Maps to [devbox] api_proxy_* in config.toml.
 istota_devbox_api_proxy_enabled: true
 istota_docker_proxy_socket_dir: "/var/run/{{ istota_namespace }}-docker"
 istota_devbox_api_proxy_exec_ttl_seconds: 300
@@ -727,13 +614,10 @@ istota_location_reconcile_grace_minutes: 10.0
 istota_location_reconcile_min_pings: 3
 istota_location_reconcile_min_dwell_sec: 60
 
-# Authenticated web interface (Nextcloud built-in OAuth2)
-#
-# Auth-only flow against NC's built-in OAuth2 provider. Set up the client in
-# Settings → Security → OAuth 2.0 clients on the target Nextcloud, then put
-# the client_id/secret here (vault the secret). Redirect URI must match
-# {istota_web_oauth2_redirect_uri} or the derived default
-# `https://{istota_hostname}/istota/callback`.
+# Authenticated web interface (Nextcloud built-in OAuth2). Set up the client in
+# NC Settings → Security → OAuth 2.0 clients, then put the client_id/secret below
+# (vault the secret). Redirect URI must match istota_web_oauth2_redirect_uri or
+# the derived default https://{istota_hostname}/istota/callback.
 istota_web_enabled: true
 istota_web_port: 8766
 
@@ -747,24 +631,19 @@ istota_web_secret_key: ""                # Session signing key (vault); generate
 
 # User-scoped Nextcloud OAuth token retention (post-as-user Talk mirroring +
 # read-state sync). "ephemeral" (default) discards the OAuth pair at login;
-# "encrypted" retains it in the web_user_tokens table, encrypted with the
-# web-only key below. NC OAuth2 tokens grant full account access, so this is
-# a deliberate opt-in.
+# "encrypted" retains it in web_user_tokens, encrypted with the web-only key
+# below. NC OAuth2 tokens grant full account access — a deliberate opt-in.
 istota_web_token_storage: "ephemeral"
-# Web-only Fernet key source (vault); >=32 chars, generate with
-# `python3 -c 'import secrets;print(secrets.token_hex(32))'`. Rendered into
-# /etc/{namespace}/web-secrets.env and loaded ONLY by the web unit — never
-# the scheduler or webhooks units (that separation is the point).
+# Web-only Fernet key (vault); >=32 chars. Rendered into web-secrets.env and
+# loaded only by the web unit, never the scheduler or webhooks units.
 istota_web_token_key: ""
 # Talk→web read-state pull cadence in seconds (0 disables the pull;
 # web→Talk push is unaffected). Only active with token storage "encrypted".
 istota_web_chat_talk_read_sync_interval: 60
 
-# Master key for the encrypted ``secrets`` table. Populated into
-# /etc/{{ istota_namespace }}/secrets.env as ISTOTA_SECRET_KEY. Generate
-# with: ``python3 -c "import secrets; print(secrets.token_hex(32))"`` and
-# store via ansible-vault. Empty disables the secrets store; tier-2
-# credentials then fall back to TOML extras only.
+# Master key for the encrypted `secrets` table, rendered into secrets.env as
+# ISTOTA_SECRET_KEY. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`
+# and vault it. Empty disables the secrets store (tier-2 creds fall back to TOML extras).
 istota_secret_key: ""
 
 # Google Workspace CLI integration (OAuth-based)

@@ -22,7 +22,7 @@ sole provider (``openai_compat``) may point at *any* endpoint, so Anthropic
 provider aliases (``opus``/``sonnet``/``haiku``) are never translated — an
 explicit model id passes through untouched. The three built-in *role* aliases
 (``fast``/``general``/``smart``) resolve to the single configured native model
-unless the operator remapped them via ``[models.roles]``, so stock config's
+unless the operator remapped them via ``[models.aliases]``, so stock config's
 ``extraction_model``/``curation_model = "general"`` never reaches the wire as a
 literal alias string (NB-3).
 """
@@ -75,8 +75,8 @@ from istota.session.messages import CompactionSummaryMessage
 from istota.session.retry import classify_error
 from istota.session.usage import TaskUsage
 
-from ._aliases import CANONICAL_ROLES
-from ._roles import get_role_override_target, get_role_overrides
+from ._aliases import CANONICAL_ROLES, split_effort
+from ._roles import get_alias_override_target, get_alias_overrides
 from ._types import BrainRequest, BrainResult
 from .claude_code import is_usage_limit_error
 
@@ -127,9 +127,9 @@ _API_RETRY_BASE_DELAY = 5.0
 _API_RETRY_MAX_DELAY = 120.0
 
 # Built-in role aliases — the portable CANONICAL_ROLES (single source of truth,
-# shared with claude_code's DEFAULT_ROLE_TARGETS keys). On the native brain these
+# shared with claude_code's DEFAULT_ALIASES tier keys). On the native brain these
 # all resolve to the one configured endpoint model unless the operator remapped
-# them via [models.roles] — so stock config's extraction_model/curation_model=
+# them via [models.aliases] — so stock config's extraction_model/curation_model=
 # "general" never reaches the wire as the literal string "general" (NB-3), and a
 # portable role survives a cross-provider fallback.
 _BUILTIN_ROLE_NAMES = CANONICAL_ROLES
@@ -416,7 +416,7 @@ class NativeBrain:
     supports_steering = True
 
     # This brain speaks an OpenAI-compatible endpoint (OpenRouter in practice).
-    # Operators key an ``[models.roles.<role>]`` sub-table on this string; a
+    # Operators key an ``[models.aliases.<name>]`` sub-table on this string; a
     # value written here is an endpoint slug and is sent verbatim, never
     # translated from the Anthropic namespace.
     model_namespace = "openai_compat"
@@ -435,26 +435,36 @@ class NativeBrain:
     # The only provider is ``openai_compat``, which can point at any endpoint
     # (Anthropic, OpenRouter, a local qwen, …). Anthropic aliases must NOT be
     # translated — sending "claude-opus-4-8" to a qwen endpoint would fail — so
-    # explicit ids pass through and only operator [models.roles] overrides
+    # explicit ids pass through and only operator [models.aliases] overrides
     # resolve.
 
     def resolve_alias(self, alias):
         if not alias:
             return None
-        # 1. Operator-overridden role — read THIS brain's namespace only, so an
-        # anthropic-namespace value (e.g. "opus-46-high") never leaks onto the
-        # OpenRouter wire. The slug passes through verbatim; no translation.
-        rt = get_role_override_target(alias, self.model_namespace)
+        # Split an optional ``:effort`` modifier first (``smart:low``,
+        # ``anthropic/claude-sonnet-4:high``); the ``/`` in a slug is untouched.
+        base, suffix_effort = split_effort(alias)
+        base_lower = base.lower()
+        # 1. Operator-overridden alias — read THIS brain's namespace only, so an
+        # anthropic-namespace value (e.g. "opus") never leaks onto the OpenRouter
+        # wire. The slug passes through verbatim; no translation. The suffix
+        # modifier wins over the override's own effort.
+        rt = get_alias_override_target(base_lower, self.model_namespace)
         if rt is not None:
-            return (rt.model, rt.effort)
+            return (rt.model, suffix_effort or rt.effort)
         # A built-in role alias with no operator override resolves to the single
         # model this endpoint is configured for (NB-3). The native brain speaks
         # to one endpoint with one model, so fast/general/smart all mean "the
-        # configured model" unless the operator remapped them via [models.roles].
-        # Provider aliases (opus/sonnet/haiku) are NOT roles and still pass
-        # through untranslated.
-        if alias.lower() in _BUILTIN_ROLE_NAMES and self._config.model:
-            return (self._config.model, None)
+        # configured model" unless the operator remapped them via [models.aliases].
+        # Provider shortcuts (opus/sonnet/haiku) are NOT roles and pass through
+        # untranslated (None unless an explicit effort modifier was given).
+        if base_lower in _BUILTIN_ROLE_NAMES and self._config.model:
+            return (self._config.model, suffix_effort)
+        # An explicit id/slug carrying a ``:effort`` modifier passes through with
+        # the effort applied; a plain unknown id stays None (unchanged — the
+        # caller's resolve_model_name handles bare-id passthrough).
+        if suffix_effort is not None:
+            return (base, suffix_effort)
         return None
 
     def resolve_model_name(self, name):
@@ -463,37 +473,38 @@ class NativeBrain:
         resolved = self.resolve_alias(name)
         if resolved is not None and resolved[0]:
             return resolved[0]
+        base, _effort = split_effort(name)
         # An unoverridden role with an empty native model must still not reach
         # the wire as the literal "general"/"fast"/"smart" — collapse to the
         # (empty) configured model, which downstream treats as "brain default".
-        if name.lower() in _BUILTIN_ROLE_NAMES:
+        if base.lower() in _BUILTIN_ROLE_NAMES:
             return self._config.model
-        return name  # explicit id pass-through; no Anthropic translation
+        return base  # explicit id pass-through (effort stripped); no translation
 
     def list_aliases(self):
-        overrides = get_role_overrides()
+        overrides = get_alias_overrides()
         listed: list[tuple[str, str | None, str | None]] = []
         seen: set[str] = set()
         # Built-in roles first: operator override (in THIS brain's namespace) if
         # present, else the native model. So `!models` shows the truthful
         # resolved table on native.
         for role in _BUILTIN_ROLE_NAMES:
-            rt = get_role_override_target(role, self.model_namespace)
+            rt = get_alias_override_target(role, self.model_namespace)
             if rt is not None:
                 listed.append((role, rt.model, rt.effort))
             else:
                 listed.append((role, self._config.model, None))
             seen.add(role)
-        # Any custom operator role names beyond the three defaults.
-        for role in overrides:
-            if role in seen:
+        # Any custom operator alias names beyond the three defaults.
+        for name in overrides:
+            if name in seen:
                 continue
-            rt = get_role_override_target(role, self.model_namespace)
+            rt = get_alias_override_target(name, self.model_namespace)
             if rt is not None:
-                listed.append((role, rt.model, rt.effort))
+                listed.append((name, rt.model, rt.effort))
         return listed
 
-    def validate_role_override(self, role, target):
+    def validate_alias_override(self, name, target):
         # No alias table to validate against for an arbitrary endpoint.
         return []
 

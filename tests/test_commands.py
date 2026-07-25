@@ -15,15 +15,15 @@ from istota.commands import (
     dispatch, parse_command,
     model_prefix_usage, parse_model_prefix, resolve_model_prefix,
 )
-from istota.brain import BrainConfig, make_brain, set_role_overrides
-from istota.brain.claude_code import HAIKU, MODEL_ALIASES, OPUS, OPUS_46, SONNET
+from istota.brain import BrainConfig, make_brain, set_alias_overrides
+from istota.brain.claude_code import DEFAULT_ALIASES, HAIKU, OPUS, SONNET
 from istota.config import Config, NextcloudConfig, SchedulerConfig, SecurityConfig, TalkConfig, UserConfig
 
 
 @pytest.fixture
 def brain():
     """Default brain instance for parser tests — ClaudeCodeBrain."""
-    set_role_overrides({})
+    set_alias_overrides({})
     return make_brain(BrainConfig(kind="claude_code"))
 
 
@@ -136,8 +136,8 @@ class TestParseModelPrefix:
         assert result.effort is None
         assert result.remainder == "draft a spec for X"
 
-    def test_known_alias_opus_high(self, brain):
-        result = parse_model_prefix("!model opus-high tackle this", brain)
+    def test_effort_modifier_high(self, brain):
+        result = parse_model_prefix("!model opus:high tackle this", brain)
         assert result is not None
         assert result.unknown_alias is None
         assert result.model == OPUS
@@ -151,19 +151,39 @@ class TestParseModelPrefix:
         assert result.effort is None
         assert result.remainder == "one-liner"
 
-    def test_known_alias_opus_xhigh(self, brain):
-        result = parse_model_prefix("!model opus-xhigh think hard", brain)
+    def test_effort_modifier_xhigh(self, brain):
+        result = parse_model_prefix("!model opus:xhigh think hard", brain)
         assert result is not None
         assert result.unknown_alias is None
         assert result.model == OPUS
         assert result.effort == "xhigh"
         assert result.remainder == "think hard"
 
-    def test_known_alias_opus_max(self, brain):
-        result = parse_model_prefix("!model opus-max go deepest", brain)
+    def test_effort_modifier_max(self, brain):
+        result = parse_model_prefix("!model opus:max go deepest", brain)
         assert result is not None
         assert result.model == OPUS
         assert result.effort == "max"
+
+    def test_effort_modifier_on_tier(self, brain):
+        result = parse_model_prefix("!model smart:low quick", brain)
+        assert result is not None
+        assert result.model == OPUS
+        assert result.effort == "low"
+        assert result.remainder == "quick"
+
+    def test_removed_dash_effort_form_is_unknown(self, brain):
+        # HARD CUT: the old ``opus-high`` spelling no longer resolves.
+        result = parse_model_prefix("!model opus-high tackle this", brain)
+        assert result is not None
+        assert result.unknown_alias == "opus-high"
+        assert result.model is None
+
+    def test_unknown_effort_suffix_is_unknown(self, brain):
+        result = parse_model_prefix("!model opus:turbo do it", brain)
+        assert result is not None
+        assert result.unknown_alias == "opus:turbo"
+        assert result.model is None
 
     def test_default_alias_clears_overrides(self, brain):
         result = parse_model_prefix("!model default just do it", brain)
@@ -217,7 +237,7 @@ class TestParseModelPrefix:
         # Guard against accidental alias-table changes that drop pinning.
         # Reaches into the ClaudeCodeBrain's table directly since pinning
         # is a brain-implementation invariant, not user-facing behaviour.
-        for alias, (model, _effort) in MODEL_ALIASES.items():
+        for alias, (model, _effort) in DEFAULT_ALIASES.items():
             if alias == "default":
                 assert model is None, "default alias must not pin a model"
                 continue
@@ -225,6 +245,11 @@ class TestParseModelPrefix:
             assert model.startswith("claude-"), (
                 f"alias {alias} must use a versioned claude-* model id, got {model}"
             )
+
+    def test_shipped_aliases_carry_no_baked_effort(self):
+        # Effort is the orthogonal :effort modifier — no shipped alias bakes it.
+        for alias, (_model, effort) in DEFAULT_ALIASES.items():
+            assert effort is None, f"alias {alias} should not bake an effort"
 
     def test_role_alias_resolves_with_no_effort(self, brain):
         result = parse_model_prefix("!model smart think hard", brain)
@@ -247,15 +272,16 @@ class TestParseModelPrefix:
         assert result.model is not None and result.model.startswith("claude-sonnet-")
         assert result.effort is None
 
-    def test_opus_46_alias_pins_to_prior_opus(self, brain):
-        result = parse_model_prefix("!model opus-46-high run a job", brain)
+    def test_prior_opus_via_canonical_id_plus_effort(self, brain):
+        # The retired ``opus-47-high`` need is met by canonical id + modifier.
+        result = parse_model_prefix("!model claude-opus-4-7:high run a job", brain)
         assert result is not None
-        assert result.model == OPUS_46
+        assert result.model == "claude-opus-4-7"
         assert result.effort == "high"
 
     def test_usage_string_lists_all_aliases(self, brain):
         usage = model_prefix_usage(brain)
-        for alias in MODEL_ALIASES:
+        for alias in DEFAULT_ALIASES:
             assert alias in usage
         # Roles surface via brain.list_aliases(), so they appear too.
         assert "smart" in usage

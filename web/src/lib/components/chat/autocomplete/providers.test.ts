@@ -6,7 +6,12 @@ vi.mock('$lib/api', () => ({
 }));
 
 import { fetchChatCommands } from '$lib/api';
-import { commandProvider, modelAliasProvider, resetCommandCatalogue } from './providers';
+import {
+  commandProvider,
+  getBaseModelChoices,
+  modelAliasProvider,
+  resetCommandCatalogue,
+} from './providers';
 
 const CATALOGUE = {
   commands: [
@@ -17,10 +22,12 @@ const CATALOGUE = {
     { name: 'stop', help: 'Cancel your task' },
   ],
   model_aliases: [
+    // Base names only — effort is the orthogonal :effort modifier, never a
+    // separate alias row (centralized-model-alias-registry spec).
     { alias: 'smart', target: 'claude-opus-4-8', effort: null },
     { alias: 'opus', target: 'claude-opus-4-8', effort: null },
-    { alias: 'opus-high', target: 'claude-opus-4-8', effort: 'high' },
-    { alias: 'sonnet', target: 'claude-sonnet-4-6', effort: null },
+    { alias: 'sonnet', target: 'claude-sonnet-5', effort: null },
+    { alias: 'haiku', target: 'claude-haiku-4-5', effort: null },
   ],
 };
 
@@ -109,17 +116,39 @@ describe('modelAliasProvider', () => {
 
   it('suggests aliases filtered by the query, canonical model as description', async () => {
     const list = await modelAliasProvider().getSuggestions('op');
-    expect(list.map((s) => s.label)).toEqual(['opus', 'opus-high']);
+    // Base names only — 'op' prefix-matches just 'opus' now.
+    expect(list.map((s) => s.label)).toEqual(['opus']);
     expect(list[0]).toMatchObject({
       value: 'opus ',
       label: 'opus',
       description: '(claude-opus-4-8)',
       key: 'model:opus',
     });
-    // Effort-bearing alias carries the effort in the parens too.
-    expect(list[1]).toMatchObject({
-      label: 'opus-high',
-      description: '(claude-opus-4-8 · high)',
+  });
+
+  it('carries an alias-resolved effort in the description when present', async () => {
+    // A custom operator alias may resolve to (model, effort); the parens show it.
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
+      commands: CATALOGUE.commands,
+      model_aliases: [{ alias: 'deep', target: 'claude-opus-4-8', effort: 'max' }],
     });
+    resetCommandCatalogue();
+    const list = await modelAliasProvider().getSuggestions('deep');
+    expect(list[0]).toMatchObject({
+      label: 'deep',
+      description: '(claude-opus-4-8 · max)',
+    });
+  });
+});
+
+describe('getBaseModelChoices', () => {
+  it('one choice per distinct model, provider-shortcut label preferred', async () => {
+    const choices = await getBaseModelChoices();
+    // smart + opus both map to claude-opus-4-8 → deduped, labeled 'opus'.
+    expect(choices).toEqual([
+      { value: 'claude-opus-4-8', label: 'opus' },
+      { value: 'claude-sonnet-5', label: 'sonnet' },
+      { value: 'claude-haiku-4-5', label: 'haiku' },
+    ]);
   });
 });

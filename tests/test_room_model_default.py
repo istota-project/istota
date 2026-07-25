@@ -218,11 +218,11 @@ class TestRoomCommand:
         assert room.model == "claude-opus-4-8"
         assert "opus" in out.lower()
 
-    async def test_set_model_with_effort_alias(self, config, db_path):
+    async def test_set_model_with_effort_modifier(self, config, db_path):
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="web")
             db.add_room_binding(conn, "room1", "web", "room1")
-            await cmd_room(_ctx(config, conn, "model opus-high"))
+            await cmd_room(_ctx(config, conn, "model opus:high"))
             room = db.get_room(conn, "room1")
         assert room.model == "claude-opus-4-8"
         assert room.effort == "high"
@@ -290,5 +290,5 @@ class TestRoomCommand:
                 _ctx(config, conn, "model sonnet", surface="web")
             )
             room = db.get_room(conn, "room1")
-        assert room.model == "claude-sonnet-4-6"
+        assert room.model == "claude-sonnet-5"
         assert isinstance(out, str)

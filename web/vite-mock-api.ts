@@ -411,16 +411,8 @@ const MOCK_TASK_DONE_MS = 8000;
 // previewed without a live backend. Returns the inline markdown for a command,
 // or null when the input is a `!model <alias> <prompt>` prefix that should
 // create a real task instead (mirrors the server: unknown alias → usage).
-const MOCK_MODEL_ALIASES = [
-  'default',
-  'fast',
-  'general',
-  'smart',
-  'opus',
-  'opus-high',
-  'sonnet',
-  'haiku',
-];
+// Base names only — effort is the orthogonal :effort modifier, not a separate alias.
+const MOCK_MODEL_ALIASES = ['default', 'fast', 'general', 'smart', 'opus', 'sonnet', 'haiku'];
 const MOCK_HELP = [
   '**Available commands:**',
   '',

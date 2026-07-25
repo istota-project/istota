@@ -177,7 +177,7 @@ brain when the primary is unavailable. Kept executor-level: brains have no
   result); an unexpected `execute` exception becomes a failed `BrainResult`.
 - `_resolve_fallback_model_effort(task, config, fallback_brain, effort)` →
   `(model, effort, dropped_pin)`. Empty requested model → fallback's own default
-  (no note). `is_portable_alias(raw, config.models.roles)` → re-resolve the
+  (no note). `is_portable_alias(raw, config_alias_portable_names(config))` → re-resolve the
   intent in the fallback namespace **via `fallback_brain.resolve_alias(raw)`**, so
   both the model *and its effort* are the fallback namespace's own (a customized
   `smart` falling back claude_code→native lands on a valid openai_compat slug +

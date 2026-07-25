@@ -32,8 +32,8 @@ from ._events import (
     ToolUseEvent,
     make_stream_parser,
 )
-from ._aliases import CANONICAL_ROLES
-from ._roles import get_role_override_target, get_role_overrides
+from ._aliases import CANONICAL_ROLES, split_effort
+from ._roles import get_alias_override_target, get_alias_overrides
 from ._types import BrainRequest, BrainResult
 
 logger = logging.getLogger("istota.brain.claude_code")
@@ -299,72 +299,73 @@ def build_claude_cli_flags(
 #
 # Versioning: bare aliases like ``opus`` always resolve to a *specific*
 # version constant (``OPUS = "claude-opus-4-8"``) so a model release can't
-# silently re-route us. Prior versions get first-class constants
-# (``OPUS_47``, ``OPUS_46``) only when there's a concrete reason to pin to
-# them (e.g., production stability) — this is not meant to be exhaustive.
+# silently re-route us. A model release bumps the constant in one place and
+# ripples through every alias + role that points at it. Prior versions are NOT
+# enumerated as aliases — an operator who needs one types the canonical id with
+# an optional ``:effort`` modifier (``claude-opus-4-7:high``), which resolves via
+# the canonical passthrough below.
 # ---------------------------------------------------------------------------
 
 OPUS: str = "claude-opus-4-8"
-OPUS_47: str = "claude-opus-4-7"
-OPUS_46: str = "claude-opus-4-6"
-SONNET: str = "claude-sonnet-4-6"
+SONNET: str = "claude-sonnet-5"
 HAIKU: str = "claude-haiku-4-5"
 
-# Provider aliases — `(model_id, effort)` pairs. ``effort=None`` means "let
-# the model decide" (no ``--effort`` flag). Adding an alias here is the only
-# place a new shortcut needs to be defined; every surface (``!model`` prefix,
-# ``!help`` output, scheduled-job model overrides) reads from this table.
-MODEL_ALIASES: dict[str, tuple[str | None, str | None]] = {
-    "default":      (None, None),
-    "opus":         (OPUS, None),
-    "opus-high":    (OPUS, "high"),
-    "opus-xhigh":   (OPUS, "xhigh"),
-    "opus-max":     (OPUS, "max"),
-    "opus-47":      (OPUS_47, None),
-    "opus-47-high": (OPUS_47, "high"),
-    "opus-46":      (OPUS_46, None),
-    "opus-46-high": (OPUS_46, "high"),
-    "sonnet":       (SONNET, None),
-    "sonnet-high":  (SONNET, "high"),
-    "haiku":        (HAIKU, None),
+# The unified alias registry for *this brain* — the code-shipped floor. Maps a
+# base alias name → ``(model_id, default_effort)`` in the Anthropic namespace.
+# Holds the portable tiers (CANONICAL_ROLES) AND the provider shortcuts together,
+# base names only: effort is an orthogonal ``:effort`` modifier applied generically
+# at resolution (``opus:high``), never baked into a name. Operators overlay this
+# via ``[models.aliases]`` TOML; a model release edits one constant here.
+# Every surface (``!model`` prefix, ``!models`` output, scheduled-job overrides)
+# reads through this table via ``Brain.resolve_alias`` / ``.list_aliases``.
+DEFAULT_ALIASES: dict[str, tuple[str | None, str | None]] = {
+    # Portable tiers (CANONICAL_ROLES) — code-floor efforts stay None; every
+    # brain must map every canonical role (enforced by the role-contract test),
+    # so a portable intent survives the cross-provider fallback.
+    "fast":    (HAIKU, None),
+    "general": (SONNET, None),
+    "smart":   (OPUS, None),
+    # Provider shortcuts (pins) — base names, no effort variants.
+    "opus":    (OPUS, None),
+    "sonnet":  (SONNET, None),
+    "haiku":   (HAIKU, None),
+    # Explicit "no override — use the brain/config default model".
+    "default": (None, None),
 }
-
-# Default role-target mapping for *this brain*. Operators override the
-# target via [models.roles] TOML; the override RHS is resolved through
-# MODEL_ALIASES so they can write provider-aware shortcuts like
-# ``smart = "opus-46-high"`` without having to type the canonical ID.
-# The keys are the portable CANONICAL_ROLES (single source of truth) — every
-# brain must map every canonical role to a real model (enforced by the
-# role-contract test), so a portable intent survives the cross-provider fallback.
-DEFAULT_ROLE_TARGETS: dict[str, str] = {
-    "fast":    HAIKU,
-    "general": SONNET,
-    "smart":   OPUS,
-}
-assert set(DEFAULT_ROLE_TARGETS) == set(CANONICAL_ROLES), (
+assert set(CANONICAL_ROLES) <= set(DEFAULT_ALIASES), (
     "ClaudeCodeBrain must map every canonical role tier"
 )
 
+# The non-tier subset of the registry — the provider shortcuts. An operator
+# alias override whose NAME collides with one of these silently changes what
+# ``!model opus`` resolves to (almost always a typo for a tier override), so
+# ``validate_alias_override`` warns on it. Overriding a tier is the normal case
+# and never warns.
+_SHORTCUT_NAMES: frozenset[str] = frozenset(set(DEFAULT_ALIASES) - set(CANONICAL_ROLES))
+
+
+def _looks_canonical(name: str) -> bool:
+    """Whether ``name`` is a raw Anthropic model id (passthrough target)."""
+    return name.startswith("claude-")
+
 
 def _resolve_target_with_effort(target: str) -> tuple[str, str | None]:
-    """Translate an override RHS through MODEL_ALIASES to ``(canonical_id, effort)``.
+    """Translate an override RHS through ``DEFAULT_ALIASES`` to ``(model_id, effort)``.
 
-    Operator wrote e.g. ``smart = "opus-high"``: this returns
-    ``("claude-opus-4-8", "high")`` — the alias's effort is preserved (fixing
-    the effort-drop). Unknown strings pass through unchanged with no effort so
-    raw canonical IDs (``"claude-opus-4-8"``) work as override targets too.
+    Splits an optional ``:effort`` modifier first, then resolves the base name.
+    Operator wrote e.g. ``smart = "opus:high"`` → ``("claude-opus-4-8", "high")``
+    (the modifier's effort wins over the alias's default). A bare shortcut
+    ``smart = "opus"`` → ``("claude-opus-4-8", None)``. An unknown / canonical
+    base passes through unchanged (raw ids like ``claude-opus-4-7`` work as
+    targets), carrying only the modifier effort.
     """
     if not target:
         return target, None
-    pair = MODEL_ALIASES.get(target.lower())
+    base, suffix_effort = split_effort(target)
+    pair = DEFAULT_ALIASES.get(base.lower())
     if pair is not None and pair[0] is not None:
-        return pair[0], pair[1]
-    return target, None
-
-
-def _resolve_target(target: str) -> str:
-    """Translate an override RHS through MODEL_ALIASES to a canonical ID (id only)."""
-    return _resolve_target_with_effort(target)[0]
+        return pair[0], (suffix_effort or pair[1])
+    return base, suffix_effort
 
 
 class ClaudeCodeBrain:
@@ -376,7 +377,7 @@ class ClaudeCodeBrain:
     supports_steering = False
 
     # This brain speaks the Anthropic model namespace. Operators key an
-    # ``[models.roles.<role>]`` sub-table on this string; TmuxClaudeBrain shares
+    # ``[models.aliases.<name>]`` sub-table on this string; TmuxClaudeBrain shares
     # it (same `claude` binary), so an ``anthropic`` value covers both.
     model_namespace = "anthropic"
 
@@ -385,96 +386,104 @@ class ClaudeCodeBrain:
     def resolve_alias(
         self, alias: str
     ) -> tuple[str | None, str | None] | None:
-        """Resolve a `!model <alias>` to (model_id, effort).
+        """Resolve a `!model <alias>` (with optional ``:effort``) to (model_id, effort).
 
-        Roles win over provider aliases (operator override > default role
-        target > MODEL_ALIASES). Returns None for unknown. A role override's
-        target is resolved through this brain's *own* alias table, and the
-        alias's effort (``opus-high`` → ``high``) is preserved — an explicit
-        ``RoleTarget.effort`` overrides it.
+        Splits a ``:effort`` modifier first, then the base name resolves:
+        operator override > ``DEFAULT_ALIASES`` (tiers + shortcuts) > canonical
+        id passthrough (``claude-*``) > None (unknown). Effort precedence: the
+        ``:effort`` suffix wins over the entry's own default effort. A role
+        override's target is itself resolved through this brain's alias table
+        (``smart = "opus"`` → ``claude-opus-4-8``), and an explicit
+        ``RoleTarget.effort`` wins over the target's alias-derived effort.
         """
-        alias_lower = alias.lower()
-        # 1. Operator-overridden role (per-namespace, effort-carrying)
-        rt = get_role_override_target(alias_lower, self.model_namespace)
+        if not alias:
+            return None
+        base, suffix_effort = split_effort(alias)
+        base_lower = base.lower()
+        # 1. Operator-overridden alias (per-namespace, effort-carrying)
+        rt = get_alias_override_target(base_lower, self.model_namespace)
         if rt is not None:
-            model_id, alias_effort = _resolve_target_with_effort(rt.model)
-            return (model_id, rt.effort or alias_effort)
-        # 2. Default role target
-        if alias_lower in DEFAULT_ROLE_TARGETS:
-            return (DEFAULT_ROLE_TARGETS[alias_lower], None)
-        # 3. Provider alias
-        return MODEL_ALIASES.get(alias_lower)
+            model_id, target_effort = _resolve_target_with_effort(rt.model)
+            return (model_id, suffix_effort or rt.effort or target_effort)
+        # 2. Shipped default (tier or shortcut)
+        pair = DEFAULT_ALIASES.get(base_lower)
+        if pair is not None:
+            model_id, default_effort = pair
+            return (model_id, suffix_effort or default_effort)
+        # 3. Canonical id passthrough (carry the modifier effort)
+        if _looks_canonical(base):
+            return (base, suffix_effort)
+        # 4. Unknown
+        return None
 
     def resolve_model_name(self, name: str | None) -> str:
         """Resolve any name to a canonical Anthropic model ID.
 
         Empty/None → ``""`` (caller falls back to brain default).
-        Unknown → pass-through (raw IDs typed into config still work).
+        Unknown → pass-through with any ``:effort`` stripped (raw IDs typed into
+        config still work; the effort never leaks into the model id).
         """
         if not name:
             return ""
         resolved = self.resolve_alias(name)
         if resolved is not None and resolved[0] is not None:
             return resolved[0]
-        return name
+        return split_effort(name)[0]
 
-    def validate_role_override(self, role: str, target: str) -> list[str]:
+    def validate_alias_override(self, name: str, target: str) -> list[str]:
         """Surface operator typos at load time.
 
         Two checks:
-        1. Role name shadows a provider alias (e.g. ``[models.roles] opus = "haiku"``
-           silently makes ``!model opus`` resolve to Haiku — almost always a typo).
-        2. Override target is neither a known provider alias nor a canonical
-           ``claude-*`` ID (it'll pass through to the CLI and fail at task time).
+        1. Alias name collides with a provider shortcut (e.g.
+           ``[models.aliases] opus = "haiku"`` silently makes ``!model opus``
+           resolve to Haiku — usually a typo for a tier override). Overriding a
+           tier is the normal case and never warns.
+        2. Override target is neither a known alias nor a canonical ``claude-*``
+           id (it'd pass through to the CLI and fail at task time). A ``:effort``
+           modifier on the target is stripped before the check.
         """
         warnings: list[str] = []
-        role_lower = role.lower()
-        if role_lower in MODEL_ALIASES:
+        name_lower = name.lower()
+        if name_lower in _SHORTCUT_NAMES:
             warnings.append(
-                f"role override {role!r} shadows the provider alias of the "
-                f"same name; future `!model {role}` calls will resolve to "
-                f"{target!r} instead of the built-in alias"
+                f"alias override {name!r} shadows the built-in provider shortcut "
+                f"of the same name; future `!model {name}` calls will resolve to "
+                f"{target!r} instead of the shipped default"
             )
         if target:
-            target_lower = target.lower()
-            looks_canonical = target.startswith("claude-")
-            known_alias = target_lower in MODEL_ALIASES
-            if not looks_canonical and not known_alias:
+            base, _effort = split_effort(target)
+            known = base.lower() in DEFAULT_ALIASES
+            if not _looks_canonical(base) and not known:
                 warnings.append(
-                    f"role override {role!r} target {target!r} is neither a "
-                    f"canonical model id nor a known provider alias; tasks "
-                    f"using this role will fail at execution time"
+                    f"alias override {name!r} target {target!r} is neither a "
+                    f"canonical model id nor a known alias; tasks using this "
+                    f"alias will fail at execution time"
                 )
         return warnings
 
     def list_aliases(self) -> list[tuple[str, str | None, str | None]]:
-        """Merged alias table for display.
+        """Merged alias table for display — base names + resolved default effort.
 
-        Roles first (sorted, with operator overrides reflected), then
-        provider aliases in declaration order. Used by the ``!models``
-        Talk command and any other surface that wants "what does X
-        resolve to right now".
+        Tiers sorted first, then the shipped shortcuts in declaration order, then
+        any custom operator aliases (sorted). Operator overrides are reflected
+        (resolved in this brain's own namespace, effort preserved). Used by
+        ``!models`` and the composer autocomplete.
         """
-        out: list[tuple[str, str | None, str | None]] = []
-        seen: set[str] = set()
-        # Roles: defaults merged with overrides (resolved in this brain's own
-        # namespace, effort preserved); overrides win.
-        roles: dict[str, tuple[str, str | None]] = {
-            role: (target, None) for role, target in DEFAULT_ROLE_TARGETS.items()
-        }
-        for role in get_role_overrides():
-            rt = get_role_override_target(role, self.model_namespace)
+        resolved: dict[str, tuple[str | None, str | None]] = dict(DEFAULT_ALIASES)
+        for name in get_alias_overrides():
+            rt = get_alias_override_target(name, self.model_namespace)
             if rt is not None:
-                model_id, alias_effort = _resolve_target_with_effort(rt.model)
-                roles[role] = (model_id, rt.effort or alias_effort)
-        for role in sorted(roles):
-            model_id, effort = roles[role]
-            out.append((role, model_id, effort))
-            seen.add(role)
-        for alias, (model, effort) in MODEL_ALIASES.items():
-            if alias in seen:
-                continue
-            out.append((alias, model, effort))
+                model_id, target_effort = _resolve_target_with_effort(rt.model)
+                resolved[name] = (model_id, rt.effort or target_effort)
+        tiers = sorted(n for n in resolved if n in CANONICAL_ROLES)
+        shortcuts = [n for n in DEFAULT_ALIASES if n not in CANONICAL_ROLES]
+        extras = sorted(
+            n for n in resolved if n not in DEFAULT_ALIASES and n not in CANONICAL_ROLES
+        )
+        out: list[tuple[str, str | None, str | None]] = []
+        for name in tiers + shortcuts + extras:
+            model, effort = resolved[name]
+            out.append((name, model, effort))
         return out
 
     # --- Execution (Brain Protocol) ----------------------------------------

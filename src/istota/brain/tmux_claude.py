@@ -530,8 +530,8 @@ class TmuxClaudeBrain:
 
     Model resolution is delegated to an internal ``ClaudeCodeBrain``: this brain
     runs the same `claude` CLI binary against the same Anthropic model namespace,
-    so duplicating ``MODEL_ALIASES`` / ``DEFAULT_ROLE_TARGETS`` would only invite
-    drift. Only ``execute`` is genuinely new.
+    so duplicating ``DEFAULT_ALIASES`` would only invite drift. Only ``execute``
+    is genuinely new.
     """
 
     # The interactive TUI queues text typed during a running turn, so a
@@ -565,8 +565,8 @@ class TmuxClaudeBrain:
     def list_aliases(self):
         return self._cli.list_aliases()
 
-    def validate_role_override(self, role, target):
-        return self._cli.validate_role_override(role, target)
+    def validate_alias_override(self, name, target):
+        return self._cli.validate_alias_override(name, target)
 
     # --- Execution --------------------------------------------------------
 

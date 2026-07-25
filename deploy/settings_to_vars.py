@@ -355,14 +355,15 @@ def convert(settings: dict) -> dict:
         if isinstance(overrides, dict) and overrides:
             result["istota_brain_source_type_overrides"] = overrides
 
-    # Operator role aliases ([models.roles]) — maps roles (fast/general/smart and
-    # any custom role) to canonical model ids. Native deploys rely on this to
-    # resolve the role names internal subsystems request.
+    # Model alias registry ([models.aliases]) — maps aliases (tiers
+    # fast/general/smart, shortcuts opus/sonnet/haiku, and any custom name) to
+    # concrete model targets. Native deploys rely on this to resolve the tier
+    # names internal subsystems request.
     models = settings.get("models", {})
     if isinstance(models, dict):
-        roles = models.get("roles", {})
-        if isinstance(roles, dict) and roles:
-            result["istota_models_roles"] = roles
+        aliases = models.get("aliases", {})
+        if isinstance(aliases, dict) and aliases:
+            result["istota_models_aliases"] = aliases
 
     # Shared default briefings (pass through as-is, it's a list of dicts)
     default_briefings = settings.get("default_briefings", [])
