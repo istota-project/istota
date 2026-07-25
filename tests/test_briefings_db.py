@@ -233,3 +233,15 @@ class TestArchive:
                           body_md="x", generated_at=old)
         assert bdb.prune_archive(conn, briefing_name="M", retention_days=0) == 0
         assert bdb.count_archive(conn, briefing_name="M") == 1
+
+    def test_delete_archived(self, conn):
+        keep = bdb.insert_archive(conn, briefing_name="M", subject="keep", body_md="x")
+        drop = bdb.insert_archive(conn, briefing_name="M", subject="drop", body_md="y")
+        assert bdb.delete_archived(conn, drop) is True
+        assert bdb.get_archived(conn, drop) is None
+        # Sibling rows are untouched — a single-row delete, not a name purge.
+        assert bdb.get_archived(conn, keep) is not None
+        assert bdb.count_archive(conn, briefing_name="M") == 1
+
+    def test_delete_archived_missing(self, conn):
+        assert bdb.delete_archived(conn, 999) is False

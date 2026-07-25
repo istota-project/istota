@@ -3,14 +3,27 @@
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { getBriefingArchive, type BriefingArchiveItem } from '$lib/api';
+  import {
+    getBriefingArchive,
+    deleteBriefingArchiveItem,
+    type BriefingArchiveItem,
+  } from '$lib/api';
   import {
     selectedBriefingId,
     briefingFilterName,
     briefingArchiveCount,
     briefingsRefreshNonce,
   } from '$lib/stores/briefings';
-  import { AppShell, ShellHeader, Sidebar, SidebarToggle, Chip, Select } from '$lib/components/ui';
+  import {
+    AppShell,
+    ShellHeader,
+    Sidebar,
+    SidebarToggle,
+    Chip,
+    Select,
+    KebabMenu,
+    ConfirmDialog,
+  } from '$lib/components/ui';
   import { Cog } from 'lucide-svelte';
 
   let { children } = $props();
@@ -23,6 +36,10 @@
   let offset = $state(0);
   let sidebarOpen = $state(false);
   let loadingMore = $state(false);
+
+  // The archived briefing pending a delete confirmation (null = no dialog).
+  let deleteTarget = $state<BriefingArchiveItem | null>(null);
+  let deleteError = $state('');
 
   // Briefing-name filter, auto-populated from the archive's distinct names.
   let nameOptions = $derived([
@@ -80,6 +97,33 @@
   function loadMore() {
     offset += PAGE;
     void load(false);
+  }
+
+  async function performDelete() {
+    const target = deleteTarget;
+    if (!target) return;
+    deleteTarget = null;
+    deleteError = '';
+    try {
+      await deleteBriefingArchiveItem(target.id);
+      const idx = items.findIndex((i) => i.id === target.id);
+      const wasSelected = $selectedBriefingId === target.id;
+      // Optimistic local removal — preserves any already-loaded older pages
+      // instead of refetching just the current offset window.
+      items = items.filter((i) => i.id !== target.id);
+      total = Math.max(0, total - 1);
+      briefingArchiveCount.set(items.length);
+      if (wasSelected) {
+        // Move the reader to a neighbour so it isn't stranded on a dead id.
+        const next = items[idx] ?? items[idx - 1] ?? null;
+        selectedBriefingId.set(next ? next.id : null);
+      }
+    } catch (e) {
+      deleteError = e instanceof Error ? e.message : 'Failed to delete briefing';
+      // Reconcile from the server so the list reflects reality.
+      offset = 0;
+      void load();
+    }
   }
 
   function fmtDate(iso: string): string {
@@ -144,19 +188,23 @@
         open={sidebarOpen}
         onClose={() => (sidebarOpen = false)}
       >
+        {#if deleteError}
+          <p class="sidebar-error">{deleteError}</p>
+        {/if}
         {#if items.length === 0}
           <p class="sidebar-empty">No briefings yet.</p>
         {:else}
           {#each items as item (item.id)}
-            <button
-              class="archive-btn"
-              class:active={item.id === $selectedBriefingId}
-              type="button"
-              onclick={() => pickItem(item.id)}
-            >
-              <span class="archive-subject">{item.subject || item.briefing_name}</span>
-              <span class="archive-date">{fmtDate(item.generated_at)}</span>
-            </button>
+            <div class="archive-row" class:active={item.id === $selectedBriefingId}>
+              <button class="archive-btn" type="button" onclick={() => pickItem(item.id)}>
+                <span class="archive-subject">{item.subject || item.briefing_name}</span>
+                <span class="archive-date">{fmtDate(item.generated_at)}</span>
+              </button>
+              <KebabMenu
+                ariaLabel="Briefing actions"
+                items={[{ label: 'Delete…', danger: true, onSelect: () => (deleteTarget = item) }]}
+              />
+            </div>
           {/each}
           {#if items.length < total}
             <button class="load-more" type="button" onclick={loadMore} disabled={loadingMore}>
@@ -171,12 +219,41 @@
   {@render children()}
 </AppShell>
 
+{#if deleteTarget}
+  <ConfirmDialog
+    open={true}
+    title="Delete briefing"
+    message={`Permanently remove the archived briefing "${deleteTarget.subject || deleteTarget.briefing_name}" from ${fmtDate(deleteTarget.generated_at)}? This cannot be undone.`}
+    confirmLabel="Delete"
+    onConfirm={performDelete}
+    onCancel={() => (deleteTarget = null)}
+  />
+{/if}
+
 <style>
+  /* Row = clickable title button (flex:1) + a kebab sibling. A KebabMenu is
+     itself a <button>, so it can't be nested inside .archive-btn; hover/active
+     background lives on the row (mirrors the chat sidebar's .room-row). */
+  .archive-row {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    border-radius: 0.3rem;
+    padding-right: 0.2rem;
+    transition: background var(--transition-fast);
+  }
+
+  .archive-row:hover,
+  .archive-row.active {
+    background: var(--surface-raised);
+  }
+
   .archive-btn {
     display: flex;
     flex-direction: column;
     gap: 0.15rem;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     text-align: left;
     background: none;
     border: none;
@@ -185,15 +262,9 @@
     cursor: pointer;
     padding: 0.4rem 0.5rem;
     border-radius: 0.3rem;
-    transition: background var(--transition-fast);
   }
 
-  .archive-btn:hover {
-    background: var(--surface-raised);
-  }
-
-  .archive-btn.active {
-    background: var(--surface-raised);
+  .archive-row.active .archive-btn {
     color: var(--text-primary);
   }
 
@@ -232,5 +303,11 @@
     padding: 0.5rem;
     font-size: var(--text-sm);
     color: var(--text-dim);
+  }
+
+  .sidebar-error {
+    padding: 0.4rem 0.5rem;
+    font-size: var(--text-xs);
+    color: var(--danger, #e88);
   }
 </style>

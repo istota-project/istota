@@ -224,6 +224,21 @@ def get_archive_item(
     return _map_archive(row)
 
 
+@router.delete("/archive/{archive_id}")
+def delete_archive_item(
+    archive_id: int,
+    _: None = Depends(verify_origin),
+    ctx: BriefingsContext = Depends(get_user_context),
+) -> dict:
+    """Remove a single archived briefing result from the reader/archive."""
+    with bdb.connect(ctx.db_path) as conn:
+        deleted = bdb.delete_archived(conn, archive_id)
+        conn.commit()
+    if not deleted:
+        raise HTTPException(404, "briefing not found")
+    return {"status": "ok"}
+
+
 # ---------------------------------------------------------------------------
 # Content model — config / blocks / sources
 # ---------------------------------------------------------------------------

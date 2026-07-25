@@ -451,6 +451,13 @@ def get_archived(conn: sqlite3.Connection, archive_id: int) -> ArchivedBriefing 
     return _row_to_archived(row) if row else None
 
 
+def delete_archived(conn: sqlite3.Connection, archive_id: int) -> bool:
+    """Delete a single archived briefing by id. Returns True if a row was
+    removed (False when the id doesn't exist)."""
+    cur = conn.execute("DELETE FROM briefing_archive WHERE id = ?", (archive_id,))
+    return bool(cur.rowcount)
+
+
 def list_archive(
     conn: sqlite3.Connection,
     *,

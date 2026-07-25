@@ -2128,6 +2128,12 @@ const handlers: MockHandler[] = [
         const item = archive.find((a) => a.id === Number(am[1]));
         return item ?? { error: 'not found' };
       }
+      if (am && method === 'DELETE') {
+        const idx = archive.findIndex((a) => a.id === Number(am[1]));
+        if (idx === -1) return { error: 'not found' };
+        archive.splice(idx, 1);
+        return { status: 'ok' };
+      }
 
       if (p === '/config' && method === 'GET') return configResponse();
 

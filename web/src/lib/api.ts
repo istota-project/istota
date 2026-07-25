@@ -1865,6 +1865,10 @@ export async function getBriefingArchiveItem(id: number): Promise<BriefingArchiv
   return apiFetch<BriefingArchiveItem>(`/briefings/archive/${id}`);
 }
 
+export async function deleteBriefingArchiveItem(id: number): Promise<void> {
+  await apiFetch(`/briefings/archive/${id}`, { method: 'DELETE' });
+}
+
 export async function getBriefingConfig(): Promise<BriefingConfigResponse> {
   return apiFetch<BriefingConfigResponse>('/briefings/config');
 }

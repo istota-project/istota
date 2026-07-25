@@ -72,6 +72,22 @@ class TestArchive:
         assert body["total"] == 1
         assert body["items"][0]["subject"] == "e"
 
+    def test_delete_archive_item(self, ctx, client):
+        with bdb.connect(ctx.db_path) as conn:
+            aid = bdb.insert_archive(
+                conn, briefing_name="Morning", subject="m", body_md="x",
+            )
+            conn.commit()
+        resp = client.delete(f"/istota/api/briefings/archive/{aid}")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+        # Gone from both the item and list endpoints.
+        assert client.get(f"/istota/api/briefings/archive/{aid}").status_code == 404
+        assert client.get("/istota/api/briefings/archive").json()["total"] == 0
+
+    def test_delete_archive_item_missing_404(self, client):
+        assert client.delete("/istota/api/briefings/archive/999").status_code == 404
+
 
 class TestBlocksSources:
     def test_create_update_delete_block(self, client):
