@@ -3018,34 +3018,88 @@ def _run_db_backup(config: Config) -> None:
     _alert_backup_problems(config, results)
 
 
+def _run_sleep_cycles(config: Config) -> None:
+    """Run the nightly per-user and per-channel sleep cycles (ISSUE-144 Tier 2).
+
+    Bundled as one off-thread unit: both are halves of the same nightly pass and
+    came due on the same interval, so running them sequentially here preserves
+    the order they had on the dispatch thread and keeps them to one background
+    thread rather than two concurrent brain-calling passes.
+
+    Each half opens its own short-lived connection instead of borrowing the
+    loop-owned one they used to share. Nothing inside the sleep cycle commits
+    mid-pass, so one connection spanning both halves would hold a single write
+    transaction for the whole nightly run; two shorten that window, and the
+    caller thread has no connection to lend anyway.
+
+    Each half is independently guarded so a failure in the per-user pass still
+    lets the channel pass run.
+    """
+    from .memory.sleep_cycle import check_channel_sleep_cycles, check_sleep_cycles
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            sleep_users = check_sleep_cycles(conn, config)
+        if sleep_users:
+            logger.info(
+                "Ran sleep cycle for %d user(s): %s",
+                len(sleep_users), ", ".join(sleep_users),
+            )
+    except Exception as e:
+        logger.error("Error running sleep cycles: %s", e)
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            channel_tokens = check_channel_sleep_cycles(conn, config)
+        if channel_tokens:
+            logger.info(
+                "Ran channel sleep cycle for %d channel(s): %s",
+                len(channel_tokens), ", ".join(channel_tokens),
+            )
+    except Exception as e:
+        logger.error("Error running channel sleep cycles: %s", e)
+
+
 def _spawn_background_check(
     name: str,
     fn: Callable[[], object],
     inflight: dict[str, threading.Thread],
+    *,
+    overlap_expected: bool = False,
 ) -> bool:
     """Run a known-slow periodic check on a short-lived daemon thread.
 
-    The DB-health sweep and the DB-backup snapshot both walk every per-user DB —
-    the backup writes to the rclone FUSE mount, where latency is unbounded. Run
-    synchronously they blocked ``pool.dispatch()`` for their whole duration, and
-    the ``LoopWatchdog.suspended()`` wrapper needed to stop them false-paging
-    left the watchdog blind to *real* stalls in the same window (ISSUE-144).
+    The DB-health sweep, the DB-backup snapshot, and the nightly sleep cycles
+    are all multi-minute: the first two walk every per-user DB (the backup
+    writing to the rclone FUSE mount, where latency is unbounded), the third
+    makes synchronous per-user LLM calls. Run synchronously they blocked
+    ``pool.dispatch()`` for their whole duration, and the
+    ``LoopWatchdog.suspended()`` wrapper needed to stop them false-paging left
+    the watchdog blind to *real* stalls in the same window (ISSUE-144).
 
     ``inflight`` is the caller's own thread registry (``run_daemon`` owns it, so
     there's no process-global state): a check whose previous run is still going
     is skipped rather than overlapped, so a wedged sweep can't stack one thread
-    per tick. Exceptions are contained — a crashed run frees the slot for the
-    next tick. Returns True when a thread was spawned.
+    per tick — and, for the sleep cycles, so a pass outliving its poll interval
+    can't re-fire against state it hasn't stamped yet. Exceptions are contained
+    — a crashed run frees the slot for the next tick. Returns True when a thread
+    was spawned.
+
+    ``overlap_expected`` demotes the skip log to DEBUG, for a check polled far
+    more often than it runs: the sleep cycles are polled every
+    ``briefing_check_interval`` but gated by their own cron, so a nightly pass
+    spanning several ticks is normal rather than a warning-worthy overrun.
 
     Daemon threads by design: an in-flight snapshot dies with the process at
     shutdown rather than delaying it. Backups write dated dirs and the restore
     path sanity-checks them, so a torn snapshot can't clobber the last good one.
+    A sleep cycle killed mid-pass leaves its ``last_run`` unstamped and re-runs
+    next cycle — the same outcome as any daemon restart during a nightly run.
     """
     prev = inflight.get(name)
     if prev is not None and prev.is_alive():
-        logger.warning(
-            "background_check_still_running name=%s — skipping this tick", name,
-        )
+        log = logger.debug if overlap_expected else logger.warning
+        log("background_check_still_running name=%s — skipping this tick", name)
         return False
 
     def _run() -> None:
@@ -3074,16 +3128,16 @@ class LoopWatchdog:
     gone silent for longer than ``stall_seconds``. It re-arms once the loop
     recovers, so a transient stall pages once rather than on every check.
 
-    Some loop checks are *known* to block for minutes by design: the nightly
-    sleep cycle runs synchronous LLM extraction per user. Those would otherwise
-    trip the watchdog every night, so the loop wraps them in ``with
-    watchdog.suspended():`` and the watchdog only fires on *unexpected* stalls —
-    the regressions this is meant to catch. They do still pause dispatch while
-    they run (ISSUE-144 Tier 2).
+    The loop has no known-long synchronous checks left, so the watchdog now has
+    full coverage: the DB-health sweep, the DB-backup snapshot (ISSUE-144 Tier 1)
+    and the nightly sleep cycles (Tier 2) all run on background threads via
+    ``_spawn_background_check``, and none of them suspends the watchdog. There
+    are no ``suspended()`` call sites in ``run_daemon``.
 
-    The DB-health sweep and the DB-backup snapshot used to be in that set; they
-    now run on background threads via ``_spawn_background_check``, so those two
-    windows are back under full watchdog coverage.
+    ``suspended()`` is kept as the escape hatch for any future check that must
+    run on the loop thread and is *known* to block for minutes — without it such
+    a check would page every time it ran, drowning out the unexpected stalls
+    this is meant to catch. Prefer ``_spawn_background_check``.
     """
 
     def __init__(self, config: Config, stall_seconds: int):
@@ -4018,29 +4072,16 @@ def run_scheduler(config: Config, max_tasks: int | None = None, dry_run: bool = 
     except Exception as e:
         logger.error("Error checking shared blocks: %s", e)
 
-    # Check scheduled jobs and sleep cycles
+    # Check scheduled jobs
     with db.get_db(config.db_path) as conn:
         scheduled_tasks = check_scheduled_jobs(conn, config)
         if scheduled_tasks:
             logger.info("Queued %d scheduled job(s)", len(scheduled_tasks))
 
-        # Check sleep cycles
-        try:
-            from .memory.sleep_cycle import check_sleep_cycles
-            sleep_users = check_sleep_cycles(conn, config)
-            if sleep_users:
-                logger.info("Ran sleep cycle for %d user(s): %s", len(sleep_users), ", ".join(sleep_users))
-        except Exception as e:
-            logger.error("Error running sleep cycles: %s", e)
-
-        # Check channel sleep cycles
-        try:
-            from .memory.sleep_cycle import check_channel_sleep_cycles
-            channel_tokens = check_channel_sleep_cycles(conn, config)
-            if channel_tokens:
-                logger.info("Ran channel sleep cycle for %d channel(s): %s", len(channel_tokens), ", ".join(channel_tokens))
-        except Exception as e:
-            logger.error("Error running channel sleep cycles: %s", e)
+    # Run any due sleep cycles. Single-pass mode is one-shot with nothing to
+    # starve, so this stays synchronous — the daemon runs the same body on a
+    # background thread (ISSUE-144 Tier 2).
+    _run_sleep_cycles(config)
 
     # Poll for new emails
     if config.email.enabled:
@@ -4393,8 +4434,9 @@ def run_daemon(
     last_scheduled_job_check = 0.0
     last_shared_block_check = 0.0
     last_cleanup_check = 0.0
+    # One clock for both sleep-cycle halves — they always came due together
+    # (same interval, same epoch) and now run as one off-thread unit.
     last_sleep_cycle_check = 0.0
-    last_channel_sleep_cycle_check = 0.0
     last_heartbeat_check = 0.0
     last_db_health_check = 0.0
     # Seed the backup clock from the persisted last-run timestamp so it survives
@@ -4479,31 +4521,21 @@ def run_daemon(
                 logger.error("Error checking scheduled jobs: %s", e)
             last_scheduled_job_check = now
 
-        # Check sleep cycles periodically (same interval as briefings). The
-        # extraction runs synchronous per-user LLM calls and can take minutes;
-        # suspend the stall watchdog so a healthy nightly run doesn't page.
+        # Poll the sleep-cycle crons periodically (same interval as briefings)
+        # and run a due pass — per-user then per-channel — off the dispatch
+        # thread (ISSUE-144 Tier 2). Extraction makes synchronous per-user LLM
+        # calls and can take minutes; on the loop thread that blocked
+        # pool.dispatch() for the whole pass and had to muzzle the watchdog to
+        # avoid paging every night. This interval is only the *poll* cadence —
+        # each check's own cron decides whether to do any work, so a pass
+        # outliving the interval is normal and the in-flight guard (not the
+        # clock) is what prevents it re-firing against unstamped state.
         if now - last_sleep_cycle_check >= config.scheduler.briefing_check_interval:
-            try:
-                from .memory.sleep_cycle import check_sleep_cycles
-                with watchdog.suspended(), db.get_db(config.db_path) as conn:
-                    sleep_users = check_sleep_cycles(conn, config)
-                    if sleep_users:
-                        logger.info("Ran sleep cycle for %d user(s): %s", len(sleep_users), ", ".join(sleep_users))
-            except Exception as e:
-                logger.error("Error running sleep cycles: %s", e)
+            _spawn_background_check(
+                "sleep-cycles", lambda: _run_sleep_cycles(config), background_checks,
+                overlap_expected=True,
+            )
             last_sleep_cycle_check = now
-
-        # Check channel sleep cycles periodically (same interval as briefings)
-        if now - last_channel_sleep_cycle_check >= config.scheduler.briefing_check_interval:
-            try:
-                from .memory.sleep_cycle import check_channel_sleep_cycles
-                with watchdog.suspended(), db.get_db(config.db_path) as conn:
-                    channel_tokens = check_channel_sleep_cycles(conn, config)
-                    if channel_tokens:
-                        logger.info("Ran channel sleep cycle for %d channel(s): %s", len(channel_tokens), ", ".join(channel_tokens))
-            except Exception as e:
-                logger.error("Error running channel sleep cycles: %s", e)
-            last_channel_sleep_cycle_check = now
 
         # Poll emails periodically
         if config.email.enabled and now - last_email_poll >= config.scheduler.email_poll_interval:

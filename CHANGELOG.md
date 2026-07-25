@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Nightly database maintenance no longer holds up new messages. The integrity sweep and the backup snapshot used to run on the same thread that picks up incoming work, so while they ran — potentially minutes, especially if the backup destination was slow — nothing new was started in any room. Both now run in the background, and the scheduler's own stall alarm stays armed while they do instead of being muted.
+- Nightly memory extraction no longer holds up new messages either. The sleep cycle that distils each day's conversations into memory also ran on the thread that starts incoming work, so a pass across several users and channels could leave new messages waiting minutes for a reply. It now runs in the background too, which means every periodic job is off that thread and the stall alarm covers the whole loop again.
 
 ### Changed
 - The feed reader stops painting the same picture twice as reblogs of one photo work their way through the blogs you follow. A repeat inside a single post is gone, and across posts a picture a more recent entry already showed is hidden on the older ones — the post still appears, with a note saying how many repeats were hidden. Suppression is bounded to a recent look-back window (adjustable in Feed settings, and switchable off) and to the view you're in, so an image resurfacing much later still shows and browsing one blog never hides a tile because of another.

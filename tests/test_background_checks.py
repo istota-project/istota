@@ -1,10 +1,12 @@
-"""Off-thread periodic checks in the scheduler daemon loop (ISSUE-144 Tier 1).
+"""Off-thread periodic checks in the scheduler daemon loop (ISSUE-144).
 
-The DB-health sweep and the DB-backup snapshot used to run synchronously on the
-dispatch thread, wrapped in ``LoopWatchdog.suspended()`` so a healthy nightly run
-didn't page. That blocked ``pool.dispatch()`` for their whole duration and left
-the stall watchdog blind for two windows a day. Both now run on short-lived
-daemon threads via ``_spawn_background_check``.
+The DB-health sweep, the DB-backup snapshot (Tier 1) and the two nightly
+sleep-cycle passes (Tier 2) all used to run synchronously on the dispatch
+thread, wrapped in ``LoopWatchdog.suspended()`` so a healthy nightly run didn't
+page. That blocked ``pool.dispatch()`` for their whole duration and left the
+stall watchdog blind for those windows. All of them now run on short-lived
+daemon threads via ``_spawn_background_check``, and no ``suspended()`` call site
+remains in ``run_daemon``.
 """
 
 from __future__ import annotations
@@ -17,14 +19,20 @@ import pytest
 
 from istota import db
 from istota.config import (
+    ChannelSleepCycleConfig,
     Config,
     SchedulerConfig,
     SecurityConfig,
+    SleepCycleConfig,
     TalkConfig,
     UserConfig,
     WebConfig,
 )
-from istota.scheduler import _run_db_backup, _spawn_background_check
+from istota.scheduler import (
+    _run_db_backup,
+    _run_sleep_cycles,
+    _spawn_background_check,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -126,6 +134,122 @@ class TestSpawnBackgroundCheck:
         done = threading.Event()
         assert _spawn_background_check("db-health", done.set, inflight) is True
         assert done.wait(timeout=5.0)
+
+    def test_skip_logs_warning_by_default(self, caplog):
+        """An unexpected overrun (the DB checks) stays a WARNING."""
+        inflight: dict[str, threading.Thread] = {}
+        release = threading.Event()
+        started = threading.Event()
+
+        def _fn():
+            started.set()
+            release.wait(timeout=5.0)
+
+        _spawn_background_check("db-health", _fn, inflight)
+        assert started.wait(timeout=5.0)
+        with caplog.at_level("DEBUG", logger="istota.scheduler"):
+            assert _spawn_background_check("db-health", _fn, inflight) is False
+        release.set()
+        inflight["db-health"].join(timeout=5.0)
+
+        records = [r for r in caplog.records if "background_check_still_running" in r.message]
+        assert records and records[0].levelname == "WARNING"
+
+    def test_skip_logs_debug_when_overlap_expected(self, caplog):
+        """The sleep cycles are polled far more often than they run.
+
+        A nightly pass spanning several 60s poll ticks is by design, so the skip
+        must not read as a warning-worthy overrun.
+        """
+        inflight: dict[str, threading.Thread] = {}
+        release = threading.Event()
+        started = threading.Event()
+
+        def _fn():
+            started.set()
+            release.wait(timeout=5.0)
+
+        _spawn_background_check("sleep-cycles", _fn, inflight, overlap_expected=True)
+        assert started.wait(timeout=5.0)
+        with caplog.at_level("DEBUG", logger="istota.scheduler"):
+            assert _spawn_background_check(
+                "sleep-cycles", _fn, inflight, overlap_expected=True,
+            ) is False
+        release.set()
+        inflight["sleep-cycles"].join(timeout=5.0)
+
+        records = [r for r in caplog.records if "background_check_still_running" in r.message]
+        assert records and records[0].levelname == "DEBUG"
+
+
+# ---------------------------------------------------------------------------
+# _run_sleep_cycles (per-user + per-channel, as one off-thread unit)
+# ---------------------------------------------------------------------------
+
+
+class TestRunSleepCycles:
+    def _config(self, tmp_path):
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            users={"alice": UserConfig()},
+            sleep_cycle=SleepCycleConfig(),
+            channel_sleep_cycle=ChannelSleepCycleConfig(),
+        )
+        cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+        db.init_db(cfg.db_path)
+        return cfg
+
+    def test_runs_both_passes_each_with_its_own_connection(self, tmp_path):
+        """Neither half borrows a caller connection, and both run in order."""
+        cfg = self._config(tmp_path)
+        order: list[str] = []
+        conns: list[object] = []
+
+        def _users(conn, config):
+            order.append("users")
+            conns.append(conn)
+            return ["alice"]
+
+        def _channels(conn, config):
+            order.append("channels")
+            conns.append(conn)
+            return ["tok"]
+
+        with patch("istota.memory.sleep_cycle.check_sleep_cycles", _users), \
+                patch("istota.memory.sleep_cycle.check_channel_sleep_cycles", _channels):
+            _run_sleep_cycles(cfg)
+
+        assert order == ["users", "channels"]
+        assert len(conns) == 2 and conns[0] is not conns[1]
+
+    def test_channel_pass_runs_even_if_user_pass_raises(self, tmp_path):
+        cfg = self._config(tmp_path)
+        ran = threading.Event()
+
+        def _boom(conn, config):
+            raise RuntimeError("extraction exploded")
+
+        with patch("istota.memory.sleep_cycle.check_sleep_cycles", _boom), \
+                patch(
+                    "istota.memory.sleep_cycle.check_channel_sleep_cycles",
+                    lambda conn, config: ran.set() or [],
+                ):
+            _run_sleep_cycles(cfg)  # must not raise
+
+        assert ran.is_set()
+
+    def test_channel_pass_failure_is_contained(self, tmp_path):
+        """A crash in the last half must not escape onto the background thread."""
+        cfg = self._config(tmp_path)
+
+        def _boom(conn, config):
+            raise RuntimeError("channel extraction exploded")
+
+        with patch(
+            "istota.memory.sleep_cycle.check_sleep_cycles",
+            lambda conn, config: [],
+        ), patch("istota.memory.sleep_cycle.check_channel_sleep_cycles", _boom):
+            _run_sleep_cycles(cfg)  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -238,53 +362,84 @@ class TestDaemonLoopNotBlocked:
             sched.request_shutdown()
             t.join(timeout=10.0)
 
-    def test_db_checks_add_no_watchdog_suspension(self, tmp_path, monkeypatch):
-        """The suspend wrappers are gone — the watchdog keeps full coverage.
+    def test_sleep_cycle_does_not_block_dispatch(self, tmp_path, monkeypatch):
+        """A wedged nightly sleep cycle must not starve pool.dispatch() (Tier 2)."""
+        import istota.scheduler as sched
 
-        The sleep-cycle sites are still suspended (Tier 2), so the assertion is
-        differential: run the loop once with the DB checks due and once with them
-        not due, and require the suspend count to be identical. If either block
-        still wrapped itself in ``suspended()`` the counts would diverge.
+        cfg = _daemon_config(tmp_path)
+        # Keep the DB checks out of the way; this test is about the sleep cycle.
+        cfg.scheduler.db_health_check_interval = 10**12
+        started = threading.Event()
+        release = threading.Event()
+        runs: list[int] = []
+        dispatches: list[int] = []
+
+        def _wedged(config):
+            runs.append(1)
+            started.set()
+            release.wait(timeout=10.0)
+
+        def _dispatch(self):
+            dispatches.append(1)
+            # Keep ticking until the pass is demonstrably in flight, then a few
+            # more times to prove dispatch is still alive while it hangs.
+            if started.is_set() and len(dispatches) > 3:
+                sched.request_shutdown()
+
+        monkeypatch.setattr(sched, "_run_sleep_cycles", _wedged)
+        t = _run_daemon_isolated(cfg, monkeypatch, _dispatch)
+        try:
+            assert started.wait(timeout=10.0), "sleep cycle never ran"
+            t.join(timeout=10.0)
+            assert not t.is_alive(), "daemon loop was blocked by the sleep cycle"
+            assert len(dispatches) > 3
+            # The in-flight guard, not the poll clock, prevents a re-fire: the
+            # loop polled the cron several times while the pass was wedged.
+            assert len(runs) == 1, f"sleep cycle re-fired while in flight: {len(runs)}"
+        finally:
+            release.set()
+            sched.request_shutdown()
+            t.join(timeout=10.0)
+
+    def test_no_check_suspends_the_watchdog(self, tmp_path, monkeypatch):
+        """The suspend wrappers are all gone — the watchdog keeps full coverage.
+
+        With Tier 2 done there is no known-long synchronous check left, so this
+        is an absolute assertion rather than the differential one Tier 1 needed:
+        driving the loop with every off-thread check due must not suspend the
+        watchdog even once.
         """
         import istota.scheduler as sched
 
-        def _one_pass(sub_path, *, due):
-            cfg = _daemon_config(sub_path)
-            # An interval far beyond epoch-seconds never comes due; 1s always does.
-            interval = 1 if due else 10**12
-            cfg.scheduler.db_health_check_interval = interval
-            cfg.scheduler.db_backup_enabled = due
-            cfg.scheduler.db_backup_interval = interval
+        cfg = _daemon_config(tmp_path)
+        cfg.scheduler.db_health_check_interval = 1
+        cfg.scheduler.db_backup_enabled = True
+        cfg.scheduler.db_backup_interval = 1
 
-            suspends: list[int] = []
-            sweeps = threading.Event()
-            real_suspended = sched.LoopWatchdog.suspended
+        suspends: list[int] = []
+        sweeps = threading.Event()
+        backups = threading.Event()
+        sleeps = threading.Event()
+        real_suspended = sched.LoopWatchdog.suspended
 
-            def _tracking_suspended(self):
-                suspends.append(1)
-                return real_suspended(self)
+        def _tracking_suspended(self):
+            suspends.append(1)
+            return real_suspended(self)
 
-            monkeypatch.setattr(sched.LoopWatchdog, "suspended", _tracking_suspended)
-            monkeypatch.setattr(
-                sched, "check_db_health", lambda config: sweeps.set() or [],
-            )
-            monkeypatch.setattr(sched, "_run_db_backup", lambda config: None)
-            monkeypatch.setattr(sched.WorkerPool, "shutdown", lambda self: None)
+        monkeypatch.setattr(sched.LoopWatchdog, "suspended", _tracking_suspended)
+        monkeypatch.setattr(sched, "check_db_health", lambda config: sweeps.set() or [])
+        monkeypatch.setattr(sched, "_run_db_backup", lambda config: backups.set())
+        monkeypatch.setattr(sched, "_run_sleep_cycles", lambda config: sleeps.set())
+        monkeypatch.setattr(sched.WorkerPool, "shutdown", lambda self: None)
 
-            t = _run_daemon_isolated(cfg, monkeypatch, lambda self: sched.request_shutdown())
-            t.join(timeout=10.0)
-            assert not t.is_alive()
-            return len(suspends), sweeps
-
-        due_suspends, due_sweeps = _one_pass(tmp_path / "due", due=True)
-        # The sweep is spawned, not awaited — give the thread a moment to land.
-        assert due_sweeps.wait(timeout=5.0), "health sweep never ran when due"
-
-        sched._shutdown_requested = False
-        idle_suspends, idle_sweeps = _one_pass(tmp_path / "idle", due=False)
-        assert not idle_sweeps.wait(timeout=0.5), "health sweep ran when not due"
-
-        assert due_suspends == idle_suspends, (
-            "a DB check is still suspending the watchdog "
-            f"(due={due_suspends}, not due={idle_suspends})"
+        t = _run_daemon_isolated(
+            cfg, monkeypatch, lambda self: sched.request_shutdown()
         )
+        t.join(timeout=10.0)
+        assert not t.is_alive()
+
+        # All three are spawned, not awaited — give the threads a moment to land.
+        assert sweeps.wait(timeout=5.0), "health sweep never ran"
+        assert backups.wait(timeout=5.0), "backup never ran"
+        assert sleeps.wait(timeout=5.0), "sleep cycle never ran"
+        assert suspends == [], f"a check is still suspending the watchdog ({len(suspends)})"

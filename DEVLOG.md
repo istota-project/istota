@@ -2,6 +2,36 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Sleep cycles off the dispatch thread (ISSUE-144 Tier 2)
+
+Finished what the Tier 1 entry below deferred: the per-user and per-channel sleep cycles now run on the same off-thread mechanism as the DB checks. The loop has no known-long synchronous check left and `run_daemon` holds no `watchdog.suspended()` call sites, so the stall watchdog covers the entire loop — the end state ISSUE-144 asked for.
+
+The re-fire guard Tier 1 said this needed turned out to already exist. `_spawn_background_check`'s in-flight registry is exactly it: a spawn is skipped while the prior run under that name is alive, so a pass outliving `briefing_check_interval` can't re-fire against users it hasn't stamped `last_run` for yet. Worth recording, because the deferral reasoning made it sound like new machinery was required.
+
+What Tier 1 *didn't* anticipate is a consequence of the interval being a poll cadence rather than a run duration. The DB checks are on a 24h interval, so their skip log effectively never fires; the sleep cycles are polled every 60s but gated by their own cron, so a legitimate multi-minute nightly pass would have logged a WARNING every minute for its whole duration. Added `overlap_expected=True`, which demotes that one log line to DEBUG — an expected multi-tick pass isn't an overrun. The alternative (poll less often) would have delayed the cron's own resolution, and suppressing the log unconditionally would have hidden a genuinely wedged sweep.
+
+Two calls worth the ink:
+
+- **Bundled both halves onto one thread** (`_run_sleep_cycles`) rather than giving each its own name and slot. They're two halves of one nightly pass that always came due together — same interval, same epoch — so one thread preserves the ordering they had on the dispatch thread instead of putting two brain-calling passes in flight at once. Each half is independently try/excepted, so a failing per-user pass still lets the channel pass run. Collapsed the two loop clocks into one accordingly.
+- **Two connections, not one shared.** Nothing inside the sleep cycle commits mid-pass (there is no `conn.commit()` in `sleep_cycle.py` — `get_db` commits on exit), so a single connection spanning both halves would hold one write transaction for the entire nightly run. Two halves the worst case. Going further and committing per user/channel is a real improvement but changes `sleep_cycle.py` atomicity, so it stayed out.
+
+`run_scheduler` (single-pass) calls the same runner synchronously — one-shot mode has nothing to starve — which also de-duped the two inline blocks that had drifted into near-copies.
+
+Deliberate behaviour change: SIGTERM used to wait out an in-progress pass, because the loop was blocked inside it. It's a daemon thread now, so it dies with the process, leaving `last_run` unstamped so the pass re-runs next cycle. That's the same outcome as any daemon restart mid-pass, and systemd SIGKILLs past `TimeoutStopSec` regardless, so a bounded join at shutdown would only have delayed shutdown by minutes to buy nothing.
+
+Residual, documented in the rules file rather than left implicit: each half still holds a write transaction for its duration, and dispatch now keeps spawning workers during it, so writer contention in that window is marginally higher than before. Pre-existing in kind — already-spawned workers always raced the pass, which is the same observation that unblocked Tier 1.
+
+Testing followed Tier 1's approach and got to drop its awkward part. The differential suspend-count check existed only because the sleep-cycle sites still legitimately suspended; with none left, `test_no_check_suspends_the_watchdog` asserts `suspends == []` outright with every off-thread check due. The wedged-pass integration test asserts both properties at once: dispatch keeps ticking to shutdown, *and* the runner was entered exactly once despite the loop polling the cron several times while it hung. All four new behavioural tests verified non-vacuous by temporarily reverting the call site to `with watchdog.suspended(): _run_sleep_cycles(config)` and by ignoring `overlap_expected` — each failed as expected, then passed on restore.
+
+Full suite green across three consecutive runs (8202 passed, 7 skipped); ruff on the touched files matches the pre-change baseline (17 pre-existing, none new).
+
+**Files added/modified:**
+- `src/istota/scheduler.py` — `_run_sleep_cycles`, `overlap_expected` on `_spawn_background_check`, both loop call sites replaced by one spawn, one clock removed, `run_scheduler` de-duped, `LoopWatchdog` docstring
+- `tests/test_background_checks.py` — Tier 2 cases (9 → 15 tests); Tier 1's differential suspend test replaced with an absolute one
+- `.claude/rules/scheduler.md` — off-thread section rewritten for all three checks, loop-step / poller-table / watchdog rows
+- `AGENTS.md` — Tier 2 note on the off-thread checks
+- `CHANGELOG.md` — Unreleased `Fixed` entry
+
 ## 2026-07-25: DB health sweep and backup off the dispatch thread (ISSUE-144 Tier 1)
 
 The scheduler's main loop had four `watchdog.suspended()` windows, not the two the issue described when it was filed — the DB-backup snapshot was added later, with ISSUE-159. Each one is a stretch where `pool.dispatch()` can't run *and* the stall watchdog is deliberately blind, so a genuine hang starting inside one is invisible until it outlives the suspension. Moved the two DB checks off the loop thread; left the two sleep-cycle checks alone.
