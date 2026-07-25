@@ -625,12 +625,17 @@
     text-decoration: underline;
   }
 
-  /* Excerpt */
+  /* Excerpt — body copy is kept in lockstep with the reader popup's
+	   .reader-content (line-height, paragraph rhythm, image/figure spacing) so a
+	   post reads the same inline and expanded. The card's 0.5rem/0.75rem inset
+	   is the shared one; FeedReader's .reader-body matches it. */
   .feed-grid :global(.excerpt) {
     margin: 0;
     padding: 0.5rem 0.75rem;
     font-size: var(--text-base);
+    line-height: 1.6;
     color: var(--text-secondary);
+    word-break: break-word;
   }
 
   .feed-grid :global(.excerpt a) {
@@ -641,14 +646,18 @@
     color: var(--text-primary);
   }
   .feed-grid :global(.excerpt p) {
-    margin: 0.5em 0;
+    margin: 0 0 0.85rem;
+  }
+
+  .feed-grid :global(.excerpt figure) {
+    margin: 0.8rem 0;
   }
 
   .feed-grid :global(.excerpt img) {
     max-width: 100%;
     height: auto;
-    border-radius: 0.25rem;
-    margin: 0.5em 0;
+    border-radius: var(--radius-card);
+    margin: 0.6rem 0;
     display: block;
   }
 

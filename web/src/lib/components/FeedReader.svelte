@@ -263,7 +263,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.6rem 0.85rem;
+    padding: 0.5rem 0.75rem;
     border-bottom: 1px solid var(--border-subtle);
     font-size: var(--text-sm);
     color: var(--text-dim); /* matches the card .meta row */
@@ -307,15 +307,17 @@
     color: var(--accent-amber);
   }
 
+  /* Same 0.5rem/0.75rem the grid card's .card-body / .excerpt / .meta use, so
+	   a post sits at the same inset inline and expanded. */
   .reader-body {
     overflow-y: auto;
-    padding: 1.1rem 1.4rem 1.6rem;
+    padding: 0.5rem 0.75rem;
   }
 
   .reader-title {
-    font-size: 1.5rem;
+    font-size: 1rem;
     line-height: 1.25;
-    margin: 0 0 0.9rem;
+    margin: 0 0 1rem;
     color: var(--text-primary);
   }
 
