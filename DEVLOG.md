@@ -2,6 +2,34 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: DB health sweep and backup off the dispatch thread (ISSUE-144 Tier 1)
+
+The scheduler's main loop had four `watchdog.suspended()` windows, not the two the issue described when it was filed — the DB-backup snapshot was added later, with ISSUE-159. Each one is a stretch where `pool.dispatch()` can't run *and* the stall watchdog is deliberately blind, so a genuine hang starting inside one is invisible until it outlives the suspension. Moved the two DB checks off the loop thread; left the two sleep-cycle checks alone.
+
+The split is by cost, not importance. `check_db_health` and `backup_databases` are both `f(config)`, open their own connections, and take nothing from the loop — mechanical to move. The sleep cycles take a loop-owned connection and stamp `last_run` only *after* processing, so an off-thread run outlasting `briefing_check_interval` would re-fire and overlap; that needs a re-fire guard and can wait (Tier 2, recorded as a residual rather than a new issue).
+
+The concurrency objection that got this deferred in the first place turned out to be unfounded, which is the main thing worth remembering here. Blocking the dispatch thread never stopped already-spawned `UserWorker` threads — they keep calling `process_one_task` independently — so the sleep cycle has always raced task execution against the DB. Moving work off the loop thread adds no new race class; it only stops *new* worker spawning from being starved. With WAL on the framework DB and `main_loop_read_timeout_ms` making a contended dispatch scan skip its tick and retry in ~0.5s, the downside is bounded.
+
+Of the four, the backup is the one that most wanted this: it writes to the rclone FUSE mount, where a degraded mount makes the write time unbounded — precisely the case where you want the watchdog awake rather than muzzled.
+
+Design points:
+- **`_spawn_background_check(name, fn, inflight)`** runs `fn` on a `bgcheck-<name>` daemon thread unless the previous run under that name is still alive, in which case it logs and skips the tick. That guard is what makes it safe to advance the interval clocks at **spawn** time rather than completion: fixed cadence, no stacking one thread per tick behind a wedged sweep. Exceptions are contained; a crashed run frees the slot.
+- **`inflight` is passed in, not module-global.** `run_daemon` owns the dict, so tests and a re-entered daemon each start clean — no process-wide state to reset between runs.
+- **The staleness alert is untouched.** It reads the *persisted* backup clock, which still only advances on a durable OK run, so making the in-memory clock advance at spawn can't suppress it.
+- **Daemon threads deliberately.** An in-flight snapshot dies with the process at shutdown rather than delaying it; backups write dated dirs and the restore path sanity-checks them, so a torn snapshot can't clobber the last good one.
+
+Testing was the interesting part. The "no longer suspends" property is easy to assert vacuously, since the two sleep-cycle sites still legitimately suspend — so the test is differential: drive the daemon loop once with the DB checks due and once with them not due (an interval past epoch-seconds never comes due), and require the suspend counts to match. Verified non-vacuous by temporarily reintroducing a `suspended()` wrapper and confirming it fails 3 ≠ 2. The other integration test wedges the health sweep on an event and asserts dispatch keeps ticking to shutdown.
+
+The new test file also shook out a **pre-existing** order-dependency by changing the xdist sharding: `setup_wizard._bootstrap` writes `os.environ["ISTOTA_CONFIG_PATH"]` directly — right for a one-shot CLI, leaky in-process — which broke `test_config_path_absent_when_unset` whenever the wizard tests landed in the same worker first. Reproduced on a clean tree to confirm it predates this work, then fixed with a snapshot/restore fixture. Worth noting: `monkeypatch.delenv` can't do this job, because it records no undo entry when the variable starts out absent, which is exactly this case.
+
+Full suite green across three consecutive runs (8196 passed, 7 skipped); ruff on `scheduler.py` matches the pre-change baseline exactly.
+
+**Files added/modified:**
+- `src/istota/scheduler.py` — `_spawn_background_check`, `_run_db_backup`, the `background_checks` registry, both call sites rewired, `LoopWatchdog` docstring
+- `tests/test_background_checks.py` — new (9 tests)
+- `tests/test_local_install_stage3.py` — env-leak isolation fixture
+- `.claude/rules/scheduler.md`, `AGENTS.md` — off-thread checks documented
+
 ## 2026-07-25: Repeat-image suppression in the feed reader (ISSUE-162)
 
 Tumblr feeds painted the same photo over and over — a reblog wave sends one picture through every blog you follow. Sampling showed ~4.6% of stored image instances were exact-URL duplicates. Two distinct mechanisms, fixed in two layers.
