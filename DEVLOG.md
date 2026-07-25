@@ -2,6 +2,26 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Delete archived briefing results from the web reader
+
+The briefings reader could list and read generated briefings but never remove one — the only prune path was the age-based `archive_retention_days` sweep. Added a per-result delete affordance, end-to-end (it was missing at every layer: DB, route, api client, UI).
+
+**Key changes:**
+- New `bdb.delete_archived(conn, id) -> bool` — single-row delete, returns False on a missing id (mirrors `get_archived`/`delete_block`).
+- New route `DELETE /istota/api/briefings/archive/{id}` — per-user briefings DB, CSRF-gated via `verify_origin`, 404 when absent; mirrors the existing `delete_block` route.
+- `deleteBriefingArchiveItem(id)` api client fn.
+- Reader sidebar rows restructured from a bare `<button>` into a flex `.archive-row` (title button + `KebabMenu` sibling — a kebab is itself a `<button>`, so it can't nest inside the row button), mirroring the chat sidebar's `.room-row`. Kebab → Delete goes through the shared `ConfirmDialog`; removal is optimistic (preserves already-loaded older pages), re-points the reader to a neighbour when the deleted item was selected, and reconciles from the server on error.
+- Mock API gained the archive DELETE so the `VITE_MOCK_API=1` preview works.
+- TDD: wrote the DB + route tests first (confirmed failing on `AttributeError` / `405`), then implemented. Kept a plain confirm (not the type-the-name challenge the chat-room hard delete uses) — deleting one archived result is low-stakes versus nuking a room's whole history.
+
+**Files added/modified:**
+- `src/istota/briefings/db.py` — `delete_archived`
+- `src/istota/briefings/routes.py` — `DELETE /archive/{archive_id}`
+- `web/src/lib/api.ts` — `deleteBriefingArchiveItem`
+- `web/src/routes/briefings/+layout.svelte` — kebab + confirm + row restructure + CSS
+- `web/vite-mock-api.ts` — mock archive DELETE handler
+- `tests/test_briefings_db.py`, `tests/test_briefings_routes.py` — coverage
+
 ## 2026-07-25: Alias-registry review fixes (native resolution + reserved `default`)
 
 Post-review hardening of the same-day alias-registry commit (Mulder/Scully pass). Five fixes, all at the resolution/validation boundary:
