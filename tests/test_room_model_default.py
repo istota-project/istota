@@ -258,6 +258,27 @@ class TestRoomCommand:
         assert room.effort is None
         assert "default" in out.lower()
 
+    async def test_model_default_clears_even_when_default_alias_overridden(
+        self, config, db_path
+    ):
+        """`!room model default` always clears, even if an operator gave the
+        reserved `default` alias a concrete resolution (else it'd set a model)."""
+        from istota.brain._roles import set_alias_overrides
+
+        set_alias_overrides({"default": {"anthropic": "opus"}})
+        try:
+            with db.get_db(db_path) as conn:
+                db.register_room(conn, "room1", "alice", origin="web")
+                db.add_room_binding(conn, "room1", "web", "room1")
+                db.set_room_model_effort(conn, "room1", "claude-opus-4-8", "high")
+                out = await cmd_room(_ctx(config, conn, "model default"))
+                room = db.get_room(conn, "room1")
+            assert room.model is None
+            assert room.effort is None
+            assert "reset" in out.lower()
+        finally:
+            set_alias_overrides({})
+
     async def test_set_effort(self, config, db_path):
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="web")

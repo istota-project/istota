@@ -451,15 +451,27 @@ class NativeBrain:
         # modifier wins over the override's own effort.
         rt = get_alias_override_target(base_lower, self.model_namespace)
         if rt is not None:
-            return (rt.model, suffix_effort or rt.effort)
+            # A legacy-flat value may carry a baked ``:effort`` (``smart =
+            # "opus:high"``); peel it so native resolves the same flat string
+            # claude_code does, instead of gluing ``:high`` onto the wire model.
+            # A provider slug's ``/`` is untouched by split_effort. Effort
+            # precedence: request suffix > explicit RoleTarget.effort > baked.
+            target_model, target_effort = (
+                split_effort(rt.model) if rt.model else (rt.model, None)
+            )
+            return (target_model, suffix_effort or rt.effort or target_effort)
         # A built-in role alias with no operator override resolves to the single
         # model this endpoint is configured for (NB-3). The native brain speaks
         # to one endpoint with one model, so fast/general/smart all mean "the
         # configured model" unless the operator remapped them via [models.aliases].
+        # This must come BEFORE the generic ``:effort`` passthrough below, or a
+        # role tier + effort with an unset model (``general:high``) would fall
+        # through and leak the literal "general" onto the wire (NB-3). An empty
+        # model collapses to None → resolve_model_name treats it as brain default.
         # Provider shortcuts (opus/sonnet/haiku) are NOT roles and pass through
         # untranslated (None unless an explicit effort modifier was given).
-        if base_lower in _BUILTIN_ROLE_NAMES and self._config.model:
-            return (self._config.model, suffix_effort)
+        if base_lower in _BUILTIN_ROLE_NAMES:
+            return (self._config.model or None, suffix_effort)
         # An explicit id/slug carrying a ``:effort`` modifier passes through with
         # the effort applied; a plain unknown id stays None (unchanged — the
         # caller's resolve_model_name handles bare-id passthrough).

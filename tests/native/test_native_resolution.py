@@ -102,6 +102,15 @@ class TestPerNamespaceOverrides:
         b = _brain("openai_compat", model="m")
         assert b.resolve_alias("smart") == ("qwen/qwen3.6-35b-a3b", None)
 
+    def test_legacy_flat_with_baked_effort_is_split(self):
+        # A flat value carrying a baked `:effort` must be split the same way
+        # claude_code splits it, not glued onto the wire model. The slug's `/`
+        # is left intact by split_effort.
+        set_alias_overrides({"smart": "openrouter/some-model:high"})
+        b = _brain("openai_compat", model="m")
+        assert b.resolve_alias("smart") == ("openrouter/some-model", "high")
+        assert b.resolve_model_name("smart") == "openrouter/some-model"
+
     def test_list_aliases_reflects_openai_compat_value(self):
         set_alias_overrides(
             {"smart": {"anthropic": "opus-high", "openai_compat": "slug/x"}}
@@ -137,6 +146,20 @@ class TestNativeRoleDefaults:
         # A misconfigured (empty) native model must not leak 'general' as an id.
         b = _brain("openai_compat", model="")
         assert b.resolve_model_name("general") == ""
+
+    def test_role_with_effort_never_reaches_wire_with_empty_model(self):
+        # Regression: a role tier + `:effort` modifier with an unset model must
+        # still not leak the literal 'general' onto the wire (NB-3). The builtin
+        # role must be resolved BEFORE the generic `:effort` passthrough.
+        b = _brain("openai_compat", model="")
+        assert b.resolve_model_name("general:high") == ""
+        assert b.resolve_alias("general:high") == (None, "high")
+
+    def test_role_with_effort_resolves_to_native_model(self):
+        # With a model set, a role tier + effort resolves to that model, effort
+        # carried through the orthogonal modifier.
+        b = _brain("openai_compat", model="qwen/qwen3.6-35b")
+        assert b.resolve_alias("smart:low") == ("qwen/qwen3.6-35b", "low")
 
     def test_explicit_id_still_passes_through(self):
         b = _brain("openai_compat", model="qwen/qwen3.6-35b")

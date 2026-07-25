@@ -452,8 +452,18 @@ class ClaudeCodeBrain:
             )
         if target:
             base, _effort = split_effort(target)
-            known = base.lower() in DEFAULT_ALIASES
-            if not _looks_canonical(base) and not known:
+            pair = DEFAULT_ALIASES.get(base.lower())
+            if pair is not None and pair[0] is None:
+                # A known alias that pins no model (the reserved ``default``).
+                # Used as a target it'd be sent to the CLI as the literal string
+                # "default" rather than resolving to a real model.
+                warnings.append(
+                    f"alias override {name!r} target {target!r} resolves to no "
+                    f"model (it is the reserved 'use the brain default' alias); "
+                    f"tasks using this alias would send it verbatim — pin a "
+                    f"concrete model id or tier instead"
+                )
+            elif pair is None and not _looks_canonical(base):
                 warnings.append(
                     f"alias override {name!r} target {target!r} is neither a "
                     f"canonical model id nor a known alias; tasks using this "

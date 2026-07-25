@@ -2,6 +2,16 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Alias-registry review fixes (native resolution + reserved `default`)
+
+Post-review hardening of the same-day alias-registry commit (Mulder/Scully pass). Five fixes, all at the resolution/validation boundary:
+- **Native role + effort leak (high).** `NativeBrain.resolve_alias` guarded the built-in-role branch on `self._config.model`, so a role tier + `:effort` with an unset model (`general:high`) fell through to the generic `:effort` passthrough and leaked the literal `"general"` onto the wire (NB-3 violation — the no-effort case was covered, the effort case wasn't). Moved the role check before the passthrough; an empty model collapses to `None` (brain default). Regression tests added for `general:high` and `smart:low`.
+- **Native flat-alias baked effort (medium).** A legacy-flat override carrying a baked `:effort` (`smart = "opus:high"`) reached the native wire unsplit, so the same flat value resolved differently on the two brains. Native's override branch now `split_effort`s the target like `claude_code` does (precedence: request suffix > explicit `RoleTarget.effort` > baked).
+- **Ansible `portable` TOML (medium).** `portable = {{ nsval | lower }}` rendered the bare word `yes`/`no` for a non-bool truthy operator value — invalid TOML that failed the whole `validate_config` parse. Now `{{ 'true' if nsval else 'false' }}`.
+- **Reserved `default` alias (medium).** `!room model default` relied on `resolve_alias("default")` returning a null model, which an operator override of `default` would break; `cmd_room` now short-circuits the literal `"default"` to always clear (brain-agnostic, covers native too). And `ClaudeCodeBrain.validate_alias_override` now warns when an override *target* resolves to a null-model alias (`smart = "default"`) instead of silently sending `"default"` verbatim.
+
+Deferred (low, dev-only): the `web/vite-mock-api.ts` mock still surfaces removed `opus-high` / `claude-sonnet-4-6`, and `_roles.get_portable_alias_names`'s docstring describes a consumer relationship the executor doesn't use.
+
 ## 2026-07-25: Centralized model alias registry + orthogonal `:effort` modifier
 
 Builds directly on the per-namespace role tiers below. Two disjoint sources of alias truth were unified into one operator-visible, config-driven registry, and effort was pulled out of alias names into a compositional `:effort` modifier. Motivation: the provider-alias table (`MODEL_ALIASES`) was a hand-maintained model×effort cross-product (`opus`/`opus-high`/`opus-xhigh`/`opus-max` + stale pins `opus-46`/`opus-47`), invisible to operators and re-edited every model release; and effort baked into alias names (`opus-high`) contradicted effort being an orthogonal axis everywhere else, causing the documented `model = "opus-46-high"` config footgun (model set, effort silently empty).

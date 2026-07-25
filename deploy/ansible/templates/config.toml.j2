@@ -253,7 +253,7 @@ imap_timeout_seconds = {{ istota_email_imap_timeout_seconds }}
 [models.aliases.{{ name }}]
 {% for ns, nsval in target.items() %}
 {% if ns == "portable" %}
-portable = {{ nsval | lower }}
+portable = {{ 'true' if nsval else 'false' }}
 {% elif nsval is mapping %}
 {{ ns }} = { model = "{{ nsval.model }}"{% if nsval.effort is defined and nsval.effort %}, effort = "{{ nsval.effort }}"{% endif %} }
 {% else %}

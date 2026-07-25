@@ -323,6 +323,18 @@ class TestValidateAliasOverride:
         warnings = brain.validate_alias_override("opus", "garbage-not-a-real-model")
         assert len(warnings) == 2
 
+    def test_default_target_warns_resolves_to_no_model(self, brain):
+        # `smart = "default"` is a known alias that pins no model; used as a
+        # target it'd be sent to the CLI as the literal "default".
+        warnings = brain.validate_alias_override("smart", "default")
+        assert any("no model" in w.lower() for w in warnings)
+        assert any("default" in w for w in warnings)
+
+    def test_default_target_with_effort_warns(self, brain):
+        # The `:effort` suffix is stripped before the check.
+        warnings = brain.validate_alias_override("smart", "default:high")
+        assert any("no model" in w.lower() for w in warnings)
+
 
 class TestLoadConfigIntegration:
     """End-to-end: [models.aliases] TOML through load_config to resolver."""

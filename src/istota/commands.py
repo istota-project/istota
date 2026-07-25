@@ -571,6 +571,12 @@ async def cmd_room(ctx: CommandContext):
                 "Usage: `!room model <alias>` (or `default` to clear). "
                 f"Aliases: {', '.join(f'`{a}`' for a in aliases)}."
             )
+        if alias == "default":
+            # The reserved `default` keyword always clears the room's model +
+            # effort, independent of any operator override that may have given
+            # the `default` alias a concrete resolution.
+            db.set_room_model_effort(conn, token, None, None)
+            return "Room model reset — this room now uses the instance default."
         resolved = make_brain(config.brain).resolve_alias(alias)
         if resolved is None:
             return (
