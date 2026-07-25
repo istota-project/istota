@@ -190,10 +190,10 @@
   }
 
   .account-balance.income {
-    color: #4adbc0;
+    color: var(--money-income);
   }
   .account-balance.expense {
-    color: #d46ab5;
+    color: var(--money-expense);
   }
 
   .empty {
@@ -201,13 +201,5 @@
     font-size: var(--text-base);
     padding: 2rem 1rem;
     text-align: center;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .account-balance.income {
-    color: #0d8f7e;
-  }
-  :global(:root[data-theme='light']) .account-balance.expense {
-    color: #a3157e;
   }
 </style>

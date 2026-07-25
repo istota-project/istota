@@ -135,7 +135,7 @@
 
   .form-error {
     font-size: var(--text-xs);
-    color: #d46ab5;
+    color: var(--status-danger-fg);
     margin-bottom: 0.5rem;
   }
 </style>

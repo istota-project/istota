@@ -468,17 +468,17 @@
 
   .card-value.income,
   .breakdown-amount.income {
-    color: #4adbc0;
+    color: var(--money-income);
   }
   .card-value.expense,
   .breakdown-amount.expense {
-    color: #d46ab5;
+    color: var(--money-expense);
   }
   .card-value.positive {
-    color: #4adbc0;
+    color: var(--money-income);
   }
   .card-value.negative {
-    color: #d46ab5;
+    color: var(--money-expense);
   }
 
   .breakdowns {
@@ -567,21 +567,5 @@
     .chart-container {
       height: 200px;
     }
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .card-value.income,
-  :global(:root[data-theme='light']) .breakdown-amount.income {
-    color: #0d8f7e;
-  }
-  :global(:root[data-theme='light']) .card-value.expense,
-  :global(:root[data-theme='light']) .breakdown-amount.expense {
-    color: #a3157e;
-  }
-  :global(:root[data-theme='light']) .card-value.positive {
-    color: #0d8f7e;
-  }
-  :global(:root[data-theme='light']) .card-value.negative {
-    color: #a3157e;
   }
 </style>

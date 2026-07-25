@@ -547,6 +547,4 @@
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
-
-  /* Light theme overrides — dark rules above untouched. */
 </style>

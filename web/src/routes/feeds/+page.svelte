@@ -422,7 +422,7 @@
   }
 
   .center-msg.error {
-    color: #c66;
+    color: var(--status-danger-fg);
   }
 
   .feed-page {
@@ -498,7 +498,7 @@
 
   .feed-grid :global(.star-btn.starred),
   .feed-grid :global(.star-btn:hover) {
-    color: #f5b300;
+    color: var(--accent-amber);
   }
 
   .feed-grid.list-view :global(.card) {
@@ -732,11 +732,6 @@
   .feed-grid.list-view :global(.card-gallery .card-image img) {
     aspect-ratio: auto;
     height: auto;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .center-msg.error {
-    color: #c0271d;
   }
   :global(:root[data-theme='light']) .feed-grid :global(.card-title-overlay) {
     background: #ececef;

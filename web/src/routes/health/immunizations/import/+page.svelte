@@ -358,8 +358,8 @@
     background: var(--surface-raised);
   }
   .btn.primary {
-    border-color: #7aa3d8;
-    color: #7aa3d8;
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
   }
   .btn.small {
     padding: 0.2rem 0.55rem;
@@ -388,7 +388,7 @@
   }
   .tab.active {
     color: var(--text-primary);
-    border-bottom-color: #7aa3d8;
+    border-bottom-color: var(--accent-blue);
   }
 
   .card {
@@ -453,7 +453,7 @@
     resize: vertical;
   }
   .paste:focus {
-    outline: 1px solid #7aa3d8;
+    outline: 1px solid var(--accent-blue);
   }
 
   .actions {
@@ -495,11 +495,11 @@
   }
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
-    color: #e88;
+    color: var(--status-danger-fg);
   }
   .msg.warn {
     background: rgba(230, 185, 107, 0.1);
-    color: #e6b96b;
+    color: var(--status-warn-fg);
   }
   .msg ul {
     margin: 0;
@@ -599,23 +599,5 @@
   .badge.conf-manual {
     background: hsla(220, 8%, 60%, 0.18);
     color: var(--text-muted);
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .btn.primary {
-    border-color: #2563b0;
-    color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .tab.active {
-    border-bottom-color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .paste:focus {
-    outline-color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .msg.error {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .msg.warn {
-    color: #946a00;
   }
 </style>

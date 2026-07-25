@@ -430,7 +430,7 @@
   }
 
   .center-msg.error {
-    color: #c66;
+    color: var(--status-danger-fg);
   }
 
   .stats-bar {
@@ -524,13 +524,7 @@
     .date-inputs {
       display: none;
     }
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .center-msg.error {
-    color: #c0271d;
-  }
-  /* Calendar icon is dark by default; drop the dark-mode invert in light mode. */
+  } /* Calendar icon is dark by default; drop the dark-mode invert in light mode. */
   :global(:root[data-theme='light'])
     .date-inputs
     input[type='date']::-webkit-calendar-picker-indicator {

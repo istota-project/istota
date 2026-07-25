@@ -453,7 +453,7 @@
   }
 
   .detail-discount {
-    color: #d46ab5;
+    color: var(--money-expense);
     white-space: nowrap;
     flex-shrink: 0;
   }
@@ -494,10 +494,5 @@
     .detail-qty {
       display: none;
     }
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .detail-discount {
-    color: #a3157e;
   }
 </style>

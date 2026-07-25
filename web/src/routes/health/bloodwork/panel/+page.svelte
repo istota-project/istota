@@ -450,7 +450,7 @@
     color: var(--text-dim);
   }
   .encounter-link a {
-    color: #7aa3d8;
+    color: var(--accent-blue);
     text-decoration: none;
   }
   .encounter-link a:hover {
@@ -491,12 +491,12 @@
     cursor: not-allowed;
   }
   .btn.primary {
-    border-color: #7aa3d8;
-    color: #7aa3d8;
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
   }
   .btn.danger {
-    border-color: #c66;
-    color: #c66;
+    border-color: var(--status-danger-fg);
+    color: var(--status-danger-fg);
   }
   .split {
     display: grid;
@@ -582,7 +582,7 @@
     cursor: pointer;
   }
   .del:hover {
-    color: #c66;
+    color: var(--status-danger-fg);
   }
   .source {
     display: flex;
@@ -622,35 +622,13 @@
   }
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
-    color: #f0a;
+    color: var(--status-danger-fg);
   }
   .msg.info {
     background: rgba(122, 163, 216, 0.1);
-    color: #7aa3d8;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .encounter-link a {
-    color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .btn.primary {
-    border-color: #2563b0;
-    color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .btn.danger {
-    border-color: #c0271d;
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .del:hover {
-    color: #c0271d;
+    color: var(--status-info-fg);
   }
   :global(:root[data-theme='light']) .flag-C {
     background: #b3261e;
-  }
-  :global(:root[data-theme='light']) .msg.error {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .msg.info {
-    color: #2563b0;
   }
 </style>

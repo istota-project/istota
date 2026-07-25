@@ -208,10 +208,10 @@
   }
 
   .nw-amount.positive {
-    color: #4adbc0;
+    color: var(--money-income);
   }
   .nw-amount.negative {
-    color: #d46ab5;
+    color: var(--money-expense);
   }
 
   .section-header {
@@ -295,13 +295,5 @@
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
     color: var(--text-primary);
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .nw-amount.positive {
-    color: #0d8f7e;
-  }
-  :global(:root[data-theme='light']) .nw-amount.negative {
-    color: #a3157e;
   }
 </style>

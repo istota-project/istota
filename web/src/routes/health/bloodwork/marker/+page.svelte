@@ -493,12 +493,12 @@
     padding: 0.15rem 0.55rem;
     border-radius: var(--radius-pill);
     background: rgba(204, 102, 102, 0.25);
-    color: #f8a09c;
+    color: var(--status-danger-fg);
     letter-spacing: 0.05em;
   }
   .alert-low .alert-pill {
     background: rgba(122, 163, 216, 0.25);
-    color: #9cc7f8;
+    color: var(--status-info-fg);
   }
   .alert-title {
     font-size: var(--text-base);
@@ -555,7 +555,7 @@
     font-style: italic;
   }
   .alert .error-text {
-    color: #f08c8c;
+    color: var(--status-danger-fg);
     font-size: var(--text-sm);
   }
 
@@ -670,11 +670,11 @@
   }
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
-    color: #f0a;
+    color: var(--status-danger-fg);
   }
   .msg.warn {
     background: rgba(230, 185, 107, 0.1);
-    color: #e6b96b;
+    color: var(--status-warn-fg);
     margin-bottom: 0.75rem;
   }
 
@@ -682,22 +682,7 @@
   :global(:root[data-theme='light']) .related a:hover {
     border-color: var(--border-default);
   }
-  :global(:root[data-theme='light']) .alert-pill {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .alert-low .alert-pill {
-    color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .alert .error-text {
-    color: #c0271d;
-  }
   :global(:root[data-theme='light']) .flag-C {
     background: #b3261e;
-  }
-  :global(:root[data-theme='light']) .msg.error {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .msg.warn {
-    color: #946a00;
   }
 </style>

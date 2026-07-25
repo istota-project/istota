@@ -59,10 +59,10 @@
     --notice-accent: var(--accent-amber);
   }
   .notice-danger {
-    --notice-accent: #c66;
+    --notice-accent: var(--status-danger-fg);
   }
   .notice-info {
-    --notice-accent: #6c8ebf;
+    --notice-accent: var(--status-info-fg);
   }
   :global(:root[data-theme='light']) .notice-danger {
     --notice-accent: #c0271d;

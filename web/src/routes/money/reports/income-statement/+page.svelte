@@ -186,10 +186,10 @@
   }
 
   .section-total.income {
-    color: #4adbc0;
+    color: var(--money-income);
   }
   .section-total.expense {
-    color: #d46ab5;
+    color: var(--money-expense);
   }
 
   .caret {
@@ -246,10 +246,10 @@
   }
 
   .tree-balance.income {
-    color: #4adbc0;
+    color: var(--money-income);
   }
   .tree-balance.expense {
-    color: #d46ab5;
+    color: var(--money-expense);
   }
 
   .net-row {
@@ -273,29 +273,9 @@
   }
 
   .net-amount.positive {
-    color: #4adbc0;
+    color: var(--money-income);
   }
   .net-amount.negative {
-    color: #d46ab5;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .section-total.income {
-    color: #0d8f7e;
-  }
-  :global(:root[data-theme='light']) .section-total.expense {
-    color: #a3157e;
-  }
-  :global(:root[data-theme='light']) .tree-balance.income {
-    color: #0d8f7e;
-  }
-  :global(:root[data-theme='light']) .tree-balance.expense {
-    color: #a3157e;
-  }
-  :global(:root[data-theme='light']) .net-amount.positive {
-    color: #0d8f7e;
-  }
-  :global(:root[data-theme='light']) .net-amount.negative {
-    color: #a3157e;
+    color: var(--money-expense);
   }
 </style>

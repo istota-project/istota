@@ -320,8 +320,8 @@
     background: var(--surface-raised);
   }
   .btn.primary {
-    border-color: #7aa3d8;
-    color: #7aa3d8;
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
   }
   .msg {
     font-size: var(--text-sm);
@@ -331,7 +331,7 @@
   }
   .msg.info {
     background: rgba(122, 163, 216, 0.1);
-    color: #7aa3d8;
+    color: var(--status-info-fg);
   }
   .msg details {
     margin-top: 0.25rem;
@@ -671,21 +671,7 @@
     padding: 0.5rem;
     border-radius: 0.3rem;
     background: rgba(204, 102, 102, 0.1);
-    color: #f0a;
-  }
-
-  /* Light theme — remap the dark-tuned chip/flag colors for white surfaces.
-	   The translucent backgrounds re-tint fine over light; only the pastel text
-	   needs darkening. Dark rules above are untouched. */
-  :global(:root[data-theme='light']) .btn.primary {
-    border-color: #2563b0;
-    color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .msg.info {
-    color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .msg.error {
-    color: #c0271d;
+    color: var(--status-danger-fg);
   }
   :global(:root[data-theme='light']) tbody td.flag-C {
     background: #b3261e;

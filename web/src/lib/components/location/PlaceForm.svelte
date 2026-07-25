@@ -258,6 +258,6 @@
   }
 
   .delete-link:hover {
-    color: #c66;
+    color: var(--status-danger-fg);
   }
 </style>

@@ -304,7 +304,7 @@
 
   .icon-btn.star.starred,
   .icon-btn.star:hover {
-    color: #f5b300;
+    color: var(--accent-amber);
   }
 
   .reader-body {

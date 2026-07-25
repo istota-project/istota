@@ -282,7 +282,7 @@
   }
 
   .center-msg.error {
-    color: #c66;
+    color: var(--status-danger-fg);
   }
 
   .stats-bar {
@@ -372,10 +372,5 @@
     letter-spacing: 0.04em;
     font-weight: 500;
     margin-bottom: 0.25rem;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .center-msg.error {
-    color: #c0271d;
   }
 </style>

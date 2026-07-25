@@ -66,7 +66,7 @@
   .field :global(input:focus),
   .field :global(select:focus),
   .field :global(textarea:focus) {
-    outline: 1px solid var(--accent, #6c8ebf);
+    outline: 1px solid var(--accent, var(--accent-blue));
   }
 
   .field.checkbox {
@@ -98,6 +98,6 @@
 
   .field-error {
     font-size: var(--text-xs);
-    color: #e88;
+    color: var(--status-danger-fg);
   }
 </style>

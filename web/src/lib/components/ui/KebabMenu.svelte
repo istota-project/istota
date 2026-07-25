@@ -90,11 +90,6 @@
     cursor: not-allowed;
   }
   :global(.ui-kebab-item--danger[data-highlighted]) {
-    color: #d46ab5;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) :global(.ui-kebab-item--danger[data-highlighted]) {
-    color: #a3157e;
+    color: var(--status-danger-fg);
   }
 </style>

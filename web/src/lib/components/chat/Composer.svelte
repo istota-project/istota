@@ -333,7 +333,7 @@
     color: var(--text-primary);
   }
   .icon-btn.stop {
-    color: #e0a0a0;
+    color: var(--status-danger-fg);
   }
 
   .file-hidden {
@@ -372,7 +372,7 @@
     color: var(--text-primary);
   }
   .attach-error {
-    color: #e0a0a0;
+    color: var(--status-danger-fg);
     font-size: var(--text-xs);
     margin-bottom: 0.3rem;
   }
@@ -380,11 +380,5 @@
   /* Light theme overrides — dark rules above untouched. */
   :global(:root[data-theme='light']) .composer {
     background: #ffffff;
-  }
-  :global(:root[data-theme='light']) .icon-btn.stop {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .attach-error {
-    color: #c0271d;
   }
 </style>

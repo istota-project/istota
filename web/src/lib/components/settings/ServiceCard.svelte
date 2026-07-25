@@ -195,7 +195,7 @@
 
   .saved-flash {
     font-size: var(--text-xs);
-    color: #6eb884;
+    color: var(--status-success-fg);
   }
 
   .clear-confirm {

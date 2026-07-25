@@ -590,7 +590,7 @@
   }
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
-    color: #f0a;
+    color: var(--status-danger-fg);
   }
   .msg.inline {
     margin: 0.25rem 0;
@@ -694,19 +694,12 @@
     cursor: not-allowed;
   }
   .btn.primary {
-    border-color: #7aa3d8;
-    color: #7aa3d8;
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
   }
 
   /* Light theme overrides — dark rules above untouched. */
   :global(:root[data-theme='light']) .card:hover {
     border-color: var(--border-default);
-  }
-  :global(:root[data-theme='light']) .msg.error {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .btn.primary {
-    border-color: #2563b0;
-    color: #2563b0;
   }
 </style>

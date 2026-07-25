@@ -120,15 +120,11 @@
 	   (#c66 dark / #c0271d light). */
   .btn-danger {
     background: transparent;
-    border: 1px solid #c66;
-    color: #c66;
+    border: 1px solid var(--status-danger-fg);
+    color: var(--status-danger-fg);
   }
   .btn-danger:hover:not(:disabled) {
     background: rgba(204, 102, 102, 0.12);
-  }
-  :global(:root[data-theme='light']) .btn-danger {
-    border-color: #c0271d;
-    color: #c0271d;
   }
   :global(:root[data-theme='light']) .btn-danger:hover:not(:disabled) {
     background: rgba(192, 39, 29, 0.08);
@@ -140,11 +136,6 @@
     padding: 0.2rem 0.35rem;
   }
   .btn-danger-icon:hover:not(:disabled) {
-    color: #c66;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .btn-danger-icon:hover:not(:disabled) {
-    color: #c0271d;
+    color: var(--status-danger-fg);
   }
 </style>

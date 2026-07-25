@@ -718,7 +718,7 @@
   }
 
   .diag.bad .diag-value {
-    color: #e88;
+    color: var(--status-danger-fg);
   }
 
   .diag-value {
@@ -855,7 +855,7 @@
   }
 
   .state-error {
-    color: #e88;
+    color: var(--status-danger-fg);
     max-width: 32ch;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -929,13 +929,5 @@
     .diag {
       padding: 0.4rem 0.5rem;
     }
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .diag.bad .diag-value {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .state-error {
-    color: #c0271d;
   }
 </style>

@@ -204,7 +204,7 @@
 .settings .field input:focus,
 .settings .field select:focus,
 .settings .field textarea:focus {
-  outline: 1px solid var(--accent, #6c8ebf);
+  outline: 1px solid var(--accent, var(--accent-blue));
 }
 
 .settings .field.checkbox {

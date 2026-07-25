@@ -2,6 +2,39 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Finished the color-token sweep (`--accent-blue`, `--money-*`)
+
+Follow-up to the chip entry below, which left plain message text hardcoded. Auditing the whole frontend rather than just the rules I'd promised turned up 228 color-bearing CSS rules, 80 of them light-theme overrides — and three *distinct* semantic roles tangled together, not the one I'd assumed.
+
+The severity axis was the expected part: `.msg.error` / `.center-msg.error` / `.field-error` / `.btn.danger` / `.sev-severe` and friends, spread across six different reds (`#c66`, `#e88`, `#f0a`, `#e0a0a0`, `#f08c8c`, `#d46ab5`). Worth noting `#f0a` — a hot magenta, plainly a placeholder someone never revisited — was the error color on eight health pages.
+
+The two roles that *aren't* severity are the interesting find:
+
+- **`--accent-blue`** (dark `#7aa3d8`, light `#2563b0`). Primary buttons, active tabs, focus rings, cross-reference links: 36 occurrences split across two near-identical blues (`#7aa3d8` in health, `#6c8ebf` in settings/notices) that both resolved to `#2563b0` in light. This is "you can act on this", not a severity, so folding it into `--status-info-fg` would have been the wrong abstraction even though the light values coincide. Kept separate, and the comment in `app.css` says why — otherwise the next reader merges them.
+- **`--money-{income,expense}`** (dark `#4adbc0`/`#d46ab5`, light `#0d8f7e`/`#a3157e`). An expense is not an error and income is not a success; a signed amount is a direction, not a judgment. Already perfectly consistent across nine money pages, just unnamed. Tokenizing removed ten overrides.
+
+That last one also caught a genuine misuse: `#d46ab5` is the expense magenta, but `TransactionForm .form-error` and the kebab menu's danger item were both using it *as a danger color*. Those now resolve to the danger red; the money surfaces keep the magenta. Same hex, two meanings, which is exactly what a token layer is for.
+
+**Method — a rule-level transformer, not find-and-replace.** Because the same hex means different things depending on where it sits, blind substitution would have been wrong in both directions. The migration script (`mig2.py`, scratch) parses CSS rules, assigns each to a semantic group by selector, and rewrites only the hexes that group owns — so `#d46ab5` became `--status-danger-fg` in `.form-error` and `--money-expense` in `.txn-amount.expense` in the same pass. Selector matching resolves longest-hint-wins so `.alert-low .alert-pill` (info) beats the bare `.alert-pill` (danger). Light-override deletion is guarded: a rule is dropped only if every declaration in it is a `*color` property, so an override that also sets layout or a background survives (`.error-panel` did).
+
+**Verification worth repeating.** Diffed every deleted light override against the token's light value: 82/82 declarations matched exactly, so light theme is byte-identical where overrides disappeared — the deletions are provably inert, not a redesign. Dark theme *does* shift where six reds collapsed to one, which is the point. Also swept for orphaned "Light theme overrides" comment headers left with nothing beneath them (found one, from the previous commit).
+
+One addition beyond the token work: the "starred" gold (`#f5b300`, three call sites) had no light rule and is a near-duplicate of `--accent-amber` (`#f5a623`), so it now uses that token and picks up the darker light-theme amber. Low-contrast gold on white was a real, if minor, gap.
+
+Net −313 lines across 42 files. Remaining hardcodes are all deliberate: map paint specs, chart datasets, categorical badges, fixed-surface chrome. The one real leftover is the raw neutral greys (`#555`/`#666`/`#888`/`#aaa`) on hover borders and muted links — several have no light rule, so a few render as harsh dark borders on white. That's the `--border-*`/`--text-*` scale's job and a separate sweep; noted in AGENTS.md rather than started here, because it touches hover states app-wide and carries actual regression risk, unlike this pass.
+
+**Key changes:**
+- Added `--accent-blue` and `--money-{income,expense}` to both theme blocks; extended the status tokens to message text, danger buttons/links, severity scales, and focus rings.
+- Fixed `#d46ab5` (the money-expense magenta) being used as a danger color in two components.
+- Replaced the `#f0a` magenta error text on eight health pages.
+- Mapped the "starred" gold to `--accent-amber`, giving it the light-theme variant it lacked.
+- Deleted 82 light-override declarations, each verified to resolve identically via its token.
+
+**Files added/modified:**
+- `web/src/app.css` — `--accent-blue`, `--money-income`, `--money-expense`
+- 41 further files across `lib/components/{chat,settings,ui,money,location}`, `lib/styles/settings.css`, and the `health` / `money` / `feeds` / `location` / `briefings` routes — severity, accent and money colors onto tokens; paired light overrides removed
+- `AGENTS.md` — Web UI "Semantic colors" section rewritten for the full token set, with the exclusions and the open neutral-grey sweep
+
 ## 2026-07-25: Standardized status chip palette (`--status-*` tokens)
 
 Started from one visual bug — the effort chip beside the default model on the admin page rendered a heavy dark-blue block on light theme — and the answer to "is it the same blue as dark theme?" was yes: `background: #6c8ebf; color: #000`, hardcoded, no theme override at all. Auditing the rest of the app for the same class turned up a second instance and, underneath it, the reason the class keeps recurring.

@@ -156,7 +156,7 @@
   }
 
   .status.error {
-    color: var(--danger, #e88);
+    color: var(--danger, var(--status-danger-fg));
   }
 
   .empty {

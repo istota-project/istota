@@ -440,12 +440,12 @@
     font-size: var(--text-xs);
   }
   .btn.primary {
-    border-color: #7aa3d8;
-    color: #7aa3d8;
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
   }
   .btn.danger {
-    border-color: #c66;
-    color: #c66;
+    border-color: var(--status-danger-fg);
+    color: var(--status-danger-fg);
   }
 
   .form {
@@ -553,15 +553,15 @@
   }
   .sev-mild {
     background: hsla(145, 40%, 55%, 0.18);
-    color: #9bd6a6;
+    color: var(--status-success-fg);
   }
   .sev-moderate {
     background: hsla(35, 60%, 60%, 0.22);
-    color: #e6b96b;
+    color: var(--status-warn-fg);
   }
   .sev-severe {
     background: hsla(0, 60%, 55%, 0.28);
-    color: #ff9d96;
+    color: var(--status-danger-fg);
   }
   .d-meta {
     display: flex;
@@ -576,7 +576,7 @@
     text-decoration: none;
   }
   .d-meta .enc:hover {
-    color: #7aa3d8;
+    color: var(--accent-blue);
     text-decoration: underline;
   }
   .d-actions {
@@ -610,31 +610,6 @@
   }
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
-    color: #f0a;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .btn.primary {
-    border-color: #2563b0;
-    color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .btn.danger {
-    border-color: #c0271d;
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .sev-mild {
-    color: #15803d;
-  }
-  :global(:root[data-theme='light']) .sev-moderate {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .sev-severe {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .d-meta .enc:hover {
-    color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .msg.error {
-    color: #c0271d;
+    color: var(--status-danger-fg);
   }
 </style>

@@ -360,8 +360,8 @@
     background: var(--surface-raised);
   }
   .btn.primary {
-    border-color: #7aa3d8;
-    color: #7aa3d8;
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
   }
 
   .quick-form {
@@ -613,15 +613,15 @@
   }
   .severity.sev-mild {
     background: hsla(145, 40%, 55%, 0.18);
-    color: #9bd6a6;
+    color: var(--status-success-fg);
   }
   .severity.sev-moderate {
     background: hsla(35, 60%, 60%, 0.22);
-    color: #e6b96b;
+    color: var(--status-warn-fg);
   }
   .severity.sev-severe {
     background: hsla(0, 60%, 55%, 0.28);
-    color: #ff9d96;
+    color: var(--status-danger-fg);
   }
 
   .empty {
@@ -642,13 +642,7 @@
   }
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
-    color: #f0a;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .btn.primary {
-    border-color: #2563b0;
-    color: #2563b0;
+    color: var(--status-danger-fg);
   }
   :global(:root[data-theme='light']) .card:hover {
     border-color: var(--border-default);
@@ -676,17 +670,5 @@
   }
   :global(:root[data-theme='light']) .badge.type-dental {
     color: #0d8f7e;
-  }
-  :global(:root[data-theme='light']) .severity.sev-mild {
-    color: #15803d;
-  }
-  :global(:root[data-theme='light']) .severity.sev-moderate {
-    color: #946a00;
-  }
-  :global(:root[data-theme='light']) .severity.sev-severe {
-    color: #c0271d;
-  }
-  :global(:root[data-theme='light']) .msg.error {
-    color: #c0271d;
   }
 </style>

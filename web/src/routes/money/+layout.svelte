@@ -151,7 +151,7 @@
   .error-line {
     font-family: ui-monospace, SFMono-Regular, monospace;
     font-size: var(--text-xs);
-    color: #ffb;
+    color: var(--status-warn-fg);
     padding: 0.15rem 0;
   }
 
@@ -243,8 +243,5 @@
   :global(:root[data-theme='light']) .error-panel {
     background: #f7dada;
     border-bottom-color: #f0caca;
-  }
-  :global(:root[data-theme='light']) .error-line {
-    color: #946a00;
   }
 </style>

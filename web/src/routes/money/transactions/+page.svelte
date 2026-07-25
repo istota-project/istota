@@ -465,10 +465,10 @@
   }
 
   .txn-amount.income {
-    color: #4adbc0;
+    color: var(--money-income);
   }
   .txn-amount.expense {
-    color: #d46ab5;
+    color: var(--money-expense);
   }
 
   .postings {
@@ -560,13 +560,5 @@
     .txn-amount {
       min-width: 4rem;
     }
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .txn-amount.income {
-    color: #0d8f7e;
-  }
-  :global(:root[data-theme='light']) .txn-amount.expense {
-    color: #a3157e;
   }
 </style>

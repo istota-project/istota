@@ -440,8 +440,8 @@
     background: var(--surface-raised);
   }
   .btn.primary {
-    border-color: #7aa3d8;
-    color: #7aa3d8;
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
   }
   .btn.small {
     padding: 0.2rem 0.55rem;
@@ -451,7 +451,7 @@
     color: var(--text-muted);
   }
   .btn.danger:hover:not(:disabled) {
-    color: #e88;
+    color: var(--status-danger-fg);
   }
 
   .quick-form {
@@ -705,26 +705,12 @@
   }
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
-    color: #e88;
-  }
-
-  /* Light theme — remap the dark-tuned status badge / chip colors for white
-	   surfaces. The hsla badge backgrounds re-tint fine over light; only the
-	   pastel text needs darkening. Dark rules above are untouched. */
-  :global(:root[data-theme='light']) .btn.primary {
-    border-color: #2563b0;
-    color: #2563b0;
-  }
-  :global(:root[data-theme='light']) .btn.danger:hover:not(:disabled) {
-    color: #c0271d;
+    color: var(--status-danger-fg);
   }
   :global(:root[data-theme='light']) .card:hover {
     border-color: var(--border-default);
   }
   :global(:root[data-theme='light']) .badge.status-series_incomplete {
     color: #7c3aed;
-  }
-  :global(:root[data-theme='light']) .msg.error {
-    color: #c0271d;
   }
 </style>

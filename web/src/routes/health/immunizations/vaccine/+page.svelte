@@ -460,14 +460,11 @@
   }
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
-    color: #e88;
+    color: var(--status-danger-fg);
   }
 
   /* Light theme overrides — dark rules above untouched. */
   :global(:root[data-theme='light']) .badge.status-series_incomplete {
     color: #7c3aed;
-  }
-  :global(:root[data-theme='light']) .msg.error {
-    color: #c0271d;
   }
 </style>

@@ -314,7 +314,7 @@
   }
   .star-btn:hover,
   .star-btn.starred {
-    color: #f5b300;
+    color: var(--accent-amber);
   }
 
   /* Room label chip (aggregate views): a small clickable room tag in the
@@ -430,7 +430,7 @@
 
   .msg.error .body,
   .cmd-output.error {
-    color: #e0a0a0;
+    color: var(--status-danger-fg);
   }
 
   /* Command (!…) output: a left-aligned block set apart from the conversation
@@ -507,19 +507,7 @@
     50% {
       opacity: 1;
     }
-  }
-
-  /* Markdown block styling is global (src/app.css `.markdown`) so it applies
-	   across component boundaries — the answer body and command output both
-	   render through the same `.markdown` container class. */
-
-  /* Light theme — dark-tuned chat colors remapped for white surfaces.
-	   Dark rules above are untouched. */
-  :global(:root[data-theme='light']) .msg.error .body,
-  :global(:root[data-theme='light']) .cmd-output.error {
-    color: #c0271d;
-  }
-  /* The amber accent darkens in light mode, so the bot initial needs light
+  } /* The amber accent darkens in light mode, so the bot initial needs light
 	   text for contrast (dark mode keeps its dark initial on bright amber). */
   :global(:root[data-theme='light']) .avatar.bot {
     color: #fff;

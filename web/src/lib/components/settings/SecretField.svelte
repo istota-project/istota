@@ -77,7 +77,7 @@
   }
 
   .secret-input:focus {
-    outline: 1px solid var(--accent, #6c8ebf);
+    outline: 1px solid var(--accent, var(--accent-blue));
   }
 
   .secret-clear {
@@ -93,7 +93,7 @@
   }
 
   .secret-clear:hover:not(:disabled) {
-    color: #e88;
+    color: var(--status-danger-fg);
     background: var(--surface-raised);
   }
 

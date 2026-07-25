@@ -433,7 +433,7 @@
 
   .action-error {
     font-size: var(--text-xs);
-    color: #c66;
+    color: var(--status-danger-fg);
   }
 
   .stats-panel {
@@ -564,8 +564,5 @@
   :global(:root[data-theme='light']) .new-place-btn.active {
     color: #946a00;
     border-color: #946a00;
-  }
-  :global(:root[data-theme='light']) .action-error {
-    color: #c0271d;
   }
 </style>
