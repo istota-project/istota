@@ -568,3 +568,168 @@ class TestReplaceTaxPatterns:
     def test_unknown_kind_rejected(self, tmp_path):
         with pytest.raises(ValueError):
             cs.replace_tax_patterns(tmp_path / "money.db", {"bogus": ["x"]})
+
+
+# =============================================================================
+# Invoicing collection validation (money-config-editing spec, Stage 1)
+#
+# The invariants whose violation changes behaviour *silently* live in the
+# store, not the route, so the CLI and the agent are held to them too.
+# =============================================================================
+
+
+class TestKeyValidation:
+    def test_new_key_must_be_slug_shaped(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        for bad in ("has space", "has.dot", "-leading", "", "a" * 65):
+            with pytest.raises(ValueError, match="key"):
+                cs.upsert_client(db_path, bad, name="X")
+
+    def test_valid_keys_accepted(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        for good in ("acme", "acme-corp", "acme_corp", "9to5", "a" * 64):
+            cs.upsert_client(db_path, good, name="X")
+
+    def test_existing_nonconforming_key_still_updatable(self, tmp_path):
+        """A legacy key with a dot in it must stay editable.
+
+        The rule exists so *new* keys stay TOML- and CLI-friendly; enforcing
+        it on every write would lock a user out of their own data.
+        """
+        db_path = tmp_path / "money.db"
+        cs.init_db(db_path)
+        with cs._connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO invoicing_clients(key, name) VALUES (?, ?)",
+                ("legacy.key", "Legacy"),
+            )
+        client, state = cs.upsert_client(db_path, "legacy.key", email="x@example.com")
+        assert state == "updated"
+        assert client.email == "x@example.com"
+
+    def test_applies_to_companies_and_services(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="key"):
+            cs.upsert_company(db_path, "bad key", name="X")
+        with pytest.raises(ValueError, match="key"):
+            cs.upsert_service(db_path, "bad key", display_name="X", rate=1)
+
+
+class TestServiceValidation:
+    def test_type_is_a_closed_set(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        # "hourly" is the plausible typo: entry_line_item has no branch for it
+        # and silently bills as hours.
+        with pytest.raises(ValueError, match="type"):
+            cs.upsert_service(db_path, "consulting", type="hourly")
+        for good in ("hours", "days", "flat", "other"):
+            cs.upsert_service(db_path, "consulting", type=good)
+
+    def test_rate_must_be_a_finite_non_negative_number(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        for bad in ("abc", -1, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="rate"):
+                cs.upsert_service(db_path, "consulting", rate=bad)
+        cs.upsert_service(db_path, "consulting", rate="150.5")
+        assert cs.load_invoicing(db_path).services["consulting"].rate == 150.5
+
+    def test_income_account_shape(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="income_account"):
+            cs.upsert_service(db_path, "consulting", income_account="income consulting")
+        cs.upsert_service(db_path, "consulting", income_account="Income:Consulting")
+        # Empty clears the field rather than failing the shape check.
+        cs.upsert_service(db_path, "consulting", income_account="")
+
+    def test_unknown_field_rejected(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="unknown"):
+            cs.upsert_service(db_path, "consulting", rat=150)
+
+
+class TestClientValidation:
+    def test_schedule_is_a_closed_set(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        # check_scheduled_invoices only acts on "monthly" — anything else is
+        # accepted and then never fires.
+        with pytest.raises(ValueError, match="schedule"):
+            cs.upsert_client(db_path, "acme", schedule="weekly")
+        for good in ("on-demand", "monthly"):
+            cs.upsert_client(db_path, "acme", schedule=good)
+
+    def test_schedule_day_range(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        for bad in (0, 40, "x", 1.5):
+            with pytest.raises(ValueError, match="schedule_day"):
+                cs.upsert_client(db_path, "acme", schedule_day=bad)
+        cs.upsert_client(db_path, "acme", schedule_day=15)
+
+    def test_non_negative_day_counts(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="reminder_days"):
+            cs.upsert_client(db_path, "acme", reminder_days=-1)
+        with pytest.raises(ValueError, match="days_until_overdue"):
+            cs.upsert_client(db_path, "acme", days_until_overdue=-1)
+        cs.upsert_client(db_path, "acme", reminder_days=0, days_until_overdue=45)
+
+    def test_terms_int_or_nonempty_string(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        cs.upsert_client(db_path, "acme", terms=30)
+        cs.upsert_client(db_path, "acme", terms="NET 15")
+        with pytest.raises(ValueError, match="terms"):
+            cs.upsert_client(db_path, "acme", terms=-5)
+        with pytest.raises(ValueError, match="terms"):
+            cs.upsert_client(db_path, "acme", terms="")
+
+    def test_ar_account_shape(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="ar_account"):
+            cs.upsert_client(db_path, "acme", ar_account="assets receivable")
+        cs.upsert_client(db_path, "acme", ar_account="Assets:Accounts-Receivable")
+        cs.upsert_client(db_path, "acme", ar_account="")
+
+    def test_booleans_are_not_numbers(self, tmp_path):
+        """JSON `true` is an int to Python and would sail into a day field."""
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="schedule_day"):
+            cs.upsert_client(db_path, "acme", schedule_day=True)
+
+    def test_unknown_field_rejected(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="unknown"):
+            cs.upsert_client(db_path, "acme", nmae="Acme")
+
+
+class TestCompanyValidation:
+    def test_account_and_currency_shape(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="bank_account"):
+            cs.upsert_company(db_path, "ochotona", bank_account="checking")
+        with pytest.raises(ValueError, match="currency"):
+            cs.upsert_company(db_path, "ochotona", currency="us dollars")
+        cs.upsert_company(
+            db_path, "ochotona",
+            bank_account="Assets:Bank:Checking", currency="USD",
+            ar_account="Assets:Accounts-Receivable",
+        )
+
+    def test_multiline_text_fields_allowed(self, tmp_path):
+        """Address and payment instructions are genuinely multi-line."""
+        db_path = tmp_path / "money.db"
+        comp, _ = cs.upsert_company(
+            db_path, "ochotona", address="1 St\nCity", payment_instructions="Wire\nIBAN",
+        )
+        assert comp.address == "1 St\nCity"
+
+    def test_unknown_field_rejected(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError, match="unknown"):
+            cs.upsert_company(db_path, "ochotona", nmae="X")
+
+
+class TestValidationRejectsBeforeWriting:
+    def test_failed_upsert_leaves_no_row(self, tmp_path):
+        db_path = tmp_path / "money.db"
+        with pytest.raises(ValueError):
+            cs.upsert_service(db_path, "consulting", type="hourly")
+        assert "consulting" not in cs.load_invoicing(db_path).services

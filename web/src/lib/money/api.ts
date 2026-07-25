@@ -235,7 +235,8 @@ export interface BusinessSettingsResponse {
   status: string;
   entities: EntityRow[];
   services: ServiceRow[];
-  defaults: BusinessDefaults;
+  /** null when the user has no invoicing configuration yet. */
+  defaults: BusinessDefaults | null;
 }
 
 export async function getBusinessSettings(): Promise<BusinessSettingsResponse> {
@@ -262,6 +263,136 @@ export interface ClientsResponse {
 
 export async function getClients(): Promise<ClientsResponse> {
   return apiFetch<ClientsResponse>('/clients');
+}
+
+/**
+ * Invoicing configuration — the editable side of clients, entities and
+ * services.
+ *
+ * Two rules every caller here depends on:
+ *
+ * - **Send `""`, never `null`, to clear an optional field.** The store skips
+ *   `null` values when merging, so a null silently preserves the old value
+ *   while the form shows the field as cleared.
+ * - **Omit `bundles` and `separate` entirely.** The merge preserves what's
+ *   stored, which is why the client form can leave them out without shipping
+ *   a nested-list editor.
+ */
+export interface ClientConfigRow {
+  key: string;
+  name: string;
+  address: string;
+  email: string;
+  terms: number | string;
+  ar_account: string;
+  /** Raw — `''` means "fall back to default_entity", unlike ClientRow.entity. */
+  entity: string;
+  schedule: string;
+  schedule_day: number;
+  reminder_days: number;
+  notifications: string;
+  days_until_overdue: number;
+  ledger_posting: boolean;
+  bundles: Record<string, unknown>[];
+  separate: string[];
+}
+
+export type ClientInput = Partial<Omit<ClientConfigRow, 'key' | 'bundles' | 'separate'>>;
+export type EntityInput = Partial<Omit<EntityRow, 'key'>>;
+export type ServiceInput = Partial<Omit<ServiceRow, 'key'>>;
+
+/** Counts of what pointed at a record — carried on delete responses and 409s. */
+export interface ConfigReferences {
+  work_entries?: number;
+  invoices?: number;
+  clients?: string[];
+  default_entity?: boolean;
+  /** Clients with a blank entity — they bill under whichever one is default. */
+  default_for_clients?: number;
+}
+
+export interface ConfigDeleteResponse {
+  status: string;
+  removed: boolean;
+  references: ConfigReferences;
+}
+
+/**
+ * Clients as stored, with no defaults resolved into them.
+ *
+ * Distinct from `getClients()`, which resolves `entity` and `ar_account`
+ * through the business defaults for display. Binding an edit form to the
+ * resolved shape would *materialise* the default onto the record on save, so
+ * a later change to `default_entity` would stop propagating to a client that
+ * never had an explicit one.
+ */
+export async function getClientConfigs(): Promise<{
+  status: string;
+  clients: ClientConfigRow[];
+}> {
+  return apiFetch('/config/clients');
+}
+
+function writeJson<T>(path: string, method: string, body: unknown): Promise<T> {
+  return apiFetch<T>(path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function createClient(
+  key: string,
+  input: ClientInput,
+): Promise<{ status: string; client: ClientConfigRow }> {
+  return writeJson('/config/clients', 'POST', { key, ...input });
+}
+
+export async function updateClient(
+  key: string,
+  input: ClientInput,
+): Promise<{ status: string; client: ClientConfigRow }> {
+  return writeJson(`/config/clients/${encodeURIComponent(key)}`, 'PUT', input);
+}
+
+export async function deleteClient(key: string): Promise<ConfigDeleteResponse> {
+  return apiFetch(`/config/clients/${encodeURIComponent(key)}`, { method: 'DELETE' });
+}
+
+export async function createEntity(
+  key: string,
+  input: EntityInput,
+): Promise<{ status: string; company: EntityRow }> {
+  return writeJson('/config/companies', 'POST', { key, ...input });
+}
+
+export async function updateEntity(
+  key: string,
+  input: EntityInput,
+): Promise<{ status: string; company: EntityRow }> {
+  return writeJson(`/config/companies/${encodeURIComponent(key)}`, 'PUT', input);
+}
+
+export async function deleteEntity(key: string): Promise<ConfigDeleteResponse> {
+  return apiFetch(`/config/companies/${encodeURIComponent(key)}`, { method: 'DELETE' });
+}
+
+export async function createService(
+  key: string,
+  input: ServiceInput,
+): Promise<{ status: string; service: ServiceRow }> {
+  return writeJson('/config/services', 'POST', { key, ...input });
+}
+
+export async function updateService(
+  key: string,
+  input: ServiceInput,
+): Promise<{ status: string; service: ServiceRow }> {
+  return writeJson(`/config/services/${encodeURIComponent(key)}`, 'PUT', input);
+}
+
+export async function deleteService(key: string): Promise<ConfigDeleteResponse> {
+  return apiFetch(`/config/services/${encodeURIComponent(key)}`, { method: 'DELETE' });
 }
 
 export interface InvoiceRow {

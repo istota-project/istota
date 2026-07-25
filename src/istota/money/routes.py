@@ -482,7 +482,11 @@ async def api_business_settings(user_ctx: UserContext = Depends(get_user_config)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
     if config is None:
-        return {"status": "ok", "entities": [], "services": [], "defaults": {}}
+        # `null`, not `{}`: the settings page branches on falsiness to render
+        # its "no invoicing configuration" empty state, and `{}` is truthy in
+        # JS — so an empty object rendered a card full of `undefined`s and the
+        # empty-state branch could never fire.
+        return {"status": "ok", "entities": [], "services": [], "defaults": None}
 
     entities = [{
         "key": key,
@@ -1238,6 +1242,235 @@ def _service_to_dict(s) -> dict:
     }
 
 
+# --- Collection write plumbing ------------------------------------------------
+#
+# The `/config/*` collection routes started as a thin passthrough for a trusted
+# CLI caller. What follows makes them safe for a browser form: real create
+# semantics, shape-checked bodies, and delete guards. The *value* invariants
+# (closed sets, ranges, account shapes) live in `config_store` so the CLI and
+# the agent get them too; these helpers only cover JSON shape, and map the
+# store's `ValueError` onto a 400.
+
+# Which fields each collection accepts, split by JSON type so the coercers can
+# check them uniformly. Mirrors `config_store`'s allowed sets.
+_CLIENT_TEXT_FIELDS = (
+    "name", "address", "email", "ar_account", "entity", "schedule", "notifications",
+)
+_CLIENT_INT_FIELDS = ("schedule_day", "reminder_days", "days_until_overdue")
+_ENTITY_TEXT_FIELDS = (
+    "name", "address", "email", "payment_instructions", "logo",
+    "ar_account", "bank_account", "currency",
+)
+_SERVICE_TEXT_FIELDS = ("display_name", "type", "income_account")
+
+
+def _coerce_text_fields(body: dict, names: tuple[str, ...]) -> tuple[dict, str | None]:
+    fields: dict = {}
+    for key in names:
+        if key not in body:
+            continue
+        value = body[key]
+        if not isinstance(value, str):
+            return {}, f"invalid {key} — expected text"
+        # _CONTROL_CHARS_RE deliberately excludes \x0a, so a multi-line address
+        # or payment-instructions block passes and a stray \r doesn't.
+        if _CONTROL_CHARS_RE.search(value):
+            return {}, f"invalid {key} — control characters are not allowed"
+        fields[key] = value
+    return fields, None
+
+
+def _coerce_int_fields(body: dict, names: tuple[str, ...]) -> tuple[dict, str | None]:
+    fields: dict = {}
+    for key in names:
+        if key not in body:
+            continue
+        value = body[key]
+        # JSON `true` is an int to Python; without this it lands as day 1.
+        if isinstance(value, bool) or not isinstance(value, int):
+            return {}, f"invalid {key} — expected a whole number"
+        fields[key] = value
+    return fields, None
+
+
+def _coerce_client_fields(body: dict) -> tuple[dict, str | None]:
+    """Pull the writable subset out of a client body, or return an error.
+
+    Modelled on `_coerce_work_fields`. Two rules the forms depend on: send
+    `""` (never `null`) to clear an optional field, since the store skips
+    `None` and would silently keep the old value; and omit `bundles` /
+    `separate` entirely to preserve what's stored.
+    """
+    allowed = (
+        set(_CLIENT_TEXT_FIELDS) | set(_CLIENT_INT_FIELDS)
+        | {"terms", "ledger_posting", "bundles", "separate"}
+    )
+    unknown = set(body) - allowed
+    if unknown:
+        return {}, f"unknown keys: {sorted(unknown)}"
+
+    fields, err = _coerce_text_fields(body, _CLIENT_TEXT_FIELDS)
+    if err:
+        return {}, err
+    ints, err = _coerce_int_fields(body, _CLIENT_INT_FIELDS)
+    if err:
+        return {}, err
+    fields.update(ints)
+
+    if "terms" in body:
+        terms = body["terms"]
+        # The model is `int | str`: 30 and "NET 15" are both meaningful.
+        if isinstance(terms, bool) or not isinstance(terms, (int, str)):
+            return {}, "invalid terms — expected a number of days or a label"
+        if isinstance(terms, str) and _CONTROL_CHARS_RE.search(terms):
+            return {}, "invalid terms — control characters are not allowed"
+        fields["terms"] = terms
+
+    if "ledger_posting" in body:
+        if not isinstance(body["ledger_posting"], bool):
+            return {}, "invalid ledger_posting — expected true or false"
+        fields["ledger_posting"] = body["ledger_posting"]
+
+    if "separate" in body:
+        value = body["separate"]
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            return {}, "invalid separate — expected a list of service keys"
+        fields["separate"] = value
+
+    if "bundles" in body:
+        value = body["bundles"]
+        if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
+            return {}, "invalid bundles — expected a list of objects"
+        fields["bundles"] = value
+
+    return fields, None
+
+
+def _coerce_entity_fields(body: dict) -> tuple[dict, str | None]:
+    unknown = set(body) - set(_ENTITY_TEXT_FIELDS)
+    if unknown:
+        return {}, f"unknown keys: {sorted(unknown)}"
+    return _coerce_text_fields(body, _ENTITY_TEXT_FIELDS)
+
+
+def _coerce_service_fields(body: dict) -> tuple[dict, str | None]:
+    unknown = set(body) - (set(_SERVICE_TEXT_FIELDS) | {"rate"})
+    if unknown:
+        return {}, f"unknown keys: {sorted(unknown)}"
+
+    fields, err = _coerce_text_fields(body, _SERVICE_TEXT_FIELDS)
+    if err:
+        return {}, err
+
+    if "rate" in body:
+        rate = body["rate"]
+        if isinstance(rate, bool):
+            return {}, "invalid rate — expected a number"
+        if not isinstance(rate, (int, float, str)):
+            return {}, "invalid rate — expected a number"
+        # The finite / non-negative rule is the store's; it raises and the
+        # route maps it, so a rule stated once surfaces on both surfaces.
+        fields["rate"] = rate
+
+    return fields, None
+
+
+async def _read_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _error(message: str, status: int, **extra) -> JSONResponse:
+    return JSONResponse(
+        {"status": "error", "error": message, **extra}, status_code=status,
+    )
+
+
+def _conflict_exists(kind: str, key: str) -> JSONResponse:
+    return _error(f"{kind} '{key}' already exists", 409)
+
+
+def _work_entries_or_empty(user_ctx: UserContext) -> list:
+    """Work entries for reference counting, or none if there's no store yet.
+
+    An absent `data_dir` (a user who has never invoiced) counts as zero
+    references rather than blocking every delete.
+    """
+    from istota.money.work import load_work_entries
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return []
+    try:
+        return load_work_entries(data_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("config_delete_reference_scan_failed error=%s", exc)
+        raise
+
+
+def _service_references(user_ctx: UserContext, key: str) -> dict:
+    entries = [e for e in _work_entries_or_empty(user_ctx) if e.service == key]
+    invoices = {e.invoice for e in entries if e.invoice}
+    return {"work_entries": len(entries), "invoices": len(invoices)}
+
+
+def _client_references(user_ctx: UserContext, key: str) -> dict:
+    entries = [e for e in _work_entries_or_empty(user_ctx) if e.client == key]
+    return {"work_entries": len(entries)}
+
+
+def _resolve_references(fn, user_ctx: UserContext, key: str) -> tuple[dict, JSONResponse | None]:
+    """Run a reference scan, or return the error response to send instead.
+
+    A scan that can't complete has to *refuse* the delete: proceeding would
+    delete blind, which is the exact failure the guards exist to prevent.
+    """
+    try:
+        return fn(user_ctx, key), None
+    except Exception as exc:  # noqa: BLE001
+        return {}, _error(f"could not check what references this record: {exc}", 500)
+
+
+def _entity_references(user_ctx: UserContext, key: str) -> dict:
+    """What would break if this entity went away.
+
+    Three distinct ways an entity is depended on:
+
+    - `clients` — clients naming it explicitly.
+    - `default_entity` — it is the *stored* default. Deliberately the stored
+      scalar and not `load_invoicing`'s derived one, which falls back to the
+      first company and would make a fresh user's only entity permanently
+      undeletable.
+    - `default_for_clients` — clients with a blank `entity`, which means "bill
+      under the default". Those are repointed by the removal of whichever
+      entity is *effectively* the default, derived or not. Without this the
+      stored-scalar reading leaves a hole: with no default pinned, deleting the
+      first company silently moves every such client onto the next one, which
+      is the wrong-legal-entity-on-the-invoice failure the guard exists for.
+      Zero when the user has no clients yet, so bootstrapping still works.
+    """
+    from istota.money import config_store
+
+    cfg = config_store.load_invoicing(user_ctx.db_path)
+    clients = sorted(k for k, c in cfg.clients.items() if c.entity == key)
+    stored_default = config_store.get_invoicing_setting(user_ctx.db_path, "default_entity")
+
+    effective_default = stored_default or cfg.default_entity
+    fallback_clients = (
+        sum(1 for c in cfg.clients.values() if not c.entity)
+        if effective_default == key
+        else 0
+    )
+    return {
+        "clients": clients,
+        "default_entity": stored_default == key,
+        "default_for_clients": fallback_clients,
+    }
+
+
 @router.get("/config/invoicing")
 async def api_config_invoicing(user_ctx: UserContext = Depends(get_user_config)):
     from istota.money import config_store
@@ -1303,13 +1536,21 @@ async def api_config_companies_post(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
+    """Create an entity. 409 when the key is taken — create means create."""
     from istota.money import config_store
-    body = await request.json()
+    body = await _read_body(request)
     key = body.get("key")
-    if not key:
-        return JSONResponse({"status": "error", "error": "key required"}, 400)
-    fields = {k: v for k, v in body.items() if k != "key"}
-    comp, state = config_store.upsert_company(user_ctx.db_path, key, **fields)
+    if not key or not isinstance(key, str):
+        return _error("key required", 400)
+    fields, err = _coerce_entity_fields({k: v for k, v in body.items() if k != "key"})
+    if err:
+        return _error(err, 400)
+    if key in config_store.load_invoicing(user_ctx.db_path).companies:
+        return _conflict_exists("entity", key)
+    try:
+        comp, state = config_store.upsert_company(user_ctx.db_path, key, **fields)
+    except ValueError as exc:
+        return _error(str(exc), 400)
     return {"status": "ok", "state": state, "company": _company_to_dict(comp)}
 
 
@@ -1319,9 +1560,16 @@ async def api_config_companies_put(
     user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
+    """Update an entity. Keeps upsert semantics for `ensure`-style callers."""
     from istota.money import config_store
-    body = await request.json()
-    comp, state = config_store.upsert_company(user_ctx.db_path, key, **body)
+    body = await _read_body(request)
+    fields, err = _coerce_entity_fields(body)
+    if err:
+        return _error(err, 400)
+    try:
+        comp, state = config_store.upsert_company(user_ctx.db_path, key, **fields)
+    except ValueError as exc:
+        return _error(str(exc), 400)
     return {"status": "ok", "state": state, "company": _company_to_dict(comp)}
 
 
@@ -1330,9 +1578,38 @@ async def api_config_companies_delete(
     key: str, user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
+    """Delete an entity, refusing while anything still points at it.
+
+    Strict because the failure lands on a generated PDF: a client whose entity
+    vanished falls back to whichever company `load_invoicing` picked, so the
+    next invoice carries a different legal entity's name, address and payment
+    instructions, with nothing on it saying so.
+    """
     from istota.money import config_store
-    ok = config_store.delete_company(user_ctx.db_path, key)
-    return {"status": "ok", "removed": ok}
+
+    if key not in config_store.load_invoicing(user_ctx.db_path).companies:
+        return _error(f"entity '{key}' not found", 404)
+
+    refs, failed = _resolve_references(_entity_references, user_ctx, key)
+    if failed:
+        return failed
+    if refs["clients"] or refs["default_entity"] or refs["default_for_clients"]:
+        if refs["clients"]:
+            reason = (
+                f"entity '{key}' is used by {len(refs['clients'])} client(s): "
+                f"{', '.join(refs['clients'])}"
+            )
+        elif refs["default_entity"]:
+            reason = f"entity '{key}' is the default entity"
+        else:
+            reason = (
+                f"entity '{key}' is the default {refs['default_for_clients']} client(s) "
+                "bill under — give them an explicit entity first"
+            )
+        return _error(reason, 409, references=refs)
+
+    removed = config_store.delete_company(user_ctx.db_path, key)
+    return {"status": "ok", "removed": removed, "references": refs}
 
 
 @router.get("/config/clients")
@@ -1350,13 +1627,21 @@ async def api_config_clients_post(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
+    """Create a client. 409 when the key is taken — create means create."""
     from istota.money import config_store
-    body = await request.json()
+    body = await _read_body(request)
     key = body.get("key")
-    if not key:
-        return JSONResponse({"status": "error", "error": "key required"}, 400)
-    fields = {k: v for k, v in body.items() if k != "key"}
-    client, state = config_store.upsert_client(user_ctx.db_path, key, **fields)
+    if not key or not isinstance(key, str):
+        return _error("key required", 400)
+    fields, err = _coerce_client_fields({k: v for k, v in body.items() if k != "key"})
+    if err:
+        return _error(err, 400)
+    if key in config_store.load_invoicing(user_ctx.db_path).clients:
+        return _conflict_exists("client", key)
+    try:
+        client, state = config_store.upsert_client(user_ctx.db_path, key, **fields)
+    except ValueError as exc:
+        return _error(str(exc), 400)
     return {"status": "ok", "state": state, "client": _client_to_dict(client)}
 
 
@@ -1366,9 +1651,16 @@ async def api_config_clients_put(
     user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
+    """Update a client. Keeps upsert semantics for `ensure`-style callers."""
     from istota.money import config_store
-    body = await request.json()
-    client, state = config_store.upsert_client(user_ctx.db_path, key, **body)
+    body = await _read_body(request)
+    fields, err = _coerce_client_fields(body)
+    if err:
+        return _error(err, 400)
+    try:
+        client, state = config_store.upsert_client(user_ctx.db_path, key, **fields)
+    except ValueError as exc:
+        return _error(str(exc), 400)
     return {"status": "ok", "state": state, "client": _client_to_dict(client)}
 
 
@@ -1377,9 +1669,23 @@ async def api_config_clients_delete(
     key: str, user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
+    """Delete a client.
+
+    The soft case of the three: invoice grouping is by the entry's client key,
+    so entries and invoices survive and only the display name degrades to the
+    raw key (which the work list already flags as `unknown_client`). The
+    reference count comes back so the UI can say what it cost.
+    """
     from istota.money import config_store
-    ok = config_store.delete_client(user_ctx.db_path, key)
-    return {"status": "ok", "removed": ok}
+
+    if key not in config_store.load_invoicing(user_ctx.db_path).clients:
+        return _error(f"client '{key}' not found", 404)
+
+    refs, failed = _resolve_references(_client_references, user_ctx, key)
+    if failed:
+        return failed
+    removed = config_store.delete_client(user_ctx.db_path, key)
+    return {"status": "ok", "removed": removed, "references": refs}
 
 
 @router.get("/config/services")
@@ -1397,13 +1703,21 @@ async def api_config_services_post(
     request: Request, user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
+    """Create a service. 409 when the key is taken — create means create."""
     from istota.money import config_store
-    body = await request.json()
+    body = await _read_body(request)
     key = body.get("key")
-    if not key:
-        return JSONResponse({"status": "error", "error": "key required"}, 400)
-    fields = {k: v for k, v in body.items() if k != "key"}
-    svc, state = config_store.upsert_service(user_ctx.db_path, key, **fields)
+    if not key or not isinstance(key, str):
+        return _error("key required", 400)
+    fields, err = _coerce_service_fields({k: v for k, v in body.items() if k != "key"})
+    if err:
+        return _error(err, 400)
+    if key in config_store.load_invoicing(user_ctx.db_path).services:
+        return _conflict_exists("service", key)
+    try:
+        svc, state = config_store.upsert_service(user_ctx.db_path, key, **fields)
+    except ValueError as exc:
+        return _error(str(exc), 400)
     return {"status": "ok", "state": state, "service": _service_to_dict(svc)}
 
 
@@ -1413,9 +1727,16 @@ async def api_config_services_put(
     user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
+    """Update a service. Keeps upsert semantics for `ensure`-style callers."""
     from istota.money import config_store
-    body = await request.json()
-    svc, state = config_store.upsert_service(user_ctx.db_path, key, **body)
+    body = await _read_body(request)
+    fields, err = _coerce_service_fields(body)
+    if err:
+        return _error(err, 400)
+    try:
+        svc, state = config_store.upsert_service(user_ctx.db_path, key, **fields)
+    except ValueError as exc:
+        return _error(str(exc), 400)
     return {"status": "ok", "state": state, "service": _service_to_dict(svc)}
 
 
@@ -1424,9 +1745,32 @@ async def api_config_services_delete(
     key: str, user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
+    """Delete a service, refusing while any work entry names it.
+
+    The strictest of the three guards, because deletion breaks time in both
+    directions: `build_line_items` skips an entry whose service is missing, so
+    future work goes unbilled, *and* the invoice list rebuilds its totals from
+    live config, so every past invoice containing such an entry re-renders
+    short. To retire a service, reassign or remove the entries first.
+    """
     from istota.money import config_store
-    ok = config_store.delete_service(user_ctx.db_path, key)
-    return {"status": "ok", "removed": ok}
+
+    if key not in config_store.load_invoicing(user_ctx.db_path).services:
+        return _error(f"service '{key}' not found", 404)
+
+    refs, failed = _resolve_references(_service_references, user_ctx, key)
+    if failed:
+        return failed
+    if refs["work_entries"]:
+        return _error(
+            f"service '{key}' is used by {refs['work_entries']} work entr"
+            f"{'y' if refs['work_entries'] == 1 else 'ies'}",
+            409,
+            references=refs,
+        )
+
+    removed = config_store.delete_service(user_ctx.db_path, key)
+    return {"status": "ok", "removed": removed, "references": refs}
 
 
 @router.get("/config/tax")

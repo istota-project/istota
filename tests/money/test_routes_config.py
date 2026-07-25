@@ -276,3 +276,256 @@ class TestImport:
             json={"text": "this is not toml = "},
         )
         assert resp.status_code == 400
+
+
+# =============================================================================
+# Collection CRUD hardening (money-config-editing spec, Stage 2)
+#
+# The /config/* routes were written as a thin passthrough for a trusted CLI
+# caller. These cover the four sharp edges that only matter once a browser
+# form is driving them.
+# =============================================================================
+
+
+API = "/istota/api/money"
+
+
+def _seed_business(client) -> None:
+    client.post(f"{API}/config/companies", json={"key": "main", "name": "Main LLC"})
+    client.post(f"{API}/config/clients", json={"key": "acme", "name": "Acme Corp"})
+    client.post(
+        f"{API}/config/services",
+        json={"key": "dev", "display_name": "Development", "rate": 150},
+    )
+
+
+class TestCreateMeansCreate:
+    def test_duplicate_client_conflicts(self, ctx, client):
+        client.post(f"{API}/config/clients", json={"key": "acme", "name": "Acme Corp"})
+        resp = client.post(
+            f"{API}/config/clients", json={"key": "acme", "name": "Acme Holdings"},
+        )
+        assert resp.status_code == 409
+        assert "acme" in resp.json()["error"]
+        # The existing record is untouched — the whole point of the guard.
+        assert config_store.load_invoicing(ctx.db_path).clients["acme"].name == "Acme Corp"
+
+    def test_duplicate_company_conflicts(self, client):
+        client.post(f"{API}/config/companies", json={"key": "main", "name": "Main"})
+        resp = client.post(f"{API}/config/companies", json={"key": "main", "name": "Other"})
+        assert resp.status_code == 409
+
+    def test_duplicate_service_conflicts(self, client):
+        client.post(f"{API}/config/services", json={"key": "dev", "rate": 150})
+        resp = client.post(f"{API}/config/services", json={"key": "dev", "rate": 200})
+        assert resp.status_code == 409
+
+    def test_put_still_upserts(self, client):
+        """`ensure`-style idempotence stays available to CLI/agent callers."""
+        resp = client.put(f"{API}/config/clients/fresh", json={"name": "Fresh"})
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "created"
+
+    def test_missing_key_rejected(self, client):
+        assert client.post(f"{API}/config/clients", json={"name": "No key"}).status_code == 400
+
+    def test_bad_key_rejected(self, client):
+        resp = client.post(f"{API}/config/clients", json={"key": "has space", "name": "X"})
+        assert resp.status_code == 400
+        assert "key" in resp.json()["error"]
+
+
+class TestFieldValidation:
+    def test_unknown_key_named_in_error(self, client):
+        resp = client.post(
+            f"{API}/config/clients", json={"key": "acme", "nmae": "Acme"},
+        )
+        assert resp.status_code == 400
+        assert "nmae" in resp.json()["error"]
+
+    def test_unknown_key_on_put(self, client):
+        client.post(f"{API}/config/clients", json={"key": "acme", "name": "Acme"})
+        resp = client.put(f"{API}/config/clients/acme", json={"bogus": 1})
+        assert resp.status_code == 400
+
+    def test_store_rule_surfaces_as_400(self, client):
+        # "hourly" is the plausible typo; the store rejects it and the route
+        # passes the message through rather than 500ing.
+        resp = client.post(
+            f"{API}/config/services", json={"key": "dev", "type": "hourly"},
+        )
+        assert resp.status_code == 400
+        assert "type" in resp.json()["error"]
+
+    def test_non_numeric_rate_is_a_400_not_a_500(self, client):
+        resp = client.post(f"{API}/config/services", json={"key": "dev", "rate": "abc"})
+        assert resp.status_code == 400
+
+    def test_wrong_json_type_rejected(self, client):
+        resp = client.post(f"{API}/config/clients", json={"key": "acme", "name": 42})
+        assert resp.status_code == 400
+        resp = client.post(
+            f"{API}/config/clients", json={"key": "acme", "schedule_day": True},
+        )
+        assert resp.status_code == 400
+
+    def test_control_characters_rejected(self, client):
+        resp = client.post(
+            f"{API}/config/clients", json={"key": "acme", "name": "Acme\rCorp"},
+        )
+        assert resp.status_code == 400
+
+    def test_newlines_allowed_in_prose_fields(self, client):
+        """Address and payment instructions are genuinely multi-line."""
+        resp = client.post(
+            f"{API}/config/companies",
+            json={"key": "main", "name": "Main", "address": "1 St\nCity",
+                  "payment_instructions": "Wire to\nIBAN DE00"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["company"]["address"] == "1 St\nCity"
+
+    def test_empty_string_clears_an_optional_field(self, client):
+        client.post(
+            f"{API}/config/clients",
+            json={"key": "acme", "name": "Acme", "entity": "main"},
+        )
+        resp = client.put(f"{API}/config/clients/acme", json={"entity": ""})
+        assert resp.status_code == 200
+        assert resp.json()["client"]["entity"] == ""
+
+    def test_bundles_and_separate_round_trip(self, client):
+        resp = client.post(
+            f"{API}/config/clients",
+            json={"key": "acme", "name": "Acme", "separate": ["dev"],
+                  "bundles": [{"name": "Bundle", "services": ["dev"]}]},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["client"]["separate"] == ["dev"]
+        # Omitting them preserves what's stored — the reason the forms can
+        # leave them out without a nested-list editor.
+        client.put(f"{API}/config/clients/acme", json={"name": "Acme Corp"})
+        body = client.get(f"{API}/config/clients").json()["clients"][0]
+        assert body["separate"] == ["dev"]
+        assert body["bundles"] == [{"name": "Bundle", "services": ["dev"]}]
+
+
+class TestDeleteMissing:
+    def test_client_404(self, client):
+        assert client.delete(f"{API}/config/clients/nope").status_code == 404
+
+    def test_company_404(self, client):
+        assert client.delete(f"{API}/config/companies/nope").status_code == 404
+
+    def test_service_404(self, client):
+        assert client.delete(f"{API}/config/services/nope").status_code == 404
+
+
+class TestDeleteGuards:
+    """Each collection's guard matches how badly its absence corrupts things."""
+
+    def test_service_referenced_by_work_is_refused(self, ctx, client):
+        from istota.money.work import add_work_entry, assign_invoice_number
+
+        _seed_business(client)
+        add_work_entry(ctx.data_dir, "2026-03-01", "acme", "dev", qty=3)
+        add_work_entry(ctx.data_dir, "2026-03-02", "acme", "dev", qty=4)
+        assign_invoice_number(ctx.data_dir, [1], "INV-000001")
+
+        resp = client.delete(f"{API}/config/services/dev")
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["references"]["work_entries"] == 2
+        assert body["references"]["invoices"] == 1
+        assert "dev" in config_store.load_invoicing(ctx.db_path).services
+
+    def test_unreferenced_service_deletes(self, ctx, client):
+        _seed_business(client)
+        resp = client.delete(f"{API}/config/services/dev")
+        assert resp.status_code == 200
+        assert "dev" not in config_store.load_invoicing(ctx.db_path).services
+
+    def test_entity_referenced_by_client_is_refused(self, ctx, client):
+        _seed_business(client)
+        client.put(f"{API}/config/clients/acme", json={"entity": "main"})
+        resp = client.delete(f"{API}/config/companies/main")
+        assert resp.status_code == 409
+        assert resp.json()["references"]["clients"] == ["acme"]
+
+    def test_default_entity_is_refused(self, ctx, client):
+        _seed_business(client)
+        client.post(f"{API}/config/companies", json={"key": "spare", "name": "Spare"})
+        client.put(f"{API}/config/invoicing", json={"default_entity": "spare"})
+        resp = client.delete(f"{API}/config/companies/spare")
+        assert resp.status_code == 409
+        assert resp.json()["references"]["default_entity"] is True
+
+    def test_entity_clients_fall_back_to_is_refused(self, ctx, client):
+        """A blank `entity` on a client means "bill under the default".
+
+        Reading only the *stored* scalar isn't enough: with no default pinned,
+        `load_invoicing` derives one from the first company, so deleting it
+        would silently repoint every such client at whichever company happens
+        to be next — the exact wrong-legal-entity-on-the-PDF failure.
+        """
+        _seed_business(client)
+        client.post(f"{API}/config/companies", json={"key": "spare", "name": "Spare"})
+        # acme has no explicit entity, so it bills under whatever the default is.
+        resp = client.delete(f"{API}/config/companies/main")
+        assert resp.status_code == 409
+        assert resp.json()["references"]["default_for_clients"] == 1
+
+    def test_unreferenced_entity_deletes(self, ctx, client):
+        """A sole entity nobody points at is deletable — the bootstrap path.
+
+        `load_invoicing` *derives* a default_entity when none is stored, so
+        the guard has to read the stored scalar (and count who actually falls
+        back to it) or a fresh user could never undo their first entity.
+        """
+        client.post(f"{API}/config/companies", json={"key": "main", "name": "Main LLC"})
+        resp = client.delete(f"{API}/config/companies/main")
+        assert resp.status_code == 200
+        assert "main" not in config_store.load_invoicing(ctx.db_path).companies
+
+    def test_client_delete_is_soft(self, ctx, client):
+        from istota.money.work import add_work_entry
+
+        _seed_business(client)
+        add_work_entry(ctx.data_dir, "2026-03-01", "acme", "dev", qty=3)
+        resp = client.delete(f"{API}/config/clients/acme")
+        assert resp.status_code == 200
+        assert resp.json()["references"]["work_entries"] == 1
+        assert "acme" not in config_store.load_invoicing(ctx.db_path).clients
+
+    def test_empty_data_dir_counts_as_zero_references(self, ctx, client):
+        _seed_business(client)
+        assert not (ctx.data_dir / "invoices").exists()
+        assert client.delete(f"{API}/config/services/dev").status_code == 200
+
+    def test_unreadable_work_store_refuses_rather_than_deleting_blind(
+        self, ctx, client, monkeypatch,
+    ):
+        """If we can't count references, we can't know the delete is safe."""
+        _seed_business(client)
+
+        def boom(*a, **kw):
+            raise OSError("work store unreadable")
+
+        monkeypatch.setattr("istota.money.work.load_work_entries", boom)
+        resp = client.delete(f"{API}/config/services/dev")
+        assert resp.status_code == 500
+        assert resp.json()["status"] == "error"
+        assert "dev" in config_store.load_invoicing(ctx.db_path).services
+
+
+class TestEmptyConfigBootstrap:
+    def test_business_settings_defaults_is_null_when_unconfigured(self, client):
+        body = client.get(f"{API}/business-settings").json()
+        assert body["defaults"] is None
+        assert body["entities"] == []
+        assert body["services"] == []
+
+    def test_defaults_present_once_configured(self, client):
+        _seed_business(client)
+        body = client.get(f"{API}/business-settings").json()
+        assert body["defaults"]["currency"] == "USD"

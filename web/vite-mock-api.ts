@@ -2533,119 +2533,159 @@ const handlers: MockHandler[] = [
   ({ url }) => (url.startsWith('/istota/api/money/ledgers') ? ledgers : undefined),
   ({ url }) => (url.startsWith('/istota/api/money/check') ? checkResp : undefined),
   ({ url }) => (url.startsWith('/istota/api/money/accounts') ? accountsResp : undefined),
-  // Clients — consumed by the Clients page and by the Work entry form's
-  // client dropdown. Keys match the invoice + work fixtures below.
-  ({ url }) => {
-    if (!url.startsWith('/istota/api/money/clients')) return undefined;
-    return {
-      status: 'ok',
-      clients: [
-        {
-          key: 'globex',
-          name: 'Globex',
-          email: 'ap@globex.example',
-          address: '1 Globex Way',
-          terms: 30,
-          entity: 'main',
-          entity_name: 'Acme Studio LLC',
-          schedule: 'monthly',
-          schedule_day: 1,
-          ar_account: 'Assets:AR:Globex',
-        },
-        {
-          key: 'initech',
-          name: 'Initech',
-          email: 'billing@initech.example',
-          address: '4 Initech Plaza',
-          terms: 14,
-          entity: 'main',
-          entity_name: 'Acme Studio LLC',
-          schedule: 'on-demand',
-          schedule_day: 1,
-          ar_account: 'Assets:AR:Initech',
-        },
-        {
-          key: 'hooli',
-          name: 'Hooli',
-          email: 'accounts@hooli.example',
-          address: '9 Hooli Campus',
-          terms: 30,
-          entity: 'main',
-          entity_name: 'Acme Studio LLC',
-          schedule: 'monthly',
-          schedule_day: 15,
-          ar_account: 'Assets:AR:Hooli',
-        },
-      ],
-    };
-  },
-
-  ({ url }) => {
-    if (!url.startsWith('/istota/api/money/business-settings')) return undefined;
-    return {
-      status: 'ok',
-      entities: [
-        {
-          key: 'main',
-          name: 'Acme Studio LLC',
-          address: '123 Example St, Berlin',
-          email: 'billing@example.com',
-          payment_instructions: 'Wire to IBAN DE00 …',
-          logo: '',
-          ar_account: 'Assets:AR:Acme',
-          bank_account: 'Assets:Checking',
-          currency: 'EUR',
-        },
-      ],
-      services: [
-        {
-          key: 'consulting',
-          display_name: 'Consulting',
-          rate: 150,
-          type: 'hours',
-          income_account: 'Income:Consulting',
-        },
-        {
-          key: 'design',
-          display_name: 'Design',
-          rate: 1200,
-          type: 'days',
-          income_account: 'Income:Design',
-        },
-        {
-          key: 'retainer',
-          display_name: 'Retainer',
-          rate: 2000,
-          type: 'flat',
-          income_account: 'Income:Retainer',
-        },
-        {
-          key: 'expenses',
-          display_name: 'Expenses',
-          rate: 0,
-          type: 'other',
-          income_account: 'Income:Reimbursements',
-        },
-      ],
-      defaults: {
-        currency: 'EUR',
-        default_entity: 'main',
-        default_ar_account: 'Assets:AR:Acme',
-        default_bank_account: 'Assets:Checking',
-        invoice_output: '/tmp/invoices',
-        next_invoice_number: 42,
-        notifications: 'email',
-        days_until_overdue: 14,
-      },
-    };
-  },
-
-  // Money module mock — transactions + invoices with stateful action
-  // handlers so the row-expand UX and the kebab actions (edit txn, mark
-  // paid/pending, download PDF) are exercisable end-to-end without a backend.
+  // Money module mock — invoicing config, transactions, invoices and work
+  // entries in one stateful closure, so the CRUD surfaces (client/entity/
+  // service forms, the kebab actions, the delete guards) are exercisable
+  // end-to-end without a backend. The collections are shared: deleting a
+  // service the work fixtures reference has to 409 here the way it does
+  // against the real API.
   (() => {
     const PREFIX = '/istota/api/money';
     const today = () => new Date().toISOString().slice(0, 10);
+
+    // --- Invoicing config (mutable) ---
+    interface Entity {
+      key: string;
+      name: string;
+      address: string;
+      email: string;
+      payment_instructions: string;
+      logo: string;
+      ar_account: string;
+      bank_account: string;
+      currency: string;
+    }
+    interface ServiceCfg {
+      key: string;
+      display_name: string;
+      rate: number;
+      type: string;
+      income_account: string;
+    }
+    interface ClientCfg {
+      key: string;
+      name: string;
+      address: string;
+      email: string;
+      terms: number | string;
+      ar_account: string;
+      entity: string;
+      schedule: string;
+      schedule_day: number;
+      reminder_days: number;
+      notifications: string;
+      days_until_overdue: number;
+      ledger_posting: boolean;
+      bundles: Record<string, unknown>[];
+      separate: string[];
+    }
+
+    const entities: Entity[] = [
+      {
+        key: 'main',
+        name: 'Acme Studio LLC',
+        address: '123 Example St, Berlin',
+        email: 'billing@example.com',
+        payment_instructions: 'Wire to IBAN DE00 …',
+        logo: '',
+        ar_account: 'Assets:AR:Acme',
+        bank_account: 'Assets:Checking',
+        currency: 'EUR',
+      },
+    ];
+
+    const services: ServiceCfg[] = [
+      {
+        key: 'consulting',
+        display_name: 'Consulting',
+        rate: 150,
+        type: 'hours',
+        income_account: 'Income:Consulting',
+      },
+      {
+        key: 'design',
+        display_name: 'Design',
+        rate: 1200,
+        type: 'days',
+        income_account: 'Income:Design',
+      },
+      {
+        key: 'retainer',
+        display_name: 'Retainer',
+        rate: 2000,
+        type: 'flat',
+        income_account: 'Income:Retainer',
+      },
+      {
+        key: 'expenses',
+        display_name: 'Expenses',
+        rate: 0,
+        type: 'other',
+        income_account: 'Income:Reimbursements',
+      },
+    ];
+
+    function newClient(over: Partial<ClientCfg> & { key: string }): ClientCfg {
+      return {
+        name: over.key,
+        address: '',
+        email: '',
+        terms: 30,
+        ar_account: '',
+        entity: '',
+        schedule: 'on-demand',
+        schedule_day: 1,
+        reminder_days: 3,
+        notifications: '',
+        days_until_overdue: 0,
+        ledger_posting: true,
+        bundles: [],
+        separate: [],
+        ...over,
+      };
+    }
+
+    const clientConfigs: ClientCfg[] = [
+      newClient({
+        key: 'globex',
+        name: 'Globex',
+        email: 'ap@globex.example',
+        address: '1 Globex Way',
+        entity: 'main',
+        schedule: 'monthly',
+        ar_account: 'Assets:AR:Globex',
+      }),
+      newClient({
+        key: 'initech',
+        name: 'Initech',
+        email: 'billing@initech.example',
+        address: '4 Initech Plaza',
+        terms: 14,
+        entity: 'main',
+        ar_account: 'Assets:AR:Initech',
+      }),
+      newClient({
+        key: 'hooli',
+        name: 'Hooli',
+        email: 'accounts@hooli.example',
+        address: '9 Hooli Campus',
+        entity: 'main',
+        schedule: 'monthly',
+        schedule_day: 15,
+        ar_account: 'Assets:AR:Hooli',
+      }),
+    ];
+
+    const defaults = {
+      currency: 'EUR',
+      default_entity: 'main',
+      default_ar_account: 'Assets:AR:Acme',
+      default_bank_account: 'Assets:Checking',
+      invoice_output: '/tmp/invoices',
+      next_invoice_number: 42,
+      notifications: 'email',
+      days_until_overdue: 14,
+    };
 
     interface Txn {
       date: string;
@@ -2844,17 +2884,11 @@ const handlers: MockHandler[] = [
       paid_date: string | null;
     }
 
-    const SERVICES: Record<string, { display_name: string; rate: number; type: string }> = {
-      consulting: { display_name: 'Consulting', rate: 150, type: 'hours' },
-      design: { display_name: 'Design', rate: 1200, type: 'days' },
-      retainer: { display_name: 'Retainer', rate: 2000, type: 'flat' },
-      expenses: { display_name: 'Expenses', rate: 0, type: 'other' },
-    };
-    const CLIENT_NAMES: Record<string, string> = {
-      globex: 'Globex',
-      initech: 'Initech',
-      hooli: 'Hooli',
-    };
+    // Resolved against the live config above, not a frozen copy — so a
+    // service edited or deleted through the settings page immediately
+    // reprices (or flags) the work rows that name it.
+    const findService = (key: string) => services.find((s) => s.key === key);
+    const findClient = (key: string) => clientConfigs.find((c) => c.key === key);
 
     const work: Work[] = [
       {
@@ -2939,7 +2973,7 @@ const handlers: MockHandler[] = [
     let nextWorkUid = 7;
 
     function workAmount(w: Work): number | null {
-      const svc = SERVICES[w.service];
+      const svc = findService(w.service);
       if (!svc) return null;
       let subtotal: number;
       if (svc.type === 'flat') subtotal = svc.rate;
@@ -2960,15 +2994,16 @@ const handlers: MockHandler[] = [
     }
 
     function workRow(w: Work, index: number) {
-      const svc = SERVICES[w.service];
+      const svc = findService(w.service);
+      const client = findClient(w.client);
       const warnings: string[] = [];
       if (!svc) warnings.push('unknown_service');
-      if (!CLIENT_NAMES[w.client]) warnings.push('unknown_client');
+      if (!client) warnings.push('unknown_client');
       return {
         ...w,
         index,
         etag: workEtag(w),
-        client_name: CLIENT_NAMES[w.client] ?? w.client,
+        client_name: client?.name ?? w.client,
         service_name: svc?.display_name ?? w.service,
         service_type: svc?.type ?? '',
         computed_amount: workAmount(w),
@@ -2977,11 +3012,196 @@ const handlers: MockHandler[] = [
       };
     }
 
+    const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+    /**
+     * One CRUD handler for all three config collections.
+     *
+     * Reproduces the guarantees the pages branch on: 409 on a duplicate
+     * create (create means create), 400 on a malformed key, 404 on a missing
+     * record, and a `references` payload on delete. The per-collection delete
+     * guard is passed in — the asymmetry between them is the point.
+     */
+    function collectionCrud<T extends { key: string }>(opts: {
+      kind: string;
+      rows: T[];
+      make: (key: string, body: any) => T;
+      guard?: (row: T) => { error: string; references: any } | null;
+      references?: (row: T) => any;
+    }) {
+      return (method: string, body: any, itemKey: string | null) => {
+        const { kind, rows } = opts;
+        if (!itemKey) {
+          if (method === 'POST') {
+            const key = body?.key;
+            if (!key || !KEY_RE.test(key)) {
+              return { __status: 400, status: 'error', error: 'invalid key' };
+            }
+            if (rows.some((r) => r.key === key)) {
+              return {
+                __status: 409,
+                status: 'error',
+                error: `${kind} '${key}' already exists`,
+              };
+            }
+            const created = opts.make(key, body);
+            rows.push(created);
+            return { status: 'ok', state: 'created', [kind]: created };
+          }
+          return undefined;
+        }
+
+        const row = rows.find((r) => r.key === itemKey);
+        if (!row) {
+          return { __status: 404, status: 'error', error: `${kind} '${itemKey}' not found` };
+        }
+        if (method === 'PUT') {
+          for (const [k, v] of Object.entries(body ?? {})) {
+            if (k === 'key') continue;
+            (row as any)[k] = v;
+          }
+          return { status: 'ok', state: 'updated', [kind]: row };
+        }
+        if (method === 'DELETE') {
+          const refused = opts.guard?.(row);
+          if (refused) {
+            return {
+              __status: 409,
+              status: 'error',
+              error: refused.error,
+              references: refused.references,
+            };
+          }
+          rows.splice(rows.indexOf(row), 1);
+          return { status: 'ok', removed: true, references: opts.references?.(row) ?? {} };
+        }
+        return undefined;
+      };
+    }
+
+    const clientCrud = collectionCrud<ClientCfg>({
+      kind: 'client',
+      rows: clientConfigs,
+      make: (key, body) => newClient({ ...body, key }),
+      // Soft: entries and invoices survive a missing client — only the
+      // display name degrades to the raw key.
+      references: (row) => ({
+        work_entries: work.filter((w) => w.client === row.key).length,
+      }),
+    });
+
+    const entityCrud = collectionCrud<Entity>({
+      kind: 'company',
+      rows: entities,
+      make: (key, body) => ({
+        key,
+        name: body?.name ?? key,
+        address: body?.address ?? '',
+        email: body?.email ?? '',
+        payment_instructions: body?.payment_instructions ?? '',
+        logo: body?.logo ?? '',
+        ar_account: body?.ar_account ?? '',
+        bank_account: body?.bank_account ?? '',
+        currency: body?.currency ?? '',
+      }),
+      // Strict: a client whose entity vanished silently bills under a
+      // different legal entity on the next generated PDF. Three ways to
+      // depend on one — named explicitly, pinned as the default, or falling
+      // back to it with a blank entity.
+      guard: (row) => {
+        const clients = clientConfigs.filter((c) => c.entity === row.key).map((c) => c.key);
+        const isDefault = defaults.default_entity === row.key;
+        const fallbackClients = isDefault ? clientConfigs.filter((c) => !c.entity).length : 0;
+        if (!clients.length && !isDefault && !fallbackClients) return null;
+        return {
+          error: clients.length
+            ? `entity '${row.key}' is used by ${clients.length} client(s): ${clients.join(', ')}`
+            : `entity '${row.key}' is the default entity`,
+          references: {
+            clients,
+            default_entity: isDefault,
+            default_for_clients: fallbackClients,
+          },
+        };
+      },
+    });
+
+    const serviceCrud = collectionCrud<ServiceCfg>({
+      kind: 'service',
+      rows: services,
+      make: (key, body) => ({
+        key,
+        display_name: body?.display_name ?? key,
+        rate: Number(body?.rate ?? 0),
+        type: body?.type ?? 'hours',
+        income_account: body?.income_account ?? '',
+      }),
+      // Strictest: deletion unbills future work *and* re-renders every past
+      // invoice containing such an entry short.
+      guard: (row) => {
+        const entries = work.filter((w) => w.service === row.key);
+        if (!entries.length) return null;
+        const invoices = new Set(entries.filter((w) => w.invoice).map((w) => w.invoice));
+        return {
+          error: `service '${row.key}' is used by ${entries.length} work entries`,
+          references: { work_entries: entries.length, invoices: invoices.size },
+        };
+      },
+    });
+
     return ({ url, method, body }: { url: string; method: string; body?: any }) => {
       if (!url.startsWith(PREFIX)) return undefined;
       const parsed = new URL(url, 'http://mock');
       const path = parsed.pathname.slice(PREFIX.length); // e.g. /transactions
       const q = parsed.searchParams;
+
+      // --- Invoicing config CRUD ---
+      const configPath = path.match(/^\/config\/(clients|companies|services)(?:\/([^/]+))?$/);
+      if (configPath) {
+        const collection = configPath[1];
+        const itemKey = configPath[2] ? decodeURIComponent(configPath[2]) : null;
+        if (method === 'GET' && !itemKey) {
+          if (collection === 'clients') return { status: 'ok', clients: clientConfigs };
+          if (collection === 'companies') return { status: 'ok', companies: entities };
+          return { status: 'ok', services };
+        }
+        const crud =
+          collection === 'clients'
+            ? clientCrud
+            : collection === 'companies'
+              ? entityCrud
+              : serviceCrud;
+        const resp = crud(method, body, itemKey);
+        if (resp !== undefined) return resp;
+      }
+
+      if (path === '/clients' && method === 'GET') {
+        // The display shape: business defaults resolved in, unlike
+        // /config/clients which stays raw for the edit form.
+        return {
+          status: 'ok',
+          clients: clientConfigs.map((c) => {
+            const entityKey = c.entity || defaults.default_entity;
+            const entity = entities.find((e) => e.key === entityKey);
+            return {
+              key: c.key,
+              name: c.name,
+              email: c.email,
+              address: c.address,
+              terms: c.terms,
+              entity: entityKey,
+              entity_name: entity?.name ?? entityKey,
+              schedule: c.schedule,
+              schedule_day: c.schedule_day,
+              ar_account: c.ar_account || defaults.default_ar_account,
+            };
+          }),
+        };
+      }
+
+      if (path === '/business-settings' && method === 'GET') {
+        return { status: 'ok', entities, services, defaults };
+      }
 
       // --- Work entries (uid routes precede the collection route) ---
       const workItem = path.match(/^\/work\/([^/]+)$/);
@@ -3041,7 +3261,7 @@ const handlers: MockHandler[] = [
           invoice: '',
           paid_date: null,
         };
-        if (created.service && !SERVICES[created.service]) {
+        if (created.service && !findService(created.service)) {
           return {
             __status: 400,
             status: 'error',

@@ -1,20 +1,68 @@
 <script lang="ts">
-  import { getClients, type ClientRow } from '$lib/money/api';
+  import {
+    getClients,
+    getClientConfigs,
+    getBusinessSettings,
+    getWorkEntries,
+    createClient,
+    updateClient,
+    deleteClient,
+    ApiError,
+    type ClientRow,
+    type ClientConfigRow,
+    type ClientInput,
+    type EntityRow,
+  } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
+  import {
+    Button,
+    ConfirmDialog,
+    KebabMenu,
+    NoticeBanner,
+    type KebabItem,
+  } from '$lib/components/ui';
+  import ClientForm from '$lib/components/money/ClientForm.svelte';
 
+  // Two reads of the same collection, each keeping one honest meaning:
+  // `/clients` resolves the business defaults into `entity` and `ar_account`
+  // for display, which is exactly wrong to bind an edit form to — saving it
+  // back would *materialise* the default onto the record, so a later change
+  // to `default_entity` would stop propagating to a client that never had an
+  // explicit one. `/config/clients` is the raw shape the form edits.
   let clients: ClientRow[] = $state([]);
+  let configs: Record<string, ClientConfigRow> = $state({});
+  let entities: EntityRow[] = $state([]);
+  let defaultEntity = $state('');
   let loading = $state(true);
   let error = $state('');
+  let notice = $state('');
+
+  let busyKey = $state('');
+
+  let formOpen = $state(false);
+  let editing: ClientConfigRow | null = $state(null);
+  let formError = $state('');
+  let saving = $state(false);
+
+  let confirmOpen = $state(false);
+  let pendingDelete: ClientRow | null = $state(null);
+  let pendingReferences = $state(0);
 
   async function load() {
     loading = true;
     error = '';
     try {
-      const resp = await getClients();
-      clients = resp.clients;
+      const [display, raw, settings] = await Promise.all([
+        getClients(),
+        getClientConfigs(),
+        getBusinessSettings(),
+      ]);
+      clients = display.clients;
+      configs = Object.fromEntries(raw.clients.map((c) => [c.key, c]));
+      entities = settings.entities;
+      defaultEntity = settings.defaults?.default_entity ?? '';
     } catch (e) {
-      if (e instanceof Error) error = e.message;
-      else error = 'Failed to load clients';
+      error = e instanceof Error ? e.message : 'Failed to load clients';
     } finally {
       loading = false;
     }
@@ -24,24 +72,137 @@
     $selectedLedger;
     load();
   });
+
+  function openAdd() {
+    editing = null;
+    formError = '';
+    formOpen = true;
+  }
+
+  function openEdit(client: ClientRow) {
+    editing = configs[client.key] ?? null;
+    if (!editing) {
+      notice = `Could not load the stored record for "${client.key}".`;
+      return;
+    }
+    formError = '';
+    formOpen = true;
+  }
+
+  function closeForm() {
+    formOpen = false;
+    editing = null;
+    formError = '';
+  }
+
+  async function handleSave(key: string, data: ClientInput) {
+    saving = true;
+    formError = '';
+    try {
+      if (editing) {
+        await updateClient(key, data);
+      } else {
+        await createClient(key, data);
+      }
+      closeForm();
+      await load();
+    } catch (e) {
+      formError = e instanceof Error ? e.message : 'Failed to save client';
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function askDelete(client: ClientRow) {
+    pendingDelete = client;
+    pendingReferences = 0;
+    confirmOpen = true;
+    // Best-effort: the confirm still works without a count, it just can't
+    // say what the deletion costs.
+    try {
+      const resp = await getWorkEntries({ client: client.key, status: 'all' });
+      if (pendingDelete?.key === client.key) pendingReferences = resp.entries.length;
+    } catch {
+      /* leave the count out of the message */
+    }
+  }
+
+  async function handleDelete() {
+    const client = pendingDelete;
+    confirmOpen = false;
+    pendingDelete = null;
+    if (!client) return;
+
+    busyKey = client.key;
+    try {
+      await deleteClient(client.key);
+      await load();
+    } catch (e) {
+      // A 409 here names records the user has to go look at, so it gets a
+      // banner rather than being folded into the page-level error.
+      if (e instanceof ApiError && e.status === 409) {
+        notice = e.message;
+      } else {
+        error = e instanceof Error ? e.message : 'Failed to delete client';
+      }
+    } finally {
+      busyKey = '';
+    }
+  }
+
+  function menuItems(client: ClientRow): KebabItem[] {
+    const busy = busyKey === client.key;
+    return [
+      { label: 'Edit', onSelect: () => openEdit(client), disabled: busy },
+      { label: 'Delete', onSelect: () => askDelete(client), danger: true, disabled: busy },
+    ];
+  }
+
+  const deleteMessage = $derived.by(() => {
+    if (!pendingDelete) return '';
+    const name = pendingDelete.name || pendingDelete.key;
+    const head = `Are you sure you want to delete ${name}?`;
+    if (!pendingReferences) return `${head} This cannot be undone.`;
+    const plural = pendingReferences === 1 ? 'entry references' : 'entries reference';
+    return (
+      `${head} ${pendingReferences} work ${plural} this client and will show ` +
+      `"${pendingDelete.key}" instead of a name.`
+    );
+  });
 </script>
 
 <div class="clients-content">
+  {#if notice}
+    <div class="notice-bar">
+      <NoticeBanner title={notice} variant="warn" />
+      <Button variant="ghost" onclick={() => (notice = '')}>Dismiss</Button>
+    </div>
+  {/if}
+
+  <div class="clients-toolbar">
+    <span class="result-count">
+      {clients.length}
+      {clients.length === 1 ? 'client' : 'clients'}
+    </span>
+    <Button variant="primary" onclick={openAdd}>Add client</Button>
+  </div>
+
   {#if loading}
     <div class="loading">Loading...</div>
   {:else if error}
     <div class="error-msg">{error}</div>
   {:else if clients.length === 0}
-    <div class="empty">No clients configured.</div>
+    <div class="empty">No clients configured yet — add your first one.</div>
   {:else}
     <div class="client-grid card-grid">
       {#each clients as client (client.key)}
         <div class="client-card">
           <div class="card-header">
             <span class="client-name">{client.name}</span>
-            <span class="client-key">{client.key}</span>
+            <KebabMenu items={menuItems(client)} ariaLabel="Client actions" />
           </div>
           <div class="card-body">
+            <span class="client-key">{client.key}</span>
             {#if client.email}
               <div class="card-field">
                 <span class="field-label">Email</span>
@@ -81,9 +242,52 @@
   {/if}
 </div>
 
+{#if formOpen}
+  <ClientForm
+    client={editing}
+    {entities}
+    {defaultEntity}
+    onSave={handleSave}
+    onCancel={closeForm}
+    error={formError}
+    {saving}
+  />
+{/if}
+
+<ConfirmDialog
+  bind:open={confirmOpen}
+  title="Delete client"
+  message={deleteMessage}
+  confirmLabel="Delete"
+  onConfirm={handleDelete}
+  onCancel={() => (pendingDelete = null)}
+/>
+
 <style>
   .clients-content {
     padding: 0.5rem;
+  }
+
+  .notice-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0 0.25rem 0.4rem;
+  }
+
+  .clients-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.15rem 0.35rem 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .result-count {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
 
   .client-grid {
@@ -105,7 +309,7 @@
 
   .card-header {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
     padding: 0.6rem 0.75rem;

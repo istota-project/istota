@@ -23,6 +23,8 @@ input.
 from __future__ import annotations
 
 import json
+import math
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -684,6 +686,156 @@ def _upsert_service_row(conn: sqlite3.Connection, key: str, s: ServiceConfig) ->
     )
 
 
+# Validation -------------------------------------------------------------------
+#
+# These live in the store rather than the web route because they are the
+# invariants whose violation changes behaviour *silently* — a service typed
+# "hourly" has no branch in ``entry_line_item`` and quietly bills as hours, a
+# client scheduled "weekly" is never picked up by ``check_scheduled_invoices``.
+# Putting them here holds the CLI and the agent to the same rules the web forms
+# enforce. Route-level *shape* checks (JSON types, unknown keys named in the
+# error) stay in ``money/routes.py``.
+#
+# Only the fields a caller actually passes are checked: validating the merged
+# record would make an existing non-conforming row uneditable, which is a
+# worse failure than the one being prevented.
+
+# Usable as a bare TOML table name in `money client list --format toml` and as
+# a `--key` argument without quoting.
+_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# Beancount account shape: colon-separated components, each starting with an
+# uppercase letter or digit. Deliberately not pinned to the five default roots
+# — a ledger can rename them.
+_ACCOUNT_RE = re.compile(r"^[A-Z][A-Za-z0-9-]*(?::[A-Z0-9][A-Za-z0-9-]*)+$")
+# Beancount commodity shape.
+_COMMODITY_RE = re.compile(r"^[A-Z][A-Z0-9'._-]{0,22}[A-Z0-9]$")
+
+_ACCOUNT_FIELDS = ("ar_account", "bank_account", "income_account")
+
+_COMPANY_FIELDS = frozenset({
+    "name", "address", "email", "payment_instructions", "logo",
+    "ar_account", "bank_account", "currency",
+})
+_CLIENT_FIELDS = frozenset({
+    "name", "address", "email", "terms", "ar_account", "entity",
+    "schedule", "schedule_day", "reminder_days", "notifications",
+    "days_until_overdue", "ledger_posting", "bundles", "separate",
+})
+_SERVICE_FIELDS = frozenset({"display_name", "rate", "type", "income_account"})
+
+SERVICE_TYPES = ("hours", "days", "flat", "other")
+CLIENT_SCHEDULES = ("on-demand", "monthly")
+
+
+def _reject_unknown(kind: str, fields: dict, allowed: frozenset[str]) -> None:
+    bad = set(fields) - allowed
+    if bad:
+        raise ValueError(f"unknown {kind} fields: {sorted(bad)}")
+
+
+def _check_key(kind: str, key: str) -> None:
+    if not _KEY_RE.match(key or ""):
+        raise ValueError(
+            f"invalid {kind} key: {key!r} — use letters, digits, '-' or '_' "
+            "(max 64 characters, starting with a letter or digit)",
+        )
+
+
+def _check_accounts(fields: dict) -> None:
+    for name in _ACCOUNT_FIELDS:
+        value = fields.get(name)
+        if value in (None, ""):
+            continue  # empty clears the field; the default applies instead
+        if not isinstance(value, str) or not _ACCOUNT_RE.match(value):
+            raise ValueError(
+                f"invalid {name}: {value!r} — expected a beancount account "
+                "like Assets:Accounts-Receivable",
+            )
+
+
+def _check_currency(fields: dict) -> None:
+    value = fields.get("currency")
+    if value in (None, ""):
+        return
+    if not isinstance(value, str) or not _COMMODITY_RE.match(value):
+        raise ValueError(
+            f"invalid currency: {value!r} — expected a commodity like USD",
+        )
+
+
+def _check_int(fields: dict, name: str, *, minimum: int, maximum: int | None = None) -> None:
+    if name not in fields or fields[name] is None:
+        return
+    value = fields[name]
+    # JSON `true` is an int to Python and would otherwise sail into a day field.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"invalid {name}: {value!r} — expected a whole number")
+    if value < minimum or (maximum is not None and value > maximum):
+        bound = f"{minimum}–{maximum}" if maximum is not None else f"at least {minimum}"
+        raise ValueError(f"invalid {name}: {value} — expected {bound}")
+
+
+def _validate_company_fields(fields: dict) -> None:
+    _reject_unknown("company", fields, _COMPANY_FIELDS)
+    _check_accounts(fields)
+    _check_currency(fields)
+
+
+def _validate_client_fields(fields: dict) -> None:
+    _reject_unknown("client", fields, _CLIENT_FIELDS)
+    _check_accounts(fields)
+
+    schedule = fields.get("schedule")
+    if schedule is not None and schedule not in CLIENT_SCHEDULES:
+        raise ValueError(
+            f"invalid schedule: {schedule!r} — expected one of "
+            f"{', '.join(CLIENT_SCHEDULES)}",
+        )
+    _check_int(fields, "schedule_day", minimum=1, maximum=31)
+    _check_int(fields, "reminder_days", minimum=0)
+    _check_int(fields, "days_until_overdue", minimum=0)
+
+    terms = fields.get("terms")
+    if terms is not None:
+        # The model is `int | str`: 30 and "NET 15" are both meaningful.
+        if isinstance(terms, bool):
+            raise ValueError(f"invalid terms: {terms!r}")
+        if isinstance(terms, int):
+            if terms < 0:
+                raise ValueError(f"invalid terms: {terms} — expected at least 0")
+        elif isinstance(terms, str):
+            if not terms.strip():
+                raise ValueError("invalid terms: expected a number of days or a label")
+        else:
+            raise ValueError(f"invalid terms: {terms!r}")
+
+
+def _validate_service_fields(fields: dict) -> dict:
+    """Validate a service's fields; returns them with ``rate`` coerced to float."""
+    _reject_unknown("service", fields, _SERVICE_FIELDS)
+    _check_accounts(fields)
+
+    svc_type = fields.get("type")
+    if svc_type is not None and svc_type not in SERVICE_TYPES:
+        raise ValueError(
+            f"invalid type: {svc_type!r} — expected one of {', '.join(SERVICE_TYPES)}",
+        )
+
+    if fields.get("rate") is not None:
+        raw = fields["rate"]
+        if isinstance(raw, bool):
+            raise ValueError(f"invalid rate: {raw!r}")
+        try:
+            rate = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"invalid rate: {raw!r} — expected a number") from None
+        # A NaN propagates into every total it touches; float("1e400") is inf.
+        if not math.isfinite(rate) or rate < 0:
+            raise ValueError(f"invalid rate: {raw!r} — expected a finite amount >= 0")
+        fields = {**fields, "rate": rate}
+    return fields
+
+
 # Granular ops -----------------------------------------------------------------
 
 
@@ -691,14 +843,30 @@ def list_companies(db_path: Path | str) -> list[CompanyConfig]:
     return list(load_invoicing(db_path).companies.values())
 
 
+def get_invoicing_setting(db_path: Path | str, key: str) -> Any:
+    """Read one raw invoicing scalar, with no derivation applied.
+
+    ``load_invoicing`` *derives* a ``default_entity`` when none is stored
+    (falling back to the first company), which is right for rendering an
+    invoice and wrong for asking "did the user actually pin this entity as the
+    default?" — the delete guard needs the second question.
+    """
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        return _kv_get(conn, "invoicing_settings", key)
+
+
 def upsert_company(
     db_path: Path | str, key: str, **fields: Any,
 ) -> tuple[CompanyConfig, str]:
+    _validate_company_fields(fields)
     init_db(db_path)
     with _connect(db_path) as conn:
         existing = conn.execute(
             "SELECT * FROM invoicing_companies WHERE key = ?", (key,),
         ).fetchone()
+        if existing is None:
+            _check_key("company", key)
         merged = {
             "name": "", "address": "", "email": "", "payment_instructions": "",
             "logo": "", "ar_account": "", "bank_account": "", "currency": "",
@@ -739,6 +907,7 @@ def delete_company(db_path: Path | str, key: str) -> bool:
 def upsert_client(
     db_path: Path | str, key: str, **fields: Any,
 ) -> tuple[ClientConfig, str]:
+    _validate_client_fields(fields)
     init_db(db_path)
     defaults: dict[str, Any] = {
         "name": key, "address": "", "email": "", "terms": 30,
@@ -752,6 +921,8 @@ def upsert_client(
         existing_row = conn.execute(
             "SELECT * FROM invoicing_clients WHERE key = ?", (key,),
         ).fetchone()
+        if existing_row is None:
+            _check_key("client", key)
         if existing_row is not None:
             terms_raw = existing_row["terms"]
             try:
@@ -814,6 +985,7 @@ def delete_client(db_path: Path | str, key: str) -> bool:
 def upsert_service(
     db_path: Path | str, key: str, **fields: Any,
 ) -> tuple[ServiceConfig, str]:
+    fields = _validate_service_fields(fields)
     init_db(db_path)
     defaults: dict[str, Any] = {
         "display_name": key, "rate": 0.0, "type": "hours", "income_account": "",
@@ -822,6 +994,8 @@ def upsert_service(
         existing = conn.execute(
             "SELECT * FROM invoicing_services WHERE key = ?", (key,),
         ).fetchone()
+        if existing is None:
+            _check_key("service", key)
         if existing is not None:
             defaults.update({
                 "display_name": existing["display_name"] or key,

@@ -4,13 +4,30 @@
   import { getModuleServices, monarchLogin, type ServiceCard as ServiceCardData } from '$lib/api';
   import {
     getBusinessSettings,
+    createEntity,
+    updateEntity,
+    deleteEntity,
+    createService,
+    updateService,
+    deleteService,
+    ApiError,
     type EntityRow,
     type ServiceRow,
+    type EntityInput,
+    type ServiceInput,
     type BusinessDefaults,
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { ServiceCard, SettingsLayout, SettingsCard } from '$lib/components/settings';
-  import { Button } from '$lib/components/ui';
+  import {
+    Button,
+    ConfirmDialog,
+    KebabMenu,
+    NoticeBanner,
+    type KebabItem,
+  } from '$lib/components/ui';
+  import EntityForm from '$lib/components/money/EntityForm.svelte';
+  import ServiceForm from '$lib/components/money/ServiceForm.svelte';
 
   let loading = $state(true);
   let error = $state('');
@@ -118,6 +135,136 @@
       other: 'variable',
     };
     return labels[t] || t;
+  }
+
+  // --- Entity + service editing ---
+  //
+  // A refused delete (409) gets its own banner rather than being folded into
+  // the card's error: the server's reason names records the user has to go
+  // look at — the clients still pointing at an entity, or the work entries
+  // still naming a service.
+  let entityFormOpen = $state(false);
+  let editingEntity: EntityRow | null = $state(null);
+  let entityFormError = $state('');
+  let entitySaving = $state(false);
+  let entityNotice = $state('');
+
+  let serviceFormOpen = $state(false);
+  let editingService: ServiceRow | null = $state(null);
+  let serviceFormError = $state('');
+  let serviceSaving = $state(false);
+  let serviceNotice = $state('');
+
+  let confirmOpen = $state(false);
+  let pendingDelete: { kind: 'entity' | 'service'; key: string; label: string } | null =
+    $state(null);
+
+  function openEntityForm(entity: EntityRow | null) {
+    editingEntity = entity;
+    entityFormError = '';
+    entityFormOpen = true;
+  }
+
+  function openServiceForm(service: ServiceRow | null) {
+    editingService = service;
+    serviceFormError = '';
+    serviceFormOpen = true;
+  }
+
+  async function saveEntity(key: string, data: EntityInput) {
+    entitySaving = true;
+    entityFormError = '';
+    try {
+      if (editingEntity) await updateEntity(key, data);
+      else await createEntity(key, data);
+      entityFormOpen = false;
+      editingEntity = null;
+      await loadBusiness();
+    } catch (e) {
+      entityFormError = e instanceof Error ? e.message : 'Failed to save entity';
+    } finally {
+      entitySaving = false;
+    }
+  }
+
+  async function saveService(key: string, data: ServiceInput) {
+    serviceSaving = true;
+    serviceFormError = '';
+    try {
+      if (editingService) await updateService(key, data);
+      else await createService(key, data);
+      serviceFormOpen = false;
+      editingService = null;
+      await loadBusiness();
+    } catch (e) {
+      serviceFormError = e instanceof Error ? e.message : 'Failed to save service';
+    } finally {
+      serviceSaving = false;
+    }
+  }
+
+  function askDelete(kind: 'entity' | 'service', key: string, label: string) {
+    pendingDelete = { kind, key, label };
+    confirmOpen = true;
+  }
+
+  async function handleDelete() {
+    const target = pendingDelete;
+    confirmOpen = false;
+    pendingDelete = null;
+    if (!target) return;
+
+    entityNotice = '';
+    serviceNotice = '';
+    try {
+      if (target.kind === 'entity') await deleteEntity(target.key);
+      else await deleteService(target.key);
+      await loadBusiness();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : `Failed to delete ${target.kind}`;
+      const refused = e instanceof ApiError && e.status === 409;
+      if (target.kind === 'entity') entityNotice = msg;
+      else serviceNotice = msg;
+      if (!refused) businessError = msg;
+    }
+  }
+
+  const deleteMessage = $derived.by(() => {
+    if (!pendingDelete) return '';
+    if (pendingDelete.kind === 'entity') {
+      return (
+        `Are you sure you want to delete ${pendingDelete.label}? ` +
+        'Clients that bill under it, and the default entity, are protected — ' +
+        'the delete is refused rather than silently rebilling under another entity.'
+      );
+    }
+    return (
+      `Are you sure you want to delete ${pendingDelete.label}? ` +
+      'A service any work entry still names cannot be deleted, because it would ' +
+      'unbill that work and shrink the totals of invoices that already went out.'
+    );
+  });
+
+  function entityMenu(entity: EntityRow): KebabItem[] {
+    return [
+      { label: 'Edit', onSelect: () => openEntityForm(entity) },
+      {
+        label: 'Delete',
+        onSelect: () => askDelete('entity', entity.key, entity.name || entity.key),
+        danger: true,
+      },
+    ];
+  }
+
+  function serviceMenu(svc: ServiceRow): KebabItem[] {
+    return [
+      { label: 'Edit', onSelect: () => openServiceForm(svc) },
+      {
+        label: 'Delete',
+        onSelect: () => askDelete('service', svc.key, svc.display_name || svc.key),
+        danger: true,
+      },
+    ];
   }
 </script>
 
@@ -269,91 +416,147 @@
       {/if}
     </SettingsCard>
 
-    {#if defaults}
-      <SettingsCard title="Entities ({entities.length})">
-        <p class="hint">
-          Read-only view from <code>INVOICING.md</code>. Edit on the server to change.
-        </p>
-        {#if entities.length === 0}
-          <p class="empty">No entities configured.</p>
-        {:else}
-          <div class="entity-grid card-grid">
-            {#each entities as entity (entity.key)}
-              <div class="entity">
-                <div class="entity-head">
-                  <span>{entity.name}</span>
-                  <span class="entity-key"><code>{entity.key}</code></span>
-                </div>
-                <dl class="kv compact">
-                  {#if entity.email}
-                    <dt>Email</dt>
-                    <dd>{entity.email}</dd>
-                  {/if}
-                  {#if entity.address}
-                    <dt>Address</dt>
-                    <dd class="pre">{entity.address}</dd>
-                  {/if}
-                  {#if entity.currency}
-                    <dt>Currency</dt>
-                    <dd>{entity.currency}</dd>
-                  {/if}
-                  {#if entity.ar_account}
-                    <dt>A/R</dt>
-                    <dd><code>{entity.ar_account}</code></dd>
-                  {/if}
-                  {#if entity.bank_account}
-                    <dt>Bank</dt>
-                    <dd><code>{entity.bank_account}</code></dd>
-                  {/if}
-                  {#if entity.payment_instructions}
-                    <dt>Payment</dt>
-                    <dd class="pre">{entity.payment_instructions}</dd>
-                  {/if}
-                  {#if entity.logo}
-                    <dt>Logo</dt>
-                    <dd><code>{entity.logo}</code></dd>
-                  {/if}
-                </dl>
+    <!-- Outside the `{#if defaults}` guard on purpose: a user with no
+         invoicing configuration has to be able to create the first entity
+         and the first service from here. -->
+    <SettingsCard title="Entities ({entities.length})">
+      {#snippet actions()}
+        <Button variant="primary" size="sm" onclick={() => openEntityForm(null)}>Add entity</Button>
+      {/snippet}
+      {#if entityNotice}
+        <NoticeBanner title={entityNotice} variant="warn" />
+      {/if}
+      {#if entities.length === 0}
+        <p class="empty">No entities yet — add the one that bills your clients.</p>
+      {:else}
+        <div class="entity-grid card-grid">
+          {#each entities as entity (entity.key)}
+            <div class="entity">
+              <div class="entity-head">
+                <span>{entity.name}</span>
+                <span class="entity-key">
+                  <code>{entity.key}</code>
+                  <KebabMenu items={entityMenu(entity)} ariaLabel="Entity actions" />
+                </span>
               </div>
-            {/each}
-          </div>
-        {/if}
-      </SettingsCard>
+              <dl class="kv compact">
+                {#if entity.email}
+                  <dt>Email</dt>
+                  <dd>{entity.email}</dd>
+                {/if}
+                {#if entity.address}
+                  <dt>Address</dt>
+                  <dd class="pre">{entity.address}</dd>
+                {/if}
+                {#if entity.currency}
+                  <dt>Currency</dt>
+                  <dd>{entity.currency}</dd>
+                {/if}
+                {#if entity.ar_account}
+                  <dt>A/R</dt>
+                  <dd><code>{entity.ar_account}</code></dd>
+                {/if}
+                {#if entity.bank_account}
+                  <dt>Bank</dt>
+                  <dd><code>{entity.bank_account}</code></dd>
+                {/if}
+                {#if entity.payment_instructions}
+                  <dt>Payment</dt>
+                  <dd class="pre">{entity.payment_instructions}</dd>
+                {/if}
+                {#if entity.logo}
+                  <dt>Logo</dt>
+                  <dd><code>{entity.logo}</code></dd>
+                {/if}
+              </dl>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </SettingsCard>
 
-      <SettingsCard title="Services ({services.length})">
-        {#if services.length === 0}
-          <p class="empty">No services configured.</p>
-        {:else}
-          <div class="table-scroll">
-            <table class="grid">
-              <thead>
+    <SettingsCard title="Services ({services.length})">
+      {#snippet actions()}
+        <Button variant="primary" size="sm" onclick={() => openServiceForm(null)}>
+          Add service
+        </Button>
+      {/snippet}
+      {#if serviceNotice}
+        <NoticeBanner title={serviceNotice} variant="warn" />
+      {/if}
+      {#if services.length === 0}
+        <p class="empty">No services yet — add what you bill for.</p>
+      {:else}
+        <div class="table-scroll">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>Type</th>
+                <th class="num">Rate</th>
+                <th>Income account</th>
+                <th class="actions" aria-label="Actions"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each services as svc (svc.key)}
                 <tr>
-                  <th>Service</th>
-                  <th>Type</th>
-                  <th class="num">Rate</th>
-                  <th>Income account</th>
+                  <td>
+                    {svc.display_name}
+                    <span class="muted"> <code>{svc.key}</code></span>
+                  </td>
+                  <td class="muted">{typeLabel(svc.type)}</td>
+                  <td class="num">
+                    {svc.type === 'other' ? '—' : `$${formatRate(svc.rate)}`}
+                  </td>
+                  <td class="muted"><code>{svc.income_account || '—'}</code></td>
+                  <td class="actions">
+                    <KebabMenu items={serviceMenu(svc)} ariaLabel="Service actions" />
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {#each services as svc (svc.key)}
-                  <tr>
-                    <td>
-                      {svc.display_name}
-                      <span class="muted"> <code>{svc.key}</code></span>
-                    </td>
-                    <td class="muted">{typeLabel(svc.type)}</td>
-                    <td class="num">${formatRate(svc.rate)}</td>
-                    <td class="muted"><code>{svc.income_account || '—'}</code></td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-      </SettingsCard>
-    {/if}
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </SettingsCard>
   {/if}
 </SettingsLayout>
+
+{#if entityFormOpen}
+  <EntityForm
+    entity={editingEntity}
+    onSave={saveEntity}
+    onCancel={() => {
+      entityFormOpen = false;
+      editingEntity = null;
+    }}
+    error={entityFormError}
+    saving={entitySaving}
+  />
+{/if}
+
+{#if serviceFormOpen}
+  <ServiceForm
+    service={editingService}
+    onSave={saveService}
+    onCancel={() => {
+      serviceFormOpen = false;
+      editingService = null;
+    }}
+    error={serviceFormError}
+    saving={serviceSaving}
+  />
+{/if}
+
+<ConfirmDialog
+  bind:open={confirmOpen}
+  title={pendingDelete?.kind === 'entity' ? 'Delete entity' : 'Delete service'}
+  message={deleteMessage}
+  confirmLabel="Delete"
+  onConfirm={handleDelete}
+  onCancel={() => (pendingDelete = null)}
+/>
 
 <style>
   /* Shared .settings/.card/.field/.grid/.banner primitives live in
@@ -413,6 +616,9 @@
   }
 
   .entity-key {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
     font-weight: 400;
     color: var(--text-dim);
     font-size: var(--text-xs);
@@ -546,5 +752,11 @@
     text-align: right;
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
+  }
+
+  .grid th.actions,
+  .grid td.actions {
+    width: 1.5rem;
+    text-align: right;
   }
 </style>
