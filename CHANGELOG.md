@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-07-24
+
 Breaking changes this release:
 
 - Model alias config was renamed. `[models.roles]` is now `[models.aliases]` (Ansible `istota_models_roles` → `istota_models_aliases`); the old key is ignored with a warning. Effort is a `:effort` suffix now (`opus:high`), so the effort-in-name aliases (`opus-high`, `opus-46`, `opus-47-high`, …) no longer resolve. The per-role native-model Ansible variables (`istota_brain_native_model_fast`/`general`/`smart`) are removed — the shipped defaults define all three tiers per backend instead.
@@ -989,7 +991,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.34.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.35.0...main
+[0.35.0]: https://gitlab.com/cynium/istota/-/releases/v0.35.0
 [0.34.0]: https://gitlab.com/cynium/istota/-/releases/v0.34.0
 [0.33.0]: https://gitlab.com/cynium/istota/-/releases/v0.33.0
 [0.32.0]: https://gitlab.com/cynium/istota/-/releases/v0.32.0
