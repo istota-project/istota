@@ -205,7 +205,7 @@ istota_scheduler_event_log_enabled: true               # Write events to the tas
 istota_scheduler_stream_text_gate_chars: 280           # Narration gate: hold streamed answer text until it crosses N chars w/o a tool call (web/REPL); 0 disables. Watch `stream_gate:` logs to tune
 istota_scheduler_push_notification_threshold_seconds: 30  # Min task duration before a push notification fires
 istota_scheduler_push_notification_sources: []   # source_types that trigger a completion push; empty = ntfy opt-in only
-istota_scheduler_task_timeout_minutes: 30             # Kill task execution after N minutes
+istota_scheduler_task_timeout_minutes: 60             # Kill task execution after N minutes
 istota_scheduler_log_channel_show_skills: true        # Include selected skills in log channel messages
 
 # Scheduler robustness settings
