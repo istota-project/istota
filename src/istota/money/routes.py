@@ -668,6 +668,345 @@ async def api_invoice_pdf(
     )
 
 
+# =============================================================================
+# Work entries
+# =============================================================================
+
+# Fields a client may set on create/update. Identity (``uid``) and the
+# invoicing lifecycle (``invoice`` / ``paid_date``) are owned by the store and
+# the invoicing path respectively — an edit form must not be able to stamp an
+# invoice number or mark work paid.
+_WORK_WRITABLE_FIELDS = (
+    "date", "client", "service", "qty", "amount", "discount", "description", "entity",
+)
+
+_WORK_STATUSES = ("uninvoiced", "invoiced", "paid", "all")
+
+
+def _work_row(entry, config) -> dict:
+    """Enrich a stored work entry into the web row shape.
+
+    ``computed_amount`` runs the same rate resolution invoice generation does
+    (``entry_line_item``), so the list shows the number that will actually
+    appear on the invoice.
+    """
+    from istota.money.core.invoicing import entry_line_item
+    from istota.money.work import entry_etag
+
+    warnings: list[str] = []
+    if not entry.uid:
+        warnings.append("no_uid")
+
+    svc = config.services.get(entry.service) if config else None
+    client_config = config.clients.get(entry.client) if config else None
+    if config is not None:
+        if svc is None:
+            warnings.append("unknown_service")
+        if client_config is None:
+            warnings.append("unknown_client")
+
+    computed = None
+    if svc is not None:
+        computed = round(entry_line_item(entry, svc).amount, 2)
+
+    return {
+        "uid": entry.uid,
+        "index": entry.id,
+        "etag": entry_etag(entry),
+        "date": entry.date.isoformat(),
+        "client": entry.client,
+        "client_name": client_config.name if client_config else entry.client,
+        "service": entry.service,
+        "service_name": svc.display_name if svc else entry.service,
+        "service_type": svc.type if svc else "",
+        "qty": entry.qty,
+        "amount": entry.amount,
+        "discount": entry.discount,
+        "description": entry.description,
+        "entity": entry.entity,
+        "invoice": entry.invoice,
+        "paid_date": entry.paid_date.isoformat() if entry.paid_date else None,
+        "computed_amount": computed,
+        "editable": bool(entry.uid) and not entry.invoice,
+        "warnings": warnings,
+    }
+
+
+def _work_totals(rows: list[dict]) -> dict:
+    """Bucket counts for the toolbar summary.
+
+    Computed over the client/period-filtered set but *before* the status
+    filter, so "4 uninvoiced · $1,800" stays true while you're looking at the
+    paid bucket.
+    """
+    uninvoiced = [r for r in rows if not r["invoice"]]
+    return {
+        "uninvoiced_count": len(uninvoiced),
+        "uninvoiced_amount": round(sum(r["computed_amount"] or 0 for r in uninvoiced), 2),
+        "invoiced_count": len([r for r in rows if r["invoice"]]),
+        "paid_count": len([r for r in rows if r["paid_date"]]),
+    }
+
+
+def _work_config_or_none(user_ctx: UserContext):
+    """Invoicing config for service/client resolution, or None if unreadable.
+
+    A broken or absent config must not make work entries invisible — the
+    entries are the record of work done. It only costs display names and
+    computed amounts.
+    """
+    try:
+        return _load_invoicing_config(user_ctx)
+    except Exception as e:
+        logger.warning("work_invoicing_config_unreadable error=%s", e)
+        return None
+
+
+def _work_entry_response(data_dir, uid: str, config) -> dict | None:
+    """Re-read an entry by uid and render its row (fresh display index)."""
+    from istota.money.work import load_work_entries
+
+    for entry in load_work_entries(data_dir):
+        if entry.uid and entry.uid == uid:
+            return _work_row(entry, config)
+    return None
+
+
+def _work_mutation_error(result, config) -> JSONResponse:
+    """Map a store mutation result onto the right status code."""
+    if result.status == "not_found":
+        return JSONResponse({"status": "error", "error": "entry not found"}, status_code=404)
+    if result.status == "invoiced":
+        return JSONResponse(
+            {"status": "error", "error": "entry is invoiced"}, status_code=409,
+        )
+    if result.status == "conflict":
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": "entry changed",
+                "entry": _work_row(result.entry, config) if result.entry else None,
+            },
+            status_code=409,
+        )
+    return JSONResponse(
+        {"status": "error", "error": "no fields to update"}, status_code=400,
+    )
+
+
+def _coerce_work_fields(body: dict) -> tuple[dict, str | None]:
+    """Pull the writable subset out of a request body, or return an error."""
+    from datetime import datetime
+
+    fields: dict = {}
+    for key in _WORK_WRITABLE_FIELDS:
+        if key not in body:
+            continue
+        fields[key] = body[key]
+
+    if "date" in fields:
+        raw = fields["date"]
+        if not isinstance(raw, str):
+            return {}, "invalid date"
+        try:
+            datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError:
+            return {}, "invalid date format — use YYYY-MM-DD"
+
+    for key in ("qty", "amount", "discount"):
+        if key not in fields:
+            continue
+        value = fields[key]
+        if value is None:
+            # qty/amount are genuinely nullable ("this service doesn't use
+            # one"); discount is not — a null there would break every amount
+            # computation downstream, so read it as "no discount".
+            if key == "discount":
+                fields[key] = 0
+            continue
+        if isinstance(value, bool):
+            return {}, f"invalid {key}"
+        if not isinstance(value, (int, float)):
+            try:
+                fields[key] = float(value)
+            except (TypeError, ValueError):
+                return {}, f"invalid {key}"
+
+    return fields, None
+
+
+@router.get("/work")
+async def api_work_list(
+    client: str | None = None,
+    period: str | None = None,
+    status: str = "all",
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    """List work entries, enriched with display names and computed amounts."""
+    from istota.money.work import load_work_entries
+
+    if status not in _WORK_STATUSES:
+        return JSONResponse(
+            {"status": "error", "error": f"unknown status: {status}"}, status_code=400,
+        )
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return {"status": "ok", "entries": [], "totals": _work_totals([])}
+
+    config = _work_config_or_none(user_ctx)
+    entries = load_work_entries(data_dir)
+    if client:
+        wanted = client.lower()
+        entries = [e for e in entries if e.client.lower() == wanted]
+    if period:
+        entries = [e for e in entries if e.date.isoformat().startswith(period)]
+
+    rows = [_work_row(e, config) for e in entries]
+    totals = _work_totals(rows)
+
+    if status == "uninvoiced":
+        rows = [r for r in rows if not r["invoice"]]
+    elif status == "invoiced":
+        rows = [r for r in rows if r["invoice"] and not r["paid_date"]]
+    elif status == "paid":
+        rows = [r for r in rows if r["paid_date"]]
+
+    return {"status": "ok", "entries": rows, "totals": totals}
+
+
+@router.post("/work")
+async def api_work_create(
+    request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Create a work entry."""
+    from istota.money.core.ids import new_txn_id
+    from istota.money.work import add_work_entry
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return JSONResponse({"status": "error", "error": "no data dir"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    fields, err = _coerce_work_fields(body)
+    if err:
+        return JSONResponse({"status": "error", "error": err}, status_code=400)
+
+    entry_date = fields.get("date")
+    client_key = (fields.get("client") or "").strip()
+    service_key = (fields.get("service") or "").strip()
+    if not entry_date or not client_key or not service_key:
+        return JSONResponse(
+            {"status": "error", "error": "date, client and service are required"},
+            status_code=400,
+        )
+
+    config = _work_config_or_none(user_ctx)
+    # An entry whose service isn't configured is silently dropped at invoice
+    # time — the work is recorded and never billed. Refuse it at the door.
+    if config is not None and service_key not in config.services:
+        return JSONResponse(
+            {"status": "error", "error": f"unknown service: {service_key}"},
+            status_code=400,
+        )
+
+    uid = new_txn_id()
+    add_work_entry(
+        data_dir,
+        entry_date,
+        client_key,
+        service_key,
+        qty=fields.get("qty"),
+        amount=fields.get("amount"),
+        discount=fields.get("discount") or 0,
+        description=fields.get("description") or "",
+        entity=fields.get("entity") or "",
+        uid=uid,
+    )
+
+    row = _work_entry_response(data_dir, uid, config)
+    if row is None:
+        return JSONResponse(
+            {"status": "error", "error": "entry not readable after write"}, status_code=500,
+        )
+    return {"status": "ok", "entry": row}
+
+
+@router.patch("/work/{uid}")
+async def api_work_update(
+    uid: str,
+    request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Update an uninvoiced work entry, addressed by its stable uid."""
+    from istota.money.work import update_work_entry_by_uid
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return JSONResponse({"status": "error", "error": "no data dir"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    fields, err = _coerce_work_fields(body)
+    if err:
+        return JSONResponse({"status": "error", "error": err}, status_code=400)
+    if not fields:
+        return JSONResponse(
+            {"status": "error", "error": "no fields to update"}, status_code=400,
+        )
+
+    config = _work_config_or_none(user_ctx)
+    service_key = fields.get("service")
+    if service_key is not None and config is not None and service_key not in config.services:
+        return JSONResponse(
+            {"status": "error", "error": f"unknown service: {service_key}"},
+            status_code=400,
+        )
+
+    result = update_work_entry_by_uid(
+        data_dir, uid, expect_etag=body.get("etag") or None, **fields,
+    )
+    if not result.ok:
+        return _work_mutation_error(result, config)
+
+    row = _work_entry_response(data_dir, uid, config)
+    return {"status": "ok", "entry": row}
+
+
+@router.delete("/work/{uid}")
+async def api_work_delete(
+    uid: str,
+    etag: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Delete an uninvoiced work entry, addressed by its stable uid."""
+    from istota.money.work import remove_work_entry_by_uid
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return JSONResponse({"status": "error", "error": "no data dir"}, status_code=404)
+
+    result = remove_work_entry_by_uid(data_dir, uid, expect_etag=etag or None)
+    if not result.ok:
+        return _work_mutation_error(result, _work_config_or_none(user_ctx))
+    return {"status": "ok", "uid": uid}
+
+
 @router.get("/tax/estimate")
 async def api_tax_estimate(
     request: Request,

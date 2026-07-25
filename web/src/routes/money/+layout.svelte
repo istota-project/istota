@@ -67,7 +67,8 @@
       active: isActive('/reports'),
     },
     { href: `${moneyBase}/taxes`, label: 'Taxes', active: isActive('/taxes') },
-    { href: `${moneyBase}/business/invoices`, label: 'Business', active: isActive('/business') },
+    // Lands on Work — the daily-action tab, and upstream of invoices.
+    { href: `${moneyBase}/business/work`, label: 'Business', active: isActive('/business') },
   ]);
 
   const ledgerOptions = $derived($availableLedgers.map((l) => ({ value: l, label: l })));

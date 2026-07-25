@@ -135,6 +135,35 @@ class TestWorkCommands:
         assert output["entries"][0]["client"] == "acme"
         assert output["entries"][0]["qty"] == 8
 
+    def test_work_list_includes_uid(self, runner, tmp_path, single_ledger):
+        _, ledgers = single_ledger
+        obj = _make_context(tmp_path, ledgers=ledgers)
+        _invoke(runner, ["work", "add",
+            "-d", "2026-03-01", "-c", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=obj)
+
+        result = _invoke(runner, ["work", "list"], tmp_path=tmp_path, obj=obj)
+        entry = json.loads(result.output)["entries"][0]
+        assert entry["uid"]
+        assert len(entry["uid"]) == 32
+
+    def test_work_backfill_ids(self, runner, tmp_path, single_ledger):
+        _, ledgers = single_ledger
+        obj = _make_context(tmp_path, ledgers=ledgers)
+        work_dir = Path(obj.data_dir) / "invoices" / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "2026.toml").write_text(
+            "[[entries]]\ndate = 2026-03-01\nclient = \"acme\"\nservice = \"dev\"\n"
+        )
+
+        result = _invoke(runner, ["work", "backfill-ids"], tmp_path=tmp_path, obj=obj)
+        assert result.exit_code == 0
+        assert json.loads(result.output)["stamped"] == 1
+
+        # Idempotent.
+        result = _invoke(runner, ["work", "backfill-ids"], tmp_path=tmp_path, obj=obj)
+        assert json.loads(result.output)["stamped"] == 0
+
     def test_work_remove(self, runner, tmp_path, single_ledger):
         _, ledgers = single_ledger
         obj = _make_context(tmp_path, ledgers=ledgers)

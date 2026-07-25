@@ -2,6 +2,63 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Work entries in the web UI, and giving them a stable identity
+
+Implemented the money work-tracking spec. Work entries are the input side of invoicing — a day of work against a configured service — and the web UI could only see them once they'd landed on an invoice. Adding one meant asking the bot or running the CLI. Now there's a **Work** tab under Business with full CRUD.
+
+Most of it is web surface over CRUD that already existed. The one genuinely new backend problem is the crux: **work entries had no stable identity.**
+
+`load_work_entries` assigns `entry.id` as a 1-based index recomputed on every load. `update_work_entry(data_dir, index, …)` addresses by that index. Fine for a CLI where a human reads a list and acts on it a second later; not fine for a web page, because the index of a given entry shifts whenever anything is inserted before it. The concrete failure: the page shows entry #5, the agent adds a backdated entry in a Talk conversation, the user clicks Delete on the row labelled #5, and the API deletes what is now a different entry. No error, no warning, wrong row gone. The same race exists between two browser tabs and between the web UI and a scheduled `invoice generate`.
+
+The module had already solved this once, for beancount transactions (`core/edit.py` opens by explaining why every transaction carries an `id:` line). So this applies that pattern rather than inventing a second one: `WorkEntry.uid` from the same `core.ids.new_txn_id`, stamped by `add_work_entry`, backfilled by `backfill_work_ids` (auto-run from `ensure_initialised`, exposed as `work backfill-ids`), and re-stamped as a side effect of any `_save_entries` write so the store converges even between explicit backfills. Reading never stamps — a plain `work list` cannot mutate the store.
+
+Two design points worth recording:
+
+- **The display index stays.** It's the CLI's `#N` UX and there was no reason to break it. It just stops being identity — it's now explicitly a presentation detail, and the module docstring says which callers may use which.
+- **No sentinel on the backfill**, unlike the ledger's. A hand-added entry with no `uid` can appear at any time (the year files are deliberately hand-editable), so re-running on every init is exactly how that self-heals. It only writes when something is actually missing an id, so a fully-backfilled store costs one read.
+
+`update_work_entry` / `remove_work_entry` return a bare bool, which can't distinguish "no such entry" from "found it, it's invoiced, refused" — a distinction the route needs to pick 404 vs 409. The uid-addressed variants return a typed `WorkMutationResult` instead. They resolve *inside* `_work_lock`, so the resolve-and-mutate is atomic against other writers; resolving outside would have reintroduced the race in a narrower window.
+
+**Etags for stale content.** A uid fixes "wrong row" but not "wrong version": open the edit form, the agent changes the same entry, you save and silently revert its change. `entry_etag` is a truncated sha256 of the serialized form — derived, never stored, so it costs nothing in the file format. Per-entry rather than per-file, so two edits to different entries in the same year never conflict. Notably it excludes the display index, so an entry that merely *moved* keeps its etag; there's a test pinning that, because hashing the wrong thing would produce spurious conflicts on every insert.
+
+**Rate resolution has one home now.** The list shows what an entry *will* bill for before it's invoiced, and that number has to be the one the invoice actually carries. Extracted `entry_line_item` out of `build_line_items` so both go through it rather than the route reimplementing the `other`/`flat`/`days`/default branch. Same reasoning drives the form's live preview line (`3 × $150.00 = $450.00`) — it mirrors the same rules, so you see the number before writing the entry rather than at invoice time.
+
+**Validation the store doesn't do.** `build_line_items` does `if not svc: continue` — an entry whose service isn't configured is silently dropped from the invoice. The work is recorded and never billed. That's the worst failure mode in this area, so `POST` hard-rejects an unknown service (400) and the list flags any pre-existing one. Unknown *client* is only a warning: invoice generation is per-client, so it just never gets invoiced, and hard-rejecting would hide existing data. This does make the API stricter than the CLI and the store, which accept anything — a deliberate asymmetry, since the API is the surface where a typo is invisible.
+
+**Round-trip preservation.** `_load_year` built a `WorkEntry` from a fixed key list and `_save_year` rewrote the whole file from the serializer, so any write destroyed unrecognised keys. Unknown keys now round-trip via `WorkEntry.extra`. Comments still don't survive — that needs a comment-aware TOML library, and the module reads with `tomli` and writes by hand-rolled string building; documenting the limitation is the proportionate fix. Nested tables are dropped rather than crashing the write, so one bad hand edit can't poison every subsequent save.
+
+**Two bugs found along the way, both real:**
+
+- Pressing Enter to confirm a dropdown option in the entry form *also* fired the form's window-level Enter-to-save, writing a half-filled entry. Caught by actually driving the UI in a browser, not by any test. The handler now only commits from a text/date input. `TransactionForm.svelte` has the same unguarded handler and the same latent bug; left alone as out of scope.
+- The money mock API was mounted at `/istota/money/api` while the client calls `/istota/api/money`, so **every** money page failed under `VITE_MOCK_API=1` — the layout just showed "Failed to load money data". Pre-existing and unrelated to this work, but it had to be fixed to verify Stage 4 at all. Also added the missing `/clients` mock handler, and taught the mock harness to honour the `__status` key it was already half-using, so error paths (400/404/409) are exercisable rather than all coming back 200.
+
+`apiFetch` in the money client now throws an `ApiError` carrying status and the parsed error envelope instead of a bare `Error`. Backwards-compatible for callers that only render `.message`; needed so the page can tell a 409 conflict from an ordinary failure and offer a reload instead of a generic error.
+
+Deviations from the spec: "View invoice" navigates to the Invoices tab but doesn't filter to that invoice, because the invoices page has no filter param and adding one was outside the ask (the invoice number is in the menu label). The top-level Business nav now lands on Work rather than Invoices, following the spec's own "the tab you land on should be the one you act on daily" reasoning. Generating an invoice from the Work tab stays out of scope as specced — it writes a PDF, allocates a number from a counter with its own drift history, and stamps entries; that's the natural v2, behind a confirm dialog.
+
+Frontend component tests needed `$app/*` stubs in the vitest config: the `ui` barrel pulls in `HeaderNav`, which imports `$app/navigation`, which only resolves inside a Kit build. Worth having for any future component test that touches the barrel.
+
+**Key changes:**
+- `WorkEntry.uid` + `backfill_work_ids` + `work backfill-ids`, wired into `ensure_initialised`; `uid` in `work list` output.
+- `update_work_entry_by_uid` / `remove_work_entry_by_uid` with a typed result, resolving inside the write lock.
+- `entry_etag` optimistic concurrency; `409` with the current server-side row on mismatch.
+- `GET/POST/PATCH/DELETE /work` on the money router, with service/client validation and a shared rate-resolution helper.
+- Work tab (`Work | Invoices | Clients`), `WorkEntryForm.svelte` with service-type-driven fields and a live line-item preview.
+- `WorkEntry.extra` round-trips unrecognised TOML keys through a write.
+- Fixed the money mock API prefix, added the `/clients` fixture, made the mock harness honour non-200 statuses.
+
+**Files added/modified:**
+- `src/istota/money/work.py` — uid, etag, uid-addressed mutations, backfill, `extra` round-trip
+- `src/istota/money/core/models.py` — `WorkEntry.uid` / `.extra`
+- `src/istota/money/core/invoicing.py` — `entry_line_item` extracted from `build_line_items`
+- `src/istota/money/routes.py` — the four work routes plus row/totals/validation helpers
+- `src/istota/money/_migrate.py`, `src/istota/money/cli.py` — backfill wiring and CLI surface
+- `web/src/routes/money/business/work/+page.svelte`, `web/src/lib/components/money/WorkEntryForm.svelte` — the surface
+- `web/src/lib/money/api.ts` — work client + `ApiError`
+- `web/vite-mock-api.ts` — work fixtures, `/clients`, prefix fix, `__status` support
+- `web/vitest.config.ts`, `web/vitest-stubs/` — `$app/*` stubs for component tests
+- Tests: `tests/money/test_routes_work.py` (53), additions to `tests/money/test_work.py`, `test_cli.py`, `test_migrate.py`, and `web/src/lib/components/money/WorkEntryForm.svelte.test.ts` (18)
+
 ## 2026-07-25: Finished the color-token sweep (`--accent-blue`, `--money-*`)
 
 Follow-up to the chip entry below, which left plain message text hardcoded. Auditing the whole frontend rather than just the rules I'd promised turned up 228 color-bearing CSS rules, 80 of them light-theme overrides — and three *distinct* semantic roles tangled together, not the one I'd assumed.

@@ -11,6 +11,8 @@
 
 <div class="money-section-header">
   <div class="money-section-nav">
+    <!-- Work is upstream of invoices in the actual workflow, so it leads. -->
+    <a href="{base}/money/business/work" class:active={isActive('/money/business/work')}>Work</a>
     <a href="{base}/money/business/invoices" class:active={isActive('/money/business/invoices')}
       >Invoices</a
     >

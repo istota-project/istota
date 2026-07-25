@@ -109,7 +109,25 @@ istota-skill money work update 5 [--qty 8] [--description "Updated"]
 
 # Remove an uninvoiced work entry
 istota-skill money work remove 3
+
+# Stamp a stable uid on any entry lacking one (idempotent; runs automatically on init)
+istota-skill money work backfill-ids
 ```
+
+**Entry identity.** `work list` returns both an `id` (1-based display index) and a
+`uid` (stable). The `#N` index is what `work update` / `work remove` take, but it
+shifts whenever an entry is inserted before it — so re-run `work list` immediately
+before acting on an index, never reuse one from earlier in the conversation. The
+web UI addresses entries by `uid` for exactly this reason.
+
+**Hand-editing the year files.** `{workspace}/{BOT_DIR}/money/invoices/work/{year}.toml`
+is meant to be hand-editable, but any programmatic write rewrites the whole file
+from the serializer:
+
+- Keep the `uid` line when you edit an entry — dropping it orphans the entry
+  from the web UI until the next backfill (which assigns a *new* uid).
+- Custom keys survive; **comments do not**, and neither do nested tables. Put
+  anything you need to keep in a `description` or a scalar key of your own.
 
 ## BQL query examples
 

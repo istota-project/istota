@@ -469,3 +469,52 @@ class TestBackfillTransactionIds:
         config_store.init_db(ctx.db_path)
         assert _migrate.backfill_transaction_ids(ctx) is None
         assert 'id: "' not in ctx.ledgers[0]["path"].read_text()
+
+
+class TestBackfillWorkEntryIds:
+    def _ctx(self, workspace: Path) -> UserContext:
+        data_dir = workspace / "money"
+        (data_dir / "data").mkdir(parents=True, exist_ok=True)
+        return UserContext(
+            data_dir=data_dir,
+            ledgers=[],
+            db_path=data_dir / "data" / "money.db",
+        )
+
+    def _write_legacy_entry(self, ctx: UserContext) -> Path:
+        work_dir = Path(ctx.data_dir) / "invoices" / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        year = work_dir / "2026.toml"
+        year.write_text(
+            '[[entries]]\ndate = 2026-03-01\nclient = "acme"\nservice = "dev"\nqty = 8\n'
+        )
+        return year
+
+    def test_stamps_legacy_entries(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        year = self._write_legacy_entry(ctx)
+        assert _migrate.backfill_work_entry_ids(ctx) == 1
+        assert "uid = " in year.read_text()
+
+    def test_idempotent(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        self._write_legacy_entry(ctx)
+        _migrate.backfill_work_entry_ids(ctx)
+        assert _migrate.backfill_work_entry_ids(ctx) == 0
+
+    def test_no_work_entries_is_a_noop(self, tmp_path):
+        assert _migrate.backfill_work_entry_ids(self._ctx(tmp_path)) == 0
+
+    def test_failure_is_not_fatal(self, tmp_path, monkeypatch):
+        ctx = self._ctx(tmp_path)
+        monkeypatch.setattr(
+            "istota.money.work.backfill_work_ids",
+            lambda _d: (_ for _ in ()).throw(OSError("boom")),
+        )
+        assert _migrate.backfill_work_entry_ids(ctx) == 0
+
+    def test_runs_from_ensure_initialised(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        year = self._write_legacy_entry(ctx)
+        _migrate.ensure_initialised(ctx)
+        assert "uid = " in year.read_text()

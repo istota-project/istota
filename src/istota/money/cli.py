@@ -286,6 +286,7 @@ def work_list(ctx, client, period, uninvoiced, invoiced):
         "entries": [
             {
                 "id": e.id,
+                "uid": e.uid or None,
                 "date": e.date.isoformat(),
                 "client": e.client,
                 "service": e.service,
@@ -299,6 +300,25 @@ def work_list(ctx, client, period, uninvoiced, invoiced):
             }
             for e in entries
         ],
+    })
+
+
+@work.command("backfill-ids")
+@pass_ctx
+def work_backfill_ids(ctx):
+    """Stamp a stable ``uid`` on every work entry lacking one.
+
+    Idempotent. Runs automatically on money workspace init; exposed here for
+    operators who hand-add entries to the year files.
+    """
+    from istota.money.work import backfill_work_ids
+
+    data_dir = _require_data_dir(ctx)
+    stamped = backfill_work_ids(data_dir)
+    _output({
+        "status": "ok",
+        "stamped": stamped,
+        "message": f"Stamped {stamped} work {'entry' if stamped == 1 else 'entries'}",
     })
 
 

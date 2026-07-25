@@ -155,52 +155,60 @@ def resolve_currency(entity: CompanyConfig, config: InvoicingConfig) -> str:
 # =============================================================================
 
 
+def entry_line_item(entry: WorkEntry, svc: ServiceConfig) -> InvoiceLineItem:
+    """Resolve one work entry to a line item using its service's rate rules.
+
+    The single home of the rate branch. The web work list shows the amount an
+    entry *will* bill for before it's invoiced, and that number has to be the
+    one the invoice actually carries — so both go through here rather than
+    each implementing the branch.
+    """
+    if svc.type == "other":
+        subtotal = entry.amount or 0
+        rate = subtotal
+        qty = 1
+    elif svc.type == "flat":
+        subtotal = svc.rate
+        rate = svc.rate
+        qty = 1
+    else:
+        # "days" and the default (hours) share the same shape: quantity times
+        # the service rate, falling back to a bare amount when there's no qty.
+        qty = entry.qty or 0
+        rate = svc.rate
+        subtotal = qty * rate
+        if not subtotal and entry.amount:
+            subtotal = entry.amount
+            rate = subtotal
+            qty = 1
+
+    return InvoiceLineItem(
+        display_name=svc.display_name,
+        description=entry.description,
+        quantity=qty,
+        rate=rate,
+        discount=entry.discount,
+        amount=subtotal - entry.discount,
+    )
+
+
 def build_line_items(
     entries: list[WorkEntry],
     services: dict[str, ServiceConfig],
 ) -> list[InvoiceLineItem]:
-    """Convert work entries to invoice line items using service rates."""
+    """Convert work entries to invoice line items using service rates.
+
+    An entry whose service isn't configured is silently skipped — it never
+    reaches an invoice. The web API rejects unknown services on write and
+    flags pre-existing ones, so this stays the last line of defence rather
+    than the only one.
+    """
     items = []
     for entry in entries:
         svc = services.get(entry.service)
         if not svc:
             continue
-
-        name = svc.display_name
-        desc = entry.description
-        disc = entry.discount
-
-        if svc.type == "other":
-            subtotal = entry.amount or 0
-            rate = subtotal
-            qty = 1
-        elif svc.type == "flat":
-            subtotal = svc.rate
-            rate = svc.rate
-            qty = 1
-        elif svc.type == "days":
-            qty = entry.qty or 0
-            rate = svc.rate
-            subtotal = qty * rate
-            if not subtotal and entry.amount:
-                subtotal = entry.amount
-                rate = subtotal
-                qty = 1
-        else:
-            qty = entry.qty or 0
-            rate = svc.rate
-            subtotal = qty * rate
-            if not subtotal and entry.amount:
-                subtotal = entry.amount
-                rate = subtotal
-                qty = 1
-
-        items.append(InvoiceLineItem(
-            display_name=name, description=desc,
-            quantity=qty, rate=rate,
-            discount=disc, amount=subtotal - disc,
-        ))
-
+        items.append(entry_line_item(entry, svc))
     return items
 
 

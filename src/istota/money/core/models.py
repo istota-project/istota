@@ -167,7 +167,14 @@ class WorkEntry:
     entity: str = ""
     invoice: str = ""
     paid_date: date | None = None
-    id: int | None = None  # populated when loaded from DB
+    id: int | None = None  # 1-based display index, recomputed on every load
+    # Stable identity, stamped by every writer. The display index shifts
+    # whenever anything is inserted before an entry, so programmatic callers
+    # (the web UI) address entries by ``uid``. Empty until the backfill runs.
+    uid: str = ""
+    # Keys present in the TOML that the loader doesn't recognise, kept so a
+    # hand-authored custom key survives an unrelated programmatic write.
+    extra: dict = field(default_factory=dict)
 
 
 @dataclass

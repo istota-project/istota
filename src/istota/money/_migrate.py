@@ -542,3 +542,27 @@ def ensure_initialised(ctx: UserContext) -> None:
     migrate_legacy_workspace_config(ctx)
     seed_default_ledger(ctx)
     backfill_transaction_ids(ctx)
+    backfill_work_entry_ids(ctx)
+
+
+def backfill_work_entry_ids(ctx: UserContext) -> int:
+    """Stamp a stable ``uid`` on every work entry lacking one.
+
+    The work-entry counterpart of :func:`backfill_transaction_ids`, and the
+    thing that makes the web UI's uid-addressed edits safe. Unlike the ledger
+    backfill this carries no sentinel — a hand-added entry with no ``uid`` can
+    show up at any time, and re-running is how that self-heals. Cheap: it only
+    writes when something is missing an id.
+
+    Never fatal — a failure here must not stop a money command from running.
+    """
+    from istota.money.work import backfill_work_ids
+
+    try:
+        stamped = backfill_work_ids(Path(ctx.data_dir))
+    except Exception as exc:  # noqa: BLE001 — advisory, never fatal
+        logger.warning("money_work_id_backfill_failed error=%s", exc)
+        return 0
+    if stamped:
+        logger.info("money_work_id_backfill_done stamped=%s", stamped)
+    return stamped

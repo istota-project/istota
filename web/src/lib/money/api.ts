@@ -7,6 +7,25 @@ class AuthError extends Error {
   }
 }
 
+/**
+ * A non-OK response, carrying the status and the parsed error envelope.
+ *
+ * Callers that only render `.message` are unaffected; the work page needs
+ * `.status` to tell a 409 conflict from an ordinary failure, and `.payload`
+ * to show the current server-side row.
+ */
+class ApiError extends Error {
+  status: number;
+  payload: any;
+
+  constructor(status: number, payload: any) {
+    super(payload?.error || `API error: ${status}`);
+    this.name = 'ApiError';
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   // `base` is istota's URL prefix (e.g. /istota). Money's routes live under /api/money.
   const resp = await fetch(`${base}/api/money${path}`, {
@@ -14,7 +33,15 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: 'same-origin',
   });
   if (resp.status === 401) throw new AuthError();
-  if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+  if (!resp.ok) {
+    let payload: any = null;
+    try {
+      payload = await resp.json();
+    } catch {
+      // Non-JSON error body — the status alone has to carry the message.
+    }
+    throw new ApiError(resp.status, payload);
+  }
   return resp.json();
 }
 
@@ -320,6 +347,108 @@ export function invoicePdfUrl(invoice_number: string): string {
   return `${base}/api/money/invoices/${encodeURIComponent(invoice_number)}/pdf`;
 }
 
+/** Work entries — the input side of invoicing. */
+export interface WorkEntryRow {
+  /** Stable id. Empty until the backfill runs; such a row isn't editable. */
+  uid: string;
+  /** 1-based display index. Presentation only — it shifts under concurrent writes. */
+  index: number | null;
+  /** Content hash, echoed back on write so a stale edit 409s instead of silently reverting. */
+  etag: string;
+  date: string;
+  client: string;
+  client_name: string;
+  service: string;
+  service_name: string;
+  service_type: string;
+  qty: number | null;
+  amount: number | null;
+  discount: number;
+  description: string;
+  entity: string;
+  invoice: string;
+  paid_date: string | null;
+  /** What this entry will bill for, using the same rate rules the invoice uses. */
+  computed_amount: number | null;
+  editable: boolean;
+  /** 'unknown_service' | 'unknown_client' | 'no_uid' */
+  warnings: string[];
+}
+
+export interface WorkTotals {
+  uninvoiced_count: number;
+  uninvoiced_amount: number;
+  invoiced_count: number;
+  paid_count: number;
+}
+
+export interface WorkEntriesResponse {
+  status: string;
+  entries: WorkEntryRow[];
+  totals: WorkTotals;
+}
+
+export type WorkStatusFilter = 'uninvoiced' | 'invoiced' | 'paid' | 'all';
+
+export interface WorkEntryInput {
+  date: string;
+  client: string;
+  service: string;
+  qty?: number | null;
+  amount?: number | null;
+  discount?: number;
+  description?: string;
+  entity?: string;
+}
+
+export async function getWorkEntries(opts?: {
+  client?: string;
+  period?: string;
+  status?: WorkStatusFilter;
+}): Promise<WorkEntriesResponse> {
+  const params = new URLSearchParams();
+  if (opts?.client) params.set('client', opts.client);
+  if (opts?.period) params.set('period', opts.period);
+  if (opts?.status) params.set('status', opts.status);
+  const qs = params.toString();
+  return apiFetch<WorkEntriesResponse>(`/work${qs ? '?' + qs : ''}`);
+}
+
+export async function createWorkEntry(
+  input: WorkEntryInput,
+): Promise<{ status: string; entry: WorkEntryRow }> {
+  return apiFetch<{ status: string; entry: WorkEntryRow }>('/work', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+/** Update an entry by uid. Pass the row's `etag` so a concurrent edit conflicts. */
+export async function updateWorkEntry(
+  uid: string,
+  patch: Partial<WorkEntryInput> & { etag?: string },
+): Promise<{ status: string; entry: WorkEntryRow }> {
+  return apiFetch<{ status: string; entry: WorkEntryRow }>(`/work/${encodeURIComponent(uid)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteWorkEntry(
+  uid: string,
+  opts?: { etag?: string },
+): Promise<{ status: string; uid: string }> {
+  const params = new URLSearchParams();
+  if (opts?.etag) params.set('etag', opts.etag);
+  const qs = params.toString();
+  return apiFetch<{ status: string; uid: string }>(
+    `/work/${encodeURIComponent(uid)}${qs ? '?' + qs : ''}`,
+    { method: 'DELETE' },
+  );
+}
+
 export interface TransactionUpdate {
   // Stable id of the transaction to edit.
   id: string;
@@ -425,4 +554,4 @@ export async function recalculateTaxEstimate(
   });
 }
 
-export { AuthError };
+export { AuthError, ApiError };

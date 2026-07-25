@@ -2530,11 +2530,58 @@ const handlers: MockHandler[] = [
   ({ url }) => (url.startsWith('/istota/api/location/discover-places') ? mockDiscover : undefined),
   ({ url }) => (url.startsWith('/istota/api/location/pings') ? mockPings : undefined),
   ({ url }) => (url.startsWith('/istota/api/location/day-summary') ? mockDay : undefined),
-  ({ url }) => (url.startsWith('/istota/money/api/ledgers') ? ledgers : undefined),
-  ({ url }) => (url.startsWith('/istota/money/api/check') ? checkResp : undefined),
-  ({ url }) => (url.startsWith('/istota/money/api/accounts') ? accountsResp : undefined),
+  ({ url }) => (url.startsWith('/istota/api/money/ledgers') ? ledgers : undefined),
+  ({ url }) => (url.startsWith('/istota/api/money/check') ? checkResp : undefined),
+  ({ url }) => (url.startsWith('/istota/api/money/accounts') ? accountsResp : undefined),
+  // Clients — consumed by the Clients page and by the Work entry form's
+  // client dropdown. Keys match the invoice + work fixtures below.
   ({ url }) => {
-    if (!url.startsWith('/istota/money/api/business-settings')) return undefined;
+    if (!url.startsWith('/istota/api/money/clients')) return undefined;
+    return {
+      status: 'ok',
+      clients: [
+        {
+          key: 'globex',
+          name: 'Globex',
+          email: 'ap@globex.example',
+          address: '1 Globex Way',
+          terms: 30,
+          entity: 'main',
+          entity_name: 'Acme Studio LLC',
+          schedule: 'monthly',
+          schedule_day: 1,
+          ar_account: 'Assets:AR:Globex',
+        },
+        {
+          key: 'initech',
+          name: 'Initech',
+          email: 'billing@initech.example',
+          address: '4 Initech Plaza',
+          terms: 14,
+          entity: 'main',
+          entity_name: 'Acme Studio LLC',
+          schedule: 'on-demand',
+          schedule_day: 1,
+          ar_account: 'Assets:AR:Initech',
+        },
+        {
+          key: 'hooli',
+          name: 'Hooli',
+          email: 'accounts@hooli.example',
+          address: '9 Hooli Campus',
+          terms: 30,
+          entity: 'main',
+          entity_name: 'Acme Studio LLC',
+          schedule: 'monthly',
+          schedule_day: 15,
+          ar_account: 'Assets:AR:Hooli',
+        },
+      ],
+    };
+  },
+
+  ({ url }) => {
+    if (!url.startsWith('/istota/api/money/business-settings')) return undefined;
     return {
       status: 'ok',
       entities: [
@@ -2565,6 +2612,20 @@ const handlers: MockHandler[] = [
           type: 'days',
           income_account: 'Income:Design',
         },
+        {
+          key: 'retainer',
+          display_name: 'Retainer',
+          rate: 2000,
+          type: 'flat',
+          income_account: 'Income:Retainer',
+        },
+        {
+          key: 'expenses',
+          display_name: 'Expenses',
+          rate: 0,
+          type: 'other',
+          income_account: 'Income:Reimbursements',
+        },
       ],
       defaults: {
         currency: 'EUR',
@@ -2583,7 +2644,7 @@ const handlers: MockHandler[] = [
   // handlers so the row-expand UX and the kebab actions (edit txn, mark
   // paid/pending, download PDF) are exercisable end-to-end without a backend.
   (() => {
-    const PREFIX = '/istota/money/api';
+    const PREFIX = '/istota/api/money';
     const today = () => new Date().toISOString().slice(0, 10);
 
     interface Txn {
@@ -2766,11 +2827,238 @@ const handlers: MockHandler[] = [
       ],
     };
 
+    // Work entries — the input side of invoicing. Seeded to cover every
+    // state the Work page renders differently: uninvoiced, invoiced, paid,
+    // a flat-rate service, and an entry whose service no longer resolves.
+    interface Work {
+      uid: string;
+      date: string;
+      client: string;
+      service: string;
+      qty: number | null;
+      amount: number | null;
+      discount: number;
+      description: string;
+      entity: string;
+      invoice: string;
+      paid_date: string | null;
+    }
+
+    const SERVICES: Record<string, { display_name: string; rate: number; type: string }> = {
+      consulting: { display_name: 'Consulting', rate: 150, type: 'hours' },
+      design: { display_name: 'Design', rate: 1200, type: 'days' },
+      retainer: { display_name: 'Retainer', rate: 2000, type: 'flat' },
+      expenses: { display_name: 'Expenses', rate: 0, type: 'other' },
+    };
+    const CLIENT_NAMES: Record<string, string> = {
+      globex: 'Globex',
+      initech: 'Initech',
+      hooli: 'Hooli',
+    };
+
+    const work: Work[] = [
+      {
+        uid: 'work-1',
+        date: '2026-05-28',
+        client: 'globex',
+        service: 'consulting',
+        qty: 6,
+        amount: null,
+        discount: 0,
+        description: 'Platform review',
+        entity: 'main',
+        invoice: '',
+        paid_date: null,
+      },
+      {
+        uid: 'work-2',
+        date: '2026-05-27',
+        client: 'globex',
+        service: 'design',
+        qty: 1.5,
+        amount: null,
+        discount: 100,
+        description: 'Landing page',
+        entity: 'main',
+        invoice: '',
+        paid_date: null,
+      },
+      {
+        uid: 'work-3',
+        date: '2026-05-20',
+        client: 'hooli',
+        service: 'retainer',
+        qty: null,
+        amount: null,
+        discount: 0,
+        description: 'May retainer',
+        entity: 'main',
+        invoice: '',
+        paid_date: null,
+      },
+      {
+        uid: 'work-4',
+        date: '2026-05-12',
+        client: 'initech',
+        service: 'legacy-support',
+        qty: 4,
+        amount: null,
+        discount: 0,
+        description: 'Service no longer configured',
+        entity: 'main',
+        invoice: '',
+        paid_date: null,
+      },
+      {
+        uid: 'work-5',
+        date: '2026-05-15',
+        client: 'globex',
+        service: 'consulting',
+        qty: 30,
+        amount: null,
+        discount: 0,
+        description: 'May engagement',
+        entity: 'main',
+        invoice: 'INV-000042',
+        paid_date: null,
+      },
+      {
+        uid: 'work-6',
+        date: '2026-04-30',
+        client: 'initech',
+        service: 'design',
+        qty: 1.5,
+        amount: null,
+        discount: 0,
+        description: 'Brand refresh',
+        entity: 'main',
+        invoice: 'INV-000041',
+        paid_date: '2026-05-10',
+      },
+    ];
+    let nextWorkUid = 7;
+
+    function workAmount(w: Work): number | null {
+      const svc = SERVICES[w.service];
+      if (!svc) return null;
+      let subtotal: number;
+      if (svc.type === 'flat') subtotal = svc.rate;
+      else if (svc.type === 'other') subtotal = w.amount ?? 0;
+      else {
+        subtotal = (w.qty ?? 0) * svc.rate;
+        if (!subtotal && w.amount) subtotal = w.amount;
+      }
+      return Math.round((subtotal - w.discount) * 100) / 100;
+    }
+
+    function workRow(w: Work, index: number) {
+      const svc = SERVICES[w.service];
+      const warnings: string[] = [];
+      if (!svc) warnings.push('unknown_service');
+      if (!CLIENT_NAMES[w.client]) warnings.push('unknown_client');
+      return {
+        ...w,
+        index,
+        // Cheap content hash — enough for the mock's conflict path.
+        etag: `${w.date}-${w.qty}-${w.amount}-${w.discount}-${w.description}`.length.toString(16),
+        client_name: CLIENT_NAMES[w.client] ?? w.client,
+        service_name: svc?.display_name ?? w.service,
+        service_type: svc?.type ?? '',
+        computed_amount: workAmount(w),
+        editable: !!w.uid && !w.invoice,
+        warnings,
+      };
+    }
+
     return ({ url, method, body }: { url: string; method: string; body?: any }) => {
       if (!url.startsWith(PREFIX)) return undefined;
       const parsed = new URL(url, 'http://mock');
       const path = parsed.pathname.slice(PREFIX.length); // e.g. /transactions
       const q = parsed.searchParams;
+
+      // --- Work entries (uid routes precede the collection route) ---
+      const workItem = path.match(/^\/work\/([^/]+)$/);
+      if (workItem) {
+        const uid = decodeURIComponent(workItem[1]);
+        const idx = work.findIndex((w) => w.uid === uid);
+        if (idx < 0) return { __status: 404, status: 'error', error: 'entry not found' };
+        const entry = work[idx];
+        if (entry.invoice) {
+          return { __status: 409, status: 'error', error: 'entry is invoiced' };
+        }
+        if (method === 'DELETE') {
+          work.splice(idx, 1);
+          return { status: 'ok', uid };
+        }
+        if (method === 'PATCH') {
+          for (const key of [
+            'date',
+            'client',
+            'service',
+            'qty',
+            'amount',
+            'discount',
+            'description',
+            'entity',
+          ] as const) {
+            if (body && key in body) (entry as any)[key] = body[key];
+          }
+          work.sort((a, b) => a.date.localeCompare(b.date));
+          return { status: 'ok', entry: workRow(entry, work.indexOf(entry) + 1) };
+        }
+        return undefined;
+      }
+
+      if (path === '/work' && method === 'POST') {
+        const created: Work = {
+          uid: `work-${nextWorkUid++}`,
+          date: body?.date ?? new Date().toISOString().slice(0, 10),
+          client: (body?.client ?? '').toLowerCase(),
+          service: body?.service ?? '',
+          qty: body?.qty ?? null,
+          amount: body?.amount ?? null,
+          discount: body?.discount ?? 0,
+          description: body?.description ?? '',
+          entity: body?.entity ?? '',
+          invoice: '',
+          paid_date: null,
+        };
+        if (created.service && !SERVICES[created.service]) {
+          return {
+            __status: 400,
+            status: 'error',
+            error: `unknown service: ${created.service}`,
+          };
+        }
+        work.push(created);
+        work.sort((a, b) => a.date.localeCompare(b.date));
+        return { status: 'ok', entry: workRow(created, work.indexOf(created) + 1) };
+      }
+
+      if (path === '/work' && method === 'GET') {
+        work.sort((a, b) => a.date.localeCompare(b.date));
+        let rows = work.map((w, i) => workRow(w, i + 1));
+        const clientKey = q.get('client');
+        if (clientKey) rows = rows.filter((r) => r.client === clientKey);
+        const period = q.get('period');
+        if (period) rows = rows.filter((r) => r.date.startsWith(period));
+
+        const uninvoiced = rows.filter((r) => !r.invoice);
+        const totals = {
+          uninvoiced_count: uninvoiced.length,
+          uninvoiced_amount:
+            Math.round(uninvoiced.reduce((s, r) => s + (r.computed_amount ?? 0), 0) * 100) / 100,
+          invoiced_count: rows.filter((r) => r.invoice).length,
+          paid_count: rows.filter((r) => r.paid_date).length,
+        };
+
+        const status = q.get('status') ?? 'all';
+        if (status === 'uninvoiced') rows = rows.filter((r) => !r.invoice);
+        else if (status === 'invoiced') rows = rows.filter((r) => r.invoice && !r.paid_date);
+        else if (status === 'paid') rows = rows.filter((r) => r.paid_date);
+
+        return { status: 'ok', entries: rows, totals };
+      }
 
       // --- Invoice action routes (must precede the broad /invoices match) ---
       const action = path.match(/^\/invoices\/([^/]+)\/(mark-paid|mark-pending|pdf)$/);
@@ -4869,14 +5157,27 @@ export function mockApi(): Plugin {
     name: 'istota-mock-api',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
+        // Money's routes live under /istota/api/money, already covered by the
+        // /istota/api/ prefix — kept explicit so the intent survives a refactor.
         if (!req.url?.startsWith('/istota/api/') && !req.url?.startsWith('/istota/money/api/'))
           return next();
 
         const method = req.method ?? 'GET';
         const respond = (body: unknown) => {
           res.setHeader('Content-Type', 'application/json');
-          res.statusCode = 200;
-          res.end(JSON.stringify(body));
+          // A handler signals a non-200 by returning `__status`; the key is
+          // stripped so the payload matches what the real API returns.
+          // Without this, error paths (404 / 409 conflict / 400 validation)
+          // can't be exercised against the mock at all.
+          let payload = body;
+          let code = 200;
+          if (body && typeof body === 'object' && '__status' in (body as any)) {
+            const { __status, ...rest } = body as any;
+            code = Number(__status) || 200;
+            payload = rest;
+          }
+          res.statusCode = code;
+          res.end(JSON.stringify(payload));
         };
 
         const dispatch = (parsedBody: any) => {
