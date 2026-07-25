@@ -31,3 +31,24 @@ export const SPEED_GRADIENT_STOPS: Array<[number, string]> = [
   [200, '#ff3aff'], // HSR / intercity rail — magenta
   [300, '#ffffff'], // Shinkansen — white-hot
 ];
+
+// Same scale, darkened through the green→orange band for the light basemap,
+// where the neon values above wash out against near-white tiles. Hues are
+// preserved so a track reads the same on both themes; the blue/red/magenta
+// stops already contrast fine and are left alone. The top stop continues past
+// magenta into deep violet rather than white, which is invisible on light tiles.
+export const SPEED_GRADIENT_STOPS_LIGHT: Array<[number, string]> = [
+  [0, '#2a4a8a'], // standstill — deep blue
+  [4, '#3f7dc8'], // walking
+  [10, '#1a8f45'], // fast walk / slow bike — green
+  [20, '#6d9412'], // cycling
+  [40, '#b07d09'], // urban driving — yellow
+  [80, '#cc5500'], // highway — orange
+  [120, '#ff3a3a'], // fast highway — red
+  [200, '#ff3aff'], // HSR / intercity rail — magenta
+  [300, '#8a00d4'], // Shinkansen — deep violet (white-hot vanishes on light tiles)
+];
+
+export function speedGradientStops(theme: 'light' | 'dark'): Array<[number, string]> {
+  return theme === 'light' ? SPEED_GRADIENT_STOPS_LIGHT : SPEED_GRADIENT_STOPS;
+}

@@ -4,7 +4,7 @@
   import maplibregl from 'maplibre-gl';
   import 'maplibre-gl/dist/maplibre-gl.css';
   import type { LocationPing, Place, DiscoveredCluster, DismissedCluster } from '$lib/api';
-  import { ACTIVITY_COLORS, SPEED_GRADIENT_STOPS } from '$lib/location-constants';
+  import { ACTIVITY_COLORS, speedGradientStops } from '$lib/location-constants';
   import { buildEdges, filterAccuratePings, greatCircleArc } from '$lib/location-path';
   import { theme } from '$lib/stores/theme';
 
@@ -176,6 +176,18 @@
     };
   }
 
+  // Speed gradient: interpolate color along a continuous km/h scale. The stop
+  // colors are theme-dependent (the light basemap needs a darker green→orange
+  // band), so this is rebuilt on every theme switch.
+  function speedColorExpr(t: 'light' | 'dark'): any {
+    return [
+      'interpolate',
+      ['linear'],
+      ['get', 'speed_kmh'],
+      ...speedGradientStops(t).flatMap(([kmh, color]) => [kmh, color]),
+    ];
+  }
+
   function metersToPixels(lat: number, meters: number, zoom: number): number {
     return meters / ((78271.484 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom));
   }
@@ -319,14 +331,6 @@
       },
     });
 
-    // Speed gradient: interpolate color along a continuous km/h scale.
-    const speedColorExpr: any = [
-      'interpolate',
-      ['linear'],
-      ['get', 'speed_kmh'],
-      ...SPEED_GRADIENT_STOPS.flatMap(([kmh, color]) => [kmh, color]),
-    ];
-
     // Activity path trace — solid, speed-coloured. The speed gradient alone
     // conveys mode (walking vs cycling vs transit), so no secondary dashed
     // style is needed.
@@ -337,7 +341,7 @@
       filter: ['==', ['get', 'segment_type'], 'activity'],
       layout: { visibility: 'visible' },
       paint: {
-        'line-color': speedColorExpr,
+        'line-color': speedColorExpr(get(theme) === 'light' ? 'light' : 'dark'),
         'line-width': 2.5,
         'line-opacity': 0.75,
       },
@@ -566,8 +570,9 @@
   }
 
   // Swap basemap + recolor map-data styling for the active theme. The label
-  // halos, place-radius strokes, and dismissed-zone strokes are tuned for the
-  // dark basemap; light tiles need a white halo and lighter strokes.
+  // halos, place-radius strokes, dismissed-zone strokes, and the speed gradient
+  // are tuned for the dark basemap; light tiles need a white halo, lighter
+  // strokes, and a darker green→orange band on the track.
   function applyMapTheme(t: 'light' | 'dark') {
     if (!map || !mapLoaded) return;
     const light = t === 'light';
@@ -579,12 +584,12 @@
     map.setPaintProperty('cluster-labels', 'text-halo-color', halo);
     map.setPaintProperty('place-radius', 'circle-stroke-color', light ? '#9a9aa2' : '#555555');
     map.setPaintProperty('dismissed-zones', 'circle-stroke-color', light ? '#9a9aa2' : '#888888');
+    map.setPaintProperty('path-line', 'line-color', speedColorExpr(t));
   }
 
   function updateLayerVisibility() {
     if (!map || !mapLoaded) return;
     map.setLayoutProperty('path-line', 'visibility', showPath ? 'visible' : 'none');
-    map.setLayoutProperty('path-transit', 'visibility', showPath ? 'visible' : 'none');
     map.setLayoutProperty('path-gap-sparse', 'visibility', showPath ? 'visible' : 'none');
     map.setLayoutProperty('path-gap-flight', 'visibility', showPath ? 'visible' : 'none');
     map.setLayoutProperty('stationary-points', 'visibility', showPath ? 'visible' : 'none');

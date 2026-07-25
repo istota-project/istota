@@ -30,9 +30,8 @@
   import DayStats from '$lib/components/location/DayStats.svelte';
   import TripList from '$lib/components/location/TripList.svelte';
   import Chip from '$lib/components/ui/Chip.svelte';
-  import { Select, ConfirmDialog } from '$lib/components/ui';
+  import { ConfirmDialog } from '$lib/components/ui';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
-  import { ACTIVITY_LABELS, ALL_ACTIVITY_TYPES } from '$lib/location-constants';
 
   let pings: LocationPing[] = $state([]);
   let summary: DaySummary | null = $state(null);
@@ -44,11 +43,6 @@
   let endStr = $state('');
   let showHeat = $state(loadSetting('location.showHeat', false));
   let panelOpen = $state(false);
-  let activityFilter: string = $state('all');
-  const activityOptions = [
-    { value: 'all', label: 'All' },
-    ...ALL_ACTIVITY_TYPES.map((t) => ({ value: t, label: ACTIVITY_LABELS[t] })),
-  ];
   let showDiscover = $state(loadSetting('location.showDiscover', false));
   let clusters: DiscoveredCluster[] = $state([]);
   let dismissed: DismissedCluster[] = $state([]);
@@ -107,10 +101,6 @@
     }
   }
 
-  let activeActivityTypes = $derived<Set<string> | null>(
-    activityFilter === 'all' ? null : new Set([activityFilter]),
-  );
-
   let places = $derived($locationPlaces);
 
   function localDate(d: Date = new Date()): string {
@@ -119,10 +109,10 @@
   const today = localDate();
   let isSingleDay = $derived(startStr === endStr);
 
-  // Trips are derived from the same filtered-ping pipeline the map draws (same
-  // activity filter too), so each trip is one continuous line between stops.
+  // Trips are derived from the same filtered-ping pipeline the map draws, so
+  // each trip is one continuous line between stops.
   // Only meaningful for a single day; multi-day spans aren't itemised.
-  let trips = $derived<Trip[]>(isSingleDay ? segmentTrips(pings, activeActivityTypes) : []);
+  let trips = $derived<Trip[]>(isSingleDay ? segmentTrips(pings) : []);
 
   function yesterday(): string {
     const d = new Date();
@@ -271,14 +261,6 @@
     {#if !isSingleDay && pings.length > 0}
       <Chip checked={showHeat} onclick={() => (showHeat = !showHeat)}>Heat map</Chip>
     {/if}
-    {#if pings.length > 0}
-      <Select
-        value={activityFilter}
-        options={activityOptions}
-        onValueChange={(v) => (activityFilter = v)}
-        ariaLabel="Activity filter"
-      />
-    {/if}
     <Chip checked={showDiscover} onclick={() => (showDiscover = !showDiscover)}>
       Discover
       {#if showDiscover && clusters.length > 0}
@@ -303,7 +285,6 @@
         dismissedClusters={showDiscover ? dismissed : []}
         showPath={!showHeat}
         {showHeat}
-        {activeActivityTypes}
         selectedPlaceId={$selectedPlaceId}
         onPlaceMove={$onPlaceMove}
         pickingLocation={$pickingPlace}
