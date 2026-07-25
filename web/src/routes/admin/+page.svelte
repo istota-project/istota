@@ -125,22 +125,25 @@
   }
 
   // Source colours — a categorical palette: the hue identifies *which* source,
-  // it carries no severity meaning. Hues are spread roughly evenly around the
-  // wheel so adjacent stack segments stay tellable apart, at a mid lightness
-  // that holds up as a fill on both the dark and light backgrounds. Red is left
-  // free so it keeps meaning "failed" everywhere else on the page.
+  // it carries no severity meaning. The four sources that actually carry
+  // traffic (scheduled / talk / web / briefing) take hues roughly a quarter of
+  // the wheel apart — orange, blue, green, magenta — so they can never read as
+  // shades of one another; the rarer sources fill the gaps between them. Mid
+  // lightness throughout so each holds up as a fill on both the dark and light
+  // backgrounds, and red is left free so it keeps meaning "failed" everywhere
+  // else on the page.
   const SOURCE_COLOR: Record<string, string> = {
-    talk: '#4a8ff0', // blue
-    web: '#a86ef0', // purple
-    email: '#f08c2e', // orange
-    cli: '#1fb98a', // spring green
-    repl: '#ee5f9e', // pink
-    istota_file: '#c9a017', // gold
-    tasks_file: '#c9a017', // legacy alias for istota_file
-    scheduled: '#1fb6cf', // cyan
-    briefing: '#7a7af0', // indigo
-    heartbeat: '#6fbf3a', // green
-    subtask: '#c2703f', // copper
+    scheduled: '#f5851f', // orange
+    email: '#d9b40f', // yellow
+    istota_file: '#9ac41b', // lime
+    tasks_file: '#9ac41b', // legacy alias for istota_file
+    web: '#2fbf5f', // green
+    cli: '#14b8c4', // cyan
+    talk: '#3d8bfd', // blue
+    repl: '#9b5cf0', // violet
+    subtask: '#c455e0', // orchid
+    briefing: '#e0479e', // magenta
+    heartbeat: '#a86a3c', // brown
   };
 
   function sourceColor(name: string): string {
