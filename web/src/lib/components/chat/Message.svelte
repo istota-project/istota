@@ -90,6 +90,7 @@
   // and only when the surface passes a toggle handler.
   const starrable = $derived(typeof message.msgId === 'number' && !!onToggleStar);
   const showRoomChip = $derived(!!message.roomName && !!onRoomClick);
+  const hasActions = $derived(starrable || (meta.length > 0 && !message.streaming));
 </script>
 
 {#snippet starButton()}
@@ -104,6 +105,21 @@
   >
     <Star size={14} fill={message.starred ? 'currentColor' : 'none'} />
   </button>
+{/snippet}
+
+<!-- Per-message metadata + actions: task id / model / duration / tool count,
+     then the star. Rendered as the trailing member of the author header on a
+     fresh group (so its text baseline-aligns with the timestamp for free), and
+     absolutely positioned on a continuation row, which has no header. -->
+{#snippet actionsBar()}
+  <div class="msg-actions">
+    {#if meta.length && !message.streaming}
+      <span class="meta-footer">{meta.join(' · ')}</span>
+    {/if}
+    {#if starrable}
+      {@render starButton()}
+    {/if}
+  </div>
 {/snippet}
 
 {#if isSystem}
@@ -157,6 +173,9 @@
             >
               {message.roomName}
             </button>
+          {/if}
+          {#if hasActions}
+            {@render actionsBar()}
           {/if}
         </div>
       {/if}
@@ -215,19 +234,10 @@
       {/if}
     </div>
 
-    <!-- Floating per-message actions bar (top-right): the hover metadata plus
-		     the star toggle. One bar so the two hover surfaces can't collide; a
-		     starred message keeps its star visible at rest. Future per-message
-		     actions (copy, …) land here. -->
-    {#if starrable || (meta.length && !message.streaming)}
-      <div class="msg-actions">
-        {#if meta.length && !message.streaming}
-          <span class="meta-footer">{meta.join(' · ')}</span>
-        {/if}
-        {#if starrable}
-          {@render starButton()}
-        {/if}
-      </div>
+    <!-- A continuation row has no author header to hang the bar off, so it
+			     floats at the top-right, lined up with the gutter's hover time. -->
+    {#if continuation && hasActions}
+      {@render actionsBar()}
     {/if}
   </div>
 {/if}
@@ -257,35 +267,51 @@
     opacity: 1;
   }
 
-  /* Floating per-message actions bar at the top-right, holding the hover
-	   metadata and the star toggle. Absolutely positioned so it overlays the
-	   row's top-right corner instead of consuming a flex column — otherwise it
-	   narrows the message content (badly on mobile). `top` is set per row-type
-	   below so its baseline lines up with the time on the left, which lives in
-	   different spots: the author header on a fresh group, the gutter on a
-	   continuation. */
+  /* Per-message actions bar: hover metadata + the star toggle. One bar so the
+		   two hover surfaces can't collide. Where it sits depends on whether the row
+		   has an author header, because it must line up with that row's timestamp —
+		   and the timestamp lives in two different places. */
   .msg-actions {
-    position: absolute;
-    right: 0.75rem;
     display: flex;
     align-items: center;
     gap: 0.35rem;
   }
-  /* Fresh group: time sits in the .meta author header (next to the name). */
-  .msg:not(.continuation) .msg-actions {
-    top: 0.6rem;
+  /* Fresh group: the bar is the trailing member of the .meta header, so the
+		   shared `align-items: baseline` puts its text on the timestamp's baseline by
+		   construction. A hand-tuned offset can't do that — it has to hold across font
+		   metrics that differ per platform, and it drifted on iOS Safari. */
+  .meta .msg-actions {
+    margin-left: auto;
+    align-self: baseline;
+    /* Yield to the author/time rather than pushing them out of the row. */
+    min-width: 0;
   }
-  /* Continuation: time sits in the left gutter (.hover-time), higher up. */
+  /* The star is an icon button with no text baseline of its own; centre it on
+		   the bar instead of letting it hang off the synthesized one. */
+  .meta .msg-actions .star-btn {
+    align-self: center;
+  }
+  /* Continuation: no header, so float it top-right against the gutter's
+		   .hover-time. `top` matches the gutter's own padding, and the two share a
+		   font-size + line-height (below), so their line boxes — and therefore their
+		   baselines — coincide without a magic offset. */
   .msg.continuation .msg-actions {
-    top: 0.15rem;
+    position: absolute;
+    right: 0.75rem;
+    top: 0.1rem;
   }
 
   /* Subtle per-message metadata, revealed on hover (child of the actions bar). */
   .meta-footer {
     font-size: var(--text-xs);
+    line-height: 1.6;
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+    /* A narrow row trims the tail (tool count, then duration) rather than
+			   squeezing the author name — the id and model are the identifying bits. */
+    overflow: hidden;
+    text-overflow: ellipsis;
     opacity: 0;
     transition: opacity var(--transition-fast);
   }
@@ -366,8 +392,11 @@
     color: #111;
   }
 
+  /* Continuation-row timestamp. Font-size and line-height are deliberately the
+	   same as .meta-footer's so the two line boxes match and the floating actions
+	   bar lands on this baseline exactly. */
   .hover-time {
-    font-size: 0.62rem;
+    font-size: var(--text-xs);
     color: var(--text-dim);
     opacity: 0;
     line-height: 1.6;
@@ -390,6 +419,9 @@
     font-size: var(--text-base);
     font-weight: 600;
     color: var(--text-primary);
+    /* Author and time hold their size; the metadata bar is what gives way when
+		   the header row runs out of width. */
+    flex-shrink: 0;
   }
   .author.bot {
     color: var(--accent-amber);
@@ -398,6 +430,7 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
   }
 
   .body {
@@ -427,6 +460,12 @@
   .chip-slot.gap-below {
     margin-bottom: 0.85rem;
   }
+  /* A tool-first turn opens with a chip directly under the author header. Flush
+	   reads cramped against the header, a full paragraph gap reads detached — so
+	   it gets half the neighbour gap. */
+  .meta + .chip-slot {
+    margin-top: 0.425rem;
+  }
 
   .msg.error .body,
   .cmd-output.error {
@@ -443,7 +482,11 @@
   .cmd-row .room-chip {
     margin-bottom: 0.25rem;
   }
+  /* A command row has neither header nor gutter, so its star floats top-right
+	   on its own. (The bar is only absolute here and on continuation rows.) */
   .msg-actions.cmd-actions {
+    position: absolute;
+    right: 0.75rem;
     top: 0.3rem;
   }
   .cmd-output {

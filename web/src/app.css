@@ -135,6 +135,32 @@
   box-sizing: border-box;
 }
 
+/* iOS Safari gives date/time inputs a native control with an intrinsic content
+   width that ignores `width`/`max-width` while the platform appearance is on —
+   so a field sized to its container on desktop overflows the card on an iPhone.
+   Dropping the native appearance makes them size like any other text input. */
+input[type='date'],
+input[type='datetime-local'],
+input[type='time'],
+input[type='month'],
+input[type='week'] {
+  -webkit-appearance: none;
+  appearance: none;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* With the native appearance gone, iOS centres the value text and collapses an
+   empty input to zero height. Pin both back to the desktop rendering. */
+input[type='date']::-webkit-date-and-time-value,
+input[type='datetime-local']::-webkit-date-and-time-value,
+input[type='time']::-webkit-date-and-time-value,
+input[type='month']::-webkit-date-and-time-value,
+input[type='week']::-webkit-date-and-time-value {
+  text-align: left;
+  min-height: 1.2em;
+}
+
 html,
 body {
   height: 100%;
