@@ -168,7 +168,7 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `result_text: str` | Final response text |
 | `actions_taken: str \| None` | JSON-encoded list of tool-use descriptions |
 | `execution_trace: str \| None` | JSON-encoded `[{type:"tool"\|"text"\|"cm_boundary", ...}]`. A `tool` entry carries an optional `raw` = the verbatim Bash command (`_tool_invocation`), threaded by all three brains for playbook command extraction (ISSUE-174) |
-| `stop_reason: str` | `completed` / `cancelled` / `timeout` / `oom` / `transient_api_error` / `usage_limit` / `error` / `not_found` / `fallback`. `usage_limit` = a subscription/quota/billing limit (a persistent "brain unavailable" condition the executor reroutes to the configured fallback brain — see "Brain fallback" below). |
+| `stop_reason: str` | `completed` / `cancelled` / `timeout` / `oom` / `terminated` / `transient_api_error` / `usage_limit` / `error` / `not_found` / `fallback`. `usage_limit` = a subscription/quota/billing limit (a persistent "brain unavailable" condition the executor reroutes to the configured fallback brain — see "Brain fallback" below). `terminated` = the subprocess was killed by a signal other than SIGKILL — see "Signal deaths" below. |
 
 ## ClaudeCodeBrain
 Wraps the `claude` CLI subprocess. Owns:
@@ -212,7 +212,18 @@ Wraps the `claude` CLI subprocess. Owns:
    re-check after subprocess exit catches SIGTERM-style external kills.
 6. **Timeout** — `threading.Timer` kills the process after
    `req.timeout_seconds`; result tagged `stop_reason="timeout"`.
-7. **OOM detection** — returncode `-9` → `stop_reason="oom"`.
+7. **Signal deaths** — a negative returncode means the subprocess died on
+   signal `-rc` (`_signal_result`, both exec paths, checked after the
+   cancellation/timeout branches so `!stop` still reports as a cancellation).
+   `-9` keeps its OOM wording + `stop_reason="oom"` (SIGKILL is the OOM
+   killer's and systemd-oomd's signature); every other signal returns
+   `"Claude Code was terminated by <NAME> (signal N)"` with
+   `stop_reason="terminated"`, a WARNING, and the execution trace attached.
+   Before ISSUE-191 only `-9` was recognized and every other signal fell to the
+   generic stream-parse catch-all ("Stream parsing failed (rc=-15, N lines)").
+   `is_signal_termination(text)` is the shared marker predicate the scheduler
+   classifies on (the executor drops `stop_reason` at its return boundary, so
+   the scheduler reads failure *text* — same as OOM and cancellation).
 8. **API retry** — wraps single-attempt execution in a 3-attempt loop with
    5s fixed sleep when `is_transient_api_error()` matches (5xx/429).
    Retries do NOT count against the task's `attempt_count`.

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -208,6 +209,53 @@ def _failure_stop_reason(text: str) -> str:
     the distinct stop_reason before the generic ``error`` path swallows it.
     """
     return "usage_limit" if is_usage_limit_error(text) else "error"
+
+
+_OOM_TEXT = "Claude Code was killed (likely out of memory)"
+_TERMINATED_PREFIX = "Claude Code was terminated by "
+
+
+def is_signal_termination(text: str) -> bool:
+    """True when a failure text is the brain's signal-death message.
+
+    The executor drops ``stop_reason`` at its return boundary, so the scheduler
+    classifies failures by their text (the same way it recognizes OOM and
+    cancellation). This keeps the marker string in one place.
+    """
+    return text.startswith(_TERMINATED_PREFIX)
+
+
+def _signal_result(returncode: int | None, execution_trace: str | None) -> BrainResult | None:
+    """Classify a process killed by a signal. Returns None if it wasn't.
+
+    A negative returncode means the subprocess died on signal ``-returncode``.
+    Only SIGKILL used to be recognized (the OOM killer's and systemd-oomd's
+    signature); every other signal fell through to the generic stream-parse
+    catch-all and was reported as "Stream parsing failed (rc=-15, N lines)" — a
+    symptom, not a cause. SIGTERM in particular is what ``systemctl restart``
+    delivers to the whole cgroup under systemd's default KillMode, so it is a
+    routine event that deserves a name (ISSUE-191).
+    """
+    if returncode is None or returncode >= 0:
+        return None
+    signum = -returncode
+    if signum == signal.SIGKILL:
+        return BrainResult(
+            success=False,
+            result_text=_OOM_TEXT,
+            execution_trace=execution_trace,
+            stop_reason="oom",
+        )
+    try:
+        name = signal.Signals(signum).name
+    except ValueError:
+        name = "signal"
+    return BrainResult(
+        success=False,
+        result_text=f"{_TERMINATED_PREFIX}{name} (signal {signum})",
+        execution_trace=execution_trace,
+        stop_reason="terminated",
+    )
 
 
 def _is_root() -> bool:
@@ -608,12 +656,9 @@ class ClaudeCodeBrain:
 
         output = result.stdout.strip()
 
-        if result.returncode == -9:
-            return BrainResult(
-                success=False,
-                result_text="Claude Code was killed (likely out of memory)",
-                stop_reason="oom",
-            )
+        signal_death = _signal_result(result.returncode, None)
+        if signal_death is not None:
+            return signal_death
 
         # A session/quota limit is reported by `claude -p` as a *successful*
         # completion (rc 0, the limit text as the answer), so classify it on the
@@ -861,12 +906,17 @@ class ClaudeCodeBrain:
                 stop_reason="timeout",
             )
 
-        if process.returncode == -9:
-            return BrainResult(
-                success=False,
-                result_text="Claude Code was killed (likely out of memory)",
-                stop_reason="oom",
+        # A signal death outranks every remaining branch: the process was killed
+        # from outside, so whatever it had (or hadn't) written to stdout says
+        # nothing about why. The trace rides along — the tools that ran before
+        # the kill are the only diagnostic left (ISSUE-183/191).
+        signal_death = _signal_result(process.returncode, trace_json)
+        if signal_death is not None:
+            logger.warning(
+                "claude subprocess died on a signal: %s (stdout_lines=%d)",
+                signal_death.result_text, len(raw_stdout_lines),
             )
+            return signal_death
 
         stderr_output = "".join(stderr_lines).strip()
 

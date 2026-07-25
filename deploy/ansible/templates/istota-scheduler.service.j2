@@ -20,6 +20,18 @@ ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.scheduler -
 Restart=always
 RestartSec=5
 
+# Signal only the main process on stop. systemd's default
+# KillMode=control-group SIGTERMs *every* process in the cgroup, so a
+# `systemctl restart` (the auto-update cron issues one on every new commit)
+# killed in-flight tasks' `claude` subprocesses out from under their workers.
+# The daemon shut down gracefully, so the surviving worker recorded the corpse
+# as an ordinary task failure — and on a final attempt, as a permanent one
+# (ISSUE-191). With mixed, the daemon owns the shutdown: workers get their
+# drain window, and anything still alive when the main process exits is
+# SIGKILLed by systemd's cleanup, leaving `running` rows for
+# recover_orphaned_tasks_on_startup to requeue on the next boot.
+KillMode=mixed
+
 # FD ceiling. The scheduler holds many concurrent SQLite connections
 # (framework istota.db + per-user feeds.db + per-user location.db, each
 # WAL-mode → main + -wal + -shm), spawns claude CLI subprocesses with

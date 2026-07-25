@@ -55,6 +55,7 @@ from .executor import (
     detect_malformed_result,
     discover_calendars_for_task,
     execute_task,
+    is_signal_termination,
     is_transient_api_error,
     parse_api_error,
 )
@@ -367,6 +368,25 @@ def _format_error_for_user(error_text: str) -> str:
 
     # Generic fallback - don't expose raw error
     return "Something went sideways and I'm not entirely sure what. Resurfacing — try again?"
+
+
+def _is_shutdown_collateral(result: str) -> bool:
+    """True when a failure is this daemon's own shutdown killing the task.
+
+    Under systemd's default ``KillMode=control-group`` a ``systemctl restart``
+    (the auto-update cron issues one on every new commit) SIGTERMs every
+    process in the cgroup — including an in-flight task's `claude` subprocess.
+    The daemon's own handler shuts down gracefully, so the worker survives long
+    enough to record the corpse as a task failure and, on a final attempt,
+    fail it permanently. Nothing about the task failed, so it's requeued
+    instead (ISSUE-191).
+
+    Narrow on purpose: only a signal death, and only while shutting down. A
+    genuine model error that happens to land during shutdown takes the normal
+    path. The reverse race — the child is signalled but the daemon hasn't set
+    the flag yet — degrades to that same normal retry path.
+    """
+    return _shutdown_requested and is_signal_termination(result)
 
 
 def _strip_action_prefix(result: str) -> tuple[bool, str]:
@@ -1935,6 +1955,7 @@ def process_one_task(
             is_oom = "killed (likely out of memory)" in result
             is_cancelled = result == "Cancelled by user"
             is_policy = _is_policy_refusal(result)
+            is_shutdown_collateral = _is_shutdown_collateral(result)
             if is_cancelled:
                 db.update_task_status(conn, task_id, "cancelled", error=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task cancelled by user via !stop")
@@ -1963,6 +1984,26 @@ def process_one_task(
                             "Scheduled job %d auto-disabled after %d failures",
                             task.scheduled_job_id, fail_count,
                         )
+            elif is_shutdown_collateral:
+                # Not a task failure — the daemon is going away and took the
+                # subprocess with it. Requeue without charging an attempt or
+                # setting a backoff; the next daemon claims it immediately.
+                db.release_task_for_restart(conn, task_id, result)
+                db.log_task(
+                    conn, task_id, "warn",
+                    "Scheduler shutting down; task subprocess was terminated "
+                    "— requeued without charging an attempt",
+                )
+                logger.warning(
+                    "Task %d requeued: killed by shutdown signal (%s)",
+                    task_id, result[:120],
+                )
+                # The next attempt re-runs from the top, so this attempt's
+                # deferred-op files must not replay alongside it (ISSUE-074).
+                from .executor import get_user_temp_dir
+                _purge_deferred_files_for_retry(
+                    task, get_user_temp_dir(config, task.user_id),
+                )
             elif task.attempt_count < task.max_attempts - 1 and not is_oom:
                 # Exponential backoff: 1, 4, 16 minutes
                 delay = 1 << (task.attempt_count * 2)
@@ -2029,14 +2070,22 @@ def process_one_task(
         is_cancelled = (not success) and result == "Cancelled by user"
         is_policy = (not success) and _is_policy_refusal(result)
         is_oom = (not success) and "killed (likely out of memory)" in result
+        is_requeued = (not success) and _is_shutdown_collateral(result)
         will_retry = (
             (not success)
             and not is_cancelled
             and not is_policy
             and not is_oom
+            and not is_requeued
             and task.attempt_count < task.max_attempts - 1
         )
-        if will_retry:
+        if is_requeued:
+            # Same reasoning as the retry notice below: the task isn't done, so
+            # no terminal frame — tell the watching client why it stalled.
+            event_writer.emit("progress_text", {
+                "text": "⏳ Scheduler restarting — this task will resume shortly…",
+            })
+        elif will_retry:
             # Mirror the backoff the retry branch set (1, 4, 16 min). Reuses the
             # progress_text kind — the frontend already renders it as the live
             # progress line; it shows during the backoff gap, then the next
@@ -2045,7 +2094,7 @@ def process_one_task(
             event_writer.emit("progress_text", {
                 "text": f"⏳ Attempt failed — retrying in {delay} min…",
             })
-        if not will_retry:
+        if not will_retry and not is_requeued:
             if is_confirmation_request:
                 event_writer.emit("confirmation", {"prompt": result})
             elif success:

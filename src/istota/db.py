@@ -1247,8 +1247,12 @@ def update_task_status(
             (status, task_id),
         )
     elif status == "completed":
+        # worker_pid is cleared on every transition out of `running`: the
+        # subprocess it named is gone, and `!stop` / the web cancel endpoint
+        # both os.kill whatever the row holds — a stale PID the OS has since
+        # recycled would send SIGTERM to an unrelated process (ISSUE-191).
         conn.execute(
-            "UPDATE tasks SET status = ?, completed_at = datetime('now'), result = ?, actions_taken = ?, execution_trace = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE tasks SET status = ?, completed_at = datetime('now'), result = ?, actions_taken = ?, execution_trace = ?, worker_pid = NULL, updated_at = datetime('now') WHERE id = ?",
             (status, result, actions_taken, execution_trace, task_id),
         )
     elif status in ("failed", "cancelled"):
@@ -1262,7 +1266,8 @@ def update_task_status(
         # the web duration badge renders.
         conn.execute(
             "UPDATE tasks SET status = ?, completed_at = datetime('now'), "
-            "error = ?, actions_taken = ?, execution_trace = ?, updated_at = datetime('now') WHERE id = ?",
+            "error = ?, actions_taken = ?, execution_trace = ?, worker_pid = NULL, "
+            "updated_at = datetime('now') WHERE id = ?",
             (status, error, actions_taken, execution_trace, task_id),
         )
     else:
@@ -1283,7 +1288,10 @@ def set_task_pending_retry(
     Clears last_heartbeat/started_at so the retried row doesn't carry the prior
     attempt's liveness into the next claim — the claim itself also resets these
     (defense in depth), but a pending row shouldn't advertise a dead worker's
-    heartbeat in the meantime.
+    heartbeat in the meantime. worker_pid goes with them: the failed attempt's
+    subprocess is dead, and leaving its number on the row lets `!stop` /
+    the web cancel endpoint SIGTERM whatever the OS recycled it onto
+    (ISSUE-191).
     """
     conn.execute(
         """
@@ -1296,10 +1304,48 @@ def set_task_pending_retry(
             locked_by = NULL,
             last_heartbeat = NULL,
             started_at = NULL,
+            worker_pid = NULL,
             updated_at = datetime('now')
         WHERE id = ?
         """,
         (error, retry_delay_minutes, task_id),
+    )
+
+
+def release_task_for_restart(
+    conn: sqlite3.Connection,
+    task_id: int,
+    error: str,
+) -> None:
+    """Return a running task to the queue after the daemon's own shutdown
+    signal killed its subprocess.
+
+    Under systemd's default ``KillMode=control-group`` a ``systemctl restart``
+    SIGTERMs every process in the cgroup, so an in-flight task's `claude` child
+    dies while the daemon shuts down gracefully — and the surviving worker
+    records the corpse as an ordinary task failure (ISSUE-191). It isn't one:
+    nothing about the task failed, so the attempt is **not** charged against
+    ``attempt_count`` and no backoff is set. The next daemon claims it
+    immediately, which is what ``recover_orphaned_tasks_on_startup`` already
+    does for the SIGKILL variant of the same event.
+
+    Bounded by ``fail_ancient_pending_tasks``: a released row that never gets
+    claimed is reaped like any other stale pending task.
+    """
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'pending',
+            error = ?,
+            locked_at = NULL,
+            locked_by = NULL,
+            last_heartbeat = NULL,
+            started_at = NULL,
+            worker_pid = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        (error, task_id),
     )
 
 

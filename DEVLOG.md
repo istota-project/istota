@@ -2,6 +2,39 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: A deploy was killing in-flight tasks, and the failure looked like a parse bug
+
+Investigating ISSUE-191: a long-running scheduled task died 25 minutes in with `Stream parsing failed (rc=-15, 1480 lines)` and, being on its final attempt, failed permanently. The issue's write-up had it as probable memory pressure — the death landed inside a full-page screenshot on a box with no swap — and flagged "who sent the SIGTERM" as the honest unknown.
+
+**It was our own deploy.** The commit pushed one minute before the death (`ff006ceb`, 17:05:01 UTC) is the whole story: the auto-update cron polls every two minutes, so it fired at 17:06:00, spent ~5s on fetch/sync/migrations, and restarted the scheduler at ≈17:06:05. The task died at 17:06:05. The unit template set no `KillMode`, and systemd's default is `control-group` — SIGTERM to every process in the cgroup, the task's sandboxed model subprocess included. That is exactly `rc=-15`, and it explains the detail that had argued *against* systemd: a cgroup SIGTERM only reaches whatever is in flight at that instant, so every other task in the window finished normally. The screenshot is coincidence — it's simply where a 25-minute job happens to be at minute 25.
+
+**The reason it failed permanently instead of retrying is the more interesting half.** The daemon's SIGTERM handler is graceful: it sets a flag and returns. So the parent survived the signal that killed its child, the worker observed `rc=-15`, and the failure path recorded an ordinary task failure. Had the daemon been SIGKILLed instead, `recover_orphaned_tasks_on_startup` would have released the row back to `pending` and it would have re-run. The graceful path produced the worse outcome, purely because nothing in the failure path knew a shutdown was underway.
+
+**Not charging the attempt is the load-bearing decision.** The obvious implementation mirrors `recover_orphaned_tasks` exactly, incrementing `attempt_count` — consistent, and it keeps a hard bound. But that leaves the originating case unfixed: the task that prompted this was on its terminal attempt, so a bounded release still fails it. An attempt aborted by infrastructure isn't an attempt the task spent, so the release charges nothing and sets no backoff. The bound moves to `fail_ancient_pending_tasks`, which reaps a released row that never gets claimed like any other stale pending task. The runaway worry — a restart loop re-releasing forever — doesn't apply, because a crashing daemon never sets the shutdown flag and takes the orphan-recovery path (which does increment).
+
+**Two fixes at different layers, deliberately.** `KillMode=mixed` on the scheduler unit is the root cause and converts this whole class of event into the already-handled orphan-recovery path. But unit files aren't in the synced tree, so the auto-update cron *cannot* deploy them — that half waits on an Ansible run. The code half ships within two minutes of a push and works regardless. Hence both: the in-process branch isn't redundant belt-and-braces, it's the part that actually lands first.
+
+**The classification had to go in the result text, not `stop_reason`.** `execute_task` returns a 4-tuple and drops `stop_reason` at its boundary, so the scheduler already classifies failures by string-matching the message — that's how OOM and cancellation work today. Threading `stop_reason` out would touch every call site and test for one branch. So the brain emits a marker message and exports `is_signal_termination()` as the shared predicate, keeping the string in one place instead of duplicating it at the match site.
+
+**Adjacent latent bug found on the way.** `worker_pid` was written on claim and cleared *only* by orphan recovery — `set_task_pending_retry` and `update_task_status` both left it. Both cancel paths signal whatever the row holds, and `!stop` targets the newest `running|locked|pending_confirmation` row, which after a retry carries the *previous* attempt's dead PID. Once the OS recycles that number, a cancel SIGTERMs an unrelated process. A second, independent source of stray `-15`s, closed by clearing the column on every transition out of `running`.
+
+Signal classification also now keeps the execution trace, which a signal death used to drop — the tools that ran before the kill are the only diagnostic left (the ISSUE-183 reasoning, applied to a path it had missed).
+
+**Key changes:**
+- `_signal_result()` classifies any negative returncode in both exec paths: SIGKILL keeps its OOM wording and `stop_reason`, every other signal gets a named `stop_reason="terminated"` plus a WARNING and the trace. Ordered after the cancellation check so `!stop` still reads as a cancellation.
+- Shutdown-aware failure path: a signal death while shutting down requeues via `release_task_for_restart` — no attempt charged, no backoff, deferred ops purged, no user-facing error, no scheduled-job failure increment.
+- Watching web clients get a "Scheduler restarting…" notice instead of a terminal frame, mirroring how the retry path already handles a non-terminal failure.
+- `worker_pid` cleared on every transition out of `running`.
+- `KillMode=mixed` on the scheduler unit template (needs an Ansible run to take effect).
+
+**Files added/modified:**
+- `src/istota/brain/claude_code.py` — `_signal_result()`, `is_signal_termination()`, wired into both exec paths
+- `src/istota/scheduler.py` — `_is_shutdown_collateral()`, the requeue branch, terminal-event suppression
+- `src/istota/db.py` — `release_task_for_restart()`, `worker_pid` cleared on retry and terminal transitions
+- `src/istota/executor.py` — re-export `is_signal_termination` alongside the other brain predicates
+- `deploy/ansible/templates/istota-scheduler.service.j2` — `KillMode=mixed`
+- `tests/test_signal_termination.py` — new; 16 tests across the three layers
+
 ## 2026-07-25: Review pass on invoicing-config editing — every delete guard failed open
 
 Two-agent review of the clients/entities/services commit. The headline: **all three delete guards were reachable in a state where they reported zero references and allowed the delete**, each for a different reason, and the three reasons share one root cause — the guard re-derived what invoicing resolves instead of asking the resolver.

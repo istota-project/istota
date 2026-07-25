@@ -112,6 +112,7 @@ from .brain.claude_code import (  # noqa: E402  (kept after module docstring)
     API_RETRY_DELAY_SECONDS,
     API_RETRY_MAX_ATTEMPTS,
     TRANSIENT_STATUS_CODES,
+    is_signal_termination,
     is_transient_api_error,
     is_usage_limit_error,
     parse_api_error,
