@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-  import { SendHorizontal, Square, Paperclip, X } from 'lucide-svelte';
+  import { onDestroy, tick } from 'svelte';
+  import { ArrowUp, Square, Plus, Mic, Check, Trash2, X } from 'lucide-svelte';
   import { uploadChatAttachment, type ChatAttachment } from '$lib/api';
   import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
   import { commandProvider, modelAliasProvider } from './autocomplete/providers';
+  import { createRecorder, formatElapsed } from './useRecorder.svelte';
 
   let {
     onSend,
@@ -21,10 +22,25 @@
   let text = $state('');
   let textarea: HTMLTextAreaElement | undefined = $state();
   let fileInput: HTMLInputElement | undefined = $state();
+  // Measured to derive the single-row field width — see wrapsAtSingleRowWidth.
+  let rowEl: HTMLDivElement | undefined = $state();
+  let plusEl: HTMLButtonElement | undefined = $state();
+  let toolsEl: HTMLDivElement | undefined = $state();
+  let wrapEl: HTMLDivElement | undefined = $state();
   let attachments = $state<ChatAttachment[]>([]);
   let uploading = $state(0);
   let dragOver = $state(false);
   let uploadError = $state('');
+  // True once the text no longer fits on one line: the controls drop below the
+  // field instead of sharing its row. Driven by the measurement in autoGrow,
+  // not a media query, so it tracks content rather than viewport width.
+  let multiline = $state(false);
+
+  const recorder = createRecorder({ onComplete: (file) => upload([file]) });
+  onDestroy(() => recorder.dispose());
+
+  const AUDIO_EXT = new Set(['webm', 'm4a', 'mp3', 'ogg', 'wav', 'mp4', 'opus', 'aac']);
+  const isAudio = (name: string) => AUDIO_EXT.has(name.split('.').pop()?.toLowerCase() ?? '');
 
   // Prefix autocomplete. modelAliasProvider is ordered first so `!model <alias>`
   // (with the space) wins over the bare-! command matcher.
@@ -54,10 +70,78 @@
     }
   }
 
-  function autoGrow() {
+  // Grow the field to its content, capped at MAX_LINES. Everything is measured
+  // off the computed line-height rather than a px constant so the cap stays the
+  // same *number of lines* at every text-size setting.
+  const MAX_LINES = 8;
+
+  function lineMetrics(): { line: number; pad: number } {
+    const cs = getComputedStyle(textarea!);
+    return {
+      line: parseFloat(cs.lineHeight) || 20,
+      pad: (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0),
+    };
+  }
+
+  // Width the field has while it shares its row with the controls. Derived from
+  // the row rather than read off the field, because the field is *wider* than
+  // this whenever it has already wrapped.
+  function singleRowWidth(): number {
+    if (!rowEl || !plusEl || !toolsEl) return 0;
+    const cs = getComputedStyle(rowEl);
+    const gap = parseFloat(cs.columnGap) || 0;
+    const inner =
+      rowEl.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+    const w = inner - plusEl.offsetWidth - toolsEl.offsetWidth - gap * 2;
+    return w > 0 ? w : 0;
+  }
+
+  // Whether the text wraps — always measured at the single-row width, never at
+  // the field's current width. Measuring the current width is a feedback loop:
+  // wrapping moves the controls out of the field's row, which widens the field,
+  // which can un-wrap the text, which flips it back. The field then alternated
+  // between one and two rows on consecutive keystrokes.
+  function wrapsAtSingleRowWidth(line: number, pad: number): boolean | null {
+    const narrow = singleRowWidth();
+    const prevHeight = textarea!.style.height;
+    // Constrain the wrapper, not the field: the field is a flex item with
+    // `flex: 1` (basis 0), so its `width` is ignored for sizing and setting it
+    // would leave the measurement at whatever width the field already had —
+    // which is the feedback loop this function exists to break. The inline
+    // flex-basis also beats the `.multiline .ta-wrap` rule.
+    const prevBasis = wrapEl?.style.flexBasis ?? '';
+    const prevGrow = wrapEl?.style.flexGrow ?? '';
+    if (narrow > 0 && wrapEl) {
+      wrapEl.style.flexBasis = `${narrow}px`;
+      wrapEl.style.flexGrow = '0';
+    }
+    textarea!.style.height = 'auto';
+    const content = textarea!.scrollHeight;
+    if (wrapEl) {
+      wrapEl.style.flexBasis = prevBasis;
+      wrapEl.style.flexGrow = prevGrow;
+    }
+    textarea!.style.height = prevHeight;
+    // jsdom reports scrollHeight 0 — no answer rather than a wrong one.
+    return content > 0 ? content > line + pad + 2 : null;
+  }
+
+  function applyHeight() {
     if (!textarea) return;
+    const { line, pad } = lineMetrics();
     textarea.style.height = 'auto';
-    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+    textarea.style.height = Math.min(textarea.scrollHeight, line * MAX_LINES + pad) + 'px';
+  }
+
+  async function autoGrow() {
+    if (!textarea) return;
+    const { line, pad } = lineMetrics();
+    const wraps = wrapsAtSingleRowWidth(line, pad);
+    if (wraps !== null) multiline = wraps;
+    // Size the field only once the class change has landed, so the height is
+    // measured against the width the field actually ends up with.
+    await tick();
+    applyHeight();
   }
 
   // iOS Safari auto-zooms when a focused input renders below 16px. Rather than
@@ -163,6 +247,10 @@
   }
 </script>
 
+<!-- The wrap point moves with the field's width, so a rotation or a sidebar
+     toggle has to re-evaluate it; nothing else fires while the text is idle. -->
+<svelte:window onresize={autoGrow} />
+
 <div
   class="composer"
   class:drag={dragOver}
@@ -179,7 +267,8 @@
     <div class="attach-row">
       {#each attachments as att (att.path)}
         <span class="attach-chip">
-          📎 {att.name}
+          {isAudio(att.name) ? '🎤' : '📎'}
+          {att.name}
           <button
             class="attach-x"
             onclick={() => removeAttachment(att.path)}
@@ -194,16 +283,18 @@
     </div>
   {/if}
   {#if uploadError}<div class="attach-error">{uploadError}</div>{/if}
+  {#if recorder.error}<div class="attach-error">{recorder.error}</div>{/if}
 
-  <div class="composer-row">
+  <div class="composer-row" class:multiline bind:this={rowEl}>
     <button
-      class="icon-btn"
+      bind:this={plusEl}
+      class="icon-btn plus"
       onclick={() => fileInput?.click()}
       type="button"
       aria-label="Attach file"
       title="Attach file"
     >
-      <Paperclip size={16} />
+      <Plus />
     </button>
     <input
       bind:this={fileInput}
@@ -216,7 +307,7 @@
         (e.target as HTMLInputElement).value = '';
       }}
     />
-    <div class="ta-wrap">
+    <div class="ta-wrap" bind:this={wrapEl}>
       {#if ac.open}
         <AutocompletePopover
           suggestions={ac.suggestions}
@@ -246,37 +337,84 @@
         aria-autocomplete="list"
         aria-activedescendant={acActiveDescendant}
       ></textarea>
+      <!-- Overlaid rather than swapped in, so the textarea keeps its element
+           identity (and any in-flight autocomplete state) across a recording. -->
+      {#if recorder.recording || recorder.starting}
+        <div class="rec-overlay" aria-live="polite">
+          <span class="rec-dot" aria-hidden="true"></span>
+          {#if recorder.starting}
+            Starting…
+          {:else}
+            Recording {formatElapsed(recorder.elapsedMs)}
+          {/if}
+        </div>
+      {/if}
     </div>
-    {#if busy && onCancel}
-      <button
-        class="icon-btn send stop"
-        onclick={onCancel}
-        type="button"
-        aria-label="Stop"
-        title="Stop"
-      >
-        <Square size={16} />
-      </button>
-    {:else}
-      <button
-        class="icon-btn send"
-        onclick={submit}
-        type="button"
-        disabled={!text.trim() && attachments.length === 0}
-        aria-label="Send"
-        title="Send"
-      >
-        <SendHorizontal size={16} />
-      </button>
-    {/if}
+    <div class="tools" bind:this={toolsEl}>
+      {#if recorder.recording}
+        <button
+          class="icon-btn"
+          onclick={() => recorder.cancel()}
+          type="button"
+          aria-label="Discard recording"
+          title="Discard recording"
+        >
+          <Trash2 />
+        </button>
+        <button
+          class="icon-btn send"
+          onclick={() => recorder.stop()}
+          type="button"
+          aria-label="Finish recording"
+          title="Finish recording"
+        >
+          <Check />
+        </button>
+      {:else}
+        {#if recorder.supported}
+          <button
+            class="icon-btn"
+            onclick={() => recorder.start()}
+            type="button"
+            disabled={recorder.starting}
+            aria-label="Record voice message"
+            title="Record voice message"
+          >
+            <Mic />
+          </button>
+        {/if}
+        {#if busy && onCancel}
+          <button
+            class="icon-btn send stop"
+            onclick={onCancel}
+            type="button"
+            aria-label="Stop"
+            title="Stop"
+          >
+            <Square />
+          </button>
+        {:else}
+          <button
+            class="icon-btn send"
+            onclick={submit}
+            type="button"
+            disabled={!text.trim() && attachments.length === 0}
+            aria-label="Send"
+            title="Send"
+          >
+            <ArrowUp />
+          </button>
+        {/if}
+      {/if}
+    </div>
   </div>
 </div>
 
 <style>
+  /* No divider and no fill: the pill below is a self-contained floating
+	   element, so the wrapper only supplies spacing and the safe-area insets. */
   .composer {
     padding: 0.6rem 0.75rem;
-    border-top: 1px solid var(--border-subtle);
-    background: var(--surface-card);
     /* The composer is the bottom edge of the app, so it absorbs the device's
 		   safe-area insets: the fill still runs into the corners / under the home
 		   indicator, but the textarea and buttons sit above them. max() keeps the
@@ -288,39 +426,101 @@
   .composer.drag {
     background: var(--surface-raised);
     outline: 1px dashed var(--border-default);
+    border-radius: 1.6em;
   }
+  /* One pill owns the border, radius and focus ring; the field inside is
+	   borderless. Every internal size is em-relative to this font-size, so the
+	   controls track the user's text-size preference instead of staying at a
+	   fixed 36px while the type around them grows. */
   .composer-row {
     display: flex;
-    align-items: flex-end;
-    gap: 0.5rem;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35em;
+    font-size: var(--text-base);
+    padding: 0.3em;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 1.6em;
+    transition: border-color var(--transition-fast);
+  }
+  .composer-row:focus-within {
+    border-color: var(--text-dim);
+  }
+
+  /* Single line: [+] [text] [mic][send]. Once the text wraps it takes the full
+	   width on its own row and the controls fall underneath it — same elements,
+	   same handlers, just reordered. */
+  .plus {
+    order: 0;
   }
   .ta-wrap {
+    order: 1;
     position: relative;
-    flex: 1;
     display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .tools {
+    order: 2;
+    display: flex;
+    align-items: center;
+    gap: 0.35em;
+    margin-left: auto;
+  }
+  .composer-row.multiline .ta-wrap {
+    order: 0;
+    flex-basis: 100%;
+  }
+  .composer-row.multiline .plus {
+    order: 1;
   }
 
   textarea {
     flex: 1;
     resize: none;
-    max-height: 200px;
     overflow-y: auto;
     scrollbar-width: none;
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
+    background: transparent;
+    border: none;
     color: var(--text-primary);
     font: inherit;
-    font-size: var(--text-base);
     line-height: 1.4;
-    padding: 0.5rem 0.65rem;
+    padding: 0.45em 0.25em;
     outline: none;
   }
   textarea::-webkit-scrollbar {
     display: none;
   }
-  textarea:focus {
-    border-color: var(--text-dim);
+
+  .rec-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0 0.25em;
+    background: var(--surface-raised);
+    color: var(--text-secondary);
+    border-radius: 1.2em;
+    pointer-events: none;
+  }
+  .rec-dot {
+    width: 0.6em;
+    height: 0.6em;
+    border-radius: 50%;
+    background: var(--status-danger-fg);
+    animation: rec-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes rec-pulse {
+    50% {
+      opacity: 0.3;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .rec-dot {
+      animation: none;
+    }
   }
 
   .icon-btn {
@@ -328,16 +528,26 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
-    border-radius: var(--radius-card);
-    border: 1px solid var(--border-default);
-    background: var(--surface-raised);
+    width: 2.35em;
+    height: 2.35em;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    /* A button does not inherit font by default — without this the em sizes
+	     above resolve against the UA's ~13px and the controls stay a fixed size
+	     while the type around them grows. */
+    font: inherit;
     color: var(--text-muted);
     cursor: pointer;
     transition:
       background var(--transition-fast),
       color var(--transition-fast);
+  }
+  /* Size the glyph in CSS rather than through lucide's `size` prop, which
+	   bakes a px number into the width/height attributes. */
+  .icon-btn :global(svg) {
+    width: 1.25em;
+    height: 1.25em;
   }
   .icon-btn:hover:not(:disabled) {
     background: var(--surface-badge);
@@ -347,11 +557,24 @@
     opacity: 0.4;
     cursor: default;
   }
+  /* The send affordance is the one filled control in the bar. */
   .icon-btn.send {
-    color: var(--text-primary);
+    background: var(--accent-blue);
+    color: #fff;
   }
-  .icon-btn.stop {
-    color: var(--status-danger-fg);
+  .icon-btn.send:hover:not(:disabled) {
+    background: var(--accent-blue);
+    color: #fff;
+    filter: brightness(1.12);
+  }
+  .icon-btn.send:disabled {
+    background: var(--surface-badge);
+    color: var(--text-muted);
+    opacity: 1;
+  }
+  .icon-btn.send.stop {
+    background: var(--status-danger-fg);
+    color: #fff;
   }
 
   .file-hidden {
@@ -393,10 +616,5 @@
     color: var(--status-danger-fg);
     font-size: var(--text-xs);
     margin-bottom: 0.3rem;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .composer {
-    background: #ffffff;
   }
 </style>

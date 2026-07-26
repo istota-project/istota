@@ -3268,6 +3268,20 @@ def _chat_attachment_dir(username: str, day: str) -> Path:
     return _chat_upload_roots(username)[0] / day
 
 
+_ATTACHMENT_STEM_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _attachment_stem(filename: str, limit: int = 48) -> str:
+    """Filesystem-safe leading part of a stored attachment's name.
+
+    ``Path.stem`` drops any directory component, and the substitution keeps
+    only characters that can't traverse or confuse a path, so a hostile
+    ``filename`` (it comes from the client) can only shorten to ``""``.
+    """
+    stem = _ATTACHMENT_STEM_RE.sub("-", Path(filename).stem).strip("-._")
+    return stem[:limit]
+
+
 def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:
     import uuid
     from datetime import date
@@ -3275,7 +3289,12 @@ def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:
     day = date.today().isoformat()
     dest_dir = _chat_attachment_dir(username, day)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{uuid.uuid4().hex}{ext}"
+    # Lead with the uploaded name so the inbox is browsable (a voice message
+    # reads as `voice-20260726-131512-a3f91c02.webm`, not a bare UUID), and
+    # keep a random suffix so two same-named uploads in one day can't collide.
+    stem = _attachment_stem(filename)
+    suffix = uuid.uuid4().hex[:8] if stem else uuid.uuid4().hex
+    dest = dest_dir / f"{stem}-{suffix}{ext}" if stem else dest_dir / f"{suffix}{ext}"
     dest.write_bytes(data)
     return str(dest)
 

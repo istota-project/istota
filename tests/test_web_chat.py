@@ -1146,6 +1146,69 @@ class TestChatAttachments:
         assert os.path.exists(body["path"])
         assert "inbox/web-chat" in body["path"].replace(os.sep, "/")
 
+    async def test_stored_name_keeps_the_uploaded_stem(self, chat_client):
+        """The inbox is human-browsable: a voice message reads as
+        `voice-…-<rand>.webm`, not a bare UUID."""
+        import os
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("voice-20260726-131512.webm", b"OggS", "audio/webm")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        stored = os.path.basename(resp.json()["path"])
+        assert stored.startswith("voice-20260726-131512-")
+        assert stored.endswith(".webm")
+
+    async def test_two_same_named_uploads_do_not_collide(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        paths = []
+        for _ in range(2):
+            resp = await chat_client.post(
+                "/istota/api/chat/attachments",
+                files={"file": ("note.txt", b"hello", "text/plain")},
+                cookies=cookies, headers={"origin": "https://example.com"},
+            )
+            assert resp.status_code == 200
+            paths.append(resp.json()["path"])
+        assert paths[0] != paths[1]
+
+    async def test_hostile_filename_cannot_escape_the_attachment_dir(self, chat_client):
+        """The name comes from the client, so it is sanitised rather than
+        trusted: no separators, no traversal, no leading dot."""
+        import os
+        from istota.web_app import _attachment_stem, _save_chat_attachment
+
+        assert _attachment_stem("../../../etc/passwd") == "passwd"
+        assert _attachment_stem("..") == ""
+        assert _attachment_stem("....") == ""
+        # A Windows-style name reaches a POSIX host with its backslashes intact
+        # (they are ordinary characters here, not separators) — the point is
+        # that nothing path-shaped survives, not that the name stays pretty.
+        for hostile in ("a/b\\c.txt", r"C:\Users\x\file.txt", "x/y.txt", "\u0000null.txt"):
+            stem = _attachment_stem(hostile)
+            assert "/" not in stem and "\\" not in stem and ".." not in stem
+
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("../../escape.txt", b"x", "text/plain")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        path = resp.json()["path"].replace(os.sep, "/")
+        assert "inbox/web-chat" in path
+        assert ".." not in path
+
+    async def test_unnamed_upload_still_stores(self, chat_client):
+        """A name that sanitises to nothing falls back to a plain random one."""
+        import os
+        from istota.web_app import _save_chat_attachment
+        path = _save_chat_attachment("alice", "...", b"x")
+        assert os.path.exists(path)
+        assert not os.path.basename(path).startswith("-")
+
     async def test_disallowed_extension_rejected(self, chat_client):
         cookies = await _login(chat_client, "alice")
         resp = await chat_client.post(

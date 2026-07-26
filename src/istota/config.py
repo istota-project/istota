@@ -491,9 +491,13 @@ class WebChatConfig:
     """
     max_prompt_chars: int = 32000
     max_attachment_mb: int = 25
+    # `webm` is what MediaRecorder produces on Chrome/Firefox for the
+    # composer's voice-message button (iOS records audio/mp4, which we name
+    # `.m4a`). Audio lands as an ordinary attachment and is transcribed by
+    # `executor._pre_transcribe_attachments` on the way into the prompt.
     attachment_extensions: list[str] = field(default_factory=lambda: [
         "pdf", "png", "jpg", "jpeg", "webp", "gif", "txt", "md",
-        "csv", "wav", "mp3", "m4a", "ogg", "docx", "xlsx",
+        "csv", "wav", "mp3", "m4a", "ogg", "webm", "docx", "xlsx",
     ])
     rate_limit_messages: int = 30
     rate_limit_window_seconds: int = 300

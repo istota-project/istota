@@ -8,11 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- You can record a voice message in web chat. The composer has a microphone button that records, shows the elapsed time, and lets you discard the take or keep it; the recording is attached like any other file and transcribed on arrival, the same as a voice message sent through Talk. It needs a secure connection to reach the microphone at all, so the button is simply absent when the page is served over plain http. Transcription requires the optional speech extra to be installed.
+
 - The web UI has a text size setting, and reads slightly larger by default. Settings has a new **Appearance** card offering small, medium and large; medium is the new default, so the interface comes up a step larger than before — small is still there and is exactly the previous size. The whole interface scales together rather than just the type, so nothing crowds its container, and the choice applies as soon as you pick it. It sits alongside the light/dark theme, which is now settable there too rather than only from the header icon; both are stored in the browser, so they are per-device and need no save.
 
 - The assistant can now read a web page as markdown, with headings, list position and link addresses arriving together. That is what lets it tell an article link from a footer link on a page it has never seen, so browsing no longer depends on knowing a site's markup. It can take a front page whole or pull just the body of an article, whichever the page calls for.
 
 ### Changed
+- The web chat message box is one rounded field rather than three separate boxes. Attaching is a plus button and sending is an arrow inside the field itself, in place of the paperclip and paper-aeroplane sitting either side of it; the box has no divider or panel behind it any more, so it reads as a single element floating below the conversation. Once your message runs past one line the controls move underneath it, giving the text the full width. The buttons now grow and shrink with the text size setting, which they previously ignored.
+
+- The scroll-to-latest button sits in the middle of the conversation rather than the bottom right corner, where it had become a second arrow pointing the opposite way to the send button.
+
+- Chat attachments are stored under a readable name. A file you upload — or a voice message you record — used to land in your inbox folder as a random string of characters with the right extension, which made the folder impossible to browse. The name you uploaded is now kept, followed by a short random suffix so two files sent the same day can't overwrite each other.
+
 - On a phone, the sidebar now opens from a control in the header bar instead of a tab floating over the page. The old tab sat pinned to the middle of the left edge, on top of whatever you were reading, and had to be conspicuous to be findable at all; the new one sits at the start of the header where a menu button is expected, and the section title next to it opens the sidebar too. Chat additionally gives its messages a little more width on small screens by narrowing the avatar column.
 
 - The feeds **Images** and **Text** chips now hide pictures and body copy rather than hiding whole entries. Turning off Images used to drop every picture post out of the feed entirely — and turning off Text dropped everything else — so the two together were a post-type filter, not a display control. Each entry now stays in place and loses only the part you switched off, including pictures embedded in the body copy, so turning both off gives you a list of headlines instead of an empty page. The chips are a desktop control: a phone always shows everything and no longer offers them.

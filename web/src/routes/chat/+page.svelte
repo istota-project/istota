@@ -612,10 +612,14 @@
 	   newest message; click smooth-scrolls back to the bottom. */
   .jump-latest {
     position: absolute;
-    /* Right edge aligned with the composer's send button: the composer has
-		   0.75rem of horizontal padding and the 36px send button sits flush
-		   against it, so matching `right` + width lines the two up vertically. */
-    right: 0.75rem;
+    /* Centered over the scroll area. It used to hang off the right edge to line
+		   up with the old square send button; against the composer's round send
+		   circle that reads as two mismatched arrows stacked in the same corner,
+		   so it sits in the middle instead — which also keeps it clear of the
+		   text as the pill grows. The centering translate is folded into the
+		   hover/active transforms below, or they would cancel it. */
+    left: 50%;
+    transform: translateX(-50%);
     bottom: 0.75rem;
     z-index: 5;
     display: flex;
@@ -629,21 +633,20 @@
     color: var(--text-primary);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
     cursor: pointer;
-    opacity: 0.9;
-    transition:
-      opacity 0.12s ease,
-      transform 0.12s ease;
+    /* Fully opaque: centered it floats over message text rather than over the
+		   right margin, and the old 0.9 let that text read straight through. */
+    opacity: 1;
+    transition: transform 0.12s ease;
   }
   /* Light mode: a heavy black shadow reads harsh on the white pane — soften it. */
   :global(:root[data-theme='light']) .jump-latest {
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
   }
   .jump-latest:hover {
-    opacity: 1;
-    transform: translateY(-1px);
+    transform: translate(-50%, -1px);
   }
   .jump-latest:active {
-    transform: translateY(0);
+    transform: translate(-50%, 0);
   }
 
   .chat-empty {

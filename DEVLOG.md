@@ -2,6 +2,40 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-26: Chat composer overhaul — one pill, voice messages, and a wrap measurement that isn't self-referential
+
+The chat input was three separate boxes in a row — a bordered attach button, a bordered textarea, a bordered send button — with the icons pinned at 36px while the text around them scaled with the new text-size preference. This replaces it with a single pill and adds voice recording, and most of the session went into two bugs that only showed up once the layout could reflow.
+
+**Item 5 died on contact with the device.** The ask included removing the iOS keyboard accessory bar (the `< > ✓` strip). The only lever web content has is rendering the field as `contenteditable` instead of `<textarea>`, and I did not know whether current iOS still shows the bar for those — so rather than guess or commit to porting the autocomplete engine off `value`/`selectionStart`, the first thing built was a throwaway static page with five variants (textarea, contenteditable, plaintext-only contenteditable, input, textarea-in-a-form) reporting `visualViewport.height` live, since the bar is ~44pt and would show as a measurable difference. All five triggered it. Item dropped, test page deleted. Worth remembering the shape: a five-minute static page settled a question that would otherwise have cost a speculative refactor.
+
+**The buttons looked like they scaled and didn't.** Switching `.icon-btn` to `2.35em` and sizing the glyph via CSS (rather than lucide's `size` prop, which bakes px into the width/height attributes) *appeared* to work on screen. Measuring it in the browser said 31px at small, medium and large alike. A `<button>` does not inherit font by default, so every `em` was resolving against the UA stylesheet's ~13.3px. One `font: inherit` later: 32/35/38px against text of 13.6/14.96/16.32px. This is the second time this session that eyeballing a screenshot agreed with a change that was doing nothing.
+
+**The wrap oscillation, in two layers.** With the controls dropping below the field on wrap, the field gets *wider* when it wraps — it no longer shares its row. So text that needs two lines at the narrow width fits one line at the wide width, un-wraps, narrows, wraps again: the field alternated one/two rows on consecutive keystrokes. The fix is to make the decision's input independent of its output — always measure at the single-row width, derived from the row minus the `+` button, the tools group and the gaps. The first attempt at that still flipped, because it pinned the temporary width on the *textarea*, which is a flex item with `flex: 1` (basis `0%`) and therefore ignores `width` for sizing; the measurement was still happening at the live width. Pinning the wrapper's inline `flex-basis` (which also beats the `.multiline` rule) is what actually constrains it. Height sizing became a separate pass after `await tick()`, so the field is measured against the width it ends up with rather than the one it's leaving.
+
+Verifying this needed the browser, because jsdom has no layout: a probe drove 70 keystrokes across the boundary and counted class transitions — one flip growing, one shrinking, where the bug produced dozens. (A detour: the first probes reported 1000ms per keystroke, which was Chrome clamping timers in a backgrounded tab, not a perf regression. Microtask waits instead of `setTimeout`.) The unit test models the same boundary by returning a different `scrollHeight` when the wrapper is pinned, so it fails if the pinning is removed — it proves the logic is stateless, not that the geometry is right.
+
+**Voice messages ride the existing path.** `MediaRecorder` → a `File` → the ordinary attachment upload, because `executor._pre_transcribe_attachments` already transcribes any audio attachment into the prompt (the same route a Talk voice message takes). No new endpoint. Container is negotiated per browser: webm/opus on Chrome/Firefox, `audio/mp4` on iOS — named `.m4a`, which was already an allowed extension, so only `webm` had to be added to `attachment_extensions`. The mic button hides itself when `navigator.mediaDevices` is absent, which is what makes it vanish outside a secure context (a plain-http LAN address) instead of failing on tap.
+
+**Two things surfaced by the user mid-session.** The jump-to-latest FAB was right-aligned to line up with the old square send button; against a round send circle it read as two mismatched arrows in one corner, so it moved to centre — which then exposed that its `opacity: 0.9` had been invisible while it floated over the right margin and let message text read straight through it once centred. And the attachment chip showed "upload" for recordings: that turned out to be the **mock API** returning a hardcoded name, not real behaviour — but chasing it found that the server discards the filename entirely and stores a bare UUID, so uploads now lead with a sanitized stem and the inbox is browsable.
+
+**Key changes:**
+- `Composer.svelte` restructured into one pill: `+` / field / mic + filled `↑` send circle, wrapping to controls-below. Wrapper lost its top divider and fill (the pill is self-contained), taking a now-redundant light-theme override with it.
+- Wrap detection measured at a fixed reference width; height sizing split into a post-`tick` pass; `<svelte:window onresize>` re-evaluates.
+- `useRecorder.svelte.ts` — new; `getUserMedia` + `MediaRecorder`, per-browser container, discard/finish controls, releases the mic on stop/cancel/unmount.
+- Stored attachment names are `<sanitized-stem>-<rand><ext>` rather than a bare UUID; the stem keeps only `[A-Za-z0-9._-]` and `Path.stem` drops any directory component, so a hostile client-supplied name can only shorten to empty (which falls back to a plain random name).
+- Mock API echoes the uploaded filename instead of a fixed `'upload'` — it had been masking the real response shape in dev.
+- Tests: 17 new frontend (composer layout/send/voice + recorder unit), 4 new Python (attachment naming, collision, traversal, empty stem).
+
+**Files added/modified:**
+- `web/src/lib/components/chat/Composer.svelte` — restructured
+- `web/src/lib/components/chat/useRecorder.svelte.ts` — new
+- `web/src/lib/components/chat/{Composer,useRecorder}.svelte.test.ts` — new
+- `web/src/routes/chat/+page.svelte` — jump-to-latest centred + opaque
+- `web/vite-mock-api.ts` — upload handler echoes the real filename
+- `src/istota/web_app.py` — `_attachment_stem`, readable stored names
+- `src/istota/config.py` — `webm` added to chat attachment extensions
+- `tests/test_web_chat.py` — attachment naming + sanitisation
+
 ## 2026-07-26: The mobile sidebar toggle moves into the header bar
 
 The drawer toggle on small screens was a tab pinned to the middle of the viewport's left edge — `position: fixed`, floating over the content, hidden again the moment the drawer opened. The session started as "make it bigger and more visible in dark mode" (it was `--surface-card` on `--surface-base`, two shades of near-black, with a `--border-subtle` edge that vanished into the page) and ended with the pattern replaced, because making it bigger made the real problem obvious: a control tethered to no layout landmark has to shout to be found, and shouting is exactly what made it compete with the content it sat on top of.

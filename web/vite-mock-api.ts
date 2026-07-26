@@ -824,7 +824,13 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
   }
 
   if (path === '/istota/api/chat/attachments' && method === 'POST') {
-    return { path: `inbox/web-chat/mock/${Date.now()}.bin`, name: 'upload', size: 0 };
+    // Echo the uploaded file's own name, as the real endpoint does — a fixed
+    // 'upload' here made every attachment chip in dev show the wrong label.
+    // The body arrives as the raw multipart payload; the part headers are
+    // ASCII at the front, so the filename survives the utf8 decode.
+    const name =
+      (typeof body === 'string' ? body : '').match(/filename="([^"]*)"/)?.[1] || 'upload';
+    return { path: `inbox/web-chat/mock/${Date.now()}-${name}`, name, size: 0 };
   }
 
   return undefined;
