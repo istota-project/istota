@@ -344,10 +344,13 @@
     min-height: 0;
   }
 
+  /* Transactions scrolls here rather than in .money-section-body, so this is
+	   where the bottom safe area goes (see the money layout's insetBottom note). */
   .txn-scroll {
     flex: 1;
     overflow-y: auto;
     padding: 0 0 0.5rem;
+    padding-bottom: max(0.5rem, var(--safe-bottom));
     transition: opacity var(--transition-fast);
   }
 

@@ -86,7 +86,13 @@
 {:else if error}
   <div class="error-msg">{error}</div>
 {:else}
-  <AppShell>
+  <!-- insetBottom only on settings. Every other money section puts its own
+       scroller inside the shell (.money-section-body, or transactions'
+       .txn-scroll), so the shell's inset would land *below* that scroller as a
+       permanent dead band while its last row still ran under the home
+       indicator — the inset has to go on the scrolling box itself. Settings is
+       the one section that scrolls in .shell-main directly. -->
+  <AppShell insetBottom={onSettings}>
     {#snippet header()}
       <ShellHeader title="Money">
         {#snippet nav()}
@@ -215,12 +221,17 @@
     color: var(--text-dim);
   }
 
+  /* The section scroller, so it owns the bottom safe area (the shell hands it
+     over via insetBottom={onSettings}): the last row scrolls clear of the home
+     indicator instead of the shell reserving a strip below the scroll area that
+     nothing can ever scroll into. Inert where the inset is 0. */
   :global(.money-section-body) {
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
     overflow: auto;
+    padding-bottom: var(--safe-bottom);
   }
 
   /* Shared record-table shell ------------------------------------------------
