@@ -517,15 +517,16 @@ body {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 12px 32px rgba(0, 0, 0, 0.25);
   text-align: center;
 }
+/* The sigil is a flat near-white silhouette on transparency, so it needs no
+   badge chrome — and light theme inverts it to near-black rather than shipping
+   a second asset. Mirrors .app-nav .app-name .sigil in app.css. */
 .mark {
-  width: 4.5rem;
   height: 4.5rem;
+  width: auto;
   margin: 0 auto 1.25rem;
   display: block;
-  border-radius: 1.125rem;
-  border: 1px solid var(--border-default);
-  background: #111;
 }
+:root[data-theme='light'] .mark { filter: invert(1); }
 h1 {
   margin: 0;
   font-size: 1.35rem;
@@ -654,7 +655,7 @@ def _render_login_page(bot_name: str, version: str) -> str:
         f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
         f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
         f'<main class="card">'
-        f'<img class="mark" src="/istota/logo-192.png" alt="" width="72" height="72">'
+        f'<img class="mark" src="/istota/octopus-sigil.webp" alt="" width="68" height="72">'
         f'<h1>{name}</h1>'
         f'<p class="tagline">Sign in to continue</p>'
         f'<a class="btn" href="/istota/login?go=1">{_CLOUD_ICON}'

@@ -120,7 +120,7 @@ class TestLoginRoute:
 
         resp = await client.get("/istota/login")
         # Logo + project link + running version in the footer.
-        assert "/istota/logo-192.png" in resp.text
+        assert "/istota/octopus-sigil.webp" in resp.text
         assert "istota.cynium.com" in resp.text
         assert f"v{__version__}" in resp.text
         # Email login is advertised but not yet an actionable control — it must

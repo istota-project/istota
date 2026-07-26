@@ -53,7 +53,10 @@
   <div class="error-msg">{error}</div>
 {:else if user}
   <nav class="app-nav">
-    <a href="{base}/" class="app-name">Istota</a>
+    <a href="{base}/" class="app-name">
+      <img class="sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />
+      Istota
+    </a>
     <div class="nav-links">
       <a href="{base}/chat" class:active={isActive('/chat')}>Chat</a>
       {#if user.features.briefings}

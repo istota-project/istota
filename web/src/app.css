@@ -277,10 +277,27 @@ a:hover {
 }
 
 .app-nav .app-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   font-weight: 600;
   font-size: 0.9rem;
   text-decoration: none;
   color: var(--text-primary);
+}
+
+/* Sized in em so the sigil tracks the text-scale preference with the wordmark,
+   and kept to the wordmark's line box so adding it can't make the nav taller.
+   The asset is one flat near-white silhouette on transparency, so light theme
+   inverts it to near-black rather than shipping a second file. */
+.app-nav .app-name .sigil {
+  height: 1.3em;
+  width: auto;
+  flex-shrink: 0;
+}
+
+:root[data-theme='light'] .app-nav .app-name .sigil {
+  filter: invert(1);
 }
 
 .app-nav .nav-links {
