@@ -743,8 +743,8 @@
   /* Status badge */
   .status-badge {
     position: fixed;
-    bottom: 0.75rem;
-    right: 0.75rem;
+    bottom: max(0.75rem, var(--safe-bottom));
+    right: max(0.75rem, var(--safe-right));
     font-size: var(--text-xs);
     color: var(--text-dim);
     background: #161616;

@@ -296,7 +296,9 @@
   }
 </script>
 
-<AppShell>
+<!-- insetBottom={false}: the Composer holds the bottom safe-area inset itself, so
+     its fill reaches the screen edge while its controls stay above the indicator. -->
+<AppShell insetBottom={false}>
   {#snippet header()}
     <ShellHeader
       title={inViewMode ? VIEW_LABELS[$view as ChatView] : activeRoom ? activeRoom.name : 'Chat'}

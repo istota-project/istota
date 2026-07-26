@@ -94,15 +94,16 @@
   .nav:hover {
     background: rgba(0, 0, 0, 0.75);
   }
+  /* Full-bleed overlay, so its controls carry their own safe-area offsets. */
   .nav.prev {
-    left: 1rem;
+    left: max(1rem, var(--safe-left));
   }
   .nav.next {
-    right: 1rem;
+    right: max(1rem, var(--safe-right));
   }
   .counter {
     position: absolute;
-    bottom: 1rem;
+    bottom: max(1rem, var(--safe-bottom));
     left: 50%;
     transform: translateX(-50%);
     padding: 0.25rem 0.6rem;

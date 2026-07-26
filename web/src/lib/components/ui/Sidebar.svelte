@@ -99,6 +99,13 @@
       display: flex;
     }
 
+    /* The drawer is positioned against the shell body, so it sits outside the
+		   scroll area's bottom inset and its last row would land in the
+		   home-indicator strip. (Horizontal insets come from .shell.) */
+    .sidebar-list {
+      padding-bottom: max(0.5rem, var(--safe-bottom));
+    }
+
     .sidebar-backdrop {
       display: block;
       position: fixed;

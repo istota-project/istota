@@ -78,6 +78,18 @@
   --chat-gutter: 2.25rem;
   --chat-avatar: 2.1rem;
 
+  /* Device safe-area insets — the rounded screen corners, the notch, and the
+	   home-indicator strip. Non-zero only because app.html opts into
+	   `viewport-fit=cover`; without that the browser letterboxes the page for us
+	   and every one of these reads 0 (as it does on every desktop browser).
+	   Anything pinned to a viewport edge pads by `max(<its own padding>, <inset>)`
+	   so the inset raises the floor on a curved device and changes nothing
+	   elsewhere. Theme-independent, so there is no light-theme counterpart. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
   /* Transitions */
   --transition-fast: 0.15s ease;
 
@@ -206,6 +218,12 @@ body {
 }
 
 body {
+  /* Definite height, so a flex child can resolve `flex: 1` against it — that is
+     what lets AppShell be `height: 100%` instead of subtracting a hardcoded nav
+     height from 100vh. dvh tracks the *visible* viewport, so a collapsing mobile
+     browser toolbar no longer pushes the bottom row off-screen; the 100% above
+     stays as the fallback for pre-dvh browsers. */
+  height: 100dvh;
   margin: 0;
   font-family:
     system-ui,
@@ -237,7 +255,13 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 1rem;
+  /* Never absorb the shrink when a fill page below wants the rest of the body. */
+  flex-shrink: 0;
   padding: 0.75rem;
+  /* Landscape on a notched phone puts the notch on one side — keep the nav row
+     clear of it. Inert in portrait and on desktop (insets are 0). */
+  padding-left: max(0.75rem, var(--safe-left));
+  padding-right: max(0.75rem, var(--safe-right));
   background: var(--surface-card);
   border-bottom: 1px solid var(--border-subtle);
   font-size: 0.85rem;
@@ -300,14 +324,27 @@ a:hover {
   color: var(--text-primary);
 }
 
+/* Page padding is safe-area-aware on all three exposed edges. AppShell cancels
+   this padding with a negative margin, so it mirrors the same max() expressions
+   — keep the two in step or a shell page grows a background strip at the edge. */
 .app-content {
   padding: 1.5rem;
+  padding-bottom: max(1.5rem, var(--safe-bottom));
+  padding-left: max(1.5rem, var(--safe-left));
+  padding-right: max(1.5rem, var(--safe-right));
 }
 
-.app-content-fill {
+/* Full-height pages — the six that render an AppShell. The shell wants the whole
+   area edge to edge, so this drops the page padding rather than having the shell
+   cancel it with a negative margin, and AppShell carries the safe-area insets
+   itself. Compound selector so it also beats the `.app-content` padding
+   shorthand in the breakpoint further down, which would otherwise win on order. */
+.app-content.app-content-fill {
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-height: 0;
+  padding: 0;
   overflow: hidden;
 }
 
@@ -530,8 +567,12 @@ a:hover {
 }
 
 @media (max-width: 640px) {
+  /* Both blocks re-state the safe-area longhands: the padding shorthand below
+     resets them, and these rules win on source order. */
   .app-nav {
     padding: 0.5rem 0.75rem;
+    padding-left: max(0.75rem, var(--safe-left));
+    padding-right: max(0.75rem, var(--safe-right));
     gap: 0.5rem;
   }
   .app-nav .nav-links {
@@ -539,5 +580,8 @@ a:hover {
   }
   .app-content {
     padding: 1rem 0.75rem;
+    padding-bottom: max(1rem, var(--safe-bottom));
+    padding-left: max(0.75rem, var(--safe-left));
+    padding-right: max(0.75rem, var(--safe-right));
   }
 }

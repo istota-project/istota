@@ -64,8 +64,11 @@
   // inflating the field's font (which throws off its height vs. the buttons),
   // pin the viewport's maximum-scale only while the textarea is focused, then
   // restore it on blur so pinch-to-zoom keeps working everywhere else.
-  const VIEWPORT_DEFAULT = 'width=device-width, initial-scale=1';
-  const VIEWPORT_NO_ZOOM = 'width=device-width, initial-scale=1, maximum-scale=1';
+  // Both strings must keep viewport-fit=cover (app.html sets it): dropping it on
+  // focus would re-letterbox the page mid-interaction and jump the layout.
+  const VIEWPORT_DEFAULT = 'width=device-width, initial-scale=1, viewport-fit=cover';
+  const VIEWPORT_NO_ZOOM =
+    'width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover';
 
   function setViewport(content: string) {
     const meta = document.querySelector('meta[name="viewport"]');
@@ -76,6 +79,14 @@
   }
   function onBlur() {
     setViewport(VIEWPORT_DEFAULT);
+    // iOS scrolls the *window* to bring a focused field above the keyboard and
+    // does not reliably undo it on dismissal. The app is exactly one viewport
+    // tall with its own internal scrollers, so a non-zero window scroll has
+    // nowhere to go and leaves a dead band where the layout ran off the bottom —
+    // the "stuck at less than full height" state, most visible in an iOS
+    // home-screen web app where there is no browser chrome to hide it. Nothing
+    // legitimately scrolls the window here, so resetting it is unconditional.
+    if (window.scrollY !== 0) window.scrollTo(0, 0);
     // The popover accepts on mousedown (preventDefault keeps focus), so a
     // click on a row does not blur first — safe to close here.
     ac.close();
@@ -266,6 +277,13 @@
     padding: 0.6rem 0.75rem;
     border-top: 1px solid var(--border-subtle);
     background: var(--surface-card);
+    /* The composer is the bottom edge of the app, so it absorbs the device's
+		   safe-area insets: the fill still runs into the corners / under the home
+		   indicator, but the textarea and buttons sit above them. max() keeps the
+		   normal padding as the floor, so this is inert wherever the insets are 0. */
+    padding-bottom: max(0.6rem, var(--safe-bottom));
+    padding-left: max(0.75rem, var(--safe-left));
+    padding-right: max(0.75rem, var(--safe-right));
   }
   .composer.drag {
     background: var(--surface-raised);

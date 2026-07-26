@@ -2,7 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- viewport-fit=cover lets the page paint into the rounded corners / home
+         indicator instead of being letterboxed above them, which is what makes
+         env(safe-area-inset-*) report real values. Everything pinned to a
+         viewport edge pads by the matching --safe-* token in app.css. Composer
+         rewrites this tag on focus (iOS zoom guard) — keep the flag in both of
+         its strings. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="text-scale" content="scale" />
     <script>
       // Apply the saved theme and text scale before first paint to avoid a flash
