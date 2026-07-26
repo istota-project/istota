@@ -2,6 +2,48 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-26: Text size preference, an Appearance card, and feeds toggles that actually toggle
+
+Three web-UI changes from one session. The first two are additive; the third changes what two existing controls mean.
+
+**Text scale, and why the root font-size rather than the tokens.** New `lib/stores/fontSize.ts` — `small | medium | large`, localStorage-persisted, reflected onto `<html>` as `data-font-size`. It is a straight copy of the theme store's shape, including a branch in the single pre-paint script in `app.html`, because the size has to be right before first paint or the page reflows on load. That is also the reason it is client-local rather than a `user_profiles` field: profile data arrives after first paint, so server-persisting it would reintroduce the flash it exists to avoid.
+
+The scaling is a percentage on `:root` (`medium` 110%, `large` 120%), not an override of the `--text-*` tokens. Both were viable — the tokens carry 502 of the ~560 `font-size` declarations — but nearly all *spacing* is `rem` too, so scaling the root moves type and the space around it together and the layout keeps its proportions. Scaling only the tokens would grow text inside fixed padding, which is the more likely way to crowd a container. Percentages rather than px so a user who has raised their browser's base font keeps that gain at every level. `small` deliberately has no rule at all: it is the browser's own size, byte-identical to the previous rendering. The residue that does not scale is the four `px` SVG chart labels on the health pages and the borders, both deliberate.
+
+Medium became the default partway through, which is a smaller change than it sounds except for one trap: the normalizer had to invert. It had the usual shape — match the non-default values, fall through to the default — so keeping that while changing the fallback would have made `small` unselectable, since an explicit `setFontSize('small')` is indistinguishable from garbage. It now matches `small`/`large` and falls through to `medium`, and the `app.html` branch mirrors it; if those two ever disagree you get one frame at the wrong size. Both are pinned by tests.
+
+**Appearance card.** Theme and text size now sit together on `/settings`, between Identity and Preferences, applying on change with no Save. Theme is the same store as the header toggle, so the two stay in sync for free. The card lives inside the profile-gated block, which normally would be wrong for a client-local control — but the page loads everything through one `Promise.all`, so a failed fetch already empties the whole page, and the header toggle still works there.
+
+**Service card ordering.** Google Workspace now renders directly under the Nextcloud card. Sorted on the `oauth` flag the payload already carries rather than on the service name: Nextcloud is itself a connect flow, so the intent is that the connect/disconnect cards group above the credential-field cards, and a future OAuth service joins them without another edit. Stable sort, applied to `filter()`'s fresh array so it doesn't mutate the source.
+
+**The feeds Images / Text chips were a post-type filter.** Turning off Images dropped every picture post out of the feed; turning off Text dropped everything else. Both off gave an empty page. They now hide the pictures or the body copy across every card, entries staying put — so both off reads as a list of headlines.
+
+The interesting part is that this is done entirely in CSS on the grid (`.hide-images` / `.hide-text`), leaving `FeedCard.svelte`'s diff comment-only. The first implementation did condition the markup, which was fine until the follow-up requirement landed: desktop-only, with everything visible on a phone and the chips hidden there. Svelte's `{#if}` can't answer a media query, so that version would have needed JS viewport detection — a pattern this codebase does not use anywhere, and one that flashes the wrong layout between prerender and hydration. Moving the whole thing to CSS made the requirement fall out of a single `@media (min-width: 769px)` wrapper: on a phone the rules don't apply, so the stored toggle state is inert and there is no orphaned state to reason about. It is also the only way to reach images embedded in body copy, which arrive as `{@html}` and cannot be conditioned in a template at all. The cost is that hidden images stay in the DOM — `loading="lazy"` plus `display: none` means browsers generally skip fetching them, but that is browser behaviour, not a guarantee.
+
+The breakpoint is now a coupling across two files: the rules in `+page.svelte` and the chips' `max-width: 768px` in `+layout.svelte`. Drift either way and a phone gets a control that does nothing, or loses one that does. Both comments cross-reference each other and a test pins it.
+
+Two side effects worth knowing. The `filteredEntries` derived is gone, so the reader overlay indexes the real list and can't drift from it. And the clause in the image-dedupe work about keeping an all-suppressed post "on the image side of the image/text toggle" is now moot — there is no side to be on; the "N repeats hidden" note still renders, except when images are hidden, where a note about withheld images is noise.
+
+An earlier iteration put an "N images hidden" strip where the media had been, on the same reasoning as that repeat note. It read as clutter across a whole grid and was dropped. A picture post with no title or caption is now just its meta strip when images are off — close to blank, but not blank.
+
+**Key changes:**
+- `fontSize` store + `data-font-size` on `<html>`, applied pre-paint alongside the theme.
+- Root font-size scaling at 110% / 120%; `small` unscaled and unchanged. Default is `medium`.
+- Appearance settings card (theme + text size), between Identity and Preferences.
+- Connected-service cards sort OAuth-first, putting Google Workspace under Nextcloud.
+- Feeds Images / Text chips hide media and body copy instead of filtering entries.
+- Those chips are desktop-only — CSS-scoped rules, chips hidden below 768px.
+
+**Files added/modified:**
+- `web/src/lib/stores/fontSize.ts` — new store (+ `fontSize.test.ts`, 16 tests)
+- `web/src/app.html` — pre-paint script now applies theme and text scale
+- `web/src/app.css` — root text-scale rules
+- `web/src/routes/settings/+page.svelte` — Appearance card, OAuth-first service sort
+- `web/src/routes/feeds/+page.svelte` — grid toggle classes, desktop-scoped hide rules, `filteredEntries` removed
+- `web/src/routes/feeds/+layout.svelte` — chips hidden below the shell breakpoint
+- `web/src/lib/components/FeedCard.svelte` — comment only (+ `FeedCard.svelte.test.ts`, 11 tests)
+- `AGENTS.md` — client-local preferences section under Web UI
+
 ## 2026-07-25: Review pass on the markdown render mode
 
 Two-agent review of the ISSUE-192 commit, then its high and medium findings. Nothing here is a user-visible behaviour change to shipped code — the render mode is still unreleased — but three of the findings would have shipped as real defects, and they share a shape worth naming: the endpoint was designed for the interactive skill, then reused by the briefing source, and every place the two callers want different things is where it broke.

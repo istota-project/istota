@@ -5,16 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="text-scale" content="scale" />
     <script>
-      // Apply the saved theme before first paint to avoid a flash of the wrong
-      // theme. Mirrors lib/stores/persisted.ts (values are JSON-encoded).
+      // Apply the saved theme and text scale before first paint to avoid a flash
+      // of the wrong theme / a reflow once the size lands. Mirrors
+      // lib/stores/persisted.ts (values are JSON-encoded).
       (function () {
-        try {
-          var raw = localStorage.getItem('theme');
-          var theme = raw ? JSON.parse(raw) : 'dark';
-          document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
-        } catch (e) {
-          document.documentElement.setAttribute('data-theme', 'dark');
+        var root = document.documentElement;
+        function read(key, fallback) {
+          try {
+            var raw = localStorage.getItem(key);
+            return raw ? JSON.parse(raw) : fallback;
+          } catch (e) {
+            return fallback;
+          }
         }
+        var theme = read('theme', 'dark');
+        root.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
+        var size = read('fontSize', 'medium');
+        root.setAttribute('data-font-size', size === 'small' || size === 'large' ? size : 'medium');
       })();
     </script>
     %sveltekit.head%

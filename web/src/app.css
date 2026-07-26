@@ -83,6 +83,25 @@
   --text-base: 0.85rem;
 }
 
+/* Text scale — a client-local readability preference (lib/stores/fontSize.ts)
+   reflected onto <html> as `data-font-size`. Scaling the *root* font-size moves
+   every rem-based value together — the --text-* tokens above, the handful of
+   literal-rem sizes, and the padding/gaps around them — so the layout keeps its
+   proportions rather than growing text inside fixed boxes.
+
+   `medium` is the default; `small` is the historical unscaled size and so
+   deliberately has no rule — it leaves the browser's own base size in place.
+   Percentages (not px) throughout, so a user who has raised their browser font
+   size keeps that gain at every level instead of having it overwritten. Sizes
+   fixed in px — borders and the SVG chart labels on the health pages — stay put
+   by design. */
+:root[data-font-size='medium'] {
+  font-size: 110%;
+}
+:root[data-font-size='large'] {
+  font-size: 120%;
+}
+
 /* Light theme — overrides the surface/text/border/accent variables. Everything
    built on these variables flips automatically; only the dark-tuned status and
    chart colors on data-heavy pages keep their hardcoded values. */

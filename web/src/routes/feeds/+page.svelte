@@ -111,7 +111,7 @@
   let lightboxImages = $state<string[]>([]);
   let lightboxIndex = $state<number | null>(null);
 
-  // Reader overlay — index into filteredEntries of the open post (null = closed).
+  // Reader overlay — index into entries of the open post (null = closed).
   let readerIndex = $state<number | null>(null);
 
   // Batch read queue
@@ -229,9 +229,9 @@
     } finally {
       loadingMore = false;
     }
-    // Re-observe sentinel so the observer fires again if it's still visible
-    // (needed when client-side filters hide most entries and the sentinel
-    // never leaves the viewport between loads)
+    // Re-observe sentinel so the observer fires again if it's still visible —
+    // a short page (or one whose cards are compact because the Images chip is
+    // off) can leave it in view across the whole load.
     if (hasMore && sentinel && scrollObserver) {
       scrollObserver.unobserve(sentinel);
       scrollObserver.observe(sentinel);
@@ -340,18 +340,6 @@
 
   // Track which card the cursor most recently entered so 'f' has a target.
   let focusedEntryId: number | null = $state(null);
-
-  let filteredEntries = $derived(
-    entries.filter((e) => {
-      // An entry whose only images were suppressed as repeats is still an
-      // image post — keep it on the image side of the toggle rather than
-      // letting it drift into the text view.
-      const isImage = e.images.length > 0 || (e.duplicate_image_count ?? 0) > 0;
-      if (isImage && !$showImages) return false;
-      if (!isImage && !$showText) return false;
-      return true;
-    }),
-  );
 </script>
 
 <div class="feed-page">
@@ -360,8 +348,13 @@
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else}
-    <div class="feed-grid" class:list-view={$viewMode === 'list'}>
-      {#each filteredEntries as entry, i (entry.id)}
+    <div
+      class="feed-grid"
+      class:list-view={$viewMode === 'list'}
+      class:hide-images={!$showImages}
+      class:hide-text={!$showText}
+    >
+      {#each entries as entry, i (entry.id)}
         <div
           class="card-slot"
           data-entry-id={entry.id}
@@ -396,7 +389,7 @@
 {/if}
 
 <FeedReader
-  entries={filteredEntries}
+  {entries}
   index={readerIndex}
   {hasMore}
   onClose={() => (readerIndex = null)}
@@ -659,6 +652,46 @@
     border-radius: var(--radius-card);
     margin: 0.6rem 0;
     display: block;
+  }
+
+  /* Images / Text display toggles — DESKTOP ONLY.
+
+	   The header chips hide the pictures or the body copy across every card;
+	   they never filter entries out of the feed. All of it is done here rather
+	   than in FeedCard so that this one media query makes the whole feature
+	   desktop-only: on a phone the rules don't apply, so both chips are moot and
+	   everything shows. The chips themselves are hidden below the same
+	   breakpoint (routes/feeds/+layout.svelte), which is the shell's own 768px.
+
+	   Keep this query and the chips' `max-width: 768px` in step — if they drift,
+	   a phone gets a control that does nothing, or loses one that does. */
+  @media (min-width: 769px) {
+    .feed-grid.hide-images :global(.card-image),
+    .feed-grid.hide-images :global(.card-gallery) {
+      display: none;
+    }
+
+    /* Body copy arrives as {@html}, so pictures inside it are only reachable
+		   from CSS — without this an images-off view is still full of images.
+		   Captions survive; an emptied figure loses its margin so it leaves no gap
+		   behind. */
+    .feed-grid.hide-images :global(.excerpt img),
+    .feed-grid.hide-images :global(.excerpt picture) {
+      display: none;
+    }
+
+    .feed-grid.hide-images :global(.excerpt figure) {
+      margin: 0;
+    }
+
+    /* A note about withheld repeat images is noise when no images are drawn. */
+    .feed-grid.hide-images :global(.repeat-note) {
+      display: none;
+    }
+
+    .feed-grid.hide-text :global(.excerpt) {
+      display: none;
+    }
   }
 
   /* Meta */

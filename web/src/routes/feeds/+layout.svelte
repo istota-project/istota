@@ -280,6 +280,18 @@
     margin-left: 0.4rem;
   }
 
+  /* The Images / Text chips are a desktop affordance: on a phone a feed is a
+	   single column you scroll, so suppressing pictures or body copy buys little
+	   and the header has no room to spare. The rules they drive are scoped to the
+	   matching `min-width: 769px` query in +page.svelte, so hiding the chips here
+	   leaves no orphaned state — a phone always shows everything, whatever the
+	   stored toggles say, and the desktop view is unchanged when you go back. */
+  @media (max-width: 768px) {
+    .filter-group {
+      display: none;
+    }
+  }
+
   .feed-btn {
     display: flex;
     align-items: center;

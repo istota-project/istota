@@ -13,6 +13,8 @@
     type NextcloudTokenStatus,
   } from '$lib/api';
   import { Button, Select, type SelectOption } from '$lib/components/ui';
+  import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
+  import { theme, setTheme, type Theme } from '$lib/stores/theme';
   import {
     ServiceCard,
     GarminCard,
@@ -45,6 +47,20 @@
     if (!zones.includes('UTC')) zones = ['UTC', ...zones];
     return zones.map((z) => ({ value: z, label: z }));
   })();
+
+  // Appearance. Both are client-local (localStorage, per browser), so they
+  // apply on change with no Save step and no round-trip. Theme is also on the
+  // header toggle — this is the same store, so the two stay in sync.
+  const themeOptions: SelectOption[] = [
+    { value: 'dark', label: 'Dark (default)' },
+    { value: 'light', label: 'Light' },
+  ];
+
+  const fontSizeOptions: SelectOption[] = [
+    { value: 'small', label: 'Small' },
+    { value: 'medium', label: 'Medium (default)' },
+    { value: 'large', label: 'Large' },
+  ];
 
   let profile: UserProfile | null = $state(null);
   let profileSaving = $state(false);
@@ -235,7 +251,19 @@
   // monarch/feeds/overland leak through). Skip cards whose status is
   // "unavailable" — historically used to mean "no resource declaration" but
   // now only OAuth services with the global flag off can land there.
-  let activeServices = $derived(services.filter((s) => s.status !== 'unavailable'));
+  //
+  // OAuth cards sort to the top so they sit with the Nextcloud card rendered
+  // just above this list, which is a connect flow too — the three-line
+  // connect/disconnect cards group together instead of being split by the
+  // credential-field cards. Today that puts Google Workspace directly under
+  // Nextcloud; a future OAuth service joins the group on its own. The sort is
+  // stable, so everything else keeps the API's order, and it runs on filter()'s
+  // fresh array rather than mutating `services`.
+  let activeServices = $derived(
+    services
+      .filter((s) => s.status !== 'unavailable')
+      .sort((a, b) => Number(b.oauth ?? false) - Number(a.oauth ?? false)),
+  );
 </script>
 
 <SettingsLayout
@@ -295,6 +323,33 @@
           onValueChange={(v) => {
             if (profile) profile.timezone = v;
           }}
+        />
+      </SettingsField>
+    </SettingsCard>
+
+    <SettingsCard
+      title="Appearance"
+      description="Stored in this browser and applied immediately — no Save needed."
+    >
+      <SettingsField label="Theme" hint="Also on the toggle in the header.">
+        <Select
+          value={$theme}
+          options={themeOptions}
+          ariaLabel="Theme"
+          fullWidth
+          onValueChange={(v) => setTheme(v as Theme)}
+        />
+      </SettingsField>
+      <SettingsField
+        label="Text size"
+        hint="Scales the whole interface. Small is the original, denser size; large steps it up further for easier reading."
+      >
+        <Select
+          value={$fontSize}
+          options={fontSizeOptions}
+          ariaLabel="Text size"
+          fullWidth
+          onValueChange={(v) => setFontSize(v as FontSize)}
         />
       </SettingsField>
     </SettingsCard>

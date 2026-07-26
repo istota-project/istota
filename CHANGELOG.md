@@ -8,7 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The web UI has a text size setting, and reads slightly larger by default. Settings has a new **Appearance** card offering small, medium and large; medium is the new default, so the interface comes up a step larger than before — small is still there and is exactly the previous size. The whole interface scales together rather than just the type, so nothing crowds its container, and the choice applies as soon as you pick it. It sits alongside the light/dark theme, which is now settable there too rather than only from the header icon; both are stored in the browser, so they are per-device and need no save.
+
 - The assistant can now read a web page as markdown, with headings, list position and link addresses arriving together. That is what lets it tell an article link from a footer link on a page it has never seen, so browsing no longer depends on knowing a site's markup. It can take a front page whole or pull just the body of an article, whichever the page calls for.
+
+### Changed
+- The feeds **Images** and **Text** chips now hide pictures and body copy rather than hiding whole entries. Turning off Images used to drop every picture post out of the feed entirely — and turning off Text dropped everything else — so the two together were a post-type filter, not a display control. Each entry now stays in place and loses only the part you switched off, including pictures embedded in the body copy, so turning both off gives you a list of headlines instead of an empty page. The chips are a desktop control: a phone always shows everything and no longer offers them.
 
 ### Fixed
 - News briefings stopped declaring live sources dead. Front pages that assemble their headlines in the browser came back as nothing but section names, because the two available ways of reading a page either threw away every link address or returned the links with nothing to say which were articles — so Reuters, Le Monde, Der Spiegel and the Guardian were repeatedly written off as unreachable and the morning briefing ran on whatever was left. Pages are now read as markdown, which keeps each headline attached to its address, and how much of a front page a briefing takes is configurable.

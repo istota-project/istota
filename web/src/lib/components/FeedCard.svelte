@@ -63,6 +63,17 @@
   const galleryCount = $derived(Math.min(entry.images.length, maxGrid));
   const permalink = $derived(entry.url || entry.feed.site_url || '');
 
+  // The Images / Text header chips are *display* toggles, not filters, and this
+  // card deliberately knows nothing about them: it always renders its media and
+  // body, and the grid hides them with CSS (the .hide-images / .hide-text rules
+  // in routes/feeds/+page.svelte). That keeps the toggles desktop-only for free
+  // — the rules live in a min-width media query, so on a phone they simply
+  // don't apply and everything shows. Conditioning the markup here instead
+  // would need JS viewport detection, which nothing else in this app does, and
+  // would flash the wrong layout between prerender and hydration. It is also
+  // the only way to reach images embedded in the body copy, which arrive as
+  // {@html} and can't be conditioned in the template at all.
+
   function formatDate(iso: string): string {
     try {
       const d = new Date(iso);
