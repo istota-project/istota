@@ -300,7 +300,17 @@
   {#snippet header()}
     <ShellHeader
       title={inViewMode ? VIEW_LABELS[$view as ChatView] : activeRoom ? activeRoom.name : 'Chat'}
+      onTitleClick={() => (sidebarOpen = !sidebarOpen)}
+      titleActionLabel="open rooms"
     >
+      {#snippet leading()}
+        <SidebarToggle
+          open={sidebarOpen}
+          label="Rooms"
+          count={$rooms.length}
+          onclick={() => (sidebarOpen = !sidebarOpen)}
+        />
+      {/snippet}
       {#snippet nav()}
         {#if modelBadge}
           <button
@@ -317,12 +327,6 @@
         <Chip icon onclick={() => (confirmMarkAllRead = true)} title="Mark all rooms as read">
           <CheckCheck size={14} />
         </Chip>
-        <SidebarToggle
-          open={sidebarOpen}
-          label="Rooms"
-          count={$rooms.length}
-          onclick={() => (sidebarOpen = !sidebarOpen)}
-        />
       {/snippet}
     </ShellHeader>
   {/snippet}

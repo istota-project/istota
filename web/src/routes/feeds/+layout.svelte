@@ -140,7 +140,21 @@
 
 <AppShell>
   {#snippet header()}
-    <ShellHeader title="Feeds">
+    <ShellHeader
+      title="Feeds"
+      onTitleClick={onSettings ? undefined : () => (sidebarOpen = !sidebarOpen)}
+      titleActionLabel="open sources"
+    >
+      {#snippet leading()}
+        {#if !onSettings}
+          <SidebarToggle
+            open={sidebarOpen}
+            label="Sources"
+            count={feeds.length}
+            onclick={() => (sidebarOpen = !sidebarOpen)}
+          />
+        {/if}
+      {/snippet}
       {#snippet nav()}
         {#if !onSettings}
           <Select
@@ -184,14 +198,6 @@
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Feed settings">
           <Cog size={14} />
         </Chip>
-        {#if !onSettings}
-          <SidebarToggle
-            open={sidebarOpen}
-            label="Sources"
-            count={feeds.length}
-            onclick={() => (sidebarOpen = !sidebarOpen)}
-          />
-        {/if}
       {/snippet}
     </ShellHeader>
   {/snippet}

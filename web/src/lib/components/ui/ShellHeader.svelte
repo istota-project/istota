@@ -3,15 +3,37 @@
 
   interface Props {
     title: string;
+    /* Leading slot, before the title — the conventional home for a drawer
+       toggle (Material's navigation-icon slot). */
+    leading?: Snippet;
     nav?: Snippet;
     tools?: Snippet;
+    /* When set, the title itself is a second hit target for the same action as
+       the leading control. Deliberately styled plain: a chevron here would
+       promise a dropdown, and what opens is a drawer. */
+    onTitleClick?: () => void;
+    titleActionLabel?: string;
   }
 
-  let { title, nav, tools }: Props = $props();
+  let { title, leading, nav, tools, onTitleClick, titleActionLabel }: Props = $props();
 </script>
 
 <div class="header">
-  <h1>{title}</h1>
+  {#if leading}{@render leading()}{/if}
+  <h1>
+    {#if onTitleClick}
+      <button
+        class="title-btn"
+        onclick={onTitleClick}
+        type="button"
+        aria-label={titleActionLabel ? `${title} — ${titleActionLabel}` : undefined}
+      >
+        {title}
+      </button>
+    {:else}
+      {title}
+    {/if}
+  </h1>
   {#if nav}<div class="header-nav">{@render nav()}</div>{/if}
   {#if tools}<div class="header-tools">{@render tools()}</div>{/if}
 </div>
@@ -29,6 +51,25 @@
     font-size: 1rem;
     font-weight: 600;
     margin: 0;
+    min-width: 0;
+  }
+
+  /* Inherits everything so the heading looks untouched; it is a button purely
+	   to widen the drawer's hit area. On desktop the sidebar is permanent, so the
+	   toggle it drives is a no-op — harmless, and keeping the markup stable beats
+	   branching it on a breakpoint the component can't see. */
+  .title-btn {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: none;
+    padding: 0;
+    text-align: left;
+    cursor: pointer;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .header-nav {

@@ -111,6 +111,17 @@
     </button>
   {/if}
   <div class="money-section-tools">
+    <!-- The one placement that isn't a ShellHeader leading slot: the accounts
+		     drawer belongs to this sub-route, but the app bar is owned by the money
+		     layout above it. Leading position of this toolbar is the closest
+		     equivalent — and on mobile the toolbar is already a full-width row, so
+		     it costs no extra height either. -->
+    <SidebarToggle
+      open={sidebarOpen}
+      label="Accounts"
+      count={accounts.length}
+      onclick={() => (sidebarOpen = !sidebarOpen)}
+    />
     <Select
       value={selectedYearValue}
       options={yearOptions}
@@ -123,11 +134,6 @@
       placeholder="Filter by tag, payee..."
       value={$filterText}
       oninput={(e) => handleFilterInput(e.currentTarget.value)}
-    />
-    <SidebarToggle
-      open={sidebarOpen}
-      label="Accounts"
-      onclick={() => (sidebarOpen = !sidebarOpen)}
     />
   </div>
 </div>

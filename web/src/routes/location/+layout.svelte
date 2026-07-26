@@ -254,11 +254,12 @@
 
 <AppShell>
   {#snippet header()}
-    <ShellHeader title="Location">
-      {#snippet nav()}
-        <HeaderNav items={navItems} ariaLabel="Location section" />
-      {/snippet}
-      {#snippet tools()}
+    <ShellHeader
+      title="Location"
+      onTitleClick={onSettings ? undefined : () => (sidebarOpen = !sidebarOpen)}
+      titleActionLabel="open places"
+    >
+      {#snippet leading()}
         {#if !onSettings}
           <SidebarToggle
             open={sidebarOpen}
@@ -267,6 +268,11 @@
             onclick={() => (sidebarOpen = !sidebarOpen)}
           />
         {/if}
+      {/snippet}
+      {#snippet nav()}
+        <HeaderNav items={navItems} ariaLabel="Location section" />
+      {/snippet}
+      {#snippet tools()}
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Location settings">
           <Cog size={14} />
         </Chip>

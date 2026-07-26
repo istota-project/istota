@@ -70,6 +70,14 @@
   /* Gap between sibling chips/nav-links in a flex row. */
   --chip-gap: 0.1rem;
 
+  /* Chat row metrics: the message row's horizontal padding, the avatar column
+	   it opens with, and the avatar inside that column. Tokens rather than literals
+	   in Message.svelte so the gutter can shrink at a breakpoint without the avatar
+	   drifting out of alignment with it. */
+  --chat-row-inline: 0.75rem;
+  --chat-gutter: 2.25rem;
+  --chat-avatar: 2.1rem;
+
   /* Transitions */
   --transition-fast: 0.15s ease;
 
@@ -81,6 +89,15 @@
   --text-xs: 0.7rem;
   --text-sm: 0.75rem;
   --text-base: 0.85rem;
+}
+
+/* Mobile: the avatar column is pure chrome, so it is what gives up width to the
+   message text. */
+@media (max-width: 768px) {
+  :root {
+    --chat-gutter: 1.75rem;
+    --chat-avatar: 1.6rem;
+  }
 }
 
 /* Text scale — a client-local readability preference (lib/stores/fontSize.ts)

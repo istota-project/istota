@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The assistant can now read a web page as markdown, with headings, list position and link addresses arriving together. That is what lets it tell an article link from a footer link on a page it has never seen, so browsing no longer depends on knowing a site's markup. It can take a front page whole or pull just the body of an article, whichever the page calls for.
 
 ### Changed
+- On a phone, the sidebar now opens from a control in the header bar instead of a tab floating over the page. The old tab sat pinned to the middle of the left edge, on top of whatever you were reading, and had to be conspicuous to be findable at all; the new one sits at the start of the header where a menu button is expected, and the section title next to it opens the sidebar too. Chat additionally gives its messages a little more width on small screens by narrowing the avatar column.
+
 - The feeds **Images** and **Text** chips now hide pictures and body copy rather than hiding whole entries. Turning off Images used to drop every picture post out of the feed entirely — and turning off Text dropped everything else — so the two together were a post-type filter, not a display control. Each entry now stays in place and loses only the part you switched off, including pictures embedded in the body copy, so turning both off gives you a list of headlines instead of an empty page. The chips are a desktop control: a phone always shows everything and no longer offers them.
 
 ### Fixed

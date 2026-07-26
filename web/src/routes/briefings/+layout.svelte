@@ -153,7 +153,21 @@
 
 <AppShell>
   {#snippet header()}
-    <ShellHeader title="Briefings">
+    <ShellHeader
+      title="Briefings"
+      onTitleClick={onSettings ? undefined : () => (sidebarOpen = !sidebarOpen)}
+      titleActionLabel="open archive"
+    >
+      {#snippet leading()}
+        {#if !onSettings}
+          <SidebarToggle
+            open={sidebarOpen}
+            label="Archive"
+            count={total}
+            onclick={() => (sidebarOpen = !sidebarOpen)}
+          />
+        {/if}
+      {/snippet}
       {#snippet nav()}
         {#if !onSettings && names.length > 1}
           <Select
@@ -168,14 +182,6 @@
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Briefing settings">
           <Cog size={14} />
         </Chip>
-        {#if !onSettings}
-          <SidebarToggle
-            open={sidebarOpen}
-            label="Archive"
-            count={total}
-            onclick={() => (sidebarOpen = !sidebarOpen)}
-          />
-        {/if}
       {/snippet}
     </ShellHeader>
   {/snippet}

@@ -251,7 +251,7 @@
     gap: 0.6rem;
     /* Extra bottom padding so the hover highlight isn't flush with the last
 		   line of text. */
-    padding: 0.1rem 0.75rem 0.45rem;
+    padding: 0.1rem var(--chat-row-inline) 0.45rem;
     align-items: flex-start;
     /* Anchor for the absolutely-positioned .meta-footer (top-right). */
     position: relative;
@@ -297,7 +297,7 @@
 		   baselines — coincide without a magic offset. */
   .msg.continuation .msg-actions {
     position: absolute;
-    right: 0.75rem;
+    right: var(--chat-row-inline);
     top: 0.1rem;
   }
 
@@ -369,14 +369,14 @@
   }
 
   .gutter {
-    flex: 0 0 2.25rem;
+    flex: 0 0 var(--chat-gutter);
     display: flex;
     justify-content: center;
     padding-top: 0.1rem;
   }
   .avatar {
-    width: 2.1rem;
-    height: 2.1rem;
+    width: var(--chat-avatar);
+    height: var(--chat-avatar);
     border-radius: 0.5rem;
     display: flex;
     align-items: center;
@@ -476,7 +476,7 @@
 	   by a subtle card, so its lists / code / tables render left-to-right.
 	   Position anchor for its own star bar (durable system rows in views). */
   .cmd-row {
-    padding: 0.2rem 0.75rem 0.5rem;
+    padding: 0.2rem var(--chat-row-inline) 0.5rem;
     position: relative;
   }
   .cmd-row .room-chip {
@@ -486,7 +486,7 @@
 	   on its own. (The bar is only absolute here and on continuation rows.) */
   .msg-actions.cmd-actions {
     position: absolute;
-    right: 0.75rem;
+    right: var(--chat-row-inline);
     top: 0.3rem;
   }
   .cmd-output {

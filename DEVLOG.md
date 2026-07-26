@@ -2,6 +2,37 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-26: The mobile sidebar toggle moves into the header bar
+
+The drawer toggle on small screens was a tab pinned to the middle of the viewport's left edge — `position: fixed`, floating over the content, hidden again the moment the drawer opened. The session started as "make it bigger and more visible in dark mode" (it was `--surface-card` on `--surface-base`, two shades of near-black, with a `--border-subtle` edge that vanished into the page) and ended with the pattern replaced, because making it bigger made the real problem obvious: a control tethered to no layout landmark has to shout to be found, and shouting is exactly what made it compete with the content it sat on top of.
+
+**Where the standard answer is.** The leading slot of the top bar — Material's navigation-icon slot, UIKit's nav-bar leading item — is where a drawer toggle goes, and it needs no chrome at all because it is anchored to something. The glyph is lucide's `PanelLeft` / `PanelLeftClose` rather than a hamburger: the app already uses a kebab for row overflow menus, and "toggle the side panel" is the more precise reading anyway. A tappable title was added alongside it as a forgiving second target, styled plain — a chevron there would promise a dropdown when what opens is a drawer.
+
+**Not making the bar taller is the whole trick.** A 44px button in a bar whose tallest child is a 1.5rem title line box grows the bar by 18px on every page that has one. So the button's *layout* box is `1.5rem` — exactly the title's line box, so it can never be the tallest child — and the touch target is bought back with an out-of-flow `::before` overlay (2.5 × 2.75rem, centred), which costs no layout height. Measured at 500px wide, chat's header with the in-flow button comes out at 45px, identical to a header with no in-flow toggle at all. The overlay bleeds a little over the title, which is harmless precisely because the title fires the same toggle.
+
+The negative inline margins are the other half: the box is padding around a small glyph, so `margin-inline-start: -0.35rem` puts the *glyph* on the bar's padding edge rather than the box around it (it lands at ~13.4px against the header's 13.2px padding, so it aligns with where the title starts on pages without the button), and `-0.15rem` on the trailing side eats most of the bar's gap so the icon reads as attached to the title rather than floating beside it.
+
+**Money/transactions is the one placement that isn't a `leading` slot.** Its accounts drawer belongs to that sub-route, but the app bar is owned by `money/+layout.svelte` above it, so reaching the leading slot would mean prop-drilling or context for one button. It went to the leading edge of its own `.money-section-tools` toolbar. The section header proper was the first instinct and is wrong: on mobile that row wraps with the tools taking full width on line two, so with no active account filter, line one would have held nothing but the toggle — adding back exactly the height the `1.5rem` box exists to avoid.
+
+**A detour that outlived its reason.** Before the pattern changed, the ask was for the edge tab to cover the chat avatar gutter exactly and stop at the text column. That produced `--chat-row-inline` / `--chat-gutter` / `--chat-avatar` in `app.css`, with the gutter and avatar shrinking below 768px, so `Message.svelte` and the tab could be measured against one number instead of drifting apart. The tab is gone and with it the `width` prop it fed, but the tokens stayed: the mobile shrink reclaims width for message text on its own merits. Only the comments changed, since they were explaining an alignment trick that no longer exists.
+
+**Also folded in:** the toggle is a real toggle now. The edge tab hid itself when the drawer was open (the drawer covered where it stood) and relied on the click-outside backdrop; the header sits *above* the drawer in the shell, so the same button closes it — hence `aria-expanded` and the closing glyph.
+
+**Key changes:**
+- `SidebarToggle` is a header-leading icon button, mobile-only; the fixed edge-tab variant is deleted along with its `width` prop.
+- `ShellHeader` gains a `leading` snippet and optional `onTitleClick` / `titleActionLabel`; the title renders as a `<button>` *inside* the `h1`, so heading semantics survive and the button gets its own accessible name.
+- Layout box matches the title's line box; touch target is an out-of-flow pseudo-element. The bar's height is unchanged on every page.
+- Wired on chat, feeds, briefings, location and money/transactions. On the three section pages the toggle only renders off the settings sub-route, so `onTitleClick` is gated identically — otherwise the title would toggle a drawer that isn't mounted.
+- Chat row metrics are tokens in `app.css`; avatar gutter narrows below 768px.
+
+**Files added/modified:**
+- `web/src/lib/components/ui/SidebarToggle.svelte` — rewritten
+- `web/src/lib/components/ui/ShellHeader.svelte` — `leading` slot, tappable title
+- `web/src/app.css` — chat row metric tokens + mobile shrink
+- `web/src/lib/components/chat/Message.svelte` — reads the tokens
+- `web/src/routes/{chat/+page,feeds/+layout,briefings/+layout,location/+layout,money/transactions/+layout}.svelte` — toggle moved to leading position
+- `AGENTS.md` — mobile sidebar disclosure convention under Web UI
+
 ## 2026-07-26: Text size preference, an Appearance card, and feeds toggles that actually toggle
 
 Three web-UI changes from one session. The first two are additive; the third changes what two existing controls mean.
