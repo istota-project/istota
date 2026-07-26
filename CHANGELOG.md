@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-07-25
+
 ### Added
 - Work entries are now visible and editable in the web UI. The money section's Business area has a new **Work** tab — first in the row, since work comes before invoicing — listing the days of work behind your invoices with filters for status, client and period, and a running total of what's billable but not yet invoiced. You can add, edit and delete entries there instead of asking the assistant or using the command line. The form adapts to the service you pick, asking for hours, days or a fixed amount as appropriate, and shows the line item it will produce (`3 × $150.00 = $450.00`) before you save. Entries already on an invoice are read-only, with a link through to that invoice and a note that you'd need to void it first. An entry whose service is no longer configured is flagged, because such an entry is silently skipped at invoice time — the work would be recorded and never billed. Generating an invoice is still a chat/CLI operation.
 
@@ -1028,7 +1030,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.35.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.36.0...main
+[0.36.0]: https://gitlab.com/cynium/istota/-/releases/v0.36.0
 [0.35.0]: https://gitlab.com/cynium/istota/-/releases/v0.35.0
 [0.34.0]: https://gitlab.com/cynium/istota/-/releases/v0.34.0
 [0.33.0]: https://gitlab.com/cynium/istota/-/releases/v0.33.0
