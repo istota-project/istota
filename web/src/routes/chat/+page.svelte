@@ -51,6 +51,12 @@
   let creatingRoom = $state(false);
   let newRoomName = $state('');
   let listEl: HTMLDivElement | undefined = $state();
+  // The docked composer floats over the transcript, so its height is a layout
+  // input: it drives the transcript's bottom padding (keeping the newest message
+  // clear of the pill) and the jump-to-latest offset. Measured rather than
+  // guessed — the composer grows with attachments, error chips and wrapped text.
+  let dockEl: HTMLDivElement | undefined = $state();
+  let composerH = $state(0);
 
   const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
   const busy = $derived($status === 'sending' || $status === 'streaming');
@@ -217,6 +223,34 @@
     tick().then(() => {
       if (listEl) listEl.scrollTop = listEl.scrollHeight;
     });
+  });
+
+  // Track the docked composer's height. The transcript reserves it as bottom
+  // padding *inside* the scroller, so scrollHeight already accounts for it and
+  // the bottom-pin below stays plain `scrollTop = scrollHeight` — no offset
+  // arithmetic. What does need handling is the composer growing (or the dock
+  // disappearing in an aggregate view) while pinned: the reserved band changes
+  // under a viewport that was at the bottom, so re-pin after each measurement.
+  $effect(() => {
+    if (!dockEl) {
+      composerH = 0;
+      return;
+    }
+    const el = dockEl;
+    const measure = () => {
+      composerH = el.offsetHeight;
+      if (atBottom) {
+        tick().then(() => {
+          if (listEl) listEl.scrollTop = listEl.scrollHeight;
+        });
+      }
+    };
+    measure();
+    // jsdom has no ResizeObserver; the one-shot measure above is enough there.
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
   });
 
   // Jump-to-response: the store resolves a search result to a transcript cid
@@ -438,7 +472,7 @@
     </Sidebar>
   {/snippet}
 
-  <div class="chat-pane">
+  <div class="chat-pane" style:--composer-h="{composerH}px">
     <div class="messages-wrap">
       <div class="messages" bind:this={listEl} role="log" aria-live="polite" onscroll={onScroll}>
         {#if !$loaded}
@@ -507,13 +541,24 @@
       {/if}
     </div>
     {#if !inViewMode}
-      <!-- Sending is room-scoped; aggregate views are read-only panes. -->
-      <Composer
-        onSend={(t, atts) => session.send(t, atts)}
-        onCancel={() => session.cancel()}
-        {busy}
-        placeholder="Your message…"
-      />
+      <!-- Sending is room-scoped; aggregate views are read-only panes.
+           Docked over the transcript rather than sharing the column with it, so
+           the message list runs the full height of the pane and content passes
+           under the composer instead of stopping short of it. -->
+      <!-- Fade layer, sized to the composer band it sits behind: content
+           scrolling into that band dissolves into the pane fill instead of
+           running under the pill at full strength. Its own element rather than
+           part of the dock so it can stack *below* the jump-to-latest button —
+           painted inside the dock it would wash the button out. -->
+      <div class="composer-fade" aria-hidden="true"></div>
+      <div class="composer-dock" bind:this={dockEl}>
+        <Composer
+          onSend={(t, atts) => session.send(t, atts)}
+          onCancel={() => session.cancel()}
+          {busy}
+          placeholder="Your message…"
+        />
+      </div>
     {/if}
   </div>
 
@@ -567,9 +612,15 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+    /* Anchors the docked composer. */
+    position: relative;
     /* Lighter gray than the app base (#111) so the white text reads with
 		   softer contrast — matches the message hover-highlight shade. */
-    background: var(--surface-card);
+    /* Published as a variable as well as applied: the docked composer paints
+       this same fill behind itself and fades the transcript out into it, and it
+       can't read a sibling component's `background`. */
+    --chat-bg: var(--surface-card);
+    background: var(--chat-bg);
     /* Soften body text a touch (scoped to chat) to further ease the
 		   light-on-dark contrast. */
     --text-primary: #cfcfcf;
@@ -580,10 +631,40 @@
 	   section keeps the soft-gray fill). */
   :global(:root[data-theme='light']) .chat-pane {
     --text-primary: #2a2a2e;
-    background: #ffffff;
+    --chat-bg: #ffffff;
   }
-  /* Wrapper anchors the floating jump-to-latest button to the bottom-right of
-	   the scroll area, above the composer, independent of composer height. */
+
+  /* The composer floats over the transcript instead of taking a row of its own,
+	   so the message list keeps the full pane height and content scrolls under it.
+	   The composer itself is transparent — the fade layer below is the backdrop —
+	   and the transcript reserves the dock's measured height as bottom padding. */
+  .composer-dock {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 6;
+  }
+
+  /* Covers the composer's band plus a short run-up above it, so the dissolve is
+	   already under way before content reaches the pill. The gradient's solid stop
+	   is an absolute length rather than a percentage: the band's height moves with
+	   the composer (attachments, wrapped text), and a percentage would stretch the
+	   soft part with it — the fade would start over the transcript proper on a
+	   tall composer. z-index keeps it under the jump-to-latest FAB (5) and the
+	   dock (6); pointer-events: none so it never swallows a click. */
+  .composer-fade {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(var(--composer-h, 0px) + 1.5rem);
+    background: linear-gradient(to bottom, transparent, var(--chat-bg) 2.5rem);
+    pointer-events: none;
+    z-index: 4;
+  }
+  /* Wrapper anchors the floating jump-to-latest button to the bottom of the
+	   scroll area; the button offsets itself above the docked composer. */
   .messages-wrap {
     position: relative;
     flex: 1;
@@ -597,7 +678,11 @@
     overflow-y: auto;
     /* Row padding lives in Message (so the hover highlight spans the full
 		   channel width, Discord-style). Just a little breathing room here. */
-    padding: 0.5rem 0 1rem;
+    /* The bottom reserve keeps the newest message clear of the docked composer.
+			 It sits *inside* the scroller, so scrollHeight includes it and the
+			 stick-to-bottom pin stays a plain `scrollTop = scrollHeight`. The 0px
+			 fallback covers the aggregate views, which render no composer. */
+    padding: 0.5rem 0 calc(var(--composer-h, 0px) + 1rem);
     width: 100%;
   }
   .messages::-webkit-scrollbar {
@@ -620,7 +705,9 @@
 		   hover/active transforms below, or they would cancel it. */
     left: 50%;
     transform: translateX(-50%);
-    bottom: 0.75rem;
+    /* Rides above the docked composer, which now overlaps this wrapper's bottom
+			 edge; without the offset it would sit behind the pill. */
+    bottom: calc(var(--composer-h, 0px) + 0.75rem);
     z-index: 5;
     display: flex;
     align-items: center;

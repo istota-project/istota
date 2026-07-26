@@ -115,12 +115,21 @@
       wrapEl.style.flexBasis = `${narrow}px`;
       wrapEl.style.flexGrow = '0';
     }
+    // The single-row *padding* too, not just the width: multiline widens the
+    // field's horizontal padding, which narrows the content box and would make
+    // the text still look wrapped for a couple of characters after it stopped
+    // being — the field would sit on two rows longer than it should on the way
+    // back down. Referenced by name so the values stay defined once, in the CSS.
+    const prevPadX = [textarea!.style.paddingLeft, textarea!.style.paddingRight];
+    textarea!.style.paddingLeft = 'var(--ta-pad-x-single)';
+    textarea!.style.paddingRight = 'var(--ta-pad-x-single)';
     textarea!.style.height = 'auto';
     const content = textarea!.scrollHeight;
     if (wrapEl) {
       wrapEl.style.flexBasis = prevBasis;
       wrapEl.style.flexGrow = prevGrow;
     }
+    [textarea!.style.paddingLeft, textarea!.style.paddingRight] = prevPadX;
     textarea!.style.height = prevHeight;
     // jsdom reports scrollHeight 0 — no answer rather than a wrong one.
     return content > 0 ? content > line + pad + 2 : null;
@@ -282,8 +291,12 @@
       {#if uploading}<span class="attach-chip uploading">Uploading…</span>{/if}
     </div>
   {/if}
-  {#if uploadError}<div class="attach-error">{uploadError}</div>{/if}
-  {#if recorder.error}<div class="attach-error">{recorder.error}</div>{/if}
+  {#if uploadError || recorder.error}
+    <div class="notice-row">
+      {#if uploadError}<span class="attach-error">{uploadError}</span>{/if}
+      {#if recorder.error}<span class="attach-error">{recorder.error}</span>{/if}
+    </div>
+  {/if}
 
   <div class="composer-row" class:multiline bind:this={rowEl}>
     <button
@@ -411,9 +424,13 @@
 </div>
 
 <style>
-  /* No divider and no fill: the pill below is a self-contained floating
-	   element, so the wrapper only supplies spacing and the safe-area insets. */
+  /* No fill of its own: the composer floats over the transcript (the page docks
+	   it absolutely at the bottom of the chat pane) and the page paints the fade
+	   layer behind it, so a backdrop here would just cover that gradient. Every
+	   child that needs to stay legible over passing text carries its own chip
+	   fill — the pill below, the attachment chips, the error chips. */
   .composer {
+    position: relative;
     padding: 0.6rem 0.75rem;
     /* The composer is the bottom edge of the app, so it absorbs the device's
 		   safe-area insets: the fill still runs into the corners / under the home
@@ -475,6 +492,25 @@
   .composer-row.multiline .plus {
     order: 1;
   }
+  /* Both values live here, not just the active one: the wrap measurement reads
+	   the single-row padding by name while the field is in multiline (see
+	   wrapsAtSingleRowWidth), so it has to stay resolvable in either state. */
+  .composer-row {
+    --ta-pad-x-single: 0.25em;
+    /* Sized to match the top gap *optically*, which is not the same as matching
+		   the box padding: line-height 1.4 puts ~0.2em of half-leading above the
+		   text and the cap sits ~0.13em below the em box, so the top reads about
+		   0.33em roomier than its 0.45em padding. Setting the sides to 0.45em too
+		   left them looking half as wide as the top — most obvious at mobile
+		   widths, where the pill is narrow and the text runs to both edges. */
+    --ta-pad-x-multi: 0.8em;
+    --ta-pad-x: var(--ta-pad-x-single);
+  }
+  /* On its own full-width row the text no longer starts beside the + button, so
+	   without this it runs up against the pill's rounded edge. */
+  .composer-row.multiline {
+    --ta-pad-x: var(--ta-pad-x-multi);
+  }
 
   textarea {
     flex: 1;
@@ -486,7 +522,7 @@
     color: var(--text-primary);
     font: inherit;
     line-height: 1.4;
-    padding: 0.45em 0.25em;
+    padding: 0.45em var(--ta-pad-x);
     outline: none;
   }
   textarea::-webkit-scrollbar {
@@ -587,13 +623,16 @@
     gap: 0.3rem;
     margin-bottom: 0.4rem;
   }
+  /* Raised fill, not --surface-card: the dock behind these now paints the pane
+	   fill (which *is* --surface-card in the dark theme), so a card-filled chip
+	   would read as bare text on it. Matches the pill below. */
   .attach-chip {
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
     font-size: var(--text-xs);
     color: var(--text-secondary);
-    background: var(--surface-card);
+    background: var(--surface-raised);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
     padding: 0.15rem 0.45rem;
@@ -612,9 +651,24 @@
   .attach-x:hover {
     color: var(--text-primary);
   }
+  /* Upload / recorder failures. Chip-shaped like the attachment row above it:
+	   floating over the transcript, bare colored text had no backdrop of its own
+	   and read straight through to whatever message sat behind it. */
+  .notice-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-bottom: 0.4rem;
+  }
   .attach-error {
-    color: var(--status-danger-fg);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
     font-size: var(--text-xs);
-    margin-bottom: 0.3rem;
+    color: var(--status-danger-fg);
+    background: var(--status-danger-bg);
+    border: 1px solid color-mix(in srgb, var(--status-danger-fg) 45%, transparent);
+    border-radius: var(--radius-pill);
+    padding: 0.15rem 0.45rem;
   }
 </style>
