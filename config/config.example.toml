@@ -226,6 +226,9 @@ username = "istota"
 # Note: CalDAV settings are derived from these values automatically
 # CalDAV URL = {url}/remote.php/dav, using same username/app_password
 app_password = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
+# Default expiry applied by `nextcloud share link`. A handed-out link that never
+# expires is the thing worth avoiding; 0 opts out of a default entirely.
+share_default_expire_days = 14
 
 [talk]
 # Enable Talk polling (requires istota user to be added to conversations)

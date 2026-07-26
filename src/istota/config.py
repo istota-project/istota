@@ -26,6 +26,9 @@ class NextcloudConfig:
     url: str = ""
     username: str = ""
     app_password: str = ""
+    #: Default expiry applied by `nextcloud share link`. A handed-out link
+    #: that never expires is the thing worth avoiding; 0 opts out.
+    share_default_expire_days: int = 14
 
 
 @dataclass
@@ -1631,6 +1634,7 @@ def load_config(config_path: Path | None = None) -> Config:
             url=nc.get("url", ""),
             username=nc.get("username", ""),
             app_password=nc.get("app_password", ""),
+            share_default_expire_days=int(nc.get("share_default_expire_days", 14)),
         )
 
     if "talk" in data:

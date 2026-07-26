@@ -20,7 +20,14 @@ import os
 import sys
 
 from istota.config import Config, NextcloudConfig, load_admin_users
-from istota.nextcloud import OcsError, PathScopeError, capabilities as caps_mod, users as users_mod
+from istota.nextcloud import (
+    OcsError,
+    PathScopeError,
+    capabilities as caps_mod,
+    resolve_scoped_path,
+    shares as shares_mod,
+    users as users_mod,
+)
 from istota.nextcloud_client import (
     ocs_create_public_link,
     ocs_create_share,
@@ -29,7 +36,8 @@ from istota.nextcloud_client import (
     ocs_search_sharees,
 )
 
-_SHARE_TYPE_MAP = {"user": 0, "group": 1, "link": 3, "email": 4, "federated": 6, "talk": 10}
+_SHARE_TYPE_MAP = shares_mod.SHARE_TYPES
+_DEFAULT_EXPIRE_DAYS = 14
 
 
 def _config_from_env() -> Config:
@@ -51,6 +59,33 @@ def _config_from_env() -> Config:
 
 def _caller() -> str:
     return os.environ.get("ISTOTA_USER_ID", "")
+
+
+def _scoped(config: Config, path: str) -> str:
+    """Normalize a caller-supplied path and confine it to their workspace."""
+    user_id = _caller()
+    return resolve_scoped_path(path, user_id, is_admin=config.is_admin(user_id))
+
+
+def _default_expire_days() -> int:
+    raw = os.environ.get("NC_SHARE_DEFAULT_EXPIRE_DAYS", "")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_EXPIRE_DAYS
+
+
+def _confirmation_required(verb: str, subject: str, action_desc: str):
+    """Default-refuse envelope for a destructive op lacking --confirmed."""
+    return {
+        "status": "error",
+        "needs_confirmation": True,
+        "error": (
+            f"'{verb}' on {subject} is a destructive action that requires "
+            f"confirmation. Ask the user to approve {action_desc}, then re-run "
+            "with --confirmed."
+        ),
+    }
 
 
 def _output(data):
@@ -130,12 +165,29 @@ def cmd_group_members(args):
 
 def cmd_share_list(args):
     config = _config_from_env()
-    shares = ocs_list_shares(config, path=args.path)
+    path = _scoped(config, args.path) if args.path else None
+
+    if getattr(args, "reshares", False) or getattr(args, "subfiles", False) or getattr(
+        args, "shared_with_me", False
+    ):
+        return shares_mod.list_shares(
+            config,
+            path=path,
+            reshares=bool(getattr(args, "reshares", False)),
+            subfiles=bool(getattr(args, "subfiles", False)),
+            shared_with_me=bool(getattr(args, "shared_with_me", False)),
+        )
+
+    shares = ocs_list_shares(config, path=path)
     if shares is None:
         raise OcsError(
             "Failed to list shares", None, None, "/apps/files_sharing/api/v1/shares"
         )
     return shares
+
+
+def cmd_share_get(args):
+    return shares_mod.get_share(_config_from_env(), args.share_id)
 
 
 def cmd_share_create(args):
@@ -146,21 +198,46 @@ def cmd_share_create(args):
             f"Unknown share type: {args.type}. Use one of: {', '.join(sorted(_SHARE_TYPE_MAP))}"
         )
 
-    if share_type == 3:
+    path = _scoped(config, args.path)
+    extras = {
+        "note": getattr(args, "note", None),
+        "send_mail": True if getattr(args, "send_mail", False) else None,
+        "attributes": getattr(args, "attributes", None),
+    }
+    has_extras = any(v is not None for v in extras.values())
+
+    if share_type != shares_mod.LINK_SHARE_TYPE and not getattr(args, "with_user", None):
+        raise ValueError("--with is required for user, group, email, federated and talk shares")
+
+    # The legacy path stays on the historical wrappers so its call shape is
+    # unchanged; anything using the new fields goes through shares.create_share.
+    if has_extras:
+        return shares_mod.create_share(
+            config,
+            path=path,
+            share_type=share_type,
+            share_with=getattr(args, "with_user", None),
+            permissions=args.permissions if args.permissions is not None
+            else (1 if share_type == shares_mod.LINK_SHARE_TYPE else None),
+            password=args.password,
+            expire_date=args.expire,
+            label=args.label,
+            **extras,
+        )
+
+    if share_type == shares_mod.LINK_SHARE_TYPE:
         result = ocs_create_public_link(
             config,
-            path=args.path,
+            path=path,
             permissions=args.permissions or 1,
             password=args.password,
             expire_date=args.expire,
             label=args.label,
         )
     else:
-        if not getattr(args, "with_user", None):
-            raise ValueError("--with is required for user, group, email, federated and talk shares")
         result = ocs_create_share(
             config,
-            path=args.path,
+            path=path,
             share_type=share_type,
             share_with=args.with_user,
             permissions=args.permissions,
@@ -174,6 +251,73 @@ def cmd_share_create(args):
             "Failed to create share", None, None, "/apps/files_sharing/api/v1/shares"
         )
     return result
+
+
+def cmd_share_update(args):
+    return shares_mod.update_share(
+        _config_from_env(),
+        args.share_id,
+        permissions=args.permissions,
+        password=args.password,
+        expire_date=args.expire,
+        note=args.note,
+        label=args.label,
+    )
+
+
+def cmd_share_link(args):
+    config = _config_from_env()
+    path = _scoped(config, args.path)
+
+    password = args.password
+    if getattr(args, "password_generate", False):
+        password = shares_mod.generate_password()
+
+    days = args.days if args.days is not None else _default_expire_days()
+
+    # Only consult the server when an expiry is actually being requested.
+    server_limit = None
+    if days > 0:
+        try:
+            server_limit = caps_mod.public_link_expiry_limit(
+                caps_mod.fetch_capabilities(config)
+            )
+        except OcsError:
+            server_limit = None
+
+    return shares_mod.create_link(
+        config,
+        path=path,
+        days=days,
+        password=password,
+        permissions=args.permissions if args.permissions is not None else 1,
+        label=args.label,
+        note=args.note,
+        file_name=args.file,
+        server_expiry_limit=server_limit,
+    )
+
+
+def cmd_share_revoke(args):
+    config = _config_from_env()
+
+    if args.path:
+        # A path revoke can remove several links at once, so it defaults to refusing.
+        if not args.confirmed:
+            return _confirmation_required(
+                "share revoke --path",
+                args.path,
+                "revoking every public link on that path",
+            )
+        return shares_mod.revoke(config, path=_scoped(config, args.path))
+
+    if args.token:
+        return shares_mod.revoke(config, token=args.token)
+
+    if args.share_id is not None:
+        return shares_mod.revoke(config, share_id=args.share_id)
+
+    raise ValueError("Pass a share id, --token TOKEN, or --path PATH")
 
 
 def cmd_share_delete(args):
@@ -252,6 +396,14 @@ def build_parser():
 
     p_list = share_sub.add_parser("list", help="List shares")
     p_list.add_argument("--path", default=None, help="Filter by Nextcloud path")
+    p_list.add_argument("--reshares", action="store_true", help="Include reshares")
+    p_list.add_argument("--subfiles", action="store_true", help="Shares inside the given folder")
+    p_list.add_argument(
+        "--shared-with-me", action="store_true", help="Shares others made with this account"
+    )
+
+    p_get = share_sub.add_parser("get", help="Show one share")
+    p_get.add_argument("share_id", type=int, help="Share ID")
 
     p_create = share_sub.add_parser("create", help="Create a share")
     p_create.add_argument("--path", required=True, help="Nextcloud file/folder path")
@@ -263,6 +415,45 @@ def build_parser():
     p_create.add_argument("--password", default=None, help="Password protection")
     p_create.add_argument("--expire", default=None, help="Expiry date (YYYY-MM-DD)")
     p_create.add_argument("--label", default=None, help="Label for public links")
+    p_create.add_argument("--note", default=None, help="Note shown to the recipient")
+    p_create.add_argument("--send-mail", action="store_true", help="Email the recipient")
+    p_create.add_argument("--attributes", default=None, help="Share attributes (JSON)")
+
+    p_update = share_sub.add_parser("update", help="Change an existing share")
+    p_update.add_argument("share_id", type=int, help="Share ID")
+    p_update.add_argument("--permissions", type=int, default=None, help="Bitmask")
+    p_update.add_argument("--password", default=None, help="Set a password")
+    p_update.add_argument("--expire", default=None, help="Expiry date (YYYY-MM-DD)")
+    p_update.add_argument("--note", default=None, help="Note shown to the recipient")
+    p_update.add_argument("--label", default=None, help="Label for public links")
+
+    p_link = share_sub.add_parser(
+        "link", help="Create a public download link with sensible defaults"
+    )
+    p_link.add_argument("path", help="Nextcloud file/folder path")
+    p_link.add_argument(
+        "--days", type=int, default=None,
+        help="Expire after N days (0 = never; default from config)",
+    )
+    p_link.add_argument("--password", default=None, help="Protect with this password")
+    p_link.add_argument(
+        "--password-generate", action="store_true", help="Generate and report a password"
+    )
+    p_link.add_argument("--permissions", type=int, default=None, help="Bitmask (default: 1, read)")
+    p_link.add_argument("--label", default=None, help="Label for the link")
+    p_link.add_argument("--note", default=None, help="Note shown to the recipient")
+    p_link.add_argument(
+        "--file", default=None,
+        help="When sharing a folder, name one file for the direct-download URL",
+    )
+
+    p_revoke = share_sub.add_parser("revoke", help="Revoke a share by id, token or path")
+    p_revoke.add_argument("share_id", type=int, nargs="?", default=None, help="Share ID")
+    p_revoke.add_argument("--token", default=None, help="Public-link token")
+    p_revoke.add_argument("--path", default=None, help="Revoke every public link on this path")
+    p_revoke.add_argument(
+        "--confirmed", action="store_true", help="Required for --path (removes several at once)"
+    )
 
     p_delete = share_sub.add_parser("delete", help="Delete a share")
     p_delete.add_argument("share_id", type=int, help="Share ID to delete")
@@ -283,7 +474,11 @@ _COMMANDS = {
     ("group", "list"): cmd_group_list,
     ("group", "members"): cmd_group_members,
     ("share", "list"): cmd_share_list,
+    ("share", "get"): cmd_share_get,
     ("share", "create"): cmd_share_create,
+    ("share", "update"): cmd_share_update,
+    ("share", "link"): cmd_share_link,
+    ("share", "revoke"): cmd_share_revoke,
     ("share", "delete"): cmd_share_delete,
     ("share", "search"): cmd_share_search,
 }

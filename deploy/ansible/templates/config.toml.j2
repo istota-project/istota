@@ -211,6 +211,7 @@ username = "{{ istota_nextcloud_username }}"
 {% if not istota_use_environment_file %}
 app_password = "{{ istota_nextcloud_app_password }}"
 {% endif %}
+share_default_expire_days = {{ istota_nextcloud_share_default_expire_days }}
 
 [talk]
 enabled = {{ istota_talk_enabled | lower }}

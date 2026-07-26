@@ -244,6 +244,8 @@ istota_logging_backup_count: 5
 istota_nextcloud_url: ""
 istota_nextcloud_username: "{{ istota_namespace }}"
 istota_nextcloud_app_password: ""
+# Default expiry applied by `nextcloud share link`. 0 = no default expiry.
+istota_nextcloud_share_default_expire_days: 14
 
 # Talk settings (polling-based, no webhook needed)
 istota_talk_enabled: true

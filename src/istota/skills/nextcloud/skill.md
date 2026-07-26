@@ -5,7 +5,7 @@ description: Nextcloud control plane — capabilities probe, user/group lookup, 
 cli: true
 requires_capability: [nextcloud]
 companion_skills: [untrusted_input, sensitive_actions]
-env: [{"var":"NC_URL","from":"config","config_path":"nextcloud.url"},{"var":"NC_USER","from":"config","config_path":"nextcloud.username"},{"var":"NC_PASS","from":"config","config_path":"nextcloud.app_password","sensitive":true}]
+env: [{"var":"NC_URL","from":"config","config_path":"nextcloud.url"},{"var":"NC_USER","from":"config","config_path":"nextcloud.username"},{"var":"NC_PASS","from":"config","config_path":"nextcloud.app_password","sensitive":true},{"var":"NC_SHARE_DEFAULT_EXPIRE_DAYS","from":"config","config_path":"nextcloud.share_default_expire_days"}]
 ---
 Nextcloud's control plane: what the server supports, who is on it, and what is
 shared with whom. Every command outputs JSON.
@@ -22,8 +22,12 @@ istota-skill nextcloud user get UID
 istota-skill nextcloud user groups [UID]
 istota-skill nextcloud group list [--search Q]
 istota-skill nextcloud group members GID
-istota-skill nextcloud share list [--path P]
+istota-skill nextcloud share link PATH [--days N] [--password P|--password-generate]
+istota-skill nextcloud share list [--path P] [--reshares] [--subfiles] [--shared-with-me]
+istota-skill nextcloud share get SHARE_ID
 istota-skill nextcloud share create --path P --type user|group|link|email --with X
+istota-skill nextcloud share update SHARE_ID [--permissions N] [--expire DATE] ...
+istota-skill nextcloud share revoke (SHARE_ID | --token T | --path P --confirmed)
 istota-skill nextcloud share delete SHARE_ID
 istota-skill nextcloud share search QUERY
 ```
@@ -93,20 +97,62 @@ Creating a share is an **outbound action**: it grants someone access to a file.
 Confirm with the user before creating one, unless the share is with the task's
 own user (they already have access to their own workspace).
 
+Paths are confined to the calling user's workspace (`/Users/<user>/…`). A path
+outside it is refused.
+
+#### Asked for a download link? Use `share link`.
+
+```bash
+istota-skill nextcloud share link "/Users/alice/report.pdf"
+istota-skill nextcloud share link "/Users/alice/report.pdf" --days 3 --password-generate
+istota-skill nextcloud share link "/Users/alice/shared/project" --file notes.md
+```
+
+A link share is the right answer because it is **live** (it serves the current
+file, not a stale copy), **revocable**, **expiring**, and optionally
+**passworded**. Never copy a file somewhere public to produce a URL — that
+hands out something you cannot take back, and it goes stale the moment the
+file changes.
+
+`share link` applies an expiry by default (14 days unless the operator changed
+it); `--days 0` opts out explicitly, and you should say so to the user if you
+use it. If the server enforces a shorter maximum, the request is clamped and
+the response carries a `notice` saying so.
+
+The response is the whole lifecycle, and all of it is worth relaying:
+
+| Field | Use |
+|---|---|
+| `url` | The share page — what a person opens |
+| `download_url` | Downloads the file directly. **This is the one to hand over when someone asked for a download link**, because `url` opens a preview page |
+| `password` | Present only with `--password-generate`. Tell the user; it is not recoverable afterwards |
+| `expires` | Say this out loud — the recipient needs to know the link dies |
+| `revoke_command` | Echo it so the user can kill the link themselves |
+| `share_id`, `token` | For revoking later |
+
+For a folder, `--file NAME` builds a `download_url` pointing at one file inside
+it rather than a zip of the whole folder.
+
+#### Other share verbs
+
 ```bash
 # share a folder with a user, full permissions
 istota-skill nextcloud share create --path "/Users/alice/shared/project" --type user --with bob --permissions 31
 
-# a read-only public link
-istota-skill nextcloud share create --path "/Users/alice/report.pdf" --type link
-
-# see what is currently shared from a path, then revoke one
+# what have I handed out, and kill one
 istota-skill nextcloud share list --path "/Users/alice/report.pdf"
-istota-skill nextcloud share delete 42
+istota-skill nextcloud share revoke 42
+
+# kill every public link on a path (destructive — needs --confirmed)
+istota-skill nextcloud share revoke --path "/Users/alice/report.pdf" --confirmed
+
+# change an existing share instead of recreating it
+istota-skill nextcloud share update 42 --expire 2026-09-01 --permissions 1
 ```
 
-Paths are confined to the calling user's workspace (`/Users/<user>/…`). A path
-outside it is refused.
+`share revoke --path` can remove several links at once, so it refuses without
+`--confirmed` and returns `needs_confirmation: true`. Ask the user, then re-run.
+`share list --shared-with-me` shows what others shared with this account.
 
 #### Permissions
 
