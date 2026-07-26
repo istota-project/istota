@@ -693,6 +693,10 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    /* The transcript owns the vertical gesture. Without this, a pan that runs
+		   past the top or bottom of the list chains to the page, which on mobile
+		   reads as the page bouncing while the messages sit still. */
+    overscroll-behavior: contain;
     /* Row padding lives in Message (so the hover highlight spans the full
 		   channel width, Discord-style). Just a little breathing room here. */
     /* The bottom reserve is the `.composer-reserve` spacer at the end of the

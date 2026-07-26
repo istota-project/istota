@@ -84,6 +84,10 @@
     display: flex;
     flex-direction: column;
     overflow-y: auto;
+    /* Reaching either end of this pane must not hand the rest of the gesture to
+		   the page — the document is locked on fill routes, so chaining out of here
+		   only produces a rubber-band. */
+    overscroll-behavior: contain;
   }
 
   /* Keeps the last row of a scrolling list off the home indicator. Chat opts out

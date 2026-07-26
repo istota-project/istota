@@ -357,6 +357,21 @@ a:hover {
   overflow: hidden;
 }
 
+/* On a full-height route nothing scrolls the document — the panes inside the
+   shell do. Say so, or the document stays bounceable and a touch that starts in
+   a pane can be claimed by the page instead: on mobile the transcript sits still
+   while the whole page rubber-bands and the browser toolbar slides, and the pane
+   only takes the gesture after a priming tap.
+
+   Scoped with `:has()` rather than set on `html, body` outright: the ordinary
+   padded routes (`.app-content` without the fill modifier) DO scroll the
+   document, and locking it globally would freeze them. */
+html:has(.app-content-fill),
+body:has(.app-content-fill) {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 /* Loading / error states */
 .loading,
 .error-msg {
