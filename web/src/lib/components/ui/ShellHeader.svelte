@@ -90,7 +90,13 @@
   @media (max-width: 768px) {
     .header {
       padding: 0.5rem 0.75rem;
-      gap: 0.5rem;
+      /* Tight enough that the title lands on the app nav's wordmark: the toggle
+			   occupies 0.4→2.0rem after its negative margins, so this gap is what puts
+			   the title at the shared 2.25rem inset (see app.css). The toggle itself is
+			   left alone — it is also used outside this bar, and its own margins are
+			   what centre the glyph on the row's left edge. Nav chips carry
+			   --chip-padding-x, so their text still clears the title by 0.75rem. */
+      gap: 0.25rem;
     }
   }
 </style>

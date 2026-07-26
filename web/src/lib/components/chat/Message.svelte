@@ -248,7 +248,10 @@
 	   into one visual group (the `.continuation` rows hide the header). */
   .msg {
     display: flex;
-    gap: 0.6rem;
+    /* Tokenised because on mobile it is load-bearing: the row's inline padding,
+		   the gutter and this gap together decide where the message text starts, and
+		   that has to match the headings above it. See app.css. */
+    gap: var(--chat-avatar-gap);
     /* Extra bottom padding so the hover highlight isn't flush with the last
 		   line of text. */
     padding: 0.1rem var(--chat-row-inline) 0.45rem;
@@ -390,6 +393,35 @@
   .avatar.bot {
     background: var(--accent-amber);
     color: #111;
+  }
+
+  /* The mobile avatar is a good deal smaller (it is what buys the shared text
+	   inset — see app.css), so the initial and the corner both have to come down
+	   with it: the desktop values leave a 600-weight glyph crowding the box, and
+	   a 0.5rem radius on a 1.25rem square is a pill rather than a rounded square. */
+  @media (max-width: 768px) {
+    /* The avatar is narrower than its column here (the column's width is fixed
+		   by the shared text inset, the avatar's by the sigil it lines up with), so
+		   it hugs the leading edge instead of centring in the leftover. */
+    .gutter {
+      justify-content: flex-start;
+    }
+
+    .avatar {
+      font-size: var(--text-xs);
+      border-radius: 0.3rem;
+    }
+
+    /* The continuation-row stamp shares that column, and a `06:25 PM` does not
+		   fit 1.25rem — centred in the gutter it would overhang the row's left edge
+		   and spill ~9px into the message text on hover. Drop it here rather than
+		   shrink it (no size makes it fit): it is a hover affordance, and this
+		   breakpoint is overwhelmingly touch, where it never appears anyway. The
+		   time is still on the group header above, and the floating actions bar is
+		   positioned independently of it. */
+    .hover-time {
+      display: none;
+    }
   }
 
   /* Continuation-row timestamp. Font-size and line-height are deliberately the

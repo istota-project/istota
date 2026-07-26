@@ -71,12 +71,15 @@
   --chip-gap: 0.1rem;
 
   /* Chat row metrics: the message row's horizontal padding, the avatar column
-	   it opens with, and the avatar inside that column. Tokens rather than literals
-	   in Message.svelte so the gutter can shrink at a breakpoint without the avatar
-	   drifting out of alignment with it. */
+	   it opens with, the avatar inside that column, and the gap from that column to
+	   the message text. Tokens rather than literals in Message.svelte so the gutter
+	   can shrink at a breakpoint without the avatar drifting out of alignment with
+	   it — and so `inline + gutter + gap`, which is where the message text starts,
+	   is adjustable in one place (see the mobile block below). */
   --chat-row-inline: 0.75rem;
   --chat-gutter: 2.25rem;
   --chat-avatar: 2.1rem;
+  --chat-avatar-gap: 0.6rem;
 
   /* Device safe-area insets — the rounded screen corners, the notch, and the
 	   home-indicator strip. Non-zero only because app.html opts into
@@ -104,11 +107,28 @@
 }
 
 /* Mobile: the avatar column is pure chrome, so it is what gives up width to the
-   message text. */
+   message text.
+
+   The sizes here are not free — they put the message text on the same left edge
+   as the two headings stacked above it. On a phone the app nav, the page bar and
+   the transcript are three rows deep, and each opened at a different inset
+   (2.26 / 2.50 / 3.10rem), which reads as three ragged left edges rather than one
+   column. The wordmark is the anchor, because its inset falls out of the sigil's
+   own width: `0.75` (nav padding) + `~1.11` (sigil) + `0.4` (gap) ≈ 2.25rem. So
+   `--chat-row-inline + --chat-gutter + --chat-avatar-gap` must total 2.25rem, and
+   ShellHeader's mobile gap is tightened to land its title there too. Changing any
+   one of the three means re-checking the other two.
+
+   Only the gutter *width* is load-bearing for that sum; the avatar inside it is
+   free, so it is sized to the sigil (~1.11rem) and left-justified in the column
+   rather than centred. Both rows then open with a mark of the same size on the
+   same left edge, which is the point — centring it would inset it half the
+   leftover and put it 0.075rem off the sigil. */
 @media (max-width: 768px) {
   :root {
-    --chat-gutter: 1.75rem;
-    --chat-avatar: 1.6rem;
+    --chat-gutter: 1.25rem;
+    --chat-avatar: 1.1rem;
+    --chat-avatar-gap: 0.25rem;
   }
 }
 
