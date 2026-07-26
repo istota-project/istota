@@ -87,7 +87,12 @@
 	   and every one of these reads 0 (as it does on every desktop browser).
 	   Anything pinned to a viewport edge pads by `max(<its own padding>, <inset>)`
 	   so the inset raises the floor on a curved device and changes nothing
-	   elsewhere. Theme-independent, so there is no light-theme counterpart. */
+	   elsewhere. Theme-independent, so there is no light-theme counterpart.
+
+	   These `env()` values are the fallback, not the steady state: lib/viewport.ts
+	   latches measured pixel values onto :root at runtime (inline style wins), so
+	   a soft keyboard — which makes iOS report every inset as 0 while it is up —
+	   cannot resize anything sized from them. See that file for why. */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
@@ -251,8 +256,12 @@ body {
      what lets AppShell be `height: 100%` instead of subtracting a hardcoded nav
      height from 100vh. dvh tracks the *visible* viewport, so a collapsing mobile
      browser toolbar no longer pushes the bottom row off-screen; the 100% above
-     stays as the fallback for pre-dvh browsers. */
-  height: 100dvh;
+     stays as the fallback for pre-dvh browsers.
+
+     --app-height is set by lib/viewport.ts in an installed iOS web app only,
+     where a WebKit regression (bug 297779) leaves dvh short after the soft
+     keyboard closes. Unset everywhere else, so every other context keeps dvh. */
+  height: var(--app-height, 100dvh);
   margin: 0;
   font-family:
     system-ui,

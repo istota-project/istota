@@ -6,6 +6,7 @@
   import { DropdownMenu } from 'bits-ui';
   import { getMe, AuthError, type User } from '$lib/api';
   import { theme, toggleTheme } from '$lib/stores/theme';
+  import { installViewportGuard } from '$lib/viewport';
   import '../app.css';
 
   let { children } = $props();
@@ -13,6 +14,11 @@
   let user: User | null = $state(null);
   let loading = $state(true);
   let error = $state('');
+
+  // App-wide, because a soft keyboard is raised from every section that has a
+  // filter box or a form — not just the chat composer, which is where the first
+  // version of this lived.
+  onMount(() => installViewportGuard());
 
   onMount(async () => {
     console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);
