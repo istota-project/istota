@@ -88,6 +88,11 @@
 		   flex-grow keeps short content (and the empty state) filling the area. */
     flex: 1 0 auto;
     padding: 1.5rem 2rem;
+    /* The shell hands this route the bottom safe area (insetBottom={onSettings}),
+		   so the fill runs to the screen edge and the text clears the home
+		   indicator — rather than the fill stopping short and leaving a band of the
+		   shell background below the card. Inert where the inset is 0. */
+    padding-bottom: max(1.5rem, var(--safe-bottom));
     /* Card-colored reading surface, matching the chat message area. */
     background: var(--surface-card);
   }

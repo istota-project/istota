@@ -151,7 +151,13 @@
   onMount(() => load());
 </script>
 
-<AppShell>
+<!-- insetBottom only on the settings sub-route. The reader is a card-colored
+     surface, so letting the shell hold the bottom inset stops that fill one
+     home-indicator's height short of the screen edge and shows a band of the
+     shell background under it; the reader pads itself instead (same split the
+     chat composer makes). Settings is an ordinary scrolling form with no
+     full-bleed surface, so the shell inset is right there. -->
+<AppShell insetBottom={onSettings}>
   {#snippet header()}
     <ShellHeader
       title="Briefings"
