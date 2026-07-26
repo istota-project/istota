@@ -186,6 +186,7 @@ class TestOcsDelete:
         from istota.nextcloud_client import ocs_delete
 
         mock_resp = MagicMock()
+        mock_resp.json.return_value = {"ocs": {"meta": {"statuscode": 200}, "data": []}}
         mock_resp.raise_for_status = MagicMock()
         mock_delete.return_value = mock_resp
 

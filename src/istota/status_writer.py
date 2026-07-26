@@ -4,10 +4,9 @@ import json
 import logging
 import time
 
-import httpx
-
 from . import __version__
 from .config import Config
+from .nextcloud import dav_files_url, dav_request
 
 logger = logging.getLogger("istota.status_writer")
 
@@ -50,22 +49,23 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
         "updated_at": int(now),
     }
 
-    base_url = nc.url.rstrip("/")
-    auth = (nc.username, nc.app_password)
-    dav_base = f"{base_url}/remote.php/dav/files/{nc.username}"
-
     try:
-        # Ensure config/ directory exists (MKCOL is a no-op if it already exists)
-        httpx.request("MKCOL", f"{dav_base}/config", auth=auth, timeout=10.0)
-
-        # PUT the status file
-        resp = httpx.put(
-            f"{dav_base}/config/status.json",
+        # Ensure config/ exists. 405 means it already does, which is the
+        # steady state — dav_request accepts it rather than raising.
+        dav_request(
+            config,
+            "MKCOL",
+            dav_files_url(config, "config"),
+            timeout=10.0,
+            ok_statuses=(201, 405),
+        )
+        dav_request(
+            config,
+            "PUT",
+            dav_files_url(config, "config/status.json"),
             content=json.dumps(status, indent=2),
             headers={"Content-Type": "application/json"},
-            auth=auth,
             timeout=10.0,
         )
-        resp.raise_for_status()
     except Exception as e:
         logger.error("Failed to write status.json via WebDAV: %s", e)

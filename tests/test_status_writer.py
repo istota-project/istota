@@ -18,22 +18,35 @@ def _make_config(**kwargs):
     )
 
 
+def _dav_ok():
+    """Patch the shared WebDAV primitive's transport, returning success."""
+    return patch(
+        "istota.nextcloud._http.httpx.request",
+        return_value=MagicMock(status_code=201, text=""),
+    )
+
+
+def _call(mock_request, method):
+    """The recorded httpx.request call for a given WebDAV method."""
+    for call in mock_request.call_args_list:
+        if call[0][0] == method:
+            return call
+    raise AssertionError(f"no {method} call recorded")
+
+
 class TestStatusWriter:
     def test_writes_valid_json(self):
         cfg = _make_config()
         init_status_writer()
 
-        with patch("istota.status_writer.httpx") as mock_httpx:
-            mock_httpx.put.return_value = MagicMock(raise_for_status=MagicMock())
+        with _dav_ok() as mock_request:
             write_status(cfg, active_workers=2, pending_fg=3, pending_bg=1)
 
-            # Verify MKCOL was called for config dir
-            mock_httpx.request.assert_called_once()
-            assert mock_httpx.request.call_args[0][0] == "MKCOL"
+            # MKCOL for the config dir, then PUT of the status file.
+            methods = [c[0][0] for c in mock_request.call_args_list]
+            assert methods == ["MKCOL", "PUT"]
 
-            # Verify PUT was called with valid JSON
-            mock_httpx.put.assert_called_once()
-            content = mock_httpx.put.call_args[1]["content"]
+            content = _call(mock_request, "PUT").kwargs["content"]
             data = json.loads(content)
             assert data["status"] == "online"
             assert data["worker_pool"]["active"] == 2
@@ -44,11 +57,10 @@ class TestStatusWriter:
         cfg = _make_config(bot_name="Zorg")
         init_status_writer()
 
-        with patch("istota.status_writer.httpx") as mock_httpx:
-            mock_httpx.put.return_value = MagicMock(raise_for_status=MagicMock())
+        with _dav_ok() as mock_request:
             write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
 
-            content = mock_httpx.put.call_args[1]["content"]
+            content = _call(mock_request, "PUT").kwargs["content"]
             data = json.loads(content)
             assert data["bot_name"] == "Zorg"
             assert "version" in data
@@ -62,12 +74,28 @@ class TestStatusWriter:
         cfg = _make_config()
         init_status_writer()
 
-        with patch("istota.status_writer.httpx") as mock_httpx:
-            mock_httpx.put.return_value = MagicMock(raise_for_status=MagicMock())
+        with _dav_ok() as mock_request:
             write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
 
-            put_url = mock_httpx.put.call_args[0][0]
-            assert put_url == "https://cloud.example.com/remote.php/dav/files/botuser/config/status.json"
+            put_url = _call(mock_request, "PUT")[0][1]
+            assert put_url == (
+                "https://cloud.example.com/remote.php/dav/files/botuser/config/status.json"
+            )
+
+    def test_mkcol_on_existing_dir_still_writes(self):
+        """MKCOL answers 405 once config/ exists — the steady state, not a failure."""
+        cfg = _make_config()
+        init_status_writer()
+
+        with patch("istota.nextcloud._http.httpx.request") as mock_request:
+            mock_request.side_effect = [
+                MagicMock(status_code=405, text=""),
+                MagicMock(status_code=204, text=""),
+            ]
+            write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
+
+            methods = [c[0][0] for c in mock_request.call_args_list]
+            assert methods == ["MKCOL", "PUT"]
 
     def test_users_configured_count(self):
         from istota.config import UserConfig
@@ -77,10 +105,9 @@ class TestStatusWriter:
 
         init_status_writer()
 
-        with patch("istota.status_writer.httpx") as mock_httpx:
-            mock_httpx.put.return_value = MagicMock(raise_for_status=MagicMock())
+        with _dav_ok() as mock_request:
             write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
 
-            content = mock_httpx.put.call_args[1]["content"]
+            content = _call(mock_request, "PUT").kwargs["content"]
             data = json.loads(content)
             assert data["users_configured"] == 2

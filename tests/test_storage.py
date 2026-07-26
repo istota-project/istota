@@ -710,6 +710,7 @@ class TestShareFolderWithUser:
 
         # Share creation succeeds
         mock_post_resp = MagicMock()
+        mock_post_resp.json.return_value = {"ocs": {"meta": {"statuscode": 200}, "data": {"id": 42}}}
         mock_post_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_post_resp
 
@@ -753,6 +754,7 @@ class TestShareFolderWithUser:
         mock_get.return_value = mock_get_resp
 
         mock_post_resp = MagicMock()
+        mock_post_resp.json.return_value = {"ocs": {"meta": {"statuscode": 200}, "data": {"id": 42}}}
         mock_post_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_post_resp
 
@@ -781,6 +783,7 @@ class TestShareFolderWithUser:
 
         # POST succeeds
         mock_post_resp = MagicMock()
+        mock_post_resp.json.return_value = {"ocs": {"meta": {"statuscode": 200}, "data": {"id": 42}}}
         mock_post_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_post_resp
 
@@ -798,6 +801,7 @@ class TestShareFolderWithUser:
         mock_get.return_value = mock_get_resp
 
         mock_post_resp = MagicMock()
+        mock_post_resp.json.return_value = {"ocs": {"meta": {"statuscode": 200}, "data": {"id": 42}}}
         mock_post_resp.raise_for_status = MagicMock()
         mock_post.return_value = mock_post_resp
 
