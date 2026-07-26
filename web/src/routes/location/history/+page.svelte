@@ -502,11 +502,16 @@
     bottom: 3rem;
     left: 50%;
     transform: translateX(-50%);
+    /* Shrink-to-fit for an abs-positioned box with only `left` set is capped at
+       half the container, so the text wrapped long before it had to. */
+    width: max-content;
+    max-width: min(90%, 34rem);
+    text-align: center;
     background: rgba(17, 17, 17, 0.9);
     border: 1px solid var(--border-default);
     color: var(--text-muted);
-    font-size: var(--text-xs);
-    padding: 0.35rem 0.75rem;
+    font-size: var(--text-sm);
+    padding: 0.45rem 0.9rem;
     border-radius: var(--radius-pill);
     pointer-events: none;
     z-index: 10;
