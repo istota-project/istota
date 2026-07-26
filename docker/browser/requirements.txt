@@ -1,2 +1,6 @@
 patchright==1.50.0
 flask==3.1.0
+# Rendered-DOM -> markdown (render.py): markdownify converts, trafilatura
+# isolates article bodies. Pure Python + lxml, no browser involvement.
+markdownify==1.2.3
+trafilatura==2.1.0

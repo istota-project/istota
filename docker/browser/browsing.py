@@ -193,23 +193,35 @@ def detect_captcha(page):
     return False
 
 
-def extract_page_content(page):
-    """Extract text content, title, and links from a page."""
+DEFAULT_TEXT_MAX_CHARS = 50000
+DEFAULT_MAX_LINKS = 100
+
+
+def extract_page_content(page, max_chars=None, max_links=None):
+    """Extract text content, title, and links from a page.
+
+    Both budgets are caller-overridable. The defaults suit an article but clip a
+    link-dense hub, which is half of why an index page used to read as dead
+    (ISSUE-192). For structure-preserving output prefer render.to_markdown —
+    inner_text drops every href, and this flat link list drops every position.
+    """
     title = page.title()
+    max_chars = int(max_chars or DEFAULT_TEXT_MAX_CHARS)
+    max_links = int(max_links or DEFAULT_MAX_LINKS)
 
     try:
         text = page.inner_text("body")
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         text = "\n".join(lines)
-        if len(text) > 50000:
-            text = text[:50000] + "\n\n[Content truncated at 50000 characters]"
+        if len(text) > max_chars:
+            text = text[:max_chars] + f"\n\n[Content truncated at {max_chars} characters]"
     except Exception:
         text = ""
 
     links = []
     try:
         anchors = page.query_selector_all("a[href]")
-        for a in anchors[:100]:
+        for a in anchors[:max_links]:
             href = a.get_attribute("href")
             link_text = a.inner_text().strip()
             if href and not href.startswith(("javascript:", "#", "mailto:")):

@@ -57,7 +57,7 @@ RUN curl -fsSL -o /tmp/autoconsent-bundle.js \
        /app/stealth-extension/autoconsent-prefix.js \
        /app/stealth-extension/autoconsent-suffix.js
 
-COPY browse_api.py chrome.py browsing.py xdotool.py ./
+COPY browse_api.py chrome.py browsing.py render.py xdotool.py ./
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The assistant can now read a web page as markdown, with headings, list position and link addresses arriving together. That is what lets it tell an article link from a footer link on a page it has never seen, so browsing no longer depends on knowing a site's markup. It can take a front page whole or pull just the body of an article, whichever the page calls for.
+
+### Fixed
+- News briefings stopped declaring live sources dead. Front pages that assemble their headlines in the browser came back as nothing but section names — "World", "Business", "Opinion" — because the two available ways of reading a page either threw away every link address or returned the links with nothing to say which were articles. Reuters, Le Monde, Der Spiegel and the Guardian were repeatedly written off as unreachable and the morning briefing ran on whatever was left. Pages are now read as markdown, which keeps each headline attached to its address, and briefings that fetch a front page use that path as well.
+- Reading part of a page no longer cuts it in half. Pulling a specific element off a page was capped low enough to truncate an article's body mid-way, with nothing to indicate content had been dropped. That limit and the ones on page text and link counts are all raised, and can be raised further per request.
+
 ## [0.36.0] - 2026-07-25
 
 ### Added

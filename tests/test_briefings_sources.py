@@ -308,30 +308,145 @@ class TestBrowse:
         assert gs.ok is False
         assert "browser" in gs.provenance.lower()
 
-    def test_preset_fetch(self, tmp_path, monkeypatch):
+    def test_preset_fetch_uses_markdown(self, tmp_path, monkeypatch):
+        """Markdown, so a headline keeps its URL (ISSUE-192)."""
         import istota.briefings.sources.browse as browse_mod
 
-        class _Resp:
-            def json(self):
-                return {"status": "ok", "text": "Headline one. Headline two."}
+        calls = []
 
-        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "status": "ok",
+                    "markdown": "## Top\n\n* [Headline one](https://apnews.com/a)",
+                }
+
+        def _post(url, **kwargs):
+            calls.append((url, kwargs["json"]))
+            return _Resp()
+
+        monkeypatch.setattr(browse_mod.httpx, "post", _post)
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+
         assert gs.ok is True
         assert "AP News" in gs.text
+        assert "[Headline one](https://apnews.com/a)" in gs.text
+        assert calls[0][0].endswith("/render")
+        assert calls[0][1]["mode"] == "full"
+        assert calls[0][1]["max_chars"] == browse_mod._MARKDOWN_MAX_CHARS
+
+    def test_article_mode_forwarded(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        calls = []
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"status": "ok", "markdown": "body text"}
+
+        def _post(url, **kwargs):
+            calls.append(kwargs["json"])
+            return _Resp()
+
+        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        browse_mod.resolve(
+            {"url": "https://example.com/story", "mode": "article", "max_chars": 4000},
+            _ctx(tmp_path, browser=True),
+        )
+        assert calls[0]["mode"] == "article"
+        assert calls[0]["max_chars"] == 4000
+
+    def test_unknown_mode_falls_back_to_full(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        calls = []
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"status": "ok", "markdown": "body text"}
+
+        def _post(url, **kwargs):
+            calls.append(kwargs["json"])
+            return _Resp()
+
+        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        browse_mod.resolve(
+            {"url": "https://example.com", "mode": "readable"},
+            _ctx(tmp_path, browser=True),
+        )
+        assert calls[0]["mode"] == "full"
+
+    def test_falls_back_to_text_on_old_browser_image(self, tmp_path, monkeypatch):
+        """A container predating /render 404s — degrade, don't fail the source."""
+        import istota.briefings.sources.browse as browse_mod
+
+        calls = []
+
+        class _Resp:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def _post(url, **kwargs):
+            calls.append(url)
+            if url.endswith("/render"):
+                return _Resp(404, {})
+            return _Resp(200, {"status": "ok", "text": "Headline one. Headline two."})
+
+        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+
+        assert gs.ok is True
         assert "Headline one" in gs.text
+        assert [c.rsplit("/", 1)[-1] for c in calls] == ["render", "browse"]
 
     def test_custom_url(self, tmp_path, monkeypatch):
         import istota.briefings.sources.browse as browse_mod
 
         class _Resp:
+            status_code = 200
+
             def json(self):
-                return {"status": "ok", "text": "custom page"}
+                return {"status": "ok", "markdown": "custom page"}
 
         monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
         gs = browse_mod.resolve({"url": "https://example.com"}, _ctx(tmp_path, browser=True))
         assert gs.ok is True
         assert "example.com" in gs.text
+
+    def test_empty_render_is_not_ok(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"status": "ok", "markdown": "   "}
+
+        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        assert gs.ok is False
+        assert "no content" in gs.provenance
+
+    def test_fetch_failure_is_soft(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        def _boom(*a, **k):
+            raise RuntimeError("browser down")
+
+        monkeypatch.setattr(browse_mod.httpx, "post", _boom)
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        assert gs.ok is False
+        assert "fetch failed" in gs.provenance
 
     def test_unknown_preset(self, tmp_path):
         gs = resolve_source("browse", {"preset": "nope"}, _ctx(tmp_path, browser=True))

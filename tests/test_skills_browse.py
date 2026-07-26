@@ -13,6 +13,7 @@ from istota.skills.browse import (
     cmd_get,
     cmd_interact,
     cmd_links,
+    cmd_render,
     cmd_screenshot,
     get_api_url,
     main,
@@ -77,6 +78,49 @@ class TestBuildParser:
         args = parser.parse_args(["extract", "https://example.com", "-s", "article"])
         assert args.command == "extract"
         assert args.selector == "article"
+        assert args.max_chars is None
+        assert args.limit is None
+
+    def test_extract_with_budgets(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "extract", "https://example.com", "-s", "article",
+            "--max-chars", "80000", "--limit", "50",
+        ])
+        assert args.max_chars == 80000
+        assert args.limit == 50
+
+    def test_render_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["render", "https://example.com"])
+        assert args.command == "render"
+        assert args.url == "https://example.com"
+        assert args.mode == "full"
+        assert args.keep_session is False
+        assert args.timeout == 30
+        assert args.max_chars is None
+
+    def test_render_with_options(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "render", "https://example.com", "--mode", "article",
+            "--keep-session", "--max-chars", "250000", "--wait-for", "main",
+        ])
+        assert args.mode == "article"
+        assert args.keep_session is True
+        assert args.max_chars == 250000
+        assert args.wait_for == "main"
+
+    def test_render_session_only(self):
+        parser = build_parser()
+        args = parser.parse_args(["render", "--session", "abc123"])
+        assert args.url is None
+        assert args.session == "abc123"
+
+    def test_render_rejects_unknown_mode(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["render", "https://example.com", "--mode", "readable"])
 
     def test_interact_click(self):
         parser = build_parser()
@@ -212,6 +256,116 @@ class TestCmdGet:
         assert result["vnc_url"] == "https://vnc.example.com"
 
 
+class TestCmdRender:
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_render_returns_markdown(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com/world",
+            "title": "World",
+            "mode": "full",
+            "requested_mode": "full",
+            "markdown": "## Top stories\n\n* [Headline](https://news.example.com/a)",
+            "chars": 54,
+            "truncated": False,
+            "notes": [],
+        }
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["render", "https://news.example.com/world"])
+        result = cmd_render(args)
+
+        assert result["status"] == "ok"
+        assert "[Headline](https://news.example.com/a)" in result["markdown"]
+        assert mock_post.call_args[0][0] == "http://test:9223/render"
+        payload = mock_post.call_args[1]["json"]
+        assert payload["url"] == "https://news.example.com/world"
+        assert payload["mode"] == "full"
+        assert payload["keep_session"] is False
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_article_mode_payload(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok", "markdown": "body", "mode": "article"}
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "render", "https://news.example.com/story", "--mode", "article",
+            "--max-chars", "250000", "--wait-for", "main", "--skip-behavior",
+        ])
+        cmd_render(args)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["mode"] == "article"
+        assert payload["max_chars"] == 250000
+        assert payload["wait_for"] == "main"
+        assert payload["skip_behavior"] is True
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_render_within_a_session(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok", "markdown": "x", "session_id": "sess1"}
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["render", "--session", "sess1"])
+        cmd_render(args)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["session_id"] == "sess1"
+        assert "url" not in payload
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_render_without_url_or_session_errors_locally(self, mock_url, mock_post):
+        parser = build_parser()
+        args = parser.parse_args(["render"])
+        result = cmd_render(args)
+
+        assert result["status"] == "error"
+        assert "URL or --session" in result["error"]
+        mock_post.assert_not_called()
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_render_on_old_container_says_so(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["render", "https://example.com"])
+        result = cmd_render(args)
+
+        assert result["status"] == "error"
+        assert "browse get" in result["error"]
+        mock_resp.json.assert_not_called()
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_render_captcha_passthrough(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "captcha",
+            "session_id": "sess1",
+            "vnc_url": "https://vnc.example.com",
+        }
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["render", "https://protected.example"])
+        result = cmd_render(args)
+
+        assert result["status"] == "captcha"
+        assert result["vnc_url"] == "https://vnc.example.com"
+
+
 class TestCmdScreenshot:
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
@@ -267,6 +421,26 @@ class TestCmdExtract:
         assert result["count"] == 1
         payload = mock_post.call_args[1]["json"]
         assert payload["selector"] == "article"
+        assert "max_chars" not in payload
+        assert "limit" not in payload
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_extract_budgets_forwarded(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok", "count": 0, "elements": []}
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "extract", "https://example.com", "-s", "article",
+            "--max-chars", "80000", "--limit", "50",
+        ])
+        cmd_extract(args)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["max_chars"] == 80000
+        assert payload["limit"] == 50
 
 
 class TestCmdInteract:

@@ -1,14 +1,18 @@
 """Browse source resolver — a user-defined URL fetched via the browse skill.
 
 A source references either a bundled preset key (``ap``, ``reuters``, …) or an
-arbitrary ``url``. The page text is fetched through the headless browser API and
-truncated. Requires ``config.browser.enabled``; off → empty + note. Content is
-untrusted (the block's companion ``untrusted_input`` skill carries the handling
-rules).
+arbitrary ``url``. The page is fetched through the headless browser API as
+**markdown**, so a headline arrives attached to its URL and under the section
+heading it sits beneath; the older flattened-text path dropped every href, which
+is why a live frontpage could read as a dead one (ISSUE-192). A browser image
+predating ``/render`` answers 404 and we fall back to that text path. Requires
+``config.browser.enabled``; off → empty + note. Content is untrusted (the
+block's companion ``untrusted_input`` skill carries the handling rules).
 
 Source config shape::
 
-    {"url": "https://…", "preset": "ap"|null, "max_chars": 5000}
+    {"url": "https://…", "preset": "ap"|null, "mode": "full"|"article",
+     "max_chars": 20000}
 """
 
 from __future__ import annotations
@@ -57,6 +61,56 @@ BROWSE_PRESETS: dict[str, dict] = {
 
 _FETCH_TIMEOUT = 60.0
 
+# Markdown carries the URLs the flattened text dropped, so it needs a bigger
+# budget than ``max_source_chars`` (5000) — a frontpage spends its first couple
+# of thousand characters on masthead and subscribe chrome before the headline
+# grid starts, and cutting there would land back at "no articles found". A
+# source's explicit ``max_chars`` still wins.
+_MARKDOWN_MAX_CHARS = 20000
+
+_MODES = ("full", "article")
+
+
+def _render_markdown(api_url: str, url: str, mode: str, max_chars: int) -> str | None:
+    """Page as markdown. ``None`` means the endpoint isn't there (old image)."""
+    resp = httpx.post(
+        f"{api_url}/render",
+        json={
+            "url": url,
+            "mode": mode,
+            "timeout": 30,
+            "keep_session": False,
+            "max_chars": max_chars,
+        },
+        timeout=_FETCH_TIMEOUT,
+    )
+    if resp.status_code == 404:
+        logger.info("browse source: browser image has no /render — using text path")
+        return None
+    data = resp.json()
+    if data.get("status") != "ok":
+        logger.warning(
+            "browse source: render returned status %s for %s", data.get("status"), url,
+        )
+        return ""
+    return (data.get("markdown") or "").strip()
+
+
+def _browse_text(api_url: str, url: str) -> str:
+    """Legacy flattened-text path, for a browser image predating /render."""
+    resp = httpx.post(
+        f"{api_url}/browse",
+        json={"url": url, "timeout": 30, "keep_session": False},
+        timeout=_FETCH_TIMEOUT,
+    )
+    data = resp.json()
+    if data.get("status") != "ok":
+        logger.warning(
+            "browse source: browse returned status %s for %s", data.get("status"), url,
+        )
+        return ""
+    return (data.get("text") or "").strip()
+
 
 def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
     preset_key = config.get("preset")
@@ -77,7 +131,12 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
             provenance="(browse source has no url or preset)", ok=False,
         )
     title = name or url
-    max_chars = int(config.get("max_chars", ctx.module_config.max_source_chars) or 5000)
+    mode = config.get("mode") or "full"
+    if mode not in _MODES:
+        mode = "full"
+    explicit_max = config.get("max_chars")
+    markdown_max = int(explicit_max or _MARKDOWN_MAX_CHARS)
+    text_max = int(explicit_max or ctx.module_config.max_source_chars or 5000)
 
     browser = getattr(ctx.app_config, "browser", None)
     if not browser or not getattr(browser, "enabled", False):
@@ -88,34 +147,24 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
 
     api_url = browser.api_url
     try:
-        resp = httpx.post(
-            f"{api_url}/browse",
-            json={"url": url, "timeout": 30, "keep_session": False},
-            timeout=_FETCH_TIMEOUT,
-        )
-        data = resp.json()
+        body = _render_markdown(api_url, url, mode, markdown_max)
+        if body is None:
+            body = _browse_text(api_url, url)
+            if len(body) > text_max:
+                body = body[:text_max] + "\n[truncated]"
     except Exception as e:  # noqa: BLE001
         logger.warning("browse source: fetch failed for %s: %s", url, e)
         return GatheredSource(
             kind="browse", title=title, provenance="(browse fetch failed)", ok=False,
         )
 
-    if data.get("status") != "ok":
+    if not body:
         return GatheredSource(
-            kind="browse", title=title,
-            provenance=f"(browse returned status {data.get('status')})", ok=False,
+            kind="browse", title=title, provenance="(browse returned no content)", ok=False,
         )
-
-    text = data.get("text", "") or ""
-    if not text.strip():
-        return GatheredSource(
-            kind="browse", title=title, provenance="(browse returned no text)", ok=False,
-        )
-    if len(text) > max_chars:
-        text = text[:max_chars] + "\n[truncated]"
 
     return GatheredSource(
         kind="browse", title=title,
-        text=f"### {title} ({url})\n{text}",
+        text=f"### {title} ({url})\n{body}",
         provenance=f"frontpage of {title}",
     )

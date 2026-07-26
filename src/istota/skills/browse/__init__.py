@@ -2,6 +2,7 @@
 
 Usage:
     python -m istota.skills.browse get "https://example.com" [--keep-session] [--timeout 30]
+    python -m istota.skills.browse render "https://example.com" [--mode full|article]
     python -m istota.skills.browse screenshot "https://example.com" [--output /tmp/shot.png]
     python -m istota.skills.browse extract "https://example.com" --selector "article"
     python -m istota.skills.browse interact <session_id> --click ".button" --fill "#input=value"
@@ -41,8 +42,48 @@ def cmd_get(args):
         payload["wait_for"] = args.wait_for
     if args.skip_behavior:
         payload["skip_behavior"] = True
+    if args.max_chars:
+        payload["max_chars"] = args.max_chars
+    if args.max_links:
+        payload["max_links"] = args.max_links
 
     resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
+    return resp.json()
+
+
+def cmd_render(args):
+    """Render a page to markdown, keeping headings and links together."""
+    url = get_api_url()
+    if not args.url and not args.session:
+        return {
+            "status": "error",
+            "error": "render needs a URL or --session <id>",
+        }
+
+    payload = {
+        "mode": args.mode,
+        "timeout": args.timeout,
+        "keep_session": args.keep_session,
+    }
+    if args.url:
+        payload["url"] = args.url
+    if args.session:
+        payload["session_id"] = args.session
+    if args.wait_for:
+        payload["wait_for"] = args.wait_for
+    if args.max_chars:
+        payload["max_chars"] = args.max_chars
+    if args.skip_behavior:
+        payload["skip_behavior"] = True
+
+    resp = httpx.post(f"{url}/render", json=payload, timeout=REQUEST_TIMEOUT)
+    if resp.status_code == 404:
+        # Browser container predates the markdown renderer. Say so plainly
+        # rather than surfacing a JSON decode error from Flask's HTML 404.
+        return {
+            "status": "error",
+            "error": "This browser container has no render endpoint — use `browse get` instead.",
+        }
     return resp.json()
 
 
@@ -80,6 +121,10 @@ def cmd_extract(args):
         payload["url"] = args.url
     if args.session:
         payload["session_id"] = args.session
+    if args.max_chars:
+        payload["max_chars"] = args.max_chars
+    if args.limit:
+        payload["limit"] = args.limit
 
     resp = httpx.post(f"{url}/extract", json=payload, timeout=REQUEST_TIMEOUT)
     return resp.json()
@@ -228,6 +273,23 @@ def build_parser():
     p_get.add_argument("--wait-for", help="CSS selector to wait for after load")
     p_get.add_argument("--skip-behavior", action="store_true",
                        help="Skip simulated mouse/scroll after load (for DataDome-protected sites)")
+    p_get.add_argument("--max-chars", type=int, help="Page text budget (default 50000)")
+    p_get.add_argument("--max-links", type=int, help="Link budget (default 100)")
+
+    # render
+    p_render = sub.add_parser(
+        "render", help="Render a page to markdown (keeps headings + links together)",
+    )
+    p_render.add_argument("url", nargs="?", help="URL to render")
+    p_render.add_argument("--mode", choices=["full", "article"], default="full",
+                          help="full = whole page (hubs/indexes); article = main content only")
+    p_render.add_argument("--session", help="Existing session ID")
+    p_render.add_argument("--keep-session", action="store_true", help="Keep session alive")
+    p_render.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
+    p_render.add_argument("--wait-for", help="CSS selector to wait for after load")
+    p_render.add_argument("--max-chars", type=int, help="Markdown budget (default 100000)")
+    p_render.add_argument("--skip-behavior", action="store_true",
+                          help="Skip simulated mouse/scroll after load")
 
     # screenshot
     p_ss = sub.add_parser("screenshot", help="Take a screenshot")
@@ -243,6 +305,9 @@ def build_parser():
     p_ext.add_argument("--selector", "-s", required=True, help="CSS selector")
     p_ext.add_argument("--session", help="Existing session ID")
     p_ext.add_argument("--timeout", type=int, default=30)
+    p_ext.add_argument("--max-chars", type=int,
+                       help="Per-element text/HTML budget (default 25000)")
+    p_ext.add_argument("--limit", type=int, help="Max matched elements (default 20)")
 
     # interact
     p_int = sub.add_parser("interact", help="Interact with existing session")
@@ -272,6 +337,7 @@ def main(argv=None):
 
     commands = {
         "get": cmd_get,
+        "render": cmd_render,
         "screenshot": cmd_screenshot,
         "extract": cmd_extract,
         "interact": cmd_interact,

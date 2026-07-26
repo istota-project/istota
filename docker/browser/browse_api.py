@@ -18,6 +18,7 @@ from flask import Flask, Response, jsonify, request
 
 import chrome
 import browsing
+import render
 import xdotool
 
 app = Flask(__name__)
@@ -51,6 +52,14 @@ BROWSE_WATCHDOG_DEADLINE_S = int(os.environ.get("BROWSE_WATCHDOG_DEADLINE_S", "9
 BROWSE_WATCHDOG_POLL_S = int(os.environ.get("BROWSE_WATCHDOG_POLL_S", "5"))
 _inflight = None  # {"path", "url", "started"} for the one in-flight Flask request
 _inflight_lock = threading.Lock()
+
+# Response budgets. Every one of these is a ceiling a caller may lower, not a
+# fixed size: a link-dense hub rendered to markdown legitimately runs past the
+# text-extraction defaults these endpoints shipped with (ISSUE-192), and the old
+# hard-coded 10k HTML cap on /extract silently cut article bodies in half.
+EXTRACT_MAX_CHARS = 25000    # per matched element, per field
+EXTRACT_MAX_ELEMENTS = 200
+RENDER_MAX_CHARS = 500000
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +269,11 @@ def browse():
                 "message": "Captcha detected. Solve via VNC, then retry.",
             })
 
-        content = browsing.extract_page_content(page)
+        content = browsing.extract_page_content(
+            page,
+            max_chars=data.get("max_chars"),
+            max_links=data.get("max_links"),
+        )
         result = {"status": "ok", **content}
 
         if keep_session or not created_new:
@@ -335,6 +348,8 @@ def extract():
     session_id = data.get("session_id")
     selector = data.get("selector", "body")
     timeout = data.get("timeout", 30) * 1000
+    max_chars = max(1, min(int(data.get("max_chars") or EXTRACT_MAX_CHARS), RENDER_MAX_CHARS))
+    limit = max(1, min(int(data.get("limit") or 20), EXTRACT_MAX_ELEMENTS))
 
     created_new = False
     tab_index = None
@@ -369,11 +384,11 @@ def extract():
 
         elements = page.query_selector_all(selector)
         results = []
-        for el in elements[:20]:
+        for el in elements[:limit]:
             text = el.inner_text().strip()
             html = el.inner_html()
             if text:
-                entry = {"text": text[:10000], "html": html[:10000]}
+                entry = {"text": text[:max_chars], "html": html[:max_chars]}
                 for attr in ("href", "src", "data-link-name", "id", "class"):
                     val = el.get_attribute(attr)
                     if val:
@@ -392,6 +407,101 @@ def extract():
         })
     except Exception as e:
         if created_new:
+            _close_session(session_id)
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/render", methods=["POST"])
+def render_page():
+    """Render the page to markdown — the structure-preserving read path.
+
+    `/browse` returns flattened text (no hrefs) and a position-stripped anchor
+    list, which on an index page reads as nav chrome and article links being the
+    same thing. Markdown keeps the heading structure and the href together, so
+    the caller can tell them apart without a per-site CSS selector (ISSUE-192).
+
+    `mode=full` serializes the whole page (right for hubs, where the link grid
+    *is* the content); `mode=article` isolates the main content first (right for
+    article bodies) and degrades to full when the page has no article in it.
+
+    Takes `url` (navigate first), `session_id` (render what that tab already
+    holds), or both (navigate within an existing session).
+    """
+    _cleanup_expired()
+    data = request.get_json()
+    url = data.get("url")
+    session_id = data.get("session_id")
+    mode = data.get("mode", "full")
+    timeout = data.get("timeout", 30) * 1000
+    wait_for = data.get("wait_for")
+    keep_session = data.get("keep_session", False)
+    skip_behavior = data.get("skip_behavior", False)
+    max_chars = max(
+        1, min(int(data.get("max_chars") or render.DEFAULT_MAX_CHARS), RENDER_MAX_CHARS),
+    )
+
+    created_new = False
+    if session_id:
+        session = _get_session(session_id)
+        if not session:
+            return jsonify({
+                "error": f"session {session_id} not found or expired",
+            }), 404
+        tab_index = session["tab_index"]
+    elif url:
+        session_id, tab_index = _create_session()
+        created_new = True
+    else:
+        return jsonify({"error": "url or session_id is required"}), 400
+
+    try:
+        if url:
+            _navigate_and_wait(tab_index, url, timeout_ms=timeout)
+
+        chrome.connect_cdp()
+        page = _get_page(tab_index)
+        if not page:
+            raise RuntimeError("Tab not found")
+
+        if url:
+            browsing.wait_for_datadome(page)
+            if not skip_behavior:
+                browsing.simulate_human_behavior(page)
+            if wait_for:
+                try:
+                    page.wait_for_selector(wait_for, timeout=10000)
+                except Exception:
+                    pass
+            if browsing.detect_captcha(page):
+                # Session deliberately left open so the caller can solve it over
+                # VNC and retry against the same tab, as /browse does.
+                return jsonify({
+                    "status": "captcha",
+                    "session_id": session_id,
+                    "vnc_url": os.environ.get("BROWSER_VNC_URL", ""),
+                    "message": "Captcha detected. Solve via VNC, then retry.",
+                })
+
+        html = page.content()
+        rendered = render.to_markdown(
+            html, base_url=page.url, mode=mode, max_chars=max_chars,
+        )
+        result = {
+            "status": "ok",
+            "url": page.url,
+            "title": page.title(),
+            **rendered,
+        }
+
+        if keep_session or not created_new:
+            result["session_id"] = session_id
+        else:
+            _close_session(session_id)
+
+        return jsonify(result)
+
+    except Exception as e:
+        if created_new and not keep_session:
             _close_session(session_id)
         return jsonify({"status": "error", "error": str(e)}), 500
 
