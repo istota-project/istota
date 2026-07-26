@@ -823,6 +823,16 @@ def _build_network_allowlist(
             if parsed.hostname and "github.com" in parsed.hostname:
                 hosts.add("api.github.com:443")
 
+    # Nextcloud skill: the instance host. Only reachable when the skill proxy
+    # is off — with it on, the skill CLI runs server-side in the daemon's netns
+    # and never meets this allowlist.
+    if "nextcloud" in authorized_skills and config.nextcloud.url:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(config.nextcloud.url)
+        if parsed.hostname:
+            hosts.add(f"{parsed.hostname}:{parsed.port or 443}")
+
     # Google Workspace skill: Google API hosts
     if "google_workspace" in authorized_skills:
         hosts.update({

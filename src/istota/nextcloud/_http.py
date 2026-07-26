@@ -59,7 +59,9 @@ def is_ocs_success(code: int | None) -> bool:
     return code in _OCS_SUCCESS
 
 
-@dataclass(frozen=True)
+# Deliberately not frozen: Python (and contextlib, and pytest.raises) assign
+# __traceback__ on a live exception, which a frozen dataclass refuses.
+@dataclass(eq=False)
 class OcsError(Exception):
     """A Nextcloud request that did not succeed.
 

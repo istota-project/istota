@@ -1307,6 +1307,44 @@ def cmd_tasks_file_status(args):
         print(f"  [{t.id}] {t.status:12} {t.user_id:15} {content_preview}")
 
 
+def cmd_nextcloud_capabilities(args):
+    """Probe what the configured Nextcloud server supports — the deployment fit-check."""
+    from istota.nextcloud import OcsError, capabilities as caps_mod
+
+    config = load_config(Path(args.config) if args.config else None)
+    if not config.nextcloud.url:
+        print(json.dumps({"status": "error", "error": "Nextcloud is not configured"}, indent=2))
+        sys.exit(1)
+
+    try:
+        payload = caps_mod.fetch_capabilities(config)
+    except OcsError as e:
+        print(json.dumps(e.to_envelope(), indent=2))
+        sys.exit(1)
+
+    if args.raw:
+        print(json.dumps(payload, indent=2, default=str))
+        return
+
+    if args.check:
+        names = [n.strip() for n in args.check.split(",") if n.strip()]
+        checks = caps_mod.evaluate_checks(payload, names)
+        for name, ok in checks.items():
+            print(f"  [{'ok ' if ok else 'MISSING'}] {name}")
+        missing = [n for n, ok in checks.items() if not ok]
+        if missing:
+            print(f"\nMissing: {', '.join(missing)}")
+            sys.exit(1)
+        return
+
+    account = {}
+    try:
+        account = caps_mod.fetch_account(config)
+    except OcsError:
+        pass
+    print(json.dumps(caps_mod.summarize(payload, account), indent=2, default=str))
+
+
 def cmd_experimental_list(args):
     """List known experimental feature flags with current on/off status."""
     from istota.experimental import KNOWN_FEATURES
@@ -1714,6 +1752,19 @@ def main():
     from istota import cli_money
     cli_money.add_subparser(subparsers)
 
+    # nextcloud (with subparsers)
+    nc_parser = subparsers.add_parser("nextcloud", help="Nextcloud server operations")
+    nc_subparsers = nc_parser.add_subparsers(dest="nextcloud_action", required=True)
+    nc_caps_parser = nc_subparsers.add_parser(
+        "capabilities", help="What the configured Nextcloud server supports",
+    )
+    nc_caps_parser.add_argument("--raw", action="store_true", help="Full capabilities payload")
+    nc_caps_parser.add_argument(
+        "--check",
+        default=None,
+        help="Comma list of dotted feature names; exits non-zero if any is missing",
+    )
+
     # experimental
     exp_parser = subparsers.add_parser("experimental", help="Experimental feature flags")
     exp_subparsers = exp_parser.add_subparsers(dest="experimental_action", required=True)
@@ -1785,6 +1836,11 @@ def main():
         rc = cli_money.dispatch(args, config)
         if rc:
             sys.exit(rc)
+    elif args.command == "nextcloud":
+        nextcloud_commands = {
+            "capabilities": cmd_nextcloud_capabilities,
+        }
+        nextcloud_commands[args.nextcloud_action](args)
     elif args.command == "experimental":
         experimental_commands = {
             "list": cmd_experimental_list,

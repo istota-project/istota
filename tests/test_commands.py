@@ -1203,7 +1203,9 @@ class TestCmdSkills:
         # browser + devbox off by default → the capability gate files browse and
         # devbox under Disabled (not Available), with no explicit disabled_skills.
         config = make_config()
-        assert config.available_capabilities() == set()
+        caps = config.available_capabilities()
+        assert "browser" not in caps
+        assert "devbox" not in caps
         with db.get_db(config.db_path) as conn:
             result = await cmd_skills(_ctx(config, conn, "alice", "room1", ""))
         assert "**Disabled**" in result

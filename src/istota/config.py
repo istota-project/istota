@@ -1329,6 +1329,11 @@ class Config:
             caps.add("browser")
         if self.devbox.enabled:
             caps.add("devbox")
+        # Keyed on the URL for the same reason storage_is_nextcloud is: a
+        # standalone local install has no Nextcloud at all, and every verb of
+        # the nextcloud skill would fail there.
+        if self.nextcloud.url:
+            caps.add("nextcloud")
         return caps
 
     def is_admin(self, user_id: str) -> bool:
