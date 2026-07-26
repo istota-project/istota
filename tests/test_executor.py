@@ -2075,8 +2075,24 @@ class TestPreTranscribeAttachments:
         result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "[voice.mp3]")
         assert "remind me to buy groceries" in result
         assert "voice.mp3" in result
-        assert result.startswith("Transcribed voice message:")
+        assert "Transcribed voice message:" in result
         mock_transcribe.assert_called_once_with("/tmp/voice.mp3")
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_empty_prompt_becomes_the_transcript(self, mock_transcribe):
+        """A voice memo sent with nothing typed: the transcript is the prompt."""
+        mock_transcribe.return_value = {"status": "ok", "text": "call the plumber"}
+        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "")
+        assert result.startswith("Transcribed voice message: call the plumber")
+
+    @patch(_TRANSCRIBE_PATCH)
+    def test_accompanying_text_is_kept(self, mock_transcribe):
+        """Text sent alongside a voice memo is the instruction the audio was
+        sent under — the transcript is appended, never a replacement."""
+        mock_transcribe.return_value = {"status": "ok", "text": "call the plumber"}
+        result = _pre_transcribe_attachments(["/tmp/voice.mp3"], "summarize this")
+        assert result.startswith("summarize this")
+        assert "call the plumber" in result
 
     @patch(_TRANSCRIBE_PATCH)
     def test_transcription_failure_returns_prompt_unchanged(self, mock_transcribe):

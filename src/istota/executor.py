@@ -161,6 +161,12 @@ def _pre_transcribe_attachments(
 
     Returns an enriched prompt with transcribed text, or the original prompt
     if no audio attachments or transcription fails.
+
+    The transcript is *appended* to whatever the sender typed rather than
+    replacing it: a voice memo can arrive alongside a written message ("have a
+    listen and summarize this"), and dropping that half loses the instruction
+    the audio was sent under. A send with no typed text (the composer's
+    record-and-send) carries only the transcript.
     """
     if not attachments:
         return prompt
@@ -203,7 +209,11 @@ def _pre_transcribe_attachments(
 
     transcribed_text = " ".join(transcribed_parts)
     filenames = ", ".join(Path(p).name for p in audio_paths)
-    return f"Transcribed voice message: {transcribed_text}\n\n(Original audio: {filenames})"
+    block = (
+        f"Transcribed voice message: {transcribed_text}\n\n"
+        f"(Original audio: {filenames})"
+    )
+    return block if not prompt.strip() else f"{prompt}\n\n{block}"
 
 
 def _preshrink_image_attachments(

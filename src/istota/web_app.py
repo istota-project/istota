@@ -2476,6 +2476,30 @@ def _validate_chat_attachments(username: str, paths: list) -> list[str] | None:
     return out
 
 
+def _describe_attachment_only_message(attachments: list[str]) -> str:
+    """Stand-in prompt for a send that carried attachments but no typed text.
+
+    Voice memos are the motivating case: the recording is the message. The
+    descriptor names what arrived so the turn is legible everywhere the raw
+    prompt is read (transcript, conversation context, the Talk mirror repost),
+    and it keeps the prompt useful when transcription is unavailable — the
+    model still sees "there is audio here" plus the attachment path, and can
+    reach for the whisper skill itself.
+    """
+    from .executor import _AUDIO_EXTENSIONS
+
+    names = [os.path.basename(p) for p in attachments]
+    audio = [
+        n for n in names
+        if os.path.splitext(n)[1].lstrip(".").lower() in _AUDIO_EXTENSIONS
+    ]
+    if audio and len(audio) == len(names):
+        label = "Voice message" if len(audio) == 1 else "Voice messages"
+        return f"{label} (see attached audio)."
+    joined = ", ".join(names)
+    return f"(Sent without a message — see attached: {joined})"
+
+
 def _chat_create_web_task(
     username: str, token: str, text: str,
     attachments: list[str] | None = None,
@@ -3120,14 +3144,23 @@ async def chat_send_message(
 
     data = await request.json()
     text = (data.get("text") or "").strip()
-    if not text:
-        return JSONResponse({"error": "text required"}, status_code=400)
     if len(text) > _config.web.chat.max_prompt_chars:
         return JSONResponse({"error": "message too long"}, status_code=400)
 
     attachments = _validate_chat_attachments(username, data.get("attachments") or [])
     if attachments is None:
         return JSONResponse({"error": "invalid attachment path"}, status_code=400)
+
+    # An attachment-only send is a real message — a voice memo recorded in the
+    # composer is the whole message, with nothing typed alongside it. The
+    # attachment *is* the content, so stand a short descriptor in for the empty
+    # text rather than rejecting the send (or storing a blank user turn that
+    # reads as nothing in history, in LLM context, and on a Talk mirror leg).
+    # The executor's audio pre-transcription then folds the spoken words in.
+    if not text:
+        if not attachments:
+            return JSONResponse({"error": "text or attachment required"}, status_code=400)
+        text = _describe_attachment_only_message(attachments)
 
     # A leading "!" is either a `!model` prefix (strip + carry overrides into the
     # task) or a `!command` (run synchronously, return inline — no task row, no

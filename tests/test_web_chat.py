@@ -657,6 +657,69 @@ class TestChatMessagesApi:
         )
         assert resp.status_code == 400
 
+    async def _upload_path(self, username: str, filename: str) -> str:
+        """A real file under the user's web-chat upload root, so the send's
+        attachment validation accepts it."""
+        import istota.web_app as mod
+        root = mod._chat_upload_roots(username)[0]
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / filename
+        path.write_bytes(b"\x00\x01")
+        return str(path)
+
+    async def test_voice_memo_only_send_is_accepted(self, chat_client):
+        """A composer voice memo with nothing typed is the message — the send
+        creates a task whose prompt describes the recording (the executor's
+        pre-transcription later folds in the spoken words)."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        audio = await self._upload_path("alice", "voice-abc123.webm")
+        resp = await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "", "attachments": [audio]}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        task_id = resp.json()["task_id"]
+        assert task_id is not None
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            task = db.get_task(c, task_id)
+        assert task.attachments == [audio]
+        assert "Voice message" in task.prompt
+
+    async def test_attachment_only_send_describes_the_files(self, chat_client):
+        """A non-audio attachment sent with no text gets a descriptor naming
+        it, so the stored turn isn't blank in history or LLM context."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        image = await self._upload_path("alice", "receipt-99.png")
+        resp = await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "", "attachments": [image]}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            task = db.get_task(c, resp.json()["task_id"])
+        assert "receipt-99.png" in task.prompt
+
+    async def test_attachment_only_turn_round_trips_in_history(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        audio = await self._upload_path("alice", "voice-xyz.webm")
+        await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "", "attachments": [audio]}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        data = (await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )).json()
+        user_msgs = [m for m in data["messages"] if m["role"] == "user"]
+        assert user_msgs and "Voice message" in user_msgs[0]["text"]
+
     async def test_history_round_trip(self, chat_client):
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)

@@ -775,8 +775,14 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
   if (msgMatch && method === 'POST') {
     const room = mockChatRooms.find((r) => r.id === Number(msgMatch[1]));
     if (!room) return { error: 'room not found' };
-    const text = String(body?.text || '').trim();
-    if (!text) return { error: 'text required' };
+    const attachments: string[] = Array.isArray(body?.attachments) ? body.attachments : [];
+    // An attachment-only send (a composer voice memo) is a real message: the
+    // recording is the content. Mirrors the server's descriptor stand-in.
+    let text = String(body?.text || '').trim();
+    if (!text) {
+      if (!attachments.length) return { error: 'text or attachment required' };
+      text = 'Voice message (see attached audio).';
+    }
     if (text.startsWith('!')) {
       const inline = mockCommandResult(text);
       if (inline !== null) return { task_id: null, inline_result: inline };
