@@ -338,13 +338,13 @@ See [Google Workspace](../features/google-workspace.md) for setup instructions.
 
 ## `[site]`
 
-Instance-wide web root and public hostname (not per-user).
+The deployment's public DNS name.
 
 | Setting | Default | Description |
 |---|---|---|
-| `enabled` | `false` | Serve the bot's own instance web root via nginx |
-| `hostname` | `""` | Public DNS name; used by the web app for OAuth2 redirect derivation, origin/CSRF checks, and webhook URLs — load-bearing independent of `enabled` |
-| `base_path` | `""` | The bot's own static web root the agent may edit |
+| `hostname` | `""` | Public DNS name; used by the web app for OAuth2 redirect derivation, origin/CSRF checks, and webhook URLs |
+
+The agent-writable static web root (`enabled` / `base_path`) was removed. A publicly-served directory the agent could write to with an ordinary `cp` was an outbound egress channel the confirmation model treated as a benign local write, so anything the agent could read could be published to a public URL without a gate. Serve static assets outside istota, from a directory the agent cannot reach. A stale `enabled` / `base_path` key logs a warning at config load and is ignored.
 
 ## `[web]`
 

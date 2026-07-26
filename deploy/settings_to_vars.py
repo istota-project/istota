@@ -187,9 +187,7 @@ _SECTION_FLAT_KEYS = {
         "enabled": "istota_backup_enabled",
     },
     "site": {
-        "enabled": "istota_site_enabled",
         "hostname": "istota_hostname",
-        "base_path": "istota_site_base_path",
     },
     "web": {
         "enabled": "istota_web_enabled",

@@ -1,5 +1,6 @@
 """Configuration loading for istota.config module."""
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -1016,15 +1017,25 @@ repos_dir = "/srv/repos"
 class TestSiteConfig:
     def test_defaults(self):
         sc = SiteConfig()
-        assert sc.enabled is False
         assert sc.hostname == ""
-        assert sc.base_path == ""
 
-    def test_config_default(self):
-        cfg = Config()
-        assert cfg.site.enabled is False
+    def test_no_static_web_root_fields(self):
+        """The agent-writable static web root was removed (ISSUE-194)."""
+        sc = SiteConfig()
+        assert not hasattr(sc, "enabled")
+        assert not hasattr(sc, "base_path")
 
     def test_load_from_toml(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[site]
+hostname = "istota.example.com"
+""")
+        cfg = load_config(config_file)
+        assert cfg.site.hostname == "istota.example.com"
+
+    def test_retired_keys_are_ignored_with_warning(self, tmp_path, caplog):
+        """A stale [site] block from a pre-removal deploy must not fail load."""
         config_file = tmp_path / "config.toml"
         config_file.write_text("""
 [site]
@@ -1032,16 +1043,15 @@ enabled = true
 hostname = "istota.example.com"
 base_path = "/srv/app/istota/html"
 """)
-        cfg = load_config(config_file)
-        assert cfg.site.enabled is True
+        with caplog.at_level(logging.WARNING):
+            cfg = load_config(config_file)
         assert cfg.site.hostname == "istota.example.com"
-        assert cfg.site.base_path == "/srv/app/istota/html"
+        assert "base_path" in caplog.text
 
     def test_load_defaults_when_not_set(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text("")
         cfg = load_config(config_file)
-        assert cfg.site.enabled is False
         assert cfg.site.hostname == ""
 
 

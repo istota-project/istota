@@ -437,7 +437,6 @@ wiz_hostname() {
     dim "Several features need a public DNS name pointing at this server:"
     dim "  • web UI (Nextcloud OAuth2 redirect must be HTTPS)"
     dim "  • GPS location webhook (Overland posts here)"
-    dim "  • the bot's own static web root (when site_enabled is set)"
     echo
     dim "The role installs nginx and renders /etc/nginx/conf.d/<hostname>.conf"
     dim "with a self-signed snakeoil cert. DNS, Let's Encrypt, and any extra"
@@ -697,8 +696,8 @@ claude_oauth_token = "$_WIZ_CLAUDE_TOKEN"
 secret_key = "$_WIZ_SECRET_KEY"
 
 [site]
-# Public hostname for nginx (used by the web UI redirect, location webhook,
-# and the bot's own web root). DNS + TLS are operator-managed.
+# Public hostname for nginx (used by the web UI redirect and the location
+# webhook). DNS + TLS are operator-managed.
 hostname = "$_WIZ_HOSTNAME"
 
 [web]

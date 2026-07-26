@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The assistant can now read a web page as markdown, with headings, list position and link addresses arriving together. That is what lets it tell an article link from a footer link on a page it has never seen, so browsing no longer depends on knowing a site's markup. It can take a front page whole or pull just the body of an article, whichever the page calls for.
 
+### Removed
+- The bot's own static web root is gone. It was a directory the assistant could write to freely, served to the public without a password — so anything the assistant could read, it could publish to a URL without ever asking you first. Copying a file is the kind of ordinary local action the confirmation rules deliberately leave alone, which is exactly why this one slipped past them. The directory is no longer reachable from the assistant's sandbox, the deployment no longer serves it, and the `enabled` and `base_path` settings are ignored with a warning if left in place. Host static files outside istota, somewhere the assistant cannot write.
+
 ### Changed
 - The web chat message box is one rounded field rather than three separate boxes. Attaching is a plus button and sending is an arrow inside the field itself, in place of the paperclip and paper-aeroplane sitting either side of it; the box has no divider or panel behind it any more, so it reads as a single element floating below the conversation. Once your message runs past one line the controls move underneath it, giving the text the full width. The buttons now grow and shrink with the text size setting, which they previously ignored.
 

@@ -443,7 +443,7 @@ def _make_config(tmp_path):
     return Config(
         db_path=db_path,
         nextcloud_mount_path=tmp_path / "mount",
-        site=SiteConfig(enabled=True, hostname="example.com"),
+        site=SiteConfig(hostname="example.com"),
         users={"alice": UserConfig(display_name="Alice"),
                "bob": UserConfig(display_name="Bob")},
         web=WebConfig(

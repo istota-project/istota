@@ -132,13 +132,26 @@ sole configured user, for no-auth mode).
 
 ### `SiteConfig`
 ```
-enabled: bool = False        hostname: str = ""           base_path: str = ""
+hostname: str = ""
 ```
-`hostname` is the deployment's public DNS name (web OAuth2 redirect + origin/CSRF
-checks + location webhook URL), used regardless of `enabled`. `enabled` +
-`base_path` are the bot's own instance-wide static web root, bound RW into the
-sandbox so the agent can edit it. Per-user `/~user/` static sites were removed
-(ISSUE-171).
+The deployment's public DNS name (web OAuth2 redirect + origin/CSRF checks +
+location webhook URL). That is the whole dataclass — static hosting is not an
+istota concern.
+
+Per-user `/~user/` static sites were removed in ISSUE-171; the instance-wide
+one (`enabled` + `base_path`) followed in **ISSUE-194**. It was bound RW into
+the sandbox and served unauthenticated by nginx, which made `cp <anything>
+$WEBSITE_PATH/` a public egress the confirmation model classified as a benign
+local write — the gate framework is channel-aware (email / share / ntfy /
+browser POST) and a filesystem write to a publicly-reachable path was an
+unnamed channel. Removing the primitive was chosen over teaching the model to
+reason about "is this path public", since that judgement is exactly what an
+injected instruction talks its way past. Gone with it: the bwrap RW bind and
+`native_fs_roots` write root, the `WEBSITE_PATH`/`WEBSITE_URL` env vars, the
+"Web Root" prompt resource section, and the nginx `root` + html-dir Ansible
+plumbing (the rendered vhost now `return 404`s on `/` so nothing is served
+from an inherited root). A stale `enabled`/`base_path` in TOML logs a warning
+and is ignored.
 
 ### `NetworkConfig`
 ```

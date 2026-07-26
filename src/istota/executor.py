@@ -1270,12 +1270,6 @@ def build_bwrap_cmd(
             else:
                 _ro_bind(rpath)
 
-    # --- Instance web root (RW) — the bot's own static site directory ---
-    if config.site.enabled and config.site.base_path:
-        site_dir = Path(config.site.base_path)
-        if site_dir.exists():
-            _bind(site_dir)
-
     # --- Lifecycle ---
     chdir_target = workspace_resolved or user_temp_dir.resolve()
     args.extend(["--die-with-parent", "--chdir", str(chdir_target)])
@@ -1398,10 +1392,6 @@ def native_fs_roots(
                 except ValueError:
                     pass
             _add(write if r.permissions == "readwrite" else read_only, rpath)
-
-    # Instance web root (RW).
-    if config.site.enabled and config.site.base_path:
-        _add(write, Path(config.site.base_path))
 
     read_roots = list(dict.fromkeys(write + read_only))
     return read_roots, write
@@ -2162,14 +2152,6 @@ def build_prompt(
             for name, url, writable in discovered_calendars
         )
         resource_sections.append(f"Calendars (shared by {task.user_id}):\n{cal_list}")
-
-    # Instance web root (the bot's own static site) — config-driven, not a
-    # declarable resource type.
-    if config.site.enabled and config.site.base_path:
-        site_lines = [f"  - Path: {config.site.base_path} (readwrite)"]
-        if config.site.hostname:
-            site_lines.insert(0, f"  - URL: https://{config.site.hostname}/")
-        resource_sections.append("Web Root (your own static site):\n" + "\n".join(site_lines))
 
     resources_text = "\n\n".join(resource_sections)
 
@@ -3051,12 +3033,6 @@ def execute_task(
             env["ISTOTA_DEVBOX_MAX_OUTPUT_BYTES"] = str(
                 config.devbox.max_output_bytes
             )
-
-        # Instance web root — the bot's own static site directory
-        if config.site.enabled and config.site.base_path:
-            env["WEBSITE_PATH"] = str(config.site.base_path)
-            if config.site.hostname:
-                env["WEBSITE_URL"] = f"https://{config.site.hostname}/"
 
         # Declarative env vars from skill manifests
         from .skills._env import (

@@ -234,13 +234,6 @@
     append: yes
   when: not istota_update_only and not istota_web_only and (istota_browser_enabled or istota_devbox_enabled)
 
-- name: Add istota user to www-data group
-  user:
-    name: "{{ istota_user }}"
-    groups: www-data
-    append: yes
-  when: not istota_update_only and not istota_web_only and istota_site_enabled
-
 - name: Allow Docker containers to access host ports
   community.general.ufw:
     rule: allow
@@ -2170,26 +2163,7 @@
   apt:
     name: nginx
     state: present
-  when: (istota_site_enabled or istota_location_enabled | default(false) or istota_web_enabled | default(false)) and not istota_update_only and not istota_web_only
-
-- name: Create site root html directory
-  file:
-    path: "{{ istota_home }}/html"
-    state: directory
-    owner: "{{ istota_user }}"
-    group: www-data
-    mode: "0755"
-  when: istota_site_enabled and not istota_web_only
-
-- name: Deploy default index.html for site root
-  template:
-    src: index.html.j2
-    dest: "{{ istota_home }}/html/index.html"
-    owner: "{{ istota_user }}"
-    group: www-data
-    mode: "0644"
-    force: no
-  when: istota_site_enabled and not istota_web_only
+  when: (istota_location_enabled | default(false) or istota_web_enabled | default(false)) and not istota_update_only and not istota_web_only
 
 - name: Deploy nginx config
   template:
@@ -2198,7 +2172,7 @@
     owner: root
     group: root
     mode: "0644"
-  when: (istota_site_enabled or istota_location_enabled | default(false) or istota_web_enabled | default(false)) and not istota_web_only
+  when: (istota_location_enabled | default(false) or istota_web_enabled | default(false)) and not istota_web_only
   notify:
     - reload nginx
 
@@ -2206,7 +2180,7 @@
   file:
     path: "/etc/nginx/conf.d/{{ istota_hostname }}.conf"
     state: absent
-  when: not istota_site_enabled and not (istota_location_enabled | default(false)) and not (istota_web_enabled | default(false)) and not istota_web_only
+  when: not (istota_location_enabled | default(false)) and not (istota_web_enabled | default(false)) and not istota_web_only
   notify:
     - reload nginx
 

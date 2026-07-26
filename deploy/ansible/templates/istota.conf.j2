@@ -36,11 +36,13 @@ server {
 
   # include /etc/nginx/snippets/letsencrypt.conf;
 
-{% if istota_site_enabled %}
-  # The bot's own static web root
-  root {{ istota_home }}/html;
-  autoindex on;
-{% endif %}
+  # No static web root. The agent-writable one was removed (ISSUE-194): a
+  # publicly-served directory the agent could write to with an ordinary `cp`
+  # egressed private data with no confirmation gate. Serve nothing by default
+  # so a stray file under any inherited root can't be reached.
+  location / {
+    return 404;
+  }
 
 {% if istota_web_enabled %}
   # Task event SSE stream — must stream, not buffer. Longest-prefix match wins

@@ -654,21 +654,19 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # `{workspace}/money/ledgers/*.beancount`.
 
 # ============================================================================
-# Web Root + Public Hostname
+# Public Hostname
 # ============================================================================
-# `hostname` is the deployment's public DNS name. It is used by the web UI
-# (OAuth2 redirect + origin/CSRF checks) and the location webhook URL — set
-# it whenever the web or location features are enabled, regardless of
-# `enabled` below.
+# The deployment's public DNS name. Used by the web UI (OAuth2 redirect +
+# origin/CSRF checks) and the location webhook URL — set it whenever the web
+# or location features are enabled.
 #
-# `enabled` + `base_path` control the bot's own static web root: the agent
-# may edit files under `base_path`. Serving is left to whatever web server
-# points at that directory. (Per-user `/~user/` sites were removed.)
+# The bot's static web root (`enabled` + `base_path`) was removed: a
+# publicly-served directory the agent could write to was an outbound egress
+# channel with no confirmation gate. Serve static assets outside istota, from
+# a directory the agent cannot reach.
 
 # [site]
-# enabled = false
-# hostname = "istota.example.com"          # public hostname
-# base_path = "/srv/app/istota/html"       # bot's static web root
+# hostname = "istota.example.com"
 
 # ============================================================================
 # Authenticated Web Interface (Nextcloud built-in OAuth2)

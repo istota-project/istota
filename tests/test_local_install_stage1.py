@@ -292,7 +292,7 @@ class TestNextcloudAuthRegression:
         cfg = Config(
             db_path=tmp_path / "istota.db",
             nextcloud_mount_path=tmp_path / "workspace",
-            site=SiteConfig(enabled=True, hostname="example.com"),
+            site=SiteConfig(hostname="example.com"),
             users={"alice": UserConfig(display_name="Alice")},
             web=WebConfig(
                 enabled=True, auth="nextcloud",

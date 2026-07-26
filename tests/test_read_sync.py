@@ -34,7 +34,7 @@ def _make_config(tmp_path, token_storage="encrypted", sync_interval=60):
     config = Config(
         db_path=db_path,
         nextcloud_mount_path=tmp_path / "mount",
-        site=SiteConfig(enabled=True, hostname="example.com"),
+        site=SiteConfig(hostname="example.com"),
         users={"alice": UserConfig(display_name="Alice")},
         web=WebConfig(
             enabled=True, port=8766,

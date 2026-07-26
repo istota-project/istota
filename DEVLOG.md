@@ -2,6 +2,27 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-26: Remove the static web root (ISSUE-194) — the confirmation model gates channels, and a public directory isn't one
+
+The instance web root was an agent-writable directory served unauthenticated by nginx. `cp <anything> $WEBSITE_PATH/` published it. The confirmation framework never saw this because it enumerates outbound *channels* — external email, Nextcloud shares, ntfy, browser form posts — and a local filesystem write is explicitly on the safe side of that line. The classification is channel-aware when the property that matters is whether the destination is publicly reachable.
+
+**Why removal rather than path-aware classification.** The obvious fix is to teach the write path "if the destination resolves somewhere public, treat it as outbound." That leaves the decision inside the model's reasoning, and the threat here is precisely instructions arriving in ingested content — a fetched page, an email body, an OCR'd screenshot — that argue their way past a judgement call. The unguessable-random-filename mitigation is worth nothing for the same reason: obscurity defends against an outsider guessing a URL, not an insider choosing one. Deleting the primitive can't be argued with. The worst single line the route allowed was `cp data/istota.db html/x.db` — a multi-user dump where only the `secrets` table is encrypted, so the blast radius was every user's notes index, KV, facts and conversation history, not just the operator's.
+
+**The split that survived.** `SiteConfig` carried two unrelated things and only `enabled`/`base_path` were the hazard. `hostname` is load-bearing for the web app — OAuth2 redirect derivation, the origin/CSRF check, the location webhook URL — so the dataclass keeps that field and nothing else. This is the second cut at this config: ISSUE-171 removed the per-user `/~user/` sites and kept the instance-wide one specifically so the agent could still edit it, which is the assumption that turned out to be the bug.
+
+**Four code sites, and the deploy half is what actually closes it.** In `executor.py`: the bwrap RW bind, the `native_fs_roots` write root (the native brain's file tools run outside bwrap, so it needs its own allowlist entry), the `WEBSITE_PATH`/`WEBSITE_URL` env, and the "Web Root (your own static site)" prompt resource section. Removing those stops the agent reaching the directory — but a live host keeps serving whatever is already in it until nginx is re-rendered, so the Ansible change is not cosmetic. The vhost template drops its `root` + `autoindex on` and gains an explicit `location / { return 404; }`: with no `root` the server block would otherwise inherit the http-level default and serve the distro page, and a longer-prefix `location /istota/` still wins, so the proxied routes are unaffected. Also dropped: the html-dir + default-index tasks, the `istota` → `www-data` group membership, `index.html.j2`, and `istota_site_enabled` from the nginx install/deploy/remove conditions (nginx is now installed for web or location only).
+
+A stale `[site] enabled`/`base_path` logs a warning at config load rather than failing — an existing deploy's TOML predates the removal, and the warning is the place to say the directory may still be served by something outside istota.
+
+Left alone deliberately: the existing files under `{{ istota_home }}/html`. Nothing serves or writes them after this, and auto-deleting operator content during a playbook run is the wrong default. Full suite green (8564 passed, 7 skipped); ruff unchanged against its 479-error baseline.
+
+**Files touched.**
+- `src/istota/config.py` — `SiteConfig` reduced to `hostname`; `[site]` parse warns on the retired keys
+- `src/istota/executor.py` — removed the bwrap bind, `native_fs_roots` write root, `WEBSITE_*` env, and Web Root prompt section
+- `deploy/ansible/{defaults,tasks}/main.yml`, `templates/{istota.conf,config.toml}.j2`, `README.md`, `deploy/settings_to_vars.py`, `deploy/wizard.sh` — vars, tasks and vhost; deleted `templates/index.html.j2`
+- `config/config.example.toml`, `docs/configuration/reference.md`, `docs/reference/environment-variables.md`, `docs/architecture/executor.md`, `.claude/rules/{config,executor}.md`
+- `tests/test_config.py`, `tests/test_executor.py` (+ 9 files' `SiteConfig(...)` call sites) — the two executor test classes now assert the env vars and prompt section are never produced
+
 ## 2026-07-26: Chat composer overhaul — one pill, voice messages, and a wrap measurement that isn't self-referential
 
 The chat input was three separate boxes in a row — a bordered attach button, a bordered textarea, a bordered send button — with the icons pinned at 36px while the text around them scaled with the new text-size preference. This replaces it with a single pill and adds voice recording, and most of the session went into two bugs that only showed up once the layout could reflow.

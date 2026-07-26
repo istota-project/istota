@@ -547,16 +547,19 @@ class WebConfig:
 
 @dataclass
 class SiteConfig:
-    """Instance web-root + public hostname.
+    """The deployment's public DNS name.
 
-    ``base_path`` is the bot's own static web root (instance-wide, not
-    per-user) that the agent may edit. ``hostname`` is the deployment's
-    public DNS name, used by the web app for OAuth2 redirect derivation,
-    origin/CSRF checks, and webhook URLs — independent of ``enabled``.
+    Used by the web app for OAuth2 redirect derivation, origin/CSRF checks,
+    and webhook URLs.
+
+    The agent-writable static web root (``enabled`` / ``base_path``) was
+    removed in ISSUE-194: a publicly-served directory the agent could write
+    to with an ordinary ``cp`` was an outbound egress channel the
+    confirmation model classified as a benign local write, so any private
+    data the agent could read could be published to a public URL without
+    tripping a gate. Serving static assets is now entirely outside istota.
     """
-    enabled: bool = False
     hostname: str = ""        # e.g. "istota.example.com"
-    base_path: str = ""       # e.g. "/srv/app/istota/html"
 
 
 @dataclass
@@ -2019,11 +2022,20 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "site" in data:
         s = data["site"]
-        config.site = SiteConfig(
-            enabled=s.get("enabled", False),
-            hostname=s.get("hostname", ""),
-            base_path=s.get("base_path", ""),
-        )
+        config.site = SiteConfig(hostname=s.get("hostname", ""))
+        # The agent-writable static web root was removed (ISSUE-194). A stale
+        # block from a pre-removal deploy must not fail load, but the operator
+        # needs to know nothing is serving that directory on istota's behalf
+        # any more — and that nginx may still be.
+        retired = [k for k in ("enabled", "base_path") if k in s]
+        if retired:
+            logger.warning(
+                "[site] %s no longer supported and ignored — the agent-writable "
+                "static web root was removed as an ungated exfiltration channel. "
+                "Remove the key(s); if a web server still serves that directory, "
+                "take it down separately.",
+                ", ".join(retired),
+            )
 
     if "caldav" in data:
         cd = data["caldav"]

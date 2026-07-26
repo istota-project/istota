@@ -102,13 +102,6 @@ Some module env vars are resolved at runtime by Python hooks rather than static 
 | `GITHUB_API_CMD` | Path to API wrapper script |
 | `GIT_CONFIG_*` | Git credential helpers for HTTPS auth |
 
-## Website
-
-| Variable | Source |
-|---|---|
-| `WEBSITE_PATH` | `config.site.base_path` |
-| `WEBSITE_URL` | `config.site.hostname` |
-
 ## Credential proxy
 
 When `skill_proxy_enabled = true`, every env var declared with `sensitive: true` in any skill manifest is stripped from the subprocess environment and injected server-side by the proxy. The set is computed at task time by `derive_credential_set(skill_index)`. Today's set:
