@@ -195,19 +195,27 @@ def detect_captcha(page):
 
 DEFAULT_TEXT_MAX_CHARS = 50000
 DEFAULT_MAX_LINKS = 100
+# Hard ceilings. Like the /extract and /render budgets in browse_api, a
+# caller-supplied value is a ceiling it may *lower*, never one it may raise
+# without bound: the response goes straight into an agent's context. Clamping
+# also disarms a negative budget, which slices from the wrong end — max_links=-5
+# would return every anchor but the last five, i.e. more than the default.
+MAX_TEXT_MAX_CHARS = 500000
+MAX_MAX_LINKS = 2000
 
 
 def extract_page_content(page, max_chars=None, max_links=None):
     """Extract text content, title, and links from a page.
 
-    Both budgets are caller-overridable. The defaults suit an article but clip a
-    link-dense hub, which is half of why an index page used to read as dead
-    (ISSUE-192). For structure-preserving output prefer render.to_markdown —
-    inner_text drops every href, and this flat link list drops every position.
+    Both budgets are caller-overridable within the ceilings above. The defaults
+    suit an article but clip a link-dense hub, which is half of why an index
+    page used to read as dead (ISSUE-192). For structure-preserving output
+    prefer render.to_markdown — inner_text drops every href, and this flat link
+    list drops every position.
     """
     title = page.title()
-    max_chars = int(max_chars or DEFAULT_TEXT_MAX_CHARS)
-    max_links = int(max_links or DEFAULT_MAX_LINKS)
+    max_chars = max(1, min(int(max_chars or DEFAULT_TEXT_MAX_CHARS), MAX_TEXT_MAX_CHARS))
+    max_links = max(1, min(int(max_links or DEFAULT_MAX_LINKS), MAX_MAX_LINKS))
 
     try:
         text = page.inner_text("body")

@@ -258,8 +258,9 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **Key fns**: `get_quotes()`, `get_futures_quotes()`, `get_index_quotes()`, `format_market_summary()`, `fetch_finviz_data()`, `format_finviz_briefing()`
 
 ### `browse/` - Headless Browser
-**Subcommands**: `get`, `screenshot`, `extract`, `interact`, `close`
+**Subcommands**: `get`, `render`, `screenshot`, `extract`, `interact`, `links`, `close`
 **Env vars**: `BROWSER_API_URL`
+**Note**: `render` is the first move on any page whose structure matters — it returns the page as markdown, so a headline keeps its URL and its position (ISSUE-192); `get` flattens the DOM and drops every href. `--mode full` for hubs, `--mode article` for bodies. Article mode is overridden to full when the URL looks like a section front *and* no single `<article>` node dominates the page, so a headline grid can't be silently discarded; `notes` says when that happened. Declares `requires_capability: [browser]`, so the whole skill drops out of selection and the menu when `config.browser.enabled` is off.
 
 ### `transcribe/` - OCR
 **Subcommands**: `ocr`

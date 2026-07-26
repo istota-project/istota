@@ -78,8 +78,19 @@ def cmd_render(args):
 
     resp = httpx.post(f"{url}/render", json=payload, timeout=REQUEST_TIMEOUT)
     if resp.status_code == 404:
-        # Browser container predates the markdown renderer. Say so plainly
-        # rather than surfacing a JSON decode error from Flask's HTML 404.
+        # Two unrelated failures share this status. The endpoint's own
+        # "session not found or expired" is a JSON body with an `error` key —
+        # routine, since sessions expire after 10 minutes and the scroll-then-
+        # re-render recipe re-uses one. A container predating the renderer
+        # answers Flask's HTML route-miss instead, and only that one means the
+        # feature is absent. Reporting both as absent would send the agent back
+        # to the flattened-text path this command exists to replace.
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and data.get("error"):
+            return {"status": "error", "error": data["error"]}
         return {
             "status": "error",
             "error": "This browser container has no render endpoint — use `browse get` instead.",

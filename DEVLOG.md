@@ -2,6 +2,47 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Review pass on the markdown render mode
+
+Two-agent review of the ISSUE-192 commit, then its high and medium findings. Nothing here is a user-visible behaviour change to shipped code — the render mode is still unreleased — but three of the findings would have shipped as real defects, and they share a shape worth naming: the endpoint was designed for the interactive skill, then reused by the briefing source, and every place the two callers want different things is where it broke.
+
+**The 404 that disabled the feature.** `cmd_render` reported any 404 as "this container has no render endpoint — use `browse get` instead". But `/render` returns 404 for two unrelated reasons, and the routine one is an expired session — sessions last 10 minutes and the skill's own scroll-then-re-render recipe re-uses one. So the documented flow told the agent the feature didn't exist and pointed it back at the flattened-text path this whole change exists to replace. The two are distinguishable: the endpoint's 404 carries a JSON `error` body, Flask's route-miss carries HTML. The existing test had `mock_resp.json.assert_not_called()`, which pinned the conflation in place; it's gone.
+
+**The operator cap that stopped applying.** `[briefings] max_source_chars` is documented in three places as capping a single source's gathered text, and both sibling resolvers honour it — but the markdown path hardcoded 20000 and only consulted the knob on the dead 404-fallback branch. Rather than fold markdown into the text cap (5000 truncates a front page above the headline grid, which is the bug this feature fixed), added `max_browse_chars` as its own knob, defaulting to 20000. Precedence: a source's own `max_chars` > `max_browse_chars` > code floor. Two caps because they measure genuinely different things; the alternative was one cap that no setting could make correct for both.
+
+**A CLI footer in the synthesis prompt.** `/render` appends `[Markdown truncated at N characters — raise --max-chars or switch to --mode article]` into the markdown, which the briefing source spliced verbatim into the prompt. Correct wording for the skill, meaningless in a briefing, and at 20000 chars it fires on essentially every real front page. The response already carries a `truncated` flag, so the footer is stripped and the fact goes into provenance instead — the source header, where it reads as metadata rather than as an instruction the model might surface in the delivered briefing. Fixed on the istota side deliberately, not upstream: the footer is right where it was written.
+
+**The index guess needed a veto, not a rewrite.** `_looks_like_index` was sound reasoning from a real measurement (no aggregate content signal separates hubs from articles) but it was named and worded as a classification when it's a guess from URL shape. It reads a short, undated, shallow slug as a section front — right for `/world`, wrong for `/wiki/Poland`, `/p/some-title`, `/blog/why-i-left`, whole families of real articles rendered full with a note asserting they were index pages. Renamed `_url_looks_like_index` and gave it `_has_dominant_article` as an override: one `<article>` node holding 40%+ of the page's text means article mode proceeds whatever the URL looks like. The subtlety is what it *excludes* — `main` and `[role=main]`, which the neighbouring `_largest_main_node` accepts. A hub wraps its entire grid in one, so honouring them would hand the veto to every index page and reinstate exactly the silent-grid-discard the guard exists for. A hub's `<article>`s are cards: many, each a small fraction.
+
+**Timeout inversion, and why serializing was the fix.** The briefing's 60s client timeout sat *below* the container's own 90s watchdog deadline, so the client always gave up first and left the container working on a request nobody was waiting for. Raising it to 120s alone would have made things worse: the container is single-threaded, so concurrent browse sources queue in the kernel backlog with their client clocks already running — source 5 could burn its whole budget waiting to be served and then report a live front page as unreachable, which is the reported symptom, reintroduced by the fix. So they now serialize on a process-global lock. Costs no wall-clock (the browser was never going to work in parallel) and each request gets its full budget from when it's actually issued. A 90s queue-wait bound stops N sources from serializing into N × 120s of generation; a source that never gets a turn fails soft.
+
+**Untrusted, and being honest about what protects it.** The module docstring claimed the content was untrusted and that a companion skill carried the handling rules. Neither held: the source returned the default `untrusted=False`, and the skill selected for a briefing generation task is `briefing`, which declares no `untrusted_input` companion. Set the flag, so assembly wraps it in the do-not-follow-instructions delimiter, and rewrote the docstring to say that the delimiter is the whole protection. Markdown raised the stakes over the flattened text it replaced — the page's own absolute URLs now arrive intact, and there are many more of them.
+
+**Test coverage for a vendored tree.** `render.py` had no test running in istota's CI. Upstream owns the full suite, but a bad re-sync wouldn't fail anything here, and the failure mode is silent (front pages read as dead again). Added `tests/test_browser_render.py` covering only the subset briefings depend on, stubbing `markdownify` the way `test_browser_chrome_watchdog.py` stubs `patchright` — it's a container-only dep and nothing in these tests converts anything. One test asserts the truncation-footer regex in the briefing source still matches what `_truncate` produces, which is the coupling most likely to rot.
+
+**Container half.** Edited in `stealth-browser` and synced, per the vendoring rule; upstream took the DEVLOG entry and its own tests (37 → 75 unit tests). One upstream test had to change meaning rather than just being updated: `test_index_url_is_rendered_full_with_a_note` paired article HTML with a hub URL, an artificial combination the veto now correctly reclassifies, so it moved onto a real 12-card hub fixture — the shape the guard actually protects. Deploying still needs an Ansible run to rebuild the image off its content hash.
+
+**Left open** (the review's lows, none load-bearing): `_truncate` overshoots its cap by the length of its own note, so `chars <= max_chars` doesn't hold; `javascript:`/`data:` hrefs survive into the markdown while the skill tells the model every URL is absolute and usable; a `captcha` status from the browser collapses into a generic "no content" provenance note, losing the one signal that tells an operator to solve it over VNC; and the `int()` coercion of caller budgets sits outside the endpoint handlers' `try`, so a non-numeric value escapes the JSON error envelope.
+
+**Key changes:**
+- `browse render` 404s are disambiguated by body shape; an expired session reports as itself.
+- New `[briefings] max_browse_chars` (default 20000), the markdown counterpart of `max_source_chars`.
+- Render truncation footer stripped from briefing prompts; truncation reported via provenance.
+- `_url_looks_like_index` renamed and overridable by `_has_dominant_article` (40% of page text, `<article>` only).
+- `_postprocess` dedup documented as previous-non-empty-line; table rows exempted.
+- `extract_page_content` clamps `max_chars`/`max_links` like the sibling endpoints, disarming a negative budget.
+- Browse fetches serialize against the single-threaded container; 60s → 120s, above its watchdog deadline.
+- Browse sources marked `untrusted`, so assembly wraps them.
+
+**Files added/modified:**
+- `src/istota/skills/browse/__init__.py` — 404 disambiguation
+- `src/istota/skills/browse/skill.md` — article-mode override is now conditional
+- `src/istota/briefings/sources/browse.py` — budget knob, footer strip, lock, `untrusted`
+- `src/istota/config.py` — `BriefingsModuleConfig.max_browse_chars`
+- `docker/browser/render.py`, `docker/browser/browsing.py` — synced from `stealth-browser`
+- `docs/configuration/reference.md`, `config/config.example.toml`, `.claude/rules/skills.md`
+- `tests/test_browser_render.py` (new), `tests/test_skills_browse.py`, `tests/test_briefings_sources.py`, `tests/test_config_shared_blocks.py`
+
 ## 2026-07-25: Four money list pages had four private copies of the same table
 
 Started as two small asks on the Business tabs and turned into an extraction. Invoices had a date column that shifted position row to row, and the status chip it hid on mobile left nothing behind to tell posted from paid at a glance.

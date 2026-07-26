@@ -739,6 +739,9 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # archive_retention_days = 90     # prune archived results older than this (0 = keep forever)
 # default_lookback_hours = 12     # seeds the email/rss source window when a source omits it
 # max_source_chars = 5000         # cap on a single source's gathered text
+# max_browse_chars = 20000        # same cap for a browse source, which gathers markdown
+                                  # rather than flattened text (the URLs it keeps cost
+                                  # characters, and a frontpage opens with masthead chrome)
 # shared_block_timezone = "UTC"   # timezone shared (global) blocks evaluate their cron in;
                                   # typically the operator's own zone so the morning/evening
                                   # regeneration windows line up with their day

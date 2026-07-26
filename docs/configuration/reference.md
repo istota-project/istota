@@ -256,6 +256,7 @@ Module-level settings for the briefings module (per-user content store + archive
 | `archive_retention_days` | `90` | Prune archived briefing results older than this, on insert (0 = keep forever) |
 | `default_lookback_hours` | `12` | Seeds the `email` / `rss` source window when a source omits it |
 | `max_source_chars` | `5000` | Cap on a single source's gathered text |
+| `max_browse_chars` | `20000` | The same cap for a `browse` source, which gathers markdown rather than flattened text. Bigger because the URLs the markdown keeps cost characters, and a frontpage spends its first couple of thousand on masthead chrome before the headline grid starts. A source's own `max_chars` wins over either cap. |
 | `shared_block_timezone` | `"UTC"` | Timezone module-owned shared blocks evaluate their cron in. Shared blocks are global (generated once, no per-user timezone), so this is one operator-chosen zone — typically the operator's own, so morning/evening regeneration lines up with their day. An invalid name falls back to UTC at run time. |
 
 ## `[[briefing_shared_blocks]]`

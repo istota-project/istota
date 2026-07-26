@@ -335,8 +335,10 @@ class TestCmdRender:
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
     def test_render_on_old_container_says_so(self, mock_url, mock_post):
+        # Flask's route-miss 404 is HTML, so .json() raises.
         mock_resp = MagicMock()
         mock_resp.status_code = 404
+        mock_resp.json.side_effect = ValueError("not json")
         mock_post.return_value = mock_resp
 
         parser = build_parser()
@@ -345,7 +347,26 @@ class TestCmdRender:
 
         assert result["status"] == "error"
         assert "browse get" in result["error"]
-        mock_resp.json.assert_not_called()
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_render_expired_session_404_is_not_reported_as_missing_endpoint(
+        self, mock_url, mock_post,
+    ):
+        # The endpoint's own 404 carries a JSON error body. Reporting it as
+        # "no render endpoint" would send the agent back to `browse get`.
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.json.return_value = {"error": "session sess1 not found or expired"}
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        args = parser.parse_args(["render", "--session", "sess1"])
+        result = cmd_render(args)
+
+        assert result["status"] == "error"
+        assert "not found or expired" in result["error"]
+        assert "browse get" not in result["error"]
 
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")

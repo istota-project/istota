@@ -1,5 +1,6 @@
 """Tests for the briefings source resolvers (fail-soft contract)."""
 
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,13 +10,16 @@ from istota.briefings.sources import GatheredSource, SourceContext, resolve_sour
 from istota.config import BrowserConfig, Config, EmailConfig, UserConfig
 
 
-def _ctx(tmp_path, *, conn=None, now=None, browser=False, users=("alice",)):
+def _ctx(tmp_path, *, conn=None, now=None, browser=False, users=("alice",),
+         briefings=None):
     cfg = Config(
         db_path=tmp_path / "istota.db",
         nextcloud_mount_path=tmp_path / "mount",
         browser=BrowserConfig(enabled=browser, api_url="http://browser:9223"),
         users={u: UserConfig(timezone="UTC") for u in users},
     )
+    if briefings is not None:
+        cfg.briefings = briefings
     return SourceContext(app_config=cfg, user_id="alice", conn=conn, now=now)
 
 
@@ -381,6 +385,163 @@ class TestBrowse:
             _ctx(tmp_path, browser=True),
         )
         assert calls[0]["mode"] == "full"
+
+    def test_operator_budget_caps_the_markdown_request(self, tmp_path, monkeypatch):
+        """[briefings] max_browse_chars is the knob; a source's own wins over it."""
+        from istota.config import BriefingsModuleConfig
+
+        import istota.briefings.sources.browse as browse_mod
+
+        calls = []
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"status": "ok", "markdown": "body text"}
+
+        def _post(url, **kwargs):
+            calls.append(kwargs["json"])
+            return _Resp()
+
+        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        ctx = _ctx(
+            tmp_path, browser=True,
+            briefings=BriefingsModuleConfig(max_browse_chars=3000),
+        )
+        browse_mod.resolve({"preset": "ap"}, ctx)
+        assert calls[0]["max_chars"] == 3000
+
+        browse_mod.resolve({"preset": "ap", "max_chars": 8000}, ctx)
+        assert calls[1]["max_chars"] == 8000
+
+    def test_truncation_footer_is_kept_out_of_the_prompt(self, tmp_path, monkeypatch):
+        """/render's footer names CLI flags that mean nothing to the synthesis model."""
+        import istota.briefings.sources.browse as browse_mod
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "status": "ok",
+                    "truncated": True,
+                    "markdown": (
+                        "## Top\n\n* [Headline](https://apnews.com/a)\n\n"
+                        "[Markdown truncated at 20000 characters — "
+                        "raise --max-chars or switch to --mode article]"
+                    ),
+                }
+
+        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+
+        assert gs.ok is True
+        assert "[Headline](https://apnews.com/a)" in gs.text
+        assert "--max-chars" not in gs.text
+        assert "Markdown truncated" not in gs.text
+        # The fact survives, as provenance rather than an instruction.
+        assert "truncated" in gs.provenance
+
+    def test_content_is_marked_untrusted(self, tmp_path, monkeypatch):
+        """An arbitrary web page — assembly wraps it in the do-not-follow frame."""
+        import istota.briefings.sources.browse as browse_mod
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"status": "ok", "markdown": "## Top"}
+
+        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        assert gs.untrusted is True
+
+    def test_client_timeout_outlives_the_container_watchdog(self):
+        """Else the client gives up first and the container works on a dead request."""
+        import istota.briefings.sources.browse as browse_mod
+
+        # BROWSE_WATCHDOG_DEADLINE_S in docker/browser/browse_api.py.
+        assert browse_mod._FETCH_TIMEOUT > 90
+
+    def test_fetches_are_serialized_against_the_single_threaded_browser(
+        self, tmp_path, monkeypatch,
+    ):
+        import threading
+
+        import istota.briefings.sources.browse as browse_mod
+
+        concurrent = []
+        active = 0
+        guard = threading.Lock()
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"status": "ok", "markdown": "## Top"}
+
+        def _post(*a, **k):
+            nonlocal active
+            with guard:
+                active += 1
+                concurrent.append(active)
+            time.sleep(0.02)
+            with guard:
+                active -= 1
+            return _Resp()
+
+        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        ctx = _ctx(tmp_path, browser=True)
+        threads = [
+            threading.Thread(target=browse_mod.resolve, args=({"preset": "ap"}, ctx))
+            for _ in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert concurrent, "no fetch ran"
+        assert max(concurrent) == 1
+
+    def test_a_source_that_never_gets_the_browser_fails_soft(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        monkeypatch.setattr(browse_mod, "_QUEUE_WAIT_TIMEOUT", 0.01)
+        browse_mod._BROWSER_LOCK.acquire()
+        try:
+            gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        finally:
+            browse_mod._BROWSER_LOCK.release()
+
+        assert gs.ok is False
+        assert "busy" in gs.provenance
+
+    def test_the_lock_is_released_when_a_fetch_raises(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        def _boom(*a, **k):
+            raise RuntimeError("browser down")
+
+        monkeypatch.setattr(browse_mod.httpx, "post", _boom)
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        assert gs.ok is False
+        assert browse_mod._BROWSER_LOCK.acquire(timeout=1) is True
+        browse_mod._BROWSER_LOCK.release()
+
+    def test_untruncated_render_has_a_plain_provenance(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"status": "ok", "markdown": "## Top", "truncated": False}
+
+        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        assert gs.provenance == "frontpage of AP News"
 
     def test_falls_back_to_text_on_old_browser_image(self, tmp_path, monkeypatch):
         """A container predating /render 404s — degrade, don't fail the source."""

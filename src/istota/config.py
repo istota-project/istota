@@ -819,10 +819,19 @@ class BriefingsModuleConfig:
     insert (0 = keep forever). ``default_lookback_hours`` seeds the email/rss
     source lookback window when a source omits it. ``max_source_chars`` caps a
     single source's gathered text.
+
+    ``max_browse_chars`` is the same cap for a ``browse`` source, which is
+    separate because that source gathers *markdown* rather than flattened
+    text: the URLs it keeps (the whole point of ISSUE-192) cost characters,
+    and a frontpage spends its first couple of thousand on masthead chrome
+    before the headline grid starts, so the text budget would cut above the
+    content. Both are per-source caps an operator can lower; a source's own
+    ``max_chars`` still wins over either.
     """
     archive_retention_days: int = 90
     default_lookback_hours: int = 12
     max_source_chars: int = 5000
+    max_browse_chars: int = 20000
     # Timezone shared briefing blocks evaluate their cron in. Shared blocks are
     # global (generated once, no per-user timezone) so this is a single
     # operator-chosen zone — typically the operator's local zone so the
@@ -1948,6 +1957,7 @@ def load_config(config_path: Path | None = None) -> Config:
             archive_retention_days=br.get("archive_retention_days", 90),
             default_lookback_hours=br.get("default_lookback_hours", 12),
             max_source_chars=br.get("max_source_chars", 5000),
+            max_browse_chars=br.get("max_browse_chars", 20000),
             shared_block_timezone=br.get("shared_block_timezone", "UTC"),
         )
 

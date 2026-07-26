@@ -130,8 +130,14 @@ def _postprocess(markdown):
     """Tidy the raw conversion without changing what it says.
 
     News pages ship the same headline twice (a mobile DOM and a desktop DOM),
-    which lands as adjacent identical lines; dropping the repeat costs nothing
-    and buys a materially shorter page.
+    which lands as a repeated line; dropping the repeat costs nothing and buys
+    a materially shorter page.
+
+    The comparison skips over blank lines rather than resetting on them, so it
+    catches the block-level duplicate (two `<h2>`s convert to lines separated by
+    a blank) as well as the inline one: a repeat is any line identical to the
+    previous *non-empty* line. Table rows are exempt, being the one construct
+    where an identical adjacent line is data rather than duplication.
     """
     text = (markdown or "").replace(" ", " ").replace("​", "")
     text = _TRAILING_WS_RE.sub("", text)
@@ -141,7 +147,7 @@ def _postprocess(markdown):
     previous = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped and stripped == previous:
+        if stripped and stripped == previous and not stripped.startswith("|"):
             continue
         if stripped:
             previous = stripped
@@ -168,20 +174,25 @@ def _truncate(markdown, max_chars):
     )
 
 
-def _looks_like_index(url):
-    """Does this URL address a section front rather than one article?
+def _url_looks_like_index(url):
+    """Does this URL *shape* suggest a section front rather than one article?
 
     Article mode on an index page is the dangerous case: readability keeps a few
     hundred characters of teaser prose, clears any content-length floor, and
     silently discards the headline grid that was the whole point of the fetch.
-    Measured on live front pages, no *content* signal separates the two — link
-    retention, paragraph length and link density all overlap between real hubs
-    and real articles in both directions. The URL does separate them, and needs
-    no per-site knowledge: an article ends in a slug that is long, or dated, or
-    sits several levels deep, while a section front is a short word or two.
+    Measured on live front pages, none of the *aggregate* content signals
+    separate the two — link retention, paragraph length and link density all
+    overlap between real hubs and real articles in both directions. URL shape
+    does separate most of them, and needs no per-site knowledge: an article ends
+    in a slug that is long, or dated, or sits several levels deep, while a
+    section front is a short word or two.
 
-    Errs toward `index`, because that answer costs noise (the full page contains
-    the article) while the other costs the entire page.
+    It is a guess, not a classification, and a deliberately biased one: it errs
+    toward `index`, because that answer costs noise (the full page contains the
+    article) while the other costs the entire page. The families it gets wrong
+    are the short, undated, shallow slug — `/wiki/Poland`, `/p/some-title`,
+    `/blog/why-i-left` — which is why `_has_dominant_article` gets a veto over
+    it in `to_markdown`.
     """
     path = urlparse(url or "").path.strip("/")
     if not path:
@@ -193,6 +204,35 @@ def _looks_like_index(url):
     if re.search(r"\d", last):
         return False
     return len(last) < 25
+
+
+# A page is treated as a real article, whatever its URL looks like, when one
+# article node holds at least this much of the page's text.
+ARTICLE_DOMINANCE_RATIO = 0.4
+
+
+def _has_dominant_article(soup):
+    """Is there one <article> node holding most of this page's text?
+
+    The narrow content signal the aggregate ones lacked, and the veto over a
+    URL-shape guess. Deliberately excludes `main` / `[role=main]`, which
+    `_largest_main_node` accepts: on a hub, `main` wraps the entire headline
+    grid and would dominate every time, turning the veto into exactly the
+    silent-grid-discard this module guards against. A hub's `<article>` nodes
+    are cards — many of them, each a small fraction of the page — so requiring a
+    single dominant one separates the two shapes without per-site knowledge.
+    """
+    nodes = soup.select("article, [itemprop=articleBody]")
+    if not nodes:
+        return False
+    body = soup.body or soup
+    total = len(body.get_text(strip=True))
+    if total <= 0:
+        return False
+    largest = max(len(n.get_text(strip=True)) for n in nodes)
+    if largest < ARTICLE_MIN_CHARS:
+        return False
+    return largest / total >= ARTICLE_DOMINANCE_RATIO
 
 
 def _largest_main_node(soup):
@@ -268,11 +308,12 @@ def to_markdown(html, base_url="", mode="full", max_chars=DEFAULT_MAX_CHARS):
     used = requested
     markdown = None
     if requested == "article":
-        if _looks_like_index(base_url):
+        if _url_looks_like_index(base_url) and not _has_dominant_article(soup):
             used = "full"
             notes.append(
-                "URL addresses a section front, not an article — rendered in full "
-                "so the headline grid isn't discarded"
+                "URL looks like a section front and no single article node "
+                "dominates the page — rendered in full so a headline grid isn't "
+                "discarded"
             )
         else:
             markdown = _article_markdown(normalized_html, soup, base_url, notes)

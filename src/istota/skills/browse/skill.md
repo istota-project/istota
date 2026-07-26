@@ -62,7 +62,7 @@ istota-skill browse close <id>
  "chars": 20539, "truncated": false, "notes": ["..."], "session_id": "..."}
 ```
 
-Every URL in the markdown is already absolute — use them exactly as given. `mode` is what actually ran, which can differ from what you asked for: a section-front URL is always rendered in full, because isolating "the article" on an index page throws the headline grid away, and a page with no article in it falls back to full too. Either way `notes` says what happened. `truncated` means you hit `--max-chars`; re-run with a bigger budget or `--mode article`.
+Every URL in the markdown is already absolute — use them exactly as given. `mode` is what actually ran, which can differ from what you asked for: a URL shaped like a section front is rendered in full unless the page turns out to hold one dominant article, because isolating "the article" on an index page throws the headline grid away; a page with no article in it falls back to full too. Either way `notes` says what happened. `truncated` means you hit `--max-chars`; re-run with a bigger budget or `--mode article`.
 
 `get`:
 

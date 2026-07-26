@@ -112,6 +112,14 @@ class TestLoadConfigSeeding:
         config = load_config(cfg_path)
         assert config.briefings.shared_block_timezone == "America/Los_Angeles"
 
+    def test_max_browse_chars_default_and_override(self, tmp_path):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(tomli_w.dumps({"bot_name": "Istota"}))
+        assert load_config(cfg_path).briefings.max_browse_chars == 20000
+
+        cfg_path.write_text(tomli_w.dumps({"briefings": {"max_browse_chars": 6000}}))
+        assert load_config(cfg_path).briefings.max_browse_chars == 6000
+
 
 class TestApplySharedBlocksOverlay:
     def _base_config(self, tmp_path):
