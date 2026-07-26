@@ -212,6 +212,15 @@ input[type='week']::-webkit-date-and-time-value {
   min-height: 1.2em;
 }
 
+/* Scrollbars are left entirely to the platform. Do NOT add `::-webkit-scrollbar`
+   rules (or `scrollbar-width`/`scrollbar-color`) to a scroll container: styling
+   one at all opts that element out of the OS overlay scrollbar, so instead of a
+   thumb that fades in while scrolling, it gets a permanent classic scrollbar
+   with a track occupying layout width. The app is one screen tall and scrolls
+   inside its panes, so that turns into a strip beside every list. Hiding a
+   scrollbar outright (`display: none`) is a different thing and is fine where a
+   control has no room for one — the composer textarea does that. */
+
 html,
 body {
   height: 100%;

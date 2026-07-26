@@ -345,14 +345,6 @@
     flex-shrink: 0;
   }
 
-  .stops-panel::-webkit-scrollbar {
-    width: 3px;
-  }
-  .stops-panel::-webkit-scrollbar-thumb {
-    background: var(--border-default);
-    border-radius: 2px;
-  }
-
   .panel-section {
     padding-bottom: 0.5rem;
     margin-bottom: 0.25rem;

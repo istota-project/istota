@@ -351,17 +351,6 @@
     transition: opacity var(--transition-fast);
   }
 
-  .txn-scroll::-webkit-scrollbar {
-    width: 4px;
-  }
-  .txn-scroll::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .txn-scroll::-webkit-scrollbar-thumb {
-    background: var(--border-default);
-    border-radius: 2px;
-  }
-
   .txn-scroll.faded {
     opacity: 0.5;
   }

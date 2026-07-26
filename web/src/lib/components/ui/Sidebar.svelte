@@ -67,17 +67,6 @@
     padding: 0 0.25rem 0.5rem;
   }
 
-  .sidebar-list::-webkit-scrollbar {
-    width: 4px;
-  }
-  .sidebar-list::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .sidebar-list::-webkit-scrollbar-thumb {
-    background: var(--border-default);
-    border-radius: 2px;
-  }
-
   .sidebar-backdrop {
     display: none;
   }

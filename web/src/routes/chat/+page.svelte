@@ -527,6 +527,25 @@
             />
           {/each}
         {/if}
+        <!-- Bottom reserve: keeps the newest message clear of the docked
+             composer. A spacer rather than padding on the scroller, because the
+             fade below is a sticky child and sticky is constrained to its
+             containing block's *content* box — as padding, the reserve would
+             park the fade that far above the scrollport's bottom edge. Either
+             way it is inside the scroller, so scrollHeight accounts for it and
+             the stick-to-bottom pin stays a plain `scrollTop = scrollHeight`. -->
+        <div class="composer-reserve" aria-hidden="true"></div>
+        {#if !inViewMode}
+          <!-- Fade layer, sized to the composer band it sits behind: content
+               scrolling into that band dissolves into the pane fill instead of
+               running under the pill at full strength. It is a child of the
+               scroller (sticky, pinned to the bottom of the scrollport) rather
+               than an overlay over it, because a scroller paints its scrollbar
+               above its own content — an overlay sibling painted over the
+               bottom of the scrollbar too, so the thumb dissolved along with
+               the text. -->
+          <div class="composer-fade" aria-hidden="true"></div>
+        {/if}
       </div>
       <!-- Jump-to-latest: shown only when scrolled up off the bottom. -->
       {#if showJumpToLatest}
@@ -545,12 +564,6 @@
            Docked over the transcript rather than sharing the column with it, so
            the message list runs the full height of the pane and content passes
            under the composer instead of stopping short of it. -->
-      <!-- Fade layer, sized to the composer band it sits behind: content
-           scrolling into that band dissolves into the pane fill instead of
-           running under the pill at full strength. Its own element rather than
-           part of the dock so it can stack *below* the jump-to-latest button —
-           painted inside the dock it would wash the button out. -->
-      <div class="composer-fade" aria-hidden="true"></div>
       <div class="composer-dock" bind:this={dockEl}>
         <Composer
           onSend={(t, atts) => session.send(t, atts)}
@@ -654,14 +667,18 @@
 	   tall composer. z-index keeps it under the jump-to-latest FAB (5) and the
 	   dock (6); pointer-events: none so it never swallows a click. */
   .composer-fade {
-    position: absolute;
-    left: 0;
-    right: 0;
+    position: sticky;
     bottom: 0;
     height: calc(var(--composer-h, 0px) + 1.5rem);
+    /* Cancels its own height so it overlaps the reserve above rather than
+       extending the scroll range. */
+    margin-top: calc(-1 * (var(--composer-h, 0px) + 1.5rem));
     background: linear-gradient(to bottom, transparent, var(--chat-bg) 2.5rem);
     pointer-events: none;
-    z-index: 4;
+  }
+
+  .composer-reserve {
+    height: calc(var(--composer-h, 0px) + 1rem);
   }
   /* Wrapper anchors the floating jump-to-latest button to the bottom of the
 	   scroll area; the button offsets itself above the docked composer. */
@@ -678,19 +695,10 @@
     overflow-y: auto;
     /* Row padding lives in Message (so the hover highlight spans the full
 		   channel width, Discord-style). Just a little breathing room here. */
-    /* The bottom reserve keeps the newest message clear of the docked composer.
-			 It sits *inside* the scroller, so scrollHeight includes it and the
-			 stick-to-bottom pin stays a plain `scrollTop = scrollHeight`. The 0px
-			 fallback covers the aggregate views, which render no composer. */
-    padding: 0.5rem 0 calc(var(--composer-h, 0px) + 1rem);
+    /* The bottom reserve is the `.composer-reserve` spacer at the end of the
+			 list rather than padding here — see its comment in the markup. */
+    padding: 0.5rem 0 0;
     width: 100%;
-  }
-  .messages::-webkit-scrollbar {
-    width: 4px;
-  }
-  .messages::-webkit-scrollbar-thumb {
-    background: var(--border-default);
-    border-radius: 2px;
   }
 
   /* Jump-to-latest FAB — appears bottom-right when the user scrolls up off the

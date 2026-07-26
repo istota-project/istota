@@ -91,15 +91,4 @@
   .shell-main.inset-bottom {
     padding-bottom: var(--safe-bottom);
   }
-
-  .shell-main::-webkit-scrollbar {
-    width: 4px;
-  }
-  .shell-main::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .shell-main::-webkit-scrollbar-thumb {
-    background: var(--border-default);
-    border-radius: 2px;
-  }
 </style>

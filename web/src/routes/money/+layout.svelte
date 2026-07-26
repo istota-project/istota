@@ -271,17 +271,6 @@
     padding: 0 0 0.5rem;
   }
 
-  :global(.money-table::-webkit-scrollbar) {
-    width: 4px;
-  }
-  :global(.money-table::-webkit-scrollbar-track) {
-    background: transparent;
-  }
-  :global(.money-table::-webkit-scrollbar-thumb) {
-    background: var(--border-default);
-    border-radius: 2px;
-  }
-
   :global(.money-table-header) {
     display: flex;
     align-items: baseline;
