@@ -2178,7 +2178,18 @@ class TestSearchMemory:
 
 
 class TestSearchTalkApi:
-    """Test the _search_talk_api helper."""
+    """Test the _search_talk_api helper.
+
+    It shares its implementation with `nextcloud talk search` — both go through
+    TalkClient.search_messages on the persistent singleton.
+    """
+
+    @staticmethod
+    def _talk_client(data=None, error=None):
+        client = MagicMock()
+        client.search_messages = AsyncMock(
+            side_effect=error) if error else AsyncMock(return_value=data)
+        return patch("istota.async_runtime.get_talk_client", return_value=client)
 
     @pytest.mark.asyncio
     async def test_returns_formatted_results(self, make_config):
@@ -2199,7 +2210,7 @@ class TestSearchTalkApi:
                 },
             ],
         }
-        with patch("istota.commands.ocs_get", return_value=mock_ocs_data):
+        with self._talk_client(mock_ocs_data):
             results = await _search_talk_api(config, "deploy")
 
         assert len(results) == 1
@@ -2213,7 +2224,7 @@ class TestSearchTalkApi:
         from istota.commands import _search_talk_api
 
         config = make_config()
-        with patch("istota.commands.ocs_get", return_value=None):
+        with self._talk_client(error=RuntimeError("Talk unreachable")):
             results = await _search_talk_api(config, "test")
 
         assert results == []
@@ -2223,7 +2234,7 @@ class TestSearchTalkApi:
         from istota.commands import _search_talk_api
 
         config = make_config()
-        with patch("istota.commands.ocs_get", return_value={"entries": []}):
+        with self._talk_client({"entries": []}):
             results = await _search_talk_api(config, "test")
 
         assert results == []

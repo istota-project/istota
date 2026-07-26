@@ -17,7 +17,6 @@ from . import db
 from .brain import Brain, EFFORT_LEVELS, make_brain
 from .memory import search as memory_search_mod
 from .config import Config
-from .nextcloud_client import ocs_get
 
 if TYPE_CHECKING:
     from .transport.registry import TransportRegistry
@@ -1670,13 +1669,20 @@ async def _search_talk_api(
     query: str,
     limit: int = 20,
 ) -> list[dict]:
-    """Search Nextcloud Talk messages via the unified search API."""
-    data = ocs_get(
-        config,
-        "/search/providers/talk-message/search",
-        params={"term": query, "limit": str(limit)},
-        timeout=10.0,
-    )
+    """Search Nextcloud Talk messages via the unified search API.
+
+    Shares its implementation with ``nextcloud talk search`` so one call site
+    serves both the user-facing command and the agent. Best-effort: a Talk
+    hiccup must not wedge ``!search``.
+    """
+    from .async_runtime import get_talk_client
+
+    try:
+        data = await get_talk_client(config).search_messages(query, limit=limit)
+    except Exception as e:
+        logger.debug("Talk message search failed: %s", e)
+        return []
+
     if not data:
         return []
 

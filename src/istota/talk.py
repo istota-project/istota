@@ -2,6 +2,7 @@
 
 import logging
 import re
+from contextlib import asynccontextmanager
 
 import httpx
 
@@ -279,6 +280,103 @@ class TalkClient:
             json={"roomName": name[:200]},
         )
         response.raise_for_status()
+
+    async def set_conversation_description(
+        self, conversation_token: str, description: str,
+    ) -> None:
+        """Set a conversation's description."""
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"
+            f"/{conversation_token}/description"
+        )
+        client = await self._ensure_open()
+        response = await client.put(
+            url,
+            auth=self.auth,
+            headers=self._headers(json_body=True),
+            json={"description": description[:500]},
+        )
+        response.raise_for_status()
+
+    async def leave_conversation(self, conversation_token: str) -> None:
+        """Remove the authenticated account from a conversation."""
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room"
+            f"/{conversation_token}/participants/self"
+        )
+        client = await self._ensure_open()
+        response = await client.delete(
+            url, auth=self.auth, headers=self._headers(),
+        )
+        response.raise_for_status()
+
+    async def delete_conversation(self, conversation_token: str) -> None:
+        """Delete a conversation for everyone. Destructive."""
+        url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v4/room/{conversation_token}"
+        client = await self._ensure_open()
+        response = await client.delete(
+            url, auth=self.auth, headers=self._headers(),
+        )
+        response.raise_for_status()
+
+    async def search_mentions(
+        self, conversation_token: str, search: str, limit: int = 20,
+    ) -> list[dict]:
+        """Candidates the bot could @mention in a conversation."""
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat"
+            f"/{conversation_token}/mentions"
+        )
+        client = await self._ensure_open()
+        response = await client.get(
+            url,
+            auth=self.auth,
+            headers=self._headers(),
+            params={"search": search, "limit": limit},
+        )
+        response.raise_for_status()
+        return response.json().get("ocs", {}).get("data", [])
+
+    async def share_file(self, conversation_token: str, path: str) -> dict:
+        """Post a file into a conversation.
+
+        A Talk attachment is a share of type 10 whose ``shareWith`` is the
+        conversation token — the one operation that bridges the file and chat
+        surfaces.
+        """
+        url = f"{self.base_url}/ocs/v2.php/apps/files_sharing/api/v1/shares"
+        client = await self._ensure_open()
+        response = await client.post(
+            url,
+            auth=self.auth,
+            headers=self._headers(),
+            data={
+                "path": path,
+                "shareType": 10,
+                "shareWith": conversation_token,
+            },
+        )
+        response.raise_for_status()
+        return response.json().get("ocs", {}).get("data", {})
+
+    async def search_messages(
+        self, query: str, conversation_token: str | None = None, limit: int = 20,
+    ) -> dict:
+        """Search Talk messages through the unified-search provider.
+
+        The same endpoint the ``!search`` command reads, so one implementation
+        serves both the user-facing command and the agent.
+        """
+        url = f"{self.base_url}/ocs/v2.php/search/providers/talk-message/search"
+        params: dict[str, str] = {"term": query, "limit": str(limit)}
+        if conversation_token:
+            params["from"] = f"/call/{conversation_token}"
+        client = await self._ensure_open()
+        response = await client.get(
+            url, auth=self.auth, headers=self._headers(), params=params,
+        )
+        response.raise_for_status()
+        return response.json().get("ocs", {}).get("data", {})
 
     async def mark_conversation_read(self, conversation_token: str) -> bool:
         """Mark a whole conversation read for the authenticated identity.
@@ -561,6 +659,23 @@ class TalkClient:
 
         with open(local_path, "wb") as f:
             f.write(response.content)
+
+
+@asynccontextmanager
+async def transient_client(config: Config):
+    """A short-lived TalkClient for a process with no persistent runtime.
+
+    The daemon holds a single pooled client on the persistent asyncio loop, and
+    no daemon path may construct its own (see .claude/rules/transport.md). The
+    skill CLI is the documented exemption: it is a one-shot subprocess making
+    one or two requests, so spinning up the persistent runtime would cost more
+    than it buys. **Only the nextcloud skill CLI should use this.**
+    """
+    client = TalkClient(config)
+    try:
+        yield client
+    finally:
+        await client.aclose()
 
 
 def split_message(message: str, max_length: int = 4000) -> list[str]:

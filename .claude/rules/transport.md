@@ -358,6 +358,18 @@ which is its canonical home. The CLI shares that singleton too (via
 `commands.dispatch` → `get_talk_client`), so the "no direct `TalkClient` outside
 the transport" invariant holds by grep.
 
+**One documented exemption: `talk.transient_client(config)`.** The `nextcloud`
+skill's `talk` group (agent-facing room/message control — see
+`.claude/rules/skills.md`) runs inside the skill CLI, a short-lived subprocess
+with **no persistent asyncio runtime**: it makes one or two requests and exits.
+Standing the persistent runtime up there costs more than it buys, so `talk.py`
+exposes an explicit `transient_client(config)` async context manager that
+constructs a client and closes it on exit. Its docstring names the skill CLI as
+its only sanctioned caller. This is why the grep above finds a second
+construction — it is a deliberate, named exemption rather than a drift, and no
+daemon path may use it. The `web_app` bearer-token clients are a separate,
+already-documented case (user-scoped OAuth, web process only).
+
 **The delivery shims stay.** `scheduler.post_result_to_talk`,
 `post_result_to_email`, and `edit_talk_message` remain thin named functions over
 `TalkTransport.deliver`/`.edit` and `transport.email.outbound.deliver_email_result`
