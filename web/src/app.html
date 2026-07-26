@@ -10,6 +10,27 @@
          its strings. -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="text-scale" content="scale" />
+
+    <!-- Icons + PWA manifest. Assets live in static/ and are taken from the
+         main Istota site. %sveltekit.assets% resolves per page depth (the build
+         emits relative paths), so these stay correct under the /istota base. -->
+    <link rel="icon" type="image/png" href="%sveltekit.assets%/favicon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="%sveltekit.assets%/apple-touch-icon.png" />
+    <link
+      rel="manifest"
+      href="%sveltekit.assets%/manifest.webmanifest"
+      crossorigin="use-credentials"
+    />
+    <!-- Mobile browser chrome. Content is --surface-base for the active theme;
+         the pre-paint script below seeds it and applyTheme() keeps it in step
+         with the toggle. Deliberately not a prefers-color-scheme pair — the
+         theme is a stored preference that can disagree with the OS. -->
+    <meta name="theme-color" content="#111111" />
+    <meta name="apple-mobile-web-app-title" content="Istota" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
     <script>
       // Apply the saved theme and text scale before first paint to avoid a flash
       // of the wrong theme / a reflow once the size lands. Mirrors
@@ -24,8 +45,10 @@
             return fallback;
           }
         }
-        var theme = read('theme', 'dark');
-        root.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
+        var theme = read('theme', 'dark') === 'light' ? 'light' : 'dark';
+        root.setAttribute('data-theme', theme);
+        var chrome = document.querySelector('meta[name="theme-color"]');
+        if (chrome) chrome.setAttribute('content', theme === 'light' ? '#ffffff' : '#111111');
         var size = read('fontSize', 'medium');
         root.setAttribute('data-font-size', size === 'small' || size === 'large' ? size : 'medium');
       })();

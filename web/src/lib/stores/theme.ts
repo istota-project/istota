@@ -16,10 +16,22 @@ function initialTheme(): Theme {
 /** Current theme. Mirrors the `data-theme` attribute on <html>. */
 export const theme = writable<Theme>(initialTheme());
 
+/**
+ * Mobile browser chrome color per theme. Mirrors `--surface-base` in app.css
+ * and the seed values in the pre-paint script in app.html — keep all three in
+ * step.
+ */
+const CHROME_COLOR: Record<Theme, string> = {
+  dark: '#111111',
+  light: '#ffffff',
+};
+
 /** Reflect the theme onto <html> so the CSS variable overrides take effect. */
 export function applyTheme(value: Theme): void {
   if (typeof document !== 'undefined') {
     document.documentElement.setAttribute('data-theme', value);
+    const chrome = document.querySelector('meta[name="theme-color"]');
+    if (chrome) chrome.setAttribute('content', CHROME_COLOR[value]);
   }
 }
 
