@@ -18,12 +18,14 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from istota.config import Config, NextcloudConfig, load_admin_users
 from istota.nextcloud import (
     OcsError,
     PathScopeError,
     capabilities as caps_mod,
+    dav as dav_mod,
     resolve_scoped_path,
     shares as shares_mod,
     users as users_mod,
@@ -342,6 +344,98 @@ def cmd_share_search(args):
     return result
 
 
+# --- files (the WebDAV control plane) ---
+
+
+def cmd_files_stat(args):
+    config = _config_from_env()
+    return dav_mod.stat(config, _scoped(config, args.path))
+
+
+def cmd_files_list(args):
+    config = _config_from_env()
+    path = _scoped(config, args.path)
+    entries = dav_mod.list_dir(config, path, depth=args.depth)
+    return {"path": path, "count": len(entries), "entries": entries}
+
+
+def cmd_files_search(args):
+    config = _config_from_env()
+    scope = _scoped(config, args.scope)
+    results = dav_mod.search(
+        config,
+        scope=scope,
+        name=args.name,
+        mime=args.mime,
+        min_size=args.min_size,
+        modified_since=args.modified_since,
+        limit=args.limit,
+    )
+    return {"scope": scope, "count": len(results), "results": results}
+
+
+def cmd_files_upload(args):
+    config = _config_from_env()
+    remote = _scoped(config, args.remote)
+
+    supports_chunking = True
+    if args.chunked or Path(args.local).stat().st_size >= dav_mod.CHUNKED_UPLOAD_THRESHOLD:
+        try:
+            supports_chunking = caps_mod.feature_map(
+                caps_mod.fetch_capabilities(config)
+            ).get("dav.chunking", False)
+        except OcsError:
+            supports_chunking = False
+
+    return dav_mod.upload(
+        config,
+        Path(args.local),
+        remote,
+        chunked=True if args.chunked else None,
+        supports_chunking=supports_chunking,
+    )
+
+
+def cmd_files_download(args):
+    config = _config_from_env()
+    return dav_mod.download(config, _scoped(config, args.remote), Path(args.local))
+
+
+def cmd_files_versions(args):
+    config = _config_from_env()
+    return dav_mod.versions(config, _scoped(config, args.path))
+
+
+def cmd_files_restore_version(args):
+    config = _config_from_env()
+    return dav_mod.restore_version(config, _scoped(config, args.path), args.version)
+
+
+def cmd_files_trash(args):
+    config = _config_from_env()
+    if args.trash_action == "list":
+        entries = dav_mod.trash_list(config)
+        return {"count": len(entries), "entries": entries}
+    if args.trash_action == "restore":
+        return dav_mod.trash_restore(config, args.name)
+    if args.trash_action == "empty":
+        if not args.confirmed:
+            return _confirmation_required(
+                "files trash empty", "the trash bin", "permanently deleting everything in it"
+            )
+        return dav_mod.trash_empty(config)
+    raise ValueError("Use: files trash list|restore NAME|empty --confirmed")
+
+
+def cmd_files_favorite(args):
+    config = _config_from_env()
+    return dav_mod.set_favorite(config, _scoped(config, args.path), favorite=not args.off)
+
+
+def cmd_files_quota(args):
+    return dav_mod.quota(_config_from_env())
+
+
 # --- parser ---
 
 
@@ -462,6 +556,52 @@ def build_parser():
     p_search.add_argument("query", help="Search query (username or display name)")
     p_search.add_argument("--item-type", default="file", help="Item type (default: file)")
 
+    # files — WebDAV operations the mount can't express
+    files = sub.add_parser("files", help="WebDAV operations the filesystem can't express")
+    files_sub = files.add_subparsers(dest="command")
+
+    p_stat = files_sub.add_parser("stat", help="Server-side properties of one path")
+    p_stat.add_argument("path", help="Nextcloud path")
+
+    p_flist = files_sub.add_parser("list", help="List a folder with server-side properties")
+    p_flist.add_argument("path", help="Nextcloud folder path")
+    p_flist.add_argument("--depth", type=int, default=1, help="PROPFIND depth (default: 1)")
+
+    p_fsearch = files_sub.add_parser("search", help="Indexed, server-side search")
+    p_fsearch.add_argument("--scope", required=True, help="Folder to search under")
+    p_fsearch.add_argument("--name", default=None, help="Name glob (e.g. '*.pdf')")
+    p_fsearch.add_argument("--mime", default=None, help="MIME pattern (e.g. 'image/*')")
+    p_fsearch.add_argument("--min-size", type=int, default=None, help="Minimum size in bytes")
+    p_fsearch.add_argument("--modified-since", default=None, help="HTTP-date lower bound")
+    p_fsearch.add_argument("--limit", type=int, default=100, help="Max results (default: 100)")
+
+    p_upload = files_sub.add_parser("upload", help="Upload a local file")
+    p_upload.add_argument("local", help="Local file path")
+    p_upload.add_argument("remote", help="Destination Nextcloud path")
+    p_upload.add_argument("--chunked", action="store_true", help="Force chunked upload")
+
+    p_download = files_sub.add_parser("download", help="Download to a local path")
+    p_download.add_argument("remote", help="Nextcloud path")
+    p_download.add_argument("local", help="Local destination path")
+
+    p_versions = files_sub.add_parser("versions", help="List stored versions of a file")
+    p_versions.add_argument("path", help="Nextcloud path")
+
+    p_restore = files_sub.add_parser("restore-version", help="Restore a stored version")
+    p_restore.add_argument("path", help="Nextcloud path")
+    p_restore.add_argument("version", help="Version id from `files versions`")
+
+    p_trash = files_sub.add_parser("trash", help="Trash bin")
+    p_trash.add_argument("trash_action", choices=["list", "restore", "empty"])
+    p_trash.add_argument("name", nargs="?", default=None, help="Trash entry name (restore)")
+    p_trash.add_argument("--confirmed", action="store_true", help="Required for empty")
+
+    p_fav = files_sub.add_parser("favorite", help="Mark or unmark a favorite")
+    p_fav.add_argument("path", help="Nextcloud path")
+    p_fav.add_argument("--off", action="store_true", help="Unmark instead")
+
+    files_sub.add_parser("quota", help="Storage quota for the bot account")
+
     return parser
 
 
@@ -481,6 +621,16 @@ _COMMANDS = {
     ("share", "revoke"): cmd_share_revoke,
     ("share", "delete"): cmd_share_delete,
     ("share", "search"): cmd_share_search,
+    ("files", "stat"): cmd_files_stat,
+    ("files", "list"): cmd_files_list,
+    ("files", "search"): cmd_files_search,
+    ("files", "upload"): cmd_files_upload,
+    ("files", "download"): cmd_files_download,
+    ("files", "versions"): cmd_files_versions,
+    ("files", "restore-version"): cmd_files_restore_version,
+    ("files", "trash"): cmd_files_trash,
+    ("files", "favorite"): cmd_files_favorite,
+    ("files", "quota"): cmd_files_quota,
 }
 
 
