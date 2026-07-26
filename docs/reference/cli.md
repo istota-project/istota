@@ -154,6 +154,16 @@ istota-skill kv set-add      <ns> <key> <member> [<member>...]    # Add members 
 istota-skill kv set-remove   <ns> <key> <member> [<member>...]    # Remove members (deferred)
 ```
 
+### Nextcloud
+
+```bash
+istota nextcloud capabilities                # Curated summary of what the server supports
+istota nextcloud capabilities --raw          # Full /cloud/capabilities payload
+istota nextcloud capabilities --check talk,sharing.public   # Exits non-zero if any is missing
+```
+
+The `--check` form is the deployment fit-check — usable in a shell or a heartbeat `shell-command`. See [Nextcloud](../features/nextcloud.md) for the feature names and for the full `istota-skill nextcloud` surface.
+
 ### Experimental features
 
 ```bash

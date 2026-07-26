@@ -19,7 +19,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | Skill | Keywords | CLI |
 |---|---|---|
 | `email` | email, mail, send, inbox, reply, message | yes -- send, output |
-| `nextcloud` | share, sharing, nextcloud, permission, access | yes -- share list/create/delete/search |
+| `nextcloud` | share, sharing, download link, nextcloud, permission, access, capabilities, quota | yes -- capabilities, user, group, share (incl. `share link`), files, talk, notify, activity. Gated on `requires_capability: [nextcloud]` |
 | `ntfy` | ntfy, push notification, notify me, notify my phone, mobile alert | yes -- send (one-way push to the user's ntfy device) |
 
 ## Productivity

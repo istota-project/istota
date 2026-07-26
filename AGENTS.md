@@ -54,7 +54,8 @@ src/istota/
 ├── devbox_proxy_protocol.py  # Wire protocol for devbox_proxy (single-line JSON, 16 MiB cap)
 ├── docker_proxy.py       # Per-user Docker-API allowlist proxy: bound into the sandbox at /var/run/docker.sock in place of the root-equivalent raw socket; permits only exec/cp/inspect/restart on the user's own container
 ├── nextcloud_api.py      # NC user metadata
-├── nextcloud_client.py   # OCS + WebDAV plumbing
+├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications
+├── nextcloud_client.py   # Back-compat shim: the None-returning variants four best-effort daemon paths depend on
 ├── storage.py            # Bot-managed Nextcloud storage
 ├── briefings/            # Block/source briefings module — DB, source resolvers, generation, reader/settings routes, migration
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe (repeat-image suppression)
@@ -153,6 +154,9 @@ What it IS: a one-way push channel (bot → device) used by heartbeat alerts, sc
 
 ### Skills
 Self-contained `src/istota/skills/<name>/skill.md` (YAML frontmatter + body). **Single-axis model:** a skill is either **eager** (full body in the prompt, because a deterministic rule in `select_skills` picked it — `always_include` / `source_types` / `file_types` / `sticky` / `companions`, minus `excludes`) or in the **menu** (a one-line entry the model pulls in full via `istota-skill skills show <name>`, which also delivers that skill's companions). The menu is the full eligible catalogue (`eligible_skill_names` — every loadable skill not already eager), so the capable main model self-selects from it. Keyword (`triggers`) and `resource_types` matching are NOT selectors (kept as `!skills`-surfaced documentation); `resource_types` survives only as a menu-membership gate. There is no eager/lazy `disclosure` field, no `progressive_disclosure` flag, no `always_eager` list — the menu is intrinsic. CLI skills expose `python -m istota.skills.<name>` and run through the credential-injecting skill proxy. The `skills` core skill is the on-demand loader. (The former LLM "Pass 2 semantic routing" pre-router and the two-axis eager/lazy disclosure model were both removed — the menu replaced them.) Full details in `.claude/rules/skills.md`.
+
+### Nextcloud control plane
+The `nextcloud` skill is a multi-group CLI over `src/istota/nextcloud/` (spec `Specs/Done/nextcloud-skill-cli.md`): `capabilities` (a one-call deployment fit-check with `--check` as a shell gate, also `istota nextcloud capabilities`), `user`/`group` lookup (non-admin-safe via `/core/autocomplete/get`; the provisioning verbs name admin rights as the cause of a 997), `share` (incl. `share link` — the ISSUE-193 fix: default expiry, optional password, a synthesized direct-download URL, a revoke loop), `files` (the WebDAV operations the mount can't express — properties, indexed server-side SEARCH, versions, trash, quota, chunked upload; deliberately **no** read/write/mkdir/rm/mv/cp), `talk` (an *agent-facing* control surface, not a second delivery path), and `notify`/`activity` reads. Every failure raises `OcsError` carrying HTTP status + OCS status + the server's message. Gated by `requires_capability: [nextcloud]` (keyed on `nextcloud.url`, so it vanishes on a standalone install). Inbound text is untrusted-framed; outbound sharing/messaging is confirmation-gated; destructive verbs need `--confirmed`; `files`/`share` paths are scoped to `/Users/<caller>/` for non-admins. `nextcloud_client.py` survives as the `None`-returning shim for four best-effort daemon paths. See `docs/features/nextcloud.md`.
 
 ### Input Channels
 - **Talk**: long-poll, message cache, ack/progress/result via referenceId. `!commands` intercepted in poller.

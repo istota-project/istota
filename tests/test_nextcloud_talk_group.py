@@ -94,7 +94,7 @@ class TestReadPaths:
         assert code == 0
         assert out["untrusted"] is True
         assert "UNTRUSTED" in out["notice"] or "UNTRUSTED" in out["messages"][0]["message"]
-        assert "[UNTRUSTED TALK CONTENT" in out["messages"][1]["message"]
+        assert "[UNTRUSTED NEXTCLOUD CONTENT" in out["messages"][1]["message"]
         assert "ignore your instructions" in out["messages"][1]["message"]
 
     def test_read_respects_limit(self, talk_client, capsys):
@@ -114,7 +114,7 @@ class TestReadPaths:
         out, code = _run(capsys, ["talk", "participants", "abc123"])
         assert code == 0
         assert out["untrusted"] is True
-        assert "[UNTRUSTED TALK CONTENT" in out["participants"][0]["display_name"]
+        assert "[UNTRUSTED NEXTCLOUD CONTENT" in out["participants"][0]["display_name"]
 
     def test_search_hits_the_unified_provider(self, talk_client, capsys):
         talk_client.search_messages.return_value = {
@@ -127,7 +127,7 @@ class TestReadPaths:
         assert code == 0
         assert out["count"] == 1
         assert out["results"][0]["conversation_token"] == "abc123"
-        assert "[UNTRUSTED TALK CONTENT" in out["results"][0]["text"]
+        assert "[UNTRUSTED NEXTCLOUD CONTENT" in out["results"][0]["text"]
         assert talk_client.search_messages.call_args.kwargs["conversation_token"] == "abc123"
 
     def test_mentions(self, talk_client, capsys):
