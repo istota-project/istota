@@ -382,7 +382,7 @@
               <tr>
                 <td>
                   <span class="username">{u.display_name || u.username}</span>
-                  {#if u.is_admin}<span class="badge">admin</span>{/if}
+                  {#if u.is_admin}<span class="admin-badge">admin</span>{/if}
                 </td>
                 <td class="num col-total">{formatNumber(u.tasks_total)}</td>
                 <td class="source-cell">
@@ -541,7 +541,9 @@
                 <th class="col-cron">Cron</th>
                 <th class="col-status">Status</th>
                 <th class="col-lastrun">Last run</th>
-                <th class="num">Failures</th>
+                <th class="num col-failures"
+                  ><span class="label-full">Failures</span><span class="label-abbr">Fails</span></th
+                >
               </tr>
             </thead>
             <tbody>
@@ -563,7 +565,7 @@
                     <span class="status-label">{j.enabled ? 'enabled' : 'paused'}</span>
                   </td>
                   <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
-                  <td class="num">{j.consecutive_failures}</td>
+                  <td class="num col-failures">{j.consecutive_failures}</td>
                 </tr>
                 {#if expandable && expandedJobs[j.id]}
                   <tr class="error-row">
@@ -586,7 +588,7 @@
                   <td class="col-cron"><span class="muted">—</span></td>
                   <td class="col-status"><span class="muted">—</span></td>
                   <td class="col-lastrun">{formatTimestamp(summary.lastRun)}</td>
-                  <td class="num">{summary.failures}</td>
+                  <td class="num col-failures">{summary.failures}</td>
                 </tr>
                 {#if modulesExpanded}
                   {#each parts.moduleJobs as j (j.id)}
@@ -609,7 +611,7 @@
                         <span class="status-label">{j.enabled ? 'enabled' : 'paused'}</span>
                       </td>
                       <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
-                      <td class="num">{j.consecutive_failures}</td>
+                      <td class="num col-failures">{j.consecutive_failures}</td>
                     </tr>
                     {#if expandable && expandedJobs[j.id]}
                       <tr class="error-row">
@@ -776,6 +778,8 @@
     font-weight: 500;
   }
 
+  /* Neutral count chip (module-poller row). Distinct from .admin-badge — this
+	   one carries a number, not an identity. */
   .badge {
     display: inline-block;
     margin-left: 0.4rem;
@@ -784,6 +788,21 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
     color: var(--text-muted);
+  }
+
+  /* Matches .effort-chip's metrics so the two chips read as one family;
+	   amber is the identity accent, not a severity. */
+  .admin-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.4rem;
+    font-size: 0.55rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--accent-amber) 18%, transparent);
+    color: var(--accent-amber);
   }
 
   .kpi-grid {
@@ -973,6 +992,10 @@
     word-break: break-word;
   }
 
+  .label-abbr {
+    display: none;
+  }
+
   .row-clickable {
     cursor: pointer;
   }
@@ -1158,6 +1181,12 @@
     .users-grid .col-avg {
       width: 4rem;
     }
+    /* The user column is too narrow to hold name + chip on one line, and the
+		   wrap leaves the chip stranded under an off-centre name. Admin status
+		   isn't actionable from the mobile view, so drop it. */
+    .admin-badge {
+      display: none;
+    }
     .kpi-value {
       font-size: 1.1rem;
     }
@@ -1173,6 +1202,28 @@
     }
     .jobs-grid {
       min-width: 0;
+    }
+    /* Fixed table layout splits unsized columns evenly, which gave the job
+		   name the same quarter of a phone-width table as a status dot and a
+		   one-digit failure count. Pin the three narrow columns to just what
+		   their content (and header) needs and leave Job unsized so it takes
+		   the remainder — same approach as .users-grid. */
+    .jobs-grid .col-status {
+      width: 3.75rem;
+    }
+    .jobs-grid .col-lastrun {
+      width: 4.5rem;
+    }
+    .jobs-grid .col-failures {
+      width: 3.25rem;
+    }
+    /* "Failures" is one long word that can't wrap; the short form is what
+		   lets that column shrink to its integer. */
+    .col-failures .label-full {
+      display: none;
+    }
+    .col-failures .label-abbr {
+      display: inline;
     }
     /* Source greys are hard to tell apart in the stack-bar at any width;
 		   on mobile the bar is even narrower, so keep the labelled chips
