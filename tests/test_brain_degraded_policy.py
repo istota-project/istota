@@ -114,8 +114,13 @@ class TestReportBrainResult:
 
 
 def _sleep_config(tmp_path, *, cooldown=900, cron="* * * * *"):
-    """A sleep-cycle config whose cron is always due (every minute)."""
-    from istota.config import Config, SleepCycleConfig
+    """A sleep-cycle config whose cron is always due (every minute).
+
+    Both crons are set: the channel pass reads `channel_sleep_cycle`, whose
+    default `0 3 * * *` leaves a never-run channel not-due until 03:00 UTC —
+    making any channel-loop test pass or fail on the wall clock.
+    """
+    from istota.config import ChannelSleepCycleConfig, Config, SleepCycleConfig
 
     mount = tmp_path / "mount"
     mount.mkdir()
@@ -124,6 +129,9 @@ def _sleep_config(tmp_path, *, cooldown=900, cron="* * * * *"):
         temp_dir=tmp_path / "temp",
         nextcloud_mount_path=mount,
         sleep_cycle=SleepCycleConfig(enabled=True, cron=cron, lookback_hours=24),
+        channel_sleep_cycle=ChannelSleepCycleConfig(
+            enabled=True, cron=cron, lookback_hours=24
+        ),
         users={"alice": UserConfig(timezone="UTC")},
     )
     cfg.brain = BrainConfig(kind="claude_code", fallback_cooldown_seconds=cooldown)
