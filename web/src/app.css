@@ -279,6 +279,30 @@ a:hover {
   margin-inline-start: calc(-1 * var(--chip-padding-x));
 }
 
+/* Safe-area padding for a viewport-pinned overlay backdrop.
+
+   There is no way to enforce this from above: a `position: fixed` element is
+   out of the document flow, so no ancestor's padding — not .app-content's, not
+   AppShell's — reaches it. Every full-bleed overlay has to carry the insets
+   itself, and this is that expression written once instead of per component.
+
+   Apply it to the BACKDROP, not the panel: the scrim must still run edge to
+   edge (it covers the status-bar strip, which is the point), and it is the
+   backdrop's padding that keeps the panel inside it clear of the notch, the
+   Dynamic Island and the home indicator. A panel sized against the backdrop
+   should use `max-height: 100%`, which resolves against the padded content box
+   and so tracks the insets for free.
+
+   Set --overlay-pad-block / --overlay-pad-inline to the padding the overlay
+   wants where there are no insets (desktop, and any browser tab); each edge
+   then takes whichever of the two is larger, so this is inert there. */
+.overlay-safe {
+  padding-top: max(var(--overlay-pad-block, 1rem), var(--safe-top));
+  padding-bottom: max(var(--overlay-pad-block, 1rem), var(--safe-bottom));
+  padding-left: max(var(--overlay-pad-inline, 1rem), var(--safe-left));
+  padding-right: max(var(--overlay-pad-inline, 1rem), var(--safe-right));
+}
+
 /* App shell */
 .app-nav {
   display: flex;

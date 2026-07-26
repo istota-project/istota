@@ -436,7 +436,7 @@
 {/if}
 
 {#if modalOpen}
-  <div class="modal-backdrop" onclick={() => (modalOpen = false)} role="presentation">
+  <div class="modal-backdrop overlay-safe" onclick={() => (modalOpen = false)} role="presentation">
     <div class="modal" onclick={(e) => e.stopPropagation()} role="presentation">
       <h2>Log measurement</h2>
       <form onsubmit={submitEntry}>
@@ -596,6 +596,8 @@
     margin: 0.25rem 0;
   }
 
+  /* Padding comes from .overlay-safe (app.css); these are its no-inset
+     baseline. Without it a tall modal runs under the Dynamic Island. */
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -603,6 +605,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    --overlay-pad-block: 1rem;
+    --overlay-pad-inline: 1rem;
     z-index: 100;
   }
   .modal {

@@ -74,8 +74,10 @@
   }
   .lightbox img {
     max-width: 90vw;
-    /* Leave room for the bottom control bar so it never covers the image. */
-    max-height: calc(90vh - 4rem);
+    /* Leave room for the bottom control bar so it never covers the image, and
+		   for the device insets — 5vh of slack is under the Dynamic Island's height
+		   on a phone, so without this the top of a tall image sits behind it. */
+    max-height: calc(90dvh - 4rem - var(--safe-top) - var(--safe-bottom));
     object-fit: contain;
   }
   /* Full-bleed overlay, so its controls carry their own safe-area offsets. */

@@ -56,8 +56,13 @@
     border-radius: var(--radius-card);
     padding: 1rem;
     width: var(--modal-width, 420px);
-    max-width: calc(100vw - 2rem);
-    max-height: calc(100vh - 2rem);
+    /* The panel is pinned to the viewport centre rather than laid out inside a
+		   padded backdrop, so it can't use .overlay-safe — the insets come off its
+		   caps instead. Subtracting both ends of each axis keeps a full-height modal
+		   inside the safe box once it is centred, and dvh tracks a collapsing mobile
+		   browser toolbar the way the body's height does. Inert where insets are 0. */
+    max-width: calc(100vw - 2rem - var(--safe-left) - var(--safe-right));
+    max-height: calc(100dvh - 2rem - var(--safe-top) - var(--safe-bottom));
     overflow: auto;
     z-index: 51;
     outline: none;

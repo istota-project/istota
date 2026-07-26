@@ -134,7 +134,7 @@
 {#if entry}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="reader-backdrop" onclick={onClose}>
+  <div class="reader-backdrop overlay-safe" onclick={onClose}>
     <button class="nav prev" onclick={prev} disabled={!hasPrev} aria-label="Previous post">
       <ChevronLeft size={28} />
     </button>
@@ -230,8 +230,12 @@
 <style>
   /* Mirror the Lightbox backdrop so the two overlays feel like one surface.
 	   align-items: center keeps the panel vertically centered; the panel caps
-	   at 94vh and scrolls internally, so a short post centers on screen while a
-	   long one fills the height without overflowing the viewport. */
+	   at the padded box and scrolls internally, so a short post centers on
+	   screen while a long one fills the height without overflowing the viewport.
+
+	   Padding comes from .overlay-safe (app.css) — the scrim stays edge to edge
+	   while the panel keeps clear of the Dynamic Island and the home indicator.
+	   These two values are the no-inset baseline it raises. */
   .reader-backdrop {
     position: fixed;
     inset: 0;
@@ -240,7 +244,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 3vh 1rem;
+    --overlay-pad-block: 3vh;
+    --overlay-pad-inline: 1rem;
     overflow: auto;
   }
 
@@ -255,7 +260,9 @@
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
     display: flex;
     flex-direction: column;
-    max-height: 94vh;
+    /* Resolves against the backdrop's padded content box, so the cap tracks the
+		   safe-area insets instead of restating a vh figure that ignores them. */
+    max-height: 100%;
     overflow: hidden;
   }
 
