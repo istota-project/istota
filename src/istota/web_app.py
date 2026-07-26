@@ -455,24 +455,229 @@ async def _nc_oauth2_userinfo(token: dict) -> dict:
     return inner
 
 
+# Project homepage, linked from the login footer. Names the software, not the
+# deployment — a rebranded `bot_name` still runs Istota.
+ISTOTA_SITE_URL = "https://istota.cynium.com"
+
+# Tokens mirror web/src/app.css. Dark is the default (as in the app); an explicit
+# `data-theme="light"` from the stored preference flips it, so a user who picked
+# light in the app doesn't get flashed a dark login page.
+_LOGIN_PAGE_CSS = """
+:root {
+  color-scheme: dark;
+  --surface-base: #111;
+  --surface-card: #1a1a1a;
+  --surface-raised: #222;
+  --text-primary: #e0e0e0;
+  --text-muted: #888;
+  --text-dim: #666;
+  --border-default: #333;
+  --border-subtle: #222;
+  --accent-amber: #f5a623;
+  --accent-blue: #7aa3d8;
+  --glow: rgba(245, 166, 35, 0.09);
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+  --surface-base: #ffffff;
+  --surface-card: #f4f4f5;
+  --surface-raised: #e8e8ea;
+  --text-primary: #1a1a1a;
+  --text-muted: #6b6b70;
+  --text-dim: #8a8a90;
+  --border-default: #d4d4d8;
+  --border-subtle: #e4e4e7;
+  --accent-amber: #b9740a;
+  --accent-blue: #2563b0;
+  --glow: rgba(185, 116, 10, 0.07);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  padding: 2rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  background: var(--surface-base);
+  background-image: radial-gradient(60rem 32rem at 50% -8rem, var(--glow), transparent 70%);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.card {
+  width: 100%;
+  max-width: 22rem;
+  padding: 2.25rem 1.75rem 1.75rem;
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 1rem;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 12px 32px rgba(0, 0, 0, 0.25);
+  text-align: center;
+}
+.mark {
+  width: 4.5rem;
+  height: 4.5rem;
+  margin: 0 auto 1.25rem;
+  display: block;
+  border-radius: 1.125rem;
+  border: 1px solid var(--border-default);
+  background: #111;
+}
+h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.tagline {
+  margin: 0.4rem 0 1.75rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.7rem 1rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--border-default);
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-decoration: none;
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+}
+a.btn:hover {
+  border-color: var(--accent-amber);
+  transform: translateY(-1px);
+}
+a.btn:focus-visible {
+  outline: 2px solid var(--accent-amber);
+  outline-offset: 2px;
+}
+.btn svg { flex: none; }
+.lucide-cloud { color: var(--accent-blue); }
+.btn-disabled {
+  margin-top: 0.75rem;
+  color: var(--text-dim);
+  background: transparent;
+  border-style: dashed;
+  cursor: not-allowed;
+}
+.soon {
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1rem 0 0.25rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.divider::before, .divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+}
+footer {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+footer a {
+  color: var(--text-muted);
+  text-decoration: none;
+  border-bottom: 1px solid var(--border-default);
+}
+footer a:hover { color: var(--accent-amber); border-bottom-color: var(--accent-amber); }
+@media (prefers-reduced-motion: reduce) {
+  .btn { transition: none; }
+  a.btn:hover { transform: none; }
+}
+"""
+
+# Reads the same localStorage key the SvelteKit theme store writes (a JSON
+# string), so the login page matches the app the user is about to enter. Runs
+# before first paint — keep it in <head>.
+_LOGIN_PAGE_THEME_SCRIPT = (
+    "try{if(JSON.parse(localStorage.getItem('theme'))==='light')"
+    "document.documentElement.setAttribute('data-theme','light')}catch(e){}"
+)
+
+# Lucide icons, inlined. This page is server-rendered FastAPI HTML, so it can't
+# import `lucide-svelte` the way the SvelteKit app does — the path data and the
+# default attributes are copied verbatim from the package so the two surfaces
+# draw the same glyphs.
+def _lucide(name: str, body: str) -> str:
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" '
+        f'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+        f'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" '
+        f'class="lucide lucide-{name}">{body}</svg>'
+    )
+
+
+_CLOUD_ICON = _lucide("cloud", '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>')
+
+_MAIL_ICON = _lucide(
+    "mail",
+    '<path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7"/>'
+    '<rect x="2" y="4" width="20" height="16" rx="2"/>',
+)
+
+
+def _render_login_page(bot_name: str, version: str) -> str:
+    """The unauthenticated landing page: one card, one working way in."""
+    name = escape(bot_name)
+    return (
+        f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>Sign in &middot; {name}</title>'
+        f'<link rel="icon" href="/istota/favicon.png">'
+        f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
+        f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
+        f'<main class="card">'
+        f'<img class="mark" src="/istota/logo-192.png" alt="" width="72" height="72">'
+        f'<h1>{name}</h1>'
+        f'<p class="tagline">Sign in to continue</p>'
+        f'<a class="btn" href="/istota/login?go=1">{_CLOUD_ICON}'
+        f'Log in with Nextcloud</a>'
+        f'<div class="divider">or</div>'
+        f'<div class="btn btn-disabled" aria-disabled="true">{_MAIL_ICON}'
+        f'Log in with email <span class="soon">Coming soon</span></div>'
+        f'</main>'
+        f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
+        f'rel="noopener">Istota</a> v{escape(version)}</footer>'
+        f'</body></html>'
+    )
+
+
 @auth_router.get("/login")
 async def login(request: Request):
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
         return Response("Auth not configured", status_code=500)
     if not request.query_params.get("go"):
-        bot_name = escape(_config.bot_name) if _config else "Istota"
-        return HTMLResponse(
-            f'<!doctype html><html><head><meta charset="utf-8">'
-            f'<title>{bot_name}</title>'
-            f'<style>body{{background:#111;color:#e0e0e0;font-family:system-ui,-apple-system,sans-serif;'
-            f'display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}'
-            f'.box{{text-align:center}}h1{{font-size:1.2rem;margin:0 0 1rem}}'
-            f'a{{color:#e0e0e0;padding:0.5rem 1.25rem;border:1px solid #333;border-radius:999px;'
-            f'text-decoration:none;font-size:0.85rem;transition:all 0.15s}}'
-            f'a:hover{{background:#e0e0e0;color:#111;border-color:#e0e0e0}}</style></head>'
-            f'<body><div class="box"><h1>{bot_name}</h1>'
-            f'<a href="/istota/login?go=1">Log in with Nextcloud</a></div></body></html>'
-        )
+        from . import __version__
+
+        bot_name = _config.bot_name if _config else "Istota"
+        return HTMLResponse(_render_login_page(bot_name, __version__))
     return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
 
 

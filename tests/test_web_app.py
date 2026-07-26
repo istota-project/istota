@@ -115,6 +115,32 @@ class TestLoginRoute:
         assert resp.status_code == 200
         assert "Log in with Nextcloud" in resp.text
 
+    async def test_login_page_shows_logo_version_and_email_placeholder(self, client, app):
+        from istota import __version__
+
+        resp = await client.get("/istota/login")
+        # Logo + project link + running version in the footer.
+        assert "/istota/logo-192.png" in resp.text
+        assert "istota.cynium.com" in resp.text
+        assert f"v{__version__}" in resp.text
+        # Email login is advertised but not yet an actionable control — it must
+        # not render as a link, or it would 404 into the Nextcloud flow.
+        assert "Coming soon" in resp.text
+        assert 'href="/istota/login?go=1"' in resp.text
+        assert resp.text.count('href="/istota/login?go=1"') == 1
+
+    async def test_login_page_escapes_bot_name(self, client, app):
+        import istota.web_app as mod
+
+        original = mod._config.bot_name
+        mod._config.bot_name = '<script>alert(1)</script>'
+        try:
+            resp = await client.get("/istota/login")
+        finally:
+            mod._config.bot_name = original
+        assert "<script>alert(1)</script>" not in resp.text
+        assert "&lt;script&gt;" in resp.text
+
     async def test_login_with_go_redirects_to_oidc(self, client, app):
         import istota.web_app as mod
 
