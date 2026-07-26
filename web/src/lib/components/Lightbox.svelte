@@ -48,13 +48,15 @@
   <div class="lightbox open" onclick={onClose}>
     <img src={images[current]} alt="" />
     {#if images.length > 1}
-      <button class="nav prev" onclick={prev} aria-label="Previous image">
-        <ChevronLeft size={32} />
-      </button>
-      <button class="nav next" onclick={next} aria-label="Next image">
-        <ChevronRight size={32} />
-      </button>
-      <div class="counter">{current + 1} / {images.length}</div>
+      <div class="controls">
+        <button class="nav" onclick={prev} aria-label="Previous image">
+          <ChevronLeft size={24} />
+        </button>
+        <div class="counter">{current + 1} / {images.length}</div>
+        <button class="nav" onclick={next} aria-label="Next image">
+          <ChevronRight size={24} />
+        </button>
+      </div>
     {/if}
   </div>
 {/if}
@@ -72,18 +74,27 @@
   }
   .lightbox img {
     max-width: 90vw;
-    max-height: 90vh;
+    /* Leave room for the bottom control bar so it never covers the image. */
+    max-height: calc(90vh - 4rem);
     object-fit: contain;
   }
-  .nav {
+  /* Full-bleed overlay, so its controls carry their own safe-area offsets. */
+  .controls {
     position: absolute;
-    top: 50%;
-    transform: translateY(-50%);
+    bottom: max(1rem, var(--safe-bottom));
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: default;
+  }
+  .nav {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 3rem;
-    height: 3rem;
+    width: 2.5rem;
+    height: 2.5rem;
     border: none;
     border-radius: 50%;
     background: rgba(0, 0, 0, 0.5);
@@ -94,23 +105,13 @@
   .nav:hover {
     background: rgba(0, 0, 0, 0.75);
   }
-  /* Full-bleed overlay, so its controls carry their own safe-area offsets. */
-  .nav.prev {
-    left: max(1rem, var(--safe-left));
-  }
-  .nav.next {
-    right: max(1rem, var(--safe-right));
-  }
   .counter {
-    position: absolute;
-    bottom: max(1rem, var(--safe-bottom));
-    left: 50%;
-    transform: translateX(-50%);
     padding: 0.25rem 0.6rem;
     background: rgba(0, 0, 0, 0.5);
     color: #fff;
     font-size: 0.8rem;
     border-radius: 0.25rem;
     pointer-events: none;
+    white-space: nowrap;
   }
 </style>
