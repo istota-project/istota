@@ -2,6 +2,43 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-25: Four money list pages had four private copies of the same table
+
+Started as two small asks on the Business tabs and turned into an extraction. Invoices had a date column that shifted position row to row, and the status chip it hid on mobile left nothing behind to tell posted from paid at a glance.
+
+**The date jitter was the status chip's width.** The client column is `flex: 1`, so it eats the slack and everything to its right is positioned by the widths of the columns after it. `.inv-status` had no fixed width, so `posted` / `paid` / `draft` each pushed the date and amount a different distance — the invoices copy of the chip had simply never gained the `min-width` the work copy had. Giving it a fixed slot fixes the column, and it's the invariant to remember: a variable-width cell anywhere after the flex column re-lays out everything downstream of it per row.
+
+**Mobile keeps the signal by moving it onto the identifier.** Below 640px the chip is hidden, so the invoice number takes the chip's own tokens — warn for posted, success for paid, badge for draft — as a colored pill. Deliberately mobile-only: at desktop width the chip is right there and tinting the number as well is redundant. The number keeps its own type (monospace, `--text-xs`) rather than the chip's, since it's the row's primary label at that width and shrinking it would hurt.
+
+**Uppercase chips needed a new scale step.** The type scale stopped at `--text-xs`, and caps read a size larger than lowercase, so a chip left at `xs` outweighed the table header above it. Added `--text-2xs` (0.55rem after one round of "even smaller"). Two consequences worth knowing: the header cells share the chip class, so both pages explicitly reset them to header type — they're column labels, not chips — and the `min-width` that stops the jitter has to shrink with the text or the chip becomes a mostly-empty capsule.
+
+**Then: "they're basically the same table and should share styling."** Correct, and it was worse than two copies — transactions is a third and clients a fourth. All four carried near-identical toolbar / scroll-container / header / row / chip rules, and had drifted on the one thing that's most visible: the inline edge. The section nav sat at 0.75rem, the work and invoices toolbars at 1rem, and their rows at 1.25rem (0.5rem list inset plus 0.75rem row padding). No two left edges on a page lined up. Transactions was the only one internally consistent, at 0.75rem throughout, so its geometry became the shared one — rows now carry the inline padding themselves, which also means a row's hover fill spans the full width instead of floating inset.
+
+The shell went into `routes/money/+layout.svelte` next to the existing `.money-section-*` globals rather than a new file, because that's already where this project puts cross-page money CSS. Net 370 lines deleted for 302 added, and the added ones are in one place.
+
+**Two follow-on reports, both diagnosed to something other than the container.** The work table still looked inset: its first column, `.work-index`, was `text-align: right` in a 1.75rem slot, so a one- or two-digit index floated ~1.3rem in while the invoice number sat flush. Left-aligned it; the fixed slot still keeps Date from moving between one- and two-digit indices. Then the result counts looked subtly different between tabs — same class by then, so identical type; what differed was bar height, since work's toolbar carries Selects and a Button and invoices' carries only the count. A shared `min-height` reserves control height whether or not a page has filters.
+
+**Scope calls.** Transactions got the toolbar but not the table body — `.txn-scroll` and `.txn-row` are still private, and adopting the shell there changes row height on the busiest money page, so it wants its own step. Clients lost its `.clients-content` wrapper padding, which had to go or it would have double-counted against the shared toolbar's own 0.75rem; the notice bar and card grid took the inline edge instead, so the count shifts 0.1rem left and the cards stay put. `class:flagged` on the work row was dead markup — nothing in the app defines `.flagged` — and went with the rest.
+
+**Unverified visually.** The browser extension wasn't connected this session, so every figure here is computed from the CSS, not measured. `prettier`, `svelte-check` (0 errors, 0 warnings, so no orphaned selectors) and a production build all pass, but the left-edge shift in particular wants eyes on it.
+
+**Key changes:**
+- Shared record-table shell in `routes/money/+layout.svelte`: `.money-toolbar`, `.money-notice-bar`, `.money-result-count`, `.money-table` (+ scrollbar), `.money-table-header`, `.money-table-row` (+ hover/expanded/focus, pointer keyed on `role="button"`), `.money-sortable` / `.money-sort-arrow`, `.money-status` (+ the three variants, the header-cell reset, and the mobile hide), `.money-amount`, `.money-kebab-spacer`, `.money-table-empty`.
+- All four money list pages converted; each keeps only its own column rules.
+- Status chips are uppercase, bold, `--text-2xs`; new scale token in `app.css`.
+- Invoices: fixed date and status slots; invoice number carries status colors below 640px; toolbar no longer unmounts while loading (it was shifting the table up and back down on every reload).
+- Work: index column left-aligned; `class:flagged` removed.
+- Clients: wrapper padding removed, inline edge moved onto the notice bar and card grid.
+
+**Files added/modified:**
+- `web/src/app.css` — `--text-2xs`
+- `web/src/routes/money/+layout.svelte` — the shell
+- `web/src/routes/money/business/invoices/+page.svelte` — columns only
+- `web/src/routes/money/business/work/+page.svelte` — columns only
+- `web/src/routes/money/business/clients/+page.svelte` — shared toolbar/notice bar, inline edge
+- `web/src/routes/money/transactions/+page.svelte` — shared toolbar
+- `AGENTS.md` — shell documented in the Web UI section
+
 ## 2026-07-25: A deploy was killing in-flight tasks, and the failure looked like a parse bug
 
 Investigating ISSUE-191: a long-running scheduled task died 25 minutes in with `Stream parsing failed (rc=-15, 1480 lines)` and, being on its final attempt, failed permanently. The issue's write-up had it as probable memory pressure — the death landed inside a full-page screenshot on a box with no swap — and flagged "who sent the SIGTERM" as the honest unknown.

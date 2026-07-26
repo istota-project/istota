@@ -316,14 +316,14 @@
 
 <div class="work-content">
   {#if conflict}
-    <div class="conflict-bar">
+    <div class="money-notice-bar">
       <NoticeBanner title={conflict} variant="warn" />
       <Button variant="ghost" onclick={reloadFromConflict}>Reload</Button>
     </div>
   {/if}
 
-  <div class="work-toolbar">
-    <span class="result-count">
+  <div class="money-toolbar">
+    <span class="money-result-count">
       {totals.uninvoiced_count} uninvoiced &middot; ${formatAmount(totals.uninvoiced_amount)}
     </span>
     <div class="filters">
@@ -344,24 +344,29 @@
   {:else if error}
     <div class="error-msg">{error}</div>
   {:else if entries.length === 0}
-    <div class="empty">No work entries found.</div>
+    <div class="money-table-empty">No work entries found.</div>
   {:else}
-    <div class="work-list">
-      <div class="work-header">
+    <div class="money-table">
+      <div class="money-table-header">
         <span class="work-index">#</span>
-        <button class="work-date sortable" onclick={toggleSort} type="button" title="Sort by date">
-          Date <span class="sort-arrow">{sortAsc ? '▲' : '▼'}</span>
+        <button
+          class="work-date money-sortable"
+          onclick={toggleSort}
+          type="button"
+          title="Sort by date"
+        >
+          Date <span class="money-sort-arrow">{sortAsc ? '▲' : '▼'}</span>
         </button>
         <span class="work-client">Client</span>
         <span class="work-service">Service</span>
         <span class="work-qty">Qty</span>
-        <span class="work-status">Status</span>
-        <span class="work-amount">Amount</span>
-        <span class="work-kebab-spacer"></span>
+        <span class="work-status money-status">Status</span>
+        <span class="work-amount money-amount">Amount</span>
+        <span class="money-kebab-spacer"></span>
       </div>
       {#each sorted as entry (entry.uid || `${entry.date}-${entry.index}`)}
         {@const warning = warningText(entry)}
-        <div class="work-row" class:flagged={!!warning}>
+        <div class="money-table-row">
           <span class="work-index" title="Display index — shifts as entries are added">
             {entry.index ?? ''}
           </span>
@@ -375,13 +380,13 @@
           </span>
           <span class="work-qty">{formatQty(entry)}</span>
           <span
-            class="work-status"
+            class="work-status money-status"
             class:status-paid={statusOf(entry) === 'paid'}
             class:status-posted={statusOf(entry) === 'posted'}
             class:status-draft={statusOf(entry) === 'draft'}>{statusLabel(entry)}</span
           >
           <span
-            class="work-amount"
+            class="work-amount money-amount"
             title={entry.invoice
               ? 'Computed at the current rate — the invoice is the record of what was billed.'
               : undefined}
@@ -429,23 +434,6 @@
     min-height: 0;
   }
 
-  .conflict-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 1rem 0;
-  }
-
-  .work-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.4rem 1rem;
-    flex-shrink: 0;
-    flex-wrap: wrap;
-  }
-
   .filters {
     display: flex;
     align-items: center;
@@ -453,75 +441,19 @@
     flex-wrap: wrap;
   }
 
-  .result-count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
+  /* Columns only — the toolbar/list/header/row/chip shell is shared, in
+     routes/money/+layout.svelte. */
 
-  .work-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 0.5rem 0.5rem;
-  }
-
-  .work-list::-webkit-scrollbar {
-    width: 4px;
-  }
-  .work-list::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .work-list::-webkit-scrollbar-thumb {
-    background: var(--border-default);
-    border-radius: 2px;
-  }
-
-  .work-header {
-    display: flex;
-    align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.3rem 0.75rem 0.4rem;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    border-bottom: 1px solid var(--border-subtle);
-    margin-bottom: 0.15rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
-  }
-
-  .work-header .work-status {
-    color: var(--text-dim);
-    background: none;
-    padding: 0;
-  }
-
-  .work-kebab-spacer {
-    width: 1.1rem;
-    flex-shrink: 0;
-  }
-
-  .work-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.4rem 0.75rem;
-    font-size: var(--text-sm);
-    border-radius: 0.25rem;
-    transition: background var(--transition-fast);
-  }
-
-  .work-row:hover {
-    background: var(--surface-card);
-  }
-
+  /* Left-aligned so the first character sits on the same edge as the invoice
+     number one tab over — right-aligning it in the slot floated the whole
+     table ~1.3rem inward. The fixed slot still keeps Date from shifting
+     between one- and two-digit indices. */
   .work-index {
     font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
     font-size: var(--text-xs);
     color: var(--text-dim);
     flex-shrink: 0;
     min-width: 1.75rem;
-    text-align: right;
   }
 
   .work-date {
@@ -566,88 +498,26 @@
     text-align: right;
   }
 
-  button.sortable {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
-    cursor: pointer;
-    padding: 0;
-    text-align: left;
-  }
-
-  button.sortable:hover {
-    color: var(--text-muted);
-  }
-
-  .sort-arrow {
-    font-size: 0.55rem;
-    vertical-align: middle;
-    margin-left: 0.15rem;
-    opacity: 0.5;
-  }
-
-  button.sortable:hover .sort-arrow {
-    opacity: 1;
-  }
-
+  /* Fits the longest label ("uninvoiced") in caps — if the chip outgrows the
+     slot it starts shifting the Amount column per row again. */
   .work-status {
-    font-size: var(--text-xs);
-    flex-shrink: 0;
-    padding: 0.1rem 0.4rem;
-    border-radius: var(--radius-pill);
     min-width: 5rem;
-    text-align: center;
-  }
-
-  .work-status.status-posted {
-    color: var(--status-warn-fg);
-    background: var(--status-warn-bg);
-  }
-
-  .work-status.status-paid {
-    color: var(--status-success-fg);
-    background: var(--status-success-bg);
-  }
-
-  .work-status.status-draft {
-    color: var(--text-muted);
-    background: var(--surface-badge);
   }
 
   .work-amount {
-    text-align: right;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
     min-width: 5.5rem;
-    color: var(--text-primary);
   }
 
+  /* Hangs under the row's first text column (index + gap). */
   .work-warning {
     font-size: var(--text-xs);
     color: var(--status-warn-fg);
     padding: 0 0.75rem 0.35rem 3.25rem;
   }
 
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
-
   @media (max-width: 640px) {
     .work-index,
     .work-qty {
-      display: none;
-    }
-    .work-header .work-status,
-    .work-row .work-status {
       display: none;
     }
     .work-date {

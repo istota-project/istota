@@ -235,8 +235,8 @@
 
 <div class="txn-content">
   {#if !loading}
-    <div class="result-bar">
-      <span class="result-count">{total.toLocaleString()} entries</span>
+    <div class="money-toolbar">
+      <span class="money-result-count">{total.toLocaleString()} entries</span>
     </div>
   {/if}
 
@@ -342,16 +342,6 @@
     flex-direction: column;
     flex: 1;
     min-height: 0;
-  }
-
-  .result-bar {
-    padding: 0.4rem 0.75rem;
-    flex-shrink: 0;
-  }
-
-  .result-count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .txn-scroll {

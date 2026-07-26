@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nightly memory extraction no longer holds up new messages either. The sleep cycle that distils each day's conversations into memory also ran on the thread that starts incoming work, so a pass across several users and channels could leave new messages waiting minutes for a reply. It now runs in the background too, which means every periodic job is off that thread and the stall alarm covers the whole loop again.
 
 ### Changed
+- The money section's lists — work, invoices, clients and transactions — now line up. They had each been styled separately and drifted apart: columns started at three different distances from the left edge on the same page, the date on the invoice list shifted position from row to row depending on how long the status beside it was, and the same count line was a different height on each tab. Status chips are now uppercase and smaller throughout, and on a narrow screen, where the chip doesn't fit, the invoice number itself is coloured to show whether an invoice is draft, posted or paid.
+
 - The feed reader stops painting the same picture twice as reblogs of one photo work their way through the blogs you follow. A repeat inside a single post is gone, and across posts a picture a more recent entry already showed is hidden on the older ones — the post still appears, with a note saying how many repeats were hidden. Suppression is bounded to a recent look-back window (adjustable in Feed settings, and switchable off) and to the view you're in, so an image resurfacing much later still shows and browsing one blog never hides a tile because of another.
 
 ## [0.35.0] - 2026-07-24

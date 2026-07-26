@@ -164,35 +164,44 @@
 </script>
 
 <div class="invoices-content">
-  {#if !loading}
-    <div class="invoices-toolbar">
-      <span class="result-count">{invoiceCount} invoices ({outstandingCount} outstanding)</span>
-    </div>
-  {/if}
+  <!-- Always rendered, count or not: dropping the whole bar while loading
+       shifted the table up and back down on every reload. -->
+  <div class="money-toolbar">
+    {#if !loading}
+      <span class="money-result-count"
+        >{invoiceCount} invoices ({outstandingCount} outstanding)</span
+      >
+    {/if}
+  </div>
 
   {#if loading}
     <div class="loading">Loading...</div>
   {:else if error}
     <div class="error-msg">{error}</div>
   {:else if invoices.length === 0}
-    <div class="empty">No invoices found.</div>
+    <div class="money-table-empty">No invoices found.</div>
   {:else}
-    <div class="inv-list">
-      <div class="inv-header">
+    <div class="money-table">
+      <div class="money-table-header">
         <span class="inv-number">Invoice</span>
         <span class="inv-client">Client</span>
-        <button class="inv-date sortable" onclick={toggleSort} type="button" title="Sort by date">
-          Date <span class="sort-arrow">{sortAsc ? '\u25B2' : '\u25BC'}</span>
+        <button
+          class="inv-date money-sortable"
+          onclick={toggleSort}
+          type="button"
+          title="Sort by date"
+        >
+          Date <span class="money-sort-arrow">{sortAsc ? '\u25B2' : '\u25BC'}</span>
         </button>
-        <span class="inv-status">Status</span>
-        <span class="inv-amount">Amount</span>
-        <span class="inv-expand-spacer"></span>
+        <span class="inv-status money-status">Status</span>
+        <span class="inv-amount money-amount">Amount</span>
+        <span class="money-kebab-spacer"></span>
       </div>
       {#each sorted as inv (inv.invoice_number)}
         {@const key = inv.invoice_number}
         {@const isExpanded = expandedKeys.has(key)}
         <div
-          class="inv-row"
+          class="money-table-row"
           class:expanded={isExpanded}
           role="button"
           tabindex="0"
@@ -205,16 +214,21 @@
             }
           }}
         >
-          <span class="inv-number">{inv.invoice_number}</span>
+          <span
+            class="inv-number"
+            class:status-paid={inv.status === 'paid'}
+            class:status-posted={inv.status === 'outstanding'}
+            class:status-draft={inv.status === 'draft'}>{inv.invoice_number}</span
+          >
           <span class="inv-client">{inv.client}</span>
           <span class="inv-date">{formatDate(inv.date)}</span>
           <span
-            class="inv-status"
+            class="inv-status money-status"
             class:status-paid={inv.status === 'paid'}
             class:status-posted={inv.status === 'outstanding'}
             class:status-draft={inv.status === 'draft'}>{displayStatus(inv.status)}</span
           >
-          <span class="inv-amount">${formatAmount(inv.total)}</span>
+          <span class="inv-amount money-amount">${formatAmount(inv.total)}</span>
           <KebabMenu items={menuItems(inv)} />
         </div>
         {#if isExpanded}
@@ -255,86 +269,8 @@
     min-height: 0;
   }
 
-  .invoices-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.4rem 1rem;
-    flex-shrink: 0;
-  }
-
-  .result-count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
-  .inv-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 0.5rem 0.5rem;
-  }
-
-  .inv-list::-webkit-scrollbar {
-    width: 4px;
-  }
-  .inv-list::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .inv-list::-webkit-scrollbar-thumb {
-    background: var(--border-default);
-    border-radius: 2px;
-  }
-
-  .inv-header {
-    display: flex;
-    align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.3rem 0.75rem 0.4rem;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    border-bottom: 1px solid var(--border-subtle);
-    margin-bottom: 0.15rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
-  }
-
-  .inv-header .inv-status {
-    color: var(--text-dim);
-    background: none;
-    padding: 0;
-  }
-
-  .inv-expand-spacer {
-    width: 1.1rem;
-    flex-shrink: 0;
-  }
-
-  .inv-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.4rem 0.75rem;
-    font-size: var(--text-sm);
-    border-radius: 0.25rem;
-    transition: background var(--transition-fast);
-    cursor: pointer;
-    text-align: left;
-    width: 100%;
-  }
-
-  .inv-row:focus-visible {
-    outline: 1px solid var(--border-default);
-    outline-offset: -1px;
-  }
-
-  .inv-row:hover {
-    background: var(--surface-card);
-  }
-
-  .inv-row.expanded {
-    background: var(--surface-card);
-  }
+  /* Columns only — the toolbar/list/header/row/chip shell is shared, in
+     routes/money/+layout.svelte. */
 
   .inv-number {
     font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
@@ -342,6 +278,7 @@
     color: var(--text-muted);
     flex-shrink: 0;
     min-width: 6.5rem;
+    box-sizing: border-box;
   }
 
   .inv-client {
@@ -354,74 +291,28 @@
     font-weight: 500;
   }
 
+  /* Fixed slot: the client column absorbs the slack, so a variable-width date
+     (or status) would slide the whole right side of the row per row. */
   .inv-date {
     color: var(--text-dim);
     white-space: nowrap;
     flex-shrink: 0;
     font-size: var(--text-xs);
+    min-width: 6.5rem;
   }
 
-  button.sortable {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
-    cursor: pointer;
-    padding: 0;
-  }
-
-  button.sortable:hover {
-    color: var(--text-muted);
-  }
-
-  .sort-arrow {
-    font-size: 0.55rem;
-    vertical-align: middle;
-    margin-left: 0.15rem;
-    opacity: 0.5;
-  }
-
-  button.sortable:hover .sort-arrow {
-    opacity: 1;
-  }
-
+  /* Snug around the longest label ("posted") in caps: a slot much wider than
+     the text turns the chip into a mostly-empty capsule. */
   .inv-status {
-    font-size: var(--text-xs);
-    flex-shrink: 0;
-    padding: 0.1rem 0.4rem;
-    border-radius: var(--radius-pill);
-  }
-
-  .inv-status.status-posted {
-    color: var(--status-warn-fg);
-    background: var(--status-warn-bg);
-  }
-
-  .inv-status.status-paid {
-    color: var(--status-success-fg);
-    background: var(--status-success-bg);
-  }
-
-  .inv-status.status-draft {
-    color: var(--text-muted);
-    background: var(--surface-badge);
+    min-width: 4rem;
   }
 
   .inv-amount {
-    text-align: right;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
     min-width: 5.5rem;
-    color: var(--text-primary);
   }
 
   .inv-details {
-    padding: 0.15rem 0.75rem 0.4rem 2.5rem;
+    padding: 0.15rem 0.75rem 0.4rem 2rem;
     background: var(--surface-card);
     border-radius: 0 0 0.25rem 0.25rem;
     margin-top: -0.15rem;
@@ -467,29 +358,35 @@
     min-width: 4rem;
   }
 
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
-
   @media (max-width: 640px) {
     .inv-date {
       display: none;
     }
-    .inv-header .inv-status,
-    .inv-row .inv-status {
-      display: none;
-    }
+    /* The shared shell hides the status chip at this width, so the invoice
+       number carries the status colors instead — same tokens as the chip. */
     .inv-number {
-      min-width: 5rem;
+      min-width: 5.25rem;
+      padding: 0.1rem 0.4rem;
+      border-radius: var(--radius-pill);
+      text-align: center;
+    }
+    .inv-number.status-posted {
+      color: var(--status-warn-fg);
+      background: var(--status-warn-bg);
+    }
+    .inv-number.status-paid {
+      color: var(--status-success-fg);
+      background: var(--status-success-bg);
+    }
+    .inv-number.status-draft {
+      color: var(--text-muted);
+      background: var(--surface-badge);
     }
     .inv-amount {
       min-width: 4rem;
     }
     .inv-details {
-      padding-left: 1.5rem;
+      padding-left: 0.75rem;
     }
     .detail-qty {
       display: none;

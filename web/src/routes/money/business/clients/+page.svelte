@@ -173,14 +173,14 @@
 
 <div class="clients-content">
   {#if notice}
-    <div class="notice-bar">
+    <div class="money-notice-bar">
       <NoticeBanner title={notice} variant="warn" />
       <Button variant="ghost" onclick={() => (notice = '')}>Dismiss</Button>
     </div>
   {/if}
 
-  <div class="clients-toolbar">
-    <span class="result-count">
+  <div class="money-toolbar">
+    <span class="money-result-count">
       {clients.length}
       {clients.length === 1 ? 'client' : 'clients'}
     </span>
@@ -192,7 +192,7 @@
   {:else if error}
     <div class="error-msg">{error}</div>
   {:else if clients.length === 0}
-    <div class="empty">No clients configured yet — add your first one.</div>
+    <div class="money-table-empty">No clients configured yet — add your first one.</div>
   {:else}
     <div class="client-grid card-grid">
       {#each clients as client (client.key)}
@@ -264,35 +264,13 @@
 />
 
 <style>
-  .clients-content {
-    padding: 0.5rem;
-  }
-
-  .notice-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0 0.25rem 0.4rem;
-  }
-
-  .clients-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.15rem 0.35rem 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .result-count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
+  /* No wrapper padding: the toolbar and grid carry the shared 0.75rem inline
+     edge themselves, so this page's content lines up with the work and
+     invoices tables on the sibling tabs. */
 
   .client-grid {
     --card-min: 280px;
-    padding: 0.25rem;
+    padding: 0 0.75rem 0.75rem;
   }
 
   .client-card {
@@ -360,13 +338,6 @@
   .field-value.account {
     font-size: var(--text-xs);
     font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
-  }
-
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
   }
 
   @media (max-width: 640px) {

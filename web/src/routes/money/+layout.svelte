@@ -223,6 +223,207 @@
     overflow: auto;
   }
 
+  /* Shared record-table shell ------------------------------------------------
+     Work, invoices and transactions are the same table: a toolbar, a scrolling
+     list, a row of column labels, one row per record. They each carried a
+     near-identical private copy of these rules and had drifted — the toolbar
+     sat at 1rem while its own rows sat at 1.25rem, so no two left edges on the
+     page lined up. The shell lives here; a page only styles its own columns
+     (widths, alignment) and any page-specific rows underneath. */
+
+  /* min-height reserves the height of a Button/Select row (0.4rem padding +
+     a 1.4rem md button) whether or not this toolbar has filters in it. Without
+     it a bar holding only the result count sits ~6px shorter than one with
+     controls, so the count and the table under it land at a different height
+     on each tab. */
+  :global(.money-toolbar) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 2.2rem;
+    padding: 0.4rem 0.75rem;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  /* Dismissible banner strip above a toolbar (a stale-read conflict, a delete
+     that needs explaining). Sits on the same inline edge as the toolbar and
+     leaves the vertical gap to the toolbar's own top padding. */
+  :global(.money-notice-bar) {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem 0;
+  }
+
+  :global(.money-result-count) {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* No inline padding: rows carry it, so a row's hover fill spans the full
+     width and its text still starts on the section header's left edge. */
+  :global(.money-table) {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 0 0.5rem;
+  }
+
+  :global(.money-table::-webkit-scrollbar) {
+    width: 4px;
+  }
+  :global(.money-table::-webkit-scrollbar-track) {
+    background: transparent;
+  }
+  :global(.money-table::-webkit-scrollbar-thumb) {
+    background: var(--border-default);
+    border-radius: 2px;
+  }
+
+  :global(.money-table-header) {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.3rem 0.75rem 0.4rem;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border-subtle);
+    margin-bottom: 0.15rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+  }
+
+  :global(.money-table-row) {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.4rem 0.75rem;
+    font-size: var(--text-sm);
+    border-radius: 0.25rem;
+    transition: background var(--transition-fast);
+    text-align: left;
+    width: 100%;
+  }
+
+  :global(.money-table-row:hover),
+  :global(.money-table-row.expanded) {
+    background: var(--surface-card);
+  }
+
+  /* Only expandable rows are clickable; a plain row shouldn't claim to be. */
+  :global(.money-table-row[role='button']) {
+    cursor: pointer;
+  }
+
+  :global(.money-table-row:focus-visible) {
+    outline: 1px solid var(--border-default);
+    outline-offset: -1px;
+  }
+
+  /* Column label that sorts. Sits in .money-table-header, so it has to shed the
+     button defaults and inherit the label type. */
+  :global(.money-sortable) {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+  }
+
+  :global(.money-sortable:hover) {
+    color: var(--text-muted);
+  }
+
+  :global(.money-sort-arrow) {
+    font-size: var(--text-2xs);
+    vertical-align: middle;
+    margin-left: 0.15rem;
+    opacity: 0.5;
+  }
+
+  :global(.money-sortable:hover .money-sort-arrow) {
+    opacity: 1;
+  }
+
+  /* Status chip. The page sets min-width — the label set differs per table, and
+     a fixed slot is what keeps the columns after it from shifting per row. */
+  :global(.money-status) {
+    font-size: var(--text-2xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--radius-pill);
+    white-space: nowrap;
+    text-align: center;
+    box-sizing: border-box;
+  }
+
+  :global(.money-status.status-posted) {
+    color: var(--status-warn-fg);
+    background: var(--status-warn-bg);
+  }
+
+  :global(.money-status.status-paid) {
+    color: var(--status-success-fg);
+    background: var(--status-success-bg);
+  }
+
+  :global(.money-status.status-draft) {
+    color: var(--text-muted);
+    background: var(--surface-badge);
+  }
+
+  /* The header cell shares the class but is a column label, not a chip. */
+  :global(.money-table-header .money-status) {
+    color: var(--text-dim);
+    background: none;
+    padding: 0;
+    font-size: var(--text-xs);
+    font-weight: 500;
+  }
+
+  :global(.money-amount) {
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    color: var(--text-primary);
+  }
+
+  /* Reserves the width of the trailing KebabMenu so header labels line up with
+     the values under them. */
+  :global(.money-kebab-spacer) {
+    width: 1.1rem;
+    flex-shrink: 0;
+  }
+
+  :global(.money-table-empty) {
+    color: var(--text-dim);
+    font-size: var(--text-base);
+    padding: 2rem 1rem;
+    text-align: center;
+  }
+
+  @media (max-width: 640px) {
+    /* Too narrow for a status column — the pages fall back to a colored
+       identifier in the first column. */
+    :global(.money-table-header .money-status),
+    :global(.money-table-row .money-status) {
+      display: none;
+    }
+  }
+
   @media (max-width: 768px) {
     :global(.money-section-header) {
       padding: 0.5rem 0.75rem;
