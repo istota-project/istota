@@ -3,7 +3,7 @@
   import { getMe, getProfile, type User } from '$lib/api';
   import { onMount } from 'svelte';
   import { HeartPulse, MapPin, MessageSquare, Newspaper, Rss, Wallet } from 'lucide-svelte';
-  import { buildGreeting, type Greeting } from '$lib/greeting';
+  import { buildGreeting, noteSegments, type Greeting } from '$lib/greeting';
 
   let user: User | null = $state(null);
   let welcome: Greeting | null = $state(null);
@@ -62,7 +62,12 @@
           />
           <div class="welcome-text">
             <p class="welcome-greeting">{welcome.greeting}</p>
-            <p class="welcome-note">{welcome.note}</p>
+            <!-- Rendered segment by segment rather than as one string, so the
+                 address is a real mailto link. Kept on one line (and off
+                 prettier) because a break between the tags would put a space
+                 either side of the link, inside a sentence. -->
+            <!-- prettier-ignore -->
+            <p class="welcome-note">{#each noteSegments(welcome.note, user.contact?.email) as segment}{#if segment.mailto}<a href="mailto:{segment.mailto}">{segment.text}</a>{:else}{segment.text}{/if}{/each}</p>
           </div>
         </section>
       {/if}
@@ -148,16 +153,21 @@
     font-weight: 600;
     font-size: 0.95rem;
     color: var(--text-primary);
-    text-wrap: balance;
   }
   .welcome-note {
     margin: 0.25rem 0 0;
     font-size: 0.85rem;
     color: var(--text-muted);
-    text-wrap: balance;
     /* A plus-address is one unbroken token and can be long; on a phone it would
 		   otherwise run past the card's edge rather than wrap. */
     overflow-wrap: anywhere;
+  }
+  .welcome-note a {
+    color: var(--accent-blue);
+    text-decoration: none;
+  }
+  .welcome-note a:hover {
+    text-decoration: underline;
   }
 
   /* Equal-height cards at every width. Without `grid-auto-rows: 1fr` each grid

@@ -5,6 +5,7 @@ import {
   dayparts,
   daypartForHour,
   hourInZone,
+  noteSegments,
   welcomeNotes,
   OCTOPUS_FACTS,
   type Daypart,
@@ -131,6 +132,44 @@ describe('welcomeNotes', () => {
     for (const fact of OCTOPUS_FACTS) {
       expect(fact.length, fact).toBeLessThanOrEqual(90);
     }
+  });
+});
+
+describe('noteSegments', () => {
+  const email = 'zorg+alice@bot.example.com';
+
+  it('splits the email tip so the address can be linked', () => {
+    const note = availableTips({ email })[0];
+    const segments = noteSegments(note, email);
+    expect(segments.map((s) => s.text).join('')).toBe(note);
+    const linked = segments.filter((s) => s.mailto);
+    expect(linked).toHaveLength(1);
+    expect(linked[0].text).toBe(email);
+    expect(linked[0].mailto).toBe(email);
+  });
+
+  it('leaves the trailing punctuation outside the link', () => {
+    const segments = noteSegments(`Email me at ${email}. Attachments welcome.`, email);
+    expect(segments[segments.length - 1].text).toBe('. Attachments welcome.');
+    expect(segments[segments.length - 1].mailto).toBeUndefined();
+  });
+
+  it('is a single plain segment for a note that names no address', () => {
+    const fact = OCTOPUS_FACTS[0];
+    expect(noteSegments(fact, email)).toEqual([{ text: fact }]);
+  });
+
+  it('is a single plain segment when no address is configured', () => {
+    const note = 'Email me at nowhere.';
+    for (const address of [null, undefined, '', '   ']) {
+      expect(noteSegments(note, address)).toEqual([{ text: note }]);
+    }
+  });
+
+  it('links every occurrence of the address', () => {
+    const segments = noteSegments(`${email} and ${email}`, email);
+    expect(segments.filter((s) => s.mailto)).toHaveLength(2);
+    expect(segments.map((s) => s.text).join('')).toBe(`${email} and ${email}`);
   });
 });
 

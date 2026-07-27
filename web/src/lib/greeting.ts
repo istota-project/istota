@@ -125,6 +125,31 @@ export function welcomeNotes(ctx: TipContext, botName = ''): string[] {
   return [...availableTips(ctx, botName), ...OCTOPUS_FACTS];
 }
 
+export interface NoteSegment {
+  text: string;
+  /** Set when the segment is the address itself, so the card links it. */
+  mailto?: string;
+}
+
+/* The email tip names an address the user is meant to write to, so it should be
+   a mailto link rather than a string to copy out by hand. The split is done
+   here on the plain text — the card renders the segments as elements — so the
+   note never has to become markup the component would have to trust. Splitting
+   on the address rather than matching a pattern is what keeps the trailing
+   period of the sentence out of the link. */
+export function noteSegments(note: string, email?: string | null): NoteSegment[] {
+  const address = (email ?? '').trim();
+  if (!address || !note.includes(address)) return [{ text: note }];
+  const segments: NoteSegment[] = [];
+  const parts = note.split(address);
+  parts.forEach((part, i) => {
+    if (part) segments.push({ text: part });
+    // One address sits between every pair of parts.
+    if (i < parts.length - 1) segments.push({ text: address, mailto: address });
+  });
+  return segments;
+}
+
 export function daypartForHour(hour: number): Daypart {
   // Fold anything out of range (a bad parse, a caller doing arithmetic) back
   // into the day rather than falling through every branch to 'night'.
