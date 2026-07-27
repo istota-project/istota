@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Web chat is live in every room at once. A reply typed in Talk, an alert, a scheduled post — anything landing in any room you belong to now appears in the browser in about a second, whether or not you are looking at that room and whether or not one of your own turns is still running. Rooms in the sidebar show their unread count and the last message as it arrives, instead of only a number that refreshed every few seconds. Short turns that started and finished between two refreshes used to be missed entirely until you reloaded; they can't be now. A confirmation prompt raised from another surface also shows up as a card you can act on.
+- Web chat is live in every room at once. A reply typed in Talk, an alert, a scheduled post — anything landing in any room you belong to now appears in the browser in about a second, whether or not you are looking at that room and whether or not one of your own turns is still running. Rooms in the sidebar show their unread count as it changes, rather than a number that refreshed every few seconds. Short turns that started and finished between two refreshes used to be missed entirely until you reloaded; they can't be now. A confirmation prompt raised from another surface also shows up as a card you can act on.
 
 - When a task produces a file in web chat, the assistant can hand it straight over as a download link. The link opens the file from inside your own logged-in session — nothing is published, no share is created, and only your own files are reachable. Previously the assistant had no way to give you a file at all in the browser: it would quote a path on the server that you had no means of opening.
 
@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The assistant can now read a web page as markdown, with headings, list position and link addresses arriving together. That is what lets it tell an article link from a footer link on a page it has never seen, so browsing no longer depends on knowing a site's markup. It can take a front page whole or pull just the body of an article, whichever the page calls for.
 
 - Are.na videos play inside the reader, and an uploaded PDF opens from its cover. Previously a video was a card you could only click through to YouTube, and a PDF looked like an ordinary photo post, so clicking one zoomed its first page as a picture with no way to reach the document itself.
+
+- The assistant can work with Nextcloud itself now, not only the files on the mount. It can create a share link with an expiry and an optional password and revoke it again, look up users and groups, search your files against the server's own index rather than walking the folder tree, read a file's properties, versions and trash, check your quota, and read your notifications and activity. It can also look up a Talk room, read its history and participants, post into a room it belongs to, and hand a file to a conversation. Everything it reads that somebody else wrote is treated as untrusted, sending and sharing ask you first, and destructive operations refuse without an explicit confirmation. Ask it "what does my Nextcloud support" and it will tell you in one call.
+
+- The web UI has proper icons and installs to a home screen. It ships a favicon, an Apple touch icon and an app manifest, so adding it to an iPhone or iPad gives you the Istota mark instead of a screenshot of the page, and the browser chrome takes the colour of the theme you chose rather than the system's.
 
 ### Removed
 - The bot's own static web root is gone. It was a directory the assistant could write to freely, served to the public without a password — so anything the assistant could read, it could publish to a URL without ever asking you first. Copying a file is the kind of ordinary local action the confirmation rules deliberately leave alone, which is exactly why this one slipped past them. The directory is no longer reachable from the assistant's sandbox, the deployment no longer serves it, and the `enabled` and `base_path` settings are ignored with a warning if left in place. Host static files outside istota, somewhere the assistant cannot write.
@@ -34,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - On a phone, the sidebar now opens from a control in the header bar instead of a tab floating over the page. The old tab sat pinned to the middle of the left edge, on top of whatever you were reading, and had to be conspicuous to be findable at all; the new one sits at the start of the header where a menu button is expected, and the section title next to it opens the sidebar too. Chat additionally gives its messages a little more width on small screens by narrowing the avatar column.
 
+- The login page is a card rather than a bare link: the Istota mark, the bot's name, the Nextcloud sign-in button, and a greyed-out "Log in with email — coming soon" row, with the running version in the footer. It follows the light or dark theme you picked in the app instead of always coming up dark. The octopus sigil now also sits beside the name in the navigation bar.
+
+- The deployment serves a page at the site root again, but it belongs to the operator rather than the bot. The old root was writable by the assistant, which is why it was removed; this one lives outside the assistant's reach entirely and only the operator can put anything in it. It seeds an empty index page on first run and never overwrites what you put there, directory listings are off, and turning it off restores the previous 404. Takes effect on the next Ansible run.
+
+- Scrollbars are left to the platform. Styling them at all opts out of the fading overlay bar the operating system draws and gets a permanent one whose track takes up width — tolerable while pages scrolled as a document, but the app is now one screen tall and scrolls inside its panes, so those thin bars had become fixed strips beside every list.
+
+- Links inside content look the same everywhere. Chat, the briefings reader and the feeds reader each styled them separately, so briefing links were not visibly links at all and feed links were grey and permanently underlined. All three share one colour and a hover state now, and briefings picks up the code blocks, quotes and tables chat already had.
+
+- The image lightbox's previous and next arrows moved into the bottom bar beside the counter, instead of sitting on top of the picture they navigate.
+
 - The feeds **Images** and **Text** chips now hide pictures and body copy rather than hiding whole entries. Turning off Images used to drop every picture post out of the feed entirely — and turning off Text dropped everything else — so the two together were a post-type filter, not a display control. Each entry now stays in place and loses only the part you switched off, including pictures embedded in the body copy, so turning both off gives you a list of headlines instead of an empty page. The chips are a desktop control: a phone always shows everything and no longer offers them.
 
 ### Fixed
@@ -45,9 +59,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The gap under the message box on an iPhone came back as soon as you typed anything. Working around the keyboard shrinking the page relied on measuring again once it closed, but typing scrolls the page to keep the cursor in view and iOS does not always put it back. The measurement now waits for the screen to settle, recognises a keyboard swiped away rather than dismissed, and undoes the leftover shift.
 
+- The installed iOS app no longer ends up a band short of the bottom of the screen. Once the keyboard has been dismissed, iOS 26 goes on reporting the page as smaller than it is — a bug that reaches Apple's own site — and the app was taking its height from that reading, after which nothing recovered it for the life of the page, a reload included. It now sizes itself from the measurement that survives the keyboard, never shrinks to a reading taken while the keyboard is closing, and carries the last good one across a reload. A genuine resize — rotation, split view — is still adopted.
+
+- The app runs edge to edge on a phone without anything hiding under the hardware. Controls pinned to the bottom were clipped by the rounded corners and the home indicator, the navigation bar painted under the status bar on a home-screen app, and full-screen overlays — the feed article panel, the image lightbox, the health chart — ran under the Dynamic Island. All of them keep clear of the device's insets now, and the money section's lists scroll into that space rather than leaving a dead band beneath them.
+
+- Tapping a message in web chat no longer leaves its star lit. iOS treats a tap as a hover and clears it only when you tap somewhere that takes its place, so in a long conversation every message you had ever touched kept showing its star and timestamp. One message shows its controls at a time now, a second tap or a scroll puts them away, and a scroll flick no longer counts as a tap.
+
+- Switching rooms on iOS Safari could leave the conversation blank until you swiped or opened the sidebar. Everything was in place and only the repaint was missing, in any room with enough history to scroll. Leaving a room part-way up its history also used to open the next one at the top of its first page instead of at the newest message.
+
+- Scrolling the conversation with a finger no longer drags the whole page. A swipe starting in the transcript was often claimed by the document instead: the messages sat still while the page rubber-banded and the browser toolbar slid, and the transcript took the gesture only after a priming tap.
+
+- A voice message sent on its own was uploaded and then rejected as empty, because the send was checked for text before anything looked at the attachments. It goes through now, and an instruction typed alongside a recording is no longer thrown away when the recording is transcribed.
+
+- Opening the All or Unread view and then navigating away and back left both that view and a room selected — two highlighted rows in the sidebar, and a room's history rendered inside the aggregate pane.
+
+- A run of layout details on phones: the empty-room notice sits in the middle of the space you can actually see rather than a composer's height above it, the briefing reader's text lines up with the titles above it instead of being inset a fifth of the screen, the navigation bar, the page bar and the conversation open on one left edge rather than three, the feeds settings tables give their titles the room instead of collapsing them to a few characters, and the location map's hint stops wrapping mid-sentence.
+
 - The new-version prompt wrapped mid-sentence on a phone, because it could never grow wider than half the screen.
 
 - The web UI added to an iPhone or iPad home screen could go on running an old version indefinitely, quietly missing every feature shipped since. It kept working well enough not to look broken, so the only symptom was that new things never arrived. Browsers are now told which parts of the app they may keep and which they must re-check, and a session left open offers a Reload prompt when a new version is available.
+
+- A Nextcloud failure says what went wrong. A permissions denial, a missing file, an expired app password and a network timeout all collapsed to the same empty result, so the assistant could tell you only that something hadn't worked. An operation needing admin rights now says so and points at the alternative that doesn't.
 
 - Searching your Nextcloud files never worked. Every `files search` failed outright against a real server, so the assistant fell back to walking the folder tree — slow on a large one, and it gave up on some searches entirely.
 
