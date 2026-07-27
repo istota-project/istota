@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The feeds **Images** and **Text** chips now hide pictures and body copy rather than hiding whole entries. Turning off Images used to drop every picture post out of the feed entirely — and turning off Text dropped everything else — so the two together were a post-type filter, not a display control. Each entry now stays in place and loses only the part you switched off, including pictures embedded in the body copy, so turning both off gives you a list of headlines instead of an empty page. The chips are a desktop control: a phone always shows everything and no longer offers them.
 
 ### Fixed
+- Sending a message from an iPhone could cancel it the instant it started. The Send button turns into a Stop button the moment a message goes off, and iOS delivered the tap to whichever button had taken that spot — so a tap on Send arrived as a tap on Stop. The turn usually ran to completion anyway, but another browser open on the same room showed it as cancelled.
+
+- Stop did nothing if you pressed it in the first moment after sending. Until the server had accepted the message there was nothing to stop yet, and the press was discarded rather than remembered — on a slow connection that is exactly when you'd reach for it. It now takes effect as soon as the message lands.
+
+- The gap under the message box on an iPhone came back as soon as you typed anything. Working around the keyboard shrinking the page relied on measuring again once it closed, but typing scrolls the page to keep the cursor in view and iOS does not always put it back. The measurement now waits for the screen to settle, recognises a keyboard swiped away rather than dismissed, and undoes the leftover shift.
+
+- The new-version prompt wrapped mid-sentence on a phone, because it could never grow wider than half the screen.
+
 - The web UI added to an iPhone or iPad home screen could go on running an old version indefinitely, quietly missing every feature shipped since. It kept working well enough not to look broken, so the only symptom was that new things never arrived. Browsers are now told which parts of the app they may keep and which they must re-check, and a session left open offers a Reload prompt when a new version is available.
 
 - Searching your Nextcloud files never worked. Every `files search` failed outright against a real server, so the assistant fell back to walking the folder tree — slow on a large one, and it gave up on some searches entirely.

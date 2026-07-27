@@ -139,6 +139,60 @@ describe('Composer send control', () => {
     expect(btn(container, 'Send')).toBeNull();
     expect(btn(container, 'Stop')).toBeTruthy();
   });
+
+  it('keeps the same element across the send/stop flip', async () => {
+    const onCancel = vi.fn();
+    const { container, rerender } = mount({ busy: false, onCancel });
+    const before = btn(container, 'Send');
+    await rerender({ busy: true, onCancel });
+    // Not merely "a stop button exists": it must be the *same* node. iOS
+    // re-hit-tests when it delivers a tap's synthesized click, so a swapped
+    // element receives the tap that was aimed at its predecessor — a Send
+    // arriving as a Stop.
+    expect(btn(container, 'Stop')).toBe(before);
+  });
+
+  it('ignores an activation whose mode flipped under it', async () => {
+    vi.useFakeTimers();
+    try {
+      const onSend = vi.fn();
+      const onCancel = vi.fn();
+      const { container, textarea, rerender } = mount({ onSend, onCancel, busy: false });
+      await type(textarea, 'hi');
+      const control = btn(container, 'Send')!;
+      await fireEvent.click(control);
+      expect(onSend).toHaveBeenCalledTimes(1);
+
+      // The parent flips busy inside that same click, and the duplicate
+      // delivery lands on the control now reading Stop.
+      await rerender({ onSend, onCancel, busy: true });
+      await fireEvent.click(control);
+      expect(onCancel).not.toHaveBeenCalled();
+
+      // Past the window it is a real tap again.
+      vi.advanceTimersByTime(500);
+      await fireEvent.click(control);
+      expect(onCancel).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still allows two deliberate sends in quick succession', async () => {
+    vi.useFakeTimers();
+    try {
+      const onSend = vi.fn();
+      const { container, textarea } = mount({ onSend });
+      await type(textarea, 'one');
+      await fireEvent.click(btn(container, 'Send')!);
+      await type(textarea, 'two');
+      await fireEvent.click(btn(container, 'Send')!);
+      // The guard is about a flipped *mode*, not a rate limit.
+      expect(onSend).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('Composer layout', () => {

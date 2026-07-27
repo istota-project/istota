@@ -1,0 +1,200 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { installViewportGuard } from './viewport';
+
+/**
+ * The guard exists to survive soft-keyboard transitions, so the cases worth
+ * pinning are the ones where the platform lies: focus retained after the
+ * keyboard is dismissed, a viewport that keeps reporting itself short, and a
+ * reading that is still moving when the first sample is taken.
+ */
+
+type VV = {
+  height: number;
+  scale: number;
+  addEventListener: (t: string, f: () => void) => void;
+  removeEventListener: (t: string, f: () => void) => void;
+};
+
+let insets: Record<string, string>;
+let teardown: (() => void) | undefined;
+
+function setVisualViewport(height: number | null): VV | null {
+  if (height == null) {
+    Object.defineProperty(window, 'visualViewport', { value: null, configurable: true });
+    return null;
+  }
+  const vv: VV = {
+    height,
+    scale: 1,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  Object.defineProperty(window, 'visualViewport', { value: vv, configurable: true });
+  return vv;
+}
+
+function standalone(on: boolean) {
+  window.matchMedia = ((q: string) => ({
+    matches: on && q.includes('standalone'),
+    media: q,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+}
+
+function appHeight(): string {
+  return document.documentElement.style.getPropertyValue('--app-height');
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  insets = { top: '47px', bottom: '34px', left: '0px', right: '0px' };
+  // The probe resolves env() through getComputedStyle; jsdom has no env(), so
+  // the padding values are served from `insets` and mutated per scenario.
+  vi.spyOn(window, 'getComputedStyle').mockImplementation(
+    (el: Element) =>
+      ({
+        getPropertyValue: (p: string) =>
+          (el as HTMLElement).getAttribute('aria-hidden') === 'true'
+            ? (insets[p.replace('padding-', '')] ?? '')
+            : '',
+      }) as unknown as CSSStyleDeclaration,
+  );
+  window.scrollTo = vi.fn() as unknown as typeof window.scrollTo;
+  Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true, writable: true });
+  standalone(true);
+  setVisualViewport(800);
+  document.body.innerHTML = '';
+});
+
+afterEach(() => {
+  teardown?.();
+  teardown = undefined;
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+function focusTextEntry(): HTMLTextAreaElement {
+  const ta = document.createElement('textarea');
+  document.body.appendChild(ta);
+  ta.focus();
+  return ta;
+}
+
+describe('installViewportGuard', () => {
+  it('publishes the measured insets and, in standalone, the app height', () => {
+    teardown = installViewportGuard();
+    const root = document.documentElement.style;
+    expect(root.getPropertyValue('--safe-top')).toBe('47px');
+    expect(root.getPropertyValue('--safe-bottom')).toBe('34px');
+    expect(appHeight()).toBe('800px');
+  });
+
+  it('leaves --app-height alone outside standalone', () => {
+    standalone(false);
+    teardown = installViewportGuard();
+    expect(appHeight()).toBe('');
+  });
+
+  it('holds its reading while the keyboard is up', () => {
+    teardown = installViewportGuard();
+    focusTextEntry();
+    setVisualViewport(400); // keyboard occluding half the viewport
+    insets = { top: '0px', bottom: '0px', left: '0px', right: '0px' };
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(2000);
+    // The collapsed insets iOS reports mid-keyboard must not be latched.
+    expect(document.documentElement.style.getPropertyValue('--safe-bottom')).toBe('34px');
+  });
+
+  it('re-measures when the keyboard is dismissed with focus retained', () => {
+    teardown = installViewportGuard();
+    const ta = focusTextEntry();
+    setVisualViewport(400);
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(500);
+
+    // Swipe-to-dismiss: the viewport comes back but iOS keeps focus on the
+    // field. A focus-only test would treat this as keyboard-up forever.
+    setVisualViewport(800);
+    Object.defineProperty(window, 'innerHeight', { value: 900, configurable: true });
+    insets = { ...insets, bottom: '20px' };
+    expect(document.activeElement).toBe(ta);
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(1000);
+
+    expect(appHeight()).toBe('900px');
+    expect(document.documentElement.style.getPropertyValue('--safe-bottom')).toBe('20px');
+  });
+
+  it('keeps sampling until the reading stops moving', () => {
+    teardown = installViewportGuard();
+    // A transition that is still in motion when the first sample lands: a
+    // single fixed-delay re-measure would latch whichever frame it hit.
+    const heights = [500, 640, 900, 900, 900];
+    let i = 0;
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      get: () => heights[Math.min(i++, heights.length - 1)],
+    });
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(2000);
+    expect(appHeight()).toBe('900px');
+  });
+
+  it('unwinds the residual scroll the keyboard leaves behind', () => {
+    // What only happens once text has been typed: iOS scrolls the layout
+    // viewport to track the caret and does not always put it back.
+    Object.defineProperty(document.documentElement, 'scrollTop', {
+      value: 120,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(document.documentElement, 'scrollHeight', {
+      value: 800,
+      configurable: true,
+    });
+    Object.defineProperty(document.documentElement, 'clientHeight', {
+      value: 800,
+      configurable: true,
+    });
+    teardown = installViewportGuard();
+    expect(window.scrollTo).toHaveBeenCalledWith(0, 0);
+  });
+
+  it('leaves a genuinely scrollable document scrolled where the user left it', () => {
+    Object.defineProperty(document.documentElement, 'scrollTop', {
+      value: 120,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(document.documentElement, 'scrollHeight', {
+      value: 4000,
+      configurable: true,
+    });
+    Object.defineProperty(document.documentElement, 'clientHeight', {
+      value: 800,
+      configurable: true,
+    });
+    teardown = installViewportGuard();
+    expect(window.scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('falls back to focus alone when there is no visualViewport', () => {
+    setVisualViewport(null);
+    teardown = installViewportGuard();
+    focusTextEntry();
+    insets = { ...insets, bottom: '0px' };
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(2000);
+    expect(document.documentElement.style.getPropertyValue('--safe-bottom')).toBe('34px');
+  });
+
+  it('removes what it published on teardown', () => {
+    const stop = installViewportGuard();
+    stop();
+    expect(appHeight()).toBe('');
+    expect(document.documentElement.style.getPropertyValue('--safe-top')).toBe('');
+    expect(document.querySelector('[aria-hidden="true"]')).toBeNull();
+  });
+});

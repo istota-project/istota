@@ -216,6 +216,37 @@
     queueMicrotask(autoGrow);
   }
 
+  // The send/stop control is one button in two modes — see the markup below.
+  const canSend = $derived(!!text.trim() || attachments.length > 0);
+  const showStop = $derived(busy && !!onCancel);
+
+  // Belt to the single-element brace: even on one element, a tap can be
+  // delivered twice (a compat mouse event after the touch), and the second
+  // delivery lands after the mode has flipped — so it would read as the
+  // *opposite* command. Drop an activation whose mode differs from the one the
+  // last activation ran in, within the window a duplicate could arrive in.
+  // A repeat in the same mode is left alone: two genuine sends are harmless,
+  // and a real stop is never this fast (the mode only just changed under it).
+  const MODE_FLIP_GUARD_MS = 400;
+  let lastActivationAt = 0;
+  let lastActivationMode: 'send' | 'stop' | null = null;
+
+  function activatePrimary() {
+    const mode: 'send' | 'stop' = showStop ? 'stop' : 'send';
+    const now = Date.now();
+    if (
+      lastActivationMode !== null &&
+      mode !== lastActivationMode &&
+      now - lastActivationAt < MODE_FLIP_GUARD_MS
+    ) {
+      return;
+    }
+    lastActivationAt = now;
+    lastActivationMode = mode;
+    if (mode === 'stop') onCancel?.();
+    else submit();
+  }
+
   function onInput() {
     autoGrow();
     syncAc();
@@ -396,28 +427,29 @@
             <Mic />
           </button>
         {/if}
-        {#if busy && onCancel}
-          <button
-            class="icon-btn send stop"
-            onclick={onCancel}
-            type="button"
-            aria-label="Stop"
-            title="Stop"
-          >
+        <!-- One button across both modes, never an {#if} swap. Sending flips
+             `busy` synchronously inside the click handler, so a swap would
+             destroy the element the tap is still resolving against — and iOS
+             Safari re-hit-tests when it delivers the synthesized click, landing
+             it on whatever now occupies that spot. That is a tap on Send
+             arriving as a tap on Stop: the task was cancelled the instant it
+             started, and only a second client (rendering the room stream)
+             showed it, because the sending client had already moved on. -->
+        <button
+          class="icon-btn send"
+          class:stop={showStop}
+          onclick={activatePrimary}
+          type="button"
+          disabled={showStop ? false : !canSend}
+          aria-label={showStop ? 'Stop' : 'Send'}
+          title={showStop ? 'Stop' : 'Send'}
+        >
+          {#if showStop}
             <Square />
-          </button>
-        {:else}
-          <button
-            class="icon-btn send"
-            onclick={submit}
-            type="button"
-            disabled={!text.trim() && attachments.length === 0}
-            aria-label="Send"
-            title="Send"
-          >
+          {:else}
             <ArrowUp />
-          </button>
-        {/if}
+          {/if}
+        </button>
       {/if}
     </div>
   </div>
@@ -575,6 +607,9 @@
     font: inherit;
     color: var(--text-muted);
     cursor: pointer;
+    /* Opts out of double-tap-to-zoom on this target, which is what makes iOS
+	     hold a tap open and then deliver it as a delayed synthesized click. */
+    touch-action: manipulation;
     transition:
       background var(--transition-fast),
       color var(--transition-fast);

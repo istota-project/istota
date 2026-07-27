@@ -262,15 +262,22 @@
 
 <style>
   /* Pinned above the safe-area inset so it clears the iOS home indicator —
-     this prompt exists chiefly for the home-screen PWA. */
+     this prompt exists chiefly for the home-screen PWA.
+     Centred by insetting both edges + `margin-inline: auto` rather than
+     `left: 50%` + translate: with only `left` set, a fixed element's
+     shrink-to-fit width is capped at the space from the midpoint to the right
+     edge (50vw), so the label wrapped mid-sentence on a phone. */
   .update-toast {
     position: fixed;
-    left: 50%;
-    transform: translateX(-50%);
+    left: 1rem;
+    right: 1rem;
     bottom: calc(1rem + var(--safe-bottom));
+    width: fit-content;
+    margin-inline: auto;
     z-index: 200;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 0.75rem;
     padding: 0.5rem 0.5rem 0.5rem 1rem;
     border: 1px solid var(--border-subtle);
@@ -279,7 +286,12 @@
     color: var(--text-primary);
     font-size: var(--text-sm);
     box-shadow: 0 4px 16px rgb(0 0 0 / 0.3);
-    max-width: calc(100vw - 2rem);
+  }
+  /* The row fits on a 320px viewport at the default text scale; at a larger
+     one the label still has to wrap, so balance it into even lines rather than
+     leaving one orphaned word above the button. */
+  .update-toast span {
+    text-wrap: balance;
   }
   .update-toast button {
     font: inherit;

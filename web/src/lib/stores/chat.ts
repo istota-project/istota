@@ -215,6 +215,9 @@ function createSession(): ChatSession {
   const messages = writable<ChatMessage[]>([]);
   const status = writable<ChatStatus>('idle');
   const activeTaskId = writable<number | null>(null);
+  // Set when Stop is tapped before the send POST has returned a task id; applied
+  // by `sendTurn` the moment it has one. See `cancel`.
+  let cancelRequested = false;
   const loaded = writable(false);
   const error = writable('');
   // Which pane the transcript renders: the active room, or a cross-room
@@ -516,6 +519,7 @@ function createSession(): ChatSession {
     resetPaging();
     status.set('idle');
     activeTaskId.set(null);
+    cancelRequested = false;
   }
 
   // Set a single room's unread badge locally (optimistic clears + merge).
@@ -1515,6 +1519,7 @@ function createSession(): ChatSession {
       },
     ]);
     status.set('sending');
+    cancelRequested = false;
 
     // Hold this room's stream frames until the turn's task id is stamped
     // below — see `pendingSend`. A previous send's buffer can't still be open
@@ -1588,6 +1593,17 @@ function createSession(): ChatSession {
       m.taskId = res.task_id!;
       m.status = 'pending';
     });
+    // A Stop tapped while this POST was in flight (see `cancel`) has an id to
+    // act on now. Cancel first, then stream anyway: the stream is what renders
+    // the cancellation as the turn's terminal state.
+    if (cancelRequested) {
+      cancelRequested = false;
+      try {
+        await cancelChatTask(res.task_id);
+      } catch {
+        /* ignore */
+      }
+    }
     // Stream now if the room is free, otherwise queue behind the in-flight
     // task. The backend gate keeps this task pending until its turn either way.
     enqueueStream(res.task_id, phCid);
@@ -1595,7 +1611,16 @@ function createSession(): ChatSession {
 
   async function cancel() {
     const taskId = get(activeTaskId);
-    if (taskId == null) return;
+    if (taskId == null) {
+      // The turn is between the POST and its response, so there is no id to
+      // cancel yet — but the composer has been showing Stop since `send` set
+      // 'sending', and on a slow connection that window is long enough to tap
+      // in. Latch the intent for `sendTurn` to apply against the real id rather
+      // than dropping it silently. Gated on an in-flight send so a stray cancel
+      // can never arm a later turn.
+      if (get(status) === 'sending') cancelRequested = true;
+      return;
+    }
     try {
       await cancelChatTask(taskId);
     } catch {
