@@ -247,6 +247,68 @@ describe('Composer send control', () => {
     expect(document.activeElement).toBe(textarea);
   });
 
+  it('takes focus back when the file picker drops it', async () => {
+    // WebKit's upload panel takes first responder off the field as it presents,
+    // so the keyboard left *after* the sheet had already appeared. That sheet is
+    // a popover, not a modal takeover — the keyboard is entitled to stay behind
+    // it, and the field losing focus is the only reason it goes.
+    softKeyboard(true);
+    const { container, textarea } = mount();
+    textarea.focus();
+
+    await fireEvent.click(btn(container, 'Attach file')!);
+    textarea.blur();
+    await tick();
+
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('leaves an ordinary blur alone', async () => {
+    // Only the picker's blur is taken back. Tapping away from the composer has
+    // to keep working, or the keyboard becomes one that refuses to leave.
+    softKeyboard(true);
+    const { textarea } = mount();
+    textarea.focus();
+
+    textarea.blur();
+    await tick();
+
+    expect(document.activeElement).not.toBe(textarea);
+  });
+
+  it('takes it back once, not on every blur after a picker', async () => {
+    softKeyboard(true);
+    const { container, textarea } = mount();
+    textarea.focus();
+
+    await fireEvent.click(btn(container, 'Attach file')!);
+    textarea.blur();
+    await tick();
+    expect(document.activeElement).toBe(textarea);
+
+    textarea.blur();
+    await tick();
+    expect(document.activeElement).not.toBe(textarea);
+  });
+
+  it('ignores a blur that arrives too late to be the picker', async () => {
+    // A blur this long after the tap is the user putting the keyboard away
+    // themselves, not the panel coming up.
+    softKeyboard(true);
+    const { container, textarea } = mount();
+    textarea.focus();
+    const now = vi.spyOn(Date, 'now');
+
+    now.mockReturnValue(1_000);
+    await fireEvent.click(btn(container, 'Attach file')!);
+    now.mockReturnValue(30_000);
+    textarea.blur();
+    await tick();
+
+    expect(document.activeElement).not.toBe(textarea);
+    now.mockRestore();
+  });
+
   it('leaves a tap on the field itself alone', async () => {
     // Only the buttons suppress the focus shift. The textarea needs its own
     // mousedown default — that is what places the caret.

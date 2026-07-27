@@ -168,10 +168,38 @@
     const meta = document.querySelector('meta[name="viewport"]');
     if (meta) meta.setAttribute('content', content);
   }
+  // Opening the attach sheet costs the keyboard, and it should not.
+  //
+  // The tap itself is handled — the button cancels its own focus shift (see
+  // keepFocus) — but the sheet WebKit puts up for a file input takes first
+  // responder off the field as it presents, so the keyboard leaves *after* the
+  // sheet has already appeared. That sheet is a popover rather than a modal
+  // takeover, so the keyboard is entitled to stay behind it; the field losing
+  // focus is the only reason it goes.
+  //
+  // So take the focus back. If iOS honours that while the panel is up, the
+  // keyboard never leaves. If it doesn't, the field is still the focused
+  // element when the panel closes and the web view is first responder again,
+  // so the keyboard comes back then — worse than nothing happening, better
+  // than it staying gone.
+  //
+  // Bounded to one blur, and only one that could plausibly be the panel's. A
+  // standing rule would catch the user tapping away to put the keyboard down
+  // and haul it straight back up.
+  const PICKER_BLUR_WINDOW_MS = 2000;
+  let pickerOpenedAt = 0;
+
+  function openFilePicker() {
+    pickerOpenedAt = document.activeElement === textarea ? Date.now() : 0;
+    fileInput?.click();
+  }
+
   function onFocus() {
     setViewport(VIEWPORT_NO_ZOOM);
   }
   function onBlur() {
+    const fromPicker = pickerOpenedAt > 0 && Date.now() - pickerOpenedAt < PICKER_BLUR_WINDOW_MS;
+    pickerOpenedAt = 0;
     setViewport(VIEWPORT_DEFAULT);
     // iOS scrolls the *window* to bring a focused field above the keyboard and
     // does not reliably undo it on dismissal. The app is exactly one viewport
@@ -184,6 +212,11 @@
     // The popover accepts on mousedown (preventDefault keeps focus), so a
     // click on a row does not blur first — safe to close here.
     ac.close();
+    // The rest of the teardown runs either way: if the refocus is ignored, the
+    // field really is blurred and the viewport had to be put back. Re-focusing
+    // simply runs onFocus again, which is idempotent. Queued rather than called
+    // here because the focus change that brought us in is still in flight.
+    if (fromPicker) queueMicrotask(() => textarea?.focus());
   }
 
   async function upload(files: FileList | File[]) {
@@ -369,7 +402,7 @@
       bind:this={plusEl}
       class="icon-btn plus"
       onmousedown={keepFocus}
-      onclick={() => fileInput?.click()}
+      onclick={openFilePicker}
       type="button"
       aria-label="Attach file"
       title="Attach file"
