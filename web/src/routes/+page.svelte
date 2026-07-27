@@ -17,7 +17,6 @@
 
 <div class="dashboard">
   {#if user}
-    <h1>Dashboard</h1>
     <div class="feature-grid card-grid" style="--card-min: 200px; --card-gap: 1rem;">
       {#if user.features.chat}
         <a href="{base}/chat" class="feature-card">
@@ -60,10 +59,12 @@
 </div>
 
 <style>
-  .dashboard h1 {
-    font-size: 1.1rem;
-    font-weight: 600;
-    margin: 0 0 1.5rem;
+  /* Equal-height cards at every width. Without this each grid row sizes to its
+	   own content, so a description that wraps to two lines (Health, Money) makes
+	   that row taller than the rest — most visible in the single-column phone
+	   layout, where every card is its own row. */
+  .feature-grid {
+    grid-auto-rows: 1fr;
   }
   .feature-card {
     display: block;
