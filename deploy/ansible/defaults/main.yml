@@ -642,6 +642,21 @@ istota_web_token_key: ""
 # Talk→web read-state pull cadence in seconds (0 disables the pull;
 # web→Talk push is unaffected). Only active with token storage "encrypted".
 istota_web_chat_talk_read_sync_interval: 60
+# Live room-event stream (GET /chat/stream): one user-scoped SSE connection per
+# open tab carrying every room the user is a member of. Server-side poll cadence
+# in ms — deliberately slower than the task stream's 200ms, since these are
+# message-level events.
+istota_web_chat_room_stream_poll_interval_ms: 1000
+# SSE comment-frame cadence, seconds. The vhost allows 3600s reads, but a
+# corporate proxy or mobile network drops a silent connection far sooner.
+istota_web_chat_room_stream_keepalive_seconds: 20
+# Resource guard for a far-behind cursor (a tab resumed from suspend). Tripping
+# either cap emits a `gap` frame and the client reloads instead of replaying.
+istota_web_chat_room_stream_max_batch: 500
+istota_web_chat_room_stream_max_bytes: 2000000
+# Per-connection room-metadata diff cadence (rename / model / effort / room
+# added or removed elsewhere), seconds. 0 disables it.
+istota_web_chat_room_stream_room_check_seconds: 10
 
 # Master key for the encrypted `secrets` table, rendered into secrets.env as
 # ISTOTA_SECRET_KEY. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`

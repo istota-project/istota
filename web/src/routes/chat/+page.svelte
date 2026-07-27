@@ -506,12 +506,21 @@
                 <MessageSquare size={13} />
               </span>
             {/if}
-            <span class="room-name" class:unread>{room.name}</span>
-            {#if unread}
-              <span class="unread-chip" title={`${unreadCount} unread`}>
-                {unreadCount > 99 ? '99+' : unreadCount}
+            <span class="room-text">
+              <span class="room-line">
+                <span class="room-name" class:unread>{room.name}</span>
+                {#if unread}
+                  <span class="unread-chip" title={`${unreadCount} unread`}>
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                {/if}
               </span>
-            {/if}
+              <!-- Last-message preview, populated by the room stream for
+							     background rooms (the active room's content is on screen). -->
+              {#if room.preview && room.id !== $activeRoomId}
+                <span class="room-preview">{room.preview}</span>
+              {/if}
+            </span>
           </button>
           <KebabMenu
             ariaLabel="Room actions"
@@ -952,9 +961,33 @@
   .room-row.active .room-btn {
     color: var(--text-primary);
   }
+  /* Title + badge on one line, optional preview beneath. The origin glyph stays
+	   a sibling of this column so it keeps its own fixed slot. */
+  .room-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    gap: 0.1rem;
+  }
+  .room-line {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+  }
   .room-name {
     flex: 1;
     min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Last message in a background room. One line, ellipsised — the sidebar is
+	   a glance surface, not a second transcript. */
+  .room-preview {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

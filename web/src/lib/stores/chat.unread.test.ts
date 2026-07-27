@@ -97,9 +97,11 @@ describe('chat store — unread indicators', () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1, 0), room(2, 0)] });
     const s = await freshSession();
     await s.init(); // selects room 1, starts the refresh timer
-    // next poll: room 2 gained 5 unread; room 1 (active) reports a stale 9
+    // next poll: room 2 gained 5 unread; room 1 (active) reports a stale 9.
+    // The rooms poll is the slow metadata reconciler now (30s) — live counts
+    // ride the room stream, so this asserts the reconciler, not the live path.
     api.getChatRooms.mockResolvedValue({ rooms: [room(1, 9), room(2, 5)] });
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(30000);
     const byId = Object.fromEntries(get(s.rooms).map((r) => [r.id, r]));
     expect(byId[2].unread_count).toBe(5);
     expect(byId[1].unread_count).toBe(0); // active room forced clear
@@ -112,7 +114,7 @@ describe('chat store — unread indicators', () => {
     const s = await freshSession();
     await s.init();
     api.getChatRooms.mockResolvedValue({ rooms: [room(1, 0), room(2, 2)] });
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(30000);
     expect(get(s.rooms).map((r) => r.id)).toContain(2);
     expect(get(s.rooms).find((r) => r.id === 2)?.unread_count).toBe(2);
     s.teardown();

@@ -669,6 +669,25 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         : null,
     };
   }
+  // Room-event tail. The mock server can't hold an SSE connection, so the
+  // client's EventSource fails over to polling this — which is exactly the
+  // degradation path the real deployment uses behind a buffering proxy, so dev
+  // exercises it by default.
+  if (path === '/istota/api/chat/events' && method === 'GET') {
+    const q = new URL(`http://x${url}`).searchParams;
+    const sinceId = Math.max(0, Number(q.get('since_id') || '0'));
+    const limitParam = Number(q.get('limit') || '0');
+    const rows = mockAggregateRows();
+    const maxId = rows.reduce((n, m) => Math.max(n, m.msg_id), 0);
+    const fresh = rows.filter((m) => m.msg_id > sinceId);
+    const want = limitParam > 0 ? Math.min(limitParam, 500) : 500;
+    if (fresh.length > want) return { events: [], cursor: maxId, gap: true };
+    return {
+      events: fresh.map(({ _createdAtMs, ...m }) => m),
+      cursor: Math.max(maxId, sinceId),
+      gap: false,
+    };
+  }
   const starMatch = path.match(/^\/istota\/api\/chat\/messages\/(\d+)\/star$/);
   if (starMatch && method === 'PUT') {
     const msgId = Number(starMatch[1]);

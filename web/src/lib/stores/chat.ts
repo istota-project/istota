@@ -20,7 +20,10 @@ import {
   getChatMessagesView,
   getRoomMessages,
   getChatRooms,
+  getRoomEvents,
   getTaskEvents,
+  chatRoomStreamUrl,
+  type ChatRoomEvent,
   markAllRoomsRead,
   markRoomRead,
   sendChatMessage,
@@ -242,20 +245,44 @@ function createSession(): ChatSession {
   let activeStream: { stop: () => void } | null = null;
   let streamQueue: { taskId: number; cid: number }[] = [];
   // Bot-delivered messages (alerts / logs / notifications routed to the `web`
-  // surface) are appended to the room out-of-band — they have no task to
-  // stream. When the room is idle we poll its history and surface any new ones.
-  // `seenNotifIds` dedups across polls; it's reset per room in loadHistory.
+  // surface) arrive on the room stream as `role: 'system'` rows carrying a
+  // notif_id. `seenNotifIds` dedups a streamed row against one the history
+  // load already rendered; it's reset per room in loadHistory.
   const seenNotifIds = new Set<number>();
-  let notifTimer: ReturnType<typeof setInterval> | null = null;
-  const NOTIF_POLL_MS = 5000;
-  // Sidebar unread badges. A separate timer re-fetches the room list (counts
-  // included) so a notification / scheduled post / mirrored Talk turn landing
-  // in a *non-active* room lights it up without a reload. Runs regardless of
-  // which room is active (unlike the notif poll, which is scoped to the open
-  // room) but is cheap — one rooms-list call.
+  // Slow metadata reconciler, NOT the live path — the room stream carries
+  // content and unread deltas now. It is kept (rather than deleted) because
+  // GET /chat/rooms is what drives the Talk→web read-state pull, which is
+  // itself server-throttled at [web.chat] talk_read_sync_interval (60s); 30s
+  // satisfies it comfortably. Do not remove this timer without moving that
+  // pull somewhere else, or Talk read sync silently stops.
   let roomsTimer: ReturnType<typeof setInterval> | null = null;
-  const ROOMS_REFRESH_MS = 5000;
+  const ROOMS_REFRESH_MS = 30000;
   let onVisibility: (() => void) | null = null;
+
+  // ---- Live room-event stream (live-web-chat-room-stream spec) ----
+  //
+  // One user-scoped SSE connection carries every message in every room the user
+  // is a member of, whatever surface produced it. Room switching is a
+  // client-side filter; background rooms get real content, not just a count.
+  // Cursor is `messages.id` — one monotonic integer over user turns, assistant
+  // turns and system rows.
+  let roomStream: { stop: () => void } | null = null;
+  let roomCursor = 0;
+  let lastRoomEventAt = Date.now();
+  let hiddenSince: number | null = null;
+  // Frames that land while a recovery reload is in flight. The reload's
+  // `messages.set` would otherwise drop a row written after its DB read, and
+  // the server's per-connection cursor has already moved past it so it will
+  // never be re-sent. Buffer, then re-apply (dedup makes that idempotent).
+  let recoveryBuffer: ChatRoomEvent[] | null = null;
+  let recovering = false;
+  // Past roughly a minute of silence a reconnect has probably missed state the
+  // stream does not carry — a star toggled on another device, a read cursor
+  // advanced by the Talk→web sync, a membership change — so a reload is *more
+  // correct*, not merely cheaper. Under a minute, a transparent patch beats a
+  // flicker, and EventSource reconnects on ordinary blips often enough that
+  // forcing a reload each time would be constant churn on a flaky network.
+  const ROOM_STREAM_STALE_MS = 60000;
 
   // Clone a segment (and its tool) so a keyed {#each} sees a fresh reference.
   // text/thinking are flat; only a tool segment has a nested object to clone.
@@ -462,17 +489,9 @@ function createSession(): ChatSession {
       activeStream = null;
     }
     streamQueue = [];
-    stopNotifPolling();
     resetPaging();
     status.set('idle');
     activeTaskId.set(null);
-  }
-
-  function stopNotifPolling() {
-    if (notifTimer) {
-      clearInterval(notifTimer);
-      notifTimer = null;
-    }
   }
 
   // Set a single room's unread badge locally (optimistic clears + merge).
@@ -517,6 +536,10 @@ function createSession(): ChatSession {
           name: fresh.name,
           origin: fresh.origin,
           talk_token: fresh.talk_token,
+          // model/effort ride along so the header's model badge can't go stale
+          // until reload when the default is changed on another device.
+          model: fresh.model,
+          effort: fresh.effort,
           unread_count: unreadFor(fresh),
         };
       });
@@ -542,106 +565,346 @@ function createSession(): ChatSession {
     }
   }
 
-  // Poll the room's history while idle and surface (a) newly-delivered bot
-  // messages (alerts / logs / web-routed notifications) and (b) a task that
-  // *started* while this room was open — most importantly a Talk-originated
-  // turn (unified room sync): its user message is shown and its progress
-  // streamed live, so the conversation animates in both surfaces at once.
-  // Skipped while a task streams — the stream owns the transcript then; the
-  // next idle tick picks up anything that landed meanwhile.
-  function startNotifPolling(roomId: number) {
-    stopNotifPolling();
-    notifTimer = setInterval(async () => {
-      if (get(activeRoomId) !== roomId || activeStream || get(status) !== 'idle') return;
-      let hist;
-      try {
-        hist = await getRoomMessages(roomId);
-      } catch {
-        return;
-      }
-      if (get(activeRoomId) !== roomId) return;
-      let appended = false;
-      for (const m of hist.messages) {
-        if (m.role !== 'system' || typeof m.notif_id !== 'number') continue;
-        if (seenNotifIds.has(m.notif_id)) continue;
-        seenNotifIds.add(m.notif_id);
-        appended = true;
-        messages.update((arr) => [
-          ...arr,
-          {
-            cid: nextCid(),
-            role: 'system',
-            text: m.text,
-            segments: [],
-            streaming: false,
-            createdAt: m.created_at,
-            // Carry the durable star key from the same history row (ISSUE-172):
-            // a live-appended notification is starrable immediately, not only
-            // after a reload re-reads it through buildHistoryMessage.
-            msgId: typeof m.msg_id === 'number' ? m.msg_id : undefined,
-            starred: typeof m.msg_id === 'number' ? !!m.starred : undefined,
-          },
-        ]);
-      }
-      // A notification just landed in the open room — persist the read cursor
-      // past it (visibility-gated) so it doesn't resurface as unread later.
-      if (appended) markActiveRead(roomId);
-      pickUpNewInFlightTasks(hist);
-    }, NOTIF_POLL_MS);
+  const inFlight = (s?: string) => s === 'pending' || s === 'locked' || s === 'running';
+  // A task that has not produced its final answer yet — in-flight, or parked
+  // awaiting a confirmation the user must act on.
+  const unsettled = (s?: string) => inFlight(s) || s === 'pending_confirmation';
+
+  // ---- Room-stream frame handling ----
+
+  // A short one-line summary of a streamed row for the sidebar preview. System
+  // rows arrive as `**Title**\n\nbody`, so strip the emphasis markers rather
+  // than render raw markdown in the sidebar.
+  function previewOf(row: ChatRoomEvent): string {
+    const line = (row.text || '')
+      .replace(/[*_`#]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return line.length > 90 ? `${line.slice(0, 89)}…` : line;
   }
 
-  // Surface in-flight tasks not yet in the transcript (e.g. a Talk turn that
-  // started while the web room was open) and stream them live. Cross-surface
-  // progress: the same SSE substrate the web client already tails works for a
-  // Talk-source task because the events endpoint is ownership-gated, not
-  // source-gated. A fast turn that already completed between polls is picked up
-  // on the next room load — this path is the live, in-flight case.
-  function pickUpNewInFlightTasks(hist: ChatHistory) {
-    const actives = hist.active_tasks ?? (hist.active_task ? [hist.active_task] : []);
-    if (!actives.length) return;
-    const known = new Set<number>();
-    for (const m of get(messages)) if (typeof m.taskId === 'number') known.add(m.taskId);
-    const cur = get(activeTaskId);
-    if (cur != null) known.add(cur);
-    for (const q of streamQueue) known.add(q.taskId);
-    for (const at of actives) {
-      if (at.status === 'pending_confirmation' || known.has(at.id)) continue;
-      // Show the turn's user message first, if the room history carries it.
-      const um = hist.messages.find((m) => m.role === 'user' && m.task_id === at.id);
-      if (um) {
-        messages.update((arr) => [
-          ...arr,
-          {
-            cid: nextCid(),
-            role: 'user',
-            text: um.text,
-            taskId: at.id,
-            segments: [],
-            streaming: false,
-            createdAt: um.created_at,
-            // Star key from the history row, parity with buildHistoryMessage
-            // (ISSUE-172) so a picked-up user turn is starrable without reload.
-            msgId: typeof um.msg_id === 'number' ? um.msg_id : undefined,
-            starred: typeof um.msg_id === 'number' ? !!um.starred : undefined,
-          },
-        ]);
+  // A burst of streamed rows would otherwise fire one mark-read POST each.
+  // The cursor call is idempotent and the display is already held at 0, so
+  // coalescing on a short window costs nothing and saves the round-trips.
+  let lastStreamReadAt = 0;
+  const STREAM_READ_THROTTLE_MS = 1000;
+  function markActiveReadThrottled(roomId: number) {
+    const now = Date.now();
+    if (now - lastStreamReadAt < STREAM_READ_THROTTLE_MS) return;
+    lastStreamReadAt = now;
+    markActiveRead(roomId);
+  }
+
+  // Open a task stream for a turn that started on another surface (most often a
+  // Talk turn under unified room sync) so its progress animates here too. The
+  // task-events endpoint is ownership-gated, not source-gated, so the substrate
+  // the web client already tails works unchanged. A `pending_confirmation` task
+  // is picked up too — its persisted `confirmation` event replays and the card
+  // renders, which the old poller skipped outright.
+  function pickUpStreamedTask(taskId: number, status?: string) {
+    if (get(activeTaskId) === taskId) return;
+    if (streamQueue.some((q) => q.taskId === taskId)) return;
+    if (get(messages).some((m) => m.role === 'assistant' && m.taskId === taskId)) return;
+    const ph: ChatMessage = {
+      cid: nextCid(),
+      role: 'assistant',
+      text: '',
+      taskId,
+      status,
+      segments: [],
+      streaming: true,
+      createdAt: new Date().toISOString(),
+    };
+    messages.update((arr) => [...arr, ph]);
+    enqueueStream(taskId, ph.cid);
+  }
+
+  // Append a streamed row to the open room's transcript, deduped three ways —
+  // the durable id (a reload may already hold it), the (role, task_id) key our
+  // own optimistic placeholders carry, and notif_id for system rows.
+  function appendStreamedRow(row: ChatRoomEvent) {
+    const cur = get(messages);
+    if (typeof row.msg_id === 'number' && cur.some((m) => m.msgId === row.msg_id)) return;
+    if (typeof row.task_id === 'number') {
+      const mine = cur.find((m) => m.taskId === row.task_id && m.role === row.role);
+      if (mine) {
+        // Already on screen (our own send, or a placeholder being streamed
+        // into). Stamp the durable star key so the row is starrable without a
+        // reload, then drop the frame.
+        if (typeof row.msg_id === 'number' && mine.msgId !== row.msg_id) {
+          const msgId = row.msg_id;
+          const starred = !!row.starred;
+          updateMsg(mine.cid, (m) => {
+            m.msgId = msgId;
+            m.starred = starred;
+          });
+        }
+        return;
       }
-      const ph: ChatMessage = {
-        cid: nextCid(),
-        role: 'assistant',
-        text: '',
-        taskId: at.id,
-        status: at.status,
-        segments: [],
-        streaming: true,
-        createdAt: new Date().toISOString(),
+    }
+    if (typeof row.notif_id === 'number') {
+      if (seenNotifIds.has(row.notif_id)) return;
+      seenNotifIds.add(row.notif_id);
+    }
+    messages.update((arr) => [...arr, buildHistoryMessage(row)]);
+    if (row.role === 'user' && typeof row.task_id === 'number' && unsettled(row.status)) {
+      pickUpStreamedTask(row.task_id, row.status);
+    }
+    // Content just landed in the room the user is looking at — persist the read
+    // cursor past it (visibility-gated) so it doesn't resurface as unread.
+    const rid = get(activeRoomId);
+    if (rid != null) markActiveReadThrottled(rid);
+  }
+
+  // Background room: bump the badge and refresh the sidebar preview. Rows
+  // stream for every member room, so this is real content, not a count refetch.
+  function bumpBackgroundRoom(roomId: number, row: ChatRoomEvent) {
+    rooms.update((rs) =>
+      rs.map((r) => {
+        if (r.id !== roomId) return r;
+        // count_unread_messages excludes the user's own turns, so a turn
+        // mirrored in from Talk must not ring its own room.
+        const n = r.unread_count ?? 0;
+        return { ...r, unread_count: row.role === 'user' ? n : n + 1, preview: previewOf(row) };
+      }),
+    );
+  }
+
+  // Keep the aggregate panes live instead of frozen snapshots. Starred is
+  // skipped: a freshly arrived row is unstarred by definition. Unread applies
+  // the same "not your own turn" rule as the badge math.
+  function feedAggregateView(row: ChatRoomEvent) {
+    const v = get(view);
+    if (v === 'room' || v === 'starred') return;
+    if (v === 'unread' && row.role === 'user') return;
+    if (typeof row.msg_id === 'number' && get(messages).some((m) => m.msgId === row.msg_id)) return;
+    messages.update((arr) => [...arr, buildHistoryMessage(row)]);
+  }
+
+  function applyRoomEvent(row: ChatRoomEvent) {
+    if (recoveryBuffer) {
+      recoveryBuffer.push(row);
+      return;
+    }
+    const token = row.room_token;
+    if (!token) return;
+    const room = get(rooms).find((r) => r.token === token);
+    if (room && room.id === get(activeRoomId) && get(view) === 'room') {
+      appendStreamedRow(row);
+      return;
+    }
+    feedAggregateView(row);
+    if (room) bumpBackgroundRoom(room.id, row);
+  }
+
+  // `room` metadata frame: a rename / model / effort change, or a room
+  // appearing or disappearing on another device or surface. Closes the
+  // "renamed or deleted elsewhere never propagates" gap without a room refetch.
+  function applyRoomFrame(frame: {
+    action?: string;
+    id?: number;
+    room?: Partial<ChatRoom> & { id: number };
+  }) {
+    if (frame.action === 'remove') {
+      const id = frame.id;
+      if (typeof id !== 'number') return;
+      rooms.update((rs) => rs.filter((r) => r.id !== id));
+      if (get(activeRoomId) === id) {
+        const remaining = get(rooms);
+        if (remaining[0]) void selectRoom(remaining[0].id);
+        else {
+          activeRoomId.set(null);
+          messages.set([]);
+        }
+      }
+      return;
+    }
+    const fresh = frame.room;
+    if (!fresh || typeof fresh.id !== 'number') return;
+    rooms.update((rs) => {
+      const idx = rs.findIndex((r) => r.id === fresh.id);
+      // The snapshot deliberately omits unread counts (they ride the `message`
+      // frames) and the client-derived preview, so merge rather than replace.
+      if (idx === -1) return [...rs, { ...(fresh as ChatRoom), unread_count: 0 }];
+      const next = rs.slice();
+      next[idx] = {
+        ...next[idx],
+        name: fresh.name ?? next[idx].name,
+        origin: fresh.origin ?? next[idx].origin,
+        model: fresh.model ?? null,
+        effort: fresh.effort ?? null,
       };
-      messages.update((arr) => [...arr, ph]);
-      enqueueStream(at.id, ph.cid);
+      return next;
+    });
+  }
+
+  // Recovery routine shared by the server's `gap` frame and the client-side age
+  // rule. Reloading is cheap AND authoritative — refreshRooms returns
+  // server-computed unread counts for every room and the active room is one
+  // 50-row page — so it is the right answer whenever replay is doubtful.
+  // `cursor` is the server's max *scanned* id (null → ask for a fresh one).
+  async function recoverStream(cursor: number | null) {
+    if (recovering) return;
+    recovering = true;
+    recoveryBuffer = [];
+    try {
+      let target = cursor;
+      if (target == null) {
+        try {
+          // limit=1 → the server does the cheap MAX(id) gate and hands back a
+          // cursor without serializing a backlog we're about to discard.
+          target = (await getRoomEvents(roomCursor, 1)).cursor;
+        } catch {
+          target = null;
+        }
+      }
+      const v = get(view);
+      const rid = get(activeRoomId);
+      if (v === 'room' && rid != null) {
+        stopActive();
+        await loadHistory(rid);
+      } else if (v !== 'room') {
+        await loadViewPage(v);
+      }
+      await refreshRooms();
+      if (target != null && target > roomCursor) roomCursor = target;
+    } catch {
+      /* transient — the next frame or poll retries */
+    } finally {
+      const buffered = recoveryBuffer ?? [];
+      recoveryBuffer = null;
+      recovering = false;
+      for (const row of buffered) {
+        try {
+          applyRoomEvent(row);
+        } catch {
+          /* one bad row must not strand the rest */
+        }
+      }
     }
   }
 
-  const inFlight = (s?: string) => s === 'pending' || s === 'locked' || s === 'running';
+  function startRoomStream() {
+    if (roomStream) return;
+    let es: EventSource | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+    let opened = false;
+
+    const halt = () => {
+      stopped = true;
+      if (es) {
+        es.close();
+        es = null;
+      }
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    };
+
+    // Polling fallback over the snapshot endpoint — the same shape streamTask
+    // already uses when SSE is unavailable (mock dev backend, buffering proxy).
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const page = await getRoomEvents(roomCursor);
+        lastRoomEventAt = Date.now();
+        if (page.gap) {
+          if (page.cursor > roomCursor) roomCursor = page.cursor;
+          void recoverStream(page.cursor);
+          return;
+        }
+        for (const row of page.events) {
+          try {
+            applyRoomEvent(row);
+          } catch {
+            /* swallow */
+          }
+        }
+        if (page.cursor > roomCursor) roomCursor = page.cursor;
+      } catch {
+        /* transient; try again next tick */
+      }
+    };
+    const startPolling = () => {
+      if (pollTimer || stopped) return;
+      void poll();
+      pollTimer = setInterval(() => void poll(), Math.max(pollIntervalMs, 1000));
+    };
+
+    try {
+      es = new EventSource(chatRoomStreamUrl(roomCursor), { withCredentials: true });
+      es.addEventListener('message', (e: MessageEvent) => {
+        if (e.data == null) return;
+        lastRoomEventAt = Date.now();
+        // Idempotent on the durable id: a Last-Event-ID resume or a brief
+        // SSE↔poll overlap can redeliver a row we already applied.
+        const id = Number(e.lastEventId) || 0;
+        if (id) {
+          if (id <= roomCursor) return;
+          roomCursor = id;
+        }
+        let row: ChatRoomEvent;
+        try {
+          row = JSON.parse(e.data);
+        } catch {
+          return;
+        }
+        try {
+          applyRoomEvent(row);
+        } catch {
+          /* a render throw must never wedge the stream */
+        }
+      });
+      es.addEventListener('gap', (e: MessageEvent) => {
+        if (e.data == null) return;
+        lastRoomEventAt = Date.now();
+        let cursor = 0;
+        try {
+          cursor = Number(JSON.parse(e.data).cursor) || 0;
+        } catch {
+          return;
+        }
+        if (cursor > roomCursor) roomCursor = cursor;
+        void recoverStream(cursor);
+      });
+      es.addEventListener('room', (e: MessageEvent) => {
+        if (e.data == null) return;
+        lastRoomEventAt = Date.now();
+        try {
+          applyRoomFrame(JSON.parse(e.data));
+        } catch {
+          /* swallow */
+        }
+      });
+      es.onopen = () => {
+        const idle = Date.now() - lastRoomEventAt;
+        lastRoomEventAt = Date.now();
+        // First open follows a fresh history load — nothing to recover.
+        if (opened && idle > ROOM_STREAM_STALE_MS) void recoverStream(null);
+        opened = true;
+      };
+      es.onerror = () => {
+        if (stopped) return;
+        if (es) {
+          es.close();
+          es = null;
+        }
+        startPolling();
+      };
+    } catch {
+      startPolling();
+    }
+    roomStream = { stop: halt };
+  }
+
+  function stopRoomStream() {
+    if (roomStream) {
+      roomStream.stop();
+      roomStream = null;
+    }
+  }
 
   // Build a render-ready ChatMessage from a server history row. Shared by the
   // first load and the scroll-up older-page prepend so both reconstruct the
@@ -708,7 +971,6 @@ function createSession(): ChatSession {
     oldestCursor = hist.oldest_cursor ?? null;
     hasMore.set(!!hist.has_more);
     loadingOlder.set(false);
-    startNotifPolling(roomId);
 
     // Resume the room's in-flight tasks in order: the first streams, the rest
     // queue behind it. A leading pending_confirmation is left parked (its card
@@ -884,14 +1146,33 @@ function createSession(): ChatSession {
         markRoomRead(target.id).catch(() => {});
       }
       loaded.set(true);
-      // Keep sidebar badges live, and clear the open room when the tab regains
-      // focus (messages that arrived while backgrounded were held unread).
+      // Seed the stream cursor from the server's current max before connecting,
+      // so a fresh session doesn't replay the backlog it just rendered.
+      // (limit=1 → the server answers from its MAX(id) gate, not a serialized
+      // page.)
+      try {
+        roomCursor = (await getRoomEvents(0, 1)).cursor;
+      } catch {
+        roomCursor = 0;
+      }
+      startRoomStream();
+      // Slow metadata reconciler (see ROOMS_REFRESH_MS) — the stream is the
+      // live path.
       startRoomsRefresh();
       if (typeof document !== 'undefined') {
         onVisibility = () => {
-          if (document.visibilityState !== 'visible') return;
+          if (document.visibilityState !== 'visible') {
+            hiddenSince = Date.now();
+            return;
+          }
+          const away = hiddenSince == null ? 0 : Date.now() - hiddenSince;
+          hiddenSince = null;
           const rid = get(activeRoomId);
           if (rid != null) markActiveRead(rid);
+          // Client-side half of the gap threshold: only the client knows how
+          // long it was away, only the server knows what the delta costs, so
+          // each decides with what it has. Same recovery routine either way.
+          if (away > ROOM_STREAM_STALE_MS) void recoverStream(null);
         };
         document.addEventListener('visibilitychange', onVisibility);
       }
@@ -949,7 +1230,6 @@ function createSession(): ChatSession {
       const remaining = get(rooms);
       if (remaining[0]) await selectRoom(remaining[0].id);
       else {
-        stopNotifPolling();
         activeRoomId.set(null);
         messages.set([]);
       }
@@ -974,7 +1254,6 @@ function createSession(): ChatSession {
       const remaining = get(rooms);
       if (remaining[0]) await selectRoom(remaining[0].id);
       else {
-        stopNotifPolling();
         activeRoomId.set(null);
         messages.set([]);
       }
@@ -1052,10 +1331,11 @@ function createSession(): ChatSession {
     const trimmed = text.trim();
     if (!roomId || (!trimmed && attachments.length === 0)) return;
 
+    const userCid = nextCid();
     messages.update((a) => [
       ...a,
       {
-        cid: nextCid(),
+        cid: userCid,
         role: 'user',
         text: trimmed,
         segments: [],
@@ -1116,6 +1396,13 @@ function createSession(): ChatSession {
       status.set('idle');
       return;
     }
+    // Stamp the task id on BOTH halves of the turn. The assistant placeholder
+    // needs it to bind its stream; the user bubble needs it so the room stream
+    // recognises its own echo — the canonical `messages` user row arrives with
+    // this task_id, and (role, task_id) is what dedups it away.
+    updateMsg(userCid, (m) => {
+      m.taskId = res.task_id!;
+    });
     updateMsg(phCid, (m) => {
       m.taskId = res.task_id!;
       m.status = 'pending';
@@ -1183,6 +1470,7 @@ function createSession(): ChatSession {
   // persisted task_events via loadHistory, so no progress is lost.
   function teardown() {
     stopActive();
+    stopRoomStream();
     stopRoomsRefresh();
     // Drop the cached command/alias catalogue so a fresh session refetches it.
     resetCommandCatalogue();

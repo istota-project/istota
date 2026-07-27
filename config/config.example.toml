@@ -711,6 +711,16 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # rate_limit_window_seconds = 300
 # sse_poll_interval_ms = 200                        # server-side SSE generator cadence
 # client_poll_interval_ms = 1500                    # client polling fallback cadence
+#
+# Live room-event stream (GET /chat/stream). One user-scoped SSE connection per
+# open tab carries every room the user is a member of, so a Talk turn, a routed
+# alert, or a message in a background room reaches the browser in about a second
+# whatever surface produced it.
+# room_stream_poll_interval_ms = 1000               # server-side tail cadence
+# room_stream_keepalive_seconds = 20                # SSE comment frame, keeps proxies from dropping an idle stream
+# room_stream_max_batch = 500                       # rows before a `gap` frame tells the client to reload
+# room_stream_max_bytes = 2000000                   # serialized-byte budget, same purpose
+# room_stream_room_check_seconds = 10               # per-connection room-metadata diff (0 disables)
 # talk_read_sync_interval = 60                      # Talk→web read pull cadence (s); 0 disables; needs token_storage = "encrypted"
 
 # ============================================================================

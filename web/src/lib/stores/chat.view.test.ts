@@ -5,7 +5,7 @@
  * Covers: selectView clears the active room and loads via the aggregate
  * endpoint, selectRoom resets view to room mode, toggleStar's optimistic
  * flip / revert-on-failure / removal in the Starred view, view-aware
- * loadOlder paging, notif-poll suppression while a view is active, and
+ * loadOlder paging, no per-room history refetch while a view is active, and
  * markAllRead zeroing every room badge.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -249,7 +249,9 @@ describe('chat store — cross-room views + starring', () => {
     expect(api.getRoomMessages).toHaveBeenCalledTimes(1); // init only
   });
 
-  it('suppresses the notif poll while a view is active', async () => {
+  // The idle notif poller is gone (the room stream carries content now); what
+  // must still hold is that an aggregate view never refetches per-room history.
+  it('never refetches room history while a view is active', async () => {
     vi.useFakeTimers();
     api.getChatMessagesView.mockResolvedValue({
       messages: [],

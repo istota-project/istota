@@ -1527,6 +1527,10 @@ export interface ChatRoom {
   model?: string | null;
   /** Standing per-room effort level (low/medium/high/xhigh/max). */
   effort?: string | null;
+  /** Client-derived one-line summary of the most recent message seen on the
+   * room stream. Never sent by the server — background rooms only got content
+   * once the stream existed, so there is nothing to persist. */
+  preview?: string;
 }
 
 export interface ChatConfig {
@@ -1778,6 +1782,35 @@ export function cancelChatTask(taskId: number): Promise<{ status: string }> {
 
 export function chatStreamUrl(taskId: number): string {
   return `${base}/api/chat/tasks/${taskId}/stream`;
+}
+
+/** A row from the live room-event stream: the same shape the history endpoints
+ * emit, plus the room it belongs to, so `buildHistoryMessage` can construct a
+ * streamed row and a reloaded row through one code path. */
+export type ChatRoomEvent = ChatHistoryMessage;
+
+export interface ChatRoomEventsPage {
+  events: ChatRoomEvent[];
+  /** The cursor to adopt. On `gap` this is the max id the server *scanned*,
+   * not the last one it sent — adopting the latter would strand the rows the
+   * server chose not to replay. */
+  cursor: number;
+  /** The delta was too large to replay; reload instead (rooms list + the open
+   * room), then adopt `cursor`. */
+  gap: boolean;
+}
+
+/** Snapshot of the room-event tail — the polling fallback behind the room
+ * stream. `limit=1` asks only for a fresh cursor (used after a reload). */
+export function getRoomEvents(sinceId = 0, limit = 0): Promise<ChatRoomEventsPage> {
+  const params = new URLSearchParams({ since_id: String(sinceId) });
+  if (limit > 0) params.set('limit', String(limit));
+  return apiFetch<ChatRoomEventsPage>(`/chat/events?${params.toString()}`);
+}
+
+/** SSE endpoint carrying every message visible to the user, across all rooms. */
+export function chatRoomStreamUrl(sinceId: number): string {
+  return `${base}/api/chat/stream?since_id=${sinceId}`;
 }
 
 export interface ChatAttachment {

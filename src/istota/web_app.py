@@ -17,6 +17,7 @@ import secrets
 import shutil
 import signal
 import sqlite3
+import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -1027,10 +1028,24 @@ def _gather_admin_stats() -> dict:
         payload["error"] = str(exc)
 
     payload["modules"] = _admin_modules_section()
+    payload["chat"] = _admin_chat_section()
     payload["runtime"] = _admin_runtime_section()
     payload["models"] = _admin_models_section()
     payload["brain_status"] = _admin_brain_status_section()
     return payload
+
+
+def _admin_chat_section() -> dict:
+    """Web-chat surface gauges. `room_stream_connections` is the live count of
+    open room-event streams (one per open /chat tab): the metric that decides
+    whether the deferred shared per-user broker — one poller per user fanning
+    out in-process instead of one per connection — is ever needed."""
+    return {
+        "room_stream_connections": _room_stream_conn_delta(0),
+        "room_stream_poll_interval_ms": int(
+            _chat_knob("room_stream_poll_interval_ms", 1000),
+        ),
+    }
 
 
 def _admin_brain_status_section() -> dict:
@@ -1912,6 +1927,276 @@ async def chat_task_stream(
                     if ev["kind"] == "done":
                         return
             await asyncio.sleep(_sse_poll_seconds())
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---- Room event stream (live-web-chat-room-stream spec) ----
+#
+# Sibling of the task stream above, and the same principle: the table is the
+# bus. Where `chat_task_stream` tails `task_events` for ONE task the client
+# started, this tails the canonical `messages` store for EVERY room the user is
+# a member of — so a Talk turn, a routed alert, or a background-room message
+# reaches the browser without the client polling a full history page per room.
+#
+# One connection per session, not one per room: room switching becomes a
+# client-side filter, background rooms get real content, and a tab holds two
+# connections total (this, plus a task stream while a turn is in flight).
+#
+# `messages.id` is the whole cursor — one monotonic integer over user turns,
+# assistant turns and system messages, because the unified-room-sync work
+# already consolidated them into one table. That is what closes the fast-turn
+# hole structurally: a Talk turn that starts and finishes inside 200ms still
+# writes two `messages` rows, and both are tailed.
+
+_ROOM_STREAM_POLL_SECONDS = 1.0
+_ROOM_STREAM_KEEPALIVE_SECONDS = 20.0
+_ROOM_STREAM_ROOM_CHECK_SECONDS = 10.0
+# Read-only tail against a DB the scheduler is writing (co-located under
+# `istota serve`). WAL handles concurrent readers, but bound the wait the same
+# way the scheduler's main loop does rather than blocking 30s on a lock.
+_ROOM_STREAM_BUSY_TIMEOUT_MS = 2000
+
+_room_stream_connections = 0
+_room_stream_lock = threading.Lock()
+
+
+def _room_stream_conn_delta(delta: int) -> int:
+    """Track live room-stream connections (admin-stats gauge). The metric that
+    decides whether the deferred shared per-user broker is ever needed."""
+    global _room_stream_connections
+    with _room_stream_lock:
+        _room_stream_connections = max(0, _room_stream_connections + delta)
+        return _room_stream_connections
+
+
+def _chat_knob(name: str, default: float) -> float:
+    """A ``[web.chat]`` numeric knob, falling back to the module default when
+    absent or zero — same pattern as `_sse_poll_seconds`. Use `_chat_knob_opt`
+    for a knob whose 0 means 'off' rather than 'unset'."""
+    chat = getattr(getattr(_config, "web", None), "chat", None)
+    value = getattr(chat, name, None)
+    return float(value) if value else float(default)
+
+
+def _chat_knob_opt(name: str, default: float) -> float:
+    """As `_chat_knob`, but an explicit ``0`` is honoured as 0 (disabled) rather
+    than folded onto the default. Only the attribute being absent falls back."""
+    chat = getattr(getattr(_config, "web", None), "chat", None)
+    value = getattr(chat, name, None)
+    return float(default) if value is None else float(value)
+
+
+def _room_events_batch(
+    username: str, since_id: int, limit: int | None = None,
+) -> dict:
+    """One tail batch for ``username``: ``{events, cursor, gap}``.
+
+    ``cursor`` is what the client should adopt. On the happy path it is the last
+    delivered row's id. On truncation it is the maximum id the server **scanned**
+    — not the last one sent, which would silently strand the truncated rows —
+    and ``gap`` is True with no events, telling the client to reload (rooms +
+    active room) rather than replay a backlog.
+
+    Truncation has two independent triggers, because row count is a poor proxy
+    for cost: a joined assistant row carries `execution_trace`, so a flat row cap
+    can mean anything from a few hundred KB to several MB. `room_stream_max_batch`
+    is the outer LIMIT that stops the query pulling megabytes before a byte
+    budget could measure them; `room_stream_max_bytes` is the accumulate-and-
+    truncate budget on serialize.
+    """
+    from . import db
+    max_batch = int(_chat_knob("room_stream_max_batch", 500))
+    max_bytes = int(_chat_knob("room_stream_max_bytes", 2_000_000))
+    want = max_batch if limit is None else max(1, min(int(limit), max_batch))
+    with db.get_db(
+        _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
+    ) as conn:
+        # Cheap gate: O(1) against the primary key. Only a cursor that has
+        # actually fallen behind pays for the per-user visibility join, so an
+        # idle deployment costs one trivial query per connection per tick.
+        max_id = db.max_message_id(conn)
+        if max_id <= since_id:
+            return {"events": [], "cursor": since_id, "gap": False}
+        rows = db.list_room_events_since(
+            conn, username, since_id=since_id, limit=want + 1,
+        )
+    truncated = len(rows) > want
+    events: list[dict] = []
+    total = 0
+    for r in rows[:want]:
+        d = _cross_room_message_dict(r)
+        total += len(json.dumps(d))
+        if total > max_bytes:
+            truncated = True
+            break
+        events.append(d)
+    if truncated:
+        return {"events": [], "cursor": max_id, "gap": True}
+    # Not truncated → every row above `since_id` was scanned, so the cursor
+    # advances to the max id scanned even when nothing was *visible* to this
+    # user. Advancing only to the last delivered row would make a user with few
+    # visible messages on a busy instance re-scan the same range every tick.
+    # `max()` guards the (harmless) case of a row landing between the gate read
+    # and the tail read.
+    cursor = max_id
+    if events:
+        cursor = max(cursor, int(events[-1]["msg_id"]))
+    return {"events": events, "cursor": cursor, "gap": False}
+
+
+def _room_snapshot(username: str) -> dict[str, dict]:
+    """Room metadata the sidebar renders, keyed by canonical token.
+
+    Read-only (unlike `_chat_list_rooms`, which seeds handles / bindings / read
+    cursors), because it runs on every stream tick-interval. A registry room
+    with no `web_chat_rooms` handle yet has no frontend id, so it is skipped —
+    the 30s rooms poll creates the handle and the next diff picks it up.
+
+    Unread counts are deliberately NOT part of the snapshot: they change on
+    every message, which is exactly what the `message` frames already carry.
+    """
+    from . import db
+    with db.get_db(
+        _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
+    ) as conn:
+        handles = {
+            h.token: h
+            for h in db.list_web_chat_rooms(conn, username, include_archived=True)
+        }
+        out: dict[str, dict] = {}
+        for r in db.list_member_rooms(conn, username, include_archived=False):
+            handle = handles.get(r.token)
+            if handle is None:
+                continue
+            out[r.token] = {
+                "id": handle.id,
+                "token": r.token,
+                "name": r.name or handle.name,
+                "origin": r.origin,
+                "model": r.model,
+                "effort": r.effort,
+            }
+    return out
+
+
+def _room_delta_frames(before: dict[str, dict], after: dict[str, dict]) -> list[dict]:
+    """`room` frame payloads for what changed between two snapshots — a rename,
+    a model/effort change, or a room appearing / disappearing on another device
+    or surface. Closes the "renamed or deleted elsewhere never propagates" gap
+    without another full room-list fetch."""
+    frames: list[dict] = []
+    for token, room in after.items():
+        if before.get(token) != room:
+            frames.append({"action": "upsert", "room": room})
+    for token, room in before.items():
+        if token not in after:
+            frames.append({"action": "remove", "token": token, "id": room["id"]})
+    return frames
+
+
+@api_router.get("/chat/events")
+async def chat_room_events(
+    since_id: int = 0, limit: int = 0, user: dict = Depends(_require_api_auth),
+):
+    """Snapshot of the room event tail — the polling fallback behind
+    ``/chat/stream``, mirroring how ``/chat/tasks/{id}/events`` backs
+    ``/chat/tasks/{id}/stream``. ``limit=0`` means "the server's own cap"; the
+    client passes ``limit=1`` when it only wants a fresh cursor after a
+    reload."""
+    return await asyncio.to_thread(
+        _room_events_batch, user["username"], max(0, since_id),
+        limit if limit > 0 else None,
+    )
+
+
+@api_router.get("/chat/stream")
+async def chat_room_stream(
+    request: Request, since_id: int = 0, user: dict = Depends(_require_api_auth),
+):
+    """SSE stream of every message visible to the caller, across all their rooms.
+
+    Resumes from ``Last-Event-ID`` (EventSource sends it automatically) or
+    ``?since_id=``. Unlike the task stream this NEVER terminates on its own —
+    it is session-lived, which is why it emits a keepalive comment frame.
+
+    Only message-bearing frames carry an SSE ``id:``. EventSource retains the
+    last id it saw, so an auxiliary frame (keepalive, room metadata) carrying an
+    unrelated id would move the resume cursor to the wrong place on reconnect.
+    """
+    username = user["username"]
+    header_id = request.headers.get("last-event-id")
+    if header_id:
+        try:
+            since_id = max(since_id, int(header_id))
+        except ValueError:
+            pass
+    since_id = max(0, since_id)
+
+    poll = _chat_knob("room_stream_poll_interval_ms", 1000) / 1000.0
+    keepalive = _chat_knob(
+        "room_stream_keepalive_seconds", _ROOM_STREAM_KEEPALIVE_SECONDS,
+    )
+    room_check = _chat_knob_opt(
+        "room_stream_room_check_seconds", _ROOM_STREAM_ROOM_CHECK_SECONDS,
+    )
+
+    async def _generate():
+        cursor = since_id
+        last_frame = time.monotonic()
+        last_room_check = 0.0
+        snapshot: dict[str, dict] | None = None
+        _room_stream_conn_delta(1)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    batch = await asyncio.to_thread(
+                        _room_events_batch, username, cursor,
+                    )
+                except sqlite3.OperationalError:
+                    batch = None  # lock held past the budget — skip this tick
+                except Exception:  # noqa: BLE001 — a bad row must not kill the stream
+                    logger.warning("room stream: tail failed", exc_info=True)
+                    batch = None
+                if batch and batch["gap"]:
+                    cursor = batch["cursor"]
+                    yield (f"id: {cursor}\nevent: gap\n"
+                           f"data: {json.dumps({'cursor': cursor})}\n\n")
+                    last_frame = time.monotonic()
+                elif batch:
+                    for ev in batch["events"]:
+                        cursor = ev["msg_id"]
+                        yield (f"id: {cursor}\nevent: message\n"
+                               f"data: {json.dumps(ev)}\n\n")
+                        last_frame = time.monotonic()
+
+                now = time.monotonic()
+                if room_check and now - last_room_check >= room_check:
+                    last_room_check = now
+                    try:
+                        fresh = await asyncio.to_thread(_room_snapshot, username)
+                    except Exception:  # noqa: BLE001 — metadata is best-effort
+                        fresh = None
+                    if fresh is not None:
+                        # The first pass establishes the baseline the client
+                        # already has from its own room-list load.
+                        if snapshot is not None:
+                            for frame in _room_delta_frames(snapshot, fresh):
+                                yield f"event: room\ndata: {json.dumps(frame)}\n\n"
+                        snapshot = fresh
+
+                if time.monotonic() - last_frame >= keepalive:
+                    last_frame = time.monotonic()
+                    yield ": ping\n\n"
+                await asyncio.sleep(poll)
+        finally:
+            _room_stream_conn_delta(-1)
 
     return StreamingResponse(
         _generate(),
@@ -3205,6 +3490,39 @@ def _chat_set_message_star(username: str, message_id: int, starred: bool) -> boo
     return True
 
 
+def _cross_room_message_dict(r) -> dict:
+    """One `db._CROSS_ROOM_COLUMNS` row → the history payload shape.
+
+    Shared by the paginated aggregate views and the live room-event stream, so
+    a streamed row and a reloaded row are byte-identical and the client can
+    build both through the same `buildHistoryMessage`. Every row additionally
+    carries `room_token` / `room_name` (the stream needs the token to route a
+    frame; the aggregate panes render the label)."""
+    base = {
+        "msg_id": r["msg_id"], "starred": bool(r["starred"]),
+        "room_token": r["room_token"], "room_name": r["room_name"] or "",
+    }
+    if r["role"] == "user":
+        # `status` is the owning task's — the stream reads it to decide whether
+        # a user turn from another surface is still in flight (and so needs a
+        # task stream opened for it). Harmless on the aggregate panes.
+        d = {
+            "role": "user", "text": r["body"], "task_id": r["task_id"],
+            "status": r["status"], "created_at": r["created_at"], **base,
+        }
+    elif r["role"] == "assistant":
+        d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
+        d.update(base)
+    else:  # system — same shape as the per-room notes merge
+        text = f"**{r['title']}**\n\n{r['body']}" if r["title"] else r["body"]
+        d = {
+            "role": r["role"], "text": text, "notif_id": r["msg_id"],
+            "created_at": r["created_at"], **base,
+        }
+    d["created_at"] = _iso_utc(d.get("created_at"))
+    return d
+
+
 def _chat_aggregate_messages(
     username: str,
     view: str,
@@ -3231,28 +3549,7 @@ def _chat_aggregate_messages(
     oldest_cursor = (
         {"ts": rows[-1]["created_at"], "id": rows[-1]["msg_id"]} if rows else None
     )
-    messages: list[dict] = []
-    for r in reversed(rows):  # oldest-first for rendering
-        base = {
-            "msg_id": r["msg_id"], "starred": bool(r["starred"]),
-            "room_token": r["room_token"], "room_name": r["room_name"] or "",
-        }
-        if r["role"] == "user":
-            d = {
-                "role": "user", "text": r["body"], "task_id": r["task_id"],
-                "created_at": r["created_at"], **base,
-            }
-        elif r["role"] == "assistant":
-            d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
-            d.update(base)
-        else:  # system — same shape as the per-room notes merge
-            text = f"**{r['title']}**\n\n{r['body']}" if r["title"] else r["body"]
-            d = {
-                "role": r["role"], "text": text, "notif_id": r["msg_id"],
-                "created_at": r["created_at"], **base,
-            }
-        d["created_at"] = _iso_utc(d.get("created_at"))
-        messages.append(d)
+    messages = [_cross_room_message_dict(r) for r in reversed(rows)]
     return {
         "messages": messages,
         "has_more": has_more,

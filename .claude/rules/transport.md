@@ -24,7 +24,8 @@ Transports split into two `surface_class`es (`TransportCapabilities.surface_clas
   persistent store). `WebTransport.deliver`, by contrast, is a real write
   (ISSUE-121): web is a *user-routable* delivery surface, so alerts / the
   verbose execution log / any notification routed to `web` append an unsolicited
-  system message to the user's room (`web_chat_messages` table), rendered merged
+  system message to the user's room (a `role='system'` row in the canonical
+  `messages` store), rendered merged
   into room history and surfaced live in an open room by an idle poll. The two
   meanings of `web` — interactive stream vs. notification sink — don't collide:
   the stream path never calls `deliver`, and `deliver` never runs for a
@@ -55,7 +56,7 @@ transport/
 ├── ntfy/         # ntfy push surface (push) — NtfyTransport + send_ntfy_async (the single ntfy POST)
 ├── istota_file/  # TASKS.md result write-back (push) — IstotaFileTransport
 ├── repl/         # terminal REPL (stream) — ReplTransport (deliver is a no-op; outbound is task_events)
-└── web/          # web chat delivery surface (stream, user_routable) — WebTransport + default_web_room_token; deliver appends a web_chat_messages row
+└── web/          # web chat delivery surface (stream, user_routable) — WebTransport + default_web_room_token; deliver appends a role='system' messages row
 ```
 
 Both surfaces are subpackages because both directions live together. For Talk:
@@ -415,7 +416,7 @@ little and would churn tightly-coupled tests.
 **Web chat** (`transport/web/`, ISSUE-121): inbound is the `/chat` web POST →
 `ingest_message` (so `WebTransport.poll` returns `[]`); an interactive task's
 result streams over the SSE `task_events` reader. `WebTransport.deliver` is the
-*notification/log/alert* path — it appends a `web_chat_messages` row to the
+*notification/log/alert* path — it appends a `role='system'` `messages` row to the
 target room (`default_web_room_token` resolves a bare `web` route to the user's
 `general` room). `resolve_target` returns that default token.
 **Matrix** (see `Drafts/Matrix messaging surface spec.md`): a `MatrixTransport`

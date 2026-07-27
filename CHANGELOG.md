@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Web chat is live in every room at once. A reply typed in Talk, an alert, a scheduled post — anything landing in any room you belong to now appears in the browser in about a second, whether or not you are looking at that room and whether or not one of your own turns is still running. Rooms in the sidebar show their unread count and the last message as it arrives, instead of only a number that refreshed every few seconds. Short turns that started and finished between two refreshes used to be missed entirely until you reloaded; they can't be now. A confirmation prompt raised from another surface also shows up as a card you can act on.
+
 - When a task produces a file in web chat, the assistant can hand it straight over as a download link. The link opens the file from inside your own logged-in session — nothing is published, no share is created, and only your own files are reachable. Previously the assistant had no way to give you a file at all in the browser: it would quote a path on the server that you had no means of opening.
 
 - You can record a voice message in web chat. The composer has a microphone button that records, shows the elapsed time, and lets you discard the take or keep it; the recording is attached like any other file and transcribed on arrival, the same as a voice message sent through Talk. It needs a secure connection to reach the microphone at all, so the button is simply absent when the page is served over plain http. Transcription requires the optional speech extra to be installed.

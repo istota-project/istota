@@ -373,6 +373,12 @@ Knobs for the in-app web chat surface (the "Chat" tab). The surface is always en
 | `rate_limit_window_seconds` | `300` | Rate-limit window (5 minutes) |
 | `sse_poll_interval_ms` | `200` | Server-side `task_events` poll cadence for the SSE stream |
 | `client_poll_interval_ms` | `1500` | Client fallback poll cadence when SSE is unavailable |
+| `talk_read_sync_interval` | `60` | Talk→web read-state pull cadence, seconds (0 disables) |
+| `room_stream_poll_interval_ms` | `1000` | Server-side `messages` tail cadence for the live room stream |
+| `room_stream_keepalive_seconds` | `20` | SSE comment-frame cadence, so a proxy can't drop an idle stream |
+| `room_stream_max_batch` | `500` | Rows before a `gap` frame tells the client to reload instead of replay |
+| `room_stream_max_bytes` | `2000000` | Serialized-byte budget for the same guard |
+| `room_stream_room_check_seconds` | `10` | Per-connection room-metadata diff cadence (0 disables) |
 
 ## `[location]`
 

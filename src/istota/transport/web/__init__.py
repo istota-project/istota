@@ -7,11 +7,13 @@ stream destination and nothing is pushed for those tasks.
 
 Its ``deliver()``, unlike the REPL's no-op, is a real write — used by the
 *routing* paths (alerts, the verbose execution log, any notification routed to
-the ``web`` surface). A web room persists its messages, so an unsolicited
-bot message is appended to ``web_chat_messages`` and rendered as a standalone
-system message in the room transcript (and picked up by an open client the next
-time it reads room history). This is what makes ``web`` a selectable destination
-in the logs/alerts routing UI (``user_routable=True``).
+the ``web`` surface). A room persists its messages, so an unsolicited bot
+message is appended to the canonical ``messages`` store as a ``role='system'``
+row and rendered as a standalone system message in the room transcript. Because
+that store is what the live room stream (``GET /chat/stream``) tails, an open
+client sees it within about a second rather than on its next history read. This
+is what makes ``web`` a selectable destination in the logs/alerts routing UI
+(``user_routable=True``).
 
 ``resolve_target`` returns the user's default room token, so a bare ``web``
 route (no explicit ``:token``) lands in the user's ``general`` room.

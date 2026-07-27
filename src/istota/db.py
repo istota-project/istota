@@ -2621,64 +2621,14 @@ def ensure_default_web_chat_room(
     return create_web_chat_room(conn, user_id, "general")
 
 
-@dataclass
-class WebChatMessage:
-    """An unsolicited (bot-delivered) message in a web chat room.
-
-    Backs the ``web`` delivery surface: alerts, the verbose execution log, and
-    any notification routed to ``web`` post one of these into a room. Rendered
-    as a standalone ``role`` message merged into the room transcript by time —
-    there is no originating user prompt, so it never produces a user bubble.
-    """
-
-    id: int
-    user_id: str
-    token: str
-    role: str
-    title: str | None
-    text: str
-    created_at: str
-
-
-def _row_to_web_chat_message(row: sqlite3.Row) -> WebChatMessage:
-    return WebChatMessage(
-        id=row["id"],
-        user_id=row["user_id"],
-        token=row["token"],
-        role=row["role"],
-        title=row["title"],
-        text=row["text"],
-        created_at=row["created_at"],
-    )
-
-
-def add_web_chat_message(
-    conn: sqlite3.Connection,
-    user_id: str,
-    token: str,
-    text: str,
-    *,
-    role: str = "system",
-    title: str | None = None,
-) -> int:
-    """Append a bot-delivered message to a web chat room. Returns the new id."""
-    row = conn.execute(
-        "INSERT INTO web_chat_messages (user_id, token, role, title, text) "
-        "VALUES (?, ?, ?, ?, ?) RETURNING id",
-        (user_id, token, role, title, text),
-    ).fetchone()
-    return int(row["id"])
-
-
-def list_web_chat_messages(
-    conn: sqlite3.Connection, token: str, limit: int = 50,
-) -> list[WebChatMessage]:
-    """The most recent bot-delivered messages for a room, oldest-first."""
-    rows = conn.execute(
-        "SELECT * FROM web_chat_messages WHERE token = ? ORDER BY id DESC LIMIT ?",
-        (token, limit),
-    ).fetchall()
-    return [_row_to_web_chat_message(r) for r in reversed(rows)]
+# The legacy `web_chat_messages` accessors (`add_web_chat_message` /
+# `list_web_chat_messages` / `WebChatMessage`) are gone. Bot-delivered room
+# messages — alerts, the verbose execution log, any notification routed to
+# `web` — are written by `WebTransport.deliver` into the canonical `messages`
+# store as `role='system'` rows and read back by `list_system_messages` /
+# `list_system_messages_in_band` / `list_room_events_since`. The table itself
+# is kept for now (its `delete_web_chat_room` cascade still references it);
+# dropping it is a migration and out of scope.
 
 
 def count_recent_web_tasks(
@@ -3494,6 +3444,81 @@ def get_starred_message_ids(
     return {int(r["message_id"]) for r in rows}
 
 
+# --- Shared cross-room read fragments -------------------------------------
+#
+# The paginated aggregate views (`list_messages_across_rooms`) and the live
+# room-event tail (`list_room_events_since`, the web chat stream) must never
+# disagree about what a user is allowed to see, so both are assembled from
+# these fragments rather than each spelling the join out. Visibility =
+# membership, minus dismissals, minus archived rooms — matching
+# `list_member_rooms`. Bind parameter `:user` throughout.
+_CROSS_ROOM_COLUMNS = (
+    "SELECT m.role AS role, m.body AS body, m.title AS title, "
+    "  m.task_id AS task_id, m.id AS msg_id, m.created_at AS created_at, "
+    "  m.room_token AS room_token, r.name AS room_name, "
+    "  t.status AS status, t.actions_taken AS actions_taken, "
+    "  t.execution_trace AS execution_trace, t.started_at AS started_at, "
+    "  t.completed_at AS completed_at, t.model_used AS model_used, "
+    "  (s.message_id IS NOT NULL) AS starred "
+)
+_CROSS_ROOM_FROM = (
+    "FROM messages m "
+    "JOIN rooms r ON r.token = m.room_token AND r.archived = 0 "
+    "JOIN room_members mm ON mm.room_token = m.room_token "
+    "  AND mm.user_id = :user "
+    "LEFT JOIN message_stars s ON s.message_id = m.id "
+    "  AND s.user_id = :user "
+    "LEFT JOIN tasks t ON t.id = m.task_id "
+)
+# System rows (alerts / logs / web-routed notifications) render in the
+# aggregate views and stream too — count_unread_messages counts them, so
+# Unread (and the live unread badge) must show them.
+_CROSS_ROOM_WHERE = (
+    "WHERE NOT EXISTS (SELECT 1 FROM room_dismissals d "
+    "  WHERE d.room_token = m.room_token AND d.user_id = :user) "
+    f"AND ({TRANSCRIPT_SURFACE_FILTER} OR m.role = 'system') "
+)
+
+
+def max_message_id(conn: sqlite3.Connection) -> int:
+    """The highest `messages.id` in the whole store, or 0 when empty.
+
+    The O(1) primary-key probe the room-event stream uses as a cheap gate: only
+    when it exceeds a connection's cursor does the per-user visibility join run,
+    so an idle deployment costs one trivial query per connection per tick."""
+    row = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM messages").fetchone()
+    return int(row["m"])
+
+
+def list_room_events_since(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    since_id: int,
+    limit: int = 500,
+) -> list[sqlite3.Row]:
+    """Every message visible to ``user_id`` with ``id > since_id``, oldest-first.
+
+    The tail behind the live web-chat room stream. Same visibility predicate and
+    row shape as `list_messages_across_rooms` (shared SQL fragments), but
+    cursored on the raw monotonic `messages.id` rather than the
+    `(created_at, id)` keyset — one integer covering user turns, assistant
+    turns and system messages across every room the user is a member of.
+
+    ``limit`` is the caller's resource guard; pass ``max_batch + 1`` to detect
+    truncation.
+    """
+    sql = (
+        _CROSS_ROOM_COLUMNS + _CROSS_ROOM_FROM + _CROSS_ROOM_WHERE
+        + "AND m.id > :since_id ORDER BY m.id ASC LIMIT :limit"
+    )
+    return conn.execute(sql, {
+        "user": user_id,
+        "since_id": since_id,
+        "limit": limit,
+    }).fetchall()
+
+
 def list_messages_across_rooms(
     conn: sqlite3.Connection,
     user_id: str,
@@ -3524,36 +3549,13 @@ def list_messages_across_rooms(
     """
     if view not in ("all", "unread", "starred"):
         raise ValueError(f"unknown view: {view!r}")
-    # System rows (alerts / logs / web-routed notifications) render in the
-    # aggregate views too — count_unread_messages counts them, so Unread must
-    # show them.
-    surface = f"({TRANSCRIPT_SURFACE_FILTER} OR m.role = 'system')"
-    sql = (
-        "SELECT m.role AS role, m.body AS body, m.title AS title, "
-        "  m.task_id AS task_id, m.id AS msg_id, m.created_at AS created_at, "
-        "  m.room_token AS room_token, r.name AS room_name, "
-        "  t.status AS status, t.actions_taken AS actions_taken, "
-        "  t.execution_trace AS execution_trace, t.started_at AS started_at, "
-        "  t.completed_at AS completed_at, t.model_used AS model_used, "
-        "  (s.message_id IS NOT NULL) AS starred "
-        "FROM messages m "
-        "JOIN rooms r ON r.token = m.room_token AND r.archived = 0 "
-        "JOIN room_members mm ON mm.room_token = m.room_token "
-        "  AND mm.user_id = :user "
-        "LEFT JOIN message_stars s ON s.message_id = m.id "
-        "  AND s.user_id = :user "
-        "LEFT JOIN tasks t ON t.id = m.task_id "
-    )
+    sql = _CROSS_ROOM_COLUMNS + _CROSS_ROOM_FROM
     if view == "unread":
         sql += (
             "LEFT JOIN room_read_state rs ON rs.room_token = m.room_token "
             "  AND rs.surface = 'web' AND rs.user_id = :user "
         )
-    sql += (
-        "WHERE NOT EXISTS (SELECT 1 FROM room_dismissals d "
-        "  WHERE d.room_token = m.room_token AND d.user_id = :user) "
-        f"AND {surface} "
-    )
+    sql += _CROSS_ROOM_WHERE
     if view == "unread":
         sql += (
             "AND m.role != 'user' "

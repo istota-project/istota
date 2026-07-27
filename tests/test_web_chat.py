@@ -231,36 +231,47 @@ class TestWebChatRoomsDB:
         assert db.count_recent_web_tasks(conn, "alice", 300) == 3
 
 
+def _add_system(conn, token: str, text: str, title: str | None = None) -> int:
+    """A bot-delivered room message, the way WebTransport.deliver writes one."""
+    return db.add_message(
+        conn, token, role="system", body=text, origin_surface="web", title=title,
+    )
+
+
 class TestWebChatMessagesDB:
-    """Bot-delivered (unsolicited) room messages — the `web` delivery surface."""
+    """Bot-delivered (unsolicited) room messages — the `web` delivery surface.
+
+    These live in the canonical `messages` store as role='system' rows now; the
+    legacy `web_chat_messages` accessors are gone (live-web-chat-room-stream
+    Stage 6), though the table itself survives for the delete cascade."""
 
     def test_add_and_list_oldest_first(self, conn):
         room = db.create_web_chat_room(conn, "alice", "general")
-        db.add_web_chat_message(conn, "alice", room.token, "first")
-        db.add_web_chat_message(conn, "alice", room.token, "second", title="T")
-        msgs = db.list_web_chat_messages(conn, room.token)
-        assert [m.text for m in msgs] == ["first", "second"]
+        _add_system(conn, room.token, "first")
+        _add_system(conn, room.token, "second", title="T")
+        msgs = db.list_system_messages(conn, room.token)
+        assert [m.body for m in msgs] == ["first", "second"]
         assert msgs[0].role == "system"
         assert msgs[1].title == "T"
 
     def test_add_returns_id(self, conn):
         room = db.create_web_chat_room(conn, "alice", "general")
-        mid = db.add_web_chat_message(conn, "alice", room.token, "x")
+        mid = _add_system(conn, room.token, "x")
         assert isinstance(mid, int) and mid > 0
 
     def test_scoped_by_token(self, conn):
         a = db.create_web_chat_room(conn, "alice", "one")
         b = db.create_web_chat_room(conn, "alice", "two")
-        db.add_web_chat_message(conn, "alice", a.token, "in-a")
-        assert [m.text for m in db.list_web_chat_messages(conn, a.token)] == ["in-a"]
-        assert db.list_web_chat_messages(conn, b.token) == []
+        _add_system(conn, a.token, "in-a")
+        assert [m.body for m in db.list_system_messages(conn, a.token)] == ["in-a"]
+        assert db.list_system_messages(conn, b.token) == []
 
     def test_limit_keeps_most_recent(self, conn):
         room = db.create_web_chat_room(conn, "alice", "general")
         for i in range(5):
-            db.add_web_chat_message(conn, "alice", room.token, f"m{i}")
-        msgs = db.list_web_chat_messages(conn, room.token, limit=2)
-        assert [m.text for m in msgs] == ["m3", "m4"]
+            _add_system(conn, room.token, f"m{i}")
+        msgs = db.list_system_messages(conn, room.token, limit=2)
+        assert [m.body for m in msgs] == ["m3", "m4"]
 
 
 def _seed_task_event(conn, task_id: int, seq: int = 1) -> None:
@@ -305,13 +316,13 @@ class TestWebChatRoomDelete:
     def test_delete_cascades_web_chat_messages(self, conn):
         room = db.create_web_chat_room(conn, "alice", "general")
         other = db.create_web_chat_room(conn, "alice", "keep")
-        db.add_web_chat_message(conn, "alice", room.token, "gone")
-        db.add_web_chat_message(conn, "alice", other.token, "stays")
+        _add_system(conn, room.token, "gone")
+        _add_system(conn, other.token, "stays")
 
         assert db.delete_web_chat_room(conn, room.id, "alice") is True
 
-        assert db.list_web_chat_messages(conn, room.token) == []
-        assert [m.text for m in db.list_web_chat_messages(conn, other.token)] == ["stays"]
+        assert db.list_system_messages(conn, room.token) == []
+        assert [m.body for m in db.list_system_messages(conn, other.token)] == ["stays"]
 
     def test_delete_cascades_channel_sleep_state(self, conn):
         room = db.create_web_chat_room(conn, "alice", "general")

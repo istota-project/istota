@@ -477,6 +477,11 @@ session_secret_key = "{{ istota_web_secret_key }}"
 
 [web.chat]
 talk_read_sync_interval = {{ istota_web_chat_talk_read_sync_interval }}
+room_stream_poll_interval_ms = {{ istota_web_chat_room_stream_poll_interval_ms }}
+room_stream_keepalive_seconds = {{ istota_web_chat_room_stream_keepalive_seconds }}
+room_stream_max_batch = {{ istota_web_chat_room_stream_max_batch }}
+room_stream_max_bytes = {{ istota_web_chat_room_stream_max_bytes }}
+room_stream_room_check_seconds = {{ istota_web_chat_room_stream_room_check_seconds }}
 {% endif %}
 {% if istota_google_workspace_enabled %}
 

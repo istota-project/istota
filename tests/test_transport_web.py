@@ -111,7 +111,7 @@ class TestDeliver:
         # No room exists for this token and no task → no user to attribute to.
         assert run_coro(WebTransport(config).deliver("web-ghost-000", "x")) is None
         with db.get_db(config.db_path) as conn:
-            assert db.list_web_chat_messages(conn, "web-ghost-000") == []
+            assert db.list_system_messages(conn, "web-ghost-000") == []
 
     def test_missing_room_drops_even_with_task(self, tmp_path):
         config = _config(tmp_path)
@@ -124,7 +124,7 @@ class TestDeliver:
         ))
         assert msg_id is None
         with db.get_db(config.db_path) as conn:
-            assert db.list_web_chat_messages(conn, "web-gone-000") == []
+            assert db.list_system_messages(conn, "web-gone-000") == []
 
     def test_empty_target_with_no_task_returns_none(self, tmp_path):
         config = _config(tmp_path)

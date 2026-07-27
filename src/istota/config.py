@@ -506,6 +506,34 @@ class WebChatConfig:
     rate_limit_window_seconds: int = 300
     sse_poll_interval_ms: int = 200
     client_poll_interval_ms: int = 1500
+    # Live room-event stream (GET /chat/stream). One user-scoped SSE connection
+    # per open tab carries every room the user is a member of, so a Talk turn /
+    # routed alert / background-room message reaches the browser in about a
+    # second instead of riding a 5s client poll.
+    #
+    # The server-side poll cadence is deliberately slower than
+    # `sse_poll_interval_ms`: these are message-level events, and 200ms would
+    # quintuple idle cost for no perceptible gain.
+    room_stream_poll_interval_ms: int = 1000
+    # SSE comment frame cadence. A session-lived stream can idle for hours; the
+    # deployed nginx allows 3600s but a corporate proxy / mobile network drops a
+    # silent connection far sooner, and the drop is invisible client-side until
+    # data goes missing. Also gives `request.is_disconnected()` a regular chance
+    # to observe a vanished client.
+    room_stream_keepalive_seconds: int = 20
+    # Server-side resource guard (the "gap threshold"). A far-behind cursor —
+    # `?since_id=0`, or a tab resumed from suspend — must not dump every message
+    # the user can see. `max_batch` is the outer LIMIT that stops the query
+    # pulling megabytes; `max_bytes` is an accumulate-and-truncate budget during
+    # serialization (a joined assistant row carries `execution_trace`, so row
+    # count is a poor proxy for cost). Tripping either emits a `gap` frame and
+    # the client reloads instead of replaying the backlog.
+    room_stream_max_batch: int = 500
+    room_stream_max_bytes: int = 2_000_000
+    # Cadence for the per-connection room-metadata diff (rename / model / effort
+    # / room added or removed elsewhere). Runs off the message cursor, so it
+    # costs one membership join per connection per interval. 0 disables.
+    room_stream_room_check_seconds: int = 10
     # Talk→web read-state pull cadence (seconds). At most one Nextcloud
     # conversation-list fetch per user per interval, piggybacked on the web
     # rooms poll. 0 disables the pull (web→Talk push is unaffected). Only
@@ -2107,6 +2135,24 @@ def load_config(config_path: Path | None = None) -> Config:
             ),
             talk_read_sync_interval=chat_data.get(
                 "talk_read_sync_interval", _chat_defaults.talk_read_sync_interval
+            ),
+            room_stream_poll_interval_ms=chat_data.get(
+                "room_stream_poll_interval_ms",
+                _chat_defaults.room_stream_poll_interval_ms,
+            ),
+            room_stream_keepalive_seconds=chat_data.get(
+                "room_stream_keepalive_seconds",
+                _chat_defaults.room_stream_keepalive_seconds,
+            ),
+            room_stream_max_batch=chat_data.get(
+                "room_stream_max_batch", _chat_defaults.room_stream_max_batch
+            ),
+            room_stream_max_bytes=chat_data.get(
+                "room_stream_max_bytes", _chat_defaults.room_stream_max_bytes
+            ),
+            room_stream_room_check_seconds=chat_data.get(
+                "room_stream_room_check_seconds",
+                _chat_defaults.room_stream_room_check_seconds,
             ),
         )
         _token_storage = w.get("token_storage", "ephemeral")
