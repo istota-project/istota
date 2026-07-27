@@ -40,13 +40,18 @@ function isTextEntry(el: Element | null): boolean {
 const TAP_SLOP_PX = 10;
 
 /**
- * How far down the content has to be pulled before the keyboard goes with it.
- *
- * Roughly a couple of lines of transcript: far enough that reading back over
- * what you just typed costs nothing, short enough that the deliberate
- * pull-it-away gesture never feels like it is being ignored.
+ * How far down the content has to have come before speed is worth reading.
+ * A flick's first samples are the noisiest, and nothing has visibly moved yet.
  */
-const DISMISS_DRAG_PX = 64;
+const MIN_DRAG_PX = 24;
+
+/**
+ * Downward speed that reads as putting the keyboard away rather than reading.
+ *
+ * 0.6px/ms is 600px/s — several times a comfortable reading scroll and well
+ * under a flick, so the two do not have to be told apart by how far they went.
+ */
+const FLICK_PX_PER_MS = 0.6;
 
 /** The one gesture in flight, from the finger going down to it coming off. */
 interface Gesture {
@@ -54,6 +59,9 @@ interface Gesture {
    *  whatever happens to be focused by the time the finger lifts. */
   field: HTMLElement;
   startY: number;
+  /** The previous sample, which is what a speed gets measured against. */
+  lastY: number;
+  lastAt: number;
   /** Past the tap slop — so the lift is the end of a scroll, not a tap. */
   moved: boolean;
   /** Already dismissed; the rest of the drag has nothing left to decide. */
@@ -82,18 +90,24 @@ function eventY(e: Event): number | null {
  * The scroll half is iMessage's rule rather than ours. Blurring the moment a
  * gesture started meant any nudge of the transcript closed the keyboard, and
  * wanting to see the line above what you are writing is not the same as being
- * finished with it. So a gesture is watched rather than acted on: it dismisses
- * once it has been pulled `DISMISS_DRAG_PX` *downward* from where it began —
- * the pull-the-keyboard-down motion — and a drag the other way, toward the
- * newest message and the keyboard, never dismisses at all. Distance from the
- * origin, not from the previous move, so a slow drag arriving as twenty small
- * ones still counts.
+ * finished with it. So a gesture is watched rather than acted on.
+ *
+ * What it is watched for is *speed*, not distance. Reading back through a long
+ * exchange is a slow drag that can run the whole height of the screen several
+ * times over and still not mean "I'm done typing", so any distance threshold
+ * eventually fires on someone who is only reading. A deliberate put-it-away is
+ * a flick: fast, and downward, in the pull-the-keyboard-down direction. So a
+ * slow drag keeps the keyboard however far it runs, and it goes when the drag
+ * speeds up past `FLICK_PX_PER_MS`. Upward — toward the newest message, where
+ * the keyboard already is — never dismisses at any speed.
+ *
+ * Speed is read from the step between two samples rather than across the whole
+ * gesture, so slowing down mid-drag stops counting immediately instead of being
+ * averaged against how fast it started.
  *
  * What that costs: a tap now dismisses on the lift rather than the press,
  * because until the finger moves (or doesn't) there is nothing to tell a tap
- * from the start of a scroll. Velocity is deliberately not in this — the
- * distance gate is what "a slight scroll is fine" needs, and a speed threshold
- * is a second thing to tune with no separate symptom asking for it.
+ * from the start of a scroll.
  *
  * `touchmove` is a backstop for a drag that begins somewhere pointerdown was
  * not delivered; with no origin recorded, its first move becomes the origin.
@@ -127,29 +141,40 @@ export function installKeyboardDismiss(): () => void {
     const field = dismissableField(e);
     const y = eventY(e);
     if (!field || y === null) return;
-    gesture = { field, startY: y, moved: false, spent: false };
+    gesture = { field, startY: y, lastY: y, lastAt: Date.now(), moved: false, spent: false };
   };
 
   const onMove = (e: Event) => {
     const y = eventY(e);
     if (y === null) return;
+    const now = Date.now();
 
     if (!gesture) {
       // A drag whose pointerdown never arrived. Take this move as the origin;
       // the next one can act on it.
       const field = dismissableField(e);
       if (!field) return;
-      gesture = { field, startY: y, moved: true, spent: false };
+      gesture = { field, startY: y, lastY: y, lastAt: now, moved: true, spent: false };
       return;
     }
     if (gesture.spent) return;
 
-    const travelled = y - gesture.startY;
-    if (Math.abs(travelled) > TAP_SLOP_PX) gesture.moved = true;
-    if (travelled >= DISMISS_DRAG_PX) {
-      gesture.spent = true;
-      gesture.field.blur();
-    }
+    if (Math.abs(y - gesture.startY) > TAP_SLOP_PX) gesture.moved = true;
+
+    const stepMs = now - gesture.lastAt;
+    // Two samples in the same millisecond are not a speed. Leave the baseline
+    // where it is so the next one measures across both of them.
+    if (stepMs <= 0) return;
+    const stepY = y - gesture.lastY;
+    gesture.lastY = y;
+    gesture.lastAt = now;
+
+    if (stepY <= 0) return; // upward, or standing still
+    if (y - gesture.startY < MIN_DRAG_PX) return;
+    if (stepY / stepMs < FLICK_PX_PER_MS) return;
+
+    gesture.spent = true;
+    gesture.field.blur();
   };
 
   const onUp = () => {

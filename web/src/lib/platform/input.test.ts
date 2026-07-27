@@ -54,8 +54,20 @@ function touchMove(el: Element, y: number): void {
   el.dispatchEvent(e);
 }
 
+/** A clock the drag helpers advance, so a gesture's speed is what the test
+ *  says it is rather than however fast vitest happened to dispatch. */
+let clock = 0;
+
+/** Move to `y`, taking `ms` to get there. Speed is (distance / ms) px/ms. */
+function drag(el: Element, y: number, ms: number): void {
+  clock += ms;
+  pointerMove(el, y);
+}
+
 beforeEach(() => {
   setPointer('coarse');
+  clock = 1_000;
+  vi.spyOn(Date, 'now').mockImplementation(() => clock);
 });
 
 afterEach(() => {
@@ -176,75 +188,104 @@ describe('installKeyboardDismiss scroll gating', () => {
     field.focus();
 
     pointerDown(pane, 100);
-    pointerMove(pane, 112);
-    pointerMove(pane, 124);
+    drag(pane, 112, 60);
+    drag(pane, 124, 60);
 
     expect(document.activeElement).toBe(field);
   });
 
-  it('dismisses once a downward drag passes the threshold', () => {
-    // The deliberate gesture — pulling the keyboard down with the content.
+  it('keeps the keyboard up through a slow drag however far it runs', () => {
+    // Reading back through a long exchange is a slow drag that can cover the
+    // screen several times over and still not mean the keyboard is finished
+    // with. This is what a distance threshold got wrong.
     const { field, pane } = layout();
     stop = installKeyboardDismiss();
     field.focus();
 
     pointerDown(pane, 100);
-    pointerMove(pane, 140);
-    pointerMove(pane, 200);
-
-    expect(document.activeElement).not.toBe(field);
-  });
-
-  it('keeps the keyboard up for a drag the other way', () => {
-    // Dragging up runs the transcript toward the newest message, which is where
-    // the keyboard already is. Only the downward pull dismisses.
-    const { field, pane } = layout();
-    stop = installKeyboardDismiss();
-    field.focus();
-
-    pointerDown(pane, 300);
-    pointerMove(pane, 200);
-    pointerMove(pane, 100);
-
+    for (let i = 1; i <= 40; i++) drag(pane, 100 + i * 15, 60); // 0.25px/ms, 600px
     expect(document.activeElement).toBe(field);
   });
 
-  it('measures the drag from where it started, not the last move', () => {
-    // A slow drag arrives as many small moves. Summing the gaps rather than
-    // comparing against the origin would never reach the threshold.
+  it('dismisses when the drag speeds up', () => {
+    // The deliberate gesture — flicking the keyboard down with the content.
     const { field, pane } = layout();
     stop = installKeyboardDismiss();
     field.focus();
 
     pointerDown(pane, 100);
-    for (let y = 105; y <= 180; y += 5) pointerMove(pane, y);
+    drag(pane, 130, 60); // reading speed, past the travel floor
+    expect(document.activeElement).toBe(field);
 
+    drag(pane, 210, 16); // 5px/ms
     expect(document.activeElement).not.toBe(field);
+  });
+
+  it('keeps the keyboard up for a fast drag the other way', () => {
+    // Upward runs the transcript toward the newest message, which is where the
+    // keyboard already is. No speed makes that a dismissal.
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    pointerDown(pane, 400);
+    drag(pane, 250, 16);
+    drag(pane, 100, 16);
+
+    expect(document.activeElement).toBe(field);
+  });
+
+  it('ignores a fast twitch that has not gone anywhere yet', () => {
+    // The first samples of any gesture are the noisiest, and a flick that has
+    // moved 15px has not yet visibly moved the transcript.
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    pointerDown(pane, 100);
+    drag(pane, 115, 4); // 3.75px/ms, but only 15px of travel
+
+    expect(document.activeElement).toBe(field);
+  });
+
+  it('stops counting speed as soon as the drag slows down', () => {
+    // Speed is read per step, not averaged over the gesture — otherwise a fast
+    // start would keep dismissing long after the finger had settled.
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    pointerDown(pane, 100);
+    drag(pane, 118, 4); // fast, but under the travel floor
+    drag(pane, 140, 90); // slowed to 0.24px/ms
+    drag(pane, 160, 90);
+
+    expect(document.activeElement).toBe(field);
   });
 
   it('does not dismiss on the lift that ends a scroll', () => {
-    // A scroll that stayed under the threshold has already been judged. The
-    // finger coming off it is not a tap and must not dismiss on the way out.
+    // A scroll that never sped up has already been judged. The finger coming
+    // off it is not a tap and must not dismiss on the way out.
     const { field, pane } = layout();
     stop = installKeyboardDismiss();
     field.focus();
 
     pointerDown(pane, 100);
-    pointerMove(pane, 130);
+    drag(pane, 130, 60);
     pointerUp(pane, 130);
 
     expect(document.activeElement).toBe(field);
   });
 
-  it('dismisses only once across a long drag', () => {
+  it('dismisses only once across a long flick', () => {
     const { field, pane } = layout();
     stop = installKeyboardDismiss();
     field.focus();
     const blur = vi.spyOn(field, 'blur');
 
     pointerDown(pane, 100);
-    pointerMove(pane, 200);
-    pointerMove(pane, 300);
+    drag(pane, 200, 16);
+    drag(pane, 300, 16);
     pointerUp(pane, 300);
 
     expect(blur).toHaveBeenCalledTimes(1);
@@ -257,10 +298,13 @@ describe('installKeyboardDismiss scroll gating', () => {
     stop = installKeyboardDismiss();
     field.focus();
 
+    clock += 16;
     touchMove(pane, 100);
-    touchMove(pane, 118);
+    clock += 60;
+    touchMove(pane, 130);
     expect(document.activeElement).toBe(field);
 
+    clock += 16;
     touchMove(pane, 220);
     expect(document.activeElement).not.toBe(field);
   });
