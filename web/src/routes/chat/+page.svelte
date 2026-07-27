@@ -583,9 +583,19 @@
              containing block's *content* box — as padding, the reserve would
              park the fade that far above the scrollport's bottom edge. Either
              way it is inside the scroller, so scrollHeight accounts for it and
-             the stick-to-bottom pin stays a plain `scrollTop = scrollHeight`. -->
-        <div class="composer-reserve" aria-hidden="true"></div>
-        {#if !inViewMode}
+             the stick-to-bottom pin stays a plain `scrollTop = scrollHeight`.
+
+             Only with messages present: with none, there is nothing to keep
+             clear of the pill, and the reserve made the scroller taller than
+             its own viewport, so the bottom-pin scrolled the empty-state notice
+             up by the reserve's height — it read as sitting above centre for
+             exactly the composer's worth of space. Without it the empty
+             scroller has no scroll range and `height: 100%` centres in the
+             scrollport. -->
+        {#if $loaded && $messages.length > 0}
+          <div class="composer-reserve" aria-hidden="true"></div>
+        {/if}
+        {#if !inViewMode && $loaded && $messages.length > 0}
           <!-- Fade layer, sized to the composer band it sits behind: content
                scrolling into that band dissolves into the pane fill instead of
                running under the pill at full strength. It is a child of the
