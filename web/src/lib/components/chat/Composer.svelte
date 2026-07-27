@@ -253,6 +253,25 @@
     else submit();
   }
 
+  // Tapping a button with the soft keyboard up used to cost two taps, of which
+  // the first only closed the keyboard. iOS takes focus off the field when a
+  // button takes the tap, and the keyboard leaving reflows the composer down
+  // through the space it was standing in — all before the synthesized click is
+  // hit-tested, which then lands where the button no longer is.
+  //
+  // Suppressing the default focus shift keeps the field focused through the
+  // click, so the button gets its activation and `submit()` drops the keyboard
+  // itself, once the message has gone.
+  //
+  // On mousedown rather than pointerdown: preventing the compatibility mouse
+  // event is what suppresses the focus change, and it leaves the click intact,
+  // which cancelling the pointer event is not guaranteed to do. The textarea is
+  // deliberately not covered — its own mousedown default is what places the
+  // caret.
+  function keepFocus(e: MouseEvent) {
+    e.preventDefault();
+  }
+
   function onInput() {
     autoGrow();
     syncAc();
@@ -266,15 +285,25 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    // The engine consumes Arrow/Tab/Enter/Escape only while the popover is
-    // open; when closed it returns false and Enter-to-send runs as before.
-    if (ac.onKeydown(e)) {
-      e.preventDefault();
-      return;
-    }
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // Return writes a newline; sending is Cmd/Ctrl+Enter or the button. Enter
+    // used to submit, which made a paragraph break impossible to type — every
+    // one of them sent the message instead. Shift+Enter is left alone rather
+    // than repurposed as the send chord: it means newline everywhere else, and
+    // this field is not the place to teach someone otherwise.
+    //
+    // Ahead of the autocomplete, which takes a bare Enter to accept a
+    // completion. That is the right owner of the unmodified key, but the chord
+    // is unambiguous — with the popover open it still means send, not "accept
+    // the row and stay put".
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       submit();
+      return;
+    }
+    // The engine consumes Arrow/Tab/Enter/Escape only while the popover is
+    // open; when closed it returns false and the key does what it says.
+    if (ac.onKeydown(e)) {
+      e.preventDefault();
     }
   }
 
@@ -339,6 +368,7 @@
     <button
       bind:this={plusEl}
       class="icon-btn plus"
+      onmousedown={keepFocus}
       onclick={() => fileInput?.click()}
       type="button"
       aria-label="Attach file"
@@ -368,6 +398,10 @@
           onhover={(i) => ac.setActive(i)}
         />
       {/if}
+      <!-- `enterkeyhint` is `enter`, not `send`: the return key inserts a
+           newline, and on a phone the send button is the send affordance —
+           there is no modifier key to press with Enter there. Labelling it
+           "send" would promise the opposite of what it does. -->
       <textarea
         bind:this={textarea}
         bind:value={text}
@@ -380,7 +414,7 @@
         onblur={onBlur}
         {placeholder}
         rows="1"
-        enterkeyhint="send"
+        enterkeyhint="enter"
         aria-label="Message"
         role="combobox"
         aria-expanded={ac.open}
@@ -405,6 +439,7 @@
       {#if recorder.recording}
         <button
           class="icon-btn"
+          onmousedown={keepFocus}
           onclick={() => recorder.cancel()}
           type="button"
           aria-label="Discard recording"
@@ -414,6 +449,7 @@
         </button>
         <button
           class="icon-btn send"
+          onmousedown={keepFocus}
           onclick={() => recorder.stop()}
           type="button"
           aria-label="Finish recording"
@@ -425,6 +461,7 @@
         {#if recorder.supported}
           <button
             class="icon-btn"
+            onmousedown={keepFocus}
             onclick={() => recorder.start()}
             type="button"
             disabled={recorder.starting}
@@ -445,6 +482,7 @@
         <button
           class="icon-btn send"
           class:stop={showStop}
+          onmousedown={keepFocus}
           onclick={activatePrimary}
           type="button"
           disabled={showStop ? false : !canSend}

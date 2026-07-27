@@ -143,11 +143,52 @@ describe('Composer send control', () => {
     expect(textarea.value).toBe('');
   });
 
-  it('asks for a send key on a soft keyboard', () => {
-    // Enter already sends; without this the return key is labelled as a
-    // newline, which is the opposite of what it does.
+  it('leaves the return key labelled as a return key', () => {
+    // It inserts a newline, so it must not be labelled "send" — the label was
+    // right back when Enter submitted, and is now the opposite of the truth.
     const { textarea } = mount();
-    expect(textarea.getAttribute('enterkeyhint')).toBe('send');
+    expect(textarea.getAttribute('enterkeyhint')).not.toBe('send');
+  });
+
+  it('inserts a newline on a bare Enter instead of sending', async () => {
+    // A paragraph break used to submit the message, so anything longer than one
+    // line could not be typed straight through.
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend });
+    await type(textarea, 'first line');
+
+    const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(onSend).not.toHaveBeenCalled();
+    // Left to the browser — the default action is what inserts the newline.
+    expect(notPrevented).toBe(true);
+  });
+
+  it('leaves Shift+Enter a newline as well', async () => {
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend });
+    await type(textarea, 'first line');
+
+    const notPrevented = await fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(true);
+  });
+
+  it('sends on Cmd+Enter', async () => {
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend });
+    await type(textarea, 'hi');
+    await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+    expect(onSend).toHaveBeenCalledWith('hi', []);
+  });
+
+  it('sends on Ctrl+Enter', async () => {
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend });
+    await type(textarea, 'hi');
+    await fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+    expect(onSend).toHaveBeenCalledWith('hi', []);
   });
 
   it('drops the keyboard after a send on a touch device', async () => {
@@ -157,7 +198,7 @@ describe('Composer send control', () => {
     const { textarea } = mount();
     textarea.focus();
     await type(textarea, 'hi');
-    await fireEvent.keyDown(textarea, { key: 'Enter' });
+    await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
     expect(document.activeElement).not.toBe(textarea);
   });
 
@@ -170,6 +211,54 @@ describe('Composer send control', () => {
     expect(document.activeElement).not.toBe(textarea);
   });
 
+  it('holds the keyboard up while a tap on send is still resolving', async () => {
+    // The two-tap send. iOS takes focus off the field when a button takes the
+    // tap, and the keyboard leaving reflows the composer down out from under
+    // the finger — so the click that follows is hit-tested against the new
+    // layout and lands on nothing. The first tap dismissed the keyboard and
+    // sent nothing; the send needed a second one. Suppressing the default
+    // focus shift keeps the field focused through the click, and submit()
+    // drops the keyboard itself once the message has actually gone.
+    softKeyboard(true);
+    const { container, textarea } = mount();
+    textarea.focus();
+    await type(textarea, 'hi');
+
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    btn(container, 'Send')!.dispatchEvent(down);
+
+    expect(down.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('holds it up for the other composer tools too', async () => {
+    // Same reflow, and the attach sheet or the mic would open against a moving
+    // target for the same reason.
+    enableMic();
+    softKeyboard(true);
+    const { container, textarea } = mount();
+    textarea.focus();
+
+    for (const label of ['Attach file', 'Record voice message']) {
+      const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+      btn(container, label)!.dispatchEvent(down);
+      expect(down.defaultPrevented).toBe(true);
+    }
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('leaves a tap on the field itself alone', async () => {
+    // Only the buttons suppress the focus shift. The textarea needs its own
+    // mousedown default — that is what places the caret.
+    softKeyboard(true);
+    const { textarea } = mount();
+
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    textarea.dispatchEvent(down);
+
+    expect(down.defaultPrevented).toBe(false);
+  });
+
   it('keeps focus where there is a hardware keyboard', async () => {
     // On a desktop the next message is typed straight away, and re-focusing is
     // a mouse trip the user did not ask for.
@@ -177,7 +266,7 @@ describe('Composer send control', () => {
     const { textarea } = mount();
     textarea.focus();
     await type(textarea, 'hi');
-    await fireEvent.keyDown(textarea, { key: 'Enter' });
+    await fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
     expect(document.activeElement).toBe(textarea);
   });
 

@@ -93,25 +93,37 @@ describe('Composer autocomplete', () => {
     expect(textarea.value).toBe('!models ');
   });
 
-  it('Escape closes the popover; the next Enter sends', async () => {
+  it('Escape closes the popover; the send chord then sends', async () => {
     const { container, textarea, onSend } = mount();
     await type(textarea, '!mo');
     expect(container.querySelector('[role="listbox"]')).toBeTruthy();
     key(textarea, 'Escape');
     await tick();
     expect(container.querySelector('[role="listbox"]')).toBeNull();
-    key(textarea, 'Enter');
+    key(textarea, 'Enter', { metaKey: true });
     await tick();
     expect(onSend).toHaveBeenCalledTimes(1);
     expect(onSend).toHaveBeenCalledWith('!mo', []);
   });
 
-  it('Enter sends normally when the popover is closed', async () => {
+  it('the send chord sends normally when the popover is closed', async () => {
     const { textarea, onSend } = mount();
     await type(textarea, 'hello there');
-    key(textarea, 'Enter');
+    key(textarea, 'Enter', { metaKey: true });
     await tick();
     expect(onSend).toHaveBeenCalledWith('hello there', []);
+  });
+
+  it('the send chord sends rather than accepting the highlighted row', async () => {
+    // The popover takes a bare Enter to accept a completion, which is what that
+    // key is for now. A modifier chord is not ambiguous — it means send, and
+    // "close the popover first" would be a rule with nothing to show it.
+    const { textarea, onSend } = mount();
+    await type(textarea, '!mo');
+    key(textarea, 'Enter', { metaKey: true });
+    await tick();
+    expect(textarea.value).not.toBe('!models ');
+    expect(onSend).toHaveBeenCalledWith('!mo', []);
   });
 
   it('clicking a row accepts it', async () => {
