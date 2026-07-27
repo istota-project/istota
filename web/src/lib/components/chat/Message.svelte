@@ -374,7 +374,10 @@
 
   /* Star toggle: hidden at rest, revealed on row hover (or tap-activation on
 	   touch) / keyboard focus; a starred message keeps it visible (filled, gold)
-	   like the feeds cards. The reveal is instant — see the transition below. */
+	   like the feeds cards.
+
+	   The fade is a pointer-device affordance only — see the `.touch` rule at the
+	   end of this block for why it is switched off under a finger. */
   .star-btn {
     display: inline-flex;
     align-items: center;
@@ -393,14 +396,9 @@
 		   unaffected — pointer-events does not gate Tab — and :focus-visible below
 		   hands interactivity back. */
     pointer-events: none;
-    /* Colour fades, the reveal does not. An opacity transition is what asks the
-		   compositor to promote this button to its own layer, and a promoted layer
-		   whose opacity returns to 0 without a repaint keeps showing what it last
-		   painted — the star stranded on every tapped row while the plain text span
-		   beside it, never promoted, cleared correctly. The metadata keeps its fade
-		   because a span is not the shape that gets promoted; the star trades a
-		   150ms fade for not being able to strand. */
-    transition: color var(--transition-fast);
+    transition:
+      opacity var(--transition-fast),
+      color var(--transition-fast);
   }
   @media (hover: hover) {
     .msg:not(.touch):hover .star-btn,
@@ -422,6 +420,28 @@
   }
   .star-btn.starred {
     color: var(--accent-amber);
+  }
+
+  /* Under a finger the reveal is a swap, not a fade — for both affordances, so
+	   there is one rule rather than a fade here and an on/off there.
+
+	   Not cosmetic. An opacity transition is what asks the compositor to promote
+	   an element to its own layer, and a promoted layer whose opacity returns to
+	   0 without being repainted keeps showing what it last painted: the star
+	   stranded on every row a thumb had tapped, while the plain text span beside
+	   it — never promoted — cleared correctly. That asymmetry is what identified
+	   the mechanism. The markup gate above does not on its own avoid this: the
+	   node is inserted and the row's .active class lands in an order that leaves
+	   a style change to animate, so a transition really does run on the touch
+	   path (measured: one frame after a tap, opacity 0 with a transition in
+	   flight). Keyed on .touch and not a width breakpoint, because the axis is
+	   what the user's hand is doing — an iPad is wide and touch, a narrow
+	   desktop window is neither. */
+  .msg.touch .star-btn,
+  .cmd-row.touch .star-btn,
+  .msg.touch .meta-footer,
+  .msg.touch .hover-time {
+    transition: none;
   }
 
   /* Room label chip (aggregate views): a small clickable room tag in the
