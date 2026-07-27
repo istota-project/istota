@@ -27,8 +27,31 @@ function layout(): { field: HTMLTextAreaElement; send: HTMLElement; pane: HTMLEl
   };
 }
 
-function pointerDown(el: Element): void {
-  el.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+/** A gesture is a down, some number of moves, and a lift. `y` is the only axis
+ *  that matters — the dismiss is a vertical drag. */
+function pointerDown(el: Element, y = 100): void {
+  el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientY: y }));
+}
+
+function pointerMove(el: Element, y: number): void {
+  el.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientY: y }));
+}
+
+function pointerUp(el: Element, y = 100): void {
+  el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientY: y }));
+}
+
+/** Down and straight back up, with nothing in between. */
+function tap(el: Element, y = 100): void {
+  pointerDown(el, y);
+  pointerUp(el, y);
+}
+
+/** The touch backstop, which carries its coordinate in `touches` instead. */
+function touchMove(el: Element, y: number): void {
+  const e = new Event('touchmove', { bubbles: true });
+  Object.defineProperty(e, 'touches', { value: [{ clientY: y }] });
+  el.dispatchEvent(e);
 }
 
 beforeEach(() => {
@@ -57,7 +80,7 @@ describe('installKeyboardDismiss', () => {
     stop = installKeyboardDismiss();
     field.focus();
 
-    pointerDown(pane);
+    tap(pane);
 
     expect(document.activeElement).not.toBe(field);
   });
@@ -70,7 +93,7 @@ describe('installKeyboardDismiss', () => {
     field.focus();
     const blur = vi.spyOn(field, 'blur');
 
-    pointerDown(pane);
+    tap(pane);
 
     expect(blur).toHaveBeenCalledTimes(1);
   });
@@ -82,7 +105,7 @@ describe('installKeyboardDismiss', () => {
     stop = installKeyboardDismiss();
     field.focus();
 
-    pointerDown(send);
+    tap(send);
 
     expect(document.activeElement).toBe(field);
   });
@@ -92,7 +115,7 @@ describe('installKeyboardDismiss', () => {
     stop = installKeyboardDismiss();
     field.focus();
 
-    pointerDown(field);
+    tap(field);
 
     expect(document.activeElement).toBe(field);
   });
@@ -106,19 +129,9 @@ describe('installKeyboardDismiss', () => {
     stop = installKeyboardDismiss();
     field.focus();
 
-    pointerDown(other);
+    tap(other);
 
     expect(document.activeElement).toBe(field);
-  });
-
-  it('dismisses when a scroll gesture starts over the transcript', () => {
-    const { field, pane } = layout();
-    stop = installKeyboardDismiss();
-    field.focus();
-
-    pane.dispatchEvent(new Event('touchmove', { bubbles: true }));
-
-    expect(document.activeElement).not.toBe(field);
   });
 
   it('does nothing when no text entry is focused', () => {
@@ -126,7 +139,7 @@ describe('installKeyboardDismiss', () => {
     stop = installKeyboardDismiss();
     const blur = vi.spyOn(HTMLElement.prototype, 'blur');
 
-    pointerDown(pane);
+    tap(pane);
 
     expect(blur).not.toHaveBeenCalled();
   });
@@ -137,7 +150,7 @@ describe('installKeyboardDismiss', () => {
     stop = installKeyboardDismiss();
     field.focus();
 
-    pointerDown(pane);
+    tap(pane);
 
     expect(document.activeElement).toBe(field);
   });
@@ -148,7 +161,118 @@ describe('installKeyboardDismiss', () => {
     field.focus();
     release();
 
-    pointerDown(pane);
+    tap(pane);
+
+    expect(document.activeElement).toBe(field);
+  });
+});
+
+describe('installKeyboardDismiss scroll gating', () => {
+  it('keeps the keyboard up through a small scroll', () => {
+    // The whole point: nudging the transcript to re-read what you just typed is
+    // not "I'm done typing", and it used to cost the keyboard every time.
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    pointerDown(pane, 100);
+    pointerMove(pane, 112);
+    pointerMove(pane, 124);
+
+    expect(document.activeElement).toBe(field);
+  });
+
+  it('dismisses once a downward drag passes the threshold', () => {
+    // The deliberate gesture — pulling the keyboard down with the content.
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    pointerDown(pane, 100);
+    pointerMove(pane, 140);
+    pointerMove(pane, 200);
+
+    expect(document.activeElement).not.toBe(field);
+  });
+
+  it('keeps the keyboard up for a drag the other way', () => {
+    // Dragging up runs the transcript toward the newest message, which is where
+    // the keyboard already is. Only the downward pull dismisses.
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    pointerDown(pane, 300);
+    pointerMove(pane, 200);
+    pointerMove(pane, 100);
+
+    expect(document.activeElement).toBe(field);
+  });
+
+  it('measures the drag from where it started, not the last move', () => {
+    // A slow drag arrives as many small moves. Summing the gaps rather than
+    // comparing against the origin would never reach the threshold.
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    pointerDown(pane, 100);
+    for (let y = 105; y <= 180; y += 5) pointerMove(pane, y);
+
+    expect(document.activeElement).not.toBe(field);
+  });
+
+  it('does not dismiss on the lift that ends a scroll', () => {
+    // A scroll that stayed under the threshold has already been judged. The
+    // finger coming off it is not a tap and must not dismiss on the way out.
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    pointerDown(pane, 100);
+    pointerMove(pane, 130);
+    pointerUp(pane, 130);
+
+    expect(document.activeElement).toBe(field);
+  });
+
+  it('dismisses only once across a long drag', () => {
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+    const blur = vi.spyOn(field, 'blur');
+
+    pointerDown(pane, 100);
+    pointerMove(pane, 200);
+    pointerMove(pane, 300);
+    pointerUp(pane, 300);
+
+    expect(blur).toHaveBeenCalledTimes(1);
+  });
+
+  it('gates a touchmove drag the same way when no pointerdown arrived', () => {
+    // The backstop for a drag that begins where pointerdown was not delivered.
+    // The first move is the origin it has to measure from.
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    touchMove(pane, 100);
+    touchMove(pane, 118);
+    expect(document.activeElement).toBe(field);
+
+    touchMove(pane, 220);
+    expect(document.activeElement).not.toBe(field);
+  });
+
+  it('forgets a gesture that was cancelled', () => {
+    const { field, pane } = layout();
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    pointerDown(pane, 100);
+    pane.dispatchEvent(new MouseEvent('pointercancel', { bubbles: true, clientY: 100 }));
+    pointerUp(pane, 100);
 
     expect(document.activeElement).toBe(field);
   });
