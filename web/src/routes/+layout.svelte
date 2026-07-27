@@ -245,7 +245,8 @@
   </nav>
   <main
     class="app-content"
-    class:app-content-fill={isActive('/chat') ||
+    class:app-content-fill={isActive('/') ||
+      isActive('/chat') ||
       isActive('/location') ||
       isActive('/feeds') ||
       isActive('/money') ||

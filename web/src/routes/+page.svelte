@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
   import { HeartPulse, MapPin, MessageSquare, Newspaper, Rss, Wallet } from 'lucide-svelte';
   import { buildGreeting, noteSegments, type Greeting } from '$lib/greeting';
+  import { AppShell, ShellHeader } from '$lib/components/ui';
 
   let user: User | null = $state(null);
   let welcome: Greeting | null = $state(null);
@@ -46,72 +47,92 @@
   }
 </script>
 
-<div class="dashboard">
-  {#if user}
-    <!-- One grid, so the tiles flow around the welcome card: it takes the first
+<AppShell>
+  {#snippet header()}
+    <ShellHeader title="Dashboard" />
+  {/snippet}
+
+  <div class="dashboard">
+    {#if user}
+      <!-- One grid, so the tiles flow around the welcome card: it takes the first
          three tracks and whatever fits beside it fills out the row. -->
-    <div class="feature-grid card-grid" style="--card-min: 200px; --card-gap: 1rem;">
-      {#if welcome}
-        <section class="welcome-card">
-          <img
-            class="welcome-sigil"
-            src="{base}/octopus-sigil.webp"
-            alt=""
-            width="19"
-            height="20"
-          />
-          <div class="welcome-text">
-            <p class="welcome-greeting">{welcome.greeting}</p>
-            <!-- Rendered segment by segment rather than as one string, so the
+      <div class="feature-grid card-grid" style="--card-min: 200px; --card-gap: 1rem;">
+        {#if welcome}
+          <section class="welcome-card">
+            <img
+              class="welcome-sigil"
+              src="{base}/octopus-sigil.webp"
+              alt=""
+              width="19"
+              height="20"
+            />
+            <div class="welcome-text">
+              <p class="welcome-greeting">{welcome.greeting}</p>
+              <!-- Rendered segment by segment rather than as one string, so the
                  address is a real mailto link. Kept on one line (and off
                  prettier) because a break between the tags would put a space
                  either side of the link, inside a sentence. -->
-            <!-- prettier-ignore -->
-            <p class="welcome-note">{#each noteSegments(welcome.note, user.contact?.email) as segment}{#if segment.mailto}<a href="mailto:{segment.mailto}">{segment.text}</a>{:else}{segment.text}{/if}{/each}</p>
-          </div>
-        </section>
-      {/if}
-      {#if user.features.chat}
-        <a href="{base}/chat" class="feature-card">
-          <div class="feature-title"><MessageSquare aria-hidden="true" />Chat</div>
-          <div class="feature-desc">Talk to Istota in the app</div>
-        </a>
-      {/if}
-      {#if user.features.briefings}
-        <a href="{base}/briefings" class="feature-card">
-          <div class="feature-title"><Newspaper aria-hidden="true" />Briefings</div>
-          <div class="feature-desc">Your generated briefings and archive</div>
-        </a>
-      {/if}
-      {#if user.features.feeds}
-        <a href="{base}/feeds" class="feature-card">
-          <div class="feature-title"><Rss aria-hidden="true" />Feeds</div>
-          <div class="feature-desc">RSS feed reader</div>
-        </a>
-      {/if}
-      {#if user.features.location}
-        <a href="{base}/location" class="feature-card">
-          <div class="feature-title"><MapPin aria-hidden="true" />Location</div>
-          <div class="feature-desc">GPS tracking and map</div>
-        </a>
-      {/if}
-      {#if user.features.money}
-        <a href="{base}/money" class="feature-card">
-          <div class="feature-title"><Wallet aria-hidden="true" />Money</div>
-          <div class="feature-desc">Accounts, transactions, and reports</div>
-        </a>
-      {/if}
-      {#if user.features.health}
-        <a href="{base}/health" class="feature-card">
-          <div class="feature-title"><HeartPulse aria-hidden="true" />Health</div>
-          <div class="feature-desc">Body stats, bloodwork, and biomarker trends</div>
-        </a>
-      {/if}
-    </div>
-  {/if}
-</div>
+              <!-- prettier-ignore -->
+              <p class="welcome-note">{#each noteSegments(welcome.note, user.contact?.email) as segment}{#if segment.mailto}<a href="mailto:{segment.mailto}">{segment.text}</a>{:else}{segment.text}{/if}{/each}</p>
+            </div>
+          </section>
+        {/if}
+        {#if user.features.chat}
+          <a href="{base}/chat" class="feature-card">
+            <div class="feature-title"><MessageSquare aria-hidden="true" />Chat</div>
+            <div class="feature-desc">Talk to Istota in the app</div>
+          </a>
+        {/if}
+        {#if user.features.briefings}
+          <a href="{base}/briefings" class="feature-card">
+            <div class="feature-title"><Newspaper aria-hidden="true" />Briefings</div>
+            <div class="feature-desc">Your generated briefings and archive</div>
+          </a>
+        {/if}
+        {#if user.features.feeds}
+          <a href="{base}/feeds" class="feature-card">
+            <div class="feature-title"><Rss aria-hidden="true" />Feeds</div>
+            <div class="feature-desc">RSS feed reader</div>
+          </a>
+        {/if}
+        {#if user.features.location}
+          <a href="{base}/location" class="feature-card">
+            <div class="feature-title"><MapPin aria-hidden="true" />Location</div>
+            <div class="feature-desc">GPS tracking and map</div>
+          </a>
+        {/if}
+        {#if user.features.money}
+          <a href="{base}/money" class="feature-card">
+            <div class="feature-title"><Wallet aria-hidden="true" />Money</div>
+            <div class="feature-desc">Accounts, transactions, and reports</div>
+          </a>
+        {/if}
+        {#if user.features.health}
+          <a href="{base}/health" class="feature-card">
+            <div class="feature-title"><HeartPulse aria-hidden="true" />Health</div>
+            <div class="feature-desc">Body stats, bloodwork, and biomarker trends</div>
+          </a>
+        {/if}
+      </div>
+    {/if}
+  </div>
+</AppShell>
 
 <style>
+  /* The shell is edge to edge, so the page carries the padding `.app-content`
+	   used to give it. The horizontal safe-area insets stay on the shell around
+	   this, and the bottom one on its scroll pane, so plain values are right
+	   here. */
+  .dashboard {
+    padding: 1.5rem;
+  }
+
+  @media (max-width: 640px) {
+    .dashboard {
+      padding: 1rem 0.75rem;
+    }
+  }
+
   .welcome-card {
     grid-column: 1 / -1;
     display: flex;
