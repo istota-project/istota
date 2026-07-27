@@ -102,6 +102,17 @@
     background: #ffffff;
   }
 
+  /* Phone: the desktop 2rem inline gutter costs a fifth of a narrow screen's
+	   width, and it left the briefing text inset well past every other landmark
+	   on the page. Drop to the 0.75rem the app bar and ShellHeader use, so the
+	   body copy lines up with the titles above it. */
+  @media (max-width: 768px) {
+    .reader {
+      padding: 1rem 0.75rem;
+      padding-bottom: max(1rem, var(--safe-bottom));
+    }
+  }
+
   .briefing {
     max-width: 46rem;
   }
