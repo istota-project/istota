@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { ChevronLeft, ChevronRight, Star, X, ExternalLink } from 'lucide-svelte';
+  import { ChevronLeft, ChevronRight, FileText, Play, Star, X, ExternalLink } from 'lucide-svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
+  import { fileKind, playerUrl, providerLabel } from '$lib/feeds/embed';
 
   let {
     entries = [],
@@ -45,6 +46,32 @@
     current !== null && (current < entries.length - 1 || (hasMore && !!onNeedMore)),
   );
   const permalink = $derived(entry ? entry.url || entry.feed.site_url || '' : '');
+  const hasImages = $derived(!!entry && entry.images.length > 0);
+
+  // Same media reasoning as FeedCard, one click further in: an Are.na Embed
+  // block's hero plays rather than zooming, and an Attachment's cover opens
+  // the file rather than zooming page 1 as a picture. `playerUrl` is an
+  // allowlist and returns null for anything it can't vouch for, in which case
+  // this degrades to the ordinary lightbox hero and the body's "Watch on …"
+  // link is the way out. Nothing is guessed into an iframe src.
+  const player = $derived(entry ? playerUrl(entry.embed_url) : null);
+  const providerName = $derived(entry ? providerLabel(entry.embed_url) : '');
+  const playLabel = $derived(`Play video${providerName ? ` on ${providerName}` : ''}`);
+  const documentUrl = $derived(!player && entry?.file_url ? entry.file_url : '');
+  const documentKind = $derived(fileKind(documentUrl));
+
+  // Keyed on the entry rather than a bare boolean, so paging to the next post
+  // can't leave a previous video's frame mounted over it.
+  let playingId = $state<number | null>(null);
+  const playing = $derived(!!entry && playingId === entry.id);
+  const playerSrc = $derived(player ? `${player}?autoplay=1` : '');
+
+  // Autoplay only ever follows an explicit click, never landing on the entry.
+  function play(e: MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    if (entry) playingId = entry.id;
+  }
 
   // Mark read + scroll to top whenever we land on an entry.
   $effect(() => {
@@ -192,7 +219,55 @@
           </h1>
         {/if}
 
-        {#if entry.images.length > 0}
+        {#if player}
+          <div class="reader-hero">
+            {#if playing}
+              <div class="reader-player">
+                <iframe
+                  src={playerSrc}
+                  title={entry.title || 'Embedded video'}
+                  allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+                  sandbox="allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox"
+                  referrerpolicy="strict-origin-when-cross-origin"
+                  loading="lazy"
+                  allowfullscreen
+                ></iframe>
+              </div>
+            {:else}
+              <button
+                type="button"
+                class="reader-video"
+                class:no-poster={!hasImages}
+                onclick={play}
+                aria-label={playLabel}
+              >
+                {#if hasImages}
+                  <img src={entry.images[0]} alt={entry.title || ''} loading="lazy" />
+                {/if}
+                <span class="play-badge"><Play size={32} fill="currentColor" /></span>
+              </button>
+            {/if}
+          </div>
+        {:else if documentUrl}
+          <div class="reader-hero">
+            <!-- A real <a>, so middle-click and copy-link keep working. -->
+            <a
+              class="reader-document"
+              class:no-cover={!hasImages}
+              href={documentUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`Open ${documentKind}: ${entry.title || 'attached document'}`}
+            >
+              {#if hasImages}
+                <img src={entry.images[0]} alt={entry.title || ''} loading="lazy" />
+              {:else}
+                <FileText size={40} aria-hidden="true" />
+              {/if}
+              <span class="doc-badge">{documentKind}</span>
+            </a>
+          </div>
+        {:else if entry.images.length > 0}
           <div class="reader-hero" class:multi={entry.images.length > 1}>
             {#each entry.images as img, i}
               <button
@@ -360,6 +435,91 @@
     display: block;
     width: 100%;
     height: auto;
+  }
+
+  /* Media heroes. Same visual language as the grid's .card-video /
+	   .card-document (see routes/feeds/+page.svelte) — the difference is the
+	   corner radius, which is rounded on all four here because the reader's
+	   hero floats inside the panel rather than capping a card. */
+  .reader-video,
+  .reader-document {
+    position: relative;
+    display: grid;
+    justify-items: center;
+    border: none;
+    padding: 0;
+    background: #0e0e0e;
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  .reader-video img,
+  .reader-document img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  /* A block that carried no thumbnail / cover page still needs a target;
+	   without one it would collapse to zero height. */
+  .reader-video.no-poster,
+  .reader-document.no-cover {
+    min-height: 180px;
+    align-content: center;
+    color: var(--text-muted);
+  }
+
+  .reader-video .play-badge {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: rgb(0 0 0 / 0.6);
+    color: #fff;
+    /* A triangle's optical centre sits left of its bounding box's. */
+    padding-left: 5px;
+    transition: background 0.15s ease;
+    pointer-events: none;
+  }
+
+  .reader-video:hover .play-badge {
+    background: rgb(0 0 0 / 0.8);
+  }
+
+  .reader-document .doc-badge {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: var(--radius-sm, 4px);
+    background: rgb(0 0 0 / 0.7);
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+
+  .reader-player {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border-radius: var(--radius-card);
+    overflow: hidden;
+  }
+
+  .reader-player iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
   }
 
   /* Body copy mirrors the card .excerpt. Link color comes from the shared
