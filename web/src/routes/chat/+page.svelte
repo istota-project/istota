@@ -711,7 +711,22 @@
            under the composer instead of stopping short of it. -->
       <div class="composer-dock" bind:this={dockEl}>
         <Composer
-          onSend={(t, atts) => session.send(t, atts)}
+          onSend={(t, atts) => {
+            // Sending is the end of reading back: whatever the user had scrolled
+            // up to look at, the message they just wrote — and the reply to it —
+            // is what they want to see. So the send re-arms the stick-to-bottom
+            // latch rather than respecting it, which is the one case where the
+            // "only if you were already at the bottom" rule is wrong.
+            //
+            // Pinned immediately as well as latched: `send` is async, so the
+            // message may be a network round trip away, and the transcript
+            // should be waiting at the bottom for it rather than jumping when it
+            // lands. The $messages effect covers the landing itself.
+            atBottom = true;
+            showJumpToLatest = false;
+            void session.send(t, atts);
+            tick().then(() => pinToBottom());
+          }}
           onCancel={() => session.cancel()}
           {busy}
           placeholder="Your message…"
