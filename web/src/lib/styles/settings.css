@@ -317,7 +317,7 @@
 
 @media (max-width: 640px) {
   .settings {
-    padding: 0.75rem 0.5rem 3rem;
+    padding: 0.75rem 0.75rem 3rem;
   }
   .settings .card {
     padding: 0.6rem;
