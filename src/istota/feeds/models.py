@@ -104,6 +104,7 @@ class EntryRecord:
     content_html: str | None
     content_text: str | None
     image_urls: list[str] = field(default_factory=list)
+    embed_url: str | None = None
     published_at: str | None = None
     fetched_at: str = ""
     status: str = "unread"      # 'unread' | 'read' | 'removed'
@@ -124,6 +125,10 @@ class FetchedItem:
     content_html: str | None = None
     content_text: str | None = None
     image_urls: list[str] = field(default_factory=list)
+    # Canonical page for playable media (a YouTube / Vimeo watch URL). The
+    # reader rebuilds a player from it; we deliberately never store the
+    # provider's own <iframe> (see providers/arena.py).
+    embed_url: str | None = None
     published_at: str | None = None     # ISO 8601 UTC
 
 

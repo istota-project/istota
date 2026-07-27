@@ -35,6 +35,7 @@ function entry(over: Partial<FeedEntry> = {}): FeedEntry {
     content: '<p>Body copy of the post.</p>',
     images: ['https://example.com/a.jpg'],
     duplicate_image_count: 0,
+    embed_url: '',
     feed: {
       id: 1,
       title: 'Example Feed',

@@ -128,7 +128,7 @@ class TestGetFeeds:
         entry = body["entries"][0]
         expected = {
             "id", "title", "url", "content", "images", "duplicate_image_count",
-            "feed", "status", "starred", "starred_at",
+            "embed_url", "feed", "status", "starred", "starred_at",
             "published_at", "created_at",
         }
         assert set(entry.keys()) == expected

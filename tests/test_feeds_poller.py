@@ -329,3 +329,40 @@ class TestRssImageDedup:
         # The lead is stripped from the body, the mid-article image stays.
         assert "lead.jpg" not in (item.content_html or "")
         assert "mid.jpg" in (item.content_html or "")
+
+
+class TestArenaEmbedPassthrough:
+    """The provider→storage seam for playable media.
+
+    ``embed_url`` is the one field the reader needs to build a player, and it
+    crosses three boundaries (FetchedItem → EntryRecord → row). A silent drop
+    at any of them puts the blank-ish card back.
+    """
+
+    def test_embed_url_reaches_storage(self, tmp_path, monkeypatch):
+        from istota.feeds import db as feeds_db
+        from istota.feeds.models import FetchedItem
+        from istota.feeds.providers import arena as arena_provider
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.upsert_feed(
+                conn, url="arena:c", title="C", site_url=None,
+                source_type="arena", category_id=None, poll_interval_minutes=60,
+            )
+            conn.commit()
+
+        monkeypatch.setattr(arena_provider, "fetch", lambda ident, **kw: [
+            FetchedItem(
+                guid="1", title="Vid", url="https://www.are.na/block/1",
+                image_urls=["https://cdn/thumb.jpg"],
+                embed_url="https://www.youtube.com/watch?v=abc",
+            ),
+        ])
+
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn)
+            entries = feeds_db.list_entries(conn)
+
+        assert entries[0].embed_url == "https://www.youtube.com/watch?v=abc"

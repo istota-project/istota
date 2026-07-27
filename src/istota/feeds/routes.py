@@ -132,6 +132,9 @@ def _map_entry(
         # rather than silently omitted so the reader can still treat the entry
         # as an image post and say what it hid (ISSUE-162).
         "duplicate_image_count": len(entry.image_urls or []) - len(images),
+        # Set for playable media (an Are.na Embed block). The reader turns it
+        # into an inline player; empty for everything else.
+        "embed_url": entry.embed_url or "",
         "feed": {
             "id": feed.id if feed else 0,
             "title": (feed.title or feed.url) if feed else "",

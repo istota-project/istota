@@ -288,6 +288,7 @@ def _persist_poll(
                 content_html=item.content_html,
                 content_text=item.content_text,
                 image_urls=item.image_urls,
+                embed_url=item.embed_url,
                 published_at=item.published_at,
                 fetched_at=fetched_iso,
                 status="unread",

@@ -95,6 +95,48 @@ class TestInitDb:
 
         feeds_db.init_db(path)  # second run is a no-op
 
+    def test_v3_to_v4_adds_embed_url_preserving_entries(self, tmp_path):
+        """A v3 DB gains ``feed_entries.embed_url`` without losing rows."""
+        import sqlite3
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="arena:c", title="C", site_url=None,
+                source_type="arena", category_id=None,
+                poll_interval_minutes=60,
+            )
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="old", title="Old", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=[], published_at=None,
+                    fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+            ])
+            conn.commit()
+
+        # Rewind to v3: drop the column and the recorded version.
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN embed_url")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version','3')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")}
+            entries = feeds_db.list_entries(conn)
+        assert "embed_url" in cols
+        assert [e.guid for e in entries] == ["old"]
+        assert entries[0].embed_url is None
+
     def test_v2_to_v3_backfills_the_image_key_index(self, tmp_path):
         """A v2 DB gains ``entry_images``, backfilled from stored entries."""
         import json
@@ -286,6 +328,38 @@ class TestEntries:
         assert n == 1
         assert len(entries) == 1
         assert entries[0].image_urls == ["http://i/1.jpg"]
+
+    def test_embed_url_round_trips(self, tmp_path):
+        """A playable-media URL survives storage, for the reader's player."""
+        path, feed_id = self._seed_feed(tmp_path)
+        item = EntryRecord(
+            id=0, feed_id=feed_id, guid="v", title="Vid", url=None,
+            author=None, content_html=None, content_text=None,
+            image_urls=["http://i/thumb.jpg"],
+            embed_url="https://www.youtube.com/watch?v=abc",
+            published_at="2026-05-01T00:00:00+00:00",
+            fetched_at="2026-05-01T00:00:00+00:00",
+        )
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [item])
+            conn.commit()
+            entries = feeds_db.list_entries(conn)
+        assert entries[0].embed_url == "https://www.youtube.com/watch?v=abc"
+
+    def test_embed_url_defaults_to_none(self, tmp_path):
+        path, feed_id = self._seed_feed(tmp_path)
+        item = EntryRecord(
+            id=0, feed_id=feed_id, guid="p", title="Plain", url=None,
+            author=None, content_html=None, content_text=None,
+            image_urls=[],
+            published_at="2026-05-01T00:00:00+00:00",
+            fetched_at="2026-05-01T00:00:00+00:00",
+        )
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [item])
+            conn.commit()
+            entries = feeds_db.list_entries(conn)
+        assert entries[0].embed_url is None
 
     def test_count_and_filter_by_status(self, tmp_path):
         path, feed_id = self._seed_feed(tmp_path)

@@ -517,6 +517,60 @@
     border-radius: var(--radius-card) var(--radius-card) 0 0;
   }
 
+  /* Playable media (Are.na Embed blocks). The poster is a play surface, not
+	   a lightbox trigger, so it overrides .card-image's zoom-in cursor. */
+  .feed-grid :global(.card-video) {
+    position: relative;
+    cursor: pointer;
+  }
+
+  /* An embed whose block carried no thumbnail still gets a play target;
+	   without a poster it would otherwise collapse to zero height. */
+  .feed-grid :global(.card-video.no-poster) {
+    min-height: 160px;
+    align-items: center;
+    border-radius: var(--radius-card) var(--radius-card) 0 0;
+  }
+
+  .feed-grid :global(.card-video .play-badge) {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: rgb(0 0 0 / 0.6);
+    color: #fff;
+    /* Nudge the glyph off centre — a triangle's optical centre sits left
+		   of its bounding box's. */
+    padding-left: 4px;
+    transition: background 0.15s ease;
+    pointer-events: none;
+  }
+
+  .feed-grid :global(.card-video:hover .play-badge) {
+    background: rgb(0 0 0 / 0.8);
+  }
+
+  .feed-grid :global(.card-player) {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border-radius: var(--radius-card) var(--radius-card) 0 0;
+    overflow: hidden;
+  }
+
+  .feed-grid :global(.card-player iframe) {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+  }
+
   /* Gallery — fixed-height grid so meta strip stays visible inside the
 	   card's max-height budget. Cells use object-fit: cover instead of
 	   per-image aspect-ratio to keep the gallery from dictating card height. */

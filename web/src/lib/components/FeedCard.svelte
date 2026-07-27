@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { Star } from 'lucide-svelte';
+  import { Play, Star } from 'lucide-svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
+  import { playerUrl, providerLabel } from '$lib/feeds/embed';
 
   import { markReadDelay } from '$lib/stores/feeds';
 
@@ -62,6 +63,28 @@
   const repeatCount = $derived(entry.duplicate_image_count ?? 0);
   const galleryCount = $derived(Math.min(entry.images.length, maxGrid));
   const permalink = $derived(entry.url || entry.feed.site_url || '');
+
+  // Playable media (an Are.na Embed block). `playerUrl` is an allowlist over
+  // known providers and returns null for anything it can't vouch for — the
+  // card then behaves like any other entry and the body's "Watch on …" link
+  // (written by the provider) is the way out. Nothing is guessed into an
+  // iframe src.
+  const player = $derived(playerUrl(entry.embed_url));
+  const providerName = $derived(providerLabel(entry.embed_url));
+  const playLabel = $derived(`Play video${providerName ? ` on ${providerName}` : ''}`);
+  let playing = $state(false);
+
+  // Autoplay is honest here: it only ever follows an explicit click on the
+  // play control, never a page load.
+  const playerSrc = $derived(player ? `${player}?autoplay=1` : '');
+
+  function play(e: MouseEvent) {
+    // The hero is normally a lightbox trigger; for a video the click means
+    // "play", so stop it before the card's own open handler sees it too.
+    e.stopPropagation();
+    e.preventDefault();
+    playing = true;
+  }
 
   // The Images / Text header chips are *display* toggles, not filters, and this
   // card deliberately knows nothing about them: it always renders its media and
@@ -132,7 +155,44 @@
   {#if entry.status === 'read'}
     <span class="seen-pill">SEEN</span>
   {/if}
-  {#if isImage}
+  {#if player}
+    <!-- Playable media. The thumbnail is a play surface rather than a
+         lightbox trigger, and the frame replaces it in place on click. -->
+    {#if playing}
+      <div class="card-player">
+        <iframe
+          src={playerSrc}
+          title={entry.title || 'Embedded video'}
+          allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+          sandbox="allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox"
+          referrerpolicy="strict-origin-when-cross-origin"
+          loading="lazy"
+          allowfullscreen
+        ></iframe>
+      </div>
+    {:else}
+      <button
+        type="button"
+        class="card-image card-video"
+        class:no-poster={!isImage}
+        onclick={play}
+        aria-label={playLabel}
+      >
+        {#if isImage}
+          <img src={entry.images[0]} alt={entry.title || ''} loading="lazy" />
+        {/if}
+        <span class="play-badge"><Play size={26} fill="currentColor" /></span>
+      </button>
+    {/if}
+    {#if entry.title}
+      <div class="card-title-overlay">
+        {#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}
+      </div>
+    {/if}
+    {#if entry.content}
+      <div class="card-body"><div class="excerpt prose">{@html entry.content}</div></div>
+    {/if}
+  {:else if isImage}
     {#if entry.images.length > 1}
       <div class="card-gallery gallery-{galleryCount}">
         {#each entry.images.slice(0, maxGrid) as img, idx}

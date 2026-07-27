@@ -1066,6 +1066,7 @@ interface MockEntry {
   content: string;
   images: string[];
   duplicate_image_count: number;
+  embed_url: string;
   feed: MockFeedSource;
   status: 'read' | 'unread';
   starred: boolean;
@@ -1207,6 +1208,9 @@ function generateMockEntries(): MockEntry[] {
       content: `<p>${snippet}</p><p>This is mock content number ${i + 1}, served by the dev mock API.</p>`,
       images,
       duplicate_image_count: duplicateImageCount,
+      // Every 9th post stands in for an Are.na Embed block, so the play
+      // affordance and the inline player are reachable in dev.
+      embed_url: i % 9 === 3 ? 'https://www.youtube.com/watch?v=B0sO1wdBhMY' : '',
       feed,
       // First ~25% unread, rest read — gives the Unseen filter something to do.
       status: i < total * 0.25 ? 'unread' : 'read',

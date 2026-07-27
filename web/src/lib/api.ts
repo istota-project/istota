@@ -182,6 +182,12 @@ export interface FeedEntry {
   images: string[];
   /** Images the server hid because a newer entry already showed them. */
   duplicate_image_count: number;
+  /**
+   * Canonical watch page for playable media (an Are.na Embed block); empty
+   * otherwise. The provider's own iframe is deliberately not stored, so the
+   * reader rebuilds a player from this via `$lib/feeds/embed`.
+   */
+  embed_url: string;
   feed: Feed;
   status: string;
   starred: boolean;
