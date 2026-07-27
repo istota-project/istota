@@ -33,7 +33,7 @@ const MAX_BYTES = 25 * 1024 * 1024;
 interface CapacitorPlugins {
   Camera?: {
     getPhoto(options: Record<string, unknown>): Promise<{ base64String?: string; format?: string }>;
-    chooseFromGallery?(options: Record<string, unknown>): Promise<{
+    pickImages?(options: Record<string, unknown>): Promise<{
       photos?: { path?: string; format?: string }[];
     }>;
   };
@@ -124,16 +124,33 @@ export async function takePhoto(): Promise<File[]> {
  * The gallery pick is the one call that does not return its own bytes — it
  * hands back paths — so each one is read through Filesystem. That is the whole
  * reason the shell carries @capacitor/filesystem.
+ *
+ * `pickImages` rather than its replacement `chooseFromGallery`, despite the
+ * deprecation. They are different pickers, not two names for one:
+ *
+ * - `pickImages` presents PHPickerViewController, re-encodes to JPEG at the
+ *   asked-for quality, corrects orientation, and writes each file to the app's
+ *   own temp directory — the `path` is documented as readable through
+ *   Filesystem. That is the whole contract this module was built on.
+ * - `chooseFromGallery` presents the plugin's own SwiftUI grid, needs full
+ *   library authorisation to fill it, ignores `quality` and
+ *   `correctOrientation` entirely, and returns `{ results: [{ uri }] }` — a
+ *   `uri` pointing at the untouched original inside the Photos container, so a
+ *   HEIC stays a HEIC at full size.
+ *
+ * When `pickImages` does go, the replacement is a HEIC→JPEG step on this side,
+ * not a rename of the call.
  */
 export async function pickPhotos(): Promise<File[]> {
   const p = plugins();
-  const gallery = p?.Camera?.chooseFromGallery;
-  if (!gallery || !p?.Camera) return [];
+  const pick = p?.Camera?.pickImages;
+  if (!pick || !p?.Camera) return [];
   try {
-    const picked = await gallery.call(p.Camera, {
-      allowMultipleSelection: true,
+    const picked = await pick.call(p.Camera, {
       quality: 90,
       correctOrientation: true,
+      // `limit: 0` is unlimited. The ceiling that matters is per file, below.
+      limit: 0,
     });
     const photos = picked.photos ?? [];
     const files: File[] = [];

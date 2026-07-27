@@ -27,9 +27,14 @@ function fullBridge(): FakePlugins {
   return installPlugins({
     Camera: {
       getPhoto: vi.fn().mockResolvedValue({ base64String: THREE_BYTES, format: 'jpeg' }),
-      chooseFromGallery: vi
-        .fn()
-        .mockResolvedValue({ photos: [{ path: '/tmp/a.jpg', format: 'jpeg' }] }),
+      pickImages: vi.fn().mockResolvedValue({
+        photos: [{ path: 'file:///tmp/a.jpg', webPath: 'capacitor://x/a.jpg', format: 'jpeg' }],
+      }),
+      // Present on the bridge and easy to reach for, but it answers with
+      // `{ results: [{ uri }] }` — see the pickPhotos suite.
+      chooseFromGallery: vi.fn().mockResolvedValue({
+        results: [{ type: 0, uri: 'file:///tmp/a.heic', saved: false }],
+      }),
     },
     Filesystem: { readFile: vi.fn().mockResolvedValue({ data: THREE_BYTES }) },
     IstotaDocumentPicker: { pick: vi.fn().mockResolvedValue({ files: [] }) },
@@ -108,36 +113,54 @@ describe('takePhoto', () => {
 });
 
 describe('pickPhotos', () => {
+  it('picks through pickImages, not chooseFromGallery', async () => {
+    // The two are not interchangeable, and picking the wrong one is silent.
+    // `chooseFromGallery` answers `{ results: [{ uri }] }` — reading `.photos`
+    // off that gives `undefined`, which reads exactly like a cancelled pick, so
+    // the row opened a picker and then attached nothing at all.
+    const p = fullBridge();
+
+    const files = await pickPhotos();
+
+    expect(p.Camera!.pickImages).toHaveBeenCalled();
+    expect(p.Camera!.chooseFromGallery).not.toHaveBeenCalled();
+    expect(files).toHaveLength(1);
+  });
+
   it('reads each picked path through Filesystem', async () => {
     // The gallery pick is the one call that returns paths rather than bytes,
     // and a capacitor:// path cannot be fetched from an https origin.
     const p = fullBridge();
-    p.Camera!.chooseFromGallery.mockResolvedValue({
+    p.Camera!.pickImages.mockResolvedValue({
       photos: [
-        { path: '/tmp/a.jpg', format: 'jpeg' },
-        { path: '/tmp/b.png', format: 'png' },
+        { path: 'file:///tmp/a.jpg', format: 'jpeg' },
+        { path: 'file:///tmp/b.png', format: 'png' },
       ],
     });
 
     const files = await pickPhotos();
 
-    expect(p.Filesystem!.readFile).toHaveBeenCalledWith({ path: '/tmp/a.jpg' });
-    expect(p.Filesystem!.readFile).toHaveBeenCalledWith({ path: '/tmp/b.png' });
+    expect(p.Filesystem!.readFile).toHaveBeenCalledWith({ path: 'file:///tmp/a.jpg' });
+    expect(p.Filesystem!.readFile).toHaveBeenCalledWith({ path: 'file:///tmp/b.png' });
     expect(files.map((f) => f.type)).toEqual(['image/jpeg', 'image/png']);
   });
 
-  it('asks for more than one', async () => {
+  it('asks for a JPEG the size of the original, turned the right way up', async () => {
+    // pickImages re-encodes to JPEG whatever the library holds, so a HEIC
+    // arrives as something the upload endpoint recognises.
     const p = fullBridge();
     await pickPhotos();
-    expect(p.Camera!.chooseFromGallery.mock.calls[0][0].allowMultipleSelection).toBe(true);
+    const options = p.Camera!.pickImages.mock.calls[0][0];
+    expect(options.quality).toBe(90);
+    expect(options.correctOrientation).toBe(true);
   });
 
   it('names each file distinctly', async () => {
     const p = fullBridge();
-    p.Camera!.chooseFromGallery.mockResolvedValue({
+    p.Camera!.pickImages.mockResolvedValue({
       photos: [
-        { path: '/tmp/a.jpg', format: 'jpeg' },
-        { path: '/tmp/b.jpg', format: 'jpeg' },
+        { path: 'file:///tmp/a.jpg', format: 'jpeg' },
+        { path: 'file:///tmp/b.jpg', format: 'jpeg' },
       ],
     });
     const files = await pickPhotos();
@@ -146,7 +169,12 @@ describe('pickPhotos', () => {
 
   it('treats a cancelled pick as nothing picked', async () => {
     const p = fullBridge();
-    p.Camera!.chooseFromGallery.mockRejectedValue(new Error('User cancelled photos app'));
+    p.Camera!.pickImages.mockRejectedValue(new Error('User cancelled photos app'));
+    await expect(pickPhotos()).resolves.toEqual([]);
+  });
+
+  it('is inert on a bridge without the picker', async () => {
+    installPlugins({ Camera: {} });
     await expect(pickPhotos()).resolves.toEqual([]);
   });
 });
