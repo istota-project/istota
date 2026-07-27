@@ -628,6 +628,14 @@ istota_location_reconcile_min_dwell_sec: 60
 istota_web_enabled: true
 istota_web_port: 8766
 
+# Restart behaviour. The room-event SSE stream never completes on its own, so
+# uvicorn's default "wait forever for open connections" turned every restart
+# with a browser tab open into a 90s SIGKILL. The graceful window is how long
+# uvicorn drains before cancelling stragglers; the stop timeout is the systemd
+# cap behind it (a SIGKILL at that point means wedged, not draining).
+istota_web_graceful_shutdown_seconds: 5
+istota_web_stop_timeout_seconds: 20
+
 istota_web_oauth2_provider: ""           # Public NC URL (what the browser hits), no trailing slash
 istota_web_oauth2_client_id: ""
 istota_web_oauth2_client_secret: ""

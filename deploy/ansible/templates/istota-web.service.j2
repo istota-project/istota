@@ -14,9 +14,20 @@ Type=simple
 User={{ istota_user }}
 Group={{ istota_group }}
 WorkingDirectory={{ istota_repo_dir }}
-ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.web_app:app --host 127.0.0.1 --port {{ istota_web_port }}
+# --timeout-graceful-shutdown: the web-chat room stream (GET /chat/stream) is a
+# session-lived SSE response that never completes on its own — it exits only on
+# client disconnect, which server shutdown does not trigger. Without a deadline
+# uvicorn waits forever for it ("Waiting for connections to close"), so every
+# restart with a browser tab open sat out the full TimeoutStopSec and died on
+# SIGKILL. The flag makes uvicorn cancel the stragglers instead.
+ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.web_app:app --host 127.0.0.1 --port {{ istota_web_port }} --timeout-graceful-shutdown {{ istota_web_graceful_shutdown_seconds }}
 Restart=always
 RestartSec=5
+
+# Belt-and-braces cap on the stop phase. uvicorn should be gone in about
+# {{ istota_web_graceful_shutdown_seconds }}s, so a SIGKILL at this deadline means it wedged rather than
+# that it is still draining. Well under systemd's 90s default.
+TimeoutStopSec={{ istota_web_stop_timeout_seconds }}
 
 # FD ceiling — see scheduler unit. Web reads framework istota.db plus
 # per-user feeds.db / location.db on every request.

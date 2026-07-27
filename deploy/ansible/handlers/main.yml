@@ -57,11 +57,17 @@
   loop: "{{ istota_devbox_users }}"
   when: istota_devbox_enabled and istota_devbox_api_proxy_enabled and not istota_web_only and (istota_devbox_users | length > 0)
 
+# `not istota_web_only` mirrors the scheduler/browser/devbox handlers. In
+# web-only mode the explicit "Restart web interface (web-only mode)" task is the
+# single restart — it has to be a task rather than a notify because `Build web
+# UI` is `changed_when: false` and so can never fire a handler. Without this
+# guard a web-only run whose git checkout moved restarted the service twice:
+# once from the task, then again from this handler at end of play.
 - name: "restart istota-web"
   systemd:
     name: "{{ istota_namespace }}-web"
     state: restarted
-  when: istota_web_enabled | default(false)
+  when: (istota_web_enabled | default(false)) and not istota_web_only
 
 - name: "restart istota-webhooks"
   systemd:
