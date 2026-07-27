@@ -62,9 +62,11 @@ beforeEach(() => {
   );
   window.scrollTo = vi.fn() as unknown as typeof window.scrollTo;
   Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true, writable: true });
+  Object.defineProperty(window, 'innerWidth', { value: 390, configurable: true, writable: true });
   standalone(true);
   setVisualViewport(800);
   document.body.innerHTML = '';
+  sessionStorage.clear();
 });
 
 afterEach(() => {
@@ -279,6 +281,56 @@ describe('installViewportGuard', () => {
     window.dispatchEvent(new Event('resize'));
     vi.advanceTimersByTime(2000);
     expect(document.documentElement.style.getPropertyValue('--safe-bottom')).toBe('34px');
+  });
+
+  it('carries the tallest viewport across a reload', () => {
+    // A reload wipes the baseline while the short layout viewport iOS was left
+    // with survives it, so the first reading of the new page becomes the
+    // tallest ever seen and the app is pinned short for good. That is the band
+    // that appears on tapping the update prompt.
+    teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000); // baseline: 800
+    teardown();
+    teardown = undefined;
+
+    Object.defineProperty(window, 'innerHeight', { value: 780, configurable: true });
+    setVisualViewport(780);
+    teardown = installViewportGuard();
+    expect(appHeight()).toBe('800px');
+  });
+
+  it('ignores a stored baseline taken at another layout width', () => {
+    // Rotation and split view both change the width, and both change the
+    // height they imply — so the record is keyed on it rather than trusted.
+    teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000);
+    teardown();
+    teardown = undefined;
+
+    Object.defineProperty(window, 'innerWidth', { value: 844, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: 390, configurable: true });
+    setVisualViewport(390);
+    teardown = installViewportGuard();
+    // Straight away, before the adopt path could arrive at the same number by
+    // another route: a baseline carried over would read this as short and
+    // publish nothing at all.
+    expect(appHeight()).toBe('390px');
+  });
+
+  it('does not carry a tab baseline into the installed app', () => {
+    // A tab has toolbars and the installed app does not, so their heights are
+    // not each other's evidence.
+    standalone(false);
+    teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000); // tab baseline: 800
+    teardown();
+    teardown = undefined;
+
+    standalone(true);
+    Object.defineProperty(window, 'innerHeight', { value: 760, configurable: true });
+    setVisualViewport(760);
+    teardown = installViewportGuard();
+    expect(appHeight()).toBe('760px');
   });
 
   it('removes what it published on teardown', () => {

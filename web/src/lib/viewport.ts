@@ -97,6 +97,58 @@ function nextBaseline(prev: Baseline | null, now: Baseline, replace: boolean): B
   return { inner: Math.max(prev.inner, now.inner), visual: Math.max(prev.visual, now.visual) };
 }
 
+/**
+ * The baseline, kept across a reload.
+ *
+ * The baseline is the whole defence against a viewport iOS has left short, and
+ * it is built purely by observation — so it is only as good as this page's
+ * memory of a taller reading. A reload wipes that memory while the platform
+ * state survives it: the new document is handed the same slightly-short layout
+ * viewport the old one was left with, nothing afterwards restores those pixels,
+ * and the first reading becomes the tallest ever seen. The app is then pinned
+ * short for the life of the page — the band, back for good, and reachable
+ * without touching the keyboard again: type once, then tap the update prompt.
+ *
+ * So the baseline is written to sessionStorage and read back at startup.
+ * Session scope is the point. It covers a reload, which is where the stale
+ * platform reading lives, and it is gone by the next cold launch, which starts
+ * from a fresh WebView with nothing to carry forward.
+ *
+ * Keyed on the layout width and the display mode, since those are what change
+ * when the geometry legitimately changes — rotation, split view, a tab versus
+ * the installed app. A record that does not match is ignored rather than
+ * trusted. A stored baseline that is somehow still too tall costs nothing
+ * either: it reads as short, so nothing is published at all and the app falls
+ * back to the `dvh` default until the adopt path replaces it.
+ */
+const BASELINE_KEY = 'istota_viewport_baseline';
+
+type StoredBaseline = Baseline & { width: number; pwa: boolean };
+
+function readStoredBaseline(pwa: boolean): Baseline | null {
+  try {
+    const raw = sessionStorage.getItem(BASELINE_KEY);
+    if (!raw) return null;
+    const stored = JSON.parse(raw) as Partial<StoredBaseline> | null;
+    if (!stored || stored.width !== window.innerWidth || stored.pwa !== pwa) return null;
+    if (typeof stored.inner !== 'number' || typeof stored.visual !== 'number') return null;
+    if (!(stored.inner > 0)) return null;
+    return { inner: stored.inner, visual: stored.visual };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredBaseline(baseline: Baseline, pwa: boolean): void {
+  try {
+    const record: StoredBaseline = { ...baseline, width: window.innerWidth, pwa };
+    sessionStorage.setItem(BASELINE_KEY, JSON.stringify(record));
+  } catch {
+    // Private mode, quota, a disabled store — the in-memory baseline still
+    // does its job for this page, it just will not outlive it.
+  }
+}
+
 function currentGeometry(): Baseline {
   const vv = window.visualViewport;
   return {
@@ -220,7 +272,7 @@ export function installViewportGuard(): () => void {
   let startedAt = 0;
   let stableTicks = 0;
   let lastReading = '';
-  let baseline: Baseline | null = null;
+  let baseline: Baseline | null = readStoredBaseline(standalone);
   let sessionKind: 'blur' | 'other' = 'other';
   const written = new Map<string, string>();
   const debugPanel = debugEnabled() ? makeDebugPanel() : null;
@@ -326,7 +378,10 @@ export function installViewportGuard(): () => void {
       // rotation (cleared) and on the adopt path (replaced outright): a keyboard
       // can only ever make a viewport smaller, so a smaller reading is never
       // evidence about how tall the app should be.
-      if (!isTextEntryFocused()) baseline = nextBaseline(baseline, currentGeometry(), adoptShort);
+      if (!isTextEntryFocused()) {
+        baseline = nextBaseline(baseline, currentGeometry(), adoptShort);
+        writeStoredBaseline(baseline, standalone);
+      }
       paintDebug(adoptShort ? 'adopted' : 'settled');
       return;
     }
