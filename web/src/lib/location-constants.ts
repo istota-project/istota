@@ -1,3 +1,11 @@
+// design-lint-allow-file: categorical palette + data-viz gradient.
+//
+// The activity colors encode a *kind* (driving vs walking), not a severity, and
+// the speed stops are a continuous gradient — neither collapses onto the status
+// scale without erasing what it carries. These are also consumed by MapLibre
+// paint specs, which are rendered in WebGL and cannot resolve `var(--token)`,
+// so this file is the source of truth rather than a mirror of `app.css`.
+
 export const ACTIVITY_COLORS: Record<string, string> = {
   driving: '#4a9eff',
   walking: '#4aff7f',

@@ -590,10 +590,15 @@
     background: hsla(35, 60%, 60%, 0.22);
     color: var(--status-warn-fg);
   }
+  /* design-lint-allow-begin: categorical — the neighbouring badges use the
+     status scale (up-to-date / due / overdue), but "series incomplete" is a
+     different axis: the schedule is part-done, not late. The purple keeps it
+     off the severity ramp so it cannot be misread as a worse "overdue". */
   .badge.status-series_incomplete {
     background: hsla(280, 45%, 65%, 0.22);
     color: #d0aeec;
   }
+  /* design-lint-allow-end */
   .badge.status-up_to_date {
     background: hsla(145, 40%, 55%, 0.22);
     color: var(--status-success-fg);
@@ -708,10 +713,10 @@
     background: rgba(204, 102, 102, 0.1);
     color: var(--status-danger-fg);
   }
-  :global(:root[data-theme='light']) .card:hover {
-    border-color: var(--border-default);
-  }
+  /* design-lint-allow-begin: light half of the categorical series_incomplete
+     badge above. */
   :global(:root[data-theme='light']) .badge.status-series_incomplete {
     color: #7c3aed;
   }
+  /* design-lint-allow-end */
 </style>

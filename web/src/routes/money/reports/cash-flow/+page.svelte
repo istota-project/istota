@@ -19,6 +19,8 @@
   import { selectedYear, selectedAccount } from '$lib/money/stores/transactions';
   import { parseAmount, formatAmount } from '$lib/money/utils/accounts';
   import { untrack } from 'svelte';
+  import { theme } from '$lib/stores/theme';
+  import { chartChrome } from '$lib/chartTheme';
 
   Chart.register(
     BarController,
@@ -183,6 +185,7 @@
     const expenseData = months.map((m) => -m.expenses);
     const netData = months.map((m) => m.net);
 
+    const chrome = chartChrome();
     chart = new Chart(chartCanvas, {
       type: 'bar',
       data: {
@@ -214,12 +217,12 @@
             type: 'line',
             label: 'Net',
             data: netData,
-            borderColor: '#e0e0e0',
+            borderColor: chrome.neutral,
             backgroundColor: 'transparent',
             borderWidth: 2,
             pointRadius: 0,
             pointHoverRadius: 4,
-            pointHoverBackgroundColor: '#e0e0e0',
+            pointHoverBackgroundColor: chrome.neutral,
             tension: 0.3,
             order: 1,
           },
@@ -240,11 +243,11 @@
         plugins: {
           legend: { display: false },
           tooltip: {
-            backgroundColor: '#1a1a1a',
-            borderColor: '#333',
+            backgroundColor: chrome.tooltipBg,
+            borderColor: chrome.tooltipBorder,
             borderWidth: 1,
-            titleColor: '#e0e0e0',
-            bodyColor: '#bbb',
+            titleColor: chrome.tooltipTitle,
+            bodyColor: chrome.tooltipBody,
             padding: 10,
             callbacks: {
               label: (ctx) => {
@@ -265,17 +268,17 @@
             stacked: true,
             grid: { display: false },
             ticks: {
-              color: '#666',
+              color: chrome.tick,
               font: { size: 11 },
             },
             border: { display: false },
           },
           y: {
             grid: {
-              color: 'rgba(255,255,255,0.05)',
+              color: chrome.grid,
             },
             ticks: {
-              color: '#666',
+              color: chrome.tick,
               font: { size: 11 },
               callback: (value) => {
                 const num = Number(value);
@@ -299,6 +302,9 @@
   $effect(() => {
     const _m = months;
     const _loading = loading;
+    // Chart.js holds its colors as plain config, so a theme flip needs a
+    // rebuild — reading $theme here makes this effect depend on it.
+    const _theme = $theme;
     if (!_loading && chartCanvas && _m.length > 0) {
       untrack(() => buildChart());
     }

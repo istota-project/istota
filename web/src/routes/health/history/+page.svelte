@@ -479,7 +479,7 @@
     color: var(--text-primary);
   }
   .card:hover {
-    border-color: #555;
+    border-color: var(--border-hover);
   }
   .card-head {
     display: flex;
@@ -515,6 +515,11 @@
     border-radius: var(--radius-pill);
     font-weight: 500;
   }
+  /* design-lint-allow-begin: categorical palette — the hue names the encounter
+     type (visit / procedure / imaging / dental), not a severity. Folding these
+     onto the status scale would make a routine visit and a screening the same
+     color. Each carries an explicit light value because the tinted fills are
+     tuned per hue rather than derived from a token pair. */
   .badge.type-visit {
     background: hsla(210, 45%, 65%, 0.22);
     color: #b6ccea;
@@ -547,6 +552,7 @@
     background: hsla(185, 45%, 60%, 0.22);
     color: #95d2dc;
   }
+  /* design-lint-allow-end */
   .badge.type-other {
     background: hsla(220, 8%, 60%, 0.18);
     color: var(--text-muted);
@@ -644,9 +650,8 @@
     background: rgba(204, 102, 102, 0.1);
     color: var(--status-danger-fg);
   }
-  :global(:root[data-theme='light']) .card:hover {
-    border-color: var(--border-default);
-  }
+  /* design-lint-allow-begin: light half of the categorical encounter-type
+     palette above. */
   :global(:root[data-theme='light']) .badge.type-visit {
     color: #2563b0;
   }
@@ -671,4 +676,5 @@
   :global(:root[data-theme='light']) .badge.type-dental {
     color: #0d8f7e;
   }
+  /* design-lint-allow-end */
 </style>

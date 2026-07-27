@@ -228,7 +228,7 @@
   }
 
   .field input[type='range'] {
-    accent-color: #ffc107;
+    accent-color: var(--accent-amber);
   }
 
   .coords {

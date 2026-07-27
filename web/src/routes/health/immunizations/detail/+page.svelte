@@ -395,7 +395,7 @@
     color: var(--text-primary);
   }
   .linked-card:hover {
-    border-color: #555;
+    border-color: var(--border-hover);
   }
   .card-head {
     display: flex;
@@ -422,8 +422,5 @@
   .muted {
     font-size: var(--text-xs);
     color: var(--text-muted);
-  }
-  :global(:root[data-theme='light']) .linked-card:hover {
-    border-color: var(--border-default);
   }
 </style>

@@ -124,10 +124,7 @@
     color: var(--status-danger-fg);
   }
   .btn-danger:hover:not(:disabled) {
-    background: rgba(204, 102, 102, 0.12);
-  }
-  :global(:root[data-theme='light']) .btn-danger:hover:not(:disabled) {
-    background: rgba(192, 39, 29, 0.08);
+    background: color-mix(in srgb, var(--status-danger-fg) 12%, transparent);
   }
 
   .btn-danger-icon {

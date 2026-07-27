@@ -29,8 +29,7 @@
   import StopTimeline from '$lib/components/location/StopTimeline.svelte';
   import DayStats from '$lib/components/location/DayStats.svelte';
   import TripList from '$lib/components/location/TripList.svelte';
-  import Chip from '$lib/components/ui/Chip.svelte';
-  import { ConfirmDialog } from '$lib/components/ui';
+  import { Chip, ConfirmDialog } from '$lib/components/ui';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
   let pings: LocationPing[] = $state([]);
@@ -507,9 +506,11 @@
     width: max-content;
     max-width: min(90%, 34rem);
     text-align: center;
+    /* Dark pill in BOTH themes — it floats over the map canvas, whose
+	     lightness the theme does not control — so its text is fixed too. */
     background: rgba(17, 17, 17, 0.9);
     border: 1px solid var(--border-default);
-    color: var(--text-muted);
+    color: var(--on-scrim-fg);
     font-size: var(--text-sm);
     padding: 0.45rem 0.9rem;
     border-radius: var(--radius-pill);
@@ -521,14 +522,13 @@
     .date-inputs {
       display: none;
     }
-  } /* Calendar icon is dark by default; drop the dark-mode invert in light mode. */
+  }
+  /* design-lint-allow: not a color — a theme-conditional `filter` on a UA
+     pseudo-element we cannot restyle directly. The icon ships dark, so the dark
+     theme inverts it and the light theme must undo that. */
   :global(:root[data-theme='light'])
     .date-inputs
     input[type='date']::-webkit-calendar-picker-indicator {
     filter: none;
-  }
-  /* Floating hint sits over the map canvas — keep a dark pill, force legible light text. */
-  :global(:root[data-theme='light']) .discover-hint {
-    color: #ececef;
   }
 </style>

@@ -248,6 +248,7 @@ function makeDebugPanel(): HTMLElement {
   el.style.cssText =
     'position:fixed;top:0;right:0;z-index:9999;margin:0;padding:4px 6px;' +
     'font:10px/1.35 ui-monospace,monospace;white-space:pre;pointer-events:none;' +
+    // design-lint-allow: dev-only debug overlay, deliberately not themed.
     'background:rgb(0 0 0 / 0.72);color:#0f0;border-bottom-left-radius:6px;';
   document.body.appendChild(el);
   return el;

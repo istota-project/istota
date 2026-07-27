@@ -425,6 +425,9 @@
   .hero-img {
     border: none;
     padding: 0;
+    /* design-lint-allow: fixed chrome — letterbox behind media of unknown
+       aspect ratio; stays dark in both themes so the image reads as the
+       lit surface. */
     background: #0e0e0e; /* matches the grid .card-image letterbox */
     cursor: zoom-in;
     border-radius: var(--radius-card);
@@ -448,6 +451,9 @@
     justify-items: center;
     border: none;
     padding: 0;
+    /* design-lint-allow: fixed chrome — letterbox behind media of unknown
+       aspect ratio; stays dark in both themes so the image reads as the
+       lit surface. */
     background: #0e0e0e;
     border-radius: var(--radius-card);
     overflow: hidden;
@@ -483,6 +489,8 @@
     height: 64px;
     border-radius: 50%;
     background: rgb(0 0 0 / 0.6);
+    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
+       media, so it is white in both themes. */
     color: #fff;
     /* A triangle's optical centre sits left of its bounding box's. */
     padding-left: 5px;
@@ -501,6 +509,8 @@
     padding: 0.15rem 0.4rem;
     border-radius: var(--radius-sm, 4px);
     background: rgb(0 0 0 / 0.7);
+    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
+       media, so it is white in both themes. */
     color: #fff;
     font-size: 0.65rem;
     font-weight: 600;
@@ -510,6 +520,9 @@
   .reader-player {
     width: 100%;
     aspect-ratio: 16 / 9;
+    /* design-lint-allow: fixed chrome — letterbox behind media of unknown
+       aspect ratio; stays dark in both themes so the image reads as the
+       lit surface. */
     background: #000;
     border-radius: var(--radius-card);
     overflow: hidden;
@@ -584,6 +597,8 @@
     border: none;
     border-radius: 50%;
     background: rgba(0, 0, 0, 0.5);
+    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
+       media, so it is white in both themes. */
     color: #fff;
     cursor: pointer;
     z-index: 61;

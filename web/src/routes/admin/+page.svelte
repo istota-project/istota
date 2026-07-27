@@ -132,6 +132,8 @@
   // lightness throughout so each holds up as a fill on both the dark and light
   // backgrounds, and red is left free so it keeps meaning "failed" everywhere
   // else on the page.
+  // design-lint-allow-begin: categorical palette — the hue identifies a task
+  // source, not a severity, so these cannot fold onto the status scale.
   const SOURCE_COLOR: Record<string, string> = {
     scheduled: '#f5851f', // orange
     email: '#d9b40f', // yellow
@@ -149,6 +151,7 @@
   function sourceColor(name: string): string {
     return SOURCE_COLOR[name] ?? '#8a93a0';
   }
+  // design-lint-allow-end
 
   const INTERACTIVE_SOURCES = new Set(['talk', 'web', 'email', 'repl', 'istota_file', 'cli']);
 

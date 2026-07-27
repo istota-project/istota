@@ -95,7 +95,7 @@
     background: linear-gradient(
       100deg,
       var(--surface-badge) 20%,
-      rgba(255, 255, 255, 0.11) 50%,
+      var(--shimmer-tint) 50%,
       var(--surface-badge) 80%
     );
     background-size: 200% 100%;
@@ -209,22 +209,5 @@
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-  }
-
-  /* Light theme — lighter-gray chip fill (cascades into the .active gradient
-	   below, which reads the same --surface-badge). */
-  :global(:root[data-theme='light']) .activity {
-    --surface-badge: #eeeef0;
-  }
-  /* Light theme — the active shimmer washes out on a light surface; use a
-	   subtle dark tint instead. */
-  :global(:root[data-theme='light']) .activity.active {
-    background: linear-gradient(
-      100deg,
-      var(--surface-badge) 20%,
-      rgba(0, 0, 0, 0.06) 50%,
-      var(--surface-badge) 80%
-    );
-    background-size: 200% 100%;
   }
 </style>

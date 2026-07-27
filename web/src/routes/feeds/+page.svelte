@@ -470,8 +470,8 @@
     font-weight: 600;
     letter-spacing: 0.04em;
     padding: 0.1rem 0.35rem;
-    background: rgba(0, 0, 0, 0.55);
-    color: var(--text-muted);
+    background: var(--scrim-pill-bg);
+    color: var(--scrim-pill-fg);
     border-radius: 0.2rem;
     pointer-events: none;
     z-index: 2;
@@ -505,6 +505,9 @@
     cursor: zoom-in;
     border: none;
     padding: 0;
+    /* design-lint-allow: fixed chrome — letterbox behind media of unknown
+       aspect ratio; stays dark in both themes so the image reads as the
+       lit surface. */
     background: #0e0e0e;
     width: 100%;
   }
@@ -544,6 +547,8 @@
     height: 56px;
     border-radius: 50%;
     background: rgb(0 0 0 / 0.6);
+    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
+       media, so it is white in both themes. */
     color: #fff;
     /* Nudge the glyph off centre — a triangle's optical centre sits left
 		   of its bounding box's. */
@@ -559,6 +564,9 @@
   .feed-grid :global(.card-player) {
     width: 100%;
     aspect-ratio: 16 / 9;
+    /* design-lint-allow: fixed chrome — letterbox behind media of unknown
+       aspect ratio; stays dark in both themes so the image reads as the
+       lit surface. */
     background: #000;
     border-radius: var(--radius-card) var(--radius-card) 0 0;
     overflow: hidden;
@@ -594,6 +602,8 @@
     padding: 0.15rem 0.4rem;
     border-radius: var(--radius-sm, 4px);
     background: rgb(0 0 0 / 0.7);
+    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
+       media, so it is white in both themes. */
     color: #fff;
     font-size: 0.65rem;
     font-weight: 600;
@@ -655,6 +665,8 @@
     align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.55);
+    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
+       media, so it is white in both themes. */
     color: #fff;
     font-size: 1.2rem;
     font-weight: 600;
@@ -664,7 +676,7 @@
   /* Title overlay */
   .feed-grid :global(.card-title-overlay) {
     padding: 0.25rem 0.6rem;
-    background: #161616;
+    background: var(--surface-overlay);
     font-size: var(--text-xs);
     color: var(--text-muted);
     white-space: nowrap;
@@ -803,7 +815,7 @@
   }
 
   .feed-grid :global(.meta-link:hover) {
-    color: #aaa;
+    color: var(--text-secondary);
   }
 
   /* Sentinel / loading */
@@ -825,7 +837,7 @@
     right: max(0.75rem, var(--safe-right));
     font-size: var(--text-xs);
     color: var(--text-dim);
-    background: #161616;
+    background: var(--surface-overlay);
     padding: 0.3rem 0.6rem;
     border-radius: 0.25rem;
     z-index: 5;
@@ -852,20 +864,5 @@
   .feed-grid.list-view :global(.card-gallery .card-image img) {
     aspect-ratio: auto;
     height: auto;
-  }
-  :global(:root[data-theme='light']) .feed-grid :global(.card-title-overlay) {
-    background: #ececef;
-  }
-  /* "SEEN" pill flips to a light translucent badge so it reads on light cards
-	   and over image thumbnails alike. */
-  :global(:root[data-theme='light']) .feed-grid :global(.seen-pill) {
-    background: rgba(255, 255, 255, 0.82);
-    color: #555;
-  }
-  :global(:root[data-theme='light']) .feed-grid :global(.meta-link:hover) {
-    color: var(--text-primary);
-  }
-  :global(:root[data-theme='light']) .status-badge {
-    background: #ececef;
   }
 </style>

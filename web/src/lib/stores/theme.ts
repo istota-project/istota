@@ -21,10 +21,13 @@ export const theme = writable<Theme>(initialTheme());
  * and the seed values in the pre-paint script in app.html — keep all three in
  * step.
  */
+// design-lint-allow-begin: this IS the token's value, not a use of it — the
+// browser chrome meta tag takes a literal and cannot read a CSS variable.
 const CHROME_COLOR: Record<Theme, string> = {
   dark: '#111111',
   light: '#ffffff',
 };
+// design-lint-allow-end
 
 /** Reflect the theme onto <html> so the CSS variable overrides take effect. */
 export function applyTheme(value: Theme): void {

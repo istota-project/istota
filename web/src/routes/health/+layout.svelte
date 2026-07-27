@@ -88,7 +88,7 @@
     transition: border-color var(--transition-fast);
   }
   .health-frame :global(.card.interactive:hover) {
-    border-color: #555;
+    border-color: var(--border-hover);
   }
 
   @media (max-width: 768px) {

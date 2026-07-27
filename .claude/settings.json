@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // .tool_response.filePath // empty'); case \"$f\" in */web/src/*) node \"${f%%/web/src/*}/web/scripts/design-lint.mjs\" >/dev/null || exit 2;; esac",
+            "timeout": 30,
+            "statusMessage": "Checking web design language..."
+          }
+        ]
+      }
+    ]
+  }
+}

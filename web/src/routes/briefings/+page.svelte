@@ -98,13 +98,9 @@
 		   indicator — rather than the fill stopping short and leaving a band of the
 		   shell background below the card. Inert where the inset is 0. */
     padding-bottom: max(1.5rem, var(--safe-bottom));
-    /* Card-colored reading surface, matching the chat message area. */
-    background: var(--surface-card);
-  }
-  /* Match .chat-pane's light-theme fill exactly (light --surface-card is a soft
-	   gray; chat uses pure white for the reading surface). */
-  :global(:root[data-theme='light']) .reader {
-    background: #ffffff;
+    /* Reading surface, shared with the chat transcript: card-colored in dark,
+	     pure white in light. */
+    background: var(--surface-reading);
   }
 
   /* Phone: the desktop 2rem inline gutter costs a fifth of a narrow screen's

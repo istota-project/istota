@@ -147,9 +147,9 @@
   }
 
   .error-panel {
-    background: #1a0e0e;
+    background: var(--status-danger-bg);
     padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid #5a1f1f;
+    border-bottom: 1px solid var(--status-danger-fg);
     max-height: 200px;
     overflow-y: auto;
     flex-shrink: 0;
@@ -439,11 +439,5 @@
       flex: 1 1 auto;
       min-width: 0;
     }
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .error-panel {
-    background: #f7dada;
-    border-bottom-color: #f0caca;
   }
 </style>

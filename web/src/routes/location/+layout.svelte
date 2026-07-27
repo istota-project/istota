@@ -429,12 +429,12 @@
 
   .new-place-btn:hover {
     color: var(--text-primary);
-    border-color: #777;
+    border-color: var(--border-hover);
   }
 
   .new-place-btn.active {
-    color: #ffc107;
-    border-color: #ffc107;
+    color: var(--accent-amber);
+    border-color: var(--accent-amber);
   }
 
   .action-error {
@@ -561,14 +561,5 @@
     display: block;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .new-place-btn:hover {
-    border-color: var(--border-default);
-  }
-  :global(:root[data-theme='light']) .new-place-btn.active {
-    color: #946a00;
-    border-color: #946a00;
   }
 </style>

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
+  import { theme } from '$lib/stores/theme';
+  import { chartChrome } from '$lib/chartTheme';
   import {
     Chart,
     LineController,
@@ -149,6 +151,7 @@
     if (charts[metric]) {
       charts[metric]!.destroy();
     }
+    const chrome = chartChrome();
     charts[metric] = new Chart(canvas, {
       type: 'line',
       data: {
@@ -174,11 +177,11 @@
           x: { display: false },
           y: {
             display: true,
-            grid: { color: 'rgba(255,255,255,0.04)' },
+            grid: { color: chrome.grid },
             ticks: {
               font: { size: 9 },
               maxTicksLimit: 4,
-              color: 'rgba(255,255,255,0.4)',
+              color: chrome.tick,
             },
           },
         },
@@ -202,6 +205,7 @@
     const sysValues = sorted.map((d) => sysMap.get(d) ?? null);
     const diaValues = sorted.map((d) => diaMap.get(d) ?? null);
     if (charts.blood_pressure) charts.blood_pressure!.destroy();
+    const chrome = chartChrome();
     charts.blood_pressure = new Chart(canvas, {
       type: 'line',
       data: {
@@ -210,6 +214,8 @@
           {
             label: 'Systolic',
             data: sysValues,
+            // design-lint-allow: data-viz — Chart.js series color, read from its
+            // own config rather than CSS. Paired with Diastolic below.
             borderColor: '#f08c8c',
             backgroundColor: 'transparent',
             borderWidth: 1.5,
@@ -221,6 +227,7 @@
           {
             label: 'Diastolic',
             data: diaValues,
+            // design-lint-allow: data-viz — Chart.js series color.
             borderColor: '#7aa3d8',
             backgroundColor: 'transparent',
             borderWidth: 1.5,
@@ -239,8 +246,8 @@
           x: { display: false },
           y: {
             display: true,
-            grid: { color: 'rgba(255,255,255,0.04)' },
-            ticks: { font: { size: 9 }, maxTicksLimit: 4, color: 'rgba(255,255,255,0.4)' },
+            grid: { color: chrome.grid },
+            ticks: { font: { size: 9 }, maxTicksLimit: 4, color: chrome.tick },
           },
         },
       },
@@ -254,6 +261,9 @@
 
   $effect(() => {
     seriesByMetric;
+    // Chart.js holds its colors as plain config, so a theme flip needs a
+    // rebuild — reading $theme here makes this effect depend on it.
+    $theme;
     untrack(() => {
       // Render after the DOM updates with the new card list.
       queueMicrotask(() => {
@@ -703,7 +713,4 @@
   }
 
   /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .card:hover {
-    border-color: var(--border-default);
-  }
 </style>

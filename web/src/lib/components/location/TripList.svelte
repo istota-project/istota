@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Trip } from '$lib/location-path';
-  import { ACTIVITY_COLORS, ACTIVITY_LABELS } from '$lib/location-constants';
+  import { ACTIVITY_COLORS, ACTIVITY_LABELS, DEFAULT_PATH_COLOR } from '$lib/location-constants';
 
   interface Props {
     trips: Trip[];
@@ -36,7 +36,7 @@
       <button class="trip-item" onclick={() => onTripClick?.(trip)} type="button">
         <span
           class="trip-dot"
-          style="background: {ACTIVITY_COLORS[trip.activity_type] ?? '#4a9eff'}"
+          style="background: {ACTIVITY_COLORS[trip.activity_type] ?? DEFAULT_PATH_COLOR}"
         ></span>
         <div class="trip-info">
           <span class="trip-time">{formatTime(trip.start_time)} - {formatTime(trip.end_time)}</span>

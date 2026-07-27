@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
+  import { theme } from '$lib/stores/theme';
+  import { chartChrome } from '$lib/chartTheme';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import {
@@ -158,6 +160,7 @@
     datasets.push({
       label: trend.display_name || trend.name,
       data: values,
+      // design-lint-allow: data-viz — Chart.js series color.
       borderColor: '#7aa3d8',
       backgroundColor: 'transparent',
       borderWidth: 2,
@@ -194,6 +197,7 @@
       });
     }
 
+    const chrome = chartChrome();
     chart = new Chart(chartCanvas, {
       type: 'line',
       data: { labels, datasets },
@@ -211,9 +215,10 @@
           },
         },
         scales: {
-          x: { grid: { color: 'rgba(255,255,255,0.04)' } },
+          x: { grid: { color: chrome.grid }, ticks: { color: chrome.tick } },
           y: {
-            grid: { color: 'rgba(255,255,255,0.04)' },
+            grid: { color: chrome.grid },
+            ticks: { color: chrome.tick },
             beginAtZero: false,
           },
         },
@@ -228,6 +233,9 @@
 
   $effect(() => {
     trend;
+    // Chart.js holds its colors as plain config, so a theme flip needs a
+    // rebuild — reading $theme here makes this effect depend on it.
+    $theme;
     untrack(() => queueMicrotask(renderChart));
   });
 
@@ -467,7 +475,7 @@
   }
   .related a:hover {
     color: var(--text-primary);
-    border-color: #555;
+    border-color: var(--border-hover);
   }
   .alert {
     background: rgba(204, 102, 102, 0.08);
@@ -651,11 +659,10 @@
     color: var(--status-info-fg);
   }
   /* Critical is a step above High, so it keeps a solid saturated fill rather
-	   than the tinted chip — but it needs a light-theme value of its own, or the
-	   near-black block lands on a white card. */
+	   than the tinted chip. Both halves of the pair live in app.css. */
   .flag-C {
-    background: #6b0000;
-    color: #fff;
+    background: var(--status-critical-bg);
+    color: var(--status-critical-fg);
   }
   .empty {
     color: var(--text-dim);
@@ -679,10 +686,4 @@
   }
 
   /* Light theme overrides — dark rules above untouched. */
-  :global(:root[data-theme='light']) .related a:hover {
-    border-color: var(--border-default);
-  }
-  :global(:root[data-theme='light']) .flag-C {
-    background: #b3261e;
-  }
 </style>

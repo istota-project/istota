@@ -565,11 +565,10 @@
     color: var(--status-info-fg);
   }
   /* Critical is a step above High, so it keeps a solid saturated fill rather
-	   than the tinted chip — but it needs a light-theme value of its own, or the
-	   near-black block lands on a white card. */
+	   than the tinted chip. Both halves of the pair live in app.css. */
   .flag-C {
-    background: #6b0000;
-    color: #fff;
+    background: var(--status-critical-bg);
+    color: var(--status-critical-fg);
   }
   .add {
     margin-top: 0.5rem;
@@ -627,8 +626,5 @@
   .msg.info {
     background: rgba(122, 163, 216, 0.1);
     color: var(--status-info-fg);
-  }
-  :global(:root[data-theme='light']) .flag-C {
-    background: #b3261e;
   }
 </style>

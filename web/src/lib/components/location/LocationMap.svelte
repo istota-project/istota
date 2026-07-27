@@ -1,3 +1,18 @@
+<!--
+  design-lint-allow-file: data-viz + third-party chrome.
+
+  Two reasons, neither fixable by reaching for a token:
+
+  1. MapLibre paint properties are read by a WebGL renderer, not the CSS engine,
+     so they cannot resolve `var(--token)` — a paint spec has to carry a literal.
+     The JS-side mirror of the palette lives in `$lib/location-constants`.
+  2. The `.maplibregl-*` rules restyle vendor DOM this component does not own, so
+     they are `!important` overrides of another stylesheet rather than our own
+     design language.
+
+  Theme switching is handled imperatively in `applyThemeColors()` instead of by a
+  token pair, for reason 1.
+-->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';

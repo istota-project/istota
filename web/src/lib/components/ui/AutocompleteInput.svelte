@@ -196,7 +196,7 @@
     list-style: none;
     max-height: 12rem;
     overflow-y: auto;
-    background: var(--surface-overlay, var(--surface-card));
+    background: var(--surface-overlay);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card, 0.5rem);
     box-shadow: var(--shadow-md, 0 8px 24px rgba(0, 0, 0, 0.4));

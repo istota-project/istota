@@ -2,13 +2,15 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { page } from '$app/state';
   import { Plus, MessageSquare, Cloud, ChevronDown, Circle, Star, CheckCheck } from 'lucide-svelte';
-  import AppShell from '$lib/components/ui/AppShell.svelte';
-  import ShellHeader from '$lib/components/ui/ShellHeader.svelte';
-  import Sidebar from '$lib/components/ui/Sidebar.svelte';
-  import SidebarToggle from '$lib/components/ui/SidebarToggle.svelte';
-  import KebabMenu from '$lib/components/ui/KebabMenu.svelte';
-  import Chip from '$lib/components/ui/Chip.svelte';
-  import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+  import {
+    AppShell,
+    ShellHeader,
+    Sidebar,
+    SidebarToggle,
+    KebabMenu,
+    Chip,
+    ConfirmDialog,
+  } from '$lib/components/ui';
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
@@ -770,24 +772,14 @@
     flex-direction: column;
     /* Anchors the docked composer. */
     position: relative;
-    /* Lighter gray than the app base (#111) so the white text reads with
-		   softer contrast — matches the message hover-highlight shade. */
     /* Published as a variable as well as applied: the docked composer paints
        this same fill behind itself and fades the transcript out into it, and it
        can't read a sibling component's `background`. */
-    --chat-bg: var(--surface-card);
+    --chat-bg: var(--surface-reading);
     background: var(--chat-bg);
-    /* Soften body text a touch (scoped to chat) to further ease the
-		   light-on-dark contrast. */
-    --text-primary: #cfcfcf;
-  }
-  /* Light theme: the chat-scoped soften must flip to a soft *dark* text,
-	   otherwise the #cfcfcf above is unreadable on the light pane. A white
-	   message area (the composer paints its own --surface-card, so the input
-	   section keeps the soft-gray fill). */
-  :global(:root[data-theme='light']) .chat-pane {
-    --text-primary: #2a2a2e;
-    --chat-bg: #ffffff;
+    /* Soften body text a step (scoped to chat) to ease sustained reading. The
+		   token flips to a soft dark in light, so this needs no override. */
+    --text-primary: var(--text-reading);
   }
 
   /* The composer floats over the transcript instead of taking a row of its own,
@@ -871,18 +863,14 @@
     height: 36px;
     border-radius: 999px;
     border: 1px solid var(--border-default);
-    background: var(--surface-overlay, var(--surface-card));
+    background: var(--surface-overlay);
     color: var(--text-primary);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+    box-shadow: var(--shadow-overlay);
     cursor: pointer;
     /* Fully opaque: centered it floats over message text rather than over the
 		   right margin, and the old 0.9 let that text read straight through. */
     opacity: 1;
     transition: transform 0.12s ease;
-  }
-  /* Light mode: a heavy black shadow reads harsh on the white pane — soften it. */
-  :global(:root[data-theme='light']) .jump-latest {
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
   }
   .jump-latest:hover {
     transform: translate(-50%, -1px);

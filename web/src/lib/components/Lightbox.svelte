@@ -100,6 +100,8 @@
     border: none;
     border-radius: 50%;
     background: rgba(0, 0, 0, 0.5);
+    /* design-lint-allow: fixed chrome — the lightbox is a theme-invariant dark
+       overlay over the image, so its controls stay white in both themes. */
     color: #fff;
     cursor: pointer;
     transition: background 120ms;
@@ -110,6 +112,7 @@
   .counter {
     padding: 0.25rem 0.6rem;
     background: rgba(0, 0, 0, 0.5);
+    /* design-lint-allow: fixed chrome — see .nav above. */
     color: #fff;
     font-size: 0.8rem;
     border-radius: 0.25rem;

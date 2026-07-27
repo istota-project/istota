@@ -430,7 +430,7 @@
     font-size: var(--text-sm);
   }
   .related li a:hover {
-    border-color: #555;
+    border-color: var(--border-hover);
   }
   .related .name {
     font-weight: 500;
@@ -533,8 +533,5 @@
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
     color: var(--status-danger-fg);
-  }
-  :global(:root[data-theme='light']) .related li a:hover {
-    border-color: var(--border-default);
   }
 </style>

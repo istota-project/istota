@@ -484,8 +484,11 @@
     justify-content: center;
     font-size: 0.85rem;
     font-weight: 600;
+    /* design-lint-allow-begin: fixed surface — an avatar fill is an identity
+       chip, not a themed surface, so it holds one value in both themes. */
     color: #fff;
     background: #4a4a52;
+    /* design-lint-allow-end */
     user-select: none;
   }
   .avatar.bot {

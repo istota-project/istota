@@ -10,16 +10,32 @@
   --surface-card: #1a1a1a;
   --surface-raised: #222;
   --surface-badge: #252525;
+  /* Chrome that floats *over* content rather than sitting in the layout — a
+	   feed card's title overlay, the fixed status badge, an autocomplete popover,
+	   the jump-to-latest button. Sits between base and card so it separates from
+	   both. */
+  --surface-overlay: #161616;
+  /* Long-form reading surface: the chat transcript and the briefings reader.
+	   Card-colored in dark, but pure white in light — a reading pane wants more
+	   contrast against the shell than a card does. */
+  --surface-reading: var(--surface-card);
 
   /* Text */
   --text-primary: #e0e0e0;
   --text-secondary: #bbb;
   --text-muted: #888;
   --text-dim: #666;
+  /* Body text inside a reading surface, softened a step from --text-primary to
+	   ease sustained light-on-dark reading. Flips to a soft *dark* in light. */
+  --text-reading: #cfcfcf;
 
   /* Borders */
   --border-default: #333;
   --border-subtle: #222;
+  /* One step stronger than --border-default: the hover state of an interactive
+	   card, chip or link-tile. Defined in both themes so a hover affordance does
+	   not silently vanish on white. */
+  --border-hover: #555;
 
   /* Interactive */
   --accent: #e0e0e0;
@@ -59,6 +75,12 @@
   --status-success-bg: #204028;
   --status-info-fg: #9cc7f8;
   --status-info-bg: #20384a;
+  /* A fifth step above danger, for a value that is not merely out of range but
+	   clinically critical (the bloodwork flag-C cell). Unlike the four above it
+	   is a *solid saturated fill* rather than a tint, so `-fg` is the text laid
+	   on `-bg` — white in both themes, like --accent-amber-fill-fg. */
+  --status-critical-bg: #6b0000;
+  --status-critical-fg: #fff;
 
   /* Indicator dots — the same four severities, but saturated. A dot carries no
 	   text, so it can be far more vivid than a `-fg` label without hurting
@@ -77,12 +99,26 @@
   --money-income: #4adbc0;
   --money-expense: #d46ab5;
 
-  /* Map colors */
-  --map-path: #4a9eff;
-  --map-current: #4aff7f;
-  --map-stop: #e0e0e0;
-  --map-place-fill: rgba(51, 51, 51, 0.15);
-  --map-place-stroke: #555;
+  /* Overlay + scrim chrome. These sit on a surface whose lightness the theme
+	   does NOT control — a filled accent button, a translucent scrim over a
+	   photo, a dark pill over the map canvas — so several are deliberately one
+	   value across both themes, like --status-dot-*. */
+  /* Text on a filled accent (primary/send button, toast action). */
+  --on-accent-fg: #fff;
+  /* Text on a dark scrim that stays dark in both themes (map hints, media
+	   captions). Softer than pure white so it does not glare. */
+  --on-scrim-fg: #ececef;
+  /* A small pill laid over media of unknown lightness — it flips scrim
+	   direction with the theme so it reads on a dark card and a light one. */
+  --scrim-pill-bg: rgba(0, 0, 0, 0.55);
+  --scrim-pill-fg: var(--text-muted);
+  /* The moving highlight in a loading shimmer. Lightens in dark, darkens in
+	   light — a white sweep washes out entirely on a light surface. */
+  --shimmer-tint: rgba(255, 255, 255, 0.11);
+  /* Drop shadow for chrome floating over content. Heavier in dark, where it has
+	   to separate two dark surfaces; a black shadow that strong reads harsh on
+	   white. */
+  --shadow-overlay: 0 1px 3px rgba(0, 0, 0, 0.22);
 
   /* Radii */
   --radius-card: 0.5rem;
@@ -192,16 +228,22 @@
   --surface-card: #f4f4f5;
   --surface-raised: #e8e8ea;
   --surface-badge: #e0e0e3;
+  --surface-overlay: #ececef;
+  /* Pure white rather than the soft-gray card: a reading pane wants to be the
+	   brightest thing on the page. */
+  --surface-reading: #ffffff;
 
   /* Text */
   --text-primary: #1a1a1a;
   --text-secondary: #3f3f46;
   --text-muted: #6b6b72;
   --text-dim: #9a9aa2;
+  --text-reading: #2a2a2e;
 
   /* Borders */
   --border-default: #d4d4d8;
   --border-subtle: #e4e4e7;
+  --border-hover: #a1a1aa;
 
   /* Interactive */
   --accent: #1a1a1a;
@@ -222,14 +264,20 @@
   --status-success-bg: #d7ecdd;
   --status-info-fg: #2563b0;
   --status-info-bg: #dbe9fb;
+  /* Lighter than the dark theme's near-black block, which lands as a hole on a
+	   white table. --status-critical-fg stays white on both. */
+  --status-critical-bg: #b3261e;
 
   /* Money direction */
   --money-income: #0d8f7e;
   --money-expense: #a3157e;
 
-  /* Map colors — keep the path/current hues; soften the place overlay. */
-  --map-place-fill: rgba(0, 0, 0, 0.05);
-  --map-place-stroke: #b8b8bd;
+  /* Overlay + scrim chrome. --on-accent-fg and --on-scrim-fg are deliberately
+	   NOT redefined: both sit on a surface this theme does not lighten. */
+  --scrim-pill-bg: rgba(255, 255, 255, 0.82);
+  --scrim-pill-fg: var(--text-secondary);
+  --shimmer-tint: rgba(0, 0, 0, 0.06);
+  --shadow-overlay: 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
 *,
@@ -290,10 +338,7 @@ body {
      keyboard closes. Unset everywhere else, so every other context keeps dvh. */
   height: var(--app-height, 100dvh);
   margin: 0;
-  font-family:
-    system-ui,
-    -apple-system,
-    sans-serif;
+  font-family: var(--font-sans);
   background: var(--surface-base);
   color: var(--text-primary);
   line-height: 1.5;

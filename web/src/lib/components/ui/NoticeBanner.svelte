@@ -64,9 +64,6 @@
   .notice-info {
     --notice-accent: var(--status-info-fg);
   }
-  :global(:root[data-theme='light']) .notice-danger {
-    --notice-accent: #c0271d;
-  }
 
   .notice-head {
     display: flex;

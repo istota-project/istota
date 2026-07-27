@@ -299,7 +299,7 @@
     border-radius: var(--radius-pill);
     padding: 0.3rem 0.85rem;
     background: var(--accent-blue);
-    color: #fff;
+    color: var(--on-accent-fg);
     cursor: pointer;
     white-space: nowrap;
   }

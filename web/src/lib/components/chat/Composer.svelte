@@ -631,11 +631,11 @@
   /* The send affordance is the one filled control in the bar. */
   .icon-btn.send {
     background: var(--accent-blue);
-    color: #fff;
+    color: var(--on-accent-fg);
   }
   .icon-btn.send:hover:not(:disabled) {
     background: var(--accent-blue);
-    color: #fff;
+    color: var(--on-accent-fg);
     filter: brightness(1.12);
   }
   .icon-btn.send:disabled {
@@ -645,7 +645,7 @@
   }
   .icon-btn.send.stop {
     background: var(--status-danger-fg);
-    color: #fff;
+    color: var(--on-accent-fg);
   }
 
   .file-hidden {
