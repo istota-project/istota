@@ -102,7 +102,20 @@
   // and only when the surface passes a toggle handler.
   const starrable = $derived(typeof message.msgId === 'number' && !!onToggleStar);
   const showRoomChip = $derived(!!message.roomName && !!onRoomClick);
-  const hasActions = $derived(starrable || (meta.length > 0 && !message.streaming));
+
+  // Under a finger the reveal is gated in the *markup*, not by opacity alone.
+  // A control at zero opacity is still hit-testable, and the star sits at the
+  // row's top-right: a tap that clipped it starred the message outright, and
+  // because a tap on a button deliberately leaves the activation alone (see
+  // tapActivation), the row never lit up either. What the user saw was a gold
+  // star with no metadata beside it, on every row a thumb had brushed —
+  // indistinguishable from the sticky-hover bug this was meant to have fixed,
+  // and the tell was that only the star persisted while the metadata behaved.
+  // A starred message keeps its star: that one is state, not an affordance.
+  const revealed = $derived(!touch || active);
+  const showMeta = $derived(revealed && meta.length > 0 && !message.streaming);
+  const showStar = $derived(starrable && (revealed || !!message.starred));
+  const hasActions = $derived(showStar || showMeta);
 </script>
 
 {#snippet starButton()}
@@ -133,10 +146,10 @@
      absolutely positioned on a continuation row, which has no header. -->
 {#snippet actionsBar()}
   <div class="msg-actions">
-    {#if meta.length && !message.streaming}
+    {#if showMeta}
       <span class="meta-footer">{meta.join(' · ')}</span>
     {/if}
-    {#if starrable}
+    {#if showStar}
       {@render starButton()}
     {/if}
   </div>
@@ -163,7 +176,7 @@
     {:else}
       <div class="cmd-output markdown" class:error={message.error}>{@html bodyHtml}</div>
     {/if}
-    {#if starrable}
+    {#if showStar}
       <div class="msg-actions cmd-actions">
         {@render starButton()}
       </div>
@@ -180,10 +193,10 @@
     data-task-id={message.taskId ?? undefined}
   >
     <div class="gutter">
-      {#if continuation}
-        <time class="hover-time">{time}</time>
-      {:else}
+      {#if !continuation}
         <div class="avatar" class:bot={!isUser}>{initial}</div>
+      {:else if revealed}
+        <time class="hover-time">{time}</time>
       {/if}
     </div>
 
@@ -361,7 +374,7 @@
 
   /* Star toggle: hidden at rest, revealed on row hover (or tap-activation on
 	   touch) / keyboard focus; a starred message keeps it visible (filled, gold)
-	   like the feeds cards. */
+	   like the feeds cards. The reveal is instant — see the transition below. */
   .star-btn {
     display: inline-flex;
     align-items: center;
@@ -372,14 +385,28 @@
     color: var(--text-dim);
     cursor: pointer;
     opacity: 0;
-    transition:
-      opacity var(--transition-fast),
-      color var(--transition-fast);
+    /* Hidden *and* inert. Opacity alone leaves the button hit-testable, so a
+		   tap landing on the invisible star starred the message with nothing on
+		   screen to explain it. The markup gate above covers the touch path once a
+		   finger has been seen; this covers the frame before that and any pointer
+		   device where the row renders the button unrevealed. Keyboard focus is
+		   unaffected — pointer-events does not gate Tab — and :focus-visible below
+		   hands interactivity back. */
+    pointer-events: none;
+    /* Colour fades, the reveal does not. An opacity transition is what asks the
+		   compositor to promote this button to its own layer, and a promoted layer
+		   whose opacity returns to 0 without a repaint keeps showing what it last
+		   painted — the star stranded on every tapped row while the plain text span
+		   beside it, never promoted, cleared correctly. The metadata keeps its fade
+		   because a span is not the shape that gets promoted; the star trades a
+		   150ms fade for not being able to strand. */
+    transition: color var(--transition-fast);
   }
   @media (hover: hover) {
     .msg:not(.touch):hover .star-btn,
     .cmd-row:not(.touch):hover .star-btn {
       opacity: 1;
+      pointer-events: auto;
     }
     .msg:not(.touch) .star-btn:hover,
     .cmd-row:not(.touch) .star-btn:hover {
@@ -391,6 +418,7 @@
   .star-btn:focus-visible,
   .star-btn.starred {
     opacity: 1;
+    pointer-events: auto;
   }
   .star-btn.starred {
     color: var(--accent-amber);

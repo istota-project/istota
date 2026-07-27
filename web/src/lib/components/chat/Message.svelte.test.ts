@@ -296,6 +296,59 @@ describe('tap activation (touch)', () => {
     expect(container.querySelector('.msg')?.classList.contains('active')).toBe(true);
   });
 
+  it('does not render the star on an unrevealed touch row', () => {
+    // The regression: opacity alone hid the star but left it hit-testable, and
+    // it sits at the row's top-right. A tap that clipped it starred the message
+    // outright — and since a tap on a button leaves the activation alone, the
+    // row never lit up, so a gold star appeared with no metadata beside it. It
+    // accumulated one row per tap and read exactly like the sticky-hover bug.
+    const { container } = render(Message, {
+      message: finished({ msgId: 42 }),
+      onConfirm: noop,
+      onReject: noop,
+      onToggleStar: noop,
+      touch: true,
+    });
+    expect(container.querySelector('.star-btn')).toBeNull();
+    expect(container.querySelector('.meta-footer')).toBeNull();
+  });
+
+  it('renders the star on the active touch row', () => {
+    const { container } = render(Message, {
+      message: finished({ msgId: 42 }),
+      onConfirm: noop,
+      onReject: noop,
+      onToggleStar: noop,
+      touch: true,
+      active: true,
+    });
+    expect(container.querySelector('.star-btn')).not.toBeNull();
+  });
+
+  it('keeps an already-starred message showing its star while unrevealed', () => {
+    // Starred is state, not an affordance — hiding it would lose the only
+    // indication the message is starred at all.
+    const { container } = render(Message, {
+      message: finished({ msgId: 42, starred: true }),
+      onConfirm: noop,
+      onReject: noop,
+      onToggleStar: noop,
+      touch: true,
+    });
+    expect(container.querySelector('.star-btn')?.classList.contains('starred')).toBe(true);
+  });
+
+  it('does not render the star on an unrevealed touch system row', () => {
+    const { container } = render(Message, {
+      message: finished({ role: 'system', msgId: 42 }),
+      onConfirm: noop,
+      onReject: noop,
+      onToggleStar: noop,
+      touch: true,
+    });
+    expect(container.querySelector('.star-btn')).toBeNull();
+  });
+
   it('marks the row touch-driven so the hover reveal stands down', () => {
     // The second guard, for a device that reports hover *and* has a finger on
     // it (touchscreen laptop, iPad + trackpad) — where the media query alone
