@@ -489,8 +489,8 @@
     user-select: none;
   }
   .avatar.bot {
-    background: var(--accent-amber);
-    color: #111;
+    background: var(--accent-amber-fill);
+    color: var(--accent-amber-fill-fg);
   }
 
   /* The mobile avatar is a good deal smaller (it is what buys the shared text
@@ -680,9 +680,5 @@
     50% {
       opacity: 1;
     }
-  } /* The amber accent darkens in light mode, so the bot initial needs light
-	   text for contrast (dark mode keeps its dark initial on bright amber). */
-  :global(:root[data-theme='light']) .avatar.bot {
-    color: #fff;
   }
 </style>

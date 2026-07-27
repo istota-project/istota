@@ -26,6 +26,14 @@
   --accent-hover: #fff;
   /* Amber terminal accent — the bot's identity color + highlights (links). */
   --accent-amber: #f5a623;
+  /* The same accent as a solid FILL, with dark text on it. Deliberately one
+	   value across both themes, like --status-dot-*: the light theme darkens
+	   --accent-amber so amber *text* passes on white, and that darkening is
+	   exactly wrong for a fill — it turns a bright accent button into a muddy
+	   brown. A fill sets its own text color, so it needs no such compensation. */
+  --accent-amber-fill: #f5a623;
+  --accent-amber-fill-hover: #ffc05c;
+  --accent-amber-fill-fg: #111;
   /* Blue interactive accent — primary buttons, active tabs, focus rings,
 	   in-app cross-references. Distinct from --status-info-fg: this marks
 	   something you can act on, not a severity. */
