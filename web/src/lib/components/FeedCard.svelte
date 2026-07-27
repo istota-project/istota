@@ -159,7 +159,7 @@
       </div>
     {/if}
     {#if entry.content}
-      <div class="card-body"><div class="excerpt">{@html entry.content}</div></div>
+      <div class="card-body"><div class="excerpt prose">{@html entry.content}</div></div>
     {/if}
   {:else}
     <div class="card-body">
@@ -169,7 +169,7 @@
         </h3>
       {/if}
       {#if entry.content}
-        <div class="excerpt">{@html entry.content}</div>
+        <div class="excerpt prose">{@html entry.content}</div>
       {/if}
     </div>
   {/if}

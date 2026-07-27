@@ -214,7 +214,7 @@
         {/if}
 
         {#if entry.content}
-          <div class="reader-content">{@html entry.content}</div>
+          <div class="reader-content prose">{@html entry.content}</div>
         {/if}
 
         {#if permalink}
@@ -362,7 +362,8 @@
     height: auto;
   }
 
-  /* Body copy mirrors the card .excerpt (--text-secondary + #aaa links). */
+  /* Body copy mirrors the card .excerpt. Link color comes from the shared
+	   `prose` contract in app.css, not from here. */
   .repeat-note {
     margin: 0 0 1rem;
     font-size: var(--text-sm);
@@ -382,15 +383,6 @@
     height: auto;
     border-radius: var(--radius-card);
     margin: 0.6rem 0;
-  }
-
-  .reader-content :global(a) {
-    color: #aaa;
-    text-decoration: underline;
-  }
-
-  .reader-content :global(a:hover) {
-    color: var(--text-primary);
   }
 
   .reader-content :global(p) {

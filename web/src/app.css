@@ -30,6 +30,12 @@
 	   in-app cross-references. Distinct from --status-info-fg: this marks
 	   something you can act on, not a severity. */
   --accent-blue: #7aa3d8;
+  /* Links inside rendered body content — chat markdown, the briefings reader,
+	   feed entries. Amber, following the bot's accent. Kept as its own token
+	   rather than using --accent-amber directly so a link can be retuned without
+	   moving the identity color (and so the hover pair has somewhere to live). */
+  --link: var(--accent-amber);
+  --link-hover: #ffc05c;
 
   /* Status severities — the standardized chip/badge palette. `-fg` is the text
 	   color for a bare status label; `-bg` is the fill for a filled chip, which
@@ -184,6 +190,8 @@
   /* Darker amber so the bot's accent stays legible on a light surface. */
   --accent-amber: #b9740a;
   --accent-blue: #2563b0;
+  --link: var(--accent-amber);
+  --link-hover: #8f5a06;
 
   /* Status severities — darkened foregrounds that hold contrast on white, and
 	   pale tinted fills in place of the dark-theme blocks. */
@@ -517,8 +525,21 @@ body:has(.app-content-fill) {
   background: none;
   padding: 0;
 }
-.markdown a {
-  color: var(--accent-amber);
+/* Links inside rendered body content. This is the ONE place a content link's
+   color is decided — chat markdown, the briefings reader and feed entries all
+   draw prose from outside the app and must read the same. A surface joins by
+   putting `prose` on its container, not by writing a local `a` rule; that is
+   how the app ended up with three different link treatments (amber / plain
+   body text / hard-coded #aaa) for the same kind of content. */
+.markdown a,
+.prose a {
+  color: var(--link);
+  text-decoration: none;
+}
+.markdown a:hover,
+.prose a:hover {
+  color: var(--link-hover);
+  text-decoration: underline;
 }
 .markdown del {
   color: var(--text-muted);

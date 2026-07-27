@@ -631,13 +631,7 @@
     word-break: break-word;
   }
 
-  .feed-grid :global(.excerpt a) {
-    color: #aaa;
-    text-decoration: underline;
-  }
-  .feed-grid :global(.excerpt a:hover) {
-    color: var(--text-primary);
-  }
+  /* Link color comes from the shared `prose` contract in app.css. */
   .feed-grid :global(.excerpt p) {
     margin: 0 0 0.85rem;
   }
@@ -783,9 +777,6 @@
   :global(:root[data-theme='light']) .feed-grid :global(.seen-pill) {
     background: rgba(255, 255, 255, 0.82);
     color: #555;
-  }
-  :global(:root[data-theme='light']) .feed-grid :global(.excerpt a) {
-    color: var(--text-secondary);
   }
   :global(:root[data-theme='light']) .feed-grid :global(.meta-link:hover) {
     color: var(--text-primary);

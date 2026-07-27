@@ -65,7 +65,12 @@
         </p>
       </header>
       <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-      <div class="body">{@html renderMarkdown(current.body_md ?? '')}</div>
+      <!-- `markdown` is the shared rendered-prose block in app.css (same class
+           chat's message body uses). The local rules below layer on top of it —
+           Svelte's scoping class outranks the global ones — and only cover where
+           a reading surface genuinely differs from a chat bubble (flush lists,
+           larger headings). -->
+      <div class="body markdown">{@html renderMarkdown(current.body_md ?? '')}</div>
     </article>
   {:else if loading || $briefingArchiveCount === null}
     <p class="status">Loading…</p>
