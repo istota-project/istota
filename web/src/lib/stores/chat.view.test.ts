@@ -33,9 +33,16 @@ const api = vi.hoisted(() => ({
 }));
 
 vi.mock('$lib/api', () => api);
+// In-memory stand-in for localStorage so the selection round-trip (save on
+// select, read back on the next init) is exercised for real.
+const persisted = vi.hoisted(() => ({ map: new Map<string, unknown>() }));
 vi.mock('$lib/stores/persisted', () => ({
-  loadSetting: vi.fn(() => null),
-  saveSetting: vi.fn(),
+  loadSetting: vi.fn((key: string, fallback: unknown) =>
+    persisted.map.has(key) ? persisted.map.get(key) : fallback,
+  ),
+  saveSetting: vi.fn((key: string, value: unknown) => {
+    persisted.map.set(key, value);
+  }),
 }));
 
 function room(id: number, unread = 0, name = `Room ${id}`): ChatRoom {
@@ -81,6 +88,7 @@ async function freshSession() {
 
 describe('chat store — cross-room views + starring', () => {
   beforeEach(() => {
+    persisted.map.clear();
     Object.values(api).forEach((v) => {
       if (typeof v === 'function' && 'mockReset' in v) (v as any).mockReset();
     });
@@ -115,6 +123,59 @@ describe('chat store — cross-room views + starring', () => {
     expect(msgs[0].roomToken).toBe('t1');
     expect(msgs[0].roomName).toBe('Room 1');
     expect(get(s.hasMore)).toBe(true);
+  });
+
+  it('init restores a persisted aggregate view instead of auto-selecting a room', async () => {
+    persisted.map.set('chat.view', 'all');
+    persisted.map.set('chat.activeRoomId', 2);
+    api.getChatMessagesView.mockResolvedValue({
+      messages: [aggMsg(10, 'hello')],
+      has_more: false,
+      oldest_cursor: null,
+    });
+    const s = await freshSession();
+    await s.init();
+    expect(get(s.view)).toBe('all');
+    // Only one thing may be selected at a time — no room rides along.
+    expect(get(s.activeRoomId)).toBeNull();
+    expect(api.getChatMessagesView).toHaveBeenCalledWith('all');
+    expect(api.getRoomMessages).not.toHaveBeenCalled();
+    expect(get(s.loaded)).toBe(true);
+  });
+
+  it('re-entering /chat while a view is open does not also select a room', async () => {
+    api.getChatMessagesView.mockResolvedValue({
+      messages: [],
+      has_more: false,
+      oldest_cursor: null,
+    });
+    const s = await freshSession();
+    await s.init();
+    await s.selectView('all');
+    // Navigate away and back: the session is a module singleton, so `view`
+    // survives while the route remounts and re-inits.
+    s.teardown();
+    await s.init();
+    expect(get(s.view)).toBe('all');
+    expect(get(s.activeRoomId)).toBeNull();
+  });
+
+  it('init restores the last selected room when no view was open', async () => {
+    const s = await freshSession();
+    await s.init();
+    await s.selectRoom(2);
+    s.teardown();
+    await s.init();
+    expect(get(s.view)).toBe('room');
+    expect(get(s.activeRoomId)).toBe(2);
+  });
+
+  it('an unknown persisted view falls back to room mode', async () => {
+    persisted.map.set('chat.view', 'bogus');
+    const s = await freshSession();
+    await s.init();
+    expect(get(s.view)).toBe('room');
+    expect(get(s.activeRoomId)).toBe(1);
   });
 
   it('selectRoom resets view to room mode', async () => {

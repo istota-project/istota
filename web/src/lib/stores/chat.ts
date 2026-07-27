@@ -145,6 +145,10 @@ function randomAckVerb(): string {
   return ACK_VERBS[Math.floor(Math.random() * ACK_VERBS.length)];
 }
 
+// The cross-room aggregate views, in sidebar order. Also the validator for the
+// persisted selection — anything else falls back to room mode.
+const AGGREGATE_VIEWS: ChatView[] = ['all', 'unread', 'starred'];
+
 const STREAM_KINDS = [
   'task_started',
   'tool_start',
@@ -222,7 +226,9 @@ function createSession(): ChatSession {
   const error = writable('');
   // Which pane the transcript renders: the active room, or a cross-room
   // aggregate view (All / Unread / Starred). Aggregate views are read-only
-  // reading surfaces — no composer, no SSE; re-entering refreshes.
+  // reading surfaces — no composer, no SSE; re-entering refreshes. The
+  // selection is one thing at a time: entering a view deselects the room and
+  // vice versa, and `init` restores whichever was last chosen.
   const view = writable<'room' | ChatView>('room');
   // Older-history paging (ISSUE-131). `oldestCursor` is the keyset to fetch the
   // next older page (raw stored created_at + id), `hasMore` whether one exists,
@@ -1143,6 +1149,7 @@ function createSession(): ChatSession {
   async function selectView(v: ChatView) {
     stopActive();
     view.set(v);
+    saveSetting('chat.view', v);
     activeRoomId.set(null);
     messages.set([]);
     await loadViewPage(v);
@@ -1283,14 +1290,31 @@ function createSession(): ChatSession {
         roomCursor = 0;
       }
       if (superseded()) return;
-      const persisted = loadSetting<number | null>('chat.activeRoomId', null);
-      const target = list.find((r) => r.id === persisted) ?? list[0];
-      if (target) {
-        activeRoomId.set(target.id);
-        setRoomUnread(target.id, 0);
-        await loadHistory(target.id);
+      // Restore the last selection. An aggregate view is a selection in its own
+      // right, not a mode layered over a room — restoring the room here while
+      // `view` still said 'all' (the session is a module singleton, so `view`
+      // outlives the route) left both highlighted in the sidebar and rendered
+      // the room's history inside the aggregate pane.
+      const savedView = loadSetting<string | null>('chat.view', null);
+      const aggregate = AGGREGATE_VIEWS.includes(savedView as ChatView)
+        ? (savedView as ChatView)
+        : null;
+      if (aggregate) {
+        view.set(aggregate);
+        activeRoomId.set(null);
+        await loadViewPage(aggregate);
         if (superseded()) return;
-        markRoomRead(target.id).catch(() => {});
+      } else {
+        view.set('room');
+        const persisted = loadSetting<number | null>('chat.activeRoomId', null);
+        const target = list.find((r) => r.id === persisted) ?? list[0];
+        if (target) {
+          activeRoomId.set(target.id);
+          setRoomUnread(target.id, 0);
+          await loadHistory(target.id);
+          if (superseded()) return;
+          markRoomRead(target.id).catch(() => {});
+        }
       }
       loaded.set(true);
       startRoomStream();
@@ -1330,6 +1354,7 @@ function createSession(): ChatSession {
     if (get(activeRoomId) === id && get(view) === 'room') return;
     stopActive();
     view.set('room');
+    saveSetting('chat.view', 'room');
     activeRoomId.set(id);
     saveSetting('chat.activeRoomId', id);
     setRoomUnread(id, 0); // optimistic — chip vanishes immediately on click
