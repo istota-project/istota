@@ -250,6 +250,28 @@
     }
   }
 
+  // Touch surrogate for hover (the per-message metadata + star). A touch device
+  // has no hover, and iOS Safari's synthesized one sticks: it clears the pseudo
+  // class only on the next tap, so every row tapped in a run kept its star
+  // showing. One activated row instead, replaced by the next tap and cleared by
+  // a tap on the background — a mouse pointer is left alone (it has real hover).
+  let activeCid: number | null = $state(null);
+
+  function onListPointerUp(e: PointerEvent) {
+    if (e.pointerType === 'mouse') return;
+    const row = (e.target as HTMLElement | null)?.closest?.('[data-cid]') as HTMLElement | null;
+    const cid = row?.dataset.cid;
+    activeCid = cid === undefined ? null : Number(cid);
+  }
+
+  // Leaving the room takes the activation with it — the rows it referred to are
+  // gone, and a cid from the old transcript could collide with one in the new.
+  $effect(() => {
+    $activeRoomId;
+    $view;
+    activeCid = null;
+  });
+
   // A room / view switch replaces the transcript wholesale, so the next
   // non-empty render is a fresh conversation that opens at its newest message —
   // wherever the user happened to be scrolled in the room they left. Without
@@ -533,7 +555,14 @@
 
   <div class="chat-pane" style:--composer-h="{composerH}px">
     <div class="messages-wrap">
-      <div class="messages" bind:this={listEl} role="log" aria-live="polite" onscroll={onScroll}>
+      <div
+        class="messages"
+        bind:this={listEl}
+        role="log"
+        aria-live="polite"
+        onscroll={onScroll}
+        onpointerup={onListPointerUp}
+      >
         {#if !$loaded}
           <div class="chat-empty">Loading…</div>
         {:else if $messages.length === 0}
@@ -583,6 +612,7 @@
               onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
               onJump={(token, taskId) => session.jumpToTask(token, taskId)}
               aggregate={inViewMode}
+              active={message.cid === activeCid}
             />
           {/each}
         {/if}

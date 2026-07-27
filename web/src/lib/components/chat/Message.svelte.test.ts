@@ -250,6 +250,43 @@ describe('star affordance', () => {
   });
 });
 
+// The touch surrogate for hover: on a device with no hover the list marks one
+// row active, which is what reveals the metadata + star there. Only the class
+// is asserted — the reveal itself is CSS, and jsdom applies no stylesheet.
+describe('tap activation (touch)', () => {
+  it('is off by default', () => {
+    const { container } = render(Message, {
+      message: finished({ msgId: 42 }),
+      onConfirm: noop,
+      onReject: noop,
+      onToggleStar: noop,
+    });
+    expect(container.querySelector('.msg')?.classList.contains('active')).toBe(false);
+  });
+
+  it('marks the row active when the list activates it', () => {
+    const { container } = render(Message, {
+      message: finished({ msgId: 42 }),
+      onConfirm: noop,
+      onReject: noop,
+      onToggleStar: noop,
+      active: true,
+    });
+    expect(container.querySelector('.msg')?.classList.contains('active')).toBe(true);
+  });
+
+  it('marks a system row active too', () => {
+    const { container } = render(Message, {
+      message: finished({ role: 'system', msgId: 42 }),
+      onConfirm: noop,
+      onReject: noop,
+      onToggleStar: noop,
+      active: true,
+    });
+    expect(container.querySelector('.cmd-row')?.classList.contains('active')).toBe(true);
+  });
+});
+
 describe('room label chip (aggregate views)', () => {
   it('renders a clickable room chip when roomName is set and a handler is passed', async () => {
     const onRoomClick = vi.fn();

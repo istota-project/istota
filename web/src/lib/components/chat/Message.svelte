@@ -18,6 +18,7 @@
     onRoomClick,
     onJump,
     aggregate = false,
+    active = false,
   }: {
     message: ChatMessage;
     // True when this message continues a run from the same author, so the
@@ -40,6 +41,11 @@
     // the hover bar carries only the task number — model and timings are
     // room-level detail that belongs in the room view.
     aggregate?: boolean;
+    // Touch surrogate for hover: the one row the user last tapped. A touch
+    // device has no hover to reveal the metadata + star with, and leaning on
+    // Safari's synthesized :hover left the affordances stuck on every row
+    // ever tapped. The list owns this so exactly one row can be active.
+    active?: boolean;
   } = $props();
 
   const isUser = $derived(message.role === 'user');
@@ -126,7 +132,12 @@
   <!-- Command (!…) output / delivered notifications. Left-aligned block, not a
 	     centered notice: it carries lists / code / tables that must read
 	     left-to-right. Durable system rows (msgId) are starrable too. -->
-  <div class="cmd-row" data-cid={message.cid} data-task-id={message.taskId ?? undefined}>
+  <div
+    class="cmd-row"
+    class:active
+    data-cid={message.cid}
+    data-task-id={message.taskId ?? undefined}
+  >
     {#if showRoomChip}
       <button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
         {message.roomName}
@@ -147,6 +158,7 @@
   <div
     class="msg"
     class:continuation
+    class:active
     class:error={message.error}
     data-cid={message.cid}
     data-task-id={message.taskId ?? undefined}
@@ -263,10 +275,20 @@
     margin-top: 0.7rem;
     padding-top: 0.45rem;
   }
-  .msg:hover .hover-time {
-    opacity: 1;
+  /* Reveal rules. On a hover-capable pointer the row's own :hover drives them;
+	   on touch the list marks a single `.active` row instead (see the `active`
+	   prop). Splitting them matters: iOS Safari synthesizes :hover on tap and
+	   only clears it on the next tap *inside the same stacking context*, so an
+	   unguarded :hover left a star showing on every row the user had ever
+	   tapped. `.active` is the touch surrogate and is inherently single. */
+  @media (hover: hover) {
+    .msg:hover .hover-time,
+    .msg:hover .meta-footer {
+      opacity: 1;
+    }
   }
-  .msg:hover .meta-footer {
+  .msg.active .hover-time,
+  .msg.active .meta-footer {
     opacity: 1;
   }
 
@@ -319,8 +341,9 @@
     transition: opacity var(--transition-fast);
   }
 
-  /* Star toggle: hidden at rest, revealed on row hover / keyboard focus; a
-	   starred message keeps it visible (filled, gold) like the feeds cards. */
+  /* Star toggle: hidden at rest, revealed on row hover (or tap-activation on
+	   touch) / keyboard focus; a starred message keeps it visible (filled, gold)
+	   like the feeds cards. */
   .star-btn {
     display: inline-flex;
     align-items: center;
@@ -335,13 +358,21 @@
       opacity var(--transition-fast),
       color var(--transition-fast);
   }
-  .msg:hover .star-btn,
-  .cmd-row:hover .star-btn,
+  @media (hover: hover) {
+    .msg:hover .star-btn,
+    .cmd-row:hover .star-btn {
+      opacity: 1;
+    }
+    .star-btn:hover {
+      color: var(--accent-amber);
+    }
+  }
+  .msg.active .star-btn,
+  .cmd-row.active .star-btn,
   .star-btn:focus-visible,
   .star-btn.starred {
     opacity: 1;
   }
-  .star-btn:hover,
   .star-btn.starred {
     color: var(--accent-amber);
   }
