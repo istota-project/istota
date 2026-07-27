@@ -752,13 +752,13 @@
     flex-shrink: 0;
   }
   .dot-ok {
-    background: var(--status-success-fg);
+    background: var(--status-dot-ok);
   }
   .dot-bad {
-    background: var(--status-danger-fg);
+    background: var(--status-dot-bad);
   }
   .dot-warn {
-    background: var(--status-warn-fg);
+    background: var(--status-dot-warn);
   }
   .dot-mute {
     background: var(--text-dim);

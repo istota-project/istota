@@ -52,6 +52,17 @@
   --status-info-fg: #9cc7f8;
   --status-info-bg: #20384a;
 
+  /* Indicator dots — the same four severities, but saturated. A dot carries no
+	   text, so it can be far more vivid than a `-fg` label without hurting
+	   legibility, and at 8px it needs the extra chroma to read at a glance.
+	   Deliberately one value per severity across both themes: these are mid-tone
+	   enough to read on the dark surface and on white, so they are NOT redefined
+	   in the light block. */
+  --status-dot-ok: #1bd43d;
+  --status-dot-bad: #e8392c;
+  --status-dot-warn: #eb9a09;
+  --status-dot-info: #2e8fe6;
+
   /* Money direction — a signed-amount pair, NOT a severity. An expense is not
 	   an error and income is not a success, so these stay off the status scale
 	   even though the hues rhyme with it. */
