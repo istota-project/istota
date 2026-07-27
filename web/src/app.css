@@ -57,9 +57,8 @@
   /* Links inside rendered body content — chat markdown, the briefings reader,
 	   feed entries. Amber, following the bot's accent. Kept as its own token
 	   rather than using --accent-amber directly so a link can be retuned without
-	   moving the identity color (and so the hover pair has somewhere to live). */
+	   moving the identity color. Hover is the underline only — see `.prose a`. */
   --link: var(--accent-amber);
-  --link-hover: #ffc05c;
 
   /* Status severities — the standardized chip/badge palette. `-fg` is the text
 	   color for a bare status label; `-bg` is the fill for a filled chip, which
@@ -252,7 +251,6 @@
   --accent-amber: #b9740a;
   --accent-blue: #2563b0;
   --link: var(--accent-amber);
-  --link-hover: #8f5a06;
 
   /* Status severities — darkened foregrounds that hold contrast on white, and
 	   pale tinted fills in place of the dark-theme blocks. */
@@ -600,9 +598,11 @@ body:has(.app-content-fill) {
   color: var(--link);
   text-decoration: none;
 }
+/* Hover adds the underline and nothing else. Shifting the color as well made
+   the link move on the amber ramp — lighter in dark, darker in light — which
+   reads as a second, competing signal for the one state change. */
 .markdown a:hover,
 .prose a:hover {
-  color: var(--link-hover);
   text-decoration: underline;
 }
 .markdown del {
