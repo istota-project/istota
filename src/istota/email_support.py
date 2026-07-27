@@ -38,6 +38,26 @@ def get_email_config(config: Config) -> EmailConfig:
     )
 
 
+def per_user_address(config: Config, user_id: str) -> str | None:
+    """The plus-addressed inbound address for ``user_id``, or None.
+
+    ``bot+{user_id}@domain`` — the address ``email_ownership`` routes back to
+    this user, so it is the one to show them. None whenever it would not
+    route: email off, no/unusable ``bot_email``, or a ``bot_email`` that
+    already carries a tag (a second '+' is not a plus-address any MTA
+    delivers to us).
+    """
+    if not config.email.enabled or not user_id:
+        return None
+    bot_email = config.email.bot_email
+    if not bot_email or "@" not in bot_email:
+        return None
+    local, domain = bot_email.split("@", 1)
+    if not local or not domain or "+" in local:
+        return None
+    return f"{local}+{user_id}@{domain}"
+
+
 def normalize_subject(subject: str) -> str:
     """Normalize subject for thread grouping (remove Re:, Fwd:, etc.)."""
     normalized = subject

@@ -1,23 +1,71 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { getMe, type User } from '$lib/api';
+  import { getMe, getProfile, type User } from '$lib/api';
   import { onMount } from 'svelte';
   import { HeartPulse, MapPin, MessageSquare, Newspaper, Rss, Wallet } from 'lucide-svelte';
+  import { buildGreeting, type Greeting } from '$lib/greeting';
 
   let user: User | null = $state(null);
+  let welcome: Greeting | null = $state(null);
 
   onMount(async () => {
-    try {
-      user = await getMe();
-    } catch {
-      // layout handles auth redirect
-    }
+    // In parallel, so the card and the tiles land in the same paint rather than
+    // the greeting popping in a request later.
+    const [me, timeZone] = await Promise.all([
+      getMe().catch(() => null), // layout handles the auth redirect
+      userTimezone(),
+    ]);
+    if (!me) return;
+    user = me;
+    // The greeting is drawn here rather than at component init so it re-rolls
+    // on every load and never differs between the prerendered HTML and the
+    // hydrated page.
+    welcome = buildGreeting(me.bot_name, {
+      timeZone,
+      // Tips are only shown when they're true of this deployment, so they are
+      // gated on the same payload the tiles below are.
+      tips: {
+        email: me.contact?.email,
+        talk: me.contact?.talk,
+        features: me.features,
+      },
+    });
   });
+
+  /* The profile timezone is what the bot itself runs on, so the greeting should
+     agree with it rather than with wherever this browser happens to be. It is a
+     second request, so a failure just yields '' and `buildGreeting` falls back
+     to the browser clock. */
+  async function userTimezone(): Promise<string> {
+    try {
+      const { profile } = await getProfile();
+      return profile?.timezone ?? '';
+    } catch {
+      return '';
+    }
+  }
 </script>
 
 <div class="dashboard">
   {#if user}
+    <!-- One grid, so the tiles flow around the welcome card: it takes the first
+         three tracks and whatever fits beside it fills out the row. -->
     <div class="feature-grid card-grid" style="--card-min: 200px; --card-gap: 1rem;">
+      {#if welcome}
+        <section class="welcome-card">
+          <img
+            class="welcome-sigil"
+            src="{base}/octopus-sigil.webp"
+            alt=""
+            width="19"
+            height="20"
+          />
+          <div class="welcome-text">
+            <p class="welcome-greeting">{welcome.greeting}</p>
+            <p class="welcome-note">{welcome.note}</p>
+          </div>
+        </section>
+      {/if}
       {#if user.features.chat}
         <a href="{base}/chat" class="feature-card">
           <div class="feature-title"><MessageSquare aria-hidden="true" />Chat</div>
@@ -59,11 +107,73 @@
 </div>
 
 <style>
-  /* Equal-height cards at every width. Without this each grid row sizes to its
-	   own content, so a description that wraps to two lines (Health, Money) makes
-	   that row taller than the rest — most visible in the single-column phone
-	   layout, where every card is its own row. */
+  .welcome-card {
+    grid-column: 1 / -1;
+    display: flex;
+    /* Centred rather than top-aligned, because from four columns up the card
+		   stretches to its row's height and the two lines would otherwise sit high
+		   in a box taller than they are. */
+    align-items: center;
+    gap: 0.85rem;
+    background: var(--surface-card);
+    border: 1px solid var(--border-subtle);
+    border-left: 2px solid var(--accent-amber);
+    border-radius: var(--radius-card);
+    padding: 1.25rem;
+  }
+  /* Three tracks exist from 760px up (200px min + 1rem gap against the 1.5rem
+	   page padding, with room for a scrollbar), so the span can't spill into an
+	   implicit fourth column. Below it the card is the full row, like every
+	   other card on a phone. */
+  @media (min-width: 760px) {
+    .welcome-card {
+      grid-column: span 3;
+    }
+  }
+  /* Tall enough to span both lines of copy (roughly their two line boxes plus
+	   the gap between them). Sized in em, so it keeps that relationship as the
+	   text-scale preference moves. --sigil-filter carries the light-theme
+	   inversion (see app.css). */
+  .welcome-sigil {
+    height: 2.75em;
+    width: auto;
+    flex: none;
+    filter: var(--sigil-filter);
+  }
+  .welcome-text {
+    min-width: 0;
+  }
+  .welcome-greeting {
+    margin: 0;
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--text-primary);
+    text-wrap: balance;
+  }
+  .welcome-note {
+    margin: 0.25rem 0 0;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    text-wrap: balance;
+    /* A plus-address is one unbroken token and can be long; on a phone it would
+		   otherwise run past the card's edge rather than wrap. */
+    overflow-wrap: anywhere;
+  }
+
+  /* Equal-height cards at every width. Without `grid-auto-rows: 1fr` each grid
+	   row sizes to its own content, so a description that wraps to two lines
+	   (Health, Money) makes that row taller than the rest — most visible in the
+	   single-column phone layout, where every card is its own row.
+
+	   The welcome card is the first item, so `grid-template-rows: auto` exempts
+	   the row it leads from that equalisation while rows 2+ stay 1fr. That is
+	   what lets it be content-height wherever it holds the row alone (every
+	   width up to three columns, the phone layout included) instead of being
+	   stretched to a tile's height. From four columns up it shares the row with
+	   the tiles that flow around it and stretches to match them, which is what
+	   keeps that row looking like the ones below it. */
   .feature-grid {
+    grid-template-rows: auto;
     grid-auto-rows: 1fr;
   }
   .feature-card {

@@ -39,11 +39,20 @@ export interface NextcloudTokenStatus {
   expires_at: string | null;
 }
 
+/** Ways to reach the bot outside the web UI, as actually deployed. */
+export interface UserContact {
+  // The user's plus-addressed inbound address, or null when email is off.
+  email: string | null;
+  talk: boolean;
+}
+
 export interface User {
   username: string;
   display_name: string;
   bot_name: string;
   is_admin: boolean;
+  // Absent on a server that predates the field.
+  contact?: UserContact;
   features: {
     chat: boolean;
     feeds: boolean;

@@ -118,6 +118,11 @@
 	   to separate two dark surfaces; a black shadow that strong reads harsh on
 	   white. */
   --shadow-overlay: 0 1px 3px rgba(0, 0, 0, 0.22);
+  /* The octopus sigil ships as one flat near-white silhouette on transparency,
+	   so light theme inverts it to near-black rather than carrying a second file.
+	   A token rather than a per-site override, because more than one surface
+	   draws it (the nav wordmark, the dashboard welcome card). */
+  --sigil-filter: none;
 
   /* Radii */
   --radius-card: 0.5rem;
@@ -276,6 +281,7 @@
   --scrim-pill-fg: var(--text-secondary);
   --shimmer-tint: rgba(0, 0, 0, 0.06);
   --shadow-overlay: 0 1px 2px rgba(0, 0, 0, 0.1);
+  --sigil-filter: invert(1);
 }
 
 *,
@@ -416,16 +422,12 @@ a:hover {
 
 /* Sized in em so the sigil tracks the text-scale preference with the wordmark,
    and kept to the wordmark's line box so adding it can't make the nav taller.
-   The asset is one flat near-white silhouette on transparency, so light theme
-   inverts it to near-black rather than shipping a second file. */
+   --sigil-filter carries the light-theme inversion. */
 .app-nav .app-name .sigil {
   height: 1.3em;
   width: auto;
   flex-shrink: 0;
-}
-
-:root[data-theme='light'] .app-nav .app-name .sigil {
-  filter: invert(1);
+  filter: var(--sigil-filter);
 }
 
 .app-nav .nav-links {

@@ -1062,12 +1062,21 @@ async def api_me(user: dict = Depends(_require_api_auth)):
                 _wt.token_status(_config.db_path, username)
                 or {"connected": False, "expires_at": None}
             )
+    # Ways to reach the bot outside the web UI. Surfaced so the dashboard can
+    # tell the user their actual plus-address rather than a generic "you can
+    # email me"; null/false when the surface isn't deployed.
+    contact = {"email": None, "talk": False}
+    if _config:
+        from .email_support import per_user_address  # noqa: PLC0415
+        contact["email"] = per_user_address(_config, username)
+        contact["talk"] = bool(_config.talk.enabled and _config.nextcloud.url)
     return {
         "username": username,
         "display_name": user.get("display_name", username),
         "bot_name": _config.bot_name if _config else "Istota",
         "is_admin": is_admin,
         "features": features,
+        "contact": contact,
         "nextcloud_token": nextcloud_token,
     }
 

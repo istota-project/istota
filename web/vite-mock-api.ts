@@ -103,6 +103,12 @@ const user = {
   display_name: 'Alice',
   bot_name: 'Istota',
   is_admin: true,
+  // How the bot is reachable outside the web UI. `email` is null on an
+  // instance with email switched off, which drops the dashboard's email tip.
+  contact: {
+    email: 'istota+alice@bot.example.com',
+    talk: true,
+  } as { email: string | null; talk: boolean },
   // Present only when the instance runs [web] token_storage = "encrypted";
   // set to null to preview the "Not connected" card.
   nextcloud_token: {

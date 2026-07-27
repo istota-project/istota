@@ -15,6 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import db
+from . import email_support
 from .config import Config
 from .context import (
     build_talk_context,
@@ -2426,9 +2427,9 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
     # Per-user plus-addressed email line
     per_user_email_line = ""
-    if config.email.enabled and config.email.bot_email and "@" in config.email.bot_email:
-        local, domain = config.email.bot_email.split("@", 1)
-        per_user_email_line = f"\nPer-user email: {local}+{task.user_id}@{domain}"
+    _per_user_email = email_support.per_user_address(config, task.user_id)
+    if _per_user_email:
+        per_user_email_line = f"\nPer-user email: {_per_user_email}"
 
     prompt = f"""You are {config.bot_name}, a helpful assistant bot. You are responding to a request from user '{task.user_id}'.
 
