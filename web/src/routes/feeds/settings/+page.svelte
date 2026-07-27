@@ -424,7 +424,7 @@
                 <th class="col-title">Title</th>
                 <th class="num col-count">Feeds</th>
                 <th class="actions">Order</th>
-                <th class="actions"></th>
+                <th class="actions col-remove"></th>
               </tr>
             </thead>
             <tbody>
@@ -463,7 +463,7 @@
                       type="button">↓</button
                     >
                   </td>
-                  <td class="actions">
+                  <td class="actions col-remove">
                     <button
                       class="icon-btn danger"
                       title="Delete category"
@@ -812,6 +812,12 @@
     width: 4.5rem;
   }
 
+  /* Single-button column (category delete) needs less than a two-button one. */
+  .grid td.col-remove,
+  .grid th.col-remove {
+    width: 2.75rem;
+  }
+
   .grid input[type='text'] {
     width: 100%;
     background: transparent;
@@ -907,13 +913,31 @@
       width: 3rem;
     }
 
+    /* Every column but the title gets a content-sized width, so .col-title
+		   (width: auto) absorbs all remaining space. Leaving the action columns
+		   on `auto` made them share the leftovers evenly with the title, which
+		   is what squeezed both titles down to a few characters. */
+    .col-slug {
+      width: 7rem;
+    }
+
     .grid td.actions,
     .grid th.actions {
-      width: auto;
+      width: 4rem;
+    }
+
+    .grid td.col-remove,
+    .grid th.col-remove {
+      width: 2.5rem;
+    }
+
+    .grid th,
+    .grid td {
+      padding: 0.4rem 0.35rem;
     }
 
     .icon-btn {
-      padding: 0.25rem 0.4rem;
+      padding: 0.25rem 0.3rem;
     }
   }
 
