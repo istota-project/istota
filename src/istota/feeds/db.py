@@ -526,38 +526,70 @@ def insert_entries(
     feed_id: int,
     items: Iterable[EntryRecord],
 ) -> int:
-    """Insert new entries, ignoring duplicates by ``(feed_id, guid)``.
+    """Insert new entries and refresh the content of ones we already hold.
 
-    Returns the count of newly-inserted rows.
+    Returns the count of *newly-inserted* rows — a refresh is not "new", so
+    the poller's "N new entries" log and the unread badge stay honest.
+
+    Matching is by ``(feed_id, guid)``. A guid we've seen before used to be
+    discarded outright, which meant a provider fix could only ever reach
+    blocks connected *after* it shipped: the Are.na v3 upgrade taught the
+    poller to emit real HTML bodies, ``embed_url`` and ``file_url``, and
+    every already-stored block went on re-fetching, conflicting and being
+    thrown away, so its video / PDF / text cards stayed blank forever.
+
+    Content therefore follows the feed, and two things deliberately don't:
+
+    * **User state.** ``status`` / ``starred`` / ``starred_at`` are never
+      touched, so a repair pass can't resurrect a read entry as unread or
+      drop a star.
+    * **``fetched_at``.** The first sighting is when the entry entered *your*
+      reader; keeping it stops the "recently added" ordering and the
+      image-dedup look-back window from lurching on a refresh.
+
+    A field the feed stopped sending never erases one we hold — a thinner
+    later fetch can only degrade the card, so the richer value wins.
     """
     inserted = 0
+    refreshed = 0
     for item in items:
-        cur = conn.execute(
-            """
-            INSERT OR IGNORE INTO feed_entries(
-                feed_id, guid, title, url, author, content_html,
-                content_text, image_urls, embed_url, file_url,
-                published_at, fetched_at, status
+        image_json = json.dumps(item.image_urls) if item.image_urls else None
+        existing = conn.execute(
+            "SELECT id, image_urls, published_at, fetched_at FROM feed_entries "
+            "WHERE feed_id = ? AND guid = ?",
+            (feed_id, item.guid),
+        ).fetchone()
+
+        if existing is None:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO feed_entries(
+                    feed_id, guid, title, url, author, content_html,
+                    content_text, image_urls, embed_url, file_url,
+                    published_at, fetched_at, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    feed_id,
+                    item.guid,
+                    item.title,
+                    item.url,
+                    item.author,
+                    item.content_html,
+                    item.content_text,
+                    image_json,
+                    item.embed_url,
+                    item.file_url,
+                    item.published_at,
+                    item.fetched_at,
+                    item.status,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                feed_id,
-                item.guid,
-                item.title,
-                item.url,
-                item.author,
-                item.content_html,
-                item.content_text,
-                json.dumps(item.image_urls) if item.image_urls else None,
-                item.embed_url,
-                item.file_url,
-                item.published_at,
-                item.fetched_at,
-                item.status,
-            ),
-        )
-        if cur.rowcount:
+            # OR IGNORE still applies: a concurrent poll may have inserted the
+            # same guid between the SELECT and here.
+            if not cur.rowcount:
+                continue
             inserted += 1
             _index_entry_images(
                 conn,
@@ -566,6 +598,62 @@ def insert_entries(
                 published_at=item.published_at,
                 fetched_at=item.fetched_at,
             )
+            continue
+
+        # COALESCE(NULLIF(?, ''), col) is the "never overwrite with nothing"
+        # rule: an absent field arrives as NULL and an empty one as '', and
+        # both leave the stored value standing.
+        conn.execute(
+            """
+            UPDATE feed_entries SET
+                title        = COALESCE(NULLIF(?, ''), title),
+                url          = COALESCE(NULLIF(?, ''), url),
+                author       = COALESCE(NULLIF(?, ''), author),
+                content_html = COALESCE(NULLIF(?, ''), content_html),
+                content_text = COALESCE(NULLIF(?, ''), content_text),
+                image_urls   = COALESCE(?, image_urls),
+                embed_url    = COALESCE(NULLIF(?, ''), embed_url),
+                file_url     = COALESCE(NULLIF(?, ''), file_url),
+                published_at = COALESCE(NULLIF(?, ''), published_at)
+            WHERE id = ?
+            """,
+            (
+                item.title,
+                item.url,
+                item.author,
+                item.content_html,
+                item.content_text,
+                image_json,
+                item.embed_url,
+                item.file_url,
+                item.published_at,
+                existing["id"],
+            ),
+        )
+        refreshed += 1
+
+        if image_json is None or image_json == existing["image_urls"]:
+            continue
+        # entry_images is pure derived data, so rebuild rather than merge:
+        # leaving keys for images the entry no longer carries would suppress
+        # a later post that legitimately shows one of them.
+        conn.execute(
+            "DELETE FROM entry_images WHERE entry_id = ?", (existing["id"],)
+        )
+        _index_entry_images(
+            conn,
+            entry_id=existing["id"],
+            image_urls=item.image_urls or [],
+            # The row keeps its original fetch time, so index against that
+            # rather than this poll's clock.
+            published_at=item.published_at or existing["published_at"],
+            fetched_at=existing["fetched_at"],
+        )
+
+    if refreshed:
+        logger.debug(
+            "feeds_db_entries_refreshed feed_id=%s count=%s", feed_id, refreshed,
+        )
     return inserted
 
 

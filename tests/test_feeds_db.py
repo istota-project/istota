@@ -488,6 +488,171 @@ class TestEntries:
         assert after[0].status == "read"
 
 
+class TestEntryRefresh:
+    """Re-polling an existing entry refreshes its *content*, not its state.
+
+    The Are.na v3 upgrade rewrote what a block maps to (real HTML bodies,
+    embed_url, file_url), but every already-stored block kept the v2 shape
+    forever: the poller re-fetched them each cycle and the insert discarded
+    the richer row on the (feed_id, guid) conflict, so video, PDF and text
+    blocks stayed blank. Content columns now follow the feed; user state
+    (read/starred) and the original fetch time do not.
+    """
+
+    def _seed_feed(self, tmp_path):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="arena:c", title="C", site_url=None,
+                source_type="arena", category_id=None,
+                poll_interval_minutes=60,
+            )
+            conn.commit()
+        return path, feed_id
+
+    def _stored(self, feed_id, **over):
+        base = dict(
+            id=0, feed_id=feed_id, guid="b1", title=None, url=None,
+            author=None, content_html=None, content_text="raw text",
+            image_urls=[], published_at="2026-05-01T00:00:00+00:00",
+            fetched_at="2026-05-01T00:00:00+00:00",
+        )
+        base.update(over)
+        return EntryRecord(**base)
+
+    def test_repoll_fills_in_content_the_old_provider_missed(self, tmp_path):
+        path, feed_id = self._seed_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [self._stored(feed_id)])
+            conn.commit()
+            feeds_db.insert_entries(conn, feed_id, [self._stored(
+                feed_id,
+                title="A manifesto",
+                url="https://www.are.na/block/1",
+                author="curator",
+                content_html="<p>Body</p>",
+                content_text="Body",
+                image_urls=["http://i/thumb.jpg"],
+                embed_url="https://www.youtube.com/watch?v=abc",
+                fetched_at="2026-07-27T00:00:00+00:00",
+            )])
+            conn.commit()
+            entries = feeds_db.list_entries(conn)
+        assert len(entries) == 1
+        e = entries[0]
+        assert e.content_html == "<p>Body</p>"
+        assert e.content_text == "Body"
+        assert e.title == "A manifesto"
+        assert e.url == "https://www.are.na/block/1"
+        assert e.author == "curator"
+        assert e.image_urls == ["http://i/thumb.jpg"]
+        assert e.embed_url == "https://www.youtube.com/watch?v=abc"
+
+    def test_file_url_reaches_an_already_stored_attachment(self, tmp_path):
+        path, feed_id = self._seed_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [self._stored(
+                feed_id, image_urls=["http://i/cover.png"],
+            )])
+            conn.commit()
+            feeds_db.insert_entries(conn, feed_id, [self._stored(
+                feed_id,
+                image_urls=["http://i/cover.png"],
+                file_url="https://attachments.are.na/1/essay.pdf",
+            )])
+            conn.commit()
+            entries = feeds_db.list_entries(conn)
+        assert entries[0].file_url == "https://attachments.are.na/1/essay.pdf"
+
+    def test_refresh_is_not_counted_as_a_new_entry(self, tmp_path):
+        """The return value drives the poller's "N new" log and notifications."""
+        path, feed_id = self._seed_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            first = feeds_db.insert_entries(conn, feed_id, [self._stored(feed_id)])
+            conn.commit()
+            again = feeds_db.insert_entries(conn, feed_id, [self._stored(
+                feed_id, content_html="<p>Body</p>",
+            )])
+            conn.commit()
+        assert first == 1
+        assert again == 0
+
+    def test_read_and_starred_survive_a_refresh(self, tmp_path):
+        """Refreshing content must never resurrect an entry as unread."""
+        path, feed_id = self._seed_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [self._stored(feed_id)])
+            conn.commit()
+            entry_id = feeds_db.list_entries(conn)[0].id
+            feeds_db.update_entry_status(conn, [entry_id], "read")
+            feeds_db.update_entry_starred(conn, [entry_id], True)
+            conn.commit()
+            starred_at = conn.execute(
+                "SELECT starred_at FROM feed_entries WHERE id = ?", (entry_id,),
+            ).fetchone()[0]
+
+            feeds_db.insert_entries(conn, feed_id, [self._stored(
+                feed_id, content_html="<p>Body</p>", status="unread",
+            )])
+            conn.commit()
+            row = conn.execute(
+                "SELECT status, starred, starred_at, fetched_at "
+                "FROM feed_entries WHERE id = ?", (entry_id,),
+            ).fetchone()
+        assert row["status"] == "read"
+        assert row["starred"] == 1
+        assert row["starred_at"] == starred_at
+        # Original fetch time stands, so the "recently added" ordering and the
+        # image-dedup look-back window don't jump on a repair pass.
+        assert row["fetched_at"] == "2026-05-01T00:00:00+00:00"
+
+    def test_a_field_the_feed_dropped_does_not_erase_what_we_hold(self, tmp_path):
+        """A thinner later fetch degrades the card; keep the richer row."""
+        path, feed_id = self._seed_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [self._stored(
+                feed_id,
+                title="Kept",
+                content_html="<p>Kept</p>",
+                image_urls=["http://i/1.jpg"],
+                embed_url="https://youtu.be/abc",
+            )])
+            conn.commit()
+            feeds_db.insert_entries(conn, feed_id, [self._stored(
+                feed_id, title=None, content_html="", image_urls=[],
+                content_text=None, embed_url=None,
+            )])
+            conn.commit()
+            entries = feeds_db.list_entries(conn)
+        e = entries[0]
+        assert e.title == "Kept"
+        assert e.content_html == "<p>Kept</p>"
+        assert e.content_text == "raw text"
+        assert e.image_urls == ["http://i/1.jpg"]
+        assert e.embed_url == "https://youtu.be/abc"
+
+    def test_new_images_are_indexed_for_dedup(self, tmp_path):
+        """entry_images is derived from image_urls; a refresh must re-derive it."""
+        path, feed_id = self._seed_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [self._stored(feed_id)])
+            conn.commit()
+            entry_id = feeds_db.list_entries(conn)[0].id
+            assert conn.execute(
+                "SELECT COUNT(*) FROM entry_images WHERE entry_id = ?", (entry_id,),
+            ).fetchone()[0] == 0
+
+            feeds_db.insert_entries(conn, feed_id, [self._stored(
+                feed_id, image_urls=["http://i/thumb.jpg"],
+            )])
+            conn.commit()
+            keys = conn.execute(
+                "SELECT COUNT(*) FROM entry_images WHERE entry_id = ?", (entry_id,),
+            ).fetchone()[0]
+        assert keys == 1
+
+
 class TestStarring:
     def _seed(self, tmp_path):
         path = tmp_path / "feeds.db"
