@@ -885,14 +885,14 @@
         <p class="empty">No briefings scheduled yet.</p>
       {:else}
         <div class="table-scroll">
-          <table class="grid">
+          <table class="grid sched-table">
             <thead>
               <tr>
                 <th class="col-name">Name</th>
                 <th>Title</th>
-                <th>Cron</th>
+                <th class="nowrap">Cron</th>
                 <th>Output</th>
-                <th>Token</th>
+                <th class="col-token">Token</th>
                 <th class="col-source">Source</th>
                 <th class="actions"></th>
               </tr>
@@ -911,9 +911,9 @@
                       <span class="muted">{derivedTitle(b.name)}</span>
                     {/if}
                   </td>
-                  <td><code>{b.cron}</code></td>
+                  <td class="nowrap"><code>{b.cron}</code></td>
                   <td>{b.output}</td>
-                  <td class="muted"><code>{b.conversation_token || '—'}</code></td>
+                  <td class="col-token muted"><code>{b.conversation_token || '—'}</code></td>
                   <td class="col-source muted">
                     {b.managed === 'config' ? 'config.toml' : 'user'}
                   </td>
@@ -1469,8 +1469,31 @@
 	   primitives live in web/src/lib/styles/settings.css. Only page-specific
 	   layout stays here. */
 
+  /* Seven columns don't fit a phone, and the global .grid is
+	   table-layout:fixed/width:100%, which shoehorns them in rather than
+	   overflowing — cron and tokens end up wrapping mid-token. Give the table a
+	   natural min-width so .table-scroll scrolls horizontally instead, the same
+	   treatment .sb-table gets below. */
+  .sched-table {
+    table-layout: auto;
+    min-width: 40rem;
+  }
+  .sched-table td.actions,
+  .sched-table th.actions {
+    width: 1%;
+    white-space: nowrap;
+  }
+
   .col-name {
     width: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* A token is an opaque id — capped so one long room token can't stretch the
+	   scroll width past what the other six columns need. */
+  .col-token {
+    max-width: 12rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1779,13 +1802,10 @@
   }
 
   /* The blocks table's own responsive columns are driven from the script (see
-	   blocksWidth) so they stay in step with the expanded row's colspan. These
-	   queries cover the two tables that have no colspan rows. */
+	   blocksWidth) so they stay in step with the expanded row's colspan. The
+	   schedule table scrolls instead of dropping columns. */
   @container settings (max-width: 560px) {
     .sb-table .col-render {
-      display: none;
-    }
-    .col-source {
       display: none;
     }
   }
