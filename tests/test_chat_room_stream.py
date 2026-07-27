@@ -545,6 +545,42 @@ class TestRoomStreamSSE:
         await _drain(_FakeRequest(disconnect_after=1))
         assert mod._room_stream_conn_delta(0) == before
 
+    async def test_generator_cursor_advances_past_invisible_rows(self, tmp_path):
+        """The gate must keep short-circuiting on a busy multi-user instance.
+
+        `_room_events_batch` advances its cursor past rows this user can't see;
+        the generator has to adopt that (not `events[-1]`), or `max_id > cursor`
+        stays permanently true and the per-user visibility join runs every tick
+        instead of the O(1) MAX(id) probe.
+        """
+        import istota.web_app as mod
+        room = await self._setup(tmp_path)
+        _post(room["token"], body="mine")
+        with db.get_db(_db_path()) as conn:
+            db.register_room(conn, "web-bob-9", origin="web", user_id="bob",
+                             name="bob's")
+            db.add_room_member(conn, "web-bob-9", "bob")
+            db.add_message(conn, "web-bob-9", role="assistant",
+                           body="not yours", origin_surface="web")
+        seen: list[int] = []
+        real = mod._room_events_batch
+
+        def spy(username, since_id, limit=None):
+            seen.append(since_id)
+            return real(username, since_id, limit)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(mod, "_room_events_batch", spy)
+        try:
+            await _drain(_FakeRequest(disconnect_after=3), since_id=0)
+        finally:
+            monkeypatch.undo()
+        with db.get_db(_db_path()) as conn:
+            top = db.max_message_id(conn)
+        # The last tick asked from the global max, not from alice's own last
+        # visible row — so its MAX(id) gate short-circuits.
+        assert seen[-1] == top
+
     async def test_db_lock_skips_the_tick_without_killing_the_stream(
         self, tmp_path, monkeypatch,
     ):

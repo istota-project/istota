@@ -2171,10 +2171,19 @@ async def chat_room_stream(
                     last_frame = time.monotonic()
                 elif batch:
                     for ev in batch["events"]:
-                        cursor = ev["msg_id"]
-                        yield (f"id: {cursor}\nevent: message\n"
+                        yield (f"id: {ev['msg_id']}\nevent: message\n"
                                f"data: {json.dumps(ev)}\n\n")
                         last_frame = time.monotonic()
+                    # Adopt the batch's own cursor, not the last delivered id.
+                    # `_room_events_batch` deliberately advances past rows this
+                    # user cannot see; taking `events[-1]` instead would leave
+                    # `max_id > cursor` permanently true on any instance where
+                    # someone else is writing, so the MAX(id) gate would never
+                    # short-circuit and the per-user visibility join would run
+                    # every tick. The client's `Last-Event-ID` stays on the last
+                    # *message* id (auxiliary advances carry no frame), so a
+                    # resume merely re-scans a range — harmless.
+                    cursor = max(cursor, int(batch["cursor"]))
 
                 now = time.monotonic()
                 if room_check and now - last_room_check >= room_check:

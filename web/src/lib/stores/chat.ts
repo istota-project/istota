@@ -267,6 +267,14 @@ function createSession(): ChatSession {
   // Cursor is `messages.id` — one monotonic integer over user turns, assistant
   // turns and system rows.
   let roomStream: { stop: () => void } | null = null;
+  // True only while an EventSource is actually open. Positive evidence that no
+  // `messages` row can have been missed, which is what lets a recovery skip the
+  // history reload (see `recoverStream`'s `metadataOnly`).
+  let roomStreamLive = false;
+  // Bumped by every `init()` and by `teardown()`, so a load interrupted
+  // mid-flight abandons its remaining side effects instead of installing them
+  // on a page the user has left.
+  let initGeneration = 0;
   let roomCursor = 0;
   let lastRoomEventAt = Date.now();
   let hiddenSince: number | null = null;
@@ -276,6 +284,22 @@ function createSession(): ChatSession {
   // never be re-sent. Buffer, then re-apply (dedup makes that idempotent).
   let recoveryBuffer: ChatRoomEvent[] | null = null;
   let recovering = false;
+  // A recovery reload must not be able to wedge the live path. `applyRoomEvent`
+  // buffers every frame while a reload is in flight and only `recoverStream`'s
+  // `finally` releases it, so a request that never settles would swallow frames
+  // forever and the `recovering` guard would refuse every future attempt.
+  // `fetch` has no timeout of its own, so bound these three explicitly.
+  const RECOVERY_FETCH_TIMEOUT_MS = 15000;
+  // Frames for the room we are mid-send into. The canonical `messages` user row
+  // is written by the POST before it returns — and, with user-scoped OAuth on,
+  // before a bounded ~5s Talk mirror — so our own echo can arrive while the
+  // bubble on screen still has no `task_id` to dedup against. Appending it then
+  // produces a second user bubble AND (no assistant carries the id yet) a
+  // second placeholder + task stream. Hold that room's frames for the duration
+  // of the send and replay them once the id is stamped; the (role, task_id) key
+  // then matches and the echo is dropped. Bounded by the POST, and scoped to
+  // the one room, so nothing else is delayed.
+  let pendingSend: { token: string; rows: ChatRoomEvent[] } | null = null;
   // Past roughly a minute of silence a reconnect has probably missed state the
   // stream does not carry — a star toggled on another device, a read cursor
   // advanced by the Talk→web sync, a membership change — so a reload is *more
@@ -515,10 +539,10 @@ function createSession(): ChatSession {
   // backfill) into the existing entries by id — no reorder, no drop of local
   // state. The active room is forced to 0 so looking at it always reads as
   // clear, even if a count lands before the mark-read round-trips.
-  async function refreshRooms() {
+  async function refreshRooms(timeoutMs = 0) {
     let list: ChatRoom[];
     try {
-      ({ rooms: list } = await getChatRooms());
+      ({ rooms: list } = await getChatRooms(timeoutMs));
     } catch {
       return;
     }
@@ -631,12 +655,20 @@ function createSession(): ChatSession {
         // Already on screen (our own send, or a placeholder being streamed
         // into). Stamp the durable star key so the row is starrable without a
         // reload, then drop the frame.
-        if (typeof row.msg_id === 'number' && mine.msgId !== row.msg_id) {
-          const msgId = row.msg_id;
-          const starred = !!row.starred;
+        const msgId = typeof row.msg_id === 'number' ? row.msg_id : null;
+        const starred = !!row.starred;
+        // For a user turn, adopt the canonical body too. The server does not
+        // always store what was typed — an attachment-only send becomes a
+        // descriptor, a `!model …` prefix is stripped — and without this the
+        // web transcript would keep showing the raw text while Talk, a reload
+        // and the LLM's own context all show the stored one. Never for an
+        // assistant row: that text is the task stream's to build.
+        const body = row.role === 'user' && typeof row.text === 'string' ? row.text : null;
+        if ((msgId != null && mine.msgId !== msgId) || (body != null && body !== mine.text)) {
           updateMsg(mine.cid, (m) => {
-            m.msgId = msgId;
+            if (msgId != null) m.msgId = msgId;
             m.starred = starred;
+            if (body != null) m.text = body;
           });
         }
         return;
@@ -658,14 +690,17 @@ function createSession(): ChatSession {
 
   // Background room: bump the badge and refresh the sidebar preview. Rows
   // stream for every member room, so this is real content, not a count refetch.
-  function bumpBackgroundRoom(roomId: number, row: ChatRoomEvent) {
+  function bumpBackgroundRoom(roomId: number, row: ChatRoomEvent, countUnread = true) {
     rooms.update((rs) =>
       rs.map((r) => {
         if (r.id !== roomId) return r;
         // count_unread_messages excludes the user's own turns, so a turn
-        // mirrored in from Talk must not ring its own room.
+        // mirrored in from Talk must not ring its own room. `countUnread` is
+        // false for a row a just-completed refreshRooms already counted; the
+        // preview still updates, since that is client-derived either way.
         const n = r.unread_count ?? 0;
-        return { ...r, unread_count: row.role === 'user' ? n : n + 1, preview: previewOf(row) };
+        const bumped = countUnread && row.role !== 'user';
+        return { ...r, unread_count: bumped ? n + 1 : n, preview: previewOf(row) };
       }),
     );
   }
@@ -681,20 +716,39 @@ function createSession(): ChatSession {
     messages.update((arr) => [...arr, buildHistoryMessage(row)]);
   }
 
-  function applyRoomEvent(row: ChatRoomEvent) {
+  function applyRoomEvent(row: ChatRoomEvent, opts: { countUnread?: boolean } = {}) {
     if (recoveryBuffer) {
       recoveryBuffer.push(row);
       return;
     }
     const token = row.room_token;
     if (!token) return;
+    if (pendingSend && token === pendingSend.token) {
+      pendingSend.rows.push(row);
+      return;
+    }
     const room = get(rooms).find((r) => r.token === token);
     if (room && room.id === get(activeRoomId) && get(view) === 'room') {
       appendStreamedRow(row);
       return;
     }
     feedAggregateView(row);
-    if (room) bumpBackgroundRoom(room.id, row);
+    if (room) bumpBackgroundRoom(room.id, row, opts.countUnread ?? true);
+  }
+
+  // Replay the frames held for the duration of a send, now that the turn's
+  // task id is on screen and the ordinary dedup can recognise our own echo.
+  function drainPendingSend() {
+    const held = pendingSend;
+    pendingSend = null;
+    if (!held) return;
+    for (const row of held.rows) {
+      try {
+        applyRoomEvent(row);
+      } catch {
+        /* one bad row must not strand the rest */
+      }
+    }
   }
 
   // `room` metadata frame: a rename / model / effort change, or a room
@@ -743,30 +797,48 @@ function createSession(): ChatSession {
   // server-computed unread counts for every room and the active room is one
   // 50-row page — so it is the right answer whenever replay is doubtful.
   // `cursor` is the server's max *scanned* id (null → ask for a fresh one).
-  async function recoverStream(cursor: number | null) {
+  //
+  // `metadataOnly` skips the transcript reload and reconciles the room list
+  // alone. It is only ever passed when the SSE connection demonstrably stayed
+  // open across the quiet period, which is positive evidence that no `messages`
+  // row was missed — the stream delivered them — so the reload would buy
+  // nothing and cost a visible flicker plus a restarted task stream.
+  async function recoverStream(cursor: number | null, opts: { metadataOnly?: boolean } = {}) {
     if (recovering) return;
     recovering = true;
     recoveryBuffer = [];
+    // Rows buffered before `refreshRooms` is issued are already in the DB the
+    // server counts, so re-bumping them would inflate the badge. Rows arriving
+    // after are counted locally — erring toward a duplicate rather than a lost
+    // increment, and the 30s reconciler settles either way.
+    let countedUpTo = 0;
     try {
       let target = cursor;
       if (target == null) {
         try {
           // limit=1 → the server does the cheap MAX(id) gate and hands back a
           // cursor without serializing a backlog we're about to discard.
-          target = (await getRoomEvents(roomCursor, 1)).cursor;
+          target = (await getRoomEvents(roomCursor, 1, RECOVERY_FETCH_TIMEOUT_MS)).cursor;
         } catch {
           target = null;
         }
       }
       const v = get(view);
       const rid = get(activeRoomId);
-      if (v === 'room' && rid != null) {
-        stopActive();
-        await loadHistory(rid);
-      } else if (v !== 'room') {
-        await loadViewPage(v);
+      // Every reload here is bounded: an unbounded one would hold the frame
+      // buffer open indefinitely (see RECOVERY_FETCH_TIMEOUT_MS). The abort
+      // also means a late response can never land on top of whatever replaced
+      // it — the request is cancelled, not merely ignored.
+      if (!opts.metadataOnly) {
+        if (v === 'room' && rid != null) {
+          stopActive();
+          await loadHistory(rid, RECOVERY_FETCH_TIMEOUT_MS);
+        } else if (v !== 'room') {
+          await loadViewPage(v);
+        }
       }
-      await refreshRooms();
+      countedUpTo = recoveryBuffer?.length ?? 0;
+      await refreshRooms(RECOVERY_FETCH_TIMEOUT_MS);
       if (target != null && target > roomCursor) roomCursor = target;
     } catch {
       /* transient — the next frame or poll retries */
@@ -774,13 +846,13 @@ function createSession(): ChatSession {
       const buffered = recoveryBuffer ?? [];
       recoveryBuffer = null;
       recovering = false;
-      for (const row of buffered) {
+      buffered.forEach((row, i) => {
         try {
-          applyRoomEvent(row);
+          applyRoomEvent(row, { countUnread: i >= countedUpTo });
         } catch {
           /* one bad row must not strand the rest */
         }
-      }
+      });
     }
   }
 
@@ -790,17 +862,37 @@ function createSession(): ChatSession {
     let pollTimer: ReturnType<typeof setInterval> | null = null;
     let stopped = false;
     let opened = false;
+    // Consecutive SSE errors while the browser is still retrying on its own.
+    // Reconnect-for-free is one of the reasons this is SSE and not a WebSocket,
+    // so an ordinary blip must not cost the connection — but a persistently
+    // failing endpoint (a buffering proxy that accepts and then drops) has to
+    // concede to polling eventually.
+    let sseFailures = 0;
+    const SSE_FAILURE_LIMIT = 3;
+    // Once polling, re-probe SSE on this cadence. Unlike streamTask — where the
+    // stream is short-lived and a permanent downgrade is harmless — this
+    // connection is session-lived, so a single transient failure must not leave
+    // the tab polling for the rest of the day.
+    const SSE_RETRY_MS = 60000;
+    let lastSseAttemptAt = 0;
 
-    const halt = () => {
-      stopped = true;
+    const closeEs = () => {
+      roomStreamLive = false;
       if (es) {
         es.close();
         es = null;
       }
+    };
+    const stopPolling = () => {
       if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
       }
+    };
+    const halt = () => {
+      stopped = true;
+      closeEs();
+      stopPolling();
     };
 
     // Polling fallback over the snapshot endpoint — the same shape streamTask
@@ -825,6 +917,8 @@ function createSession(): ChatSession {
         if (page.cursor > roomCursor) roomCursor = page.cursor;
       } catch {
         /* transient; try again next tick */
+      } finally {
+        maybeReconnect();
       }
     };
     const startPolling = () => {
@@ -833,8 +927,25 @@ function createSession(): ChatSession {
       pollTimer = setInterval(() => void poll(), Math.max(pollIntervalMs, 1000));
     };
 
-    try {
-      es = new EventSource(chatRoomStreamUrl(roomCursor), { withCredentials: true });
+    // Try SSE again from the polling loop. Overlap is harmless: both paths are
+    // idempotent on `roomCursor`, and polling stops as soon as a stream opens.
+    const maybeReconnect = () => {
+      if (stopped || es) return;
+      if (Date.now() - lastSseAttemptAt < SSE_RETRY_MS) return;
+      sseFailures = 0;
+      connect();
+    };
+
+    function connect() {
+      if (stopped || es) return;
+      lastSseAttemptAt = Date.now();
+      try {
+        es = new EventSource(chatRoomStreamUrl(roomCursor), { withCredentials: true });
+      } catch {
+        es = null;
+        startPolling();
+        return;
+      }
       es.addEventListener('message', (e: MessageEvent) => {
         if (e.data == null) return;
         lastRoomEventAt = Date.now();
@@ -879,6 +990,9 @@ function createSession(): ChatSession {
         }
       });
       es.onopen = () => {
+        sseFailures = 0;
+        roomStreamLive = true;
+        stopPolling(); // a re-probe succeeded — the stream is the live path again
         const idle = Date.now() - lastRoomEventAt;
         lastRoomEventAt = Date.now();
         // First open follows a fresh history load — nothing to recover.
@@ -887,23 +1001,43 @@ function createSession(): ChatSession {
       };
       es.onerror = () => {
         if (stopped) return;
-        if (es) {
-          es.close();
-          es = null;
-        }
+        sseFailures += 1;
+        roomStreamLive = false;
+        // readyState CONNECTING (0, per the spec constant) means the browser
+        // has already scheduled its own retry; closing here would throw that
+        // away and pre-empt exactly the free reconnect SSE was chosen for. Let
+        // it try, up to the limit. Anything else — CLOSED, or an implementation
+        // with no readyState at all — is fatal, so fall back at once.
+        if (es?.readyState === 0 && sseFailures < SSE_FAILURE_LIMIT) return;
+        closeEs();
         startPolling();
       };
-    } catch {
-      startPolling();
     }
+
+    connect();
+    if (!es) startPolling();
     roomStream = { stop: halt };
   }
 
   function stopRoomStream() {
+    // Release any recovery / send hold so a teardown mid-reload can't leave the
+    // session permanently swallowing frames (both guards are module-singleton
+    // state, so a route remount would otherwise inherit the wedge).
+    recovering = false;
+    recoveryBuffer = null;
+    pendingSend = null;
+    roomStreamLive = false;
     if (roomStream) {
       roomStream.stop();
       roomStream = null;
     }
+  }
+
+  function removeVisibilityListener() {
+    if (onVisibility && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onVisibility);
+    }
+    onVisibility = null;
   }
 
   // Build a render-ready ChatMessage from a server history row. Shared by the
@@ -948,8 +1082,8 @@ function createSession(): ChatSession {
     };
   }
 
-  async function loadHistory(roomId: number) {
-    const hist = await getRoomMessages(roomId);
+  async function loadHistory(roomId: number, timeoutMs = 0) {
+    const hist = await getRoomMessages(roomId, { timeoutMs });
     // taskId → cid for assistant placeholders, so an in-flight task's stream
     // binds to the message the server already laid out in order.
     const cidByTask = new Map<number, number>();
@@ -1132,22 +1266,27 @@ function createSession(): ChatSession {
   }
 
   async function init() {
+    // `onMount` does not await this and `onDestroy` calls teardown regardless,
+    // so a navigation away mid-load would otherwise let the rest of init run
+    // *after* teardown — starting a stream, a timer and a visibility listener
+    // on a page the user has left, and leaking one more of each per remount
+    // (only the newest listener is ever removed). Every await below is followed
+    // by a generation check; teardown bumps the counter.
+    const gen = ++initGeneration;
+    const superseded = () => gen !== initGeneration;
     try {
       const cfg = await getChatConfig().catch(() => null);
+      if (superseded()) return;
       if (cfg?.client_poll_interval_ms) pollIntervalMs = cfg.client_poll_interval_ms;
       const { rooms: list } = await getChatRooms();
+      if (superseded()) return;
       rooms.set(list);
-      const persisted = loadSetting<number | null>('chat.activeRoomId', null);
-      const target = list.find((r) => r.id === persisted) ?? list[0];
-      if (target) {
-        activeRoomId.set(target.id);
-        setRoomUnread(target.id, 0);
-        await loadHistory(target.id);
-        markRoomRead(target.id).catch(() => {});
-      }
-      loaded.set(true);
-      // Seed the stream cursor from the server's current max before connecting,
-      // so a fresh session doesn't replay the backlog it just rendered.
+      // Seed the stream cursor BEFORE the history read, not after. A row
+      // committed in between is then re-delivered by the stream and dropped by
+      // the `msg_id` dedup; seeding afterwards would place it below the cursor
+      // *and* outside the rendered page — and `markRoomRead` below would have
+      // already consumed it, so it would not even show as unread. Same
+      // capture-before-reload discipline `recoverStream` uses.
       // (limit=1 → the server answers from its MAX(id) gate, not a serialized
       // page.)
       try {
@@ -1155,11 +1294,23 @@ function createSession(): ChatSession {
       } catch {
         roomCursor = 0;
       }
+      if (superseded()) return;
+      const persisted = loadSetting<number | null>('chat.activeRoomId', null);
+      const target = list.find((r) => r.id === persisted) ?? list[0];
+      if (target) {
+        activeRoomId.set(target.id);
+        setRoomUnread(target.id, 0);
+        await loadHistory(target.id);
+        if (superseded()) return;
+        markRoomRead(target.id).catch(() => {});
+      }
+      loaded.set(true);
       startRoomStream();
       // Slow metadata reconciler (see ROOMS_REFRESH_MS) — the stream is the
       // live path.
       startRoomsRefresh();
       if (typeof document !== 'undefined') {
+        removeVisibilityListener(); // never stack two
         onVisibility = () => {
           if (document.visibilityState !== 'visible') {
             hiddenSince = Date.now();
@@ -1172,7 +1323,13 @@ function createSession(): ChatSession {
           // Client-side half of the gap threshold: only the client knows how
           // long it was away, only the server knows what the delta costs, so
           // each decides with what it has. Same recovery routine either way.
-          if (away > ROOM_STREAM_STALE_MS) void recoverStream(null);
+          // A connection that stayed open across the hidden period cannot have
+          // missed a `messages` row, so that case reconciles metadata only —
+          // otherwise every alt-tab during a long turn would tear down a
+          // perfectly healthy task stream and re-render its answer from seq 0.
+          if (away > ROOM_STREAM_STALE_MS) {
+            void recoverStream(null, { metadataOnly: roomStreamLive });
+          }
         };
         document.addEventListener('visibilitychange', onVisibility);
       }
@@ -1359,6 +1516,30 @@ function createSession(): ChatSession {
     ]);
     status.set('sending');
 
+    // Hold this room's stream frames until the turn's task id is stamped
+    // below — see `pendingSend`. A previous send's buffer can't still be open
+    // (the composer blocks while sending), but drain defensively rather than
+    // dropping rows if it somehow is.
+    drainPendingSend();
+    const sendToken = get(rooms).find((r) => r.id === roomId)?.token;
+    if (sendToken) pendingSend = { token: sendToken, rows: [] };
+
+    try {
+      await sendTurn(roomId, trimmed, attachments, userCid, phCid);
+    } finally {
+      // Runs after the task id is on both halves of the turn, so the replayed
+      // echo dedups instead of duplicating.
+      drainPendingSend();
+    }
+  }
+
+  async function sendTurn(
+    roomId: number,
+    trimmed: string,
+    attachments: { path: string; name: string }[],
+    userCid: number,
+    phCid: number,
+  ) {
     const res = await sendChatMessage(
       roomId,
       trimmed,
@@ -1469,15 +1650,15 @@ function createSession(): ChatSession {
   // EventSource (or poll timer) running; remounting re-subscribes from the
   // persisted task_events via loadHistory, so no progress is lost.
   function teardown() {
+    // Invalidate any `init()` still in flight, so a navigation away mid-load
+    // can't install a stream / timer / listener behind us.
+    initGeneration += 1;
     stopActive();
     stopRoomStream();
     stopRoomsRefresh();
     // Drop the cached command/alias catalogue so a fresh session refetches it.
     resetCommandCatalogue();
-    if (onVisibility && typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', onVisibility);
-      onVisibility = null;
-    }
+    removeVisibilityListener();
   }
 
   return {

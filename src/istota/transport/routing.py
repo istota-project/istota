@@ -237,7 +237,7 @@ def _resolve_one(
             return Destination(surface, dest.channel or "stream", "stream")
         # A *foreign* task routing INTO a stream surface (e.g. an email reply →
         # web room): there is no live SSE for this task in that room, so push via
-        # the transport's deliver() (web → a web_chat_messages row).
+        # the transport's deliver() (web → a `role='system'` messages row).
         transport = registry.get(surface) if registry is not None else None
         channel = dest.channel or (transport.resolve_target(task) if transport else None)
         if not channel:

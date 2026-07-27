@@ -313,8 +313,9 @@ def _send_web(
     """Post a notification into the user's web chat room. Returns True on success.
 
     The room token is the explicit ``web:<token>`` channel if given, else the
-    user's default room. The message is appended via ``WebTransport`` (a
-    ``web_chat_messages`` row) and rendered as a system message in the room.
+    user's default room. The message is appended via ``WebTransport`` as a
+    ``role='system'`` row in the canonical ``messages`` store, rendered as a
+    system message in the room and pushed live by the room stream.
     """
     from .async_runtime import run_coro
     from .transport._types import DeliveryOptions

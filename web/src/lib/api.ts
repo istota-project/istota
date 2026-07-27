@@ -7,14 +7,31 @@ class AuthError extends Error {
   }
 }
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(`${base}/api${path}`, {
-    ...init,
-    credentials: 'same-origin',
-  });
-  if (resp.status === 401) throw new AuthError();
-  if (!resp.ok) throw new Error(`API error: ${resp.status}`);
-  return resp.json();
+async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Promise<T> {
+  // `fetch` has no timeout of its own: a stalled connection (a mobile handover,
+  // a proxy holding the socket) hangs until the OS gives up, which can be
+  // minutes or never. A caller whose own state machine is blocked on the
+  // result — the chat room stream's recovery routine — passes a bound so the
+  // request rejects and the state is released, and so a late resolve can never
+  // clobber whatever replaced it in the meantime.
+  let controller: AbortController | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  if (timeoutMs > 0 && !init?.signal) {
+    controller = new AbortController();
+    timer = setTimeout(() => controller?.abort(), timeoutMs);
+  }
+  try {
+    const resp = await fetch(`${base}/api${path}`, {
+      ...init,
+      credentials: 'same-origin',
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    if (resp.status === 401) throw new AuthError();
+    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+    return resp.json();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export interface NextcloudTokenStatus {
@@ -1634,8 +1651,8 @@ export function fetchChatCommands(): Promise<ChatCommands> {
   return apiFetch<ChatCommands>('/chat/commands');
 }
 
-export function getChatRooms(): Promise<{ rooms: ChatRoom[] }> {
-  return apiFetch<{ rooms: ChatRoom[] }>('/chat/rooms');
+export function getChatRooms(timeoutMs = 0): Promise<{ rooms: ChatRoom[] }> {
+  return apiFetch<{ rooms: ChatRoom[] }>('/chat/rooms', undefined, timeoutMs);
 }
 
 export function createChatRoom(name: string): Promise<ChatRoom> {
@@ -1688,7 +1705,7 @@ export async function deleteChatRoom(id: number): Promise<{ status: string }> {
 
 export function getRoomMessages(
   id: number,
-  opts: { limit?: number; before?: { ts: string; id: number } | null } = {},
+  opts: { limit?: number; before?: { ts: string; id: number } | null; timeoutMs?: number } = {},
 ): Promise<ChatHistory> {
   const limit = opts.limit ?? 50;
   const params = new URLSearchParams({ limit: String(limit) });
@@ -1698,7 +1715,11 @@ export function getRoomMessages(
     params.set('before_ts', opts.before.ts);
     params.set('before_id', String(opts.before.id));
   }
-  return apiFetch<ChatHistory>(`/chat/rooms/${id}/messages?${params.toString()}`);
+  return apiFetch<ChatHistory>(
+    `/chat/rooms/${id}/messages?${params.toString()}`,
+    undefined,
+    opts.timeoutMs ?? 0,
+  );
 }
 
 /** One page of the cross-room message stream for an aggregate view. Same
@@ -1802,10 +1823,10 @@ export interface ChatRoomEventsPage {
 
 /** Snapshot of the room-event tail — the polling fallback behind the room
  * stream. `limit=1` asks only for a fresh cursor (used after a reload). */
-export function getRoomEvents(sinceId = 0, limit = 0): Promise<ChatRoomEventsPage> {
+export function getRoomEvents(sinceId = 0, limit = 0, timeoutMs = 0): Promise<ChatRoomEventsPage> {
   const params = new URLSearchParams({ since_id: String(sinceId) });
   if (limit > 0) params.set('limit', String(limit));
-  return apiFetch<ChatRoomEventsPage>(`/chat/events?${params.toString()}`);
+  return apiFetch<ChatRoomEventsPage>(`/chat/events?${params.toString()}`, undefined, timeoutMs);
 }
 
 /** SSE endpoint carrying every message visible to the user, across all rooms. */

@@ -35,7 +35,19 @@ If the SSE stream falls back to polling, the client recovers without flashing an
 
 ## Web chat as a delivery surface
 
-`web` is also a *routable delivery surface* (`WebTransport`). Alerts, the verbose execution log, and any notification routed to `web` are appended to a room as unsolicited system messages in the `web_chat_messages` table (distinct from task-backed turns), merged into room history by time and surfaced live in an open room by an idle poll. Because it is user-routable, web appears automatically in every routing selector (default destination, alert route, briefing output) alongside Talk, email, and ntfy. Route to it with a bare `web` (the user's general room) or `web:<token>` for a specific room. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).
+`web` is also a *routable delivery surface* (`WebTransport`). Alerts, the verbose execution log, and any notification routed to `web` are appended to a room as unsolicited system messages — `role='system'` rows in the canonical `messages` store, distinct from task-backed turns — merged into room history by time and pushed to an open client by the room stream (below). Because it is user-routable, web appears automatically in every routing selector (default destination, alert route, briefing output) alongside Talk, email, and ntfy. Route to it with a bare `web` (the user's general room) or `web:<token>` for a specific room. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).
+
+## The live room stream
+
+The per-task stream above only ever covers a task the client itself started. Everything else — a turn that arrived from Talk, a routed alert, an unread badge, a room renamed on another device — comes over a second SSE endpoint, `GET /istota/api/chat/stream`.
+
+One connection per open tab carries **every room you are a member of**, so room switching is a client-side filter and background rooms get real content rather than a periodically refetched count. It tails the canonical `messages` store, cursored on `messages.id`: because a turn writes its rows whether or not anyone is watching, a Talk turn that starts and finishes in a fraction of a second is still delivered — timing stops mattering.
+
+Frames are `message` (one history-shaped row plus its room), `gap` (the delta was too large to replay — reload instead), `room` (a rename / model / effort change, or a room appearing or disappearing), and a periodic keepalive comment.
+
+Recovery is split between the two ends, because neither can see the other's variable: the server decides on **cost** (a row cap and a byte budget — an assistant row carries its full tool trace, so row count alone measures the wrong thing), the client on **age** (past about a minute of silence it has probably missed state the stream does not carry, such as a star toggled elsewhere). Both converge on the same routine — reload the room list and the open room, then adopt the server's cursor.
+
+If SSE is unavailable (a buffering proxy, say), the client falls back to polling `GET /istota/api/chat/events`, the same snapshot-endpoint pattern the task stream uses, and periodically re-probes the stream. The admin dashboard reports the number of live room-stream connections.
 
 ## Configuration
 
@@ -49,6 +61,12 @@ rate_limit_messages = 30
 rate_limit_window_seconds = 300
 sse_poll_interval_ms = 200
 client_poll_interval_ms = 1500
+# Live room stream
+room_stream_poll_interval_ms = 1000
+room_stream_keepalive_seconds = 20
+room_stream_max_batch = 500
+room_stream_max_bytes = 2000000
+room_stream_room_check_seconds = 10
 ```
 
 See the [configuration reference](../configuration/reference.md#webchat) for the full table.
