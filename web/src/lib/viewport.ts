@@ -24,7 +24,7 @@
  * of padding above the keyboard that it does not strictly need. That is a small
  * static gap, traded for a layout that does not move under the user mid-typing.
  */
-import { onKeyboardGeometry, shellAtLeast } from './platform/native';
+import { onKeyboardGeometry, shellAtLeast, shellVersion } from './platform/native';
 
 const EDGES = ['top', 'bottom', 'left', 'right'] as const;
 
@@ -312,6 +312,11 @@ export function installViewportGuard(): () => void {
       `base  ${baseline ? `${baseline.inner}/${Math.round(baseline.visual)}` : '-'}`,
       `off   ${vv ? Math.round(vv.offsetTop) : '-'}  scroll ${Math.round(el?.scrollTop ?? 0)}`,
       `app   ${written.get('--app-height') ?? '-'}  sb ${written.get('--safe-bottom') ?? '-'}`,
+      // The shell's own line: whether it was recognised at all, and whether its
+      // keyboard reports are landing. A version with no height behind it after
+      // the keyboard is up means the event arrived in a shape this did not
+      // read — which is exactly how the first version of this failed.
+      `shell ${shellVersion() ?? '-'}  kb ${written.get('--kb-height') ?? '-'}`,
     ].join('\n');
   }
 

@@ -73,12 +73,22 @@ export function shellAtLeast(version: string): boolean {
  * code path for both directions. Off-shell nothing ever dispatches these, so
  * subscribing is harmless.
  */
+type NativeEvent = Event & {
+  keyboardHeight?: number;
+  detail?: { keyboardHeight?: number } | null;
+};
+
 export function onKeyboardGeometry(handler: (height: number) => void): () => void {
   if (typeof window === 'undefined') return () => {};
 
   const onShow = (e: Event) => {
-    const detail = (e as CustomEvent<{ keyboardHeight?: number } | null>).detail;
-    const height = detail?.keyboardHeight;
+    const ev = e as NativeEvent;
+    // Capacitor does not use CustomEvent: it builds a plain Event and copies
+    // the payload's properties straight onto it (`native-bridge.js`,
+    // `createEvent`), so the height is on the event, not under `detail`. The
+    // `detail` read stays as a fallback — it is the shape the plugin's own
+    // typings describe, and the one a future bridge would most likely move to.
+    const height = ev.keyboardHeight ?? ev.detail?.keyboardHeight;
     handler(typeof height === 'number' && height > 0 ? height : 0);
   };
   const onHide = () => handler(0);

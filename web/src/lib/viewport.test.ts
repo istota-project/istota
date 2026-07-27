@@ -351,6 +351,11 @@ describe('installViewportGuard', () => {
 describe('installViewportGuard in the native shell', () => {
   const PLAIN_SAFARI = 'Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Safari/604.1';
 
+  /** As Capacitor's bridge sends it — see the note in platform/native.test.ts. */
+  function nativeShellEvent(name: string, keyboardHeight: number): Event {
+    return Object.assign(new Event(name), { keyboardHeight });
+  }
+
   function setUserAgent(ua: string): void {
     Object.defineProperty(window.navigator, 'userAgent', { value: ua, configurable: true });
   }
@@ -369,7 +374,7 @@ describe('installViewportGuard in the native shell', () => {
     teardown = installViewportGuard();
     expect(safeBottom()).toBe('34px');
 
-    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+    window.dispatchEvent(nativeShellEvent('keyboardWillShow', 336));
 
     expect(kbHeight()).toBe('336px');
     // The keyboard is over the home indicator, so the inset it was holding back
@@ -382,8 +387,8 @@ describe('installViewportGuard in the native shell', () => {
     setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.2.0`);
     teardown = installViewportGuard();
 
-    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
-    window.dispatchEvent(new CustomEvent('keyboardWillHide'));
+    window.dispatchEvent(nativeShellEvent('keyboardWillShow', 336));
+    window.dispatchEvent(new Event('keyboardWillHide'));
 
     expect(kbHeight()).toBe('0px');
     expect(safeBottom()).toBe('34px');
@@ -393,7 +398,7 @@ describe('installViewportGuard in the native shell', () => {
     setUserAgent(PLAIN_SAFARI);
     teardown = installViewportGuard();
 
-    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+    window.dispatchEvent(nativeShellEvent('keyboardWillShow', 336));
 
     expect(kbHeight()).toBe('');
     expect(safeBottom()).toBe('34px');
@@ -405,7 +410,7 @@ describe('installViewportGuard in the native shell', () => {
     setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.1.0`);
     teardown = installViewportGuard();
 
-    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+    window.dispatchEvent(nativeShellEvent('keyboardWillShow', 336));
 
     expect(kbHeight()).toBe('');
     expect(safeBottom()).toBe('34px');
@@ -414,11 +419,11 @@ describe('installViewportGuard in the native shell', () => {
   it('stops listening and clears the offset on teardown', () => {
     setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.2.0`);
     const stop = installViewportGuard();
-    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+    window.dispatchEvent(nativeShellEvent('keyboardWillShow', 336));
     stop();
 
     expect(kbHeight()).toBe('');
-    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+    window.dispatchEvent(nativeShellEvent('keyboardWillShow', 336));
     expect(kbHeight()).toBe('');
   });
 });
