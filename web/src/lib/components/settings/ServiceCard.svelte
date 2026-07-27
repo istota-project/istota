@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Button } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
+  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SecretField from './SecretField.svelte';
 
   interface Props {
@@ -83,6 +84,15 @@
       saving = false;
     }
   }
+
+  // The credential fields are part of the page's state, not a form of their
+  // own, so they save from the app bar with everything else. An OAuth service
+  // has no fields to write — it withdraws and leaves the button to the rest of
+  // the page. Clearing a stored secret stays an immediate, separately
+  // confirmed action: it is a deletion, not an edit awaiting a save.
+  useSettingsSave(() =>
+    !service.oauth && service.fields.length > 0 ? { dirty, saving, save: saveAll } : null,
+  );
 </script>
 
 <section class="card" data-status={service.status}>
@@ -103,16 +113,11 @@
       {#if service.last_updated}
         <span class="meta">Updated {service.last_updated}</span>
       {/if}
-      {#if !service.oauth && service.fields.length > 0}
-        {#if dirty}
-          <span class="dirty-badge">Unsaved changes</span>
-        {/if}
-        {#if savedFlash}
-          <span class="saved-flash">Saved.</span>
-        {/if}
-        <Button variant="primary" size="sm" disabled={!dirty || saving} onclick={saveAll}>
-          {saving ? 'Saving…' : 'Save'}
-        </Button>
+      <!-- No Save button: the app bar owns it (see useSettingsSave above). The
+			     flash stays, because with one shared button it is the only thing that
+			     says *this* card is what got written. -->
+      {#if savedFlash}
+        <span class="saved-flash">Saved.</span>
       {/if}
     </div>
   </header>

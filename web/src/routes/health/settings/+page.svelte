@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getHealthSettings, putHealthSettings, type HealthSettings } from '$lib/api';
-  import { Button, Select } from '$lib/components/ui';
+  import { Select } from '$lib/components/ui';
   import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { cmToFtIn, ftInToCm } from '$lib/health/units';
 
   let loading = $state(true);
@@ -164,6 +165,8 @@
   });
 
   onMount(load);
+
+  useSettingsSave(() => ({ dirty, saving, save }));
 </script>
 
 <SettingsLayout
@@ -173,15 +176,6 @@
   {error}
   {info}
 >
-  {#snippet headerActions()}
-    {#if dirty}
-      <span class="dirty-badge">Unsaved changes</span>
-    {/if}
-    <Button variant="primary" onclick={save} disabled={!dirty || saving}>
-      {saving ? 'Saving…' : 'Save changes'}
-    </Button>
-  {/snippet}
-
   <SettingsCard title="Profile">
     <SettingsField label="Date of birth" hint={ageYears != null ? `Age: ${ageYears}` : undefined}>
       <input type="date" bind:value={dobInput} />

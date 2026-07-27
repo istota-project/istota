@@ -26,6 +26,7 @@
     Select,
     ConfirmDialog,
   } from '$lib/components/ui';
+  import { HeaderSave } from '$lib/components/settings';
   import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from 'lucide-svelte';
 
   let { children } = $props();
@@ -195,6 +196,10 @@
             <CheckCheck size={14} />
           </Chip>
         {/if}
+        <!-- Ahead of the cog, so the cog keeps the bar's right edge and stays
+			     put whether or not the open page offers a save. Renders nothing
+			     unless one is registered. -->
+        <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Feed settings">
           <Cog size={14} />
         </Chip>

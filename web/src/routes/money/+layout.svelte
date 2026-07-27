@@ -7,6 +7,7 @@
   import { getLedgers, checkLedger, AuthError } from '$lib/money/api';
   import { selectedLedger, availableLedgers } from '$lib/money/stores/ledger';
   import { AppShell, ShellHeader, HeaderNav, Select, Chip } from '$lib/components/ui';
+  import { HeaderSave } from '$lib/components/settings';
   import { Cog } from 'lucide-svelte';
 
   let { children } = $props();
@@ -99,7 +100,9 @@
           <HeaderNav items={navItems} ariaLabel="Money section" />
         {/snippet}
         {#snippet tools()}
-          {#if $availableLedgers.length > 1}
+          <!-- Not on settings: nothing there is scoped to a ledger, so the
+				     picker is inert and only crowds the bar beside the Save button. -->
+          {#if !onSettings && $availableLedgers.length > 1}
             <Select
               value={$selectedLedger}
               options={ledgerOptions}
@@ -114,6 +117,10 @@
               </Collapsible.Trigger>
             </Collapsible.Root>
           {/if}
+          <!-- Ahead of the cog, so the cog keeps the bar's right edge and stays
+				     put whether or not the open page offers a save. Renders nothing
+				     unless one is registered. -->
+          <HeaderSave />
           <Chip icon checked={onSettings} onclick={toggleSettings} title="Money settings">
             <Cog size={14} />
           </Chip>

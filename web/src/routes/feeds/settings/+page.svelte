@@ -30,6 +30,7 @@
     SettingsCard,
     SettingsField,
   } from '$lib/components/settings';
+  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
 
   let loading = $state(true);
   let saving = $state(false);
@@ -125,6 +126,8 @@
       saving = false;
     }
   }
+
+  useSettingsSave(() => (moduleEnabled ? { dirty, saving, save } : null));
 
   function detectSourceType(url: string | undefined | null): string {
     if (!url) return '?';
@@ -336,15 +339,6 @@
   {error}
   {info}
 >
-  {#snippet headerActions()}
-    {#if dirty}
-      <span class="dirty-badge">Unsaved changes</span>
-    {/if}
-    <Button variant="primary" onclick={save} disabled={!dirty || saving}>
-      {saving ? 'Saving…' : 'Save changes'}
-    </Button>
-  {/snippet}
-
   {#if !moduleEnabled}
     <div class="banner info">
       Feeds module is disabled. Enable it in

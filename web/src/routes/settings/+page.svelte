@@ -18,10 +18,12 @@
   import {
     ServiceCard,
     GarminCard,
+    HeaderSave,
     SettingsLayout,
     SettingsCard,
     SettingsField,
   } from '$lib/components/settings';
+  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
 
   let services: ServiceCardData[] = $state([]);
   let allModules: string[] = $state([]);
@@ -247,6 +249,15 @@
     void refresh();
   });
 
+  // Identity and Preferences edit one record and were saved by two copies of
+  // the same button. One save in the app bar covers both — and, by aggregation,
+  // the connected-service cards below, which each used to carry a third.
+  useSettingsSave(() => ({
+    dirty: profileDirty,
+    saving: profileSaving,
+    save: saveProfile,
+  }));
+
   // /settings/services already filters to connected services (no module-owned
   // monarch/feeds/overland leak through). Skip cards whose status is
   // "unavailable" — historically used to mean "no resource declaration" but
@@ -268,36 +279,21 @@
 
 <AppShell>
   {#snippet header()}
-    <ShellHeader title="User settings" />
+    <ShellHeader title="User settings">
+      {#snippet tools()}
+        <HeaderSave />
+      {/snippet}
+    </ShellHeader>
   {/snippet}
 
   <SettingsLayout
     description="Profile and per-service credentials. Secrets are encrypted at rest and never sent back to the browser — secret fields are write-only."
     {loading}
-    {error}
+    error={error || profileError}
     {info}
   >
     {#if profile}
-      {@const saveBtn = {
-        dirty: profileDirty,
-        saving: profileSaving,
-      }}
-
-      {#snippet profileSaveActions()}
-        {#if saveBtn.dirty}
-          <span class="dirty-badge">Unsaved changes</span>
-        {/if}
-        <Button
-          variant="primary"
-          size="sm"
-          onclick={saveProfile}
-          disabled={!saveBtn.dirty || saveBtn.saving}
-        >
-          {saveBtn.saving ? 'Saving…' : 'Save'}
-        </Button>
-      {/snippet}
-
-      <SettingsCard title="Identity" actions={profileSaveActions}>
+      <SettingsCard title="Identity">
         <p class="hint">
           How Istota addresses you. User ID: <code>{profile.user_id}</code>
         </p>
@@ -360,11 +356,7 @@
         </SettingsField>
       </SettingsCard>
 
-      <SettingsCard
-        title="Preferences"
-        description="How Istota behaves for your account."
-        actions={profileSaveActions}
-      >
+      <SettingsCard title="Preferences" description="How Istota behaves for your account.">
         <SettingsField label="Trusted email senders (fnmatch patterns, comma-separated)">
           <input
             type="text"
@@ -468,9 +460,6 @@
             onValueChange={(v) => setRoute('log', v)}
           />
         </SettingsField>
-        {#if profileError}
-          <div class="banner error">{profileError}</div>
-        {/if}
       </SettingsCard>
     {/if}
 
