@@ -78,6 +78,18 @@
   let newBlockTitle = $state('');
   let expandedId = $state<number | null>(null);
   let addingSaving = $state(false);
+
+  // Responsive columns for the blocks table are decided here rather than by a
+  // container query, because the expanded editor is a `colspan` row and the two
+  // must agree: a `colspan` larger than the number of rendered columns makes the
+  // browser invent the missing ones, which on mobile collapsed the Block column
+  // and stranded the kebab mid-table. Measured on the table's own scroll box, so
+  // the thresholds are the width the table actually has. 0 = not yet measured
+  // (SSR/first paint) — show everything and let the observer narrow it.
+  let blocksWidth = $state(0);
+  const showBlockSources = $derived(blocksWidth === 0 || blocksWidth > 620);
+  const showBlockRender = $derived(blocksWidth === 0 || blocksWidth > 470);
+  const blockColumnCount = $derived(3 + (showBlockRender ? 1 : 0) + (showBlockSources ? 1 : 0));
   // Surfaces failures from the non-atomic block/source duplicate, which can
   // leave a partially built block behind.
   let blockError = $state('');
@@ -1005,14 +1017,18 @@
           {#if currentBlocks.length === 0}
             <p class="empty">No blocks yet. Add one below to start shaping this briefing.</p>
           {:else}
-            <div class="table-scroll">
+            <div class="table-scroll" bind:clientWidth={blocksWidth}>
               <table class="grid">
                 <thead>
                   <tr>
                     <th class="col-order">Order</th>
                     <th>Block</th>
-                    <th class="col-render">Render</th>
-                    <th class="col-src">Sources</th>
+                    {#if showBlockRender}
+                      <th class="col-render">Render</th>
+                    {/if}
+                    {#if showBlockSources}
+                      <th class="col-src">Sources</th>
+                    {/if}
                     <th class="actions"></th>
                   </tr>
                 </thead>
@@ -1048,27 +1064,31 @@
                           <div class="block-directive muted">{block.directive}</div>
                         {/if}
                       </td>
-                      <td class="col-render">
-                        <span class="render-pill">{block.render_mode}</span>
-                      </td>
-                      <td class="col-src">
-                        {#if block.sources.length}
-                          <div class="kind-pills">
-                            {#each block.sources as s (s.id)}
-                              <span class="kind-pill" class:off={!s.enabled}>{s.kind}</span>
-                            {/each}
-                          </div>
-                        {:else}
-                          <span class="muted">none</span>
-                        {/if}
-                      </td>
+                      {#if showBlockRender}
+                        <td class="col-render">
+                          <span class="render-pill">{block.render_mode}</span>
+                        </td>
+                      {/if}
+                      {#if showBlockSources}
+                        <td class="col-src">
+                          {#if block.sources.length}
+                            <div class="kind-pills">
+                              {#each block.sources as s (s.id)}
+                                <span class="kind-pill" class:off={!s.enabled}>{s.kind}</span>
+                              {/each}
+                            </div>
+                          {:else}
+                            <span class="muted">none</span>
+                          {/if}
+                        </td>
+                      {/if}
                       <td class="actions">
                         <KebabMenu items={blockMenu(block)} ariaLabel="Block actions" />
                       </td>
                     </tr>
                     {#if expandedId === block.id}
                       <tr class="detail-row">
-                        <td colspan="5">
+                        <td colspan={blockColumnCount}>
                           <div class="block-detail">
                             <div class="detail-grid">
                               <SettingsField label="Title">
@@ -1758,14 +1778,11 @@
     font-size: var(--text-sm);
   }
 
-  @container settings (max-width: 720px) {
-    .col-src {
-      display: none;
-    }
-  }
-
+  /* The blocks table's own responsive columns are driven from the script (see
+	   blocksWidth) so they stay in step with the expanded row's colspan. These
+	   queries cover the two tables that have no colspan rows. */
   @container settings (max-width: 560px) {
-    .col-render {
+    .sb-table .col-render {
       display: none;
     }
     .col-source {
