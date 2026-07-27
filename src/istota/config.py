@@ -218,6 +218,11 @@ class BriefingConfig:
     """Briefing configuration."""
     name: str
     cron: str  # cron expression, evaluated in user's timezone
+    # Display title for the rendered briefing (email subject, archive entry,
+    # ntfy title). Blank = derive from ``name`` (``morning`` → "Morning
+    # Briefing"). The run date is appended by the renderer, so this is the
+    # stable part only. See ``briefings.generate.resolve_briefing_title``.
+    title: str = ""
     conversation_token: str = ""  # Talk room to post to
     output: str = "talk"  # delivery surface(s): talk / email / ntfy or a comma list
     components: dict = field(default_factory=dict)
@@ -1466,6 +1471,7 @@ def _parse_briefing_specs(entries: "list | None") -> list[BriefingConfig]:
         briefings.append(BriefingConfig(
             name=b.get("name", ""),
             cron=b.get("cron", ""),
+            title=b.get("title", ""),
             conversation_token=b.get("conversation_token", ""),
             output=b.get("output", "talk"),
             # Raw parsed dict passthrough — normalisation is the seeder's job so
@@ -2654,6 +2660,7 @@ def _apply_user_briefings(config: "Config") -> None:
             bc = BriefingConfig(
                 name=r.name,
                 cron=r.cron,
+                title=r.title,
                 conversation_token=r.conversation_token,
                 output=r.output,
                 components=dict(r.components),

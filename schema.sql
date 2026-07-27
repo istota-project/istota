@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS briefing_configs (
     id INTEGER PRIMARY KEY,
     user_id TEXT NOT NULL,
     name TEXT NOT NULL,             -- 'morning', 'evening', etc.
+    title TEXT NOT NULL DEFAULT '', -- display title; '' = derive from name
     cron_expression TEXT NOT NULL,  -- '0 7 * * 1-5' for 7am weekdays
     conversation_token TEXT NOT NULL,
     components TEXT NOT NULL,       -- JSON: legacy component bag, retained only as a one-time components→blocks migration carrier

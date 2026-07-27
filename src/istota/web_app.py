@@ -4683,6 +4683,7 @@ def _briefing_to_dict(b, *, managed: str) -> dict:
         "managed": managed,
         "name": getattr(b, "name", "") or "",
         "cron": getattr(b, "cron", "") or "",
+        "title": getattr(b, "title", "") or "",
         "conversation_token": getattr(b, "conversation_token", "") or "",
         "output": getattr(b, "output", "talk") or "talk",
         "enabled": bool(getattr(b, "enabled", True)),
@@ -4757,6 +4758,13 @@ def _validate_briefing_payload(payload: dict, *, name_required: bool) -> dict:
     if not cron:
         raise HTTPException(status_code=400, detail="cron is required")
 
+    # Blank is meaningful: it means "derive the title from the name".
+    title = (payload.get("title") or "").strip()
+    if len(title) > 200:
+        raise HTTPException(status_code=400, detail="title must be 200 characters or fewer")
+    if any(ord(c) < 32 for c in title):
+        raise HTTPException(status_code=400, detail="title must not contain control characters")
+
     output = (payload.get("output") or "talk").strip()
     # Validate every leaf surface is known (rejects typos like "sms"); the
     # grammar stays permissive so legacy ``both`` / comma lists still parse,
@@ -4782,6 +4790,7 @@ def _validate_briefing_payload(payload: dict, *, name_required: bool) -> dict:
     return {
         "name": name,
         "cron": cron,
+        "title": title,
         "conversation_token": token,
         "output": output,
         "enabled": enabled,

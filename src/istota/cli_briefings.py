@@ -31,6 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
     sched.add_argument("-u", "--user")
     sched.add_argument("--name")
     sched.add_argument("--cron")
+    sched.add_argument(
+        "--title", default="",
+        help="Display title (email subject / archive entry). Blank derives it from --name.",
+    )
     sched.add_argument("--conversation-token")
     sched.add_argument("--output", default="talk")
     sched.add_argument("--disabled", action="store_true")
@@ -99,6 +103,7 @@ def _run_schedule(args, config) -> int:
         user=args.user,
         name=args.name,
         cron=args.cron,
+        title=args.title or "",
         conversation_token=args.conversation_token,
         output=args.output or "talk",
         disabled=args.disabled,

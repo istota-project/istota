@@ -1891,6 +1891,7 @@ const handlers: MockHandler[] = [
       id: number;
       name: string;
       cron: string;
+      title: string;
       conversation_token: string;
       output: string;
       enabled: boolean;
@@ -1899,6 +1900,8 @@ const handlers: MockHandler[] = [
       {
         name: 'morning',
         cron: '0 7 * * 1-5',
+        // Blank exercises the derived-title placeholder in the editor.
+        title: '',
         conversation_token: 'abc123',
         output: 'talk' as const,
         enabled: true,
@@ -1923,10 +1926,15 @@ const handlers: MockHandler[] = [
         if (!p || typeof p !== 'object') return { error: 'bad payload' };
         const name = String(p.name ?? '');
         const existing = mockDbBriefings.findIndex((b) => b.name === name);
+        const title = String(p.title ?? '').trim();
+        // Mirrors the server-side shape check so the 400 class is exercised
+        // under VITE_MOCK_API=1 rather than only in production.
+        if (title.length > 200) return { error: 'title must be 200 characters or fewer' };
         const row = {
           id: existing >= 0 ? mockDbBriefings[existing].id : nextBriefingId++,
           name,
           cron: String(p.cron ?? ''),
+          title,
           conversation_token: String(p.conversation_token ?? ''),
           output: (p.output as string) ?? 'talk',
           enabled: p.enabled !== false,

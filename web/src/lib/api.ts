@@ -702,6 +702,9 @@ export interface UserBriefingRow {
   id?: number;
   name: string;
   cron: string;
+  // Display title for the rendered briefing (email subject, archive entry).
+  // Blank means "derive from the name"; the run date is appended on render.
+  title: string;
   conversation_token: string;
   // A delivery surface (talk / email / ntfy) or a comma/surface:channel
   // descriptor; the dropdown is driven by the server's `outputs` list.
@@ -725,6 +728,7 @@ export async function getBriefings(): Promise<{
 export async function upsertBriefing(payload: {
   name: string;
   cron: string;
+  title?: string;
   conversation_token?: string;
   output?: string;
   enabled?: boolean;

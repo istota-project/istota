@@ -51,12 +51,16 @@
   let newBriefing = $state({
     name: '',
     cron: '0 7 * * *',
+    title: '',
     conversation_token: '',
     output: 'talk' as string,
     enabled: true,
   });
   let briefingError = $state('');
   let briefingSaving = $state(false);
+  // Non-null = editing that briefing in place. The POST is an upsert keyed on
+  // name, so an edit is a save with the name held fixed.
+  let briefingEditingName = $state<string | null>(null);
 
   const briefingOutputOptions: SelectOption[] = $derived(
     briefingOutputs.map((o) => ({ value: o, label: o })),
@@ -374,7 +378,49 @@
     }
   });
 
+  /** Preview of the title a blank `title` field will produce.
+   *
+   * Display hint only — the real value comes from
+   * `briefings.generate.default_briefing_title`, which is authoritative. Keep
+   * the two in step. The run date the renderer appends is not shown here.
+   */
+  function derivedTitle(name: string): string {
+    const words = name
+      .trim()
+      .split(/[-_\s]+/)
+      .filter(Boolean);
+    if (!words.length) return 'Briefing';
+    const label = words.map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+    return label.toLowerCase().includes('brief') ? label : `${label} Briefing`;
+  }
+
   // ---- Schedule handlers ----
+  function resetBriefingForm() {
+    newBriefing = {
+      name: '',
+      cron: '0 7 * * *',
+      title: '',
+      conversation_token: '',
+      output: 'talk',
+      enabled: true,
+    };
+    briefingEditingName = null;
+    briefingError = '';
+  }
+
+  function editBriefing(b: UserBriefingRow) {
+    briefingEditingName = b.name;
+    briefingError = '';
+    newBriefing = {
+      name: b.name,
+      cron: b.cron,
+      title: b.title ?? '',
+      conversation_token: b.conversation_token ?? '',
+      output: b.output,
+      enabled: b.enabled,
+    };
+  }
+
   async function submitBriefing(e: SubmitEvent) {
     e.preventDefault();
     briefingError = '';
@@ -393,17 +439,12 @@
       await upsertBriefing({
         name,
         cron,
+        title: newBriefing.title.trim(),
         conversation_token: newBriefing.conversation_token.trim() || undefined,
         output: newBriefing.output,
         enabled: newBriefing.enabled,
       });
-      newBriefing = {
-        name: '',
-        cron: '0 7 * * *',
-        conversation_token: '',
-        output: 'talk',
-        enabled: true,
-      };
+      resetBriefingForm();
       await Promise.all([reloadSchedule(), reloadContent()]);
       briefingsRefreshNonce.update((n) => n + 1);
     } catch (e) {
@@ -666,6 +707,7 @@
             <thead>
               <tr>
                 <th class="col-name">Name</th>
+                <th>Title</th>
                 <th>Cron</th>
                 <th>Output</th>
                 <th>Token</th>
@@ -680,6 +722,13 @@
                     {b.name}
                     {#if !b.enabled}<span class="muted"> (disabled)</span>{/if}
                   </td>
+                  <td>
+                    {#if b.title}
+                      {b.title}
+                    {:else}
+                      <span class="muted">{derivedTitle(b.name)}</span>
+                    {/if}
+                  </td>
                   <td><code>{b.cron}</code></td>
                   <td>{b.output}</td>
                   <td class="muted"><code>{b.conversation_token || '—'}</code></td>
@@ -688,6 +737,12 @@
                   </td>
                   <td class="actions">
                     {#if b.managed === 'db' && b.id !== undefined}
+                      <button
+                        class="icon-btn"
+                        title="Edit"
+                        type="button"
+                        onclick={() => editBriefing(b)}>✎</button
+                      >
                       <button
                         class="icon-btn danger"
                         title="Remove"
@@ -706,10 +761,25 @@
       {/if}
 
       <form class="add-form" onsubmit={submitBriefing}>
-        <h3>Add briefing</h3>
+        <h3>{briefingEditingName ? `Edit ${briefingEditingName}` : 'Add briefing'}</h3>
         <div class="add-grid">
           <SettingsField label="Name">
-            <input type="text" placeholder="morning" bind:value={newBriefing.name} />
+            <input
+              type="text"
+              placeholder="morning"
+              bind:value={newBriefing.name}
+              disabled={!!briefingEditingName}
+            />
+          </SettingsField>
+          <SettingsField
+            label="Title"
+            hint="Shown as the email subject and the archive entry. Leave it blank to derive one from the name. The run date is appended automatically."
+          >
+            <input
+              type="text"
+              placeholder={derivedTitle(newBriefing.name || 'morning')}
+              bind:value={newBriefing.title}
+            />
           </SettingsField>
           <SettingsField label="Cron (user TZ)">
             <input type="text" placeholder="0 7 * * 1-5" bind:value={newBriefing.cron} />
@@ -736,8 +806,11 @@
         </div>
         <div class="add-actions">
           <Button variant="secondary" size="sm" type="submit" disabled={briefingSaving}>
-            {briefingSaving ? 'Saving…' : '+ Add briefing'}
+            {briefingSaving ? 'Saving…' : briefingEditingName ? 'Save changes' : '+ Add briefing'}
           </Button>
+          {#if briefingEditingName}
+            <Button variant="ghost" size="sm" onclick={resetBriefingForm}>Cancel</Button>
+          {/if}
         </div>
         {#if briefingError}
           <div class="banner error">{briefingError}</div>

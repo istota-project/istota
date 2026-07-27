@@ -2152,7 +2152,10 @@ def process_one_task(
             conversation_token=task.conversation_token,
         )
         # Archive the rendered briefing for the landing page (module path only).
-        _maybe_archive_briefing(config, task, result, parsed_briefing)
+        _maybe_archive_briefing(
+            config, task, result, parsed_briefing,
+            title=briefing_title_for_task(config, task),
+        )
 
     # The ack message is left as-is — it shows the last tool call as a compact
     # execution summary. Error / cancelled status edits are handled live by the
@@ -2284,28 +2287,34 @@ def process_one_task(
         except Exception as e:
             logger.warning("Failed to cache result message for task %d: %s", task_id, e)
     if post_email:
+        email_subject = None
         if task.source_type == "briefing":
             pb = parse_briefing_json(result)
             email_result = pb["body"] if pb else strip_briefing_preamble(result)
+            email_subject = briefing_title_for_task(config, task)
         else:
             email_result = result
-        email_ok = asyncio.run(post_result_to_email(config, task, email_result))
+        email_ok = asyncio.run(post_result_to_email(
+            config, task, email_result, subject=email_subject,
+        ))
         if not email_ok:
             with db.get_db(config.db_path) as conn:
                 db.update_task_status(conn, task_id, "failed", error="Email delivery failed", actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "error", "Task completed but email delivery failed")
     if post_ntfy:
         from .transport._types import DeliveryOptions
+        ntfy_title = f"Task {task_id}"
         if task.source_type == "briefing":
             pb = parse_briefing_json(result)
             ntfy_result = pb["body"] if pb else strip_briefing_preamble(result)
+            ntfy_title = briefing_title_for_task(config, task)
         else:
             ntfy_result = result
         ntfy_transport = registry.get("ntfy")
         if ntfy_transport is not None:
             run_coro(ntfy_transport.deliver(
                 "", ntfy_result, task=task,
-                options=DeliveryOptions(title=f"Task {task_id}"),
+                options=DeliveryOptions(title=ntfy_title),
             ))
     if call_file_handler:
         # The transport re-reads the task's terminal status to derive success.
@@ -2372,8 +2381,14 @@ async def post_result_to_talk(
     )
 
 
-async def post_result_to_email(config: Config, task: db.Task, message: str) -> bool:
+async def post_result_to_email(
+    config: Config, task: db.Task, message: str, *, subject: str | None = None,
+) -> bool:
     """Send a task result as an email reply / fresh email. Returns True on success.
+
+    ``subject`` overrides the subject for a fresh (non-reply) send — the
+    briefing path passes its deterministic title so the inbox and the web
+    archive agree.
 
     Thin shim over the email transport — structured-output parsing, thread-reply
     routing, and sent-email recording live in ``transport/email/outbound.py``
@@ -2383,7 +2398,7 @@ async def post_result_to_email(config: Config, task: db.Task, message: str) -> b
     flag, which the ``Transport.deliver`` protocol (``int | None``) discards for
     a surface with no message-id concept."""
     from .transport.email import deliver_email_result
-    return await deliver_email_result(config, task, message)
+    return await deliver_email_result(config, task, message, subject=subject)
 
 
 def _deferred_briefing_placeholder(briefing_name: str) -> str:
@@ -2397,7 +2412,34 @@ def _deferred_briefing_placeholder(briefing_name: str) -> str:
     return f"Generate the '{briefing_name}' briefing."
 
 
-def _maybe_archive_briefing(config: Config, task, result: str, parsed) -> None:
+def briefing_title_for_task(config: Config, task) -> str:
+    """The deterministic display title for a finished briefing task.
+
+    Every consumer of a briefing's output (archive entry, email subject, ntfy
+    title) calls this rather than reading a model-supplied subject, so the same
+    run can't be titled three different ways. Pure function of the task row +
+    config, so the independent call sites agree without plumbing.
+
+    Dated from the task's creation time (the cron fire), rendered in the user's
+    timezone.
+    """
+    from .briefings.generate import resolve_briefing_title
+
+    when = None
+    raw = getattr(task, "created_at", None)
+    if raw:
+        try:
+            when = datetime.fromisoformat(raw)
+        except (TypeError, ValueError):
+            when = None  # Fall through to "now" — a title is never worth failing over.
+    return resolve_briefing_title(
+        config, task.user_id, getattr(task, "briefing_name", "") or "", when,
+    )
+
+
+def _maybe_archive_briefing(
+    config: Config, task, result: str, parsed, title: str | None = None,
+) -> None:
     """Archive a rendered briefing to the module's ``briefing_archive``.
 
     Only module-path briefings are archived: the module must be enabled for the
@@ -2432,7 +2474,9 @@ def _maybe_archive_briefing(config: Config, task, result: str, parsed) -> None:
     except Exception:  # noqa: BLE001
         return
 
-    subject = parsed.get("subject") if parsed else None
+    # The archive's `subject` is the deterministic title, not whatever the
+    # model felt like calling it — the same string the email subject uses.
+    subject = title or briefing_title_for_task(config, task)
     body = parsed.get("body") if parsed else strip_briefing_preamble(result)
     if not body:
         return

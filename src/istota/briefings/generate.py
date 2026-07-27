@@ -18,9 +18,10 @@ per-block synthesis directives).
 from __future__ import annotations
 
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from istota.briefings import db as briefings_db
@@ -44,6 +45,70 @@ class BriefingInput:
     prompt: str
     block_meta: dict = field(default_factory=dict)
     rendered_blocks: int = 0
+
+
+def default_briefing_title(briefing_name: str) -> str:
+    """Humanize a briefing name into a display label.
+
+    The fallback for a briefing with no explicit ``title``. ``morning`` →
+    ``Morning Briefing``; a name that already says "brief" is left alone so
+    ``morning-briefing`` doesn't become "Morning Briefing Briefing". Existing
+    capitalization is preserved (an acronym survives), so this only upper-cases
+    a leading lowercase letter.
+    """
+    words = [w for w in re.split(r"[-_\s]+", briefing_name.strip()) if w]
+    if not words:
+        return "Briefing"
+    label = " ".join(w[:1].upper() + w[1:] for w in words)
+    if "brief" in label.lower():
+        return label
+    return f"{label} Briefing"
+
+
+def format_briefing_title(label: str, when: datetime) -> str:
+    """Compose the final title: ``<label> — <weekday>, <day> <month>``.
+
+    ``when`` must already be in the reader's timezone. The day is unpadded and
+    built by hand rather than via ``%-d``, which isn't portable.
+    """
+    label = (label or "").strip() or "Briefing"
+    return f"{label} — {when:%A}, {when.day} {when:%B}"
+
+
+def resolve_briefing_title(
+    app_config,
+    user_id: str,
+    briefing_name: str,
+    when: datetime | None = None,
+) -> str:
+    """The deterministic display title for one briefing run.
+
+    Called independently by every consumer of a finished briefing (archive
+    subject, email subject, ntfy title). It is a pure function of its
+    arguments, so those consumers agree without plumbing a value between them.
+
+    Falls back to the humanized ``briefing_name`` when the briefing has no
+    configured title, is unknown, or the user isn't configured — a briefing
+    always has a title.
+    """
+    label = ""
+    try:
+        from istota.skills.briefing import get_briefings_for_user
+
+        for b in get_briefings_for_user(app_config, user_id):
+            if b.name == briefing_name:
+                label = (getattr(b, "title", "") or "").strip()
+                break
+    except Exception:  # noqa: BLE001 — a title must never fail a delivery
+        logger.debug("briefing title lookup failed for %s/%s", user_id, briefing_name)
+
+    # A naive timestamp comes from SQLite (`datetime('now')`, UTC); treating it
+    # as system-local would shift the date on a non-UTC host.
+    if when is not None and when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+
+    resolved, _ = _now_in_tz(app_config, user_id, when)
+    return format_briefing_title(label or default_briefing_title(briefing_name), resolved)
 
 
 def _now_in_tz(app_config, user_id: str, now: datetime | None):
@@ -275,11 +340,11 @@ def assemble_briefing_input(
         "NO tables.",
         "",
         "CRITICAL: Your entire response must be a single JSON object with this "
-        'exact format:\n{"subject": "<briefing subject>", "body": "<briefing '
-        'content here>"}\n\n'
+        'exact format:\n{"body": "<briefing content here>"}\n\n'
         "The body field contains the full briefing text, one section per block "
         "titled by its block title. Use \\n for newlines within the body "
-        "string. Do NOT output "
+        "string. Do NOT write a title or subject line for the briefing as a "
+        "whole — the delivery layer supplies it. Do NOT output "
         "anything outside the JSON object — no preamble, no commentary, no code "
         "fences. Do NOT send emails or use any email commands. Delivery is "
         "handled by the scheduler.",

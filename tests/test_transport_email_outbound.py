@@ -355,7 +355,7 @@ class TestBriefingLegacyFallback:
         mock_reply.assert_not_called()
         kwargs = mock_send.call_args.kwargs
         assert kwargs["to"] == "alice@example.com"
-        # Subject derived from the "Generate a X briefing" prompt.
+        # No caller-supplied title: fall back to deriving one from the prompt.
         assert kwargs["subject"] == "Morning Briefing"
         assert kwargs["content_type"] == "plain"
         # Markdown emphasis / link syntax must be stripped for plain-text email.
@@ -363,6 +363,35 @@ class TestBriefingLegacyFallback:
         assert "[link]" not in kwargs["body"]
         assert "http://x" not in kwargs["body"]
         assert "Markets are up. See link." in kwargs["body"]
+
+    @pytest.mark.asyncio
+    async def test_supplied_subject_wins_over_the_prompt_derivation(
+        self, db_path, tmp_path,
+    ):
+        """The scheduler's deterministic title overrides the prompt scrape.
+
+        The prompt says "morning" (clock-derived), the briefing is the evening
+        one — the caller's title is what the reader should see.
+        """
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(
+            db_path, source_type="briefing",
+            prompt="Generate a morning briefing for the user",
+        )
+
+        with (
+            patch("istota.transport.email.outbound.send_email") as mock_send,
+            patch("istota.transport.email.outbound.reply_to_email"),
+        ):
+            ok = await deliver_email_result(
+                config, task, "body text", subject="Evening Wrap — Monday, 27 July",
+            )
+
+        assert ok is True
+        assert mock_send.call_args.kwargs["subject"] == "Evening Wrap — Monday, 27 July"
 
     @pytest.mark.asyncio
     async def test_briefing_unstructured_no_address_returns_false(self, db_path, tmp_path):

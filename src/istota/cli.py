@@ -460,6 +460,7 @@ def run_briefing_schedule(
     user=None,
     name=None,
     cron=None,
+    title="",
     conversation_token=None,
     output="talk",
     disabled=False,
@@ -515,6 +516,7 @@ def run_briefing_schedule(
                 user_id=user,
                 name=name,
                 cron=cron,
+                title=title or "",
                 conversation_token=conversation_token or "",
                 output=output,
                 enabled=not disabled,
@@ -525,6 +527,7 @@ def run_briefing_schedule(
 
         print(
             f"Briefing ensured for {user!r}: name={briefing.name} cron={briefing.cron!r} "
+            f"title={briefing.title or '(derived)'} "
             f"output={briefing.output} enabled={briefing.enabled}"
         )
         print(f"STATE: {state}")

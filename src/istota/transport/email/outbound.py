@@ -190,8 +190,29 @@ def _record_sent_email(
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)
 
 
-async def deliver_email_result(config: "Config", task: db.Task, message: str) -> bool:
+def _legacy_briefing_subject(task: db.Task) -> str:
+    """Derive a briefing subject from the built prompt's opening line.
+
+    Only reached when no caller-supplied title is available (a direct
+    ``deliver_email_result`` call, or a task whose briefing config vanished).
+    Keyed on the clock-derived ``morning``/``evening`` wording that
+    ``briefings.generate`` writes, so it can disagree with a briefing's real
+    name — which is precisely why the title is now computed upstream.
+    """
+    match = re.search(r"Generate a (\w+) briefing", task.prompt or "")
+    briefing_type = match.group(1).title() if match else ""
+    return f"{briefing_type} Briefing".strip()
+
+
+async def deliver_email_result(
+    config: "Config", task: db.Task, message: str, *, subject: str | None = None,
+) -> bool:
     """Send task result as email reply, or fresh email for scheduled/briefing jobs.
+
+    ``subject`` overrides the subject line for a fresh send. The briefing path
+    supplies its deterministic title (``scheduler.briefing_title_for_task``) so
+    the inbox and the web archive name the same run identically; without one the
+    briefing branch derives a subject from the prompt, as it always did.
 
     Returns True on success, False on failure.
     """
@@ -212,11 +233,9 @@ async def deliver_email_result(config: "Config", task: db.Task, message: str) ->
             return False
         try:
             email_config = get_email_config(config)
-            match = re.search(r"Generate a (\w+) briefing", task.prompt)
-            briefing_type = match.group(1).title() if match else ""
             send_email(
                 to=user_config.email_addresses[0],
-                subject=f"{briefing_type} Briefing".strip(),
+                subject=subject or _legacy_briefing_subject(task),
                 body=strip_markdown(message),
                 config=email_config,
                 from_addr=config.email.bot_email,

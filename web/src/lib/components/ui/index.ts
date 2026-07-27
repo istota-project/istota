@@ -14,5 +14,6 @@ export { default as Modal } from './Modal.svelte';
 export { default as ConfirmDialog } from './ConfirmDialog.svelte';
 export { default as KebabMenu } from './KebabMenu.svelte';
 export { default as NoticeBanner } from './NoticeBanner.svelte';
+export { default as HintPopover } from './HintPopover.svelte';
 export type { SelectOption } from './Select.svelte';
 export type { KebabItem } from './KebabMenu.svelte';

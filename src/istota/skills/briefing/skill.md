@@ -6,7 +6,7 @@ exclude_persona: true
 source_types: [briefing]
 exclude_skills: [email]
 ---
-Briefings must be returned as a JSON object: `{"subject": "Morning Briefing", "body": "<content>"}`. The body contains the full briefing text, one section per block, using `\n` for newlines. Do not output anything outside the JSON object. Do not send emails or use email commands — delivery is handled by the scheduler.
+Briefings must be returned as a JSON object: `{"body": "<content>"}`. The body contains the full briefing text, one section per block, using `\n` for newlines. Do not output anything outside the JSON object. Do not write a title or subject line for the briefing as a whole — the delivery layer supplies it. Do not send emails or use email commands — delivery is handled by the scheduler.
 
 The body is formatted for chat messages (markdown). Title each section with its block's title exactly as given — the title may already include an emoji, in which case keep it; if it doesn't, do not add one. Only include sections that have data.
 

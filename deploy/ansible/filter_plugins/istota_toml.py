@@ -98,7 +98,8 @@ def istota_briefing_blocks_toml(users) -> str:
 def istota_default_briefings_toml(defaults) -> str:
     """Render the top-level ``[[default_briefings]]`` section from a list.
 
-    Each entry carries ``name`` / ``cron`` / ``output`` plus the same nested
+    Each entry carries ``name`` / ``cron`` / optional ``title`` / ``output``
+    plus the same nested
     ``[[default_briefings.blocks]]`` / ``[[...blocks.sources]]`` shape as a
     per-user briefing. Returns "" for an empty/invalid list so the template
     renders nothing (byte-unchanged config) when no defaults are configured.
@@ -113,6 +114,9 @@ def istota_default_briefings_toml(defaults) -> str:
         out.append(f"[[{prefix}]]")
         out.append(f"name = {_toml_value(briefing.get('name', ''))}")
         out.append(f"cron = {_toml_value(briefing.get('cron', ''))}")
+        # Omitted when blank so the config keeps deriving the title from the name.
+        if briefing.get("title"):
+            out.append(f"title = {_toml_value(briefing['title'])}")
         out.append(f"output = {_toml_value(briefing.get('output', 'talk'))}")
         for block in briefing.get("blocks") or []:
             out.append("")

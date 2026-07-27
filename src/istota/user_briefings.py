@@ -44,6 +44,8 @@ class UserBriefing:
     user_id: str
     name: str
     cron: str
+    # Display title; blank = derive from ``name`` at render time.
+    title: str = ""
     conversation_token: str = ""
     output: str = "talk"
     components: dict[str, Any] = field(default_factory=dict)
@@ -99,11 +101,13 @@ def _row_to_briefing(row: sqlite3.Row) -> UserBriefing:
     legacy_output = components.pop("__output__", None)
     if output == "talk" and isinstance(legacy_output, str) and legacy_output.strip():
         output = legacy_output
+    raw_title = _row_key(row, "title")
     return UserBriefing(
         id=int(row["id"]),
         user_id=row["user_id"],
         name=row["name"],
         cron=row["cron_expression"] or "",
+        title=raw_title if isinstance(raw_title, str) else "",
         conversation_token=row["conversation_token"] or "",
         output=output,
         components=components,
@@ -144,6 +148,7 @@ def ensure_briefing(
     user_id: str,
     name: str,
     cron: str,
+    title: str = "",
     conversation_token: str = "",
     output: str = "talk",
     components: dict[str, Any] | None = None,
@@ -169,6 +174,7 @@ def ensure_briefing(
     components = dict(components or {})
     components_json = json.dumps(components, sort_keys=True)
     enabled_int = 1 if enabled else 0
+    title = title or ""
 
     existing = get_briefing(db_path, user_id, name)
     if existing is None:
@@ -176,6 +182,7 @@ def ensure_briefing(
     else:
         same = (
             existing.cron == cron
+            and existing.title == title
             and existing.conversation_token == (conversation_token or "")
             and existing.output == output
             and existing.components == components
@@ -190,16 +197,19 @@ def ensure_briefing(
         conn.execute(
             """
             INSERT INTO briefing_configs
-                (user_id, name, cron_expression, conversation_token, components, output, enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (user_id, name, cron_expression, title, conversation_token,
+                 components, output, enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (user_id, name) DO UPDATE SET
                 cron_expression = excluded.cron_expression,
+                title = excluded.title,
                 conversation_token = excluded.conversation_token,
                 components = excluded.components,
                 output = excluded.output,
                 enabled = excluded.enabled
             """,
-            (user_id, name, cron, conversation_token or "", components_json, output, enabled_int),
+            (user_id, name, cron, title, conversation_token or "",
+             components_json, output, enabled_int),
         )
 
     fresh = get_briefing(db_path, user_id, name)
@@ -268,6 +278,7 @@ def import_from_user_configs(
                     continue
 
                 output = getattr(b, "output", "talk") or "talk"
+                title = getattr(b, "title", "") or ""
                 token = getattr(b, "conversation_token", "") or ""
                 comps = dict(getattr(b, "components", {}) or {})
 
@@ -275,13 +286,15 @@ def import_from_user_configs(
                     conn.execute(
                         """
                         INSERT INTO briefing_configs
-                            (user_id, name, cron_expression, conversation_token, components, output, enabled)
-                        VALUES (?, ?, ?, ?, ?, ?, 1)
+                            (user_id, name, cron_expression, title,
+                             conversation_token, components, output, enabled)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                         """,
                         (
                             user_id,
                             key[1],
                             cron,
+                            title,
                             token,
                             json.dumps(comps, sort_keys=True),
                             output,

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Briefings have a title you can set. It appears as the email subject and as the entry in the briefings archive, with the date appended, and both surfaces now show the same thing. Leave it blank and it's derived from the briefing's name. Set it in Settings → Briefings, where the schedule table also gained an edit button — previously a briefing could only be added or deleted.
+
+### Fixed
+- A briefing is titled the same way every time. The archive used to show whatever the model decided to call that day's edition, sometimes with an emoji and sometimes not, while the email arrived under a subject worked out from the clock rather than the briefing — so an evening briefing that ran in the morning was mailed as "Morning Briefing", and neither surface named a run the way the other did. Push notifications carried the task number instead of a title.
+
 ## [0.37.0] - 2026-07-26
 
 ### Added

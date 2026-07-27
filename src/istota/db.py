@@ -432,6 +432,17 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         pass  # Column already exists or table not created yet.
     _backfill_briefing_output(conn)
 
+    # Briefing configs: explicit display `title`. Empty means "derive from the
+    # briefing name", which reproduces the previous behaviour for every
+    # existing row — no backfill needed.
+    try:
+        conn.execute(
+            "ALTER TABLE briefing_configs ADD COLUMN "
+            "title TEXT NOT NULL DEFAULT ''"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists or table not created yet.
+
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError
     # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id

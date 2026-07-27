@@ -1,27 +1,34 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import HintPopover from '../ui/HintPopover.svelte';
 
   interface Props {
     label: string;
+    /** Guidance shown in a popover behind a "?" beside the label. Optional
+     *  reading — anything the user must see belongs in `warning` or `error`. */
     hint?: string;
+    /** A condition the user needs to notice but which doesn't block saving —
+     *  a stored value that no longer means what it says, say. Rendered inline
+     *  precisely because a hover popover is discoverable, not seen. */
+    warning?: string;
     error?: string;
     wide?: boolean;
     checkbox?: boolean;
     children: Snippet;
   }
 
-  let { label, hint, error, wide = false, checkbox = false, children }: Props = $props();
+  let { label, hint, warning, error, wide = false, checkbox = false, children }: Props = $props();
 </script>
 
 <label class="field" class:field-wide={wide} class:checkbox>
   {#if checkbox}
     {@render children()}
-    <span>{label}</span>
+    <span class="field-label">{label}<HintPopover text={hint} label="About {label}" /></span>
   {:else}
-    <span>{label}</span>
+    <span class="field-label">{label}<HintPopover text={hint} label="About {label}" /></span>
     {@render children()}
   {/if}
-  {#if hint}<small class="field-hint">{hint}</small>{/if}
+  {#if warning}<small class="field-warning">{warning}</small>{/if}
   {#if error}<small class="field-error">{error}</small>{/if}
 </label>
 
@@ -33,7 +40,10 @@
     font-size: var(--text-sm);
   }
 
-  .field > span {
+  .field-label {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
     color: var(--text-muted);
   }
 
@@ -76,7 +86,7 @@
     color: var(--text-primary);
   }
 
-  .field.checkbox > span {
+  .field.checkbox .field-label {
     color: var(--text-primary);
   }
 
@@ -84,15 +94,15 @@
     width: auto;
   }
 
-  .field-hint {
+  .field-warning {
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    /* Wrap at the same width as the inputs so long hints form a tidy column
-		   under the field instead of stretching the full container. */
+    color: var(--status-warn-fg);
+    /* Wrap at the input width so a long warning forms a tidy column under the
+		   field instead of stretching the whole container. */
     max-width: 24rem;
   }
 
-  .field-wide .field-hint {
+  .field-wide .field-warning {
     max-width: 36rem;
   }
 

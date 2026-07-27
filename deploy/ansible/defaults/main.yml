@@ -426,6 +426,10 @@ istota_user_secrets: {}
 # unavailable. Set to [] to seed nothing.
 istota_default_briefings:
   - name: "morning"
+    # Display title — the email subject and the archive entry. The run date is
+    # appended automatically ("Morning Briefing — Monday, 27 July"). Omit to
+    # derive it from `name`.
+    title: "Morning Briefing"
     cron: "0 6 * * 1-5"
     output: "email"
     blocks:
@@ -445,6 +449,7 @@ istota_default_briefings:
           - kind: "calendar"
             config: {}
   - name: "evening"
+    title: "Evening Briefing"
     cron: "0 18 * * 1-5"
     output: "email"
     blocks:

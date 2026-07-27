@@ -239,7 +239,7 @@
       <input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
     </SettingsField>
 
-    <SettingsField label="Schedule" hint={scheduleWarning}>
+    <SettingsField label="Schedule" warning={scheduleWarning}>
       <Select bind:value={schedule} options={scheduleOptions} fullWidth ariaLabel="Schedule" />
     </SettingsField>
 

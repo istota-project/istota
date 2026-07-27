@@ -999,7 +999,7 @@
 # Write briefing rows into the briefing_configs DB table via
 # `istota briefings schedule ensure`. The DB is the source of truth — each
 # (user, briefing.name) is upserted independently. Only schedule + delivery
-# (cron, conversation_token, output, enabled) are provisioned here; content
+# (cron, title, conversation_token, output, enabled) are provisioned here; content
 # lives in blocks (seeded once from the config `blocks:` via the module DB
 # seeder). Legacy `components:` authoring is retired.
 - name: Plan briefing ensure invocations
@@ -1014,6 +1014,7 @@
         'user': user_id,
         'name': b.name,
         'cron': b.cron,
+        'title': b.title | default(''),
         'conversation_token': b.conversation_token | default(''),
         'output': b.output | default('talk'),
         'enabled': b.enabled | default(true),
@@ -1031,6 +1032,7 @@
     --user {{ item.user }}
     --name "{{ item.name }}"
     --cron "{{ item.cron }}"
+    {% if item.title %}--title "{{ item.title }}"{% endif %}
     {% if item.conversation_token %}--conversation-token "{{ item.conversation_token }}"{% endif %}
     --output "{{ item.output }}"
     {% if not item.enabled %}--disabled{% endif %}

@@ -122,7 +122,7 @@
       <input type="text" bind:value={displayName} placeholder="Consulting" />
     </SettingsField>
 
-    <SettingsField label="Type" hint={typeWarning}>
+    <SettingsField label="Type" warning={typeWarning}>
       <Select bind:value={type} options={typeOptions} fullWidth ariaLabel="Service type" />
     </SettingsField>
 

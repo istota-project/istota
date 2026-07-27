@@ -72,7 +72,9 @@ class TestAssembleBriefingInput:
         assert result.rendered_blocks == 1
         assert "### Block: Notes" in result.prompt
         assert "Buy a gift for mom" in result.prompt
-        assert '"subject"' in result.prompt and '"body"' in result.prompt
+        # The envelope is body-only — the title is computed at delivery, not
+        # supplied by the model.
+        assert '"body"' in result.prompt and '"subject"' not in result.prompt
         assert "Notes" in result.block_meta
 
     def test_empty_block_omitted(self, tmp_path):
@@ -194,16 +196,39 @@ class TestSchedulerArchive:
         _ctx_with_blocks(cfg, [{"title": "Notes", "sources": [{"kind": "notes"}]}])
         db.init_db(cfg.db_path)
 
-        parsed = {"subject": "Morning Briefing", "body": "📰 the news"}
-        _maybe_archive_briefing(cfg, self._task(), "raw result", parsed)
+        parsed = {"body": "📰 the news"}
+        _maybe_archive_briefing(
+            cfg, self._task(created_at="2026-07-27 06:00:00"), "raw result", parsed,
+        )
 
         ctx = resolve_for_user("alice", cfg)
         with bdb.connect(ctx.db_path) as conn:
             rows = bdb.list_archive(conn, briefing_name="M")
         assert len(rows) == 1
-        assert rows[0].subject == "Morning Briefing"
+        # Deterministic — derived from the briefing name + run date, not from
+        # anything the model wrote.
+        assert rows[0].subject == "M Briefing — Monday, 27 July"
         assert rows[0].body_md == "📰 the news"
         assert set(rows[0].delivered_to) == {"talk", "email"}
+
+    def test_ignores_a_model_supplied_subject(self, tmp_path):
+        """A stale model still emitting `subject` must not reach the archive."""
+        from istota.scheduler import _maybe_archive_briefing
+
+        cfg = _config(tmp_path)
+        cfg.temp_dir = tmp_path / "temp"
+        _ctx_with_blocks(cfg, [{"title": "Notes", "sources": [{"kind": "notes"}]}])
+        db.init_db(cfg.db_path)
+
+        parsed = {"subject": "🌎 Morning Briefing — Iran, the Fed", "body": "news"}
+        _maybe_archive_briefing(
+            cfg, self._task(created_at="2026-07-27 06:00:00"), "raw result", parsed,
+        )
+
+        ctx = resolve_for_user("alice", cfg)
+        with bdb.connect(ctx.db_path) as conn:
+            rows = bdb.list_archive(conn, briefing_name="M")
+        assert rows[0].subject == "M Briefing — Monday, 27 July"
 
     def test_skips_legacy_no_blocks(self, tmp_path):
         from istota.scheduler import _maybe_archive_briefing
