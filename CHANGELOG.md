@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- When a task produces a file in web chat, the assistant can hand it straight over as a download link. The link opens the file from inside your own logged-in session — nothing is published, no share is created, and only your own files are reachable. Previously the assistant had no way to give you a file at all in the browser: it would quote a path on the server that you had no means of opening.
+
 - You can record a voice message in web chat. The composer has a microphone button that records, shows the elapsed time, and lets you discard the take or keep it; the recording is attached like any other file and transcribed on arrival, the same as a voice message sent through Talk. It needs a secure connection to reach the microphone at all, so the button is simply absent when the page is served over plain http. Transcription requires the optional speech extra to be installed.
 
 - The web UI has a text size setting, and reads slightly larger by default. Settings has a new **Appearance** card offering small, medium and large; medium is the new default, so the interface comes up a step larger than before — small is still there and is exactly the previous size. The whole interface scales together rather than just the type, so nothing crowds its container, and the choice applies as soon as you pick it. It sits alongside the light/dark theme, which is now settable there too rather than only from the header icon; both are stored in the browser, so they are per-device and need no save.
@@ -18,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The bot's own static web root is gone. It was a directory the assistant could write to freely, served to the public without a password — so anything the assistant could read, it could publish to a URL without ever asking you first. Copying a file is the kind of ordinary local action the confirmation rules deliberately leave alone, which is exactly why this one slipped past them. The directory is no longer reachable from the assistant's sandbox, the deployment no longer serves it, and the `enabled` and `base_path` settings are ignored with a warning if left in place. Host static files outside istota, somewhere the assistant cannot write.
 
 ### Changed
+- The assistant no longer creates a public share link to show you a file you already own. A public link is openable by anyone who ends up holding it, which is the wrong tool for handing someone their own file; in web chat it now uses the private download link above, and in Talk the file is already in your Nextcloud. Share links go back to being for giving a file to somebody else, and the assistant confirms with you before creating one — unless you asked for a link in the first place, which is taken as the answer.
+
 - The web chat message box is one rounded field rather than three separate boxes. Attaching is a plus button and sending is an arrow inside the field itself, in place of the paperclip and paper-aeroplane sitting either side of it; the box has no divider or panel behind it any more, so it reads as a single element floating below the conversation. Once your message runs past one line the controls move underneath it, giving the text the full width. The buttons now grow and shrink with the text size setting, which they previously ignored.
 
 - The scroll-to-latest button sits in the middle of the conversation rather than the bottom right corner, where it had become a second arrow pointing the opposite way to the send button.
@@ -29,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The feeds **Images** and **Text** chips now hide pictures and body copy rather than hiding whole entries. Turning off Images used to drop every picture post out of the feed entirely — and turning off Text dropped everything else — so the two together were a post-type filter, not a display control. Each entry now stays in place and loses only the part you switched off, including pictures embedded in the body copy, so turning both off gives you a list of headlines instead of an empty page. The chips are a desktop control: a phone always shows everything and no longer offers them.
 
 ### Fixed
+- Searching your Nextcloud files never worked. Every `files search` failed outright against a real server, so the assistant fell back to walking the folder tree — slow on a large one, and it gave up on some searches entirely.
+
+- Filtering the Nextcloud activity feed by type never worked either; asking for file activity failed instead of returning it.
+
+- Searching Talk messages within a single conversation returned results from every *other* conversation instead. Asking the assistant to find something in the room you were in would surface matches from unrelated rooms and present them as if they belonged to that one.
+
+- The assistant can now reply to a message it just posted to Talk, and tell you which message it sent. Sending reported no message identifier, so nothing could refer back to it.
+
+- Sharing a file for "1 day" failed for part of every day, depending on your timezone. The expiry was worked out from the clock where istota runs rather than the Nextcloud server's, so once the server had rolled over to the next date it rejected the date as already past — a several-hour window each evening for anyone west of their server.
+
+- Hitting Nextcloud's limit on how many share links you can create now says so, and how long to wait, instead of reporting a bare error code. The limit is 20 links per 10 minutes.
+
 - News briefings stopped declaring live sources dead. Front pages that assemble their headlines in the browser came back as nothing but section names, because the two available ways of reading a page either threw away every link address or returned the links with nothing to say which were articles — so Reuters, Le Monde, Der Spiegel and the Guardian were repeatedly written off as unreachable and the morning briefing ran on whatever was left. Pages are now read as markdown, which keeps each headline attached to its address, and how much of a front page a briefing takes is configurable.
 - Reading part of a page no longer cuts it in half. Pulling a specific element off a page was capped low enough to truncate an article's body mid-way, with nothing to indicate content had been dropped. That limit and the ones on page text and link counts are all raised, and can be raised further per request.
 

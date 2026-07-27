@@ -2,6 +2,41 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-26: Live-testing the nextcloud skill against a real server — five bugs the mocks couldn't see, and an authenticated file handover for web chat
+
+The nextcloud skill shipped with ~350 mocked tests and no run against an actual Nextcloud. Standing one up found five real defects, two of which meant a verb had never worked at all.
+
+**The mocks encoded the bugs.** `files search` 404'd every single call: the `d:basicsearch` scope href carried `/remote.php/dav/files/<user>`, but Sabre resolves that href *relative to* the SEARCH request URL, so it went hunting for a collection literally named `remote.php`. The unit test asserted the broken href by name (`test_scope_is_the_full_dav_href`) — the test and the code agreed with each other and both were wrong. Same shape for activity: `--type files` built `/activity/filter/files`, which is not a route; the named-stream form is `/activity/files` and the reserved `filter` segment is for object lookups. Neither could survive contact with a server, and neither had.
+
+**Two Talk defects with different characters.** `talk send` always reported `message_id: null`, so `--reply-to` couldn't be chained off a send — `send_message` is the one `TalkClient` method that returns the raw body instead of `ocs.data`, and reading `id` off the envelope silently yields None. Fixed at the CLI rather than changing the client, since the transport mirror and web_app both depend on the raw shape. The worse one was `talk search --token`, which returned **the inverse of what it promised**: it passed the token as the unified-search `from` parameter, which means "the page I am currently on", so the provider *excludes* that conversation. Verified with two rooms holding the same term — `from=/call/A` returned only room B. An agent asked to find something in a room would have gotten hits from other rooms and reported them as if local. Now filtered client-side on `attributes.conversation`, over-fetching so `--limit` applies after the filter.
+
+**The fifth one was luck.** The run crossed UTC midnight and every `share link --days 1` started failing with "Expiration date is in the past". `expiry_date` computed from `date.today()` — the *client's local* date — while Nextcloud evaluates against its own clock. At 17:04 PDT the server was already on tomorrow, so `--days 1` produced a date the server called past. For a Pacific user against a UTC server that is a dead seven-hour window every day. An hour earlier and this ships. Base is UTC now; a server running *ahead* of UTC is a documented residual that would need the date from the server itself.
+
+**Two things about testing that are worth carrying forward.** First: the live suite drives `main(argv)`, not the module functions, so argparse, path scoping, the error envelope and the exit code are all in the path — the surface the model actually reaches. Second: "all verbs exercised" is not "all verbs verified". A coverage guard proved 44/44 verbs were touched, but an AST pass looking for tests whose every assertion was `isinstance` or bare truthiness found five that proved nothing — `share list --path` asserted a list came back, which an implementation ignoring the filter entirely would satisfy. And two verbs (`notify get`/`dismiss`) had never executed at all: their test skipped whenever the notification queue was empty, which it always was, hiding that it also read the wrong key. It seeds its own notification now. The guard lives in the default suite rather than the live file, because the live file is skipped without credentials and a guard that skips guards nothing.
+
+**Then the second half: web chat had no way to hand over a file.** Raised as a hypothetical — user asks for something that produces a file, then wants to open it. Checking rather than assuming: attachments are inbound-only, there is no assistant-side attachment rendering, and there was no authenticated download route. So the only available answer was minting a *public* Nextcloud link to show someone a file they already own — turning an authenticated-only file into a bearer URL, for the one person who didn't need one. `GET /api/chat/files?path=` serves it inside the session instead, and link shares go back to being for giving a file to somebody else.
+
+Confinement is two independent checks because they catch different escapes: the lexical one reuses `resolve_scoped_path`, so the browser and the model are held to one rule, and a `realpath` pass afterwards catches a symlink *inside* the workspace pointing out — which no string normalization can see. No admin bypass, deliberately: `resolve_scoped_path` normally lets an admin address anything, but this is the most directly reachable read path on the web app and widening it would also make it the widest. Always `Content-Disposition: attachment` plus `nosniff`, because the workspace holds user-authored HTML and SVG and rendering those inline would execute them on the app's own origin against the cookie that just authorized the read.
+
+**The guidance mattered as much as the endpoint.** The skill said "*Asked* for a download link? Use `share link`" — a trigger that fires when the user asks for a link, not when a task produced a file. And `nextcloud` is a menu skill whose triggers are all sharing vocabulary, so "pull my Q3 numbers into a CSV" would never reach for it; the model would quote a filesystem path the browser user cannot open. The rule belongs in `web.md`, which is always loaded for web tasks and is where a surface-specific fact should live. Writing it exposed that `{user_id}` was never substituted in guidelines (only skills did it, despite AGENTS.md documenting it for both), so the example link would have rendered a literal placeholder.
+
+The confirmation rule was also genuinely ambiguous here — "confirm unless the share is with the task's own user" doesn't say what a *public link* to your own file is. It now splits three ways: the user asking for a link is itself the authorization; deciding a link would be nice for the requesting user means don't make one; anyone else means confirm every time, naming who and for how long.
+
+**Files added/modified:**
+- `tests/test_nextcloud_skill_live.py` - New. 54 live tests, all 44 CLI verbs, tiered by blast radius behind `NC_TEST_*` env gates
+- `src/istota/nextcloud/dav.py` - SEARCH scope href relative to the DAV root (`_dav_scope_prefix`)
+- `src/istota/nextcloud/notifications.py` - Named activity stream is a path segment; object lookup uses the reserved `filter` segment
+- `src/istota/nextcloud/shares.py` - `expiry_date` bases on UTC
+- `src/istota/nextcloud/_http.py` - 429 names the share cap and surfaces `Retry-After`
+- `src/istota/talk.py` - `search_messages` filters by conversation client-side; never sends `from`
+- `src/istota/skills/nextcloud/__init__.py` - `_ocs_data` unwrap so `talk send` reports a message id
+- `src/istota/skills/nextcloud/skill.md` - Three-way confirmation rule; rate-limit note
+- `src/istota/web_app.py` - `GET /chat/files` + `_resolve_chat_file` + `ChatFileError`
+- `config/guidelines/web.md` - "Handing over a file" section
+- `src/istota/executor.py` - `load_channel_guidelines` substitutes `{user_id}`
+- `tests/test_web_chat.py`, `tests/test_executor.py`, `web/src/lib/markdown/index.test.ts` - Endpoint, guidelines loader, and link-sanitizer coverage
+- `tests/test_nextcloud_{dav,http,notifications,shares,talk_group,skill_cli}.py` - Regressions for each live-found bug
+
 ## 2026-07-26: Remove the static web root (ISSUE-194) — the confirmation model gates channels, and a public directory isn't one
 
 The instance web root was an agent-writable directory served unauthenticated by nginx. `cp <anything> $WEBSITE_PATH/` published it. The confirmation framework never saw this because it enumerates outbound *channels* — external email, Nextcloud shares, ntfy, browser form posts — and a local filesystem write is explicitly on the safe side of that line. The classification is channel-aware when the property that matters is whether the destination is publicly reachable.

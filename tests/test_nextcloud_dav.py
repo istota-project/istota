@@ -184,6 +184,16 @@ class TestStatAndList:
 
 
 class TestSearchBody:
+    def test_scope_href_is_relative_to_the_dav_root(self, nc_config):
+        """Sabre resolves the scope against /remote.php/dav/.
+
+        Repeating that prefix in the href makes it hunt for a collection named
+        "remote.php" and 404 every search — the live suite caught this.
+        """
+        body = dav.build_search_body(nc_config, scope="/Users/alice")
+        assert "<d:href>/files/istota/Users/alice</d:href>" in body
+        assert "/remote.php" not in body
+
     def test_name_filter(self, nc_config):
         body = dav.build_search_body(nc_config, scope="/Users/alice", name="*.pdf")
         assert "<d:displayname/>" in body
@@ -222,9 +232,9 @@ class TestSearchBody:
         body = dav.build_search_body(nc_config, scope="/Users/alice")
         assert "<d:where>" not in body
 
-    def test_scope_is_the_full_dav_href(self, nc_config):
+    def test_scope_carries_the_requested_subtree(self, nc_config):
         body = dav.build_search_body(nc_config, scope="/Users/alice/docs")
-        assert "<d:href>/remote.php/dav/files/istota/Users/alice/docs</d:href>" in body
+        assert "<d:href>/files/istota/Users/alice/docs</d:href>" in body
 
     def test_limit_included(self, nc_config):
         body = dav.build_search_body(nc_config, scope="/Users/alice", limit=7)

@@ -81,16 +81,21 @@ def list_activity(
     object_id: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> list[dict[str, Any]]:
-    path = ACTIVITY_PATH
-    if activity_filter:
-        path = f"{ACTIVITY_PATH}/filter/{activity_filter}"
-
+    # Two distinct routes: a named stream is a path segment
+    # (/activity/files), while an object lookup is the reserved "filter"
+    # segment plus query params. /activity/filter/<name> is neither and 404s.
     params: dict[str, str] = {"limit": str(limit if limit > 0 else DEFAULT_LIMIT)}
     if since is not None:
         params["since"] = str(since)
+
     if object_type and object_id:
+        path = f"{ACTIVITY_PATH}/filter"
         params["object_type"] = object_type
         params["object_id"] = str(object_id)
+    elif activity_filter:
+        path = f"{ACTIVITY_PATH}/{activity_filter}"
+    else:
+        path = ACTIVITY_PATH
 
     data = ocs_get(config, path, params=params, timeout=timeout)
     return list(data or [])

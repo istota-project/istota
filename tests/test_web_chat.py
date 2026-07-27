@@ -1292,3 +1292,156 @@ class TestChatAttachments:
         )
         assert resp.status_code == 413
         mod._config.web.chat.max_attachment_mb = 25
+
+
+# ---------------------------------------------------------------------------
+# GET /chat/files — authenticated file handover
+# ---------------------------------------------------------------------------
+
+
+def _workspace_file(tmp_root, username, relative, body="payload\n"):
+    """Write a file into a user's workspace and return its Nextcloud path."""
+    dest = tmp_root / "mount" / "Users" / username / relative
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(body)
+    return f"/Users/{username}/{relative}"
+
+
+@_needs_web_deps
+class TestChatFileDownload:
+    """Web chat has no outbound attachment channel, so this is how a task hands
+    a file over. It exists specifically so the alternative — minting a public
+    Nextcloud link to show a user their own file — is never the default."""
+
+    async def test_requires_auth(self, chat_client):
+        resp = await chat_client.get(
+            "/istota/api/chat/files", params={"path": "/Users/alice/a.txt"},
+        )
+        assert resp.status_code == 401
+
+    async def test_serves_a_file_from_the_callers_workspace(self, chat_client, tmp_path):
+        nc_path = _workspace_file(tmp_path, "alice", "istota/report.csv", "a,b\n1,2\n")
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files", params={"path": nc_path}, cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.text == "a,b\n1,2\n"
+
+    async def test_served_as_an_attachment_never_inline(self, chat_client, tmp_path):
+        """Workspace HTML/SVG rendered inline would execute on the app's own
+        origin, against the session cookie that just authorized the read."""
+        nc_path = _workspace_file(tmp_path, "alice", "page.html", "<script>x</script>")
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files", params={"path": nc_path}, cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-disposition"].startswith("attachment")
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+    async def test_relative_path_resolves_inside_the_workspace(self, chat_client, tmp_path):
+        _workspace_file(tmp_path, "alice", "istota/notes.md", "hi\n")
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files", params={"path": "istota/notes.md"}, cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.text == "hi\n"
+
+    async def test_cannot_read_another_users_workspace(self, chat_client, tmp_path):
+        secret = _workspace_file(tmp_path, "bob", "private.txt", "bob's data\n")
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files", params={"path": secret}, cookies=cookies,
+        )
+        assert resp.status_code == 403
+        assert "bob's data" not in resp.text
+
+    async def test_traversal_is_refused(self, chat_client, tmp_path):
+        _workspace_file(tmp_path, "bob", "private.txt", "bob's data\n")
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files",
+            params={"path": "../bob/private.txt"}, cookies=cookies,
+        )
+        assert resp.status_code == 403
+
+    async def test_symlink_out_of_the_workspace_is_refused(self, chat_client, tmp_path):
+        """A lexical scope check cannot see this one — only realpath can."""
+        import os
+        outside = tmp_path / "outside-secret.txt"
+        outside.write_text("not yours\n")
+        link_dir = tmp_path / "mount" / "Users" / "alice"
+        link_dir.mkdir(parents=True, exist_ok=True)
+        os.symlink(outside, link_dir / "escape.txt")
+
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files",
+            params={"path": "/Users/alice/escape.txt"}, cookies=cookies,
+        )
+        assert resp.status_code == 403
+        assert "not yours" not in resp.text
+
+    async def test_missing_file_is_404(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files",
+            params={"path": "/Users/alice/nope.txt"}, cookies=cookies,
+        )
+        assert resp.status_code == 404
+
+    async def test_directory_is_refused(self, chat_client, tmp_path):
+        (tmp_path / "mount" / "Users" / "alice" / "istota").mkdir(parents=True)
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files",
+            params={"path": "/Users/alice/istota"}, cookies=cookies,
+        )
+        assert resp.status_code == 400
+
+    async def test_workspace_root_itself_is_refused(self, chat_client, tmp_path):
+        (tmp_path / "mount" / "Users" / "alice").mkdir(parents=True)
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files",
+            params={"path": "/Users/alice"}, cookies=cookies,
+        )
+        assert resp.status_code == 400
+
+    async def test_empty_path_is_refused(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files", params={"path": "  "}, cookies=cookies,
+        )
+        assert resp.status_code == 400
+
+    async def test_no_mount_says_so_rather_than_500ing(self, chat_client):
+        """An rclone deployment has no local workspace; the refusal has to name
+        the alternative instead of surfacing as a crash."""
+        import istota.web_app as mod
+        saved = mod._config.nextcloud_mount_path
+        mod._config.nextcloud_mount_path = None
+        try:
+            cookies = await _login(chat_client, "alice")
+            resp = await chat_client.get(
+                "/istota/api/chat/files",
+                params={"path": "/Users/alice/a.txt"}, cookies=cookies,
+            )
+            assert resp.status_code == 503
+            assert "share link" in resp.json()["error"]
+        finally:
+            mod._config.nextcloud_mount_path = saved
+
+    async def test_filename_survives_spaces(self, chat_client, tmp_path):
+        nc_path = _workspace_file(tmp_path, "alice", "Q3 report.csv", "x\n")
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get(
+            "/istota/api/chat/files", params={"path": nc_path}, cookies=cookies,
+        )
+        assert resp.status_code == 200
+        # RFC 5987 encoding — the browser decodes it back to the real name.
+        disposition = resp.headers["content-disposition"]
+        assert disposition.startswith("attachment")
+        assert "Q3%20report.csv" in disposition

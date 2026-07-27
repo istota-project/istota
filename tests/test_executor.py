@@ -1984,6 +1984,77 @@ class TestLoadPersona:
 # ---------------------------------------------------------------------------
 
 
+class TestLoadChannelGuidelines:
+    """Guidelines are templated docs; the placeholders have to resolve.
+
+    web.md's file-handover section names a concrete workspace path, so a
+    literal ``{user_id}`` reaching the model would hand the user a broken link.
+    """
+
+    def _make_config(self, tmp_path):
+        config_dir = tmp_path / "config"
+        (config_dir / "skills").mkdir(parents=True)
+        (config_dir / "guidelines").mkdir()
+        return Config(
+            skills_dir=config_dir / "skills",
+            bundled_skills_dir=tmp_path / "_empty_bundled",
+            bot_name="Zorg",
+        )
+
+    def test_substitutes_user_id(self, tmp_path):
+        from istota.executor import load_channel_guidelines
+
+        config = self._make_config(tmp_path)
+        (tmp_path / "config" / "guidelines" / "web.md").write_text(
+            "path=/Users/{user_id}/istota/report.csv",
+        )
+        result = load_channel_guidelines(config, "web", "alice")
+        assert result == "path=/Users/alice/istota/report.csv"
+        assert "{user_id}" not in result
+
+    def test_substitutes_bot_placeholders_too(self, tmp_path):
+        from istota.executor import load_channel_guidelines
+
+        config = self._make_config(tmp_path)
+        (tmp_path / "config" / "guidelines" / "web.md").write_text(
+            "{BOT_NAME} in {BOT_DIR} for {user_id}",
+        )
+        assert load_channel_guidelines(config, "web", "alice") == "Zorg in zorg for alice"
+
+    def test_no_user_id_leaves_the_placeholder_rather_than_crashing(self, tmp_path):
+        from istota.executor import load_channel_guidelines
+
+        config = self._make_config(tmp_path)
+        (tmp_path / "config" / "guidelines" / "web.md").write_text("hi {user_id}")
+        assert load_channel_guidelines(config, "web") == "hi {user_id}"
+
+    def test_missing_file_is_none(self, tmp_path):
+        from istota.executor import load_channel_guidelines
+
+        assert load_channel_guidelines(self._make_config(tmp_path), "web", "alice") is None
+
+
+class TestShippedWebGuidelines:
+    """The shipped web.md must actually carry the handover rule.
+
+    Without it the model quotes a filesystem path the browser user cannot open,
+    or reaches for a public share link to show someone their own file.
+    """
+
+    def _text(self):
+        from pathlib import Path
+        import istota
+        repo = Path(istota.__file__).resolve().parents[2]
+        return (repo / "config" / "guidelines" / "web.md").read_text()
+
+    def test_points_at_the_authenticated_download_endpoint(self):
+        text = self._text()
+        assert "/api/chat/files?path=" in text
+
+    def test_warns_off_a_public_share_link(self):
+        assert "public share link" in self._text()
+
+
 class TestLoadEmissaries:
     def _make_config(self, tmp_path):
         config_dir = tmp_path / "config"

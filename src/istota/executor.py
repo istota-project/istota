@@ -1892,12 +1892,24 @@ def load_persona(config: Config, user_id: str | None = None) -> str | None:
     return None
 
 
-def load_channel_guidelines(config: Config, source_type: str) -> str | None:
-    """Load channel-specific guidelines if they exist, substituting {BOT_NAME} placeholders."""
+def load_channel_guidelines(
+    config: Config, source_type: str, user_id: str | None = None,
+) -> str | None:
+    """Load channel-specific guidelines, substituting the doc placeholders.
+
+    ``{user_id}`` joins ``{BOT_NAME}``/``{BOT_DIR}`` here so a guideline can
+    name a concrete workspace path — web.md's file-handover link needs one, and
+    a literal ``{user_id}`` reaching the model is worse than no example. Skill
+    bodies already substitute it; this brings guidelines in line with the set
+    AGENTS.md documents.
+    """
     config_dir = config.skills_dir.parent
     guidelines_path = config_dir / "guidelines" / f"{source_type}.md"
     if guidelines_path.exists():
-        return _apply_bot_name(guidelines_path.read_text().strip(), config)
+        text = _apply_bot_name(guidelines_path.read_text().strip(), config)
+        if user_id:
+            text = text.replace("{user_id}", user_id)
+        return text
     return None
 
 
@@ -2187,7 +2199,7 @@ def build_prompt(
             persona_section = f"\n\n{persona}\n"
 
     # Load channel-specific guidelines
-    channel_guidelines = load_channel_guidelines(config, task.source_type)
+    channel_guidelines = load_channel_guidelines(config, task.source_type, task.user_id)
     channel_section = ""
     if channel_guidelines:
         channel_section = f"\n\n## Response format ({task.source_type})\n\n{channel_guidelines}\n"

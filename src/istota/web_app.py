@@ -28,6 +28,7 @@ import httpx
 from authlib.integrations.starlette_client import OAuth
 from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, UploadFile
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -3561,6 +3562,121 @@ async def chat_upload_attachment(
         )
     path = await asyncio.to_thread(_save_chat_attachment, user["username"], name, data)
     return {"path": path, "name": name, "size": len(data)}
+
+
+# ---- Chat file download (authenticated handover) ----
+#
+# Web chat has no outbound attachment channel, so a file a task produces has no
+# way to reach the user. The alternative was minting a public Nextcloud link to
+# hand someone a file they already own — turning an authenticated-only file into
+# a bearer-URL grant. This serves it inside the session instead; link shares go
+# back to being for giving a file to *someone else*.
+
+
+class ChatFileError(Exception):
+    """Refusal to serve a path, carrying the status the caller should see."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def _chat_file_workspace(username: str) -> Path:
+    """On-disk root the caller's downloads are confined to.
+
+    Deliberately the user's own workspace with no admin bypass. The endpoint
+    exists to hand someone their own files; an admin who needs to read
+    elsewhere has the sandbox and the CLI, and widening this would make the
+    single most directly-reachable read path on the web app the widest one.
+    """
+    root = _config.workspace_root(username) if _config else None
+    if root is None:
+        raise ChatFileError(
+            503,
+            "This deployment has no local workspace mount, so files cannot be "
+            "served directly. Use a Nextcloud share link instead.",
+        )
+    return root
+
+
+def _resolve_chat_file(username: str, path: str) -> Path:
+    """Map a caller-supplied workspace path to a real file, or refuse.
+
+    Two independent checks, because they catch different escapes: the lexical
+    scope check (shared with the skill CLI, so the browser and the model are
+    held to one rule) rejects ``..`` and absolute paths outside the workspace,
+    and the realpath check afterwards rejects a symlink *inside* the workspace
+    that points out of it — which no amount of string normalization can see.
+    """
+    from .nextcloud._http import (
+        PathScopeError,
+        resolve_scoped_path,
+        workspace_root as nc_workspace_root,
+    )
+
+    raw = (path or "").strip()
+    if not raw:
+        raise ChatFileError(400, "path is required")
+    if "\x00" in raw:
+        raise ChatFileError(400, "path is not a valid filename")
+
+    try:
+        # is_admin=False always — see _chat_file_workspace.
+        scoped = resolve_scoped_path(raw, username, is_admin=False)
+    except PathScopeError as e:
+        raise ChatFileError(403, str(e)) from e
+
+    root = _chat_file_workspace(username)
+    # Same helper the scope check anchors on, so the Nextcloud-path prefix and
+    # the on-disk root can't drift apart.
+    relative = scoped[len(nc_workspace_root(username)):].lstrip("/")
+    if not relative:
+        raise ChatFileError(400, "path names the workspace itself, not a file")
+
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(os.path.join(real_root, relative))
+    if real != real_root and not real.startswith(real_root + os.sep):
+        raise ChatFileError(403, "path resolves outside your workspace")
+
+    target = Path(real)
+    if not target.exists():
+        raise ChatFileError(404, "file not found")
+    if target.is_dir():
+        raise ChatFileError(400, "path is a directory, not a file")
+    if not target.is_file():
+        raise ChatFileError(400, "path is not a regular file")
+    return target
+
+
+@api_router.get("/chat/files")
+async def chat_download_file(
+    path: str = Query(..., description="Workspace path of the file to download"),
+    user: dict = Depends(_require_api_auth),
+):
+    """Serve one file out of the caller's own workspace, inside their session.
+
+    This is how a task hands over a file it produced. No share is created, so
+    nothing becomes reachable outside the authenticated session.
+    """
+    username = user["username"]
+    try:
+        target = await asyncio.to_thread(_resolve_chat_file, username, path)
+    except ChatFileError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status)
+
+    return FileResponse(
+        target,
+        filename=target.name,
+        # Always an attachment: the workspace holds user-authored HTML and SVG,
+        # and rendering those inline would execute them on the app's own origin
+        # against the session cookie that just authorized the read.
+        content_disposition_type="attachment",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 # ---- Google Workspace API routes ----

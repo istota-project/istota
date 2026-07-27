@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import secrets
 import string
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from ..config import Config
@@ -172,10 +172,23 @@ def search_sharees(
 
 
 def expiry_date(days: int, *, today: date | None = None) -> str | None:
-    """``YYYY-MM-DD`` for a link expiring in ``days``; None when days <= 0."""
+    """``YYYY-MM-DD`` for a link expiring in ``days``; None when days <= 0.
+
+    The base is **UTC** today, not the local date. Nextcloud compares the
+    expiry against its own clock, so a caller west of the server rolls over
+    later than the server does: at 17:00 in California the server is already on
+    tomorrow's date, and ``--days 1`` computes a date the server considers
+    today — rejected outright with "Expiration date is in the past". That is a
+    seven-hour window every single day for a Pacific caller against the usual
+    UTC server, and it was reproduced live.
+
+    Residual: a server running *ahead* of UTC can still see a one-day expiry as
+    same-day. Eliminating that needs the date from the server itself; UTC
+    covers the deployments we actually run.
+    """
     if days <= 0:
         return None
-    base = today or date.today()
+    base = today or datetime.now(timezone.utc).date()
     return (base + timedelta(days=days)).isoformat()
 
 

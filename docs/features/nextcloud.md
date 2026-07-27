@@ -83,6 +83,12 @@ The response carries the whole lifecycle: `url`, `download_url`, `token`, `share
 
 `share revoke` closes the loop by id, by token, or across a path. The path form can remove several links at once, so it refuses without `--confirmed`.
 
+**A public link is for giving a file to someone else.** It is a bearer URL: anyone who ends up holding it can open the file, so "who did I show this to" stops being answerable. That makes it the wrong instrument for handing a user a file they already own — in web chat the assistant uses the authenticated `GET /api/chat/files?path=` download instead (see `config/guidelines/web.md`), and in Talk the file is already in the user's Nextcloud. The confirmation rule follows from that: a user *asking* for a link is itself the authorization, the assistant deciding a link would be handy for the requesting user means not creating one at all, and any other recipient is confirmed every time. `--type user|group` is the narrower instrument whenever the recipient is known — revocable, attributable, and reaching exactly one account.
+
+Expiry is computed from **UTC**, not the local clock, because Nextcloud evaluates it against its own. A caller west of the server rolls over later than the server does, so a local base makes `--days 1` land on a date the server already calls past — a several-hour window every day, and a hard failure rather than a wrong date. A server running *ahead* of UTC can still see a one-day expiry as same-day; that residual would need the date from the server itself.
+
+Nextcloud rate-limits share creation to 20 per 10 minutes per account. Past that, every attempt returns a 429 whose message names the cap and, when the server sends `Retry-After`, how long to wait — a bare status code gives an agent nothing to decide on, and the skill tells it to report the wait rather than retry into another refusal.
+
 ## files — only what the filesystem can't do
 
 There is deliberately no `read`, `write`, `mkdir`, `rm`, `mv` or `cp`. The mount does those with ordinary POSIX calls, and an HTTP variant would give the model two ways to do one thing with no rule for choosing.
@@ -103,6 +109,8 @@ The transport seam and its persistent-loop `TalkClient` keep owning inbound poll
 `talk share-file` is the verb that bridges the two surfaces: a Talk attachment is a share of type 10 whose `shareWith` is the conversation token.
 
 The skill CLI is a one-shot subprocess with no persistent asyncio runtime, so it uses `talk.transient_client(config)` — the single documented exemption to the "no `TalkClient` outside the singleton" invariant, recorded in `.claude/rules/transport.md`.
+
+`talk search --token` restricts results to one conversation, and does so client-side. The unified-search provider's `from` parameter looks like the way to scope a search but means "the page I am currently on", so the provider *excludes* that conversation — passing the requested token there returns every room except the one asked for. The filter matches on each entry's `attributes.conversation` instead, over-fetching so `--limit` applies to the matching subset.
 
 ## notify / activity
 

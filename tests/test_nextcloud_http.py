@@ -129,6 +129,60 @@ class TestOcsError:
 # --- raising ocs_* variants ---
 
 
+class TestRateLimitMessage:
+    """A 429 arrives as a non-OCS body, so it lands in the fallback branch.
+
+    Bare "HTTP 429 from Nextcloud" is unactionable — the caller can't tell
+    whether to retry now or in ten minutes. Hit live by creating public links
+    faster than the server's 20-per-10-minutes cap.
+    """
+
+    def _rate_limited(self, retry_after=None):
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.json.side_effect = ValueError("not json")
+        resp.text = "<html>429</html>"
+        resp.headers = {"Retry-After": retry_after} if retry_after else {}
+        return resp
+
+    def test_message_explains_the_cap(self, nc_config):
+        from istota.nextcloud._http import OcsError, ocs_post
+
+        with patch("istota.nextcloud._http.httpx.post", return_value=self._rate_limited()):
+            with pytest.raises(OcsError) as e:
+                ocs_post(nc_config, "/shares", data={"path": "/a"})
+        assert e.value.http_status == 429
+        assert "Rate limited" in e.value.message
+        assert "20 per 10 minutes" in e.value.message
+
+    def test_retry_after_is_surfaced_when_the_server_sends_it(self, nc_config):
+        from istota.nextcloud._http import OcsError, ocs_post
+
+        with patch("istota.nextcloud._http.httpx.post", return_value=self._rate_limited("120")):
+            with pytest.raises(OcsError) as e:
+                ocs_post(nc_config, "/shares", data={"path": "/a"})
+        assert "Retry after 120 seconds" in e.value.message
+
+    def test_a_junk_retry_after_falls_back_to_generic_advice(self, nc_config):
+        from istota.nextcloud._http import OcsError, ocs_post
+
+        with patch("istota.nextcloud._http.httpx.post", return_value=self._rate_limited("soon")):
+            with pytest.raises(OcsError) as e:
+                ocs_post(nc_config, "/shares", data={"path": "/a"})
+        assert "Wait a few minutes" in e.value.message
+
+    def test_other_statuses_keep_the_body_detail(self, nc_config):
+        from istota.nextcloud._http import OcsError, ocs_post
+
+        resp = self._rate_limited()
+        resp.status_code = 500
+        resp.text = "upstream exploded"
+        with patch("istota.nextcloud._http.httpx.post", return_value=resp):
+            with pytest.raises(OcsError) as e:
+                ocs_post(nc_config, "/shares", data={"path": "/a"})
+        assert "upstream exploded" in e.value.message
+
+
 class TestOcsRequest:
     def test_get_returns_data(self, nc_config):
         from istota.nextcloud._http import ocs_get

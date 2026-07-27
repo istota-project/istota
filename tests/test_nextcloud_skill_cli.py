@@ -438,3 +438,36 @@ class TestEnvVarConfig:
         assert config.nextcloud.url == "https://cloud.example.com"
         assert config.nextcloud.username == "istota"
         assert config.nextcloud.app_password == "secret"
+
+
+# --- live-suite coverage ---
+
+
+class TestLiveCoverage:
+    """Every CLI verb must be driven by the live suite, or excused by name.
+
+    The live suite only runs with credentials present, so this guard lives here
+    instead — it is what stops a newly added verb from shipping with mocked
+    coverage alone.
+    """
+
+    def test_every_verb_is_exercised_or_excused(self):
+        from pathlib import Path
+
+        from istota.skills.nextcloud import _COMMANDS
+        from tests.test_nextcloud_skill_live import NOT_EXERCISED_LIVE
+
+        source = Path(__file__).with_name("test_nextcloud_skill_live.py").read_text()
+        unexercised = []
+        for group, command in _COMMANDS:
+            if (group, command) in NOT_EXERCISED_LIVE:
+                continue
+            needle = f'"{group}", "{command}"' if command else f'"{group}"'
+            if needle not in source:
+                unexercised.append(f"{group} {command or ''}".strip())
+
+        assert not unexercised, (
+            "CLI verbs with no live test: "
+            + ", ".join(sorted(unexercised))
+            + " — add one, or list it in NOT_EXERCISED_LIVE with a reason."
+        )

@@ -584,11 +584,29 @@ def cmd_talk_read(args):
     }
 
 
+def _ocs_data(result):
+    """Unwrap an OCS envelope, tolerating an already-unwrapped payload.
+
+    ``TalkClient.send_message`` is the one method that returns the raw response
+    body rather than ``ocs.data`` — its other callers (the transport mirror,
+    web_app) unwrap it themselves. Reading ``id`` off the envelope silently
+    yields None, which is how ``talk send`` came to report no message id at all.
+    """
+    if isinstance(result, dict) and "ocs" in result:
+        inner = (result.get("ocs") or {}).get("data")
+        return inner if isinstance(inner, dict) else {}
+    return result if isinstance(result, dict) else {}
+
+
 def cmd_talk_send(args):
     result = _talk_run(
         lambda c: c.send_message(args.token, args.message, reply_to=args.reply_to)
     )
-    return {"status": "ok", "token": args.token, "message_id": result.get("id")}
+    return {
+        "status": "ok",
+        "token": args.token,
+        "message_id": _ocs_data(result).get("id"),
+    }
 
 
 def cmd_talk_share_file(args):

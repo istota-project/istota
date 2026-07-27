@@ -272,7 +272,7 @@ Every proxy rejection emits a structured WARNING — `proxy_rejected task_id=…
 | `_ensure_reply_parent_in_history()` | Force-include reply parent in context |
 | `load_emissaries()` | Load constitutional principles (global only, not user-overridable) |
 | `load_persona()` | Load persona (user workspace > global) |
-| `load_channel_guidelines()` | Load guidelines/{source_type}.md |
+| `load_channel_guidelines(config, source_type, user_id=None)` | Load guidelines/{source_type}.md, substituting `{BOT_NAME}`/`{BOT_DIR}`/`{user_id}`. `{user_id}` joined the set so web.md's file-handover link can name a concrete workspace path; skill bodies already substituted it. |
 | `_split_credential_env()` | Split env dict into credential vars and clean vars (for proxy) |
 | `_build_network_allowlist()` | Build host:port allowlist for CONNECT proxy |
 | `build_bwrap_cmd()` | Build bubblewrap sandbox command wrapper. Binds the per-user Docker-API allowlist proxy socket at `/var/run/docker.sock` (unconditionally when `config.devbox.enabled and config.devbox.api_proxy_enabled` and the socket exists; no selection gate, raw socket never bound) + ro-binds `docker_cli`. |

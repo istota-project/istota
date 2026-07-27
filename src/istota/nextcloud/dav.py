@@ -93,7 +93,13 @@ def uploads_url(config: Config, upload_id: str, part: str = "") -> str:
 
 
 def _files_prefix(config: Config) -> str:
+    """Absolute path prefix of the bot's file tree, as it appears in a href."""
     return f"/remote.php/dav/files/{config.nextcloud.username}"
+
+
+def _dav_scope_prefix(config: Config) -> str:
+    """The same tree, relative to the DAV root — what a SEARCH scope wants."""
+    return f"/files/{config.nextcloud.username}"
 
 
 def href_to_path(config: Config, href: str) -> str:
@@ -275,7 +281,12 @@ def build_search_body(
     else:
         where = "<d:where><d:and>" + "".join(conditions) + "</d:and></d:where>"
 
-    scope_href = _escape_xml(f"{_files_prefix(config)}{scope if scope.startswith('/') else '/' + scope}")
+    # The scope href is resolved by the server relative to the SEARCH request
+    # URL (/remote.php/dav/), so it must NOT repeat that prefix — including it
+    # makes Sabre look for a collection literally named "remote.php" and answer
+    # 404 for every search.
+    tail = scope if scope.startswith("/") else "/" + scope
+    scope_href = _escape_xml(f"{_dav_scope_prefix(config)}{tail}")
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'

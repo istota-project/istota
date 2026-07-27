@@ -131,8 +131,16 @@ class TestActivityModule:
     def test_since_and_filter(self, mock_get, nc_config):
         mock_get.return_value = []
         notify.list_activity(nc_config, since=100, activity_filter="files", limit=5)
-        assert mock_get.call_args[0][1] == "/apps/activity/api/v2/activity/filter/files"
+        # A named stream is a bare path segment. /activity/filter/files is not
+        # a route — it 404s on a real server (caught by the live suite).
+        assert mock_get.call_args[0][1] == "/apps/activity/api/v2/activity/files"
         assert mock_get.call_args.kwargs["params"] == {"limit": "5", "since": "100"}
+
+    @patch("istota.nextcloud.notifications.ocs_get")
+    def test_object_lookup_uses_the_reserved_filter_segment(self, mock_get, nc_config):
+        mock_get.return_value = []
+        notify.list_activity(nc_config, object_type="files", object_id="7")
+        assert mock_get.call_args[0][1] == "/apps/activity/api/v2/activity/filter"
 
     @patch("istota.nextcloud.notifications.ocs_get")
     def test_object_filter_needs_both_halves(self, mock_get, nc_config):

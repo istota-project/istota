@@ -1,7 +1,7 @@
 """Share expansion and the safe-link workflow (Stage 3)."""
 
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -94,6 +94,16 @@ class TestDownloadUrl:
 class TestExpiry:
     def test_expiry_date_from_days(self):
         assert shares.expiry_date(14, today=date(2026, 1, 1)) == "2026-01-15"
+
+    def test_default_base_is_utc_not_local(self):
+        """A caller west of the server must not compute a same-day expiry.
+
+        At 17:00 Pacific the server is already on tomorrow, so a local-date
+        base makes `--days 1` land on a date Nextcloud rejects as past. Live
+        run reproduced it at 17:04 PDT / 00:04 UTC.
+        """
+        expected = datetime.now(timezone.utc).date() + timedelta(days=1)
+        assert shares.expiry_date(1) == expected.isoformat()
 
     def test_zero_days_means_no_expiry(self):
         assert shares.expiry_date(0, today=date(2026, 1, 1)) is None

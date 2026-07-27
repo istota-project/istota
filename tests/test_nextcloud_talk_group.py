@@ -145,6 +145,19 @@ class TestWritePaths:
         assert out["message_id"] == 99
         assert talk_client.send_message.call_args[0][1] == "hello"
 
+    def test_send_unwraps_the_ocs_envelope(self, talk_client, capsys):
+        """send_message alone returns the raw body, not ocs.data.
+
+        Reading "id" straight off it yields None, so every send reported no
+        message id and --reply-to could not be chained off one. Caught live.
+        """
+        talk_client.send_message.return_value = {
+            "ocs": {"meta": {"statuscode": 201}, "data": {"id": 42, "message": "hello"}}
+        }
+        out, code = _run(capsys, ["talk", "send", "abc123", "hello"])
+        assert code == 0
+        assert out["message_id"] == 42
+
     def test_send_reply_to(self, talk_client, capsys):
         talk_client.send_message.return_value = {"id": 100}
         _run(capsys, ["talk", "send", "abc123", "re", "--reply-to", "7"])
@@ -272,15 +285,53 @@ class TestTalkClientMethods:
         assert "search/providers/talk-message/search" in http.get.call_args[0][0]
         params = http.get.call_args.kwargs["params"]
         assert params["term"] == "thing"
-        assert params["limit"] == "5"
-        assert params["from"] == "/call/abc123"
+        # Over-fetched, because the conversation filter is applied client-side.
+        assert params["limit"] == "25"
 
     @pytest.mark.asyncio
-    async def test_search_messages_without_token_omits_from(self, client):
+    async def test_search_never_sends_from(self, client):
+        """``from`` means "the page I'm on" — it EXCLUDES that conversation.
+
+        Sending the requested token there returned every conversation except
+        the one asked for. Caught against a live server.
+        """
         c, http = client
         http.get.return_value = self._resp({"entries": []})
+        await c.search_messages("thing", conversation_token="abc123")
+        assert "from" not in http.get.call_args.kwargs["params"]
+
         await c.search_messages("thing")
         assert "from" not in http.get.call_args.kwargs["params"]
+
+    @pytest.mark.asyncio
+    async def test_search_filters_to_the_requested_conversation(self, client):
+        c, http = client
+        http.get.return_value = self._resp({"entries": [
+            {"subline": "here", "attributes": {"conversation": "abc123"}},
+            {"subline": "elsewhere", "attributes": {"conversation": "other"}},
+            {"subline": "no attributes at all"},
+        ]})
+        data = await c.search_messages("thing", conversation_token="abc123")
+        assert [e["subline"] for e in data["entries"]] == ["here"]
+
+    @pytest.mark.asyncio
+    async def test_search_without_a_token_keeps_every_conversation(self, client):
+        c, http = client
+        http.get.return_value = self._resp({"entries": [
+            {"subline": "a", "attributes": {"conversation": "abc123"}},
+            {"subline": "b", "attributes": {"conversation": "other"}},
+        ]})
+        data = await c.search_messages("thing")
+        assert len(data["entries"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_search_limit_applies_after_filtering(self, client):
+        c, http = client
+        http.get.return_value = self._resp({"entries": [
+            {"subline": str(i), "attributes": {"conversation": "abc123"}} for i in range(10)
+        ]})
+        data = await c.search_messages("thing", conversation_token="abc123", limit=3)
+        assert len(data["entries"]) == 3
 
     @pytest.mark.asyncio
     async def test_set_description(self, client):

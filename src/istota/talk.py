@@ -366,17 +366,35 @@ class TalkClient:
 
         The same endpoint the ``!search`` command reads, so one implementation
         serves both the user-facing command and the agent.
+
+        ``conversation_token`` restricts results to that conversation, and is
+        applied here rather than server-side. The provider's ``from`` parameter
+        means "the page I am currently on" and makes it *exclude* that
+        conversation — passing the token there returned every room except the
+        one asked for, which is worse than not filtering at all.
         """
         url = f"{self.base_url}/ocs/v2.php/search/providers/talk-message/search"
-        params: dict[str, str] = {"term": query, "limit": str(limit)}
-        if conversation_token:
-            params["from"] = f"/call/{conversation_token}"
+        # Over-fetch when filtering, so the caller's limit applies to the
+        # matching subset rather than to the pre-filter page.
+        wanted = max(1, limit)
+        params: dict[str, str] = {
+            "term": query,
+            "limit": str(wanted * 5 if conversation_token else wanted),
+        }
         client = await self._ensure_open()
         response = await client.get(
             url, auth=self.auth, headers=self._headers(), params=params,
         )
         response.raise_for_status()
-        return response.json().get("ocs", {}).get("data", {})
+        data = response.json().get("ocs", {}).get("data", {})
+
+        if conversation_token and isinstance(data, dict):
+            entries = [
+                e for e in (data.get("entries") or [])
+                if (e.get("attributes") or {}).get("conversation") == conversation_token
+            ]
+            data = {**data, "entries": entries[:wanted]}
+        return data
 
     async def mark_conversation_read(self, conversation_token: str) -> bool:
         """Mark a whole conversation read for the authenticated identity.

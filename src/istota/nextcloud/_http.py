@@ -133,6 +133,23 @@ def _not_configured(endpoint: str) -> OcsError:
 # --- OCS ---
 
 
+def _rate_limit_message(resp: Any) -> str:
+    """Explain a 429, including how long to wait when the server says."""
+    retry_after = ""
+    try:
+        retry_after = (resp.headers.get("Retry-After") or "").strip()
+    except Exception:
+        retry_after = ""
+
+    wait = f"Retry after {retry_after} seconds." if retry_after.isdigit() else (
+        "Wait a few minutes before retrying."
+    )
+    return (
+        "Rate limited by Nextcloud (HTTP 429). This endpoint caps how often an "
+        f"account may call it — share creation allows 20 per 10 minutes. {wait}"
+    )
+
+
 def ocs_request_full(
     config: Config,
     method: str,
@@ -187,11 +204,17 @@ def ocs_request_full(
 
     if not isinstance(body, dict) or "ocs" not in body:
         detail = (getattr(resp, "text", "") or "").strip()[:200]
-        if http_status is not None and http_status >= 400:
+        if http_status == 429:
+            # Nextcloud rate-limits some write endpoints per user (share
+            # creation is 20 per 10 minutes). The bare status is unactionable
+            # on its own — say what it means and when to come back, so a caller
+            # can wait rather than retry straight into another refusal.
+            message = _rate_limit_message(resp)
+        elif http_status is not None and http_status >= 400:
             message = f"HTTP {http_status} from Nextcloud"
         else:
             message = "Nextcloud returned a non-OCS response"
-        if detail:
+        if detail and http_status != 429:
             message = f"{message}: {detail}"
         raise OcsError(message, http_status, None, path)
 
