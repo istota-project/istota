@@ -160,6 +160,64 @@ describe('installViewportGuard', () => {
     expect(document.documentElement.style.getPropertyValue('--safe-bottom')).toBe('34px');
   });
 
+  it('never publishes a keyboard-shaped height after a dismissal', () => {
+    // Tapping outside the field to dismiss: the layout viewport comes back
+    // slowly, or not until some later event. Holding the last whole height
+    // leaves the app a touch too tall for a moment; publishing the short one
+    // leaves a band at the bottom that nothing afterwards corrects.
+    teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000);
+    const ta = focusTextEntry();
+    Object.defineProperty(window, 'innerHeight', { value: 420, configurable: true });
+    setVisualViewport(420);
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(400);
+
+    ta.blur();
+    window.dispatchEvent(new Event('focusout'));
+    vi.advanceTimersByTime(5000);
+
+    expect(appHeight()).toBe('800px');
+  });
+
+  it('pins the height to the tallest the viewport has been', () => {
+    // Back to within the tolerance but not all the way is still a band, just a
+    // smaller one — and the height it ought to be is already known.
+    teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000);
+    Object.defineProperty(window, 'innerHeight', { value: 780, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(2000);
+    expect(appHeight()).toBe('800px');
+  });
+
+  it('adopts a smaller window when no keyboard was involved', () => {
+    // Same short reading, no dismissal behind it (split view, a resized
+    // window): once it has held for the whole window it is simply the truth.
+    teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000);
+    Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
+    setVisualViewport(600);
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(5000);
+
+    expect(appHeight()).toBe('600px');
+  });
+
+  it('publishes the app height while only the visual viewport is short', () => {
+    // The iOS 26 residue: visualViewport stays short indefinitely after the
+    // keyboard has gone. The layout viewport is whole, which is the only thing
+    // the app height depends on.
+    teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000);
+    setVisualViewport(400);
+    Object.defineProperty(window, 'innerHeight', { value: 900, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(2000);
+
+    expect(appHeight()).toBe('900px');
+  });
+
   it('keeps sampling until the reading stops moving', () => {
     teardown = installViewportGuard();
     // A transition that is still in motion when the first sample lands: a

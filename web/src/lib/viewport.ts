@@ -92,6 +92,11 @@ function isTextEntryFocused(): boolean {
  */
 type Baseline = { inner: number; visual: number };
 
+function nextBaseline(prev: Baseline | null, now: Baseline, replace: boolean): Baseline {
+  if (!prev || replace) return now;
+  return { inner: Math.max(prev.inner, now.inner), visual: Math.max(prev.visual, now.visual) };
+}
+
 function currentGeometry(): Baseline {
   const vv = window.visualViewport;
   return {
@@ -216,6 +221,7 @@ export function installViewportGuard(): () => void {
   let stableTicks = 0;
   let lastReading = '';
   let baseline: Baseline | null = null;
+  let sessionKind: 'blur' | 'other' = 'other';
   const written = new Map<string, string>();
   const debugPanel = debugEnabled() ? makeDebugPanel() : null;
 
@@ -224,7 +230,7 @@ export function installViewportGuard(): () => void {
     const vv = window.visualViewport;
     const el = document.scrollingElement ?? document.documentElement;
     debugPanel.textContent = [
-      `${state}${standalone ? ' pwa' : ''}${isTextEntryFocused() ? ' focus' : ''}`,
+      `${state}/${sessionKind}${standalone ? ' pwa' : ''}${isTextEntryFocused() ? ' focus' : ''}`,
       `inner ${window.innerHeight}  vv ${vv ? Math.round(vv.height * vv.scale) : '-'}`,
       `base  ${baseline ? `${baseline.inner}/${Math.round(baseline.visual)}` : '-'}`,
       `off   ${vv ? Math.round(vv.offsetTop) : '-'}  scroll ${Math.round(el?.scrollTop ?? 0)}`,
@@ -238,38 +244,71 @@ export function installViewportGuard(): () => void {
     root.style.setProperty(prop, value);
   }
 
-  /** One measurement pass. Returns a fingerprint of the reading, or null if the keyboard is up. */
-  function measure(): string | null {
-    if (keyboardIsUp(baseline)) return null;
-    releaseResidualScroll();
-
+  /**
+   * One measurement pass. Returns a fingerprint of everything published (null if
+   * nothing was) and whether the layout viewport is below its baseline.
+   */
+  function measure(adoptShort: boolean): { reading: string | null; short: boolean } {
+    const geo = currentGeometry();
+    // Below the last keyboard-free layout viewport: either a keyboard still on
+    // its way out, or a genuinely smaller window (rotation, iPad split view).
+    // Which one it is only becomes clear from whether it comes back.
+    const short = baseline !== null && geo.inner < baseline.inner - RESTORED_TOLERANCE_PX;
     const parts: string[] = [];
-    if (standalone) {
-      const height = `${window.innerHeight}px`;
-      write('--app-height', height);
-      parts.push(height);
+
+    // The app height and the residual scroll are both properties of the *layout*
+    // viewport, so they are gated on that alone rather than on the keyboard
+    // verdict: a whole layout viewport is safe to publish even while the visual
+    // one is still short, which is the state iOS 26 can leave behind for good.
+    // A short one is never published — holding the last whole height leaves the
+    // app slightly too tall for a moment, where publishing a keyboard-shaped one
+    // leaves a band at the bottom that nothing later corrects.
+    if (!short || adoptShort) {
+      releaseResidualScroll();
+      if (standalone) {
+        // Pinned to the tallest the layout viewport has been, not to this
+        // reading. A reading that has come back to within the tolerance but not
+        // all the way is still a band at the bottom, just a smaller one — and
+        // the height the app *should* be is a thing we already know. Only the
+        // adopt path (a shrink that outlasted the whole window with no keyboard
+        // behind it) is allowed to publish something shorter.
+        const height = `${adoptShort ? geo.inner : Math.max(geo.inner, baseline?.inner ?? geo.inner)}px`;
+        write('--app-height', height);
+        parts.push(height);
+      }
     }
-    const cs = getComputedStyle(probe);
-    for (const edge of EDGES) {
-      const value = cs.getPropertyValue(`padding-${edge}`);
-      // An all-zero reading mid-transition would latch the wrong thing, which is
-      // what the stability requirement below is for: a value still in motion
-      // never accumulates enough identical ticks to end the session, so the last
-      // thing written is a settled one.
-      if (!value) continue;
-      write(`--safe-${edge}`, value);
-      parts.push(value);
+
+    // The insets keep the conservative gate. They read 0 while the keyboard is
+    // up, and latching that is the failure this module exists to prevent.
+    if (!keyboardIsUp(baseline)) {
+      const cs = getComputedStyle(probe);
+      for (const edge of EDGES) {
+        const value = cs.getPropertyValue(`padding-${edge}`);
+        if (!value) continue;
+        write(`--safe-${edge}`, value);
+        parts.push(value);
+      }
     }
-    return parts.join('|');
+    return { reading: parts.length ? parts.join('|') : null, short };
   }
 
   function tick(): void {
     timer = undefined;
-    const reading = measure();
-    // Keyboard up: nothing to measure, and no point burning ticks until it goes.
-    // Its dismissal fires `focusout` / a visualViewport resize, which restarts us.
+    const elapsed = Date.now() - startedAt;
+    const expired = elapsed >= SETTLE_MAX_MS;
+    // A viewport that has stayed short for the whole window, in a session no
+    // keyboard was involved in, is the real geometry — adopt it. A session that
+    // began with a blur is a keyboard dismissal by definition, so a short
+    // reading there is never adopted however long it persists.
+    const adoptShort = expired && sessionKind !== 'blur' && !isTextEntryFocused();
+    const { reading, short } = measure(adoptShort);
+
     if (reading === null) {
+      // Nothing publishable — the keyboard is up and the layout viewport with
+      // it. Keep sampling rather than waiting for an event, since the event
+      // that would restart us is exactly what a stuck transition fails to fire.
       paintDebug('held');
+      if (!expired) timer = setTimeout(tick, SETTLE_INTERVAL_MS);
       return;
     }
 
@@ -279,32 +318,46 @@ export function installViewportGuard(): () => void {
       stableTicks = 1;
     }
 
-    const elapsed = Date.now() - startedAt;
-    const settled = stableTicks >= SETTLE_STABLE_TICKS && elapsed >= SETTLE_MIN_MS;
-    if (settled) {
-      // The reference the focused-but-restored test compares against, taken only
-      // from a settled reading with nothing focused — so a value still moving
-      // through a keyboard transition can never become the baseline.
-      if (!isTextEntryFocused()) baseline = currentGeometry();
-      paintDebug('settled');
+    const settled = !short && stableTicks >= SETTLE_STABLE_TICKS && elapsed >= SETTLE_MIN_MS;
+    if (settled || adoptShort) {
+      // The reference the rest of this file measures against, taken only from a
+      // settled reading with nothing focused — so a value still moving through a
+      // keyboard transition can never become it. It only ever grows, except on
+      // rotation (cleared) and on the adopt path (replaced outright): a keyboard
+      // can only ever make a viewport smaller, so a smaller reading is never
+      // evidence about how tall the app should be.
+      if (!isTextEntryFocused()) baseline = nextBaseline(baseline, currentGeometry(), adoptShort);
+      paintDebug(adoptShort ? 'adopted' : 'settled');
       return;
     }
-    paintDebug('sampling');
-    if (elapsed >= SETTLE_MAX_MS) return;
+    paintDebug(short ? 'short' : 'sampling');
+    if (expired) return;
     timer = setTimeout(tick, SETTLE_INTERVAL_MS);
   }
 
   /**
    * (Re)start a settle session. Cheap to call from every event that could mean
    * the viewport moved — a session in progress is simply extended.
+   *
+   * A session that begins with a blur is a keyboard dismissal, and stays marked
+   * as one until it ends: everything that follows it (the resizes, the visual
+   * viewport pans) belongs to that dismissal, so a short reading during it is
+   * never mistaken for a smaller window. Which is the case the two ways of
+   * dismissing a keyboard separated — the accessory bar's Done restores the
+   * viewport fast enough to look settled, tapping outside does not.
    */
-  function settle(): void {
+  function settle(kind: 'blur' | 'other' = 'other'): void {
     clearTimeout(timer);
+    // Don't let a follow-on event downgrade an in-flight dismissal session.
+    if (kind === 'blur' || Date.now() - startedAt >= SETTLE_MAX_MS) sessionKind = kind;
     startedAt = Date.now();
     stableTicks = 0;
     lastReading = '';
     tick();
   }
+
+  const onFocusOut = () => settle('blur');
+  const onSettle = () => settle();
 
   const onVisibilityChange = () => {
     if (document.visibilityState === 'visible') settle();
@@ -314,30 +367,31 @@ export function installViewportGuard(): () => void {
   // reference is meaningless; drop it and let the session re-establish one.
   const onOrientationChange = () => {
     baseline = null;
+    sessionKind = 'other';
     settle();
   };
 
   settle();
   const vv = window.visualViewport;
-  window.addEventListener('focusout', settle);
+  window.addEventListener('focusout', onFocusOut);
   window.addEventListener('orientationchange', onOrientationChange);
-  window.addEventListener('resize', settle);
-  window.addEventListener('pageshow', settle);
+  window.addEventListener('resize', onSettle);
+  window.addEventListener('pageshow', onSettle);
   document.addEventListener('visibilitychange', onVisibilityChange);
-  vv?.addEventListener('resize', settle);
+  vv?.addEventListener('resize', onSettle);
   // The keyboard pans the visual viewport as well as resizing it, and on the way
   // out the pan is sometimes the only event that fires.
-  vv?.addEventListener('scroll', settle);
+  vv?.addEventListener('scroll', onSettle);
 
   return () => {
     clearTimeout(timer);
-    window.removeEventListener('focusout', settle);
+    window.removeEventListener('focusout', onFocusOut);
     window.removeEventListener('orientationchange', onOrientationChange);
-    window.removeEventListener('resize', settle);
-    window.removeEventListener('pageshow', settle);
+    window.removeEventListener('resize', onSettle);
+    window.removeEventListener('pageshow', onSettle);
     document.removeEventListener('visibilitychange', onVisibilityChange);
-    vv?.removeEventListener('resize', settle);
-    vv?.removeEventListener('scroll', settle);
+    vv?.removeEventListener('resize', onSettle);
+    vv?.removeEventListener('scroll', onSettle);
     probe.remove();
     debugPanel?.remove();
     root.style.removeProperty('--app-height');
