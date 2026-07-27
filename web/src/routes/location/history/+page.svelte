@@ -29,7 +29,7 @@
   import StopTimeline from '$lib/components/location/StopTimeline.svelte';
   import DayStats from '$lib/components/location/DayStats.svelte';
   import TripList from '$lib/components/location/TripList.svelte';
-  import { Chip, ConfirmDialog } from '$lib/components/ui';
+  import { Chip, ConfirmDialog, Select } from '$lib/components/ui';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
   let pings: LocationPing[] = $state([]);
@@ -130,6 +130,45 @@
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
   }
 
+  function thisYearStart(): string {
+    return `${new Date().getFullYear()}-01-01`;
+  }
+
+  // Ranges are lazy so the derived match below re-resolves them rather than
+  // comparing against dates frozen at module load.
+  const RANGE_PRESETS: { value: string; label: string; range: () => [string, string] }[] = [
+    { value: 'today', label: 'Today', range: () => [today, today] },
+    { value: 'yesterday', label: 'Yesterday', range: () => [yesterday(), yesterday()] },
+    { value: 'week', label: 'This week', range: () => [thisWeekStart(), today] },
+    { value: 'month', label: 'This month', range: () => [thisMonthStart(), today] },
+    { value: 'ytd', label: 'Year to date', range: () => [thisYearStart(), today] },
+  ];
+
+  let activePreset = $derived(
+    RANGE_PRESETS.find((p) => {
+      const [s, e] = p.range();
+      return startStr === s && endStr === e;
+    })?.value ?? 'custom',
+  );
+
+  // "Custom range" is only ever a label for a hand-picked From/To — it is
+  // appended so the trigger has something to show, never offered as a choice.
+  let rangeOptions = $derived(
+    activePreset === 'custom'
+      ? [
+          ...RANGE_PRESETS.map((p) => ({ value: p.value, label: p.label })),
+          { value: 'custom', label: 'Custom range' },
+        ]
+      : RANGE_PRESETS.map((p) => ({ value: p.value, label: p.label })),
+  );
+
+  function handlePresetChange(value: string) {
+    const preset = RANGE_PRESETS.find((p) => p.value === value);
+    if (!preset) return;
+    const [s, e] = preset.range();
+    selectRange(s, e);
+  }
+
   function readUrlParams() {
     const params = page.url.searchParams;
     const s = params.get('start') || params.get('date');
@@ -222,23 +261,12 @@
 
 <div class="page-fill">
   <div class="controls-bar">
-    <div class="chip-group">
-      <Chip checked={isSingleDay && startStr === today} onclick={() => selectRange(today, today)}
-        >Today</Chip
-      >
-      <Chip
-        checked={isSingleDay && startStr === yesterday()}
-        onclick={() => selectRange(yesterday(), yesterday())}>Yesterday</Chip
-      >
-      <Chip
-        checked={startStr === thisWeekStart() && endStr === today}
-        onclick={() => selectRange(thisWeekStart(), today)}>This week</Chip
-      >
-      <Chip
-        checked={startStr === thisMonthStart() && endStr === today}
-        onclick={() => selectRange(thisMonthStart(), today)}>This month</Chip
-      >
-    </div>
+    <Select
+      value={activePreset}
+      options={rangeOptions}
+      onValueChange={handlePresetChange}
+      ariaLabel="Date range"
+    />
     <div class="date-inputs">
       <label for="hist-start">From</label>
       <input
@@ -381,11 +409,6 @@
     padding: 0.5rem 0.75rem;
     border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
-  }
-
-  .chip-group {
-    display: flex;
-    gap: 0.25rem;
   }
 
   .date-inputs {
