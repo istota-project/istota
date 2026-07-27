@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The assistant can now read a web page as markdown, with headings, list position and link addresses arriving together. That is what lets it tell an article link from a footer link on a page it has never seen, so browsing no longer depends on knowing a site's markup. It can take a front page whole or pull just the body of an article, whichever the page calls for.
 
+- Are.na videos play inside the reader, and an uploaded PDF opens from its cover. Previously a video was a card you could only click through to YouTube, and a PDF looked like an ordinary photo post, so clicking one zoomed its first page as a picture with no way to reach the document itself.
+
 ### Removed
 - The bot's own static web root is gone. It was a directory the assistant could write to freely, served to the public without a password — so anything the assistant could read, it could publish to a URL without ever asking you first. Copying a file is the kind of ordinary local action the confirmation rules deliberately leave alone, which is exactly why this one slipped past them. The directory is no longer reachable from the assistant's sandbox, the deployment no longer serves it, and the `enabled` and `base_path` settings are ignored with a warning if left in place. Host static files outside istota, somewhere the assistant cannot write.
 
@@ -51,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - News briefings stopped declaring live sources dead. Front pages that assemble their headlines in the browser came back as nothing but section names, because the two available ways of reading a page either threw away every link address or returned the links with nothing to say which were articles — so Reuters, Le Monde, Der Spiegel and the Guardian were repeatedly written off as unreachable and the morning briefing ran on whatever was left. Pages are now read as markdown, which keeps each headline attached to its address, and how much of a front page a briefing takes is configurable.
 - Reading part of a page no longer cuts it in half. Pulling a specific element off a page was capped low enough to truncate an article's body mid-way, with nothing to indicate content had been dropped. That limit and the ones on page text and link counts are all raised, and can be raised further per request.
+
+- Are.na posts that were not a picture, some text or a link arrived as blank cards. A video, an uploaded file, or a channel connected into another one showed nothing but a feed name and a date, because the reader understood only three of Are.na's block types. All of them render now, and a type Are.na introduces later degrades to a readable card instead of an empty one.
+
+- Are.na was quietly dropping writing that came with a post. A quotation lost the line naming who said it, a picture lost the curator's note explaining why it was saved, and a quoted passage showed its raw punctuation instead of being laid out as a quote.
 
 ## [0.36.0] - 2026-07-25
 
