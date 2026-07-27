@@ -571,6 +571,36 @@
     display: block;
   }
 
+  /* Attached documents (Are.na Attachment blocks). The cover page links to
+	   the file, so it takes a pointer rather than .card-image's zoom-in. */
+  .feed-grid :global(.card-document) {
+    position: relative;
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  /* No cover page: give the icon somewhere to sit rather than collapsing. */
+  .feed-grid :global(.card-document.no-cover) {
+    min-height: 120px;
+    align-items: center;
+    color: var(--text-muted);
+    border-radius: var(--radius-card) var(--radius-card) 0 0;
+  }
+
+  .feed-grid :global(.card-document .doc-badge) {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: var(--radius-sm, 4px);
+    background: rgb(0 0 0 / 0.7);
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    pointer-events: none;
+  }
+
   /* Gallery — fixed-height grid so meta strip stays visible inside the
 	   card's max-height budget. Cells use object-fit: cover instead of
 	   per-image aspect-ratio to keep the gallery from dictating card height. */

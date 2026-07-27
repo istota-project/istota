@@ -28,7 +28,7 @@ from istota.feeds.sanitize import image_identity
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 SCHEMA_SQL = """
@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS feed_entries (
     -- <iframe>, which would force an iframe allowance in the sanitizer that
     -- every RSS feed also passes through.
     embed_url TEXT,
+    -- A downloadable document the entry is about (an Are.na Attachment,
+    -- nearly always a PDF). Distinct from embed_url: this one is opened
+    -- rather than played, and its presence is what stops the reader
+    -- treating a PDF's cover page as an ordinary gallery image.
+    file_url TEXT,
     published_at TEXT,
     fetched_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'unread',
@@ -178,10 +183,22 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE feed_entries ADD COLUMN embed_url TEXT")
 
 
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """Add ``feed_entries.file_url``.
+
+    Additive, same shape as the v4 migration: existing entries keep NULL,
+    which reads as "no attached document" and renders exactly as before.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")}
+    if "file_url" not in cols:
+        conn.execute("ALTER TABLE feed_entries ADD COLUMN file_url TEXT")
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
     (4, _migrate_v3_to_v4),
+    (5, _migrate_v4_to_v5),
 ]
 
 
@@ -519,10 +536,10 @@ def insert_entries(
             """
             INSERT OR IGNORE INTO feed_entries(
                 feed_id, guid, title, url, author, content_html,
-                content_text, image_urls, embed_url, published_at,
-                fetched_at, status
+                content_text, image_urls, embed_url, file_url,
+                published_at, fetched_at, status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 feed_id,
@@ -534,6 +551,7 @@ def insert_entries(
                 item.content_text,
                 json.dumps(item.image_urls) if item.image_urls else None,
                 item.embed_url,
+                item.file_url,
                 item.published_at,
                 item.fetched_at,
                 item.status,
@@ -865,6 +883,7 @@ def _row_to_entry(row: sqlite3.Row) -> EntryRecord:
         content_text=row["content_text"],
         image_urls=parse_image_urls(row["image_urls"]),
         embed_url=row["embed_url"] if "embed_url" in row.keys() else None,
+        file_url=row["file_url"] if "file_url" in row.keys() else None,
         published_at=row["published_at"],
         fetched_at=row["fetched_at"],
         status=row["status"],

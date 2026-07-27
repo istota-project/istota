@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { Play, Star } from 'lucide-svelte';
+  import { FileText, Play, Star } from 'lucide-svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
-  import { playerUrl, providerLabel } from '$lib/feeds/embed';
+  import { fileKind, playerUrl, providerLabel } from '$lib/feeds/embed';
 
   import { markReadDelay } from '$lib/stores/feeds';
 
@@ -77,6 +77,14 @@
   // Autoplay is honest here: it only ever follows an explicit click on the
   // play control, never a page load.
   const playerSrc = $derived(player ? `${player}?autoplay=1` : '');
+
+  // An attached document (an Are.na Attachment — nearly always a PDF). Are.na
+  // renders a cover page for one, so without this the card is indistinguishable
+  // from a photo and its hero click zooms page 1 instead of opening the file.
+  // A video wins if an entry somehow carries both, since playing is the more
+  // specific affordance.
+  const documentUrl = $derived(!player && entry.file_url ? entry.file_url : '');
+  const documentKind = $derived(fileKind(documentUrl));
 
   function play(e: MouseEvent) {
     // The hero is normally a lightbox trigger; for a video the click means
@@ -184,6 +192,34 @@
         <span class="play-badge"><Play size={26} fill="currentColor" /></span>
       </button>
     {/if}
+    {#if entry.title}
+      <div class="card-title-overlay">
+        {#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}
+      </div>
+    {/if}
+    {#if entry.content}
+      <div class="card-body"><div class="excerpt prose">{@html entry.content}</div></div>
+    {/if}
+  {:else if documentUrl}
+    <!-- An attached file. The cover is a link to the document rather than a
+         lightbox trigger: zooming page 1 as a picture is a dead end. A real
+         <a> keeps middle-click and copy-link working, and the card's own
+         click handler already ignores anchors. -->
+    <a
+      class="card-image card-document"
+      class:no-cover={!isImage}
+      href={documentUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={`Open ${documentKind}: ${entry.title || 'attached document'}`}
+    >
+      {#if isImage}
+        <img src={entry.images[0]} alt={entry.title || ''} loading="lazy" />
+      {:else}
+        <FileText size={32} aria-hidden="true" />
+      {/if}
+      <span class="doc-badge">{documentKind}</span>
+    </a>
     {#if entry.title}
       <div class="card-title-overlay">
         {#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}

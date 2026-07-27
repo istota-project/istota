@@ -105,6 +105,7 @@ class EntryRecord:
     content_text: str | None
     image_urls: list[str] = field(default_factory=list)
     embed_url: str | None = None
+    file_url: str | None = None
     published_at: str | None = None
     fetched_at: str = ""
     status: str = "unread"      # 'unread' | 'read' | 'removed'
@@ -129,6 +130,10 @@ class FetchedItem:
     # reader rebuilds a player from it; we deliberately never store the
     # provider's own <iframe> (see providers/arena.py).
     embed_url: str | None = None
+    # A downloadable document the post is *about* (an Are.na Attachment —
+    # nearly always a PDF). Distinct from embed_url: this one is opened, not
+    # played, and the reader must not treat its cover page as a gallery image.
+    file_url: str | None = None
     published_at: str | None = None     # ISO 8601 UTC
 
 

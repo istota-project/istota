@@ -101,6 +101,25 @@ export function playerUrl(raw: string | null | undefined): string | null {
   return null;
 }
 
+/**
+ * Short uppercase format name for an attached file, e.g. `PDF`.
+ *
+ * Read from the URL path, never the query — Are.na cache-busts attachments
+ * with a bare `?1776186521`, which would otherwise become the badge. Falls
+ * back to `FILE` rather than guessing, so an extensionless upload still gets
+ * a badge that reads as deliberate.
+ */
+export function fileKind(raw: string | null | undefined): string {
+  const url = parse(raw);
+  if (!url) return '';
+  const name = lastSegment(url);
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0 || dot === name.length - 1) return 'FILE';
+  const ext = name.slice(dot + 1);
+  // A long or non-alphanumeric tail isn't a format name.
+  return /^[A-Za-z0-9]{1,5}$/.test(ext) ? ext.toUpperCase() : 'FILE';
+}
+
 /** Human name for the source, for the play button's label. */
 export function providerLabel(raw: string | null | undefined): string {
   const url = parse(raw);

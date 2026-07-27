@@ -137,6 +137,51 @@ class TestInitDb:
         assert [e.guid for e in entries] == ["old"]
         assert entries[0].embed_url is None
 
+    def test_v4_to_v5_adds_file_url_preserving_entries(self, tmp_path):
+        """A v4 DB gains ``feed_entries.file_url`` without losing rows."""
+        import sqlite3
+
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="arena:c", title="C", site_url=None,
+                source_type="arena", category_id=None,
+                poll_interval_minutes=60,
+            )
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="old", title="Old", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=[], embed_url="https://youtu.be/keep",
+                    published_at=None,
+                    fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+            ])
+            conn.commit()
+
+        # Rewind to v4: drop the column and the recorded version.
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("ALTER TABLE feed_entries DROP COLUMN file_url")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version','4')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(feed_entries)")}
+            entries = feeds_db.list_entries(conn)
+        assert "file_url" in cols
+        assert [e.guid for e in entries] == ["old"]
+        assert entries[0].file_url is None
+        # The v4 column and its data must survive the v5 migration.
+        assert entries[0].embed_url == "https://youtu.be/keep"
+
     def test_v2_to_v3_backfills_the_image_key_index(self, tmp_path):
         """A v2 DB gains ``entry_images``, backfilled from stored entries."""
         import json
@@ -360,6 +405,48 @@ class TestEntries:
             conn.commit()
             entries = feeds_db.list_entries(conn)
         assert entries[0].embed_url is None
+
+    def test_file_url_round_trips(self, tmp_path):
+        """An attached document survives storage, so the card can open it."""
+        path, feed_id = self._seed_feed(tmp_path)
+        item = EntryRecord(
+            id=0, feed_id=feed_id, guid="d", title="Essay", url=None,
+            author=None, content_html=None, content_text=None,
+            image_urls=["http://i/cover.png"],
+            file_url="https://attachments.are.na/1/essay.pdf",
+            published_at="2026-05-01T00:00:00+00:00",
+            fetched_at="2026-05-01T00:00:00+00:00",
+        )
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [item])
+            conn.commit()
+            entries = feeds_db.list_entries(conn)
+        assert entries[0].file_url == "https://attachments.are.na/1/essay.pdf"
+
+    def test_embed_and_file_urls_are_independent(self, tmp_path):
+        """A video sets one, a PDF the other; neither leaks into the other."""
+        path, feed_id = self._seed_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="v", title="V", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=[], embed_url="https://youtu.be/abc",
+                    published_at=None, fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="p", title="P", url=None,
+                    author=None, content_html=None, content_text=None,
+                    image_urls=[], file_url="https://a.are.na/1.pdf",
+                    published_at=None, fetched_at="2026-05-01T00:00:00+00:00",
+                ),
+            ])
+            conn.commit()
+            by_guid = {e.guid: e for e in feeds_db.list_entries(conn)}
+        assert by_guid["v"].embed_url == "https://youtu.be/abc"
+        assert by_guid["v"].file_url is None
+        assert by_guid["p"].file_url == "https://a.are.na/1.pdf"
+        assert by_guid["p"].embed_url is None
 
     def test_count_and_filter_by_status(self, tmp_path):
         path, feed_id = self._seed_feed(tmp_path)

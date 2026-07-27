@@ -135,6 +135,9 @@ def _map_entry(
         # Set for playable media (an Are.na Embed block). The reader turns it
         # into an inline player; empty for everything else.
         "embed_url": entry.embed_url or "",
+        # Set for an attached document (an Are.na Attachment — usually a PDF).
+        # The reader opens it instead of lightboxing the cover page.
+        "file_url": entry.file_url or "",
         "feed": {
             "id": feed.id if feed else 0,
             "title": (feed.title or feed.url) if feed else "",

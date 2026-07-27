@@ -11,6 +11,8 @@ no title copy, no body and no image, and painted an empty card.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from istota.feeds.providers import arena as arena_provider
@@ -229,6 +231,85 @@ class TestAttachmentBlocks:
         (item,) = arena_provider.fetch("c")
 
         assert _renderable(item)
+
+    def test_exposes_the_file_url_so_the_card_can_open_it(self, stub_get):
+        # Without this the reader treats the cover as an ordinary picture and
+        # a click zooms page 1 in the lightbox instead of opening the PDF.
+        stub_get(self._pdf())
+
+        (item,) = arena_provider.fetch("c")
+
+        assert item.file_url == "https://attachments.are.na/45295848/63d0752a.pdf"
+
+    def test_a_block_with_no_attachment_has_no_file_url(self, stub_get):
+        stub_get(_block("Image", image=_image()))
+
+        (item,) = arena_provider.fetch("c")
+
+        assert item.file_url is None
+
+    def test_link_text_is_an_action_when_the_title_already_names_the_file(
+        self, stub_get,
+    ):
+        # Are.na titles are nearly always curated ("The Cognitive Style of
+        # PowerPoint"), not filenames, and the card shows the title above the
+        # body — so repeating it as the link text says nothing. Name the
+        # action and the cost instead.
+        stub_get(self._pdf(title="The Cognitive Style of PowerPoint"))
+
+        (item,) = arena_provider.fetch("c")
+
+        assert "Open PDF (18.1 MB)" in item.content_html
+        assert item.content_html.count("The Cognitive Style of PowerPoint") == 0
+
+    def test_falls_back_to_a_readable_name_when_the_block_is_untitled(
+        self, stub_get,
+    ):
+        # v3's `attachment.filename` is the hashed storage name, so it must
+        # never reach the reader as a label.
+        stub_get(self._pdf(title=None))
+
+        (item,) = arena_provider.fetch("c")
+
+        # The hash legitimately appears in the href — it's the real URL. What
+        # must not carry it is the text a reader sees.
+        link_text = re.search(r">([^<]*)</a>", item.content_html).group(1)
+        assert "63d0752a" not in link_text
+        assert link_text == "PDF (18.1 MB)"
+
+    def test_generalises_beyond_pdf(self, stub_get):
+        stub_get(self._pdf(
+            title="A recording",
+            attachment={
+                "filename": "abc.mp3",
+                "content_type": "audio/mpeg",
+                "file_size": 4_194_304,
+                "file_extension": "mp3",
+                "url": "https://attachments.are.na/1/abc.mp3",
+            },
+        ))
+
+        (item,) = arena_provider.fetch("c")
+
+        assert "Open MP3 (4.0 MB)" in item.content_html
+        assert item.file_url == "https://attachments.are.na/1/abc.mp3"
+
+    def test_an_attachment_with_no_url_is_still_renderable(self, stub_get):
+        stub_get(self._pdf(attachment={"content_type": "application/pdf"}))
+
+        (item,) = arena_provider.fetch("c")
+
+        assert item.file_url is None
+        assert _renderable(item)
+
+    def test_keeps_the_curator_note_above_the_file_link(self, stub_get):
+        stub_get(self._pdf(description=_rich("Why this essay matters")))
+
+        (item,) = arena_provider.fetch("c")
+
+        assert item.content_html.index("Why this essay matters") < (
+            item.content_html.index("Open PDF")
+        )
 
 
 class TestChannelBlocks:

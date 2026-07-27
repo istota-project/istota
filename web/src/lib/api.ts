@@ -188,6 +188,13 @@ export interface FeedEntry {
    * reader rebuilds a player from this via `$lib/feeds/embed`.
    */
   embed_url: string;
+  /**
+   * A downloadable document the entry is about (an Are.na Attachment, in
+   * practice a PDF); empty otherwise. Distinct from `embed_url`: this one is
+   * opened rather than played, and its presence is what stops the reader
+   * treating a PDF's cover page as an ordinary gallery image.
+   */
+  file_url: string;
   feed: Feed;
   status: string;
   starred: boolean;

@@ -177,6 +177,12 @@ def _build_embed(block: dict, block_id: str) -> FetchedItem:
 
 
 def _build_attachment(block: dict, block_id: str) -> FetchedItem:
+    """An uploaded file — in practice a PDF almost every time.
+
+    ``file_url`` is what stops the reader treating this like a picture post:
+    Are.na renders a cover page for a PDF, so without it the card looks like
+    an image and a click zooms page 1 rather than opening the document.
+    """
     body_html, body_text = _rich_text(block.get("description"))
     attachment = block.get("attachment")
     attachment = attachment if isinstance(attachment, dict) else {}
@@ -196,6 +202,7 @@ def _build_attachment(block: dict, block_id: str) -> FetchedItem:
         content_text=_join_text(body_text, label),
         # Are.na renders a cover page for PDFs; without it the card is text-only.
         image_urls=_image_urls(block),
+        file_url=str(file_url) if file_url else None,
     )
 
 
@@ -270,6 +277,7 @@ def _item(
     content_text: str | None = None,
     image_urls: list[str] | None = None,
     embed_url: str | None = None,
+    file_url: str | None = None,
 ) -> FetchedItem:
     """Fill in the fields every block type shares."""
     return FetchedItem(
@@ -281,6 +289,7 @@ def _item(
         content_text=content_text,
         image_urls=image_urls or [],
         embed_url=embed_url,
+        file_url=file_url,
         published_at=_published_at(block),
     )
 
@@ -368,15 +377,42 @@ def _source_link(block: dict, *, verb: str = "Source") -> str | None:
 
 
 def _file_label(block: dict, attachment: dict) -> str:
-    """``report.pdf (3.6 MB)`` — enough to decide whether to click."""
-    name = (
-        attachment.get("file_name")
-        or block.get("title")
-        or attachment.get("filename")
-        or "Attachment"
-    )
+    """Link text for the file: ``Open PDF (18.1 MB)``.
+
+    The block title is nearly always curated rather than a filename ("The
+    Cognitive Style of PowerPoint", not ``dewey-1934.pdf``) and the card
+    already shows it above the body, so repeating it as the link text tells
+    the reader nothing. Name the action and the cost instead — the format and
+    the size are the two things that decide whether you click.
+
+    A block with *no* title falls back to naming the file, but never to v3's
+    ``attachment.filename``: that is the hashed storage name
+    (``63d0752ac2e5….pdf``), not anything a person wrote.
+    """
+    kind = _file_kind(attachment)
     size = _human_size(attachment.get("file_size"))
-    return f"{name} ({size})" if size else str(name)
+
+    if block.get("title"):
+        base = f"Open {kind}"
+    else:
+        # v2 carried a human `file_name`; v3 does not. Accept it when present.
+        base = str(attachment.get("file_name") or kind)
+
+    return f"{base} ({size})" if size else base
+
+
+def _file_kind(attachment: dict) -> str:
+    """A short uppercase format name: ``PDF``, ``MP3``, else ``file``."""
+    ext = attachment.get("file_extension")
+    if not ext:
+        content_type = str(attachment.get("content_type") or "")
+        ext = content_type.rpartition("/")[2] or ""
+    ext = str(ext).strip().lstrip(".")
+    # Guard against a content-type subtype that isn't a format name
+    # ("octet-stream", "vnd.openxmlformats-…").
+    if ext and ext.isalnum() and len(ext) <= 5:
+        return ext.upper()
+    return "file"
 
 
 def _human_size(num) -> str | None:

@@ -1067,6 +1067,7 @@ interface MockEntry {
   images: string[];
   duplicate_image_count: number;
   embed_url: string;
+  file_url: string;
   feed: MockFeedSource;
   status: 'read' | 'unread';
   starred: boolean;
@@ -1211,6 +1212,9 @@ function generateMockEntries(): MockEntry[] {
       // Every 9th post stands in for an Are.na Embed block, so the play
       // affordance and the inline player are reachable in dev.
       embed_url: i % 9 === 3 ? 'https://www.youtube.com/watch?v=B0sO1wdBhMY' : '',
+      // Every 13th post stands in for an Are.na Attachment, so the document
+      // card and its format badge are reachable in dev.
+      file_url: i % 13 === 6 ? 'https://attachments.are.na/1/essay.pdf' : '',
       feed,
       // First ~25% unread, rest read — gives the Unseen filter something to do.
       status: i < total * 0.25 ? 'unread' : 'read',
