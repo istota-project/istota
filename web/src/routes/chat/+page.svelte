@@ -587,7 +587,7 @@
           </button>
           <KebabMenu
             ariaLabel="Room actions"
-            items={[{ label: 'Settings…', onSelect: () => (settingsRoom = room) }]}
+            items={[{ label: 'Settings', onSelect: () => (settingsRoom = room) }]}
           />
         </div>
       {/each}

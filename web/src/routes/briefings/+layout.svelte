@@ -214,7 +214,7 @@
               </button>
               <KebabMenu
                 ariaLabel="Briefing actions"
-                items={[{ label: 'Delete…', danger: true, onSelect: () => (deleteTarget = item) }]}
+                items={[{ label: 'Delete', danger: true, onSelect: () => (deleteTarget = item) }]}
               />
             </div>
           {/each}

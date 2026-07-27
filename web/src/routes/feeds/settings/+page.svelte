@@ -15,7 +15,15 @@
     type FeedsFeedState,
     type ServiceCard as ServiceCardData,
   } from '$lib/api';
-  import { Button, Modal, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Button,
+    Modal,
+    ConfirmDialog,
+    KebabMenu,
+    Select,
+    type KebabItem,
+    type SelectOption,
+  } from '$lib/components/ui';
   import {
     ServiceCard,
     SettingsLayout,
@@ -222,6 +230,20 @@
     };
   }
 
+  // No Duplicate here, unlike briefings: a feed is identified by its URL and a
+  // category by its slug, both of which must stay unique — a copy would only be
+  // valid once its identity had been retyped, which is the Add form.
+  function feedMenu(idx: number): KebabItem[] {
+    return [
+      { label: 'Edit', onSelect: () => startEdit(idx) },
+      { label: 'Delete', danger: true, onSelect: () => deleteFeed(idx) },
+    ];
+  }
+
+  function categoryMenu(idx: number): KebabItem[] {
+    return [{ label: 'Delete', danger: true, onSelect: () => deleteCategory(idx) }];
+  }
+
   function performDelete() {
     if (!confirmDelete) return;
     if (confirmDelete.kind === 'feed') {
@@ -423,7 +445,7 @@
                 <th class="col-slug">Slug</th>
                 <th class="col-title">Title</th>
                 <th class="num col-count">Feeds</th>
-                <th class="actions">Order</th>
+                <th class="actions col-order">Order</th>
                 <th class="actions col-remove"></th>
               </tr>
             </thead>
@@ -447,7 +469,7 @@
                     />
                   </td>
                   <td class="num col-count">{count}</td>
-                  <td class="actions">
+                  <td class="actions col-order">
                     <button
                       class="icon-btn"
                       title="Move up"
@@ -464,12 +486,7 @@
                     >
                   </td>
                   <td class="actions col-remove">
-                    <button
-                      class="icon-btn danger"
-                      title="Delete category"
-                      onclick={() => deleteCategory(idx)}
-                      type="button">×</button
-                    >
+                    <KebabMenu items={categoryMenu(idx)} ariaLabel="Category actions" />
                   </td>
                 </tr>
               {/each}
@@ -530,18 +547,7 @@
                     {/if}
                   </td>
                   <td class="actions">
-                    <button
-                      class="icon-btn"
-                      title="Edit"
-                      onclick={() => startEdit(idx)}
-                      type="button">✎</button
-                    >
-                    <button
-                      class="icon-btn danger"
-                      title="Delete"
-                      onclick={() => deleteFeed(idx)}
-                      type="button">×</button
-                    >
+                    <KebabMenu items={feedMenu(idx)} ariaLabel="Subscription actions" />
                   </td>
                 </tr>
               {/each}
@@ -806,13 +812,18 @@
     white-space: nowrap;
   }
 
-  /* Override shared .grid actions width — feeds row has two icon buttons. */
+  /* Row actions are a single kebab; only the reorder column still holds a pair
+	   of icon buttons, so it keeps the wider width under its own class. */
   .grid td.actions,
   .grid th.actions {
+    width: 3rem;
+  }
+
+  .grid td.col-order,
+  .grid th.col-order {
     width: 4.5rem;
   }
 
-  /* Single-button column (category delete) needs less than a two-button one. */
   .grid td.col-remove,
   .grid th.col-remove {
     width: 2.75rem;
@@ -923,6 +934,11 @@
 
     .grid td.actions,
     .grid th.actions {
+      width: 2.75rem;
+    }
+
+    .grid td.col-order,
+    .grid th.col-order {
       width: 4rem;
     }
 

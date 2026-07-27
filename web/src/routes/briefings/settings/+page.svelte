@@ -32,8 +32,10 @@
   import {
     Button,
     ConfirmDialog,
+    KebabMenu,
     Select,
     AutocompleteInput,
+    type KebabItem,
     type SelectOption,
   } from '$lib/components/ui';
   import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
@@ -76,6 +78,9 @@
   let newBlockTitle = $state('');
   let expandedId = $state<number | null>(null);
   let addingSaving = $state(false);
+  // Surfaces failures from the non-atomic block/source duplicate, which can
+  // leave a partially built block behind.
+  let blockError = $state('');
 
   // The source currently open in the inline config editor (a draft copy — only
   // committed to the backend on Save).
@@ -184,6 +189,34 @@
         config: { ...(s.config ?? {}) },
       })),
     };
+  }
+
+  // Opens the editor pre-filled with a copy under a free name rather than
+  // writing immediately — the shared-block PUT is an upsert keyed on name, and
+  // a definition is worth reviewing before it starts generating on a cron.
+  function cloneShared(b: SharedBlock) {
+    editShared(b);
+    sharedEditingName = null;
+    if (sharedDraft) {
+      sharedDraft.name = uniqueName(
+        b.name,
+        sharedBlocks.map((x) => x.name),
+      );
+      sharedDraft.enabled = false;
+    }
+  }
+
+  function sharedMenu(b: SharedBlock): KebabItem[] {
+    return [
+      {
+        label: sharedRunning === b.name ? 'Running…' : 'Run now',
+        disabled: sharedRunning === b.name,
+        onSelect: () => void doRunShared(b.name),
+      },
+      { label: 'Edit', onSelect: () => editShared(b) },
+      { label: 'Duplicate', onSelect: () => cloneShared(b) },
+      { label: 'Delete', danger: true, onSelect: () => (confirmSharedDelete = b.name) },
+    ];
   }
 
   function cancelShared() {
@@ -421,6 +454,80 @@
     };
   }
 
+  // A clone must not collide with an existing name: the briefing/shared-block
+  // endpoints are upserts keyed on name, so a colliding "copy" would silently
+  // overwrite the original rather than fail.
+  function uniqueName(base: string, taken: string[]): string {
+    const used = new Set(taken);
+    if (!used.has(`${base}-copy`)) return `${base}-copy`;
+    for (let n = 2; ; n += 1) {
+      const candidate = `${base}-copy-${n}`;
+      if (!used.has(candidate)) return candidate;
+    }
+  }
+
+  // Deep clone: the schedule row plus every block and each block's sources.
+  // Cloning the schedule alone would look successful while producing an empty
+  // briefing, since blocks are keyed by briefing_name.
+  async function cloneBriefing(b: UserBriefingRow) {
+    const name = uniqueName(
+      b.name,
+      briefings.map((x) => x.name),
+    );
+    briefingError = '';
+    briefingSaving = true;
+    try {
+      await upsertBriefing({
+        name,
+        cron: b.cron,
+        title: b.title ?? '',
+        conversation_token: b.conversation_token ?? undefined,
+        output: b.output,
+        // A clone starts muted so a duplicated schedule can't fire before it
+        // has been reviewed and renamed.
+        enabled: false,
+      });
+      const blocks = config?.briefings.find((x) => x.name === b.name)?.blocks ?? [];
+      for (const block of blocks) {
+        const resp = await putBriefingBlock({
+          briefing_name: name,
+          title: block.title,
+          directive: block.directive ?? '',
+          render_mode: block.render_mode,
+          options: block.options ?? {},
+        });
+        const newId = resp.block?.id;
+        if (!newId) continue;
+        for (const src of block.sources ?? []) {
+          await putBriefingSource({
+            block_id: newId,
+            kind: src.kind,
+            config: JSON.parse(JSON.stringify(src.config ?? {})),
+          });
+        }
+      }
+      await Promise.all([reloadSchedule(), reloadContent()]);
+      briefingsRefreshNonce.update((n) => n + 1);
+    } catch (e) {
+      briefingError = (e as Error).message || 'Clone failed';
+    } finally {
+      briefingSaving = false;
+    }
+  }
+
+  function briefingMenu(b: UserBriefingRow): KebabItem[] {
+    if (b.managed !== 'db' || b.id === undefined) return [];
+    return [
+      { label: 'Edit', onSelect: () => editBriefing(b) },
+      { label: 'Duplicate', onSelect: () => void cloneBriefing(b) },
+      {
+        label: 'Delete',
+        danger: true,
+        onSelect: () => (confirmDelete = { kind: 'briefing', id: b.id!, label: b.name }),
+      },
+    ];
+  }
+
   async function submitBriefing(e: SubmitEvent) {
     e.preventDefault();
     briefingError = '';
@@ -493,6 +600,47 @@
     await reloadContent();
   }
 
+  // Block create takes no `sources` array, so a clone is one create plus one
+  // PUT per source. Not atomic — a mid-way failure leaves a partial block
+  // rather than rolling back, which is why the error surfaces on the card.
+  async function cloneBlock(block: BriefingBlock) {
+    blockError = '';
+    try {
+      const resp = await putBriefingBlock({
+        briefing_name: selectedName,
+        title: `${block.title} (copy)`,
+        directive: block.directive ?? '',
+        render_mode: block.render_mode,
+        options: block.options ?? {},
+      });
+      const newId = resp.block?.id;
+      if (newId) {
+        for (const src of block.sources ?? []) {
+          await putBriefingSource({
+            block_id: newId,
+            kind: src.kind,
+            config: JSON.parse(JSON.stringify(src.config ?? {})),
+          });
+        }
+      }
+      await reloadContent();
+      if (newId) expandedId = newId;
+    } catch (e) {
+      blockError = (e as Error).message || 'Duplicate failed';
+    }
+  }
+
+  function blockMenu(block: BriefingBlock): KebabItem[] {
+    return [
+      {
+        label: expandedId === block.id ? 'Collapse' : 'Edit',
+        onSelect: () => toggleExpand(block),
+      },
+      { label: 'Duplicate', onSelect: () => void cloneBlock(block) },
+      { label: 'Delete', danger: true, onSelect: () => askRemoveBlock(block) },
+    ];
+  }
+
   // ---- Source handlers ----
   async function addSource(block: BriefingBlock, kind: string) {
     const cfg: Record<string, unknown> = kind === 'email' ? { mode: 'shared' } : {};
@@ -500,6 +648,28 @@
     await reloadContent();
     if (resp.id) sourceDraft = { id: resp.id, kind, config: cfg };
     resetPathState();
+  }
+
+  async function cloneSource(block: BriefingBlock, source: BriefingSource) {
+    blockError = '';
+    try {
+      await putBriefingSource({
+        block_id: block.id,
+        kind: source.kind,
+        config: JSON.parse(JSON.stringify(source.config ?? {})),
+      });
+      await reloadContent();
+    } catch (e) {
+      blockError = (e as Error).message || 'Duplicate failed';
+    }
+  }
+
+  function sourceMenu(block: BriefingBlock, source: BriefingSource): KebabItem[] {
+    return [
+      { label: 'Edit', onSelect: () => startEditSource(source) },
+      { label: 'Duplicate', onSelect: () => void cloneSource(block, source) },
+      { label: 'Remove', danger: true, onSelect: () => askRemoveSource(source) },
+    ];
   }
 
   function startEditSource(source: BriefingSource) {
@@ -737,20 +907,7 @@
                   </td>
                   <td class="actions">
                     {#if b.managed === 'db' && b.id !== undefined}
-                      <button
-                        class="icon-btn"
-                        title="Edit"
-                        type="button"
-                        onclick={() => editBriefing(b)}>✎</button
-                      >
-                      <button
-                        class="icon-btn danger"
-                        title="Remove"
-                        type="button"
-                        onclick={() =>
-                          (confirmDelete = { kind: 'briefing', id: b.id!, label: b.name })}
-                        >×</button
-                      >
+                      <KebabMenu items={briefingMenu(b)} ariaLabel="Briefing actions" />
                     {/if}
                   </td>
                 </tr>
@@ -823,6 +980,9 @@
       description="Blocks become the sections of your briefing, in order. Each block has a directive and one or more sources. Click a block to edit it."
     >
       {#if config}
+        {#if blockError}
+          <div class="banner error">{blockError}</div>
+        {/if}
         <div class="briefing-pick">
           <SettingsField label="Briefing">
             <Select
@@ -903,18 +1063,7 @@
                         {/if}
                       </td>
                       <td class="actions">
-                        <button
-                          class="icon-btn"
-                          title={expandedId === block.id ? 'Collapse' : 'Edit'}
-                          type="button"
-                          onclick={() => toggleExpand(block)}>✎</button
-                        >
-                        <button
-                          class="icon-btn danger"
-                          title="Delete block"
-                          type="button"
-                          onclick={() => askRemoveBlock(block)}>×</button
-                        >
+                        <KebabMenu items={blockMenu(block)} ariaLabel="Block actions" />
                       </td>
                     </tr>
                     {#if expandedId === block.id}
@@ -1068,18 +1217,10 @@
                                             </label>
                                           </td>
                                           <td class="actions">
-                                            <button
-                                              class="icon-btn"
-                                              title="Edit source"
-                                              type="button"
-                                              onclick={() => startEditSource(source)}>✎</button
-                                            >
-                                            <button
-                                              class="icon-btn danger"
-                                              title="Remove source"
-                                              type="button"
-                                              onclick={() => askRemoveSource(source)}>×</button
-                                            >
+                                            <KebabMenu
+                                              items={sourceMenu(block, source)}
+                                              ariaLabel="Source actions"
+                                            />
                                           </td>
                                         </tr>
                                       {/if}
@@ -1163,20 +1304,7 @@
                     <td class="small">{b.trusted ? 'trusted' : 'untrusted'}</td>
                     <td class="small nowrap">{fmtLastRun(b.status.last_run_at)}</td>
                     <td class="actions">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onclick={() => doRunShared(b.name)}
-                        disabled={sharedRunning === b.name}
-                      >
-                        {sharedRunning === b.name ? 'Running…' : 'Run now'}
-                      </Button>
-                      <Button variant="ghost" size="sm" onclick={() => editShared(b)}>Edit</Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onclick={() => (confirmSharedDelete = b.name)}>Delete</Button
-                      >
+                      <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
                     </td>
                   </tr>
                 {/each}
@@ -1389,9 +1517,11 @@
     white-space: nowrap;
   }
 
+  /* One kebab, so the column only has to reserve the trigger's width — the
+	   wider column existed for the old two-glyph ✎/× pair. */
   .grid td.actions,
   .grid th.actions {
-    width: 4.5rem;
+    width: 3rem;
   }
 
   .block-name {
@@ -1522,7 +1652,7 @@
     width: 4rem;
   }
   .grid.sub td.actions {
-    width: 4.5rem;
+    width: 3rem;
   }
 
   .src-summary {
@@ -1647,13 +1777,14 @@
   .nowrap {
     white-space: nowrap;
   }
-  /* The global .grid is table-layout:fixed/width:100%, which squishes (and
-	   overlaps) on mobile since the three text actions can't fit the 3rem actions
-	   column. Give this table a natural min-width so .table-scroll scrolls
-	   horizontally on narrow screens instead of overlapping columns. */
+  /* The global .grid is table-layout:fixed/width:100%, which squishes this
+	   table's six content columns on mobile. Keep a natural min-width so
+	   .table-scroll scrolls horizontally instead of overlapping columns. The
+	   floor used to be 44rem to fit three text action buttons; the actions are a
+	   kebab now, so only the content columns set it. */
   .sb-table {
     table-layout: auto;
-    min-width: 44rem;
+    min-width: 34rem;
   }
   .sb-table td.actions,
   .sb-table th.actions {

@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Briefings have a title you can set. It appears as the email subject and as the entry in the briefings archive, with the date appended, and both surfaces now show the same thing. Leave it blank and it's derived from the briefing's name. Set it in Settings → Briefings, where the schedule table also gained an edit button — previously a briefing could only be added or deleted.
 
+### Changed
+- Row actions look and work the same everywhere in the web UI. Briefings, content blocks, sources, shared blocks, feed subscriptions and categories, immunizations and diagnoses all put their actions behind the same ⋮ menu the money pages already used, replacing a mix of pencil and cross icons on some pages and text buttons on others. Reorder arrows stay where they are, since burying them would cost a click per nudge.
+- Briefings, blocks, sources and shared blocks can be duplicated — an action the old icon rows had no room for. A duplicated briefing copies its blocks and their sources, and arrives switched off under a free name so it can't run before you have looked it over.
+
 ### Fixed
 - A briefing is titled the same way every time. The archive used to show whatever the model decided to call that day's edition, sometimes with an emoji and sometimes not, while the email arrived under a subject worked out from the clock rather than the briefing — so an evening briefing that ran in the morning was mailed as "Morning Briefing", and neither surface named a run the way the other did. Push notifications carried the task number instead of a title.
 

@@ -10,7 +10,13 @@
     type Diagnosis,
     type Encounter,
   } from '$lib/api';
-  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
+  import {
+    Select,
+    ConfirmDialog,
+    KebabMenu,
+    type KebabItem,
+    type SelectOption,
+  } from '$lib/components/ui';
 
   const statusOptions: SelectOption[] = [
     { value: 'active', label: 'Active' },
@@ -101,6 +107,19 @@
     } finally {
       saving = false;
     }
+  }
+
+  // The status-transition action differs per section (active → resolve,
+  // resolved → reactivate, chronic → neither); Delete is common to all three.
+  function diagnosisMenu(d: Diagnosis, transition: 'resolve' | 'reactivate' | null): KebabItem[] {
+    const items: KebabItem[] = [];
+    if (transition === 'resolve') {
+      items.push({ label: 'Resolve', onSelect: () => void resolveOne(d) });
+    } else if (transition === 'reactivate') {
+      items.push({ label: 'Reactivate', onSelect: () => void reactivate(d) });
+    }
+    items.push({ label: 'Delete', danger: true, onSelect: () => (deleteTarget = d) });
+    return items;
   }
 
   async function resolveOne(d: Diagnosis) {
@@ -265,8 +284,7 @@
                 {/if}
               </div>
               <div class="d-actions">
-                <button class="btn small" onclick={() => resolveOne(d)}>Resolve</button>
-                <button class="btn small danger" onclick={() => (deleteTarget = d)}>Delete</button>
+                <KebabMenu items={diagnosisMenu(d, 'resolve')} ariaLabel="Diagnosis actions" />
               </div>
             </div>
             {#if d.notes}<p class="notes">{d.notes}</p>{/if}
@@ -298,7 +316,7 @@
                 {/if}
               </div>
               <div class="d-actions">
-                <button class="btn small danger" onclick={() => (deleteTarget = d)}>Delete</button>
+                <KebabMenu items={diagnosisMenu(d, null)} ariaLabel="Diagnosis actions" />
               </div>
             </div>
             {#if d.notes}<p class="notes">{d.notes}</p>{/if}
@@ -330,9 +348,7 @@
                   {#if d.date_resolved}<span>resolved {formatDate(d.date_resolved)}</span>{/if}
                 </div>
                 <div class="d-actions">
-                  <button class="btn small" onclick={() => reactivate(d)}>Reactivate</button>
-                  <button class="btn small danger" onclick={() => (deleteTarget = d)}>Delete</button
-                  >
+                  <KebabMenu items={diagnosisMenu(d, 'reactivate')} ariaLabel="Diagnosis actions" />
                 </div>
               </div>
             </li>

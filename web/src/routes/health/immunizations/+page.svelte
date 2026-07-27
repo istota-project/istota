@@ -12,7 +12,7 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
+  import { Select, ConfirmDialog, KebabMenu, type SelectOption } from '$lib/components/ui';
 
   let loading = $state(true);
   let error = $state('');
@@ -374,16 +374,17 @@
                 <td>{i.facility || '—'}</td>
                 <td class="notes">{i.notes || '—'}</td>
                 <td class="row-actions">
-                  <a class="btn small" href="{base}/health/immunizations/detail?id={i.id}">
-                    Edit
-                  </a>
-                  <button
-                    class="btn small danger"
-                    type="button"
-                    onclick={() => (deleteTargetId = i.id)}
-                  >
-                    Delete
-                  </button>
+                  <KebabMenu
+                    ariaLabel="Immunization actions"
+                    items={[
+                      { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
+                      {
+                        label: 'Delete',
+                        danger: true,
+                        onSelect: () => (deleteTargetId = i.id),
+                      },
+                    ]}
+                  />
                 </td>
               </tr>
             {/each}

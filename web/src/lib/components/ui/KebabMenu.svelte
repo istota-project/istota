@@ -4,7 +4,12 @@
 
   export interface KebabItem {
     label: string;
-    onSelect: () => void;
+    // Omit when the item is a link (`href`). One of the two must be set.
+    onSelect?: () => void;
+    // Renders the item as a real anchor so navigation keeps middle-click,
+    // open-in-new-tab and the status-bar URL preview. A menu item that only
+    // navigates should use this rather than an onSelect + goto().
+    href?: string;
     danger?: boolean;
     disabled?: boolean;
   }
@@ -28,13 +33,18 @@
   <DropdownMenu.Portal>
     <DropdownMenu.Content class="ui-kebab-content" sideOffset={4} align="end">
       {#each items as item (item.label)}
-        <DropdownMenu.Item
-          class={item.danger ? 'ui-kebab-item ui-kebab-item--danger' : 'ui-kebab-item'}
-          disabled={item.disabled}
-          onSelect={item.onSelect}
-        >
-          {item.label}
-        </DropdownMenu.Item>
+        {@const cls = item.danger ? 'ui-kebab-item ui-kebab-item--danger' : 'ui-kebab-item'}
+        {#if item.href}
+          <DropdownMenu.Item class={cls} disabled={item.disabled}>
+            {#snippet child({ props })}
+              <a {...props} href={item.href}>{item.label}</a>
+            {/snippet}
+          </DropdownMenu.Item>
+        {:else}
+          <DropdownMenu.Item class={cls} disabled={item.disabled} onSelect={item.onSelect}>
+            {item.label}
+          </DropdownMenu.Item>
+        {/if}
       {/each}
     </DropdownMenu.Content>
   </DropdownMenu.Portal>
@@ -81,6 +91,14 @@
     user-select: none;
     white-space: nowrap;
   }
+  /* An href item renders as an anchor; strip link chrome and let it fill the
+	   row so the hit area matches a button item exactly. */
+  :global(a.ui-kebab-item) {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+  }
+
   :global(.ui-kebab-item[data-highlighted]) {
     background: var(--surface-raised);
     color: var(--text-primary);

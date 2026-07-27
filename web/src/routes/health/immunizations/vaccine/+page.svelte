@@ -12,6 +12,7 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
+  import { KebabMenu } from '$lib/components/ui';
 
   let name = $derived(page.url.searchParams.get('name') || '');
   let loading = $state(true);
@@ -196,9 +197,12 @@
                 <td>{i.facility || '—'}</td>
                 <td class="notes">{i.notes || '—'}</td>
                 <td class="row-actions">
-                  <a class="btn small" href="{base}/health/immunizations/detail?id={i.id}">
-                    Edit
-                  </a>
+                  <KebabMenu
+                    ariaLabel="Immunization actions"
+                    items={[
+                      { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
+                    ]}
+                  />
                 </td>
               </tr>
             {/each}
