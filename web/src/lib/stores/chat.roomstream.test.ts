@@ -6,7 +6,7 @@
  * user is a member of. These tests drive it through the polling fallback (no
  * EventSource in jsdom, which is the same degradation path a buffering proxy
  * produces in production) and assert routing, dedup, the fast-turn fix, the
- * gap/recovery threshold, background badges + previews, and `room` frames.
+ * gap/recovery threshold, background badges, and `room` frames.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { get } from 'svelte/store';
@@ -240,7 +240,7 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
-  it('bumps a background room badge and preview instead of appending', async () => {
+  it('bumps a background room badge instead of appending', async () => {
     vi.useFakeTimers();
     api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2, 1)] });
     api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
@@ -251,7 +251,6 @@ describe('chat store — live room stream', () => {
     expect(get(s.messages)).toHaveLength(0);
     const r2 = get(s.rooms).find((r) => r.id === 2)!;
     expect(r2.unread_count).toBe(2);
-    expect(r2.preview).toBe('background news');
     s.teardown();
   });
 
@@ -465,7 +464,6 @@ describe('chat store — live room stream', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(get(s.rooms).find((r) => r.id === 2)!.unread_count).toBe(1);
-    expect(get(s.rooms).find((r) => r.id === 2)!.preview).toBe('counted once');
     s.teardown();
   });
 

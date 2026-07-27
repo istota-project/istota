@@ -1557,10 +1557,6 @@ export interface ChatRoom {
   model?: string | null;
   /** Standing per-room effort level (low/medium/high/xhigh/max). */
   effort?: string | null;
-  /** Client-derived one-line summary of the most recent message seen on the
-   * room stream. Never sent by the server — background rooms only got content
-   * once the stream existed, so there is nothing to persist. */
-  preview?: string;
 }
 
 export interface ChatConfig {

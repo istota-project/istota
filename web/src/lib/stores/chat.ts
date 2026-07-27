@@ -600,17 +600,6 @@ function createSession(): ChatSession {
 
   // ---- Room-stream frame handling ----
 
-  // A short one-line summary of a streamed row for the sidebar preview. System
-  // rows arrive as `**Title**\n\nbody`, so strip the emphasis markers rather
-  // than render raw markdown in the sidebar.
-  function previewOf(row: ChatRoomEvent): string {
-    const line = (row.text || '')
-      .replace(/[*_`#]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    return line.length > 90 ? `${line.slice(0, 89)}…` : line;
-  }
-
   // A burst of streamed rows would otherwise fire one mark-read POST each.
   // The cursor call is idempotent and the display is already held at 0, so
   // coalescing on a short window costs nothing and saves the round-trips.
@@ -692,20 +681,15 @@ function createSession(): ChatSession {
     if (rid != null) markActiveReadThrottled(rid);
   }
 
-  // Background room: bump the badge and refresh the sidebar preview. Rows
-  // stream for every member room, so this is real content, not a count refetch.
+  // Background room: bump the unread badge. Rows stream for every member room,
+  // so this is real content, not a count refetch.
   function bumpBackgroundRoom(roomId: number, row: ChatRoomEvent, countUnread = true) {
+    if (!countUnread || row.role === 'user') return;
+    // count_unread_messages excludes the user's own turns, so a turn mirrored
+    // in from Talk must not ring its own room. `countUnread` is false for a row
+    // a just-completed refreshRooms already counted.
     rooms.update((rs) =>
-      rs.map((r) => {
-        if (r.id !== roomId) return r;
-        // count_unread_messages excludes the user's own turns, so a turn
-        // mirrored in from Talk must not ring its own room. `countUnread` is
-        // false for a row a just-completed refreshRooms already counted; the
-        // preview still updates, since that is client-derived either way.
-        const n = r.unread_count ?? 0;
-        const bumped = countUnread && row.role !== 'user';
-        return { ...r, unread_count: bumped ? n + 1 : n, preview: previewOf(row) };
-      }),
+      rs.map((r) => (r.id === roomId ? { ...r, unread_count: (r.unread_count ?? 0) + 1 } : r)),
     );
   }
 
@@ -782,7 +766,7 @@ function createSession(): ChatSession {
     rooms.update((rs) => {
       const idx = rs.findIndex((r) => r.id === fresh.id);
       // The snapshot deliberately omits unread counts (they ride the `message`
-      // frames) and the client-derived preview, so merge rather than replace.
+      // frames), so merge rather than replace.
       if (idx === -1) return [...rs, { ...(fresh as ChatRoom), unread_count: 0 }];
       const next = rs.slice();
       next[idx] = {
