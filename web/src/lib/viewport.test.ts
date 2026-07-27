@@ -98,8 +98,9 @@ describe('installViewportGuard', () => {
 
   it('holds its reading while the keyboard is up', () => {
     teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000); // establish the keyboard-free baseline
     focusTextEntry();
-    setVisualViewport(400); // keyboard occluding half the viewport
+    setVisualViewport(400); // keyboard eating half the visual viewport
     insets = { top: '0px', bottom: '0px', left: '0px', right: '0px' };
     window.dispatchEvent(new Event('resize'));
     vi.advanceTimersByTime(2000);
@@ -107,24 +108,56 @@ describe('installViewportGuard', () => {
     expect(document.documentElement.style.getPropertyValue('--safe-bottom')).toBe('34px');
   });
 
+  it('holds its reading when the keyboard shrinks the layout viewport instead', () => {
+    // An installed iOS app resizes the *layout* viewport for the keyboard, so
+    // both heights drop together and nothing looks occluded. Reading occlusion
+    // alone called this "no keyboard" and latched the keyboard-sized height —
+    // a permanent band at the bottom, every time the keyboard opened.
+    teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000);
+    expect(appHeight()).toBe('800px');
+
+    focusTextEntry();
+    Object.defineProperty(window, 'innerHeight', { value: 420, configurable: true });
+    setVisualViewport(420);
+    insets = { top: '0px', bottom: '0px', left: '0px', right: '0px' };
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(2000);
+
+    expect(appHeight()).toBe('800px');
+    expect(document.documentElement.style.getPropertyValue('--safe-bottom')).toBe('34px');
+  });
+
   it('re-measures when the keyboard is dismissed with focus retained', () => {
     teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000); // baseline: 800 / 800
     const ta = focusTextEntry();
     setVisualViewport(400);
     window.dispatchEvent(new Event('resize'));
     vi.advanceTimersByTime(500);
 
-    // Swipe-to-dismiss: the viewport comes back but iOS keeps focus on the
-    // field. A focus-only test would treat this as keyboard-up forever.
+    // Swipe-to-dismiss: both viewports come back to the keyboard-free geometry
+    // but iOS keeps focus on the field. A focus-only test treats this as
+    // keyboard-up forever and never measures again.
     setVisualViewport(800);
-    Object.defineProperty(window, 'innerHeight', { value: 900, configurable: true });
     insets = { ...insets, bottom: '20px' };
     expect(document.activeElement).toBe(ta);
     window.dispatchEvent(new Event('resize'));
-    vi.advanceTimersByTime(1000);
+    vi.advanceTimersByTime(2000);
 
-    expect(appHeight()).toBe('900px');
     expect(document.documentElement.style.getPropertyValue('--safe-bottom')).toBe('20px');
+  });
+
+  it('does not treat a half-restored viewport as a dismissal', () => {
+    teardown = installViewportGuard();
+    vi.advanceTimersByTime(2000);
+    focusTextEntry();
+    // Layout viewport back, visual viewport still short: the keyboard is up.
+    setVisualViewport(400);
+    insets = { top: '0px', bottom: '0px', left: '0px', right: '0px' };
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(2000);
+    expect(document.documentElement.style.getPropertyValue('--safe-bottom')).toBe('34px');
   });
 
   it('keeps sampling until the reading stops moving', () => {
