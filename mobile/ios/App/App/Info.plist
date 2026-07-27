@@ -24,6 +24,16 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Istota logs your location in the background so your movement history stays complete even when the app is closed. Location data is sent only to your own Istota server.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Istota records where you&apos;ve been so it can show your location history and work out which places you visit.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Istota records motion activity — walking, driving, stationary — alongside location, so visits can be told apart from journeys.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
