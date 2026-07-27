@@ -120,6 +120,142 @@ async function type(textarea: HTMLTextAreaElement, value: string) {
 const btn = (c: HTMLElement, label: string) =>
   c.querySelector(`[aria-label="${label}"]`) as HTMLButtonElement | null;
 
+const menu = (c: HTMLElement) => c.querySelector('[role="menu"]');
+
+const picker = (c: HTMLElement, kind: string) =>
+  c.querySelector(`input[data-picker="${kind}"]`) as HTMLInputElement;
+
+/** Attach → Photo Library, which is the path that reaches a file input. */
+async function choosePhotoLibrary(c: HTMLElement) {
+  await fireEvent.click(btn(c, 'Attach file')!);
+  await fireEvent.click(btn(c, 'Photo Library')!);
+}
+
+describe('Composer attachment menu', () => {
+  it('opens our own menu rather than the system sheet', async () => {
+    const { container } = mount();
+    expect(menu(container)).toBeNull();
+
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    expect(menu(container)).toBeTruthy();
+    for (const label of ['Photo Library', 'Take Photo', 'Choose File']) {
+      expect(btn(container, label)).toBeTruthy();
+    }
+  });
+
+  it('reaches no file input just to show the menu', async () => {
+    // The whole point. WebKit's upload panel is what takes the keyboard down,
+    // and it goes up the moment a file input is activated — so the first tap
+    // must not touch one.
+    const { container } = mount();
+    const opened = vi.fn();
+    for (const input of container.querySelectorAll('input[type="file"]')) {
+      input.addEventListener('click', opened);
+    }
+
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it('keeps the field focused when a menu row is tapped', async () => {
+    softKeyboard(true);
+    const { container, textarea } = mount();
+    textarea.focus();
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    btn(container, 'Photo Library')!.dispatchEvent(down);
+
+    expect(down.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('sits inside the composer, where the global dismiss leaves it alone', async () => {
+    // installKeyboardDismiss exempts `.composer` — a menu rendered anywhere else
+    // would drop the keyboard on the way to being tapped.
+    const { container } = mount();
+    await fireEvent.click(btn(container, 'Attach file')!);
+    expect(menu(container)!.closest('.composer')).toBeTruthy();
+  });
+
+  it('opens the library picker from the library row', async () => {
+    const { container } = mount();
+    await fireEvent.click(btn(container, 'Attach file')!);
+    const open = vi.spyOn(picker(container, 'library'), 'click');
+
+    await fireEvent.click(btn(container, 'Photo Library')!);
+
+    expect(open).toHaveBeenCalled();
+    expect(menu(container)).toBeNull();
+  });
+
+  it('asks for the camera on the take-photo row', async () => {
+    const { container } = mount();
+    await fireEvent.click(btn(container, 'Attach file')!);
+    const open = vi.spyOn(picker(container, 'camera'), 'click');
+
+    await fireEvent.click(btn(container, 'Take Photo')!);
+
+    expect(open).toHaveBeenCalled();
+    expect(picker(container, 'camera').getAttribute('capture')).toBe('environment');
+  });
+
+  it('leaves the choose-file row unfiltered', async () => {
+    // The one that reaches iCloud Drive and everything else — no accept filter,
+    // or the system browser hides most of it.
+    const { container } = mount();
+    await fireEvent.click(btn(container, 'Attach file')!);
+    const open = vi.spyOn(picker(container, 'file'), 'click');
+
+    await fireEvent.click(btn(container, 'Choose File')!);
+
+    expect(open).toHaveBeenCalled();
+    expect(picker(container, 'file').hasAttribute('accept')).toBe(false);
+  });
+
+  it('closes on Escape', async () => {
+    const { container } = mount();
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(menu(container)).toBeNull();
+  });
+
+  it('closes on a tap outside it', async () => {
+    const { container } = mount();
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    await tick();
+
+    expect(menu(container)).toBeNull();
+  });
+
+  it('closes rather than reopening when attach is tapped again', async () => {
+    // The outside-tap listener sees the attach button's own pointerdown first.
+    // Closing there and reopening on the click would leave it stuck open.
+    const { container } = mount();
+    const attach = btn(container, 'Attach file')!;
+    await fireEvent.click(attach);
+
+    attach.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    await fireEvent.click(attach);
+
+    expect(menu(container)).toBeNull();
+  });
+
+  it('says whether it is open', async () => {
+    const { container } = mount();
+    const attach = btn(container, 'Attach file')!;
+    expect(attach.getAttribute('aria-expanded')).toBe('false');
+    await fireEvent.click(attach);
+    expect(attach.getAttribute('aria-expanded')).toBe('true');
+  });
+});
+
 describe('Composer send control', () => {
   it('is disabled with an empty field and enables once there is text', async () => {
     const { container, textarea } = mount();
@@ -256,7 +392,7 @@ describe('Composer send control', () => {
     const { container, textarea } = mount();
     textarea.focus();
 
-    await fireEvent.click(btn(container, 'Attach file')!);
+    await choosePhotoLibrary(container);
     textarea.blur();
     await tick();
 
@@ -281,7 +417,7 @@ describe('Composer send control', () => {
     const { container, textarea } = mount();
     textarea.focus();
 
-    await fireEvent.click(btn(container, 'Attach file')!);
+    await choosePhotoLibrary(container);
     textarea.blur();
     await tick();
     expect(document.activeElement).toBe(textarea);
@@ -300,7 +436,7 @@ describe('Composer send control', () => {
     const now = vi.spyOn(Date, 'now');
 
     now.mockReturnValue(1_000);
-    await fireEvent.click(btn(container, 'Attach file')!);
+    await choosePhotoLibrary(container);
     now.mockReturnValue(30_000);
     textarea.blur();
     await tick();

@@ -1,6 +1,17 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import { ArrowUp, Square, Plus, Mic, Check, Trash2, X } from 'lucide-svelte';
+  import {
+    ArrowUp,
+    Square,
+    Plus,
+    Mic,
+    Check,
+    Trash2,
+    X,
+    Image,
+    Camera,
+    Folder,
+  } from 'lucide-svelte';
   import { uploadChatAttachment, type ChatAttachment } from '$lib/api';
   import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
@@ -22,6 +33,12 @@
 
   let text = $state('');
   let textarea: HTMLTextAreaElement | undefined = $state();
+  // One input per attachment-menu row. Separate elements rather than one whose
+  // `accept`/`capture` are rewritten before each open: the attributes have to
+  // be in the DOM before the click, and three inert inputs are easier to read
+  // than a mutation that has to land first.
+  let libraryInput: HTMLInputElement | undefined = $state();
+  let cameraInput: HTMLInputElement | undefined = $state();
   let fileInput: HTMLInputElement | undefined = $state();
   // Measured to derive the single-row field width — see wrapsAtSingleRowWidth.
   let rowEl: HTMLDivElement | undefined = $state();
@@ -168,20 +185,50 @@
     const meta = document.querySelector('meta[name="viewport"]');
     if (meta) meta.setAttribute('content', content);
   }
-  // Opening the attach sheet costs the keyboard, and it should not.
+  // Attaching a file costs the keyboard, and it should not.
   //
-  // The tap itself is handled — the button cancels its own focus shift (see
-  // keepFocus) — but the sheet WebKit puts up for a file input takes first
-  // responder off the field as it presents, so the keyboard leaves *after* the
-  // sheet has already appeared. That sheet is a popover rather than a modal
-  // takeover, so the keyboard is entitled to stay behind it; the field losing
-  // focus is the only reason it goes.
+  // The tap on the button is handled — it cancels its own focus shift, see
+  // keepFocus — but activating a file input hands the rest to WebKit, which
+  // puts up its own sheet and takes first responder off the field as it
+  // presents. Nothing on either side of the WebView can stop that: iOS will not
+  // raise the keyboard from a programmatic focus outside a user gesture, and
+  // `runOpenPanelWithParameters`, the delegate hook that would let the shell
+  // intervene, is macOS-only — on iOS the upload panel is internal to WebKit.
   //
-  // So take the focus back. If iOS honours that while the panel is up, the
-  // keyboard never leaves. If it doesn't, the field is still the focused
-  // element when the panel closes and the web view is first responder again,
-  // so the keyboard comes back then — worse than nothing happening, better
-  // than it staying gone.
+  // So the first tap does not reach a file input at all. It opens this menu,
+  // which is part of the page, and the keyboard has no reason to move for it.
+  // The system picker opens only once a row is chosen, at which point the user
+  // has deliberately left the composer and the keyboard going is the expected
+  // thing rather than a surprise.
+  //
+  // Focus deliberately stays in the textarea while the menu is open (the rows
+  // cancel their own focus shift too, and the menu renders inside `.composer`,
+  // which installKeyboardDismiss exempts). That is the same bargain the
+  // autocomplete popover makes: a menu that took focus would drop the keyboard
+  // itself, which is the entire thing being avoided.
+  let attachMenuOpen = $state(false);
+
+  function toggleAttachMenu() {
+    attachMenuOpen = !attachMenuOpen;
+  }
+
+  function onWindowPointerDown(e: PointerEvent) {
+    if (!attachMenuOpen) return;
+    const target = e.target as Element | null;
+    // The attach button's own press arrives here before its click. Closing on
+    // it would leave the click to reopen the menu, so it is left to the toggle.
+    if (target?.closest?.('.attach-menu, .plus')) return;
+    attachMenuOpen = false;
+  }
+
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (attachMenuOpen && e.key === 'Escape') attachMenuOpen = false;
+  }
+
+  // Once a row is chosen the panel does come up, and the keyboard goes with it.
+  // Take the focus back so the field is still the focused element when the
+  // panel closes and the WebView is first responder again — which is what
+  // brings the keyboard back rather than leaving the user to tap the field.
   //
   // Bounded to one blur, and only one that could plausibly be the panel's. A
   // standing rule would catch the user tapping away to put the keyboard down
@@ -189,9 +236,16 @@
   const PICKER_BLUR_WINDOW_MS = 2000;
   let pickerOpenedAt = 0;
 
-  function openFilePicker() {
+  function openPicker(input: HTMLInputElement | undefined) {
+    attachMenuOpen = false;
     pickerOpenedAt = document.activeElement === textarea ? Date.now() : 0;
-    fileInput?.click();
+    input?.click();
+  }
+
+  function onFilesChosen(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (input.files) upload(input.files);
+    input.value = '';
   }
 
   function onFocus() {
@@ -357,7 +411,11 @@
 
 <!-- The wrap point moves with the field's width, so a rotation or a sidebar
      toggle has to re-evaluate it; nothing else fires while the text is idle. -->
-<svelte:window onresize={autoGrow} />
+<svelte:window
+  onresize={autoGrow}
+  onpointerdown={onWindowPointerDown}
+  onkeydown={onWindowKeydown}
+/>
 
 <div
   class="composer"
@@ -371,6 +429,45 @@
   ondragleave={() => (dragOver = false)}
   ondrop={onDrop}
 >
+  <!-- Inside `.composer` on purpose: that is the selector installKeyboardDismiss
+       exempts, so tapping a row is not also a tap "outside the composer". -->
+  {#if attachMenuOpen}
+    <div class="attach-menu" role="menu" aria-label="Attach">
+      <button
+        class="attach-menu-item"
+        type="button"
+        role="menuitem"
+        aria-label="Photo Library"
+        onmousedown={keepFocus}
+        onclick={() => openPicker(libraryInput)}
+      >
+        <Image size={16} />
+        Photo Library
+      </button>
+      <button
+        class="attach-menu-item"
+        type="button"
+        role="menuitem"
+        aria-label="Take Photo"
+        onmousedown={keepFocus}
+        onclick={() => openPicker(cameraInput)}
+      >
+        <Camera size={16} />
+        Take Photo
+      </button>
+      <button
+        class="attach-menu-item"
+        type="button"
+        role="menuitem"
+        aria-label="Choose File"
+        onmousedown={keepFocus}
+        onclick={() => openPicker(fileInput)}
+      >
+        <Folder size={16} />
+        Choose File
+      </button>
+    </div>
+  {/if}
   {#if attachments.length || uploading}
     <div class="attach-row">
       {#each attachments as att (att.path)}
@@ -402,23 +499,44 @@
       bind:this={plusEl}
       class="icon-btn plus"
       onmousedown={keepFocus}
-      onclick={openFilePicker}
+      onclick={toggleAttachMenu}
       type="button"
       aria-label="Attach file"
       title="Attach file"
+      aria-haspopup="menu"
+      aria-expanded={attachMenuOpen}
     >
       <Plus />
     </button>
+    <!-- `capture` is what sends the camera row straight to the camera instead
+         of the picker. The choose-file row carries no `accept` on purpose —
+         a filter there hides everything the system browser could otherwise
+         reach. -->
+    <input
+      bind:this={libraryInput}
+      data-picker="library"
+      type="file"
+      multiple
+      accept="image/*,video/*"
+      class="file-hidden"
+      onchange={onFilesChosen}
+    />
+    <input
+      bind:this={cameraInput}
+      data-picker="camera"
+      type="file"
+      accept="image/*"
+      capture="environment"
+      class="file-hidden"
+      onchange={onFilesChosen}
+    />
     <input
       bind:this={fileInput}
+      data-picker="file"
       type="file"
       multiple
       class="file-hidden"
-      onchange={(e) => {
-        const f = (e.target as HTMLInputElement).files;
-        if (f) upload(f);
-        (e.target as HTMLInputElement).value = '';
-      }}
+      onchange={onFilesChosen}
     />
     <div class="ta-wrap" bind:this={wrapEl}>
       {#if ac.open}
@@ -728,6 +846,43 @@
 
   .file-hidden {
     display: none;
+  }
+
+  /* Above the composer rather than over it, anchored to the attach button's
+     edge. `.composer` is the positioned ancestor, and its own padding is what
+     the left offset matches so the menu lines up with the button below it. */
+  .attach-menu {
+    position: absolute;
+    bottom: 100%;
+    left: max(0.75rem, var(--safe-left));
+    margin-bottom: 0.3rem;
+    padding: 0.25rem;
+    display: flex;
+    flex-direction: column;
+    min-width: 12rem;
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: 0.4rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 100;
+  }
+  .attach-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.6rem;
+    border: none;
+    border-radius: 0.3rem;
+    background: transparent;
+    font: inherit;
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .attach-menu-item:hover {
+    background: var(--surface-raised);
   }
 
   .attach-row {
