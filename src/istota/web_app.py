@@ -91,6 +91,34 @@ def _resolve_static_dir() -> Path:
     )
 
 
+# SvelteKit emits two classes of asset and they need opposite caching. Bare
+# `StaticFiles` sends neither header, leaving both to heuristic freshness — and
+# an iOS home-screen PWA takes that as licence to pin the app shell more or less
+# forever. That is how a device ends up running a months-old bundle against a
+# current API: the shell it cached still names hashed chunks the server has
+# since deleted, so nothing 404s loudly, it just never picks up new code.
+def _static_cache_control(path: str) -> str:
+    """The `Cache-Control` for a built asset, by SvelteKit's own two classes."""
+    # `_app/immutable/*` is content-addressed — the hash changes when the bytes
+    # do, so it can be cached indefinitely and never revalidated.
+    if "/_app/immutable/" in f"/{path.lstrip('/')}":
+        return "public, max-age=31536000, immutable"
+    # Everything else is a stable name with changing content: the HTML shell
+    # (which names the hashed chunks), version.json, the manifest, icons.
+    # `no-cache` still allows caching — it requires revalidation, which the
+    # ETag answers with a 304 in the common case.
+    return "no-cache"
+
+
+class _CacheHeaderStatics(StaticFiles):
+    """`StaticFiles` that stamps the cache policy above onto every response."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = _static_cache_control(scope.get("path", ""))
+        return response
+
+
 _STATIC_DIR = _resolve_static_dir()
 
 
@@ -5546,4 +5574,8 @@ app.dependency_overrides[_garmin_verify_origin] = _verify_origin
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():
-    app.mount("/istota", StaticFiles(directory=str(_STATIC_DIR), html=True), name="web-static")
+    app.mount(
+        "/istota",
+        _CacheHeaderStatics(directory=str(_STATIC_DIR), html=True),
+        name="web-static",
+    )

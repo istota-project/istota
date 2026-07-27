@@ -57,6 +57,53 @@ class TestStaticDirResolution:
         assert _pick_static_dir("", repo, pkg) == repo
 
 
+@_needs_web_deps
+class TestStaticCacheControl:
+    """Bare StaticFiles sends no Cache-Control, so both asset classes fall to
+    heuristic freshness — and an iOS home-screen PWA reads that as licence to
+    pin the app shell indefinitely, running months-old code against a current
+    API (its cached shell names hashed chunks the server has since deleted, so
+    nothing fails loudly). The two classes need opposite policies."""
+
+    def test_hashed_assets_are_immutable(self):
+        from istota.web_app import _static_cache_control
+        got = _static_cache_control("/istota/_app/immutable/entry/app.B53rWCQM.js")
+        assert "immutable" in got
+        assert "max-age=31536000" in got
+
+    def test_shell_and_stable_names_revalidate(self):
+        from istota.web_app import _static_cache_control
+        for path in (
+            "/istota/chat/",
+            "/istota/index.html",
+            "/istota/manifest.webmanifest",
+            "/istota/_app/version.json",
+        ):
+            assert _static_cache_control(path) == "no-cache", path
+
+    def test_classification_is_path_relative(self):
+        """The mount strips the prefix, so the raw scope path may be relative."""
+        from istota.web_app import _static_cache_control
+        assert "immutable" in _static_cache_control("_app/immutable/chunks/x.js")
+
+    def test_mounted_statics_stamp_the_header(self, tmp_path, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from istota.web_app import _CacheHeaderStatics
+        root = tmp_path / "build"
+        (root / "_app" / "immutable").mkdir(parents=True)
+        (root / "index.html").write_text("<html></html>")
+        (root / "_app" / "immutable" / "a.js").write_text("//")
+        probe = FastAPI()
+        probe.mount("/istota", _CacheHeaderStatics(directory=str(root), html=True))
+        client = TestClient(probe)
+        assert client.get("/istota/").headers["cache-control"] == "no-cache"
+        assert "immutable" in client.get(
+            "/istota/_app/immutable/a.js",
+        ).headers["cache-control"]
+
+
 # ---------------------------------------------------------------------------
 # Workspace as a local folder
 # ---------------------------------------------------------------------------

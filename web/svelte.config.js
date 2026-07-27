@@ -21,6 +21,15 @@ const config = {
     paths: {
       base: '/istota',
     },
+    version: {
+      // Poll `_app/version.json` so a long-lived session learns a new build
+      // shipped. SvelteKit only reloads on the *next navigation*, which a chat
+      // tab left open for days never performs — the root layout turns `updated`
+      // into a visible prompt (and auto-reloads when idle). Chiefly for the iOS
+      // home-screen PWA, which caches the app shell aggressively enough to keep
+      // running a deleted bundle against a current API.
+      pollInterval: 300000,
+    },
   },
 };
 

@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The feeds **Images** and **Text** chips now hide pictures and body copy rather than hiding whole entries. Turning off Images used to drop every picture post out of the feed entirely — and turning off Text dropped everything else — so the two together were a post-type filter, not a display control. Each entry now stays in place and loses only the part you switched off, including pictures embedded in the body copy, so turning both off gives you a list of headlines instead of an empty page. The chips are a desktop control: a phone always shows everything and no longer offers them.
 
 ### Fixed
+- The web UI added to an iPhone or iPad home screen could go on running an old version indefinitely, quietly missing every feature shipped since. It kept working well enough not to look broken, so the only symptom was that new things never arrived. Browsers are now told which parts of the app they may keep and which they must re-check, and a session left open offers a Reload prompt when a new version is available.
+
 - Searching your Nextcloud files never worked. Every `files search` failed outright against a real server, so the assistant fell back to walking the folder tree — slow on a large one, and it gave up on some searches entirely.
 
 - Filtering the Nextcloud activity feed by type never worked either; asking for file activity failed instead of returning it.

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { page } from '$app/state';
+  import { page, updated } from '$app/state';
   import { onMount } from 'svelte';
   import { LogOut, Menu, Sun, Moon } from 'lucide-svelte';
   import { DropdownMenu } from 'bits-ui';
@@ -19,6 +19,28 @@
   // filter box or a form — not just the chat composer, which is where the first
   // version of this lived.
   onMount(() => installViewportGuard());
+
+  // Stale-build prompt. `kit.version.pollInterval` flips `updated.current` when
+  // a new build ships, but SvelteKit only acts on it at the *next navigation* —
+  // and a chat tab left open for days never navigates. Worse on the iOS
+  // home-screen PWA, which caches the app shell hard enough to keep running a
+  // bundle the server has deleted; that is how a device ended up polling
+  // endpoints that no longer exist while never opening the room stream.
+  //
+  // The prompt is deliberately a tap rather than an automatic reload: a reload
+  // discards a half-typed message, and the client cannot tell whether the
+  // composer is mid-thought.
+  onMount(() => {
+    if (typeof document === 'undefined') return;
+    // The poll timer is throttled in a background tab and stopped outright in a
+    // suspended PWA, so returning to the app is the moment a check is actually
+    // worth something — it is also the moment a stale bundle does its damage.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void updated.check();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  });
 
   onMount(async () => {
     console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);
@@ -229,7 +251,47 @@
   </main>
 {/if}
 
+{#if updated.current}
+  <!-- Sits outside the {#if user} block: a stale bundle can fail /api/me in
+       ways a fresh one would not, and that is exactly when the prompt matters. -->
+  <div class="update-toast" role="status">
+    <span>A new version is available.</span>
+    <button type="button" onclick={() => location.reload()}>Reload</button>
+  </div>
+{/if}
+
 <style>
+  /* Pinned above the safe-area inset so it clears the iOS home indicator —
+     this prompt exists chiefly for the home-screen PWA. */
+  .update-toast {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: calc(1rem + var(--safe-bottom));
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.5rem 0.5rem 1rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-pill);
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    box-shadow: 0 4px 16px rgb(0 0 0 / 0.3);
+    max-width: calc(100vw - 2rem);
+  }
+  .update-toast button {
+    font: inherit;
+    border: none;
+    border-radius: var(--radius-pill);
+    padding: 0.3rem 0.85rem;
+    background: var(--accent-blue);
+    color: #fff;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
   .theme-btn {
     display: inline-flex;
     align-items: center;
