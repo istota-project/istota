@@ -93,25 +93,31 @@
   });
 </script>
 
-<div class="header">
-  <h1>Immunization detail</h1>
-  <div class="actions">
-    <a class="btn" href="{base}/health/immunizations">Back</a>
-    {#if immunization}
-      <a
-        class="btn"
-        href="{base}/health/immunizations/vaccine?name={encodeURIComponent(immunization.name)}"
-      >
-        View all {immunization.name}
-      </a>
-      <button class="btn danger" type="button" onclick={() => (confirmDelete = true)}>Delete</button
-      >
-    {/if}
+{#if !loading}
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left under
+       this header. -->
+  <div class="header">
+    <h1>Immunization detail</h1>
+    <div class="actions">
+      <a class="btn" href="{base}/health/immunizations">Back</a>
+      {#if immunization}
+        <a
+          class="btn"
+          href="{base}/health/immunizations/vaccine?name={encodeURIComponent(immunization.name)}"
+        >
+          View all {immunization.name}
+        </a>
+        <button class="btn danger" type="button" onclick={() => (confirmDelete = true)}
+          >Delete</button
+        >
+      {/if}
+    </div>
   </div>
-</div>
+{/if}
 
 {#if loading}
-  <div class="loading">Loading…</div>
+  <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="msg error">{error}</div>
 {:else if immunization}

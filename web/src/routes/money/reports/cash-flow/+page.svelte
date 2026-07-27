@@ -312,11 +312,11 @@
 </script>
 
 {#if loading}
-  <div class="loading">Loading...</div>
+  <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="error-msg">{error}</div>
 {:else if months.length === 0}
-  <div class="loading">No data for the selected period.</div>
+  <div class="center-msg">No data for the selected period.</div>
 {:else}
   <div class="cashflow-page">
     <div class="chart-container">

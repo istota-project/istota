@@ -164,18 +164,21 @@
 </script>
 
 <div class="invoices-content">
-  <!-- Always rendered, count or not: dropping the whole bar while loading
-       shifted the table up and back down on every reload. -->
-  <div class="money-toolbar">
-    {#if !loading}
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message. The bar used to stay put (with only its count dropped)
+       to stop the table shifting up and back down on a reload; that shift
+       cannot happen now, because the table is not on screen while loading —
+       bar and table arrive together. -->
+  {#if !loading}
+    <div class="money-toolbar">
       <span class="money-result-count"
         >{invoiceCount} invoices ({outstandingCount} outstanding)</span
       >
-    {/if}
-  </div>
+    </div>
+  {/if}
 
   {#if loading}
-    <div class="loading">Loading...</div>
+    <div class="center-msg">Loading…</div>
   {:else if error}
     <div class="error-msg">{error}</div>
   {:else if invoices.length === 0}

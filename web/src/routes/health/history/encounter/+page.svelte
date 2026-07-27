@@ -144,22 +144,28 @@
   });
 </script>
 
-<div class="header">
-  <div>
-    <a class="back" href="{base}/health/history">← Medical history</a>
-    <h1>Encounter</h1>
-  </div>
-  {#if encounter && !editing}
-    <div class="actions">
-      <button class="btn" type="button" onclick={startEdit}>Edit</button>
-      <button class="btn danger" type="button" onclick={() => (confirmDelete = true)}>Delete</button
-      >
+{#if !loading}
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left under
+       this header. -->
+  <div class="header">
+    <div>
+      <a class="back" href="{base}/health/history">← Medical history</a>
+      <h1>Encounter</h1>
     </div>
-  {/if}
-</div>
+    {#if encounter && !editing}
+      <div class="actions">
+        <button class="btn" type="button" onclick={startEdit}>Edit</button>
+        <button class="btn danger" type="button" onclick={() => (confirmDelete = true)}
+          >Delete</button
+        >
+      </div>
+    {/if}
+  </div>
+{/if}
 
 {#if loading}
-  <div class="loading">Loading…</div>
+  <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="msg error">{error}</div>
 {:else if encounter}

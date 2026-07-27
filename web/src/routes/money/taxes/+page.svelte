@@ -113,7 +113,7 @@
 
 <div class="tax-content">
   {#if loading}
-    <div class="loading">Loading...</div>
+    <div class="center-msg">Loading…</div>
   {:else if error && !data}
     <div class="error-msg">{error}</div>
   {:else if !data}
@@ -421,8 +421,13 @@
 </div>
 
 <style>
+  /* A growing column so the whole-pane states (`.center-msg`) center in the
+	   section body rather than sitting against the top edge. */
   .tax-content {
     padding: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    flex: 1 0 auto;
   }
 
   .tax-layout {

@@ -322,25 +322,29 @@
     </div>
   {/if}
 
-  <div class="money-toolbar">
-    <span class="money-result-count">
-      {totals.uninvoiced_count} uninvoiced &middot; ${formatAmount(totals.uninvoiced_amount)}
-    </span>
-    <div class="filters">
-      <Select
-        value={statusFilter}
-        options={statusOptions}
-        ariaLabel="Status filter"
-        onValueChange={(v) => (statusFilter = v as WorkStatusFilter)}
-      />
-      <Select bind:value={clientFilter} options={clientFilterOptions} ariaLabel="Client filter" />
-      <Select bind:value={periodFilter} options={periodOptions} ariaLabel="Period filter" />
-      <Button variant="primary" onclick={openAdd}>Add entry</Button>
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left below. -->
+  {#if !loading}
+    <div class="money-toolbar">
+      <span class="money-result-count">
+        {totals.uninvoiced_count} uninvoiced &middot; ${formatAmount(totals.uninvoiced_amount)}
+      </span>
+      <div class="filters">
+        <Select
+          value={statusFilter}
+          options={statusOptions}
+          ariaLabel="Status filter"
+          onValueChange={(v) => (statusFilter = v as WorkStatusFilter)}
+        />
+        <Select bind:value={clientFilter} options={clientFilterOptions} ariaLabel="Client filter" />
+        <Select bind:value={periodFilter} options={periodOptions} ariaLabel="Period filter" />
+        <Button variant="primary" onclick={openAdd}>Add entry</Button>
+      </div>
     </div>
-  </div>
+  {/if}
 
   {#if loading}
-    <div class="loading">Loading...</div>
+    <div class="center-msg">Loading…</div>
   {:else if error}
     <div class="error-msg">{error}</div>
   {:else if entries.length === 0}

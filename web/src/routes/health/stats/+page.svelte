@@ -364,19 +364,24 @@
   onMount(load);
 </script>
 
-<div class="bar">
-  <div class="ranges">
-    {#each ['30d', '90d', '1y', 'all'] as r}
-      <button class:active={range === r} onclick={() => (range = r as Range)} type="button"
-        >{r}</button
-      >
-    {/each}
+{#if !loading}
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left under
+       this header. -->
+  <div class="bar">
+    <div class="ranges">
+      {#each ['30d', '90d', '1y', 'all'] as r}
+        <button class:active={range === r} onclick={() => (range = r as Range)} type="button"
+          >{r}</button
+        >
+      {/each}
+    </div>
+    <button class="log-btn" onclick={() => openEntry()} type="button">+ Log measurement</button>
   </div>
-  <button class="log-btn" onclick={() => openEntry()} type="button">+ Log measurement</button>
-</div>
+{/if}
 
 {#if loading}
-  <div class="loading">Loading…</div>
+  <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="msg error">{error}</div>
 {:else if metricsToShow().length === 0 && !hasBp()}

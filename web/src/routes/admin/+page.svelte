@@ -241,7 +241,7 @@
 
   <div class="settings admin-page">
     {#if loading && !stats}
-      <div class="loading">Loading…</div>
+      <div class="center-msg">Loading…</div>
     {:else if error}
       <div class="banner error">{error}</div>
     {:else if stats}

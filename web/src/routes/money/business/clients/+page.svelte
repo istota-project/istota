@@ -179,16 +179,20 @@
     </div>
   {/if}
 
-  <div class="money-toolbar">
-    <span class="money-result-count">
-      {clients.length}
-      {clients.length === 1 ? 'client' : 'clients'}
-    </span>
-    <Button variant="primary" onclick={openAdd}>Add client</Button>
-  </div>
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left below. -->
+  {#if !loading}
+    <div class="money-toolbar">
+      <span class="money-result-count">
+        {clients.length}
+        {clients.length === 1 ? 'client' : 'clients'}
+      </span>
+      <Button variant="primary" onclick={openAdd}>Add client</Button>
+    </div>
+  {/if}
 
   {#if loading}
-    <div class="loading">Loading...</div>
+    <div class="center-msg">Loading…</div>
   {:else if error}
     <div class="error-msg">{error}</div>
   {:else if clients.length === 0}
@@ -266,7 +270,14 @@
 <style>
   /* No wrapper padding: the toolbar and grid carry the shared 0.75rem inline
      edge themselves, so this page's content lines up with the work and
-     invoices tables on the sibling tabs. */
+     invoices tables on the sibling tabs. A growing column, matching the work
+     and invoices tabs, so a whole-pane state (`.center-msg`) centers below the
+     toolbar instead of hugging it. */
+  .clients-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1 0 auto;
+  }
 
   .client-grid {
     --card-min: 280px;

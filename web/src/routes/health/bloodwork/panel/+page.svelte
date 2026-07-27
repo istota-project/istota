@@ -203,7 +203,7 @@
 
 <div class="page">
   {#if loading}
-    <div class="loading">Loading…</div>
+    <div class="center-msg">Loading…</div>
   {:else if error && !panel}
     <div class="msg error">{error}</div>
   {:else if panel}
@@ -384,6 +384,9 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    /* Grows so the loading state centers in the pane, like every other health
+	     page (whose content sits directly in the frame). */
+    flex: 1 0 auto;
   }
   .header {
     display: flex;

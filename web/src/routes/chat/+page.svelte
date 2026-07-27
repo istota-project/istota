@@ -910,6 +910,10 @@
     justify-content: center;
     gap: 0.4rem;
     color: var(--text-dim);
+    /* Matches the whole-pane loading message every other section uses
+	     (`.center-msg`, app.css). The empty states set their own larger type on
+	     the `<p>` below, so this only lands on the bare "Loading…" line. */
+    font-size: var(--text-sm);
     text-align: center;
   }
   .chat-empty p {

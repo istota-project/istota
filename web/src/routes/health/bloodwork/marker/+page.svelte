@@ -282,10 +282,15 @@
   onMount(load);
 </script>
 
-<a class="back" href="{base}/health/bloodwork">← Bloodwork</a>
+{#if !loading}
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left under
+       this header. -->
+  <a class="back" href="{base}/health/bloodwork">← Bloodwork</a>
+{/if}
 
 {#if loading}
-  <div class="loading">Loading…</div>
+  <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="msg error">{error}</div>
 {:else if trend}

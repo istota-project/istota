@@ -94,13 +94,18 @@
   });
 </script>
 
-<div class="header">
-  <h1>{ref?.display_name || name}</h1>
-  <a class="btn" href="{base}/health/immunizations">Back</a>
-</div>
+{#if !loading}
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left under
+       this header. -->
+  <div class="header">
+    <h1>{ref?.display_name || name}</h1>
+    <a class="btn" href="{base}/health/immunizations">Back</a>
+  </div>
+{/if}
 
 {#if loading}
-  <div class="loading">Loading…</div>
+  <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="msg error">{error}</div>
 {:else if !ref}

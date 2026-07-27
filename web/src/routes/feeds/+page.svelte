@@ -344,7 +344,7 @@
 
 <div class="feed-page">
   {#if loading}
-    <div class="center-msg">Loading feeds...</div>
+    <div class="center-msg">Loading…</div>
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else}
@@ -405,21 +405,15 @@
 <Lightbox images={lightboxImages} index={lightboxIndex} onClose={() => (lightboxIndex = null)} />
 
 <style>
-  .center-msg {
-    min-height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-    font-size: var(--text-sm);
-  }
-
-  .center-msg.error {
-    color: var(--status-danger-fg);
-  }
-
+  /* A growing column rather than a block with `min-height: 100%`: it fills the
+	   pane the same way, and it is what lets the whole-pane states
+	   (`.center-msg`, global) center themselves in it with `flex: 1`.
+	   `flex-basis: auto` and no shrink, so a long grid still extends the scroll
+	   area instead of being pinned to the viewport height. */
   .feed-page {
-    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    flex: 1 0 auto;
     padding: 0.75rem;
   }
 

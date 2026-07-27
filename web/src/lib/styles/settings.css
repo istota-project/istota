@@ -9,6 +9,11 @@
   padding: 1.5rem 1rem 4rem;
   display: flex;
   flex-direction: column;
+  /* Grows into the pane so a whole-pane state (`.center-msg`, the loading
+     placeholder) can center itself in it. Inert for the cards themselves,
+     which keep their natural height at the top of the column — basis auto and
+     no shrink, so a long settings page still scrolls. */
+  flex: 1 0 auto;
   gap: 1rem;
   box-sizing: border-box;
   container-type: inline-size;
@@ -71,12 +76,6 @@
 .banner.info {
   background: rgba(110, 184, 132, 0.15);
   color: var(--status-success-fg);
-}
-
-.settings .placeholder {
-  color: var(--text-dim);
-  padding: 2rem 0;
-  text-align: center;
 }
 
 .settings .card {
@@ -322,4 +321,14 @@
   .settings .card {
     padding: 0.6rem;
   }
+}
+
+/* While the pane holds nothing but the loading message, drop the wrapper's own
+   padding: it is asymmetric (extra at the bottom, to keep the last card off the
+   screen edge), which would put the message a notch above the pane's centre
+   while every other section centres exactly. `.center-msg` carries its own
+   padding. Last in the file so it wins over the breakpoints above, which
+   re-declare the padding shorthand. */
+.settings:has(> .center-msg) {
+  padding: 0;
 }

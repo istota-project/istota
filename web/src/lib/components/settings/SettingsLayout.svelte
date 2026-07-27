@@ -26,7 +26,11 @@
 </script>
 
 <div class="settings">
-  {#if title || description || headerActions}
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left under this
+       header. The banners below stay: they are feedback about the last action,
+       and a reload should not swallow them. -->
+  {#if !loading && (title || description || headerActions)}
     <header class="settings-header">
       <div>
         {#if title}<h1>{title}</h1>{/if}
@@ -46,7 +50,7 @@
   {/if}
 
   {#if loading}
-    <div class="placeholder">Loading…</div>
+    <div class="center-msg">Loading…</div>
   {:else}
     {@render children()}
   {/if}

@@ -526,7 +526,38 @@ body:has(.app-content-fill) {
   overscroll-behavior: none;
 }
 
-/* Loading / error states */
+/* A route's whole-pane status message — the loading placeholder, and the empty
+   and error states that occupy the same slot. One rule so every module reads the
+   same: centered in the content area both ways, dim, small.
+
+   `flex: 1` rather than `min-height: 100%` is what does the vertical centering:
+   the pane it lands in is always a growing flex column (`.shell-main` and every
+   module frame below it), and a percentage height would instead measure the
+   *whole* pane and overflow it wherever a toolbar sits above the message. The
+   `min-height` is a floor for the few parents that size to their content.
+
+   `.error-msg` is the older, top-aligned pair of `.loading`; both survive for
+   in-card status lines that are not a pane state (an inline "Generating…", a
+   banner above a still-rendered layout). Reach for `.center-msg` for anything
+   that is the only thing on screen. */
+.center-msg {
+  flex: 1;
+  min-height: 8rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem 1rem;
+  box-sizing: border-box;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+
+.center-msg.error {
+  color: var(--status-danger-fg);
+}
+
+/* Inline loading / error states (in a card, above a rendered layout) */
 .loading,
 .error-msg {
   text-align: center;
@@ -536,7 +567,7 @@ body:has(.app-content-fill) {
 }
 
 .error-msg {
-  color: #c66;
+  color: var(--status-danger-fg);
 }
 
 /* Rendered markdown — shared by every chat surface that draws bot output

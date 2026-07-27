@@ -79,7 +79,7 @@
 </script>
 
 {#if loading}
-  <div class="loading">Loading...</div>
+  <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="error-msg">{error}</div>
 {:else}

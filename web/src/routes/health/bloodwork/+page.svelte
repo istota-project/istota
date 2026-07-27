@@ -134,23 +134,28 @@
   onMount(load);
 </script>
 
-<div class="header">
-  <h1>Bloodwork</h1>
-  <div class="actions">
-    <button class="btn" type="button" onclick={triggerCsvPick} disabled={csvImporting}>
-      {csvImporting ? 'Importing…' : 'Import CSV'}
-    </button>
-    <input
-      bind:this={csvInput}
-      type="file"
-      accept=".csv,text/csv"
-      style="display: none"
-      onchange={onCsvPicked}
-    />
-    <a class="btn" href={healthCsvExportUrl()} download="bloodwork.csv">Export CSV</a>
-    <a class="btn primary" href="{base}/health/bloodwork/upload">Upload lab results</a>
+{#if !loading}
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left under
+       this header. -->
+  <div class="header">
+    <h1>Bloodwork</h1>
+    <div class="actions">
+      <button class="btn" type="button" onclick={triggerCsvPick} disabled={csvImporting}>
+        {csvImporting ? 'Importing…' : 'Import CSV'}
+      </button>
+      <input
+        bind:this={csvInput}
+        type="file"
+        accept=".csv,text/csv"
+        style="display: none"
+        onchange={onCsvPicked}
+      />
+      <a class="btn" href={healthCsvExportUrl()} download="bloodwork.csv">Export CSV</a>
+      <a class="btn primary" href="{base}/health/bloodwork/upload">Upload lab results</a>
+    </div>
   </div>
-</div>
+{/if}
 
 {#if csvSummary}
   <div class="msg info">
@@ -187,7 +192,7 @@
 {/if}
 
 {#if loading}
-  <div class="loading">Loading…</div>
+  <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="msg error">{error}</div>
 {:else if matrix && matrix.panels.length === 0 && drafts.length === 0}

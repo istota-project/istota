@@ -179,15 +179,20 @@
   onMount(load);
 </script>
 
-<div class="header">
-  <div>
-    <a class="back" href="{base}/health/history">← Medical history</a>
-    <h1>Conditions</h1>
+{#if !loading}
+  <!-- Held back while loading so the pane shows nothing but the centered
+       loading message, rather than centering it in the space left under
+       this header. -->
+  <div class="header">
+    <div>
+      <a class="back" href="{base}/health/history">← Medical history</a>
+      <h1>Conditions</h1>
+    </div>
+    <button class="btn" type="button" onclick={() => (formOpen = !formOpen)}>
+      {formOpen ? 'Cancel' : '+ Add diagnosis'}
+    </button>
   </div>
-  <button class="btn" type="button" onclick={() => (formOpen = !formOpen)}>
-    {formOpen ? 'Cancel' : '+ Add diagnosis'}
-  </button>
-</div>
+{/if}
 
 {#if formOpen}
   <form class="form" onsubmit={submit}>
@@ -257,7 +262,7 @@
 {/if}
 
 {#if loading}
-  <div class="loading">Loading…</div>
+  <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="msg error">{error}</div>
 {:else}

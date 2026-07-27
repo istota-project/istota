@@ -73,7 +73,7 @@
       <div class="body markdown">{@html renderMarkdown(current.body_md ?? '')}</div>
     </article>
   {:else if loading || $briefingArchiveCount === null}
-    <p class="status">Loading…</p>
+    <p class="center-msg">Loading…</p>
   {:else}
     <div class="empty">
       <h1>No briefings yet</h1>
@@ -92,6 +92,11 @@
 		   overflow *past* padding-bottom, losing the bottom gap at scroll-end.
 		   flex-grow keeps short content (and the empty state) filling the area. */
     flex: 1 0 auto;
+    /* A column so the loading state (`.center-msg`, the only child in that
+		   branch) can center itself in the pane with `flex: 1`. The article and
+		   the empty state keep their natural height at the top of the column. */
+    display: flex;
+    flex-direction: column;
     padding: 1.5rem 2rem;
     /* The shell hands this route the bottom safe area (insetBottom={onSettings}),
 		   so the fill runs to the screen edge and the text clears the home

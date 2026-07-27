@@ -172,7 +172,7 @@
 
 <div class="page-fill">
   {#if loading}
-    <div class="center-msg">Loading location data...</div>
+    <div class="center-msg">Loading…</div>
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else}
@@ -270,19 +270,6 @@
     flex: 1;
     min-height: 0;
     position: relative;
-  }
-
-  .center-msg {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-    font-size: var(--text-sm);
-  }
-
-  .center-msg.error {
-    color: var(--status-danger-fg);
   }
 
   .stats-bar {

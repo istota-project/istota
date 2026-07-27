@@ -241,7 +241,7 @@
   {/if}
 
   {#if loading && transactions.length === 0}
-    <div class="loading">Loading...</div>
+    <div class="center-msg">Loading…</div>
   {:else if error}
     <div class="error-msg">{error}</div>
   {:else if transactions.length === 0}
