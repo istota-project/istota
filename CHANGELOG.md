@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-07-26
+
 ### Added
 - Web chat is live in every room at once. A reply typed in Talk, an alert, a scheduled post — anything landing in any room you belong to now appears in the browser in about a second, whether or not you are looking at that room and whether or not one of your own turns is still running. Rooms in the sidebar show their unread count as it changes, rather than a number that refreshed every few seconds. Short turns that started and finished between two refreshes used to be missed entirely until you reloaded; they can't be now. A confirmation prompt raised from another surface also shows up as a card you can act on.
 
@@ -1123,7 +1125,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.36.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.37.0...main
+[0.37.0]: https://gitlab.com/cynium/istota/-/releases/v0.37.0
 [0.36.0]: https://gitlab.com/cynium/istota/-/releases/v0.36.0
 [0.35.0]: https://gitlab.com/cynium/istota/-/releases/v0.35.0
 [0.34.0]: https://gitlab.com/cynium/istota/-/releases/v0.34.0
