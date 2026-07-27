@@ -1607,6 +1607,9 @@ export interface ChatHistoryMessage {
   // Aggregate-view rows (GET /chat/messages) additionally carry their room.
   room_token?: string;
   room_name?: string;
+  // Display names of files a user turn carried, so the attachment chips
+  // survive a transcript rebuild (the composer's in-memory names don't).
+  attachments?: string[];
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */
@@ -1818,12 +1821,16 @@ export async function sendChatMessage(
   roomId: number,
   text: string,
   attachments: string[] = [],
+  // Display labels, positional against `attachments`. The stored filename
+  // carries a random collision suffix, so the name the user picked is only
+  // knowable here — the server persists these for the transcript's chips.
+  attachmentNames: string[] = [],
 ): Promise<SendResult> {
   const resp = await fetch(`${base}/api/chat/rooms/${roomId}/messages`, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, attachments }),
+    body: JSON.stringify({ text, attachments, attachment_names: attachmentNames }),
   });
   if (resp.status === 401) throw new AuthError();
   if (resp.status === 429) {

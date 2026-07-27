@@ -1073,6 +1073,9 @@ function createSession(): ChatSession {
       starred: typeof m.msg_id === 'number' ? !!m.starred : undefined,
       roomToken: m.room_token,
       roomName: m.room_name,
+      // Persisted server-side, so the chip survives leaving the room and
+      // coming back (the composer's names are long gone by then).
+      attachments: m.attachments?.length ? m.attachments : undefined,
     };
   }
 
@@ -1558,6 +1561,7 @@ function createSession(): ChatSession {
       roomId,
       trimmed,
       attachments.map((x) => x.path),
+      attachments.map((x) => x.name),
     );
     if (!res.ok) {
       updateMsg(phCid, (m) => {

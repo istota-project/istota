@@ -22,11 +22,56 @@ function installPlugins(p: FakePlugins): FakePlugins {
   return p;
 }
 
+function base64Of(bytes: Uint8Array): string {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+
+/**
+ * A Filesystem that actually holds files and honours offset/length, so a test
+ * can watch a read being taken in pieces rather than in one string.
+ */
+function fakeFilesystem(files: Record<string, number> = { 'file:///tmp/a.jpg': 3 }) {
+  const contents = new Map<string, Uint8Array>();
+  for (const [path, size] of Object.entries(files)) {
+    const bytes = new Uint8Array(size);
+    for (let i = 0; i < size; i++) bytes[i] = i % 251;
+    contents.set(path, bytes);
+  }
+  return {
+    contents,
+    stat: vi.fn(async ({ path }: { path: string }) => {
+      const bytes = contents.get(path);
+      if (!bytes) throw new Error(`no such file: ${path}`);
+      return { size: bytes.length, type: 'file' };
+    }),
+    readFile: vi.fn(async ({ path, offset, length }: FakeRead) => {
+      const bytes = contents.get(path);
+      if (!bytes) throw new Error(`no such file: ${path}`);
+      const from = offset ?? 0;
+      const to = length && length > 0 ? from + length : bytes.length;
+      return { data: base64Of(bytes.slice(from, to)) };
+    }),
+    deleteFile: vi.fn(async ({ path }: { path: string }) => {
+      contents.delete(path);
+    }),
+  };
+}
+
+interface FakeRead {
+  path: string;
+  offset?: number;
+  length?: number;
+}
+
 /** Everything present, in the shape the real bridge hands over. */
-function fullBridge(): FakePlugins {
+function fullBridge(files?: Record<string, number>): FakePlugins {
   return installPlugins({
     Camera: {
-      getPhoto: vi.fn().mockResolvedValue({ base64String: THREE_BYTES, format: 'jpeg' }),
+      getPhoto: vi
+        .fn()
+        .mockResolvedValue({ path: 'file:///tmp/a.jpg', webPath: 'x', format: 'jpeg' }),
       pickImages: vi.fn().mockResolvedValue({
         photos: [{ path: 'file:///tmp/a.jpg', webPath: 'capacitor://x/a.jpg', format: 'jpeg' }],
       }),
@@ -36,13 +81,13 @@ function fullBridge(): FakePlugins {
         results: [{ type: 0, uri: 'file:///tmp/a.heic', saved: false }],
       }),
     },
-    Filesystem: { readFile: vi.fn().mockResolvedValue({ data: THREE_BYTES }) },
+    Filesystem: fakeFilesystem(files) as unknown as Record<string, ReturnType<typeof vi.fn>>,
     IstotaDocumentPicker: { pick: vi.fn().mockResolvedValue({ files: [] }) },
   });
 }
 
 beforeEach(() => {
-  setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.3.0`);
+  setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.4.0`);
 });
 
 afterEach(() => {
@@ -85,7 +130,10 @@ describe('takePhoto', () => {
     await takePhoto();
     const options = p.Camera!.getPhoto.mock.calls[0][0];
     expect(options.source).toBe('CAMERA');
-    expect(options.resultType).toBe('base64');
+    // `uri` rather than `base64`: a base64 result is the whole photo in one
+    // string across the bridge, which is the cost this module is built to
+    // avoid. A path is read in pieces instead.
+    expect(options.resultType).toBe('uri');
   });
 
   it('returns the photo as a File with its bytes decoded', async () => {
@@ -130,7 +178,7 @@ describe('pickPhotos', () => {
   it('reads each picked path through Filesystem', async () => {
     // The gallery pick is the one call that returns paths rather than bytes,
     // and a capacitor:// path cannot be fetched from an https origin.
-    const p = fullBridge();
+    const p = fullBridge({ 'file:///tmp/a.jpg': 3, 'file:///tmp/b.png': 3 });
     p.Camera!.pickImages.mockResolvedValue({
       photos: [
         { path: 'file:///tmp/a.jpg', format: 'jpeg' },
@@ -140,8 +188,9 @@ describe('pickPhotos', () => {
 
     const files = await pickPhotos();
 
-    expect(p.Filesystem!.readFile).toHaveBeenCalledWith({ path: 'file:///tmp/a.jpg' });
-    expect(p.Filesystem!.readFile).toHaveBeenCalledWith({ path: 'file:///tmp/b.png' });
+    const read = p.Filesystem!.readFile.mock.calls.map((c) => c[0].path);
+    expect(read).toContain('file:///tmp/a.jpg');
+    expect(read).toContain('file:///tmp/b.png');
     expect(files.map((f) => f.type)).toEqual(['image/jpeg', 'image/png']);
   });
 
@@ -156,7 +205,7 @@ describe('pickPhotos', () => {
   });
 
   it('names each file distinctly', async () => {
-    const p = fullBridge();
+    const p = fullBridge({ 'file:///tmp/a.jpg': 3, 'file:///tmp/b.jpg': 3 });
     p.Camera!.pickImages.mockResolvedValue({
       photos: [
         { path: 'file:///tmp/a.jpg', format: 'jpeg' },
@@ -179,8 +228,105 @@ describe('pickPhotos', () => {
   });
 });
 
+describe('reading a picked file', () => {
+  const CHUNK = 3 * 1024 * 1024;
+
+  it('takes a large file in pieces rather than one string', async () => {
+    // The whole reason for the ceiling that used to sit here: a base64 string
+    // of the entire file lands on the JS heap in one allocation, and at that
+    // point the file has cost about three times its size before the upload has
+    // even started. Reading a window at a time makes the peak the window.
+    const size = CHUNK * 2 + 17;
+    const p = fullBridge({ 'file:///tmp/a.jpg': size });
+
+    const [file] = await pickPhotos();
+
+    const reads = p.Filesystem!.readFile.mock.calls.map((c) => c[0]);
+    expect(reads.map((r) => r.offset)).toEqual([0, CHUNK, CHUNK * 2]);
+    expect(reads.every((r) => r.length <= CHUNK)).toBe(true);
+    expect(file.size).toBe(size);
+  });
+
+  it('reassembles the bytes in order', async () => {
+    const size = CHUNK + 512;
+    const p = fullBridge({ 'file:///tmp/a.jpg': size });
+    const expected = (
+      p.Filesystem as unknown as { contents: Map<string, Uint8Array> }
+    ).contents.get('file:///tmp/a.jpg')!;
+
+    const [file] = await pickPhotos();
+
+    const got = new Uint8Array(await file.arrayBuffer());
+    expect(got.length).toBe(expected.length);
+    expect(got[0]).toBe(expected[0]);
+    expect(got[CHUNK - 1]).toBe(expected[CHUNK - 1]);
+    expect(got[CHUNK]).toBe(expected[CHUNK]);
+    expect(got[size - 1]).toBe(expected[size - 1]);
+  });
+
+  it('deletes the copy once it has been read', async () => {
+    // Both pickers hand over a copy in the app's own temp directory. Left
+    // behind they are dead weight the size of every file ever attached.
+    const p = fullBridge();
+
+    await pickPhotos();
+
+    expect(p.Filesystem!.deleteFile).toHaveBeenCalledWith({ path: 'file:///tmp/a.jpg' });
+  });
+
+  it('still produces the file when the copy cannot be deleted', async () => {
+    const p = fullBridge();
+    p.Filesystem!.deleteFile.mockRejectedValue(new Error('read-only'));
+
+    const files = await pickPhotos();
+
+    expect(files).toHaveLength(1);
+  });
+
+  it('copes with a Filesystem that ignores the range', async () => {
+    // offset/length arrived in @capacitor/filesystem 8.1. An older one answers
+    // the whole file to every read, which without this guard is an endless loop
+    // appending the same bytes.
+    const p = fullBridge({ 'file:///tmp/a.jpg': CHUNK * 2 });
+    const whole = (p.Filesystem as unknown as { contents: Map<string, Uint8Array> }).contents.get(
+      'file:///tmp/a.jpg',
+    )!;
+    p.Filesystem!.readFile.mockResolvedValue({ data: base64Of(whole) });
+
+    const [file] = await pickPhotos();
+
+    expect(p.Filesystem!.readFile).toHaveBeenCalledTimes(1);
+    expect(file.size).toBe(CHUNK * 2);
+  });
+
+  it('falls back to a whole-file read with no stat to size it', async () => {
+    const p = fullBridge();
+    delete (p.Filesystem as unknown as Record<string, unknown>).stat;
+
+    const [file] = await pickPhotos();
+
+    expect(file.size).toBe(3);
+    expect(p.Filesystem!.readFile).toHaveBeenCalledWith({ path: 'file:///tmp/a.jpg' });
+  });
+});
+
 describe('pickDocuments', () => {
-  it('maps the plugin result onto Files', async () => {
+  it('reads the path the plugin hands back', async () => {
+    const p = fullBridge({ 'file:///tmp/notes.pdf': 3 });
+    p.IstotaDocumentPicker!.pick.mockResolvedValue({
+      files: [{ name: 'notes.pdf', mimeType: 'application/pdf', path: 'file:///tmp/notes.pdf' }],
+    });
+
+    const [file] = await pickDocuments();
+
+    expect(file.name).toBe('notes.pdf');
+    expect(file.type).toBe('application/pdf');
+    expect(file.size).toBe(3);
+  });
+
+  it('still takes base64 from a shell too old to send a path', async () => {
+    // 0.3.0 sent bytes. The web half deploys in minutes and the binary lags a
+    // TestFlight cycle, so both shapes have to work at once.
     const p = fullBridge();
     p.IstotaDocumentPicker!.pick.mockResolvedValue({
       files: [{ name: 'notes.pdf', mimeType: 'application/pdf', data: THREE_BYTES }],
@@ -189,8 +335,8 @@ describe('pickDocuments', () => {
     const [file] = await pickDocuments();
 
     expect(file.name).toBe('notes.pdf');
-    expect(file.type).toBe('application/pdf');
     expect(file.size).toBe(3);
+    expect(p.Filesystem!.readFile).not.toHaveBeenCalled();
   });
 
   it('returns nothing for a cancelled pick', async () => {
