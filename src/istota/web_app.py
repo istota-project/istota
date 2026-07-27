@@ -26,6 +26,7 @@ from html import escape
 from pathlib import Path
 
 import httpx
+from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
 from authlib.integrations.starlette_client import OAuth
 from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, UploadFile
 from fastapi.responses import (
@@ -700,6 +701,36 @@ def _render_login_page(bot_name: str, version: str) -> str:
     )
 
 
+def _render_login_error_page(
+    bot_name: str, version: str, headline: str, detail: str
+) -> str:
+    """A login failure the user can act on, in the same card as the login page.
+
+    ``headline`` and ``detail`` are always caller-supplied fixed strings —
+    never provider- or exception-derived text, which is attacker-influenceable
+    and would be reflected straight into a browser response.
+    """
+    name = escape(bot_name)
+    return (
+        f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>Sign-in failed &middot; {name}</title>'
+        f'<link rel="icon" href="/istota/favicon.png">'
+        f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
+        f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
+        f'<main class="card">'
+        f'<img class="mark" src="/istota/octopus-sigil.webp" alt="" width="68" height="72">'
+        f'<h1>{name}</h1>'
+        f'<p class="tagline">{escape(headline)}</p>'
+        f'<p class="tagline">{escape(detail)}</p>'
+        f'<a class="btn" href="/istota/login">Try signing in again</a>'
+        f'</main>'
+        f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
+        f'rel="noopener">Istota</a> v{escape(version)}</footer>'
+        f'</body></html>'
+    )
+
+
 @auth_router.get("/login")
 async def login(request: Request):
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
@@ -716,7 +747,53 @@ async def login(request: Request):
 async def callback(request: Request):
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
         return Response("Auth not configured", status_code=500)
-    token = await _oauth.nextcloud.authorize_access_token(request)
+
+    from . import __version__  # noqa: PLC0415
+
+    _bot_name = _config.bot_name if _config else "Istota"
+
+    def _login_error(status: int, headline: str, detail: str) -> HTMLResponse:
+        return HTMLResponse(
+            _render_login_error_page(_bot_name, __version__, headline, detail),
+            status_code=status,
+        )
+
+    # A failure here is not a server fault and must not surface as a bare 500.
+    # The common causes are all recoverable by starting again: the session
+    # cookie carrying the OAuth ``state`` was cleared or never sent, a stale or
+    # bookmarked callback URL was opened, or the authorize hop happened in a
+    # different cookie jar than the callback (an embedded WebView handing off
+    # to the system browser does exactly this).
+    try:
+        token = await _oauth.nextcloud.authorize_access_token(request)
+    except MismatchingStateError:
+        logger.warning(
+            "OAuth2 callback state mismatch — session cookie missing or stale "
+            "(client=%s)", request.client.host if request.client else "?",
+        )
+        return _login_error(
+            400,
+            "Sign-in could not be completed",
+            "This sign-in link has expired, or your browser did not send the "
+            "cookie that started it. Please sign in again.",
+        )
+    except OAuthError as e:
+        # The provider declined — a cancelled consent, a revoked client.
+        logger.warning("OAuth2 callback rejected by provider: %s", e)
+        return _login_error(
+            400,
+            "Sign-in was declined",
+            "The identity provider did not authorise this sign-in.",
+        )
+    except Exception:
+        # Token-endpoint unreachable or misbehaving. Distinct from the above:
+        # retrying may work, but nothing the user did caused it.
+        logger.exception("OAuth2 token exchange failed")
+        return _login_error(
+            502,
+            "Sign-in is temporarily unavailable",
+            "Could not reach the identity provider. Please try again shortly.",
+        )
 
     # NC's built-in OAuth2 returns the resource owner's username inline in
     # the token response (`user_id`), so we don't need a second HTTP round-trip.

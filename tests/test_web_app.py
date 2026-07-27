@@ -193,6 +193,71 @@ class TestCallbackRoute:
         assert resp.status_code == 302
         mod._nc_oauth2_userinfo.assert_called_once()
 
+    async def test_callback_state_mismatch_returns_400_not_500(self, client, app):
+        """A failed state check is a recoverable client-side condition, not a
+        server fault.
+
+        It happens whenever the session cookie carrying the OAuth ``state`` is
+        not the one the callback is read with: cookies cleared mid-login, a
+        bookmarked or re-submitted callback URL, or an embedded WebView handing
+        the authorize hop to the system browser (a separate cookie jar). Left
+        unhandled it surfaces as a bare 500 with a traceback, which says
+        nothing about how to recover.
+        """
+        import istota.web_app as mod
+        from authlib.integrations.base_client.errors import MismatchingStateError
+
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(
+            side_effect=MismatchingStateError()
+        )
+
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        assert resp.status_code == 400
+        # The user must be told how to get out of it.
+        assert "/istota/login" in resp.text
+
+    async def test_callback_provider_error_returns_400(self, client, app):
+        """The provider declining (e.g. the user cancels consent) comes back as
+        an OAuthError too, and is equally not a server fault."""
+        import istota.web_app as mod
+        from authlib.integrations.base_client.errors import OAuthError
+
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(
+            side_effect=OAuthError(error="access_denied")
+        )
+
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        assert resp.status_code == 400
+
+    async def test_callback_token_exchange_failure_returns_502(self, client, app):
+        """A token-endpoint failure is an upstream problem, so it must stay
+        distinguishable from the 400s above rather than collapsing into one
+        generic error — 502 matches what the userinfo fallback already returns."""
+        import istota.web_app as mod
+
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(
+            side_effect=RuntimeError("connection refused")
+        )
+
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        assert resp.status_code == 502
+
+    async def test_callback_failure_does_not_leak_exception_text(self, client, app):
+        """Whatever the provider put in the error, it is attacker-influenceable
+        and reflected into a browser response, so it must not be echoed."""
+        import istota.web_app as mod
+        from authlib.integrations.base_client.errors import OAuthError
+
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(
+            side_effect=OAuthError(description="<script>alert(1)</script>")
+        )
+
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        assert resp.status_code == 400
+        # Not `"<script>" not in ...`: the page carries its own inline theme
+        # script, so only the payload itself is evidence of reflection.
+        assert "alert(1)" not in resp.text
+
 
 @_needs_web_deps
 class TestUnauthenticatedAccess:
