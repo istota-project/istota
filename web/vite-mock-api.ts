@@ -145,6 +145,9 @@ interface MockChatTask {
   prompt: string;
   createdAt: number;
   variant?: 'simple' | 'multiround';
+  /** Attachment chip labels, persisted the way the backend persists them, so
+   * a chip in dev survives leaving the room and coming back. */
+  attachments?: string[];
 }
 const mockChatRooms: MockChatRoom[] = [
   {
@@ -530,6 +533,7 @@ function mockFinishedTurn(t: MockChatTask): { user: any; assistant: any } {
       created_at: new Date(t.createdAt).toISOString(),
       msg_id: mockUserMsgId(t),
       starred: mockStars.has(mockUserMsgId(t)),
+      ...(t.attachments?.length ? { attachments: t.attachments } : {}),
     },
     assistant: {
       role: 'assistant',
@@ -782,6 +786,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
           text: t.prompt,
           task_id: t.id,
           created_at: new Date(t.createdAt).toISOString(),
+          ...(t.attachments?.length ? { attachments: t.attachments } : {}),
         });
         active = { id: t.id, status: 'running' };
       }
@@ -801,6 +806,14 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     const room = mockChatRooms.find((r) => r.id === Number(msgMatch[1]));
     if (!room) return { error: 'room not found' };
     const attachments: string[] = Array.isArray(body?.attachments) ? body.attachments : [];
+    const rawNames: string[] = Array.isArray(body?.attachment_names) ? body.attachment_names : [];
+    // Same rule as the server: positional display labels, discarded wholesale
+    // on a count mismatch rather than landing on the wrong file.
+    const attachmentNames = attachments.length
+      ? rawNames.length === attachments.length
+        ? rawNames.map(String)
+        : attachments.map((p) => p.split('/').pop() || p)
+      : [];
     // An attachment-only send (a composer voice memo) is a real message: the
     // recording is the content. Mirrors the server's descriptor stand-in.
     let text = String(body?.text || '').trim();
@@ -823,6 +836,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       prompt: text,
       createdAt: Date.now(),
       variant,
+      attachments: attachmentNames,
     });
     return {
       task_id: id,

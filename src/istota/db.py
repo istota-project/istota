@@ -610,9 +610,17 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 task_id       INTEGER,
                 origin_surface TEXT NOT NULL,
                 external_ids  TEXT,
+                attachments   TEXT,
                 created_at    TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        # Existing deploys: the transcript has to keep showing that a turn
+        # carried a file after retention deletes the `tasks` row holding the
+        # paths, so the display names live on the message row too.
+        try:
+            conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id)")
         # Correct an existing deploy's looser index in place. The original keyed
         # on (room_token, origin_surface, role, task_id); drop it so the tighter
@@ -2784,6 +2792,9 @@ class Message:
     origin_surface: str
     external_ids: dict | None
     created_at: str
+    #: Display names of files the turn carried (display-only; the paths live on
+    #: the task row, which retention eventually deletes).
+    attachments: list[str] | None = None
 
 
 def _row_to_room(row: sqlite3.Row) -> Room:
@@ -2813,7 +2824,9 @@ def _row_to_room_binding(row: sqlite3.Row) -> RoomBinding:
 def _row_to_message(row: sqlite3.Row) -> Message:
     raw = row["external_ids"]
     external = json.loads(raw) if raw else None
+    raw_att = row["attachments"] if "attachments" in row.keys() else None
     return Message(
+        attachments=json.loads(raw_att) if raw_att else None,
         id=row["id"],
         room_token=row["room_token"],
         role=row["role"],
@@ -3083,12 +3096,14 @@ def add_message(
     title: str | None = None,
     task_id: int | None = None,
     external_ids: dict | None = None,
+    attachments: list[str] | None = None,
 ) -> int:
     """Append a message to a room's canonical transcript. Returns the new id."""
     row = conn.execute(
         "INSERT INTO messages "
-        "(room_token, role, body, title, task_id, origin_surface, external_ids) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        "(room_token, role, body, title, task_id, origin_surface, external_ids, "
+        " attachments) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -3097,6 +3112,7 @@ def add_message(
             task_id,
             origin_surface,
             json.dumps(external_ids) if external_ids else None,
+            json.dumps(attachments) if attachments else None,
         ),
     ).fetchone()
     return int(row["id"])
@@ -3467,6 +3483,7 @@ _CROSS_ROOM_COLUMNS = (
     "SELECT m.role AS role, m.body AS body, m.title AS title, "
     "  m.task_id AS task_id, m.id AS msg_id, m.created_at AS created_at, "
     "  m.room_token AS room_token, r.name AS room_name, "
+    "  m.attachments AS attachments, t.attachments AS task_attachments, "
     "  t.status AS status, t.actions_taken AS actions_taken, "
     "  t.execution_trace AS execution_trace, t.started_at AS started_at, "
     "  t.completed_at AS completed_at, t.model_used AS model_used, "

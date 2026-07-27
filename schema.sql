@@ -723,6 +723,11 @@ CREATE TABLE IF NOT EXISTS messages (
     task_id       INTEGER,                  -- turn's task; NULL for system msgs
     origin_surface TEXT NOT NULL,           -- surface the message was authored on
     external_ids  TEXT,                     -- JSON {surface: external_id} mirror ledger
+    -- JSON [display_name] for a turn that carried files. Display-only, and
+    -- deliberately duplicated off `tasks.attachments` (which holds paths):
+    -- retention GCs the task row, and the transcript has to keep showing that
+    -- a file was part of the turn.
+    attachments   TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);

@@ -2779,7 +2779,8 @@ _SPINE_COLUMNS = (
     "  m.id AS msg_id, m.created_at AS created_at, t.status AS status, "
     "  t.actions_taken AS actions_taken, t.execution_trace AS execution_trace, "
     "  t.started_at AS started_at, t.completed_at AS completed_at, "
-    "  t.model_used AS model_used, (s.message_id IS NOT NULL) AS starred "
+    "  t.model_used AS model_used, (s.message_id IS NOT NULL) AS starred, "
+    "  m.attachments AS attachments, t.attachments AS task_attachments "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
 )
@@ -2787,8 +2788,41 @@ _SPINE_COLUMNS = (
 _AUX_COLUMNS = (
     "SELECT id, prompt, result, status, error, confirmation_prompt, "
     "created_at, actions_taken, execution_trace, started_at, completed_at, "
-    "model_used FROM tasks "
+    "model_used, attachments FROM tasks "
 )
+
+
+def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | None:
+    """The attachment chip labels for a history row, or None for a turn that
+    carried no files.
+
+    Prefers the display names stored on the canonical `messages` row (what the
+    user actually picked). Falls back to basenames of the joined `tasks` paths,
+    which covers turns predating the message-side column — and only those, since
+    retention deletes the task row not long after.
+    """
+    keys = row.keys()
+    if message_column and "attachments" in keys and row["attachments"]:
+        try:
+            names = json.loads(row["attachments"])
+        except (TypeError, ValueError):
+            names = None
+        if isinstance(names, list) and names:
+            return [str(n) for n in names]
+    raw_paths = None
+    if not message_column and "attachments" in keys:
+        raw_paths = row["attachments"]
+    elif "task_attachments" in keys:
+        raw_paths = row["task_attachments"]
+    if not raw_paths:
+        return None
+    try:
+        paths = json.loads(raw_paths)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(paths, list) or not paths:
+        return None
+    return [os.path.basename(str(p)) for p in paths]
 
 
 def _chat_room_messages(
@@ -2976,11 +3010,15 @@ def _chat_room_messages(
     for r in reversed(msg_rows):  # oldest-first
         tid = r["task_id"]
         if r["role"] == "user":
-            messages.append({
+            d = {
                 "role": "user", "text": r["body"], "task_id": tid,
                 "created_at": r["created_at"],
                 "msg_id": r["msg_id"], "starred": bool(r["starred"]),
-            })
+            }
+            names = _row_attachment_names(r)
+            if names:
+                d["attachments"] = names
+            messages.append(d)
         else:  # assistant — a stored assistant row is by definition a completed turn
             messages.append(_assistant_message_dict(r, r["body"], r["status"] or "completed"))
         if tid is not None:
@@ -2995,10 +3033,14 @@ def _chat_room_messages(
     for r in reversed(task_rows):
         tid = r["id"]
         if ("user", tid) not in seen:
-            messages.append({
+            d = {
                 "role": "user", "text": r["prompt"], "task_id": tid,
                 "created_at": r["created_at"],
-            })
+            }
+            names = _row_attachment_names(r, message_column=False)
+            if names:
+                d["attachments"] = names
+            messages.append(d)
             seen.add(("user", tid))
         status = r["status"]
         if ("assistant", tid) in seen:
@@ -3121,6 +3163,7 @@ def _chat_create_web_task(
     model: str | None = None,
     effort: str | None = None,
     apply_room_default: bool = True,
+    attachment_names: list[str] | None = None,
 ) -> tuple[str, int]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)`` or
     ``("rate_limited", window_seconds)``."""
@@ -3148,6 +3191,7 @@ def _chat_create_web_task(
             text=text, source_type="web", output_target="room", priority=5,
             attachments=attachments or None, model=model, effort=effort,
             apply_room_default=apply_room_default,
+            attachment_names=attachment_names or None,
         )
     return ("ok", task_id)
 
@@ -3633,6 +3677,9 @@ def _cross_room_message_dict(r) -> dict:
             "role": "user", "text": r["body"], "task_id": r["task_id"],
             "status": r["status"], "created_at": r["created_at"], **base,
         }
+        names = _row_attachment_names(r)
+        if names:
+            d["attachments"] = names
     elif r["role"] == "assistant":
         d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
         d.update(base)
@@ -3777,6 +3824,15 @@ async def chat_send_message(
     attachments = _validate_chat_attachments(username, data.get("attachments") or [])
     if attachments is None:
         return JSONResponse({"error": "invalid attachment path"}, status_code=400)
+    # Display labels for the transcript's attachment chips. The stored filename
+    # carries a collision-avoiding random suffix, so the name the user picked is
+    # only knowable from the client. Display-only and never a path, so it needs
+    # no path validation — just a bound on what a client can persist.
+    raw_names = data.get("attachment_names") or []
+    attachment_names = (
+        [str(n)[:_MAX_ATTACHMENT_NAME_CHARS] for n in raw_names]
+        if isinstance(raw_names, list) else []
+    )
 
     # An attachment-only send is a real message — a voice memo recorded in the
     # composer is the whole message, with nothing typed alongside it. The
@@ -3836,6 +3892,7 @@ async def chat_send_message(
     outcome, value = await asyncio.to_thread(
         _chat_create_web_task, username, room.token, text, attachments,
         model_override, effort_override, not model_prefix_used,
+        attachment_names,
     )
     if outcome == "rate_limited":
         return JSONResponse(
@@ -3929,6 +3986,9 @@ def _chat_attachment_dir(username: str, day: str) -> Path:
 
 
 _ATTACHMENT_STEM_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# A chip label is display-only, so it's bounded rather than sanitized (the
+# renderer escapes it); this just keeps a client from persisting an essay.
+_MAX_ATTACHMENT_NAME_CHARS = 200
 
 
 def _attachment_stem(filename: str, limit: int = 48) -> str:

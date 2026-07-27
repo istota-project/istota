@@ -15,6 +15,7 @@ transport's `poll()`; this just performs the resolve + store + create step.
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from .. import db
@@ -31,6 +32,28 @@ logger = logging.getLogger(__name__)
 ROOM_SURFACES = frozenset({"talk", "web"})
 
 
+def display_attachment_names(
+    attachments: list[str] | None,
+    names: list[str] | None = None,
+) -> list[str] | None:
+    """The labels a turn's attachment chips render, or None when it carried no
+    files.
+
+    A stored attachment's filename is not the one the user picked — the web
+    upload appends a random suffix (`note.txt` → `note-a1b2c3d4.txt`) so two
+    same-named uploads in a day can't collide. So a caller that still knows the
+    original names (the web composer) supplies them and they win; every other
+    surface falls back to the stored basename. `names` is positional and
+    display-only, so a mismatched count is discarded rather than zipped — a
+    label landing on the wrong file is worse than a plainer one.
+    """
+    if not attachments:
+        return None
+    if names and len(names) == len(attachments):
+        return [str(n) for n in names]
+    return [os.path.basename(p) for p in attachments]
+
+
 def record_inbound(
     conn,
     config: "Config",
@@ -43,6 +66,7 @@ def record_inbound(
     channel_name: str | None = None,
     is_group_chat: bool = False,
     attachments: list[str] | None = None,
+    attachment_names: list[str] | None = None,
     platform_message_id: int | None = None,
     reply_to_message_id: int | None = None,
     reply_to_content: str | None = None,
@@ -174,6 +198,7 @@ def record_inbound(
                     if external_id is not None
                     else None
                 ),
+                attachments=display_attachment_names(attachments, attachment_names),
             )
 
     return room_token, task_id

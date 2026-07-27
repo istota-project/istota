@@ -94,9 +94,7 @@ describe('chat store — attachment chips', () => {
 
   it('leaves attachments undefined for a plain turn', async () => {
     api.getRoomMessages.mockResolvedValue(
-      history([
-        { role: 'user', text: 'no files', task_id: 8, created_at: '2026-06-10T12:00:00Z' },
-      ]),
+      history([{ role: 'user', text: 'no files', task_id: 8, created_at: '2026-06-10T12:00:00Z' }]),
     );
     const s = await freshSession();
     await s.init();
@@ -121,9 +119,7 @@ describe('chat store — attachment chips', () => {
     await s.init();
     await s.selectRoom(2);
     await s.selectRoom(1);
-    expect(get(s.messages).find((m) => m.role === 'user')?.attachments).toEqual([
-      'receipt.pdf',
-    ]);
+    expect(get(s.messages).find((m) => m.role === 'user')?.attachments).toEqual(['receipt.pdf']);
   });
 
   it('sends the display names alongside the paths', async () => {

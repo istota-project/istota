@@ -1044,6 +1044,131 @@ class TestChatMessagesApi:
 
 
 @_needs_web_deps
+class TestChatAttachmentPersistence:
+    """An attachment chip must survive leaving the room and coming back.
+
+    The chip is rendered from the *history payload*, so the display names have
+    to be persisted on the canonical `messages` row — the composer's in-memory
+    names are gone the moment the transcript is rebuilt, and `tasks` (the only
+    place the paths lived) is GC'd by retention.
+    """
+
+    async def _room(self, client, cookies):
+        return (await client.get("/istota/api/chat/rooms", cookies=cookies)).json()["rooms"][0]
+
+    async def _upload_path(self, username: str, filename: str) -> str:
+        import istota.web_app as mod
+        root = mod._chat_upload_roots(username)[0]
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / filename
+        path.write_bytes(b"\x00\x01")
+        return str(path)
+
+    async def _send(self, client, cookies, room, payload):
+        return await client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json=payload, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+    async def _history(self, client, cookies, room):
+        return (await client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )).json()["messages"]
+
+    async def test_history_carries_the_client_supplied_display_names(self, chat_client):
+        """The stored file is `note-a1b2c3d4.txt`; the chip must still read
+        `note.txt`, so the client's display names are what get persisted."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        up = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("note.txt", b"hello world", "text/plain")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        path = up.json()["path"]
+        resp = await self._send(chat_client, cookies, room, {
+            "text": "summarize this",
+            "attachments": [path],
+            "attachment_names": ["note.txt"],
+        })
+        assert resp.status_code == 200
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        assert user_msgs and user_msgs[0]["attachments"] == ["note.txt"]
+
+    async def test_names_fall_back_to_the_stored_basename(self, chat_client):
+        """A surface that supplies no display names (Talk, or an older web
+        client) still gets a chip — derived from the path."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        path = await self._upload_path("alice", "receipt-99.png")
+        await self._send(chat_client, cookies, room, {
+            "text": "look", "attachments": [path],
+        })
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        assert user_msgs and user_msgs[0]["attachments"] == ["receipt-99.png"]
+
+    async def test_mismatched_name_count_falls_back_to_basenames(self, chat_client):
+        """Names are display-only and positional; a client that sends the wrong
+        number of them can't shift a label onto the wrong file."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        one = await self._upload_path("alice", "a-1.png")
+        two = await self._upload_path("alice", "b-2.png")
+        await self._send(chat_client, cookies, room, {
+            "text": "two files", "attachments": [one, two],
+            "attachment_names": ["only-one.png"],
+        })
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        assert user_msgs[0]["attachments"] == ["a-1.png", "b-2.png"]
+
+    async def test_chip_survives_task_retention_cleanup(self, chat_client):
+        """`cleanup_old_tasks` deletes the `tasks` row that holds the paths, so
+        a names-on-`tasks` fix would lose the chip after a few days."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        path = await self._upload_path("alice", "invoice-7.pdf")
+        resp = await self._send(chat_client, cookies, room, {
+            "text": "file this", "attachments": [path],
+            "attachment_names": ["invoice.pdf"],
+        })
+        task_id = resp.json()["task_id"]
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            c.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        assert user_msgs and user_msgs[0]["attachments"] == ["invoice.pdf"]
+
+    async def test_turn_without_attachments_omits_the_field(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        await self._send(chat_client, cookies, room, {"text": "just text"})
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        assert user_msgs and not user_msgs[0].get("attachments")
+
+    async def test_aggregate_view_carries_attachments(self, chat_client):
+        """The cross-room stream/aggregate rows go through the same client
+        builder, so they must carry the same field."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        path = await self._upload_path("alice", "shot-3.png")
+        await self._send(chat_client, cookies, room, {
+            "text": "see this", "attachments": [path],
+            "attachment_names": ["shot.png"],
+        })
+        data = (await chat_client.get(
+            "/istota/api/chat/messages?view=all", cookies=cookies,
+        )).json()
+        user_msgs = [m for m in data["messages"] if m["role"] == "user"]
+        assert user_msgs and user_msgs[0]["attachments"] == ["shot.png"]
+
+
+@_needs_web_deps
 class TestChatDeleteApi:
     async def _create_room(self, client, cookies, name):
         return (await client.post(
