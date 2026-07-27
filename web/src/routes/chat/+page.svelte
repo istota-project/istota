@@ -198,6 +198,43 @@
     showJumpToLatest = false;
   }
 
+  /**
+   * Pin the transcript to its newest message.
+   *
+   * `repaint` is for the case where the scroller's whole content was just
+   * replaced — a room or view switch. iOS Safari sometimes leaves that frame
+   * unpainted: the DOM is there and the offset is right (the newest message
+   * shows up exactly where it belongs the instant anything forces a repaint —
+   * a swipe, or merely opening the rooms drawer), but the pane reads blank,
+   * empty-state placeholder included. It only shows on rooms with enough
+   * history to scroll, because only those move the offset at all — replacing
+   * the content and jumping in the same frame is what loses the invalidation.
+   *
+   * So on those switches we make the scroll happen for real, across frames:
+   * one pixel off the bottom, then back. Re-assigning the offset it already
+   * holds would be a no-op and invalidate nothing, which is why this nudges
+   * rather than just repeating the pin. Two frames at 1px is invisible, and it
+   * doubles as a late correction if the composer or an image settled after the
+   * first pin.
+   */
+  function pinToBottom(repaint = false) {
+    if (!listEl) return;
+    listEl.scrollTop = listEl.scrollHeight;
+    if (!repaint || typeof requestAnimationFrame === 'undefined') return;
+    requestAnimationFrame(() => {
+      if (!listEl) return;
+      // Relative to the max *scroll offset*, not scrollHeight: scrollHeight - 1
+      // clamps straight back to the bottom on any scroller taller than a pixel,
+      // so it would leave the offset unchanged and repaint nothing.
+      const maxTop = listEl.scrollHeight - listEl.clientHeight;
+      if (maxTop <= 1) return; // nothing to scroll, so nothing was jumped
+      listEl.scrollTop = maxTop - 1;
+      requestAnimationFrame(() => {
+        if (listEl) listEl.scrollTop = listEl.scrollHeight;
+      });
+    });
+  }
+
   async function onScroll() {
     if (!listEl) return;
     sampleAtBottom();
@@ -213,16 +250,33 @@
     }
   }
 
+  // A room / view switch replaces the transcript wholesale, so the next
+  // non-empty render is a fresh conversation that opens at its newest message —
+  // wherever the user happened to be scrolled in the room they left. Without
+  // the latch reset, leaving a room mid-history skipped the pin entirely and the
+  // new room opened at the top of its first page. Plain (non-reactive) lets, so
+  // neither this effect nor the one below re-runs on them.
+  let switchPending = false;
+  $effect(() => {
+    $activeRoomId;
+    $view;
+    switchPending = true;
+    atBottom = true;
+  });
+
   // Auto-scroll to the newest message when the list changes — but only if we
   // were at the bottom before the change (a streamed delta, a new send, a
   // notification append while reading the latest). A scroll-up prepend leaves
   // atBottom false, so the anchor restore in onScroll owns the viewport instead.
   $effect(() => {
-    $messages;
+    const msgs = $messages;
     if (!atBottom) return;
-    tick().then(() => {
-      if (listEl) listEl.scrollTop = listEl.scrollHeight;
-    });
+    // First content after a switch: pin with the repaint pass. The empty render
+    // the switch passes through on its way there doesn't count — it has nothing
+    // to paint and no offset to lose.
+    const afterSwitch = switchPending && msgs.length > 0;
+    if (afterSwitch) switchPending = false;
+    tick().then(() => pinToBottom(afterSwitch));
   });
 
   // Track the docked composer's height. The transcript reserves it as bottom
@@ -239,11 +293,7 @@
     const el = dockEl;
     const measure = () => {
       composerH = el.offsetHeight;
-      if (atBottom) {
-        tick().then(() => {
-          if (listEl) listEl.scrollTop = listEl.scrollHeight;
-        });
-      }
+      if (atBottom) tick().then(() => pinToBottom());
     };
     measure();
     // jsdom has no ResizeObserver; the one-shot measure above is enough there.
