@@ -19,6 +19,7 @@
     onJump,
     aggregate = false,
     active = false,
+    touch = false,
   }: {
     message: ChatMessage;
     // True when this message continues a run from the same author, so the
@@ -46,6 +47,11 @@
     // Safari's synthesized :hover left the affordances stuck on every row
     // ever tapped. The list owns this so exactly one row can be active.
     active?: boolean;
+    // True once the page's last pointer was a finger. `@media (hover: hover)`
+    // answers for the device, not the gesture — a touchscreen laptop or an iPad
+    // with a trackpad reports hover, and a tap there still strands a synthesized
+    // :hover. This mutes the hover reveal for as long as touch is what's in use.
+    touch?: boolean;
   } = $props();
 
   const isUser = $derived(message.role === 'user');
@@ -103,7 +109,15 @@
   <button
     class="star-btn"
     class:starred={message.starred}
-    onclick={() => onToggleStar?.(message.cid)}
+    onclick={(e) => {
+      onToggleStar?.(message.cid);
+      // A pointer-driven click leaves the button focused, and a focus ring that
+      // also reveals the icon is a second way for a star to sit there lit after
+      // the user has moved on (Safari has shipped :focus-visible on tap).
+      // `detail > 0` is the pointer's signature — a keyboard activation reports
+      // 0, so this can't take focus away from keyboard use.
+      if (e.detail > 0) e.currentTarget.blur();
+    }}
     aria-label={message.starred ? 'Unstar message' : 'Star message'}
     aria-pressed={message.starred ? 'true' : 'false'}
     title={message.starred ? 'Unstar' : 'Star'}
@@ -135,6 +149,7 @@
   <div
     class="cmd-row"
     class:active
+    class:touch
     data-cid={message.cid}
     data-task-id={message.taskId ?? undefined}
   >
@@ -159,6 +174,7 @@
     class="msg"
     class:continuation
     class:active
+    class:touch
     class:error={message.error}
     data-cid={message.cid}
     data-task-id={message.taskId ?? undefined}
@@ -275,15 +291,17 @@
     margin-top: 0.7rem;
     padding-top: 0.45rem;
   }
-  /* Reveal rules. On a hover-capable pointer the row's own :hover drives them;
-	   on touch the list marks a single `.active` row instead (see the `active`
-	   prop). Splitting them matters: iOS Safari synthesizes :hover on tap and
-	   only clears it on the next tap *inside the same stacking context*, so an
-	   unguarded :hover left a star showing on every row the user had ever
-	   tapped. `.active` is the touch surrogate and is inherently single. */
+  /* Reveal rules. With a real pointer the row's own :hover drives them; under a
+	   finger the list marks a single `.active` row instead. Splitting them
+	   matters: iOS Safari synthesizes :hover on tap and clears it only when a
+	   later tap displaces it, so an unguarded :hover left a star showing on every
+	   row the user had ever tapped. `.active` is the touch surrogate and is
+	   inherently single. Two guards, because they fail on different devices — the
+	   media query knows a phone has no hover at all, `.touch` knows a finger was
+	   used on a device that also has a mouse. */
   @media (hover: hover) {
-    .msg:hover .hover-time,
-    .msg:hover .meta-footer {
+    .msg:not(.touch):hover .hover-time,
+    .msg:not(.touch):hover .meta-footer {
       opacity: 1;
     }
   }
@@ -359,11 +377,12 @@
       color var(--transition-fast);
   }
   @media (hover: hover) {
-    .msg:hover .star-btn,
-    .cmd-row:hover .star-btn {
+    .msg:not(.touch):hover .star-btn,
+    .cmd-row:not(.touch):hover .star-btn {
       opacity: 1;
     }
-    .star-btn:hover {
+    .msg:not(.touch) .star-btn:hover,
+    .cmd-row:not(.touch) .star-btn:hover {
       color: var(--accent-amber);
     }
   }

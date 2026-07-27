@@ -248,6 +248,27 @@ describe('star affordance', () => {
     await fireEvent.click(container.querySelector('.star-btn')!);
     expect(onToggleStar).toHaveBeenCalledWith(7);
   });
+
+  it('drops focus after a pointer tap but keeps it for keyboard activation', async () => {
+    // A focus ring that also reveals the icon is a second way for a star to sit
+    // lit after the user moved on (Safari has shipped :focus-visible on tap).
+    // detail > 0 is the pointer's signature; a keyboard click reports 0.
+    const { container } = render(Message, {
+      message: finished({ msgId: 42 }),
+      onConfirm: noop,
+      onReject: noop,
+      onToggleStar: noop,
+    });
+    const btn = container.querySelector<HTMLButtonElement>('.star-btn')!;
+
+    btn.focus();
+    await fireEvent.click(btn, { detail: 1 });
+    expect(document.activeElement).not.toBe(btn);
+
+    btn.focus();
+    await fireEvent.click(btn, { detail: 0 });
+    expect(document.activeElement).toBe(btn);
+  });
 });
 
 // The touch surrogate for hover: on a device with no hover the list marks one
@@ -273,6 +294,20 @@ describe('tap activation (touch)', () => {
       active: true,
     });
     expect(container.querySelector('.msg')?.classList.contains('active')).toBe(true);
+  });
+
+  it('marks the row touch-driven so the hover reveal stands down', () => {
+    // The second guard, for a device that reports hover *and* has a finger on
+    // it (touchscreen laptop, iPad + trackpad) — where the media query alone
+    // still lets a synthesized :hover stick.
+    const { container } = render(Message, {
+      message: finished({ msgId: 42 }),
+      onConfirm: noop,
+      onReject: noop,
+      onToggleStar: noop,
+      touch: true,
+    });
+    expect(container.querySelector('.msg')?.classList.contains('touch')).toBe(true);
   });
 
   it('marks a system row active too', () => {

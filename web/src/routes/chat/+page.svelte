@@ -12,6 +12,13 @@
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
   import RoomSettings from '$lib/components/chat/RoomSettings.svelte';
+  import {
+    isTap,
+    nextActivation,
+    UNCHANGED,
+    type Activation,
+    type PointerSample,
+  } from '$lib/components/chat/tapActivation';
   import { getChatSession } from '$lib/stores/chat';
   import { getMe, type ChatRoom, type ChatView } from '$lib/api';
 
@@ -237,6 +244,7 @@
 
   async function onScroll() {
     if (!listEl) return;
+    clearActivation();
     sampleAtBottom();
     // Near the top with older history available → fetch the previous page and
     // restore the scroll anchor so the viewport stays put (scroll-anchored
@@ -253,16 +261,54 @@
   // Touch surrogate for hover (the per-message metadata + star). A touch device
   // has no hover, and iOS Safari's synthesized one sticks: it clears the pseudo
   // class only on the next tap, so every row tapped in a run kept its star
-  // showing. One activated row instead, replaced by the next tap and cleared by
-  // a tap on the background — a mouse pointer is left alone (it has real hover).
-  let activeCid: number | null = $state(null);
+  // showing. One activated row instead — a mouse pointer is left alone, it has
+  // real hover. Rules in tapActivation.ts; this owns the state and the clears.
+  let activeCid: Activation = $state(null);
+  let tapStart: PointerSample | null = null;
+
+  function onListPointerDown(e: PointerEvent) {
+    if (e.pointerType === 'mouse') return;
+    tapStart = { x: e.clientX, y: e.clientY, t: e.timeStamp };
+  }
 
   function onListPointerUp(e: PointerEvent) {
     if (e.pointerType === 'mouse') return;
-    const row = (e.target as HTMLElement | null)?.closest?.('[data-cid]') as HTMLElement | null;
-    const cid = row?.dataset.cid;
-    activeCid = cid === undefined ? null : Number(cid);
+    const start = tapStart;
+    tapStart = null;
+    // A scroll flick also ends with a pointerup over a row, and a long press is
+    // a text selection. Neither activates.
+    if (!start || !isTap(start, { x: e.clientX, y: e.clientY, t: e.timeStamp })) return;
+    const next = nextActivation(e.target as Element | null, activeCid);
+    if (next !== UNCHANGED) activeCid = next;
   }
+
+  // Everything that ends an activation without a tap on the list. Scrolling
+  // carries the row off-screen (and starts as a touch on it, so it would
+  // otherwise stay lit), and a tap anywhere else on the page — composer,
+  // sidebar, header — is the user moving on. Capture phase so a handler that
+  // stops propagation can't strand it.
+  function clearActivation() {
+    if (activeCid !== null) activeCid = null;
+  }
+
+  // Last pointer to touch the page. `@media (hover: hover)` is the first line of
+  // defence against synthesized hover, but it answers for the device, not the
+  // gesture: a touchscreen laptop or an iPad with a trackpad reports hover, and
+  // a finger on one of those still leaves a sticky :hover behind. So the rows
+  // also defer to what was last used, and hover reveals go quiet after a touch.
+  let pointerIsTouch = $state(false);
+
+  $effect(() => {
+    const onDocPointerDown = (e: PointerEvent) => {
+      pointerIsTouch = e.pointerType !== 'mouse';
+      if (!pointerIsTouch) return;
+      const t = e.target as Node | null;
+      if (t && listEl?.contains(t)) return; // list taps are the list's own business
+      clearActivation();
+    };
+    document.addEventListener('pointerdown', onDocPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onDocPointerDown, true);
+  });
 
   // Leaving the room takes the activation with it — the rows it referred to are
   // gone, and a cid from the old transcript could collide with one in the new.
@@ -561,7 +607,9 @@
         role="log"
         aria-live="polite"
         onscroll={onScroll}
+        onpointerdown={onListPointerDown}
         onpointerup={onListPointerUp}
+        onpointercancel={() => (tapStart = null)}
       >
         {#if !$loaded}
           <div class="chat-empty">Loading…</div>
@@ -613,6 +661,7 @@
               onJump={(token, taskId) => session.jumpToTask(token, taskId)}
               aggregate={inViewMode}
               active={message.cid === activeCid}
+              touch={pointerIsTouch}
             />
           {/each}
         {/if}
