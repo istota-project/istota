@@ -6,6 +6,7 @@
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
   import { commandProvider, modelAliasProvider } from './autocomplete/providers';
   import { createRecorder, formatElapsed } from './useRecorder.svelte';
+  import { usesSoftKeyboard } from '$lib/platform/input';
 
   let {
     onSend,
@@ -214,6 +215,11 @@
     text = '';
     attachments = [];
     queueMicrotask(autoGrow);
+    // A sent message is the end of a turn, and the reply arrives in the third of
+    // the screen the keyboard is standing on. Where the keyboard is soft, giving
+    // that space back is what the user was going to do next anyway. Where it is
+    // hardware, focus is free and they are probably still typing, so it stays.
+    if (usesSoftKeyboard()) textarea?.blur();
   }
 
   // The send/stop control is one button in two modes — see the markup below.
@@ -374,6 +380,7 @@
         onblur={onBlur}
         {placeholder}
         rows="1"
+        enterkeyhint="send"
         aria-label="Message"
         role="combobox"
         aria-expanded={ac.open}

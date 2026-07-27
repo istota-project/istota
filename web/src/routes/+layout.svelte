@@ -7,6 +7,7 @@
   import { getMe, AuthError, type User } from '$lib/api';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { installViewportGuard } from '$lib/viewport';
+  import { installKeyboardDismiss } from '$lib/platform/input';
   import '../app.css';
 
   let { children } = $props();
@@ -19,6 +20,10 @@
   // filter box or a form — not just the chat composer, which is where the first
   // version of this lived.
   onMount(() => installViewportGuard());
+
+  // Same reasoning, same scope: every section has something to type into, and
+  // on a touch device the keyboard outstays its welcome in all of them.
+  onMount(() => installKeyboardDismiss());
 
   // Stale-build prompt. `kit.version.pollInterval` flips `updated.current` when
   // a new build ships, but SvelteKit only acts on it at the *next navigation* —

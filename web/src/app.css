@@ -339,8 +339,15 @@ body {
 
      --app-height is set by lib/viewport.ts in an installed iOS web app only,
      where a WebKit regression (bug 297779) leaves dvh short after the soft
-     keyboard closes. Unset everywhere else, so every other context keeps dvh. */
-  height: var(--app-height, 100dvh);
+     keyboard closes. Unset everywhere else, so every other context keeps dvh.
+
+     --kb-height is the soft keyboard, and only the native shell ever sets it:
+     the viewport units deliberately ignore virtual keyboards, so nothing here
+     shrinks on its own when the keyboard arrives and a bottom-docked composer
+     ends up behind it. The shell knows the height before the keys animate, so
+     subtracting it here is what puts the composer above the keyboard in the
+     same moment. 0 in every browser, where the WebView cannot report it. */
+  height: calc(var(--app-height, 100dvh) - var(--kb-height, 0px));
   margin: 0;
   font-family: var(--font-sans);
   background: var(--surface-base);

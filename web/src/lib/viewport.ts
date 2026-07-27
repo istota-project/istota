@@ -24,7 +24,31 @@
  * of padding above the keyboard that it does not strictly need. That is a small
  * static gap, traded for a layout that does not move under the user mid-typing.
  */
+import { onKeyboardGeometry, shellAtLeast } from './platform/native';
+
 const EDGES = ['top', 'bottom', 'left', 'right'] as const;
+
+/**
+ * Third job, and the only one that is not a workaround: take the soft
+ * keyboard's height from the native shell.
+ *
+ * Everything above infers the keyboard from viewports that move underneath it.
+ * The shell does not have to infer anything — iOS tells it how tall the
+ * keyboard will be and when, and Capacitor forwards that as a `keyboardWillShow`
+ * event at the *start* of the animation. Published as `--kb-height`, which
+ * `app.css` subtracts from the app's height, so the composer is above the
+ * keyboard before the keys have finished sliding up.
+ *
+ * Gated on the shell version, because until 0.2.0 the shell resized the WebView
+ * itself (`resize: native`) and an offset applied here as well would count the
+ * keyboard twice. That native resize is also why this is worth doing: Capacitor
+ * defers it until the keyboard's animation has finished *plus 200ms*
+ * (`Keyboard.m:256`), then applies it in one jump, which is the visible lurch
+ * this replaces. Shell 0.2.0 sets `resize: none` and hands the job here.
+ *
+ * A browser never sees these events, so nothing about it changes.
+ */
+const SHELL_WEB_MANAGED_KEYBOARD = '0.2.0';
 
 /**
  * Second job: pin the app's height in an installed iOS web app.
@@ -412,6 +436,42 @@ export function installViewportGuard(): () => void {
     tick();
   }
 
+  /**
+   * The shell's keyboard, applied as it happens.
+   *
+   * Deliberately not routed through the settle machinery: that exists to find
+   * the truth in readings that lie, and this number does not lie. It is written
+   * straight through, in one pass with the inset, so the layout moves once.
+   *
+   * `--safe-bottom` goes to 0 for the duration. The inset is held at its
+   * home-indicator value through a keyboard transition on purpose (see the top
+   * of this file), but a keyboard is physically over the home indicator, so
+   * holding it there is a dead strip between the composer and the keys. The
+   * latched value is put back on the way out — the measurement it came from
+   * cannot be retaken while the keyboard is up.
+   */
+  let latchedSafeBottom: string | null = null;
+
+  function applyKeyboardHeight(height: number): void {
+    if (height > 0) {
+      if (latchedSafeBottom === null) latchedSafeBottom = written.get('--safe-bottom') ?? '';
+      write('--kb-height', `${height}px`);
+      write('--safe-bottom', '0px');
+      paintDebug('keyboard');
+      return;
+    }
+    write('--kb-height', '0px');
+    if (latchedSafeBottom) write('--safe-bottom', latchedSafeBottom);
+    latchedSafeBottom = null;
+    // The dismissal still needs the settle pass: it is what re-measures the
+    // insets and unwinds any scroll iOS applied to track the caret.
+    settle('blur');
+  }
+
+  const stopKeyboard = shellAtLeast(SHELL_WEB_MANAGED_KEYBOARD)
+    ? onKeyboardGeometry(applyKeyboardHeight)
+    : () => {};
+
   const onFocusOut = () => settle('blur');
   const onSettle = () => settle();
 
@@ -441,6 +501,7 @@ export function installViewportGuard(): () => void {
 
   return () => {
     clearTimeout(timer);
+    stopKeyboard();
     window.removeEventListener('focusout', onFocusOut);
     window.removeEventListener('orientationchange', onOrientationChange);
     window.removeEventListener('resize', onSettle);
@@ -451,6 +512,7 @@ export function installViewportGuard(): () => void {
     probe.remove();
     debugPanel?.remove();
     root.style.removeProperty('--app-height');
+    root.style.removeProperty('--kb-height');
     for (const edge of EDGES) root.style.removeProperty(`--safe-${edge}`);
   };
 }

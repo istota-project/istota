@@ -341,3 +341,84 @@ describe('installViewportGuard', () => {
     expect(document.querySelector('[aria-hidden="true"]')).toBeNull();
   });
 });
+
+/**
+ * In the native shell the keyboard stops being something to infer from a moving
+ * viewport: the shell says how tall it is, before it animates. These cover the
+ * handover — that the app takes the offset only from a shell that has stopped
+ * applying it natively, and that a browser is untouched.
+ */
+describe('installViewportGuard in the native shell', () => {
+  const PLAIN_SAFARI = 'Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Safari/604.1';
+
+  function setUserAgent(ua: string): void {
+    Object.defineProperty(window.navigator, 'userAgent', { value: ua, configurable: true });
+  }
+
+  function kbHeight(): string {
+    return document.documentElement.style.getPropertyValue('--kb-height');
+  }
+  function safeBottom(): string {
+    return document.documentElement.style.getPropertyValue('--safe-bottom');
+  }
+
+  afterEach(() => setUserAgent(PLAIN_SAFARI));
+
+  it('takes the keyboard height the moment the shell announces it', () => {
+    setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.2.0`);
+    teardown = installViewportGuard();
+    expect(safeBottom()).toBe('34px');
+
+    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+
+    expect(kbHeight()).toBe('336px');
+    // The keyboard is over the home indicator, so the inset it was holding back
+    // for is genuinely gone — and holding it anyway is a visible dead strip
+    // between the composer and the keys.
+    expect(safeBottom()).toBe('0px');
+  });
+
+  it('restores the latched inset when the keyboard goes', () => {
+    setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.2.0`);
+    teardown = installViewportGuard();
+
+    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+    window.dispatchEvent(new CustomEvent('keyboardWillHide'));
+
+    expect(kbHeight()).toBe('0px');
+    expect(safeBottom()).toBe('34px');
+  });
+
+  it('ignores the keyboard events in a browser', () => {
+    setUserAgent(PLAIN_SAFARI);
+    teardown = installViewportGuard();
+
+    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+
+    expect(kbHeight()).toBe('');
+    expect(safeBottom()).toBe('34px');
+  });
+
+  it('ignores them on a shell that still resizes itself', () => {
+    // 0.1.0 shipped `resize: native`, so the WebView shrinks under us and an
+    // offset applied here as well would be counted twice.
+    setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.1.0`);
+    teardown = installViewportGuard();
+
+    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+
+    expect(kbHeight()).toBe('');
+    expect(safeBottom()).toBe('34px');
+  });
+
+  it('stops listening and clears the offset on teardown', () => {
+    setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.2.0`);
+    const stop = installViewportGuard();
+    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+    stop();
+
+    expect(kbHeight()).toBe('');
+    window.dispatchEvent(new CustomEvent('keyboardWillShow', { detail: { keyboardHeight: 336 } }));
+    expect(kbHeight()).toBe('');
+  });
+});

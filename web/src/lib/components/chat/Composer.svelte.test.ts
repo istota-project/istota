@@ -72,6 +72,16 @@ function enableMic() {
   });
 }
 
+/** Which keyboard the composer thinks it is talking to. */
+function softKeyboard(on: boolean) {
+  window.matchMedia = ((q: string) => ({
+    matches: on === q.includes('coarse'),
+    media: q,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+}
+
 afterEach(() => {
   cleanup();
   delete (globalThis as Record<string, unknown>).MediaRecorder;
@@ -131,6 +141,53 @@ describe('Composer send control', () => {
     await fireEvent.click(btn(container, 'Send')!);
     expect(onSend).toHaveBeenCalledWith('hi there', []);
     expect(textarea.value).toBe('');
+  });
+
+  it('asks for a send key on a soft keyboard', () => {
+    // Enter already sends; without this the return key is labelled as a
+    // newline, which is the opposite of what it does.
+    const { textarea } = mount();
+    expect(textarea.getAttribute('enterkeyhint')).toBe('send');
+  });
+
+  it('drops the keyboard after a send on a touch device', async () => {
+    // The reply arrives behind the keyboard otherwise, and getting it out of
+    // the way was a second deliberate gesture every time.
+    softKeyboard(true);
+    const { textarea } = mount();
+    textarea.focus();
+    await type(textarea, 'hi');
+    await fireEvent.keyDown(textarea, { key: 'Enter' });
+    expect(document.activeElement).not.toBe(textarea);
+  });
+
+  it('drops it after the send button too, not just the return key', async () => {
+    softKeyboard(true);
+    const { container, textarea } = mount();
+    textarea.focus();
+    await type(textarea, 'hi');
+    await fireEvent.click(btn(container, 'Send')!);
+    expect(document.activeElement).not.toBe(textarea);
+  });
+
+  it('keeps focus where there is a hardware keyboard', async () => {
+    // On a desktop the next message is typed straight away, and re-focusing is
+    // a mouse trip the user did not ask for.
+    softKeyboard(false);
+    const { textarea } = mount();
+    textarea.focus();
+    await type(textarea, 'hi');
+    await fireEvent.keyDown(textarea, { key: 'Enter' });
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('keeps focus when Enter did not send', async () => {
+    softKeyboard(true);
+    const { textarea } = mount();
+    textarea.focus();
+    await type(textarea, 'hi');
+    await fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
+    expect(document.activeElement).toBe(textarea);
   });
 
   it('swaps to a stop control while a task is running', () => {
