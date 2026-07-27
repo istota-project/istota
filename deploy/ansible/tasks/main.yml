@@ -2155,7 +2155,7 @@
   when: istota_use_nextcloud_mount and not istota_web_only
 
 # ============================================================
-# NGINX (web UI + webhooks reverse proxy + bot web root)
+# NGINX (web UI + webhooks reverse proxy + static web root)
 # ============================================================
 
 # nginx — inlined (replace with a dedicated role if you prefer)
@@ -2164,6 +2164,35 @@
     name: nginx
     state: present
   when: (istota_location_enabled | default(false) or istota_web_enabled | default(false)) and not istota_update_only and not istota_web_only
+
+# The web root is operator territory: root-owned, group-readable by nginx, and
+# outside istota_home so no sandbox bind or istota-user write path reaches it.
+- name: Create static web root
+  file:
+    path: "{{ istota_web_root_path }}"
+    state: directory
+    owner: "{{ istota_web_root_owner }}"
+    group: "{{ istota_web_root_group }}"
+    mode: "{{ istota_web_root_dir_mode }}"
+  when:
+    - istota_web_root_enabled | default(true)
+    - istota_location_enabled | default(false) or istota_web_enabled | default(false)
+    - not istota_web_only
+
+# force: no — the placeholder seeds an empty root once; operator content wins
+# on every subsequent run.
+- name: Deploy placeholder index.html when the web root has none
+  template:
+    src: index.html.j2
+    dest: "{{ istota_web_root_path }}/index.html"
+    owner: "{{ istota_web_root_owner }}"
+    group: "{{ istota_web_root_group }}"
+    mode: "{{ istota_web_root_file_mode }}"
+    force: no
+  when:
+    - istota_web_root_enabled | default(true)
+    - istota_location_enabled | default(false) or istota_web_enabled | default(false)
+    - not istota_web_only
 
 - name: Deploy nginx config
   template:

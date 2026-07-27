@@ -148,10 +148,19 @@ unnamed channel. Removing the primitive was chosen over teaching the model to
 reason about "is this path public", since that judgement is exactly what an
 injected instruction talks its way past. Gone with it: the bwrap RW bind and
 `native_fs_roots` write root, the `WEBSITE_PATH`/`WEBSITE_URL` env vars, the
-"Web Root" prompt resource section, and the nginx `root` + html-dir Ansible
-plumbing (the rendered vhost now `return 404`s on `/` so nothing is served
-from an inherited root). A stale `enabled`/`base_path` in TOML logs a warning
-and is ignored.
+"Web Root" prompt resource section, and the `WEBSITE_PATH`-shaped Ansible
+plumbing. A stale `enabled`/`base_path` in TOML logs a warning and is ignored.
+
+Ansible does serve a static root at `/` again (`istota_web_root_enabled`,
+default on, `istota_web_root_path` = `/srv/www/html`), but it is not the same
+primitive: the directory is root-owned, lives outside `istota_home`, is bound
+into no sandbox, and the istota user cannot write it — so there is no path
+from the agent to a published file, which is the property ISSUE-194 was
+about. It is operator content, managed only by the playbook (the templated
+`index.html` is written `force: no`, so it seeds an empty root once and never
+overwrites). Disabling it restores the explicit `location / { return 404; }`,
+which the vhost still needs in that mode — with no `root` the server block
+would inherit the http-level default and serve the distro page.
 
 ### `NetworkConfig`
 ```

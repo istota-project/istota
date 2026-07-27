@@ -36,13 +36,26 @@ server {
 
   # include /etc/nginx/snippets/letsencrypt.conf;
 
-  # No static web root. The agent-writable one was removed (ISSUE-194): a
-  # publicly-served directory the agent could write to with an ordinary `cp`
-  # egressed private data with no confirmation gate. Serve nothing by default
-  # so a stray file under any inherited root can't be reached.
+{% if istota_web_root_enabled | default(true) %}
+  # Static web root, Ansible-managed and root-owned. Distinct from the
+  # agent-writable root removed in ISSUE-194: that one was bound read-write
+  # into the bwrap sandbox, so `cp <anything> $WEBSITE_PATH/` was an
+  # unconfirmed public egress. This path is outside istota_home, the istota
+  # user cannot write it, and nothing binds it into the sandbox — the bot has
+  # no path to publish here. A longer-prefix location below still wins.
+  root {{ istota_web_root_path }};
+  index index.html;
+
+  location / {
+    try_files $uri $uri/ =404;
+  }
+{% else %}
+  # Web root disabled. An explicit 404 is required: with no `root` the server
+  # block inherits the http-level default and would serve the distro page.
   location / {
     return 404;
   }
+{% endif %}
 
 {% if istota_web_enabled %}
   # Task event SSE stream — must stream, not buffer. Longest-prefix match wins

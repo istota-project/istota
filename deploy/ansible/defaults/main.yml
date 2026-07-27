@@ -776,6 +776,21 @@ istota_developer_github_api_allowlist:            # API endpoint allowlist (enfo
 # Public hostname for nginx (web UI, webhooks)
 istota_hostname: "{{ istota_namespace }}.example.com"
 
+# Static web root served at the domain root (/). Ansible-managed and entirely
+# outside the bot: the path is not under istota_home, the istota user has no
+# write access, and nothing binds it into the bwrap sandbox — so this is not a
+# return of the agent-writable web root removed in ISSUE-194. Content is the
+# operator's; the templated index is written only when the file is missing.
+# Set istota_web_root_enabled: false to keep `/` returning 404.
+istota_web_root_enabled: true
+istota_web_root_path: /srv/www/html
+istota_web_root_owner: root
+# nginx (www-data on Debian) needs read access, not write — group-read is
+# enough, so the directory stays root-owned.
+istota_web_root_group: www-data
+istota_web_root_dir_mode: "0755"
+istota_web_root_file_mode: "0644"
+
 # Backup settings
 istota_backup_enabled: true
 istota_backup_local_dir: "{{ istota_home }}/data/backups"
