@@ -1652,6 +1652,32 @@ export function getChatConfig(): Promise<ChatConfig> {
   return apiFetch<ChatConfig>('/chat/config');
 }
 
+/**
+ * `getChatConfig`, shared across callers.
+ *
+ * The limits in here are the server's, and they are what the composer checks a
+ * file against before spending an upload on it. Several places want them and
+ * none of them can change them, so one request per page load is enough.
+ *
+ * A failure is not cached: the config is best-effort, and a client that gave up
+ * permanently on one bad response would keep enforcing nothing (or, worse, a
+ * stale guess) for the life of the page.
+ */
+let chatConfigInFlight: Promise<ChatConfig> | null = null;
+
+export function chatConfigOnce(): Promise<ChatConfig> {
+  chatConfigInFlight ??= getChatConfig().catch((e) => {
+    chatConfigInFlight = null;
+    throw e;
+  });
+  return chatConfigInFlight;
+}
+
+/** Test seam: drop the cached config so the next call fetches again. */
+export function resetChatConfigCache(): void {
+  chatConfigInFlight = null;
+}
+
 export interface ChatCommand {
   name: string;
   help: string;

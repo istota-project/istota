@@ -670,6 +670,13 @@ istota_web_chat_room_stream_max_bytes: 2000000
 # Per-connection room-metadata diff cadence (rename / model / effort / room
 # added or removed elsewhere), seconds. 0 disables it.
 istota_web_chat_room_stream_room_check_seconds: 10
+# Largest chat attachment, in MB. One number for two consumers: the app rejects
+# a larger upload with a 413 the client can read, and the vhost sets
+# client_max_body_size from it. Left to drift, the smaller of the two wins and
+# nginx answers with its own HTML error page instead — which the web client
+# cannot parse, so the user gets "upload failed (413)" and no reason. nginx's
+# own default is 1m, so this must be rendered rather than omitted.
+istota_web_chat_max_attachment_mb: 25
 
 # Master key for the encrypted `secrets` table, rendered into secrets.env as
 # ISTOTA_SECRET_KEY. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`

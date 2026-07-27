@@ -12,7 +12,7 @@
     Camera,
     Folder,
   } from 'lucide-svelte';
-  import { uploadChatAttachment, type ChatAttachment } from '$lib/api';
+  import { uploadChatAttachment, chatConfigOnce, type ChatAttachment } from '$lib/api';
   import AutocompletePopover from './autocomplete/AutocompletePopover.svelte';
   import { createAutocomplete, type AcceptResult } from './autocomplete/useAutocomplete.svelte';
   import { commandProvider, modelAliasProvider } from './autocomplete/providers';
@@ -52,6 +52,18 @@
   let uploading = $state(0);
   let dragOver = $state(false);
   let uploadError = $state('');
+  // What the server will accept, or null until /chat/config answers. See
+  // refusalReason for why null means "ask the server" rather than a default.
+  let limits = $state<{ maxBytes: number; maxMb: number; extensions: string[] } | null>(null);
+  chatConfigOnce()
+    .then((cfg) => {
+      limits = {
+        maxBytes: cfg.max_attachment_mb * 1024 * 1024,
+        maxMb: cfg.max_attachment_mb,
+        extensions: cfg.attachment_extensions ?? [],
+      };
+    })
+    .catch(() => {});
   // True once the text no longer fits on one line: the controls drop below the
   // field instead of sharing its row. Driven by the measurement in autoGrow,
   // not a media query, so it tracks content rather than viewport width.
@@ -271,9 +283,39 @@
     ac.close();
   }
 
+  /**
+   * Why the server would turn this file away, or null if it would take it.
+   *
+   * Both numbers are the server's, fetched once from /chat/config, so there is
+   * one place to change the ceiling and the client follows. Worth checking here
+   * because the 413 only arrives after the whole body has been read: on a phone
+   * that is a long wait to be told no.
+   *
+   * `limits` stays null until the config lands, and a config that never lands
+   * leaves it null for good. That is deliberate — an unreachable /chat/config
+   * must not become a client-side refusal of files the server would have taken.
+   */
+  function refusalReason(file: File): string | null {
+    if (!limits) return null;
+    if (file.size > limits.maxBytes) {
+      return `${file.name} is larger than ${limits.maxMb} MB.`;
+    }
+    const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+    if (limits.extensions.length && !limits.extensions.includes(ext)) {
+      return `.${ext} is not a file type this server accepts.`;
+    }
+    return null;
+  }
+
   async function upload(files: FileList | File[]) {
     uploadError = '';
     for (const file of Array.from(files)) {
+      const refusal = refusalReason(file);
+      if (refusal) {
+        // Keep going: one file being too big is no reason to drop the others.
+        uploadError = refusal;
+        continue;
+      }
       uploading++;
       try {
         const att = await uploadChatAttachment(file);

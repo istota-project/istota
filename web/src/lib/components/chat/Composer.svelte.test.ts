@@ -5,6 +5,7 @@ import { tick } from 'svelte';
 vi.mock('$lib/api', () => ({
   uploadChatAttachment: vi.fn(),
   fetchChatCommands: vi.fn(),
+  chatConfigOnce: vi.fn(),
 }));
 
 // The pickers have their own unit tests (nativePicker.test.ts). Here the seam
@@ -17,7 +18,7 @@ vi.mock('$lib/platform/nativePicker', () => ({
   pickDocuments: vi.fn(async () => []),
 }));
 
-import { uploadChatAttachment, fetchChatCommands } from '$lib/api';
+import { uploadChatAttachment, fetchChatCommands, chatConfigOnce } from '$lib/api';
 import {
   nativePickersAvailable,
   takePhoto,
@@ -28,7 +29,15 @@ import { resetCommandCatalogue } from './autocomplete/providers';
 import Composer from './Composer.svelte';
 
 const upload = uploadChatAttachment as ReturnType<typeof vi.fn>;
+const chatConfig = chatConfigOnce as ReturnType<typeof vi.fn>;
 const hasNative = nativePickersAvailable as ReturnType<typeof vi.fn>;
+
+/** A File that claims a size without allocating it. */
+function sizedFile(name: string, bytes: number, type = 'image/jpeg'): File {
+  const file = new File(['x'], name, { type });
+  Object.defineProperty(file, 'size', { value: bytes });
+  return file;
+}
 const native = {
   camera: takePhoto as ReturnType<typeof vi.fn>,
   photos: pickPhotos as ReturnType<typeof vi.fn>,
@@ -124,6 +133,13 @@ beforeEach(() => {
   });
   upload.mockReset();
   upload.mockResolvedValue({ path: 'inbox/voice.webm', name: 'voice.webm', size: 12 });
+  chatConfig.mockReset();
+  chatConfig.mockResolvedValue({
+    max_prompt_chars: 32000,
+    max_attachment_mb: 25,
+    attachment_extensions: ['jpg', 'jpeg', 'png', 'pdf', 'webm'],
+    client_poll_interval_ms: 1500,
+  });
 });
 
 function mount(props: Record<string, unknown> = {}) {
@@ -245,6 +261,69 @@ describe('Composer attachment menu', () => {
     await tick();
 
     expect(upload).toHaveBeenCalled();
+  });
+
+  it('refuses a file bigger than the server takes, without uploading it', async () => {
+    // The server answers 413 only after reading the whole body, so without this
+    // the user waits out an upload of a file that was never going to land. The
+    // limit is the server's own, read from /chat/config.
+    native.photos.mockResolvedValue([sizedFile('huge.jpg', 30 * 1024 * 1024)]);
+    const { container } = mount();
+    await tick();
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    await fireEvent.click(btn(container, 'Photo Library')!);
+    await tick();
+
+    expect(upload).not.toHaveBeenCalled();
+    expect(container.querySelector('.attach-error')?.textContent).toContain('25 MB');
+  });
+
+  it('refuses a type the server does not accept', async () => {
+    native.documents.mockResolvedValue([
+      sizedFile('payload.exe', 1024, 'application/octet-stream'),
+    ]);
+    const { container } = mount();
+    await tick();
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    await fireEvent.click(btn(container, 'Choose File')!);
+    await tick();
+
+    expect(upload).not.toHaveBeenCalled();
+    expect(container.querySelector('.attach-error')?.textContent).toContain('.exe');
+  });
+
+  it('carries on with the files that do fit', async () => {
+    // One refusal in a batch is not a reason to drop the rest.
+    native.photos.mockResolvedValue([
+      sizedFile('huge.jpg', 30 * 1024 * 1024),
+      sizedFile('fine.jpg', 1024),
+    ]);
+    const { container } = mount();
+    await tick();
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    await fireEvent.click(btn(container, 'Photo Library')!);
+    await tick();
+
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect((upload.mock.calls[0][0] as File).name).toBe('fine.jpg');
+  });
+
+  it('lets the server decide when the limits never arrived', async () => {
+    // /chat/config is best-effort. Failing to reach it must not turn into a
+    // client-side refusal of files the server would have taken.
+    chatConfig.mockRejectedValue(new Error('offline'));
+    native.photos.mockResolvedValue([sizedFile('huge.jpg', 900 * 1024 * 1024)]);
+    const { container } = mount();
+    await tick();
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    await fireEvent.click(btn(container, 'Photo Library')!);
+    await tick();
+
+    expect(upload).toHaveBeenCalledTimes(1);
   });
 
   it('uploads nothing when the pick was cancelled', async () => {

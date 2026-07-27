@@ -2,10 +2,17 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
-// Mock the API: attachment upload (unused here) + the command catalogue.
+// Mock the API: attachment upload and limits (unused here) + the command
+// catalogue.
 vi.mock('$lib/api', () => ({
   uploadChatAttachment: vi.fn(),
   fetchChatCommands: vi.fn(),
+  chatConfigOnce: vi.fn(async () => ({
+    max_prompt_chars: 32000,
+    max_attachment_mb: 25,
+    attachment_extensions: [],
+    client_poll_interval_ms: 1500,
+  })),
 }));
 
 import { fetchChatCommands } from '$lib/api';

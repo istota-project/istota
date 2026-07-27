@@ -26,10 +26,6 @@ import { shellAtLeast } from './native';
 /** The shell that first carried @capacitor/camera and IstotaDocumentPicker. */
 const SHELL_WITH_PICKERS = '0.3.0';
 
-/** Cost ceiling before base64 doubles it on the way across. Mirrors the
- *  document plugin's own limit so both halves refuse the same file. */
-const MAX_BYTES = 25 * 1024 * 1024;
-
 interface CapacitorPlugins {
   Camera?: {
     getPhoto(options: Record<string, unknown>): Promise<{ base64String?: string; format?: string }>;
@@ -86,9 +82,14 @@ function photoName(format: string, index: number): string {
   return `photo-${stamp}${suffix}.${format || 'jpg'}`;
 }
 
-function tooBig(file: File): boolean {
-  return file.size > MAX_BYTES;
-}
+/**
+ * Nothing here checks a size.
+ *
+ * These pickers used to drop an oversized file on the floor, which looked
+ * exactly like a cancelled pick. The composer's upload path checks every file
+ * it is handed — from a picker, the file input, a paste or a drop — against the
+ * limit the server publishes, and says so. One check, one number, one message.
+ */
 
 /** Take a photo with the camera. One shot, so at most one file. */
 export async function takePhoto(): Promise<File[]> {
@@ -111,7 +112,7 @@ export async function takePhoto(): Promise<File[]> {
       photoName(format === 'jpeg' ? 'jpg' : format, 0),
       `image/${format}`,
     );
-    return tooBig(file) ? [] : [file];
+    return [file];
   } catch (e) {
     if (isCancellation(e)) return [];
     throw e;
@@ -149,7 +150,8 @@ export async function pickPhotos(): Promise<File[]> {
     const picked = await pick.call(p.Camera, {
       quality: 90,
       correctOrientation: true,
-      // `limit: 0` is unlimited. The ceiling that matters is per file, below.
+      // `limit: 0` is unlimited. Size is the composer's business, not the
+      // picker's — see the note above takePhoto.
       limit: 0,
     });
     const photos = picked.photos ?? [];
@@ -165,7 +167,7 @@ export async function pickPhotos(): Promise<File[]> {
         photoName(format === 'jpeg' ? 'jpg' : format, i),
         `image/${format}`,
       );
-      if (!tooBig(file)) files.push(file);
+      files.push(file);
     }
     return files;
   } catch (e) {
