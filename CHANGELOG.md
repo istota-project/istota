@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Briefings, blocks, sources and shared blocks can be duplicated — an action the old icon rows had no room for. A duplicated briefing copies its blocks and their sources, and arrives switched off under a free name so it can't run before you have looked it over.
 
 ### Fixed
+- The Admin and Settings pages keep the navigation on screen while you scroll. They were the only two that carried the top bar away with the page, which on a phone or in the app left no way to another section without scrolling back up. Both now name the page in a fixed bar beneath the navigation, as every other section already did.
 - A briefing is titled the same way every time. The archive used to show whatever the model decided to call that day's edition, sometimes with an emoji and sometimes not, while the email arrived under a subject worked out from the clock rather than the briefing — so an evening briefing that ran in the morning was mailed as "Morning Briefing", and neither surface named a run the way the other did. Push notifications carried the task number instead of a title.
 
 ## [0.37.0] - 2026-07-26

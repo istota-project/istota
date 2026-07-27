@@ -490,7 +490,7 @@ a:hover {
   padding-right: max(1.5rem, var(--safe-right));
 }
 
-/* Full-height pages — the six that render an AppShell. The shell wants the whole
+/* Full-height pages — the eight that render an AppShell. The shell wants the whole
    area edge to edge, so this drops the page padding rather than having the shell
    cancel it with a negative margin, and AppShell carries the safe-area insets
    itself. Compound selector so it also beats the `.app-content` padding

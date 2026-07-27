@@ -245,7 +245,9 @@
       isActive('/feeds') ||
       isActive('/money') ||
       isActive('/health') ||
-      isActive('/briefings')}
+      isActive('/briefings') ||
+      isActive('/admin') ||
+      isActive('/settings')}
   >
     {@render children()}
   </main>

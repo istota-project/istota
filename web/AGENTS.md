@@ -51,13 +51,13 @@ Import everything from the barrel: `import { Button, Modal } from '$lib/componen
 
 Every module settings page is `SettingsLayout` → `SettingsCard` → `SettingsField`. Do not build a settings page out of raw markup.
 
-| Component        | Use for                                                                                        |
-| ---------------- | ---------------------------------------------------------------------------------------------- |
-| `SettingsLayout` | The page frame: `title`, `description`, `loading`, `error`, `info`, `headerActions`            |
-| `SettingsCard`   | A titled group of fields, with its own `actions` (the Save button) and `status`                |
-| `SettingsField`  | One labelled control. `wide` for full-width, `checkbox` for checkbox rows                      |
-| `SecretField`    | A write-only credential input (bullet-masked, `configured` shows it is set without echoing it) |
-| `ServiceCard`    | A connected-service card on `/settings` or a module settings page                              |
+| Component        | Use for                                                                                                                                                                                              |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SettingsLayout` | The page frame: `title`, `description`, `loading`, `error`, `info`, `headerActions`. `title` is optional — omit it when the `ShellHeader` above already names the page, and the header row collapses |
+| `SettingsCard`   | A titled group of fields, with its own `actions` (the Save button) and `status`                                                                                                                      |
+| `SettingsField`  | One labelled control. `wide` for full-width, `checkbox` for checkbox rows                                                                                                                            |
+| `SecretField`    | A write-only credential input (bullet-masked, `configured` shows it is set without echoing it)                                                                                                       |
+| `ServiceCard`    | A connected-service card on `/settings` or a module settings page                                                                                                                                    |
 
 **`SettingsField` supplementary text is three-slotted by whether the user must see it.** `hint` is optional guidance and renders in a `HintPopover` behind a "?" beside the label. `warning` and `error` render inline, because a hover popover is discoverable, not seen. A data-integrity notice ("this client is never invoiced automatically") is a `warning`, not a `hint` — do not put anything the user needs to act on behind hover.
 
@@ -112,6 +112,8 @@ Not linted at all: `*.test.ts`, which asserts on the very literals the rules for
 **Module page** (`routes/<module>/+layout.svelte`): `AppShell` with a `ShellHeader` header snippet (`SidebarToggle` in `leading`, `HeaderNav` in `nav`, a `Cog` link to `<module>/settings` in `tools`) and a `Sidebar` when the module has a list/detail split. `routes/briefings/+layout.svelte` is the cleanest example.
 
 **Module settings page** (`routes/<module>/settings/+page.svelte`): `SettingsLayout` wrapping `SettingsCard`s. Call `getModuleServices(<module>)` first and render the "Module disabled" banner when `module_enabled` is false, instead of the configuration UI.
+
+**Every top-level route renders an `AppShell` and is listed in the `app-content-fill` class on `routes/+layout.svelte`'s `<main>`.** The two are one decision, not two: without the shell nothing pins the app nav, and without the class the document scrolls and carries the nav off the top of the screen — which is only noticeable on a phone or in the iOS app, where the nav is the only way back to another section. A single-page section (`/chat`, `/admin`, `/settings`) puts the shell in its `+page.svelte`; a section with sub-routes puts it in `+layout.svelte`. `ShellHeader`'s `title` is the page's name in the fixed bar.
 
 **Money list page**: the record-table shell is defined once as globals in `routes/money/+layout.svelte` — `.money-toolbar`, `.money-notice-bar`, `.money-table`, `.money-table-header`, `.money-table-row`, `.money-sortable`, `.money-status`, `.money-amount`, `.money-kebab-spacer`, `.money-table-empty`. A page styles only its own columns (widths, alignment) and inherits everything else. The shell fixes the inline edge at `0.75rem` for every element on the page; do not set your own.
 

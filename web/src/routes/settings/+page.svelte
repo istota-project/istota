@@ -12,7 +12,7 @@
     type UserProfile,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { Button, Select, type SelectOption } from '$lib/components/ui';
+  import { AppShell, ShellHeader, Button, Select, type SelectOption } from '$lib/components/ui';
   import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
   import {
@@ -266,263 +266,272 @@
   );
 </script>
 
-<SettingsLayout
-  title="Settings"
-  description="Profile and per-service credentials. Secrets are encrypted at rest and never sent back to the browser — secret fields are write-only."
-  {loading}
-  {error}
-  {info}
->
-  {#if profile}
-    {@const saveBtn = {
-      dirty: profileDirty,
-      saving: profileSaving,
-    }}
+<AppShell>
+  {#snippet header()}
+    <ShellHeader title="User settings" />
+  {/snippet}
 
-    {#snippet profileSaveActions()}
-      {#if saveBtn.dirty}
-        <span class="dirty-badge">Unsaved changes</span>
-      {/if}
-      <Button
-        variant="primary"
-        size="sm"
-        onclick={saveProfile}
-        disabled={!saveBtn.dirty || saveBtn.saving}
-      >
-        {saveBtn.saving ? 'Saving…' : 'Save'}
-      </Button>
-    {/snippet}
+  <SettingsLayout
+    description="Profile and per-service credentials. Secrets are encrypted at rest and never sent back to the browser — secret fields are write-only."
+    {loading}
+    {error}
+    {info}
+  >
+    {#if profile}
+      {@const saveBtn = {
+        dirty: profileDirty,
+        saving: profileSaving,
+      }}
 
-    <SettingsCard title="Identity" actions={profileSaveActions}>
-      <p class="hint">
-        How Istota addresses you. User ID: <code>{profile.user_id}</code>
-      </p>
-
-      <SettingsField label="Display name">
-        <input type="text" bind:value={profile.display_name} />
-      </SettingsField>
-      <SettingsField label="Email addresses (comma-separated)">
-        <input
-          type="text"
-          value={profileListString(profile.email_addresses)}
-          oninput={(e) => {
-            if (profile)
-              profile.email_addresses = parseListInput((e.currentTarget as HTMLInputElement).value);
-          }}
-        />
-      </SettingsField>
-      <SettingsField
-        label="Timezone (IANA)"
-        hint="Setting a timezone here overrides your Nextcloud timezone and is kept across restarts."
-      >
-        <Select
-          value={profile.timezone || 'UTC'}
-          options={timezoneOptions}
-          ariaLabel="Timezone"
-          fullWidth
-          onValueChange={(v) => {
-            if (profile) profile.timezone = v;
-          }}
-        />
-      </SettingsField>
-    </SettingsCard>
-
-    <SettingsCard
-      title="Appearance"
-      description="Stored in this browser and applied immediately — no Save needed."
-    >
-      <SettingsField label="Theme" hint="Also on the toggle in the header.">
-        <Select
-          value={$theme}
-          options={themeOptions}
-          ariaLabel="Theme"
-          fullWidth
-          onValueChange={(v) => setTheme(v as Theme)}
-        />
-      </SettingsField>
-      <SettingsField
-        label="Text size"
-        hint="Scales the whole interface. Small is the original, denser size; large steps it up further for easier reading."
-      >
-        <Select
-          value={$fontSize}
-          options={fontSizeOptions}
-          ariaLabel="Text size"
-          fullWidth
-          onValueChange={(v) => setFontSize(v as FontSize)}
-        />
-      </SettingsField>
-    </SettingsCard>
-
-    <SettingsCard
-      title="Preferences"
-      description="How Istota behaves for your account."
-      actions={profileSaveActions}
-    >
-      <SettingsField label="Trusted email senders (fnmatch patterns, comma-separated)">
-        <input
-          type="text"
-          value={profileListString(profile.trusted_email_senders)}
-          oninput={(e) => {
-            if (profile)
-              profile.trusted_email_senders = parseListInput(
-                (e.currentTarget as HTMLInputElement).value,
-              );
-          }}
-        />
-      </SettingsField>
-      <SettingsField
-        label="Quiet email senders (filed silently — no task; fnmatch patterns, comma-separated)"
-      >
-        <input
-          type="text"
-          value={profileListString(profile.quiet_email_senders)}
-          oninput={(e) => {
-            if (profile)
-              profile.quiet_email_senders = parseListInput(
-                (e.currentTarget as HTMLInputElement).value,
-              );
-          }}
-        />
-      </SettingsField>
-      <SettingsField label="Disabled skills (comma-separated)">
-        <input
-          type="text"
-          value={profileListString(profile.disabled_skills)}
-          oninput={(e) => {
-            if (profile)
-              profile.disabled_skills = parseListInput((e.currentTarget as HTMLInputElement).value);
-          }}
-        />
-      </SettingsField>
-      {#if allModules.length > 0}
-        <div class="field">
-          <span>Disabled modules</span>
-          <div class="module-toggles">
-            {#each allModules as m (m)}
-              <label class="module-chip">
-                <input
-                  type="checkbox"
-                  checked={(profile.disabled_modules || []).includes(m)}
-                  onchange={() => toggleDisabledModule(m)}
-                />
-                <span>{m}</span>
-              </label>
-            {/each}
-          </div>
-          <p class="hint">
-            Modules are on by default. Tick to opt out — the corresponding UI tab and scheduled jobs
-            will be hidden / paused.
-          </p>
-        </div>
-      {/if}
-      <SettingsField
-        label="Default delivery destination"
-        hint="Where your results and notifications go. Alerts can use a separate channel below."
-      >
-        <Select
-          value={profile.default_destination || 'talk'}
-          options={destinationOptions(profile.default_destination || 'talk')}
-          ariaLabel="Default delivery destination"
-          fullWidth
-          onValueChange={(v) => {
-            if (profile) profile.default_destination = v || 'talk';
-          }}
-        />
-      </SettingsField>
-      <SettingsField
-        label="Send alerts to"
-        hint="Optional. Route alerts (heartbeat failures, security and policy notices) to a louder or separate channel, e.g. ntfy for push. 'talk' uses your alerts channel; leave on (default) to use the default destination."
-      >
-        <Select
-          value={(profile.routing || {})['alert'] || ''}
-          options={routeOptions((profile.routing || {})['alert'] || '', {
-            talkLabel: 'talk (alerts channel)',
-          })}
-          ariaLabel="Alert delivery destination"
-          fullWidth
-          onValueChange={(v) => setRoute('alert', v)}
-        />
-      </SettingsField>
-      <SettingsField
-        label="Send execution log to"
-        hint="Optional. The verbose per-task execution log — every tool call plus a final summary. 'talk' uses your logs channel; email and ntfy get a single final summary. (off) disables it."
-      >
-        <Select
-          value={logRouteValue()}
-          options={routeOptions(logRouteValue(), {
-            emptyValue: 'none',
-            emptyLabel: '(off)',
-            talkLabel: 'talk (logs channel)',
-          })}
-          ariaLabel="Execution log destination"
-          fullWidth
-          onValueChange={(v) => setRoute('log', v)}
-        />
-      </SettingsField>
-      {#if profileError}
-        <div class="banner error">{profileError}</div>
-      {/if}
-    </SettingsCard>
-  {/if}
-
-  {#if activeServices.length > 0 || ncToken}
-    <div class="subsection-heading">
-      <h2>Connected services</h2>
-      <p class="hint">
-        Per-service credentials for skills that need them. Values are encrypted at rest and never
-        sent back to the browser — secret fields are write-only. Module-specific credentials live on
-        their own settings pages (<a href="{base}/feeds/settings">feeds</a>,
-        <a href="{base}/money/settings">money</a>,
-        <a href="{base}/location/settings">location</a>).
-      </p>
-    </div>
-  {/if}
-
-  {#if ncToken}
-    {@const nc = ncToken}
-    <SettingsCard
-      title="Nextcloud"
-      description="When connected, messages you send from web chat appear in Nextcloud Talk under your own name, and read state syncs between web and Talk."
-    >
-      {#snippet status()}
-        <span class="status-pill status-{nc.connected ? 'configured' : 'missing'}">
-          {nc.connected ? 'Connected' : 'Not connected'}
-        </span>
+      {#snippet profileSaveActions()}
+        {#if saveBtn.dirty}
+          <span class="dirty-badge">Unsaved changes</span>
+        {/if}
+        <Button
+          variant="primary"
+          size="sm"
+          onclick={saveProfile}
+          disabled={!saveBtn.dirty || saveBtn.saving}
+        >
+          {saveBtn.saving ? 'Saving…' : 'Save'}
+        </Button>
       {/snippet}
-      {#if nc.connected}
-        <div class="oauth-actions">
-          <Button
-            variant="secondary"
-            size="sm"
-            onclick={disconnectNextcloud}
-            disabled={ncTokenBusy}
-          >
-            {ncTokenBusy ? 'Disconnecting…' : 'Disconnect'}
-          </Button>
-        </div>
-      {:else}
-        <p class="empty">
-          Log out and back in to connect — the connection is established at login.
-        </p>
-      {/if}
-    </SettingsCard>
-  {/if}
 
-  {#each activeServices as svc (svc.service)}
-    {#if svc.custom_ui && svc.service === 'garmin'}
-      <GarminCard />
-    {:else}
-      <ServiceCard
-        service={svc}
-        onChanged={reloadServices}
-        onConnect={connectGoogle}
-        onDisconnect={disconnectGoogle}
-        {oauthBusy}
-      />
+      <SettingsCard title="Identity" actions={profileSaveActions}>
+        <p class="hint">
+          How Istota addresses you. User ID: <code>{profile.user_id}</code>
+        </p>
+
+        <SettingsField label="Display name">
+          <input type="text" bind:value={profile.display_name} />
+        </SettingsField>
+        <SettingsField label="Email addresses (comma-separated)">
+          <input
+            type="text"
+            value={profileListString(profile.email_addresses)}
+            oninput={(e) => {
+              if (profile)
+                profile.email_addresses = parseListInput(
+                  (e.currentTarget as HTMLInputElement).value,
+                );
+            }}
+          />
+        </SettingsField>
+        <SettingsField
+          label="Timezone (IANA)"
+          hint="Setting a timezone here overrides your Nextcloud timezone and is kept across restarts."
+        >
+          <Select
+            value={profile.timezone || 'UTC'}
+            options={timezoneOptions}
+            ariaLabel="Timezone"
+            fullWidth
+            onValueChange={(v) => {
+              if (profile) profile.timezone = v;
+            }}
+          />
+        </SettingsField>
+      </SettingsCard>
+
+      <SettingsCard
+        title="Appearance"
+        description="Stored in this browser and applied immediately — no Save needed."
+      >
+        <SettingsField label="Theme" hint="Also on the toggle in the header.">
+          <Select
+            value={$theme}
+            options={themeOptions}
+            ariaLabel="Theme"
+            fullWidth
+            onValueChange={(v) => setTheme(v as Theme)}
+          />
+        </SettingsField>
+        <SettingsField
+          label="Text size"
+          hint="Scales the whole interface. Small is the original, denser size; large steps it up further for easier reading."
+        >
+          <Select
+            value={$fontSize}
+            options={fontSizeOptions}
+            ariaLabel="Text size"
+            fullWidth
+            onValueChange={(v) => setFontSize(v as FontSize)}
+          />
+        </SettingsField>
+      </SettingsCard>
+
+      <SettingsCard
+        title="Preferences"
+        description="How Istota behaves for your account."
+        actions={profileSaveActions}
+      >
+        <SettingsField label="Trusted email senders (fnmatch patterns, comma-separated)">
+          <input
+            type="text"
+            value={profileListString(profile.trusted_email_senders)}
+            oninput={(e) => {
+              if (profile)
+                profile.trusted_email_senders = parseListInput(
+                  (e.currentTarget as HTMLInputElement).value,
+                );
+            }}
+          />
+        </SettingsField>
+        <SettingsField
+          label="Quiet email senders (filed silently — no task; fnmatch patterns, comma-separated)"
+        >
+          <input
+            type="text"
+            value={profileListString(profile.quiet_email_senders)}
+            oninput={(e) => {
+              if (profile)
+                profile.quiet_email_senders = parseListInput(
+                  (e.currentTarget as HTMLInputElement).value,
+                );
+            }}
+          />
+        </SettingsField>
+        <SettingsField label="Disabled skills (comma-separated)">
+          <input
+            type="text"
+            value={profileListString(profile.disabled_skills)}
+            oninput={(e) => {
+              if (profile)
+                profile.disabled_skills = parseListInput(
+                  (e.currentTarget as HTMLInputElement).value,
+                );
+            }}
+          />
+        </SettingsField>
+        {#if allModules.length > 0}
+          <div class="field">
+            <span>Disabled modules</span>
+            <div class="module-toggles">
+              {#each allModules as m (m)}
+                <label class="module-chip">
+                  <input
+                    type="checkbox"
+                    checked={(profile.disabled_modules || []).includes(m)}
+                    onchange={() => toggleDisabledModule(m)}
+                  />
+                  <span>{m}</span>
+                </label>
+              {/each}
+            </div>
+            <p class="hint">
+              Modules are on by default. Tick to opt out — the corresponding UI tab and scheduled
+              jobs will be hidden / paused.
+            </p>
+          </div>
+        {/if}
+        <SettingsField
+          label="Default delivery destination"
+          hint="Where your results and notifications go. Alerts can use a separate channel below."
+        >
+          <Select
+            value={profile.default_destination || 'talk'}
+            options={destinationOptions(profile.default_destination || 'talk')}
+            ariaLabel="Default delivery destination"
+            fullWidth
+            onValueChange={(v) => {
+              if (profile) profile.default_destination = v || 'talk';
+            }}
+          />
+        </SettingsField>
+        <SettingsField
+          label="Send alerts to"
+          hint="Optional. Route alerts (heartbeat failures, security and policy notices) to a louder or separate channel, e.g. ntfy for push. 'talk' uses your alerts channel; leave on (default) to use the default destination."
+        >
+          <Select
+            value={(profile.routing || {})['alert'] || ''}
+            options={routeOptions((profile.routing || {})['alert'] || '', {
+              talkLabel: 'talk (alerts channel)',
+            })}
+            ariaLabel="Alert delivery destination"
+            fullWidth
+            onValueChange={(v) => setRoute('alert', v)}
+          />
+        </SettingsField>
+        <SettingsField
+          label="Send execution log to"
+          hint="Optional. The verbose per-task execution log — every tool call plus a final summary. 'talk' uses your logs channel; email and ntfy get a single final summary. (off) disables it."
+        >
+          <Select
+            value={logRouteValue()}
+            options={routeOptions(logRouteValue(), {
+              emptyValue: 'none',
+              emptyLabel: '(off)',
+              talkLabel: 'talk (logs channel)',
+            })}
+            ariaLabel="Execution log destination"
+            fullWidth
+            onValueChange={(v) => setRoute('log', v)}
+          />
+        </SettingsField>
+        {#if profileError}
+          <div class="banner error">{profileError}</div>
+        {/if}
+      </SettingsCard>
     {/if}
-  {/each}
-</SettingsLayout>
+
+    {#if activeServices.length > 0 || ncToken}
+      <div class="subsection-heading">
+        <h2>Connected services</h2>
+        <p class="hint">
+          Per-service credentials for skills that need them. Values are encrypted at rest and never
+          sent back to the browser — secret fields are write-only. Module-specific credentials live
+          on their own settings pages (<a href="{base}/feeds/settings">feeds</a>,
+          <a href="{base}/money/settings">money</a>,
+          <a href="{base}/location/settings">location</a>).
+        </p>
+      </div>
+    {/if}
+
+    {#if ncToken}
+      {@const nc = ncToken}
+      <SettingsCard
+        title="Nextcloud"
+        description="When connected, messages you send from web chat appear in Nextcloud Talk under your own name, and read state syncs between web and Talk."
+      >
+        {#snippet status()}
+          <span class="status-pill status-{nc.connected ? 'configured' : 'missing'}">
+            {nc.connected ? 'Connected' : 'Not connected'}
+          </span>
+        {/snippet}
+        {#if nc.connected}
+          <div class="oauth-actions">
+            <Button
+              variant="secondary"
+              size="sm"
+              onclick={disconnectNextcloud}
+              disabled={ncTokenBusy}
+            >
+              {ncTokenBusy ? 'Disconnecting…' : 'Disconnect'}
+            </Button>
+          </div>
+        {:else}
+          <p class="empty">
+            Log out and back in to connect — the connection is established at login.
+          </p>
+        {/if}
+      </SettingsCard>
+    {/if}
+
+    {#each activeServices as svc (svc.service)}
+      {#if svc.custom_ui && svc.service === 'garmin'}
+        <GarminCard />
+      {:else}
+        <ServiceCard
+          service={svc}
+          onChanged={reloadServices}
+          onConnect={connectGoogle}
+          onDisconnect={disconnectGoogle}
+          {oauthBusy}
+        />
+      {/if}
+    {/each}
+  </SettingsLayout>
+</AppShell>
 
 <style>
   /* Shared .settings/.card/.field/.grid/.banner/.icon-btn primitives live in
