@@ -18,6 +18,12 @@
   import { commandProvider, modelAliasProvider } from './autocomplete/providers';
   import { createRecorder, formatElapsed } from './useRecorder.svelte';
   import { usesSoftKeyboard } from '$lib/platform/input';
+  import {
+    nativePickersAvailable,
+    takePhoto,
+    pickPhotos,
+    pickDocuments,
+  } from '$lib/platform/nativePicker';
 
   let {
     onSend,
@@ -33,12 +39,9 @@
 
   let text = $state('');
   let textarea: HTMLTextAreaElement | undefined = $state();
-  // One input per attachment-menu row. Separate elements rather than one whose
-  // `accept`/`capture` are rewritten before each open: the attributes have to
-  // be in the DOM before the click, and three inert inputs are easier to read
-  // than a mutation that has to land first.
-  let libraryInput: HTMLInputElement | undefined = $state();
-  let cameraInput: HTMLInputElement | undefined = $state();
+  // The one file input left, and only the off-shell path reaches it: unfiltered
+  // and multiple, exactly as before the attachment menu existed. The menu's own
+  // rows go through the native pickers instead.
   let fileInput: HTMLInputElement | undefined = $state();
   // Measured to derive the single-row field width — see wrapsAtSingleRowWidth.
   let rowEl: HTMLDivElement | undefined = $state();
@@ -189,17 +192,22 @@
   //
   // The tap on the button is handled — it cancels its own focus shift, see
   // keepFocus — but activating a file input hands the rest to WebKit, which
-  // puts up its own sheet and takes first responder off the field as it
-  // presents. Nothing on either side of the WebView can stop that: iOS will not
-  // raise the keyboard from a programmatic focus outside a user gesture, and
-  // `runOpenPanelWithParameters`, the delegate hook that would let the shell
-  // intervene, is macOS-only — on iOS the upload panel is internal to WebKit.
+  // raises its own action sheet and takes first responder off the field. The
+  // page has no say in that, and no way back from it either: a programmatic
+  // `.focus()` does not raise the keyboard in a WKWebView at all
+  // (ionic-team/capacitor#334), so there is nothing to restore it with.
   //
-  // So the first tap does not reach a file input at all. It opens this menu,
-  // which is part of the page, and the keyboard has no reason to move for it.
-  // The system picker opens only once a row is chosen, at which point the user
-  // has deliberately left the composer and the keyboard going is the expected
-  // thing rather than a surprise.
+  // So the first tap does not reach a file input. It opens this menu, which is
+  // part of the page and which the keyboard has no reason to move for, and the
+  // rows go straight to the source they name — through the shell's native
+  // pickers, because a file input cannot be aimed at one. `capture` is the only
+  // hint HTML carries and `accept` is unreliable on iOS (rdar://36726477), so
+  // routing the rows back through file inputs would only put our menu in front
+  // of WebKit's, which is a step added rather than removed.
+  //
+  // Off-shell there is no menu at all: without native pickers every row would
+  // end at the same sheet, so the button opens the file input directly and the
+  // browser behaves exactly as it did before any of this.
   //
   // Focus deliberately stays in the textarea while the menu is open (the rows
   // cancel their own focus shift too, and the menu renders inside `.composer`,
@@ -208,8 +216,9 @@
   // itself, which is the entire thing being avoided.
   let attachMenuOpen = $state(false);
 
-  function toggleAttachMenu() {
-    attachMenuOpen = !attachMenuOpen;
+  function onAttachClick() {
+    if (nativePickersAvailable()) attachMenuOpen = !attachMenuOpen;
+    else fileInput?.click();
   }
 
   function onWindowPointerDown(e: PointerEvent) {
@@ -225,21 +234,17 @@
     if (attachMenuOpen && e.key === 'Escape') attachMenuOpen = false;
   }
 
-  // Once a row is chosen the panel does come up, and the keyboard goes with it.
-  // Take the focus back so the field is still the focused element when the
-  // panel closes and the WebView is first responder again — which is what
-  // brings the keyboard back rather than leaving the user to tap the field.
-  //
-  // Bounded to one blur, and only one that could plausibly be the panel's. A
-  // standing rule would catch the user tapping away to put the keyboard down
-  // and haul it straight back up.
-  const PICKER_BLUR_WINDOW_MS = 2000;
-  let pickerOpenedAt = 0;
-
-  function openPicker(input: HTMLInputElement | undefined) {
+  /** Run one of the native pickers and attach whatever it hands back. */
+  async function pickWith(source: () => Promise<File[]>) {
     attachMenuOpen = false;
-    pickerOpenedAt = document.activeElement === textarea ? Date.now() : 0;
-    input?.click();
+    uploadError = '';
+    try {
+      const files = await source();
+      if (files.length) upload(files);
+    } catch {
+      // The picker itself failed — a cancel resolves empty rather than throwing.
+      uploadError = 'Could not open the picker.';
+    }
   }
 
   function onFilesChosen(e: Event) {
@@ -252,8 +257,6 @@
     setViewport(VIEWPORT_NO_ZOOM);
   }
   function onBlur() {
-    const fromPicker = pickerOpenedAt > 0 && Date.now() - pickerOpenedAt < PICKER_BLUR_WINDOW_MS;
-    pickerOpenedAt = 0;
     setViewport(VIEWPORT_DEFAULT);
     // iOS scrolls the *window* to bring a focused field above the keyboard and
     // does not reliably undo it on dismissal. The app is exactly one viewport
@@ -266,11 +269,6 @@
     // The popover accepts on mousedown (preventDefault keeps focus), so a
     // click on a row does not blur first — safe to close here.
     ac.close();
-    // The rest of the teardown runs either way: if the refocus is ignored, the
-    // field really is blurred and the viewport had to be put back. Re-focusing
-    // simply runs onFocus again, which is idempotent. Queued rather than called
-    // here because the focus change that brought us in is still in flight.
-    if (fromPicker) queueMicrotask(() => textarea?.focus());
   }
 
   async function upload(files: FileList | File[]) {
@@ -439,7 +437,7 @@
         role="menuitem"
         aria-label="Photo Library"
         onmousedown={keepFocus}
-        onclick={() => openPicker(libraryInput)}
+        onclick={() => pickWith(pickPhotos)}
       >
         <Image size={16} />
         Photo Library
@@ -450,7 +448,7 @@
         role="menuitem"
         aria-label="Take Photo"
         onmousedown={keepFocus}
-        onclick={() => openPicker(cameraInput)}
+        onclick={() => pickWith(takePhoto)}
       >
         <Camera size={16} />
         Take Photo
@@ -461,7 +459,7 @@
         role="menuitem"
         aria-label="Choose File"
         onmousedown={keepFocus}
-        onclick={() => openPicker(fileInput)}
+        onclick={() => pickWith(pickDocuments)}
       >
         <Folder size={16} />
         Choose File
@@ -499,7 +497,7 @@
       bind:this={plusEl}
       class="icon-btn plus"
       onmousedown={keepFocus}
-      onclick={toggleAttachMenu}
+      onclick={onAttachClick}
       type="button"
       aria-label="Attach file"
       title="Attach file"
@@ -508,28 +506,9 @@
     >
       <Plus />
     </button>
-    <!-- `capture` is what sends the camera row straight to the camera instead
-         of the picker. The choose-file row carries no `accept` on purpose —
-         a filter there hides everything the system browser could otherwise
-         reach. -->
-    <input
-      bind:this={libraryInput}
-      data-picker="library"
-      type="file"
-      multiple
-      accept="image/*,video/*"
-      class="file-hidden"
-      onchange={onFilesChosen}
-    />
-    <input
-      bind:this={cameraInput}
-      data-picker="camera"
-      type="file"
-      accept="image/*"
-      capture="environment"
-      class="file-hidden"
-      onchange={onFilesChosen}
-    />
+    <!-- The off-shell fallback. Tapping it raises WebKit's own sheet, which is
+         what a browser has always done here and the reason the menu above is
+         gated on the native pickers being there to make it worth a tap. -->
     <input
       bind:this={fileInput}
       data-picker="file"

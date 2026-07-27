@@ -7,11 +7,33 @@ vi.mock('$lib/api', () => ({
   fetchChatCommands: vi.fn(),
 }));
 
+// The pickers have their own unit tests (nativePicker.test.ts). Here the seam
+// is what matters: which one a row reaches for, and whether the menu is offered
+// at all.
+vi.mock('$lib/platform/nativePicker', () => ({
+  nativePickersAvailable: vi.fn(() => true),
+  takePhoto: vi.fn(async () => []),
+  pickPhotos: vi.fn(async () => []),
+  pickDocuments: vi.fn(async () => []),
+}));
+
 import { uploadChatAttachment, fetchChatCommands } from '$lib/api';
+import {
+  nativePickersAvailable,
+  takePhoto,
+  pickPhotos,
+  pickDocuments,
+} from '$lib/platform/nativePicker';
 import { resetCommandCatalogue } from './autocomplete/providers';
 import Composer from './Composer.svelte';
 
 const upload = uploadChatAttachment as ReturnType<typeof vi.fn>;
+const hasNative = nativePickersAvailable as ReturnType<typeof vi.fn>;
+const native = {
+  camera: takePhoto as ReturnType<typeof vi.fn>,
+  photos: pickPhotos as ReturnType<typeof vi.fn>,
+  documents: pickDocuments as ReturnType<typeof vi.fn>,
+};
 
 /** jsdom leaves scrollHeight at 0, so autoGrow can't tell one line from many.
  *  Feed it a height we control to exercise the wrap threshold.
@@ -125,11 +147,13 @@ const menu = (c: HTMLElement) => c.querySelector('[role="menu"]');
 const picker = (c: HTMLElement, kind: string) =>
   c.querySelector(`input[data-picker="${kind}"]`) as HTMLInputElement;
 
-/** Attach → Photo Library, which is the path that reaches a file input. */
-async function choosePhotoLibrary(c: HTMLElement) {
-  await fireEvent.click(btn(c, 'Attach file')!);
-  await fireEvent.click(btn(c, 'Photo Library')!);
-}
+beforeEach(() => {
+  hasNative.mockReturnValue(true);
+  for (const fn of Object.values(native)) {
+    fn.mockReset();
+    fn.mockResolvedValue([]);
+  }
+});
 
 describe('Composer attachment menu', () => {
   it('opens our own menu rather than the system sheet', async () => {
@@ -145,9 +169,9 @@ describe('Composer attachment menu', () => {
   });
 
   it('reaches no file input just to show the menu', async () => {
-    // The whole point. WebKit's upload panel is what takes the keyboard down,
-    // and it goes up the moment a file input is activated — so the first tap
-    // must not touch one.
+    // The whole point. WebKit's sheet is what takes the keyboard down, and it
+    // goes up the moment a file input is activated — so the tap that opens the
+    // menu must not touch one.
     const { container } = mount();
     const opened = vi.fn();
     for (const input of container.querySelectorAll('input[type="file"]')) {
@@ -157,6 +181,20 @@ describe('Composer attachment menu', () => {
     await fireEvent.click(btn(container, 'Attach file')!);
 
     expect(opened).not.toHaveBeenCalled();
+  });
+
+  it('skips the menu entirely in a plain browser', async () => {
+    // Without native pickers every row would end at WebKit's sheet anyway, so
+    // the menu would be a step added rather than removed. The button goes
+    // straight to the file input, exactly as it did before the menu existed.
+    hasNative.mockReturnValue(false);
+    const { container } = mount();
+    const open = vi.spyOn(picker(container, 'file'), 'click');
+
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    expect(menu(container)).toBeNull();
+    expect(open).toHaveBeenCalled();
   });
 
   it('keeps the field focused when a menu row is tapped', async () => {
@@ -180,39 +218,66 @@ describe('Composer attachment menu', () => {
     expect(menu(container)!.closest('.composer')).toBeTruthy();
   });
 
-  it('opens the library picker from the library row', async () => {
+  it('sends each row to the source it names', async () => {
+    // The row landing where it says it will is the whole reason for the native
+    // pickers — routing these back through a file input would put our menu in
+    // front of WebKit's rather than instead of it.
+    const rows: [string, ReturnType<typeof vi.fn>][] = [
+      ['Photo Library', native.photos],
+      ['Take Photo', native.camera],
+      ['Choose File', native.documents],
+    ];
+    for (const [label, fn] of rows) {
+      const { container, unmount } = mount();
+      await fireEvent.click(btn(container, 'Attach file')!);
+      await fireEvent.click(btn(container, label)!);
+      expect(fn, label).toHaveBeenCalled();
+      unmount();
+    }
+  });
+
+  it('uploads what the picker hands back', async () => {
+    native.photos.mockResolvedValue([new File(['x'], 'a.jpg', { type: 'image/jpeg' })]);
     const { container } = mount();
     await fireEvent.click(btn(container, 'Attach file')!);
-    const open = vi.spyOn(picker(container, 'library'), 'click');
+
+    await fireEvent.click(btn(container, 'Photo Library')!);
+    await tick();
+
+    expect(upload).toHaveBeenCalled();
+  });
+
+  it('uploads nothing when the pick was cancelled', async () => {
+    // A cancel comes back as an empty list rather than an error, so there is
+    // nothing to report and nothing to send.
+    const { container } = mount();
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    await fireEvent.click(btn(container, 'Photo Library')!);
+    await tick();
+
+    expect(upload).not.toHaveBeenCalled();
+    expect(container.querySelector('.attach-error')).toBeNull();
+  });
+
+  it('says so when the picker itself fails', async () => {
+    native.documents.mockRejectedValue(new Error('no picker'));
+    const { container } = mount();
+    await fireEvent.click(btn(container, 'Attach file')!);
+
+    await fireEvent.click(btn(container, 'Choose File')!);
+    await tick();
+
+    expect(container.querySelector('.attach-error')?.textContent).toContain('picker');
+  });
+
+  it('closes the menu as the picker opens', async () => {
+    const { container } = mount();
+    await fireEvent.click(btn(container, 'Attach file')!);
 
     await fireEvent.click(btn(container, 'Photo Library')!);
 
-    expect(open).toHaveBeenCalled();
     expect(menu(container)).toBeNull();
-  });
-
-  it('asks for the camera on the take-photo row', async () => {
-    const { container } = mount();
-    await fireEvent.click(btn(container, 'Attach file')!);
-    const open = vi.spyOn(picker(container, 'camera'), 'click');
-
-    await fireEvent.click(btn(container, 'Take Photo')!);
-
-    expect(open).toHaveBeenCalled();
-    expect(picker(container, 'camera').getAttribute('capture')).toBe('environment');
-  });
-
-  it('leaves the choose-file row unfiltered', async () => {
-    // The one that reaches iCloud Drive and everything else — no accept filter,
-    // or the system browser hides most of it.
-    const { container } = mount();
-    await fireEvent.click(btn(container, 'Attach file')!);
-    const open = vi.spyOn(picker(container, 'file'), 'click');
-
-    await fireEvent.click(btn(container, 'Choose File')!);
-
-    expect(open).toHaveBeenCalled();
-    expect(picker(container, 'file').hasAttribute('accept')).toBe(false);
   });
 
   it('closes on Escape', async () => {
@@ -381,68 +446,6 @@ describe('Composer send control', () => {
       expect(down.defaultPrevented).toBe(true);
     }
     expect(document.activeElement).toBe(textarea);
-  });
-
-  it('takes focus back when the file picker drops it', async () => {
-    // WebKit's upload panel takes first responder off the field as it presents,
-    // so the keyboard left *after* the sheet had already appeared. That sheet is
-    // a popover, not a modal takeover — the keyboard is entitled to stay behind
-    // it, and the field losing focus is the only reason it goes.
-    softKeyboard(true);
-    const { container, textarea } = mount();
-    textarea.focus();
-
-    await choosePhotoLibrary(container);
-    textarea.blur();
-    await tick();
-
-    expect(document.activeElement).toBe(textarea);
-  });
-
-  it('leaves an ordinary blur alone', async () => {
-    // Only the picker's blur is taken back. Tapping away from the composer has
-    // to keep working, or the keyboard becomes one that refuses to leave.
-    softKeyboard(true);
-    const { textarea } = mount();
-    textarea.focus();
-
-    textarea.blur();
-    await tick();
-
-    expect(document.activeElement).not.toBe(textarea);
-  });
-
-  it('takes it back once, not on every blur after a picker', async () => {
-    softKeyboard(true);
-    const { container, textarea } = mount();
-    textarea.focus();
-
-    await choosePhotoLibrary(container);
-    textarea.blur();
-    await tick();
-    expect(document.activeElement).toBe(textarea);
-
-    textarea.blur();
-    await tick();
-    expect(document.activeElement).not.toBe(textarea);
-  });
-
-  it('ignores a blur that arrives too late to be the picker', async () => {
-    // A blur this long after the tap is the user putting the keyboard away
-    // themselves, not the panel coming up.
-    softKeyboard(true);
-    const { container, textarea } = mount();
-    textarea.focus();
-    const now = vi.spyOn(Date, 'now');
-
-    now.mockReturnValue(1_000);
-    await choosePhotoLibrary(container);
-    now.mockReturnValue(30_000);
-    textarea.blur();
-    await tick();
-
-    expect(document.activeElement).not.toBe(textarea);
-    now.mockRestore();
   });
 
   it('leaves a tap on the field itself alone', async () => {
