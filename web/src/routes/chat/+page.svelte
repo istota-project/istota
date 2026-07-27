@@ -810,6 +810,14 @@
 
   .chat-empty {
     height: 100%;
+    /* The composer is docked *over* the scrollport, so centring in the full
+		   height puts the notice half a composer below the middle of the space the
+		   user can actually see. Reserving the pill's height discounts it from the
+		   centring instead. Inside the 100% (border-box globally), so unlike the
+		   `.composer-reserve` spacer this adds no scroll range for the
+		   stick-to-bottom pin to act on — the reason the notice used to read high
+		   by the same measure. 0 in an aggregate view, which has no dock. */
+    padding-bottom: var(--composer-h, 0px);
     display: flex;
     flex-direction: column;
     align-items: center;
