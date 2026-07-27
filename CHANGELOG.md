@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The feeds **Images** and **Text** chips now hide pictures and body copy rather than hiding whole entries. Turning off Images used to drop every picture post out of the feed entirely — and turning off Text dropped everything else — so the two together were a post-type filter, not a display control. Each entry now stays in place and loses only the part you switched off, including pictures embedded in the body copy, so turning both off gives you a list of headlines instead of an empty page. The chips are a desktop control: a phone always shows everything and no longer offers them.
 
 ### Fixed
+- Are.na posts you already had stayed blank after the reader learned to render them. Improvements to a feed only ever reached posts that arrived afterwards, because a post already in your reader was recognised on the next check and skipped rather than updated. Videos, PDFs and quotes saved before the change are filled in on the next check, keeping whatever you had read or starred.
+
 - Sending a message from an iPhone could cancel it the instant it started. The Send button turns into a Stop button the moment a message goes off, and iOS delivered the tap to whichever button had taken that spot — so a tap on Send arrived as a tap on Stop. The turn usually ran to completion anyway, but another browser open on the same room showed it as cancelled.
 
 - Stop did nothing if you pressed it in the first moment after sending. Until the server had accepted the message there was nothing to stop yet, and the press was discarded rather than remembered — on a slow connection that is exactly when you'd reach for it. It now takes effect as soon as the message lands.
