@@ -771,6 +771,81 @@ class TestBuiltinTodos:
         assert gs.ok is False
 
 
+class TestTodoSectionMembership:
+    """Each item records the heading it fell under (ISSUE-207).
+
+    The extractor used to skip heading lines and flatten every bullet into one
+    undifferentiated list, so a block directive like "only show items under
+    ### NOW" was impossible to honour — by synthesis time the section boundary
+    was already gone.
+    """
+
+    def test_items_carry_their_section(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(
+            ctx,
+            "TODO.md",
+            "### NOW\n- [ ] ship it\n\n### BACKLOG\n- [ ] someday\n",
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.ok is True
+        assert [(i["text"], i["section"]) for i in gs.items] == [
+            ("- [ ] ship it", "NOW"),
+            ("- [ ] someday", "BACKLOG"),
+        ]
+
+    def test_items_before_any_heading_have_no_section(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "- loose item\n\n## NOW\n- under now\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["section"] for i in gs.items] == [None, "NOW"]
+
+    def test_most_recent_heading_wins_regardless_of_level(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(
+            ctx,
+            "TODO.md",
+            "# My Todos\n- titled\n## Work\n- work item\n### NOW\n- now item\n"
+            "## Personal\n- personal item\n",
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["section"] for i in gs.items] == [
+            "My Todos", "Work", "NOW", "Personal",
+        ]
+
+    def test_closing_hashes_stripped_from_label(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "### NOW ###\n- item\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.items[0]["section"] == "NOW"
+
+    def test_unnamed_heading_clears_the_section(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        # A bare "###" names nothing; don't attribute later items to the
+        # previous section just because the file had a divider-ish heading.
+        _write_user_file(ctx, "TODO.md", "## NOW\n- a\n###\n- b\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["section"] for i in gs.items] == ["NOW", None]
+
+    def test_heading_line_is_never_an_item(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "### NOW\n- only item\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == ["- only item"]
+
+    def test_provenance_reports_section_count(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "### NOW\n- a\n### LATER\n- b\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.provenance == "2 pending in 2 sections"
+
+    def test_provenance_unchanged_without_sections(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "- a\n- b\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert gs.provenance == "2 pending"
+
+
 class TestBuiltinReminders:
     def test_no_path_returns_not_configured(self, tmp_path):
         gs = resolve_source("reminders", {}, _ctx(tmp_path))

@@ -161,29 +161,59 @@ _BULLET_RE = re.compile(r"^[-*+]\s+\S")
 # A numbered list item: "1. " or "1) ".
 _NUMBERED_RE = re.compile(r"^\d+[.)]\s+\S")
 _HORIZONTAL_RULES = {"---", "***", "___"}
+# An ATX heading: 1-6 hashes, a space, the title, optional closing hashes.
+_HEADING_RE = re.compile(r"^#{1,6}\s+(?P<title>.*?)\s*#*\s*$")
 
 
-def _extract_todo_items(content: str) -> list[str]:
+def _heading_label(line: str) -> str | None:
+    """The section name a heading line declares, or None if it names nothing.
+
+    ``### NOW`` and ``### NOW ###`` both yield ``"NOW"``. A bare ``###`` (or
+    any hash run without a title) yields None, which *clears* the current
+    section rather than leaving later items attributed to the section above it.
+    """
+    match = _HEADING_RE.match(line)
+    if not match:
+        return None
+    return match.group("title").strip() or None
+
+
+def _extract_todo_items(content: str) -> list[dict]:
     """Pull pending todo lines from a markdown-ish list, format-lenient.
 
     Accepts any standard todo-list line — GitHub checkboxes (``- [ ]``),
     plain bullets (``-`` / ``*`` / ``+``), and numbered items (``1.`` /
     ``1)``) — with arbitrary leading indentation. Checked checkboxes
-    (``- [x]``) are treated as done and excluded; headings, horizontal
-    rules, blank lines, and unmarked prose are skipped.
+    (``- [x]``) are treated as done and excluded; horizontal rules, blank
+    lines, and unmarked prose are skipped.
+
+    Each item is ``{"text": <line>, "section": <heading> | None}``. Headings
+    are still never items, but they are no longer *discarded*: an item records
+    the most recent heading above it, at any level, so a block directive naming
+    a section ("only show items under NOW") has something to act on. Before
+    this the whole file flattened into one undifferentiated list and such a
+    directive was impossible to honour, not merely ignored (ISSUE-207).
+
+    "Most recent heading at any level" is deliberately flat rather than a
+    nested breadcrumb: it is what a person means by "the section this item is
+    under", and a breadcrumb would prefix every group with the document title.
     """
-    items: list[str] = []
+    items: list[dict] = []
+    section: str | None = None
     for raw in content.splitlines():
         line = raw.strip()
-        if not line or line.startswith("#") or line in _HORIZONTAL_RULES:
+        if not line or line in _HORIZONTAL_RULES:
+            continue
+        if line.startswith("#"):
+            section = _heading_label(line)
             continue
         checkbox = _CHECKBOX_RE.match(line)
         if checkbox:
             if checkbox.group("mark") == " ":  # unchecked → pending
-                items.append(line)
+                items.append({"text": line, "section": section})
             continue  # checked → done, skip
         if _BULLET_RE.match(line) or _NUMBERED_RE.match(line):
-            items.append(line)
+            items.append({"text": line, "section": section})
     return items
 
 
@@ -200,15 +230,18 @@ def resolve_todos(config: dict, ctx: SourceContext) -> GatheredSource:
             kind="todos", title="Todos",
             provenance="(no TODO file at configured path)", ok=False,
         )
-    items = [{"text": text} for text in _extract_todo_items(content)]
+    items = _extract_todo_items(content)
     if not items:
         return GatheredSource(
             kind="todos", title="Todos",
             provenance="(no pending todos)", ok=False,
         )
+    provenance = f"{len(items)} pending"
+    sections = {item["section"] for item in items if item["section"]}
+    if sections:
+        provenance += f" in {len(sections)} section{'s' if len(sections) > 1 else ''}"
     return GatheredSource(
-        kind="todos", title="Todos", items=items,
-        provenance=f"{len(items)} pending",
+        kind="todos", title="Todos", items=items, provenance=provenance,
     )
 
 

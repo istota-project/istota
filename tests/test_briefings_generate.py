@@ -158,6 +158,84 @@ class TestEmailNewsletterDiscrimination:
         assert "receipt" not in rendered.lower()
 
 
+class TestTodoSectionRendering:
+    """Todo items render grouped under their source heading (ISSUE-207).
+
+    Without this the model saw a flat list and a block directive naming a
+    section ("only show items under ### NOW") had nothing to act on.
+    """
+
+    def _gs(self, items):
+        from istota.briefings.sources import GatheredSource
+
+        return GatheredSource(kind="todos", title="Todos", items=items)
+
+    def test_section_label_precedes_its_group(self):
+        from istota.briefings.generate import _render_source
+
+        rendered = _render_source(self._gs([
+            {"text": "- [ ] ship it", "section": "NOW"},
+            {"text": "- [ ] and this", "section": "NOW"},
+            {"text": "- [ ] someday", "section": "BACKLOG"},
+        ]))
+        body = rendered.splitlines()[1:]  # drop the source header
+        assert body == [
+            body[0],  # the grouping note
+            "NOW:",
+            "- [ ] ship it",
+            "- [ ] and this",
+            "BACKLOG:",
+            "- [ ] someday",
+        ]
+
+    def test_label_emitted_once_per_group(self):
+        from istota.briefings.generate import _render_source
+
+        rendered = _render_source(self._gs([
+            {"text": "- a", "section": "NOW"},
+            {"text": "- b", "section": "NOW"},
+        ]))
+        assert rendered.count("NOW:") == 1
+
+    def test_labels_are_not_markdown_headings(self):
+        """The block prompt forbids markdown headings in the output; a raw
+        '### NOW' inside a source body invites one straight through."""
+        from istota.briefings.generate import _render_source
+
+        rendered = _render_source(self._gs([
+            {"text": "- a", "section": "NOW"},
+        ]))
+        assert "#" not in rendered
+
+    def test_sectionless_items_render_bare(self):
+        from istota.briefings.generate import _render_source
+
+        rendered = _render_source(self._gs([
+            {"text": "- loose", "section": None},
+            {"text": "- under now", "section": "NOW"},
+        ]))
+        lines = rendered.splitlines()
+        assert "- loose" in lines
+        assert lines.index("NOW:") == lines.index("- under now") - 1
+
+    def test_grouping_note_only_when_sections_present(self):
+        from istota.briefings.generate import _render_source
+
+        with_sections = _render_source(self._gs([
+            {"text": "- a", "section": "NOW"},
+        ]))
+        without = _render_source(self._gs([{"text": "- a", "section": None}]))
+        assert "grouped by" in with_sections.lower()
+        assert "grouped by" not in without.lower()
+
+    def test_legacy_items_without_section_key_still_render(self):
+        """An archived/mid-rollout item dict may predate the section key."""
+        from istota.briefings.generate import _render_source
+
+        rendered = _render_source(self._gs([{"text": "- [ ] task one"}]))
+        assert "- [ ] task one" in rendered
+
+
 class TestArchive:
     def test_archive_and_prune(self, tmp_path):
         cfg = _config(tmp_path)

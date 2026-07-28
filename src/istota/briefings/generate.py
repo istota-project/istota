@@ -139,6 +139,16 @@ _EMAIL_DISCRIMINATION_NOTE = (
     "spam. If you're unsure whether an item is a newsletter, keep it."
 )
 
+# Todo items carry the heading they appeared under, so a block directive can
+# name a section ("only show items under NOW"). The groups render as a plain
+# "<section>:" label line rather than a markdown heading — the block prompt
+# forbids headings in the output, and a raw "### NOW" inside a source body is
+# an invitation for one to pass straight through.
+_TODO_SECTION_NOTE = (
+    "Items below are grouped by the heading they appear under in the source "
+    "file; each group is preceded by its section name and a colon."
+)
+
 
 def _render_source(gs: GatheredSource) -> str:
     """Render one gathered source's content into prompt text."""
@@ -149,6 +159,9 @@ def _render_source(gs: GatheredSource) -> str:
     content: list[str] = []
     if gs.kind == "email":
         content.append(_EMAIL_DISCRIMINATION_NOTE)
+    if any(item.get("section") for item in gs.items):
+        content.append(_TODO_SECTION_NOTE)
+    current_section: str | None = None
     if gs.text.strip():
         content.append(gs.text.strip())
     for item in gs.items:
@@ -159,6 +172,11 @@ def _render_source(gs: GatheredSource) -> str:
                 content.append(body)
             content.append("")
         elif "text" in item:  # todos
+            section = item.get("section")
+            if section != current_section:
+                current_section = section
+                if section:
+                    content.append(f"{section}:")
             content.append(item["text"])
         else:  # rss / generic
             line = f"- {item.get('title', '(untitled)')}"
