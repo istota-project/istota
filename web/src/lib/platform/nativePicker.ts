@@ -14,11 +14,16 @@
  * falls back to the file input it always had. See `native.ts` for why the User
  * Agent rather than `window.Capacitor` is the signal.
  *
- * What the pickers hand over is a path, and the bytes are read from it here a
- * window at a time. Nothing ever holds a whole file, which is why there is no
- * size at which this stops working — see `fileFromPath`.
+ * What the pickers hand over is a path, never the file. Where it goes from
+ * there depends on what the shell can do:
  *
- * The reading goes through @capacitor/filesystem rather than a `fetch` of the
+ * - With `IstotaUploader`, nowhere. The path is passed back to the shell, which
+ *   posts it to the server itself, and the file never enters the page at all.
+ * - Without it, the bytes are read here a window at a time (`fileFromPath`) and
+ *   uploaded as an ordinary multipart fetch. Slower, but nothing ever holds a
+ *   whole file, so there is still no size at which it stops working.
+ *
+ * Reading goes through @capacitor/filesystem rather than a `fetch` of the
  * `webPath` the plugins also return. The WebView is pointed at this deployment,
  * so its origin is https, and a `capacitor://localhost` file URL read from here
  * is a cross-origin fetch that gets refused
@@ -64,9 +69,50 @@ interface CapacitorPlugins {
   };
   IstotaDocumentPicker?: {
     pick(): Promise<{
-      files?: { name?: string; mimeType?: string; path?: string; data?: string }[];
+      files?: { name?: string; mimeType?: string; size?: number; path?: string; data?: string }[];
     }>;
   };
+  IstotaUploader?: {
+    upload(options: {
+      url: string;
+      path: string;
+      name: string;
+      mimeType: string;
+      fieldName: string;
+    }): Promise<{ status: number; body: string }>;
+  };
+}
+
+/**
+ * A file the user chose.
+ *
+ * Either the bytes are here in the page (`blob`) or they are still on disk and
+ * the shell will post them itself (`nativePath`) — never both. The second is
+ * the better deal by a distance: the file goes from the picker to the server
+ * without passing through the WebView at all. The first is what a browser, an
+ * older shell, a paste or a drag-and-drop can offer.
+ */
+export interface Picked {
+  name: string;
+  type: string;
+  size: number;
+  nativePath?: string;
+  blob?: File;
+}
+
+/** Wrap a File the page already holds, so one code path handles both. */
+export function pickedFromFile(file: File): Picked {
+  return { name: file.name, type: file.type, size: file.size, blob: file };
+}
+
+/**
+ * Can the shell post a file from disk on our behalf?
+ *
+ * Detected by presence rather than by version: the plugin either answered the
+ * bridge or it did not, and there is no older shape of it to tell apart.
+ */
+export function nativeUploadAvailable(): boolean {
+  return !!plugins()?.IstotaUploader;
 }
 
 function plugins(): CapacitorPlugins | null {
@@ -148,6 +194,59 @@ async function fileFromPath(path: string, name: string, type: string): Promise<F
   }
 }
 
+/**
+ * Turn a path the picker left behind into something the composer can upload.
+ *
+ * With the uploader present this reads nothing at all — the size comes from a
+ * `stat` and the path is passed along for the shell to post. That is the whole
+ * point of stage three: for a file picked natively and uploaded natively, not
+ * one byte crosses the bridge. Without it, the bytes are read here instead.
+ */
+async function pickedFromPath(
+  path: string,
+  name: string,
+  type: string,
+  knownSize?: number,
+): Promise<Picked | null> {
+  if (nativeUploadAvailable()) {
+    const size = knownSize ?? (await plugins()?.Filesystem?.stat?.({ path }))?.size ?? 0;
+    return { name, type, size, nativePath: path };
+  }
+  const file = await fileFromPath(path, name, type);
+  return file ? pickedFromFile(file) : null;
+}
+
+/**
+ * Hand a file on disk to the shell to post.
+ *
+ * The response comes back as a status and a body rather than as a thrown
+ * error, because the server's own JSON is the useful part of a refusal — the
+ * caller reads it exactly as it reads a `fetch` response. The copy is deleted
+ * either way; a failed upload has no more use for it than a successful one,
+ * and the composer does not retry.
+ */
+export async function uploadFromPath(
+  picked: Picked,
+  url: string,
+): Promise<{ status: number; body: string }> {
+  const uploader = plugins()?.IstotaUploader;
+  const path = picked.nativePath;
+  if (!uploader || !path) throw new Error('No native uploader.');
+  try {
+    return await uploader.upload({
+      url,
+      path,
+      name: picked.name,
+      mimeType: picked.type || 'application/octet-stream',
+      fieldName: 'file',
+    });
+  } finally {
+    await plugins()
+      ?.Filesystem?.deleteFile?.({ path })
+      .catch(() => {});
+  }
+}
+
 /** `photo-20260727-143015.jpg` — the pickers hand back paths, not names. */
 function photoName(format: string, index: number): string {
   const d = new Date();
@@ -167,7 +266,7 @@ function photoName(format: string, index: number): string {
  */
 
 /** Take a photo with the camera. One shot, so at most one file. */
-export async function takePhoto(): Promise<File[]> {
+export async function takePhoto(): Promise<Picked[]> {
   const camera = plugins()?.Camera;
   if (!camera) return [];
   try {
@@ -186,12 +285,14 @@ export async function takePhoto(): Promise<File[]> {
     const name = photoName(format === 'jpeg' ? 'jpg' : format, 0);
     const type = `image/${format}`;
     if (photo.path) {
-      const file = await fileFromPath(photo.path, name, type);
-      return file ? [file] : [];
+      const picked = await pickedFromPath(photo.path, name, type);
+      return picked ? [picked] : [];
     }
     // A shell older than 0.4.0 answers a `uri` request with base64 anyway,
     // because it asked for base64 — nothing to read from disk.
-    if (photo.base64String) return [fileFromBase64(photo.base64String, name, type)];
+    if (photo.base64String) {
+      return [pickedFromFile(fileFromBase64(photo.base64String, name, type))];
+    }
     return [];
   } catch (e) {
     if (isCancellation(e)) return [];
@@ -222,7 +323,7 @@ export async function takePhoto(): Promise<File[]> {
  * When `pickImages` does go, the replacement is a HEIC→JPEG step on this side,
  * not a rename of the call.
  */
-export async function pickPhotos(): Promise<File[]> {
+export async function pickPhotos(): Promise<Picked[]> {
   const p = plugins();
   const pick = p?.Camera?.pickImages;
   if (!pick || !p?.Camera) return [];
@@ -235,12 +336,12 @@ export async function pickPhotos(): Promise<File[]> {
       limit: 0,
     });
     const photos = picked.photos ?? [];
-    const files: File[] = [];
+    const files: Picked[] = [];
     for (let i = 0; i < photos.length; i++) {
       const path = photos[i].path;
       if (!path) continue;
       const format = photos[i].format || 'jpeg';
-      const file = await fileFromPath(
+      const file = await pickedFromPath(
         path,
         photoName(format === 'jpeg' ? 'jpg' : format, i),
         `image/${format}`,
@@ -263,20 +364,22 @@ export async function pickPhotos(): Promise<File[]> {
  * ceiling in the Objective-C existed to bound. Feature-detected rather than
  * version-gated: the answer says which one it is.
  */
-export async function pickDocuments(): Promise<File[]> {
+export async function pickDocuments(): Promise<Picked[]> {
   const picker = plugins()?.IstotaDocumentPicker;
   if (!picker) return [];
   try {
     const result = await picker.pick();
-    const files: File[] = [];
+    const files: Picked[] = [];
     for (const f of result.files ?? []) {
       const name = f.name || 'file';
       const type = f.mimeType || 'application/octet-stream';
       if (f.path) {
-        const file = await fileFromPath(f.path, name, type);
+        // This plugin reports the size, so with the uploader present there is
+        // no `stat` either — the pick costs one bridge call and nothing else.
+        const file = await pickedFromPath(f.path, name, type, f.size);
         if (file) files.push(file);
       } else if (f.data) {
-        files.push(fileFromBase64(f.data, name, type));
+        files.push(pickedFromFile(fileFromBase64(f.data, name, type)));
       }
     }
     return files;

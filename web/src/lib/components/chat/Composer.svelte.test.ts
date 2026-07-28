@@ -16,6 +16,9 @@ vi.mock('$lib/platform/nativePicker', () => ({
   takePhoto: vi.fn(async () => []),
   pickPhotos: vi.fn(async () => []),
   pickDocuments: vi.fn(async () => []),
+  // Not a seam — the real one, so a File handed to upload() behaves the way it
+  // does in the app.
+  pickedFromFile: (f: File) => ({ name: f.name, type: f.type, size: f.size, blob: f }),
 }));
 
 import { uploadChatAttachment, fetchChatCommands, chatConfigOnce } from '$lib/api';

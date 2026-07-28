@@ -23,6 +23,8 @@
     takePhoto,
     pickPhotos,
     pickDocuments,
+    pickedFromFile,
+    type Picked,
   } from '$lib/platform/nativePicker';
 
   let {
@@ -247,7 +249,7 @@
   }
 
   /** Run one of the native pickers and attach whatever it hands back. */
-  async function pickWith(source: () => Promise<File[]>) {
+  async function pickWith(source: () => Promise<Picked[]>) {
     attachMenuOpen = false;
     uploadError = '';
     try {
@@ -295,7 +297,7 @@
    * leaves it null for good. That is deliberate — an unreachable /chat/config
    * must not become a client-side refusal of files the server would have taken.
    */
-  function refusalReason(file: File): string | null {
+  function refusalReason(file: Picked): string | null {
     if (!limits) return null;
     if (file.size > limits.maxBytes) {
       return `${file.name} is larger than ${limits.maxMb} MB.`;
@@ -307,9 +309,18 @@
     return null;
   }
 
-  async function upload(files: FileList | File[]) {
+  /**
+   * The one sink every attachment goes through.
+   *
+   * A pick from the native menu arrives as a path the shell will post itself; a
+   * paste, drop, file input or voice memo arrives as bytes already in the page.
+   * Both become a `Picked` here so the size check, the error handling and the
+   * chip list have one shape to deal with.
+   */
+  async function upload(files: FileList | File[] | Picked[]) {
     uploadError = '';
-    for (const file of Array.from(files)) {
+    const items = Array.from(files).map((f) => (f instanceof File ? pickedFromFile(f) : f));
+    for (const file of items) {
       const refusal = refusalReason(file);
       if (refusal) {
         // Keep going: one file being too big is no reason to drop the others.

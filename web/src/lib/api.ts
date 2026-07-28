@@ -1,4 +1,5 @@
 import { base } from '$app/paths';
+import { uploadFromPath, type Picked } from '$lib/platform/nativePicker';
 
 class AuthError extends Error {
   constructor() {
@@ -1895,10 +1896,29 @@ export interface ChatAttachment {
   size: number;
 }
 
-export async function uploadChatAttachment(file: File): Promise<ChatAttachment> {
+const CHAT_ATTACHMENT_PATH = '/chat/attachments';
+
+/**
+ * Upload one attachment, by whichever route the file arrived on.
+ *
+ * A file the shell picked is still on disk and never had to come into the page
+ * at all: the shell posts it straight from there with URLSession, and what
+ * crosses the bridge is the server's answer. Everything else — a paste, a drop,
+ * a file input, a voice memo — is already in memory here and goes out as an
+ * ordinary multipart fetch.
+ *
+ * Both routes end at the same endpoint and read the same JSON back, including
+ * the error bodies, so the caller cannot tell them apart and does not need to.
+ */
+export async function uploadChatAttachment(item: File | Picked): Promise<ChatAttachment> {
+  if (!(item instanceof File) && item.nativePath) {
+    return uploadFromShell(item);
+  }
+  const file = item instanceof File ? item : item.blob;
+  if (!file) throw new Error('Nothing to upload.');
   const form = new FormData();
   form.append('file', file);
-  const resp = await fetch(`${base}/api/chat/attachments`, {
+  const resp = await fetch(`${base}/api${CHAT_ATTACHMENT_PATH}`, {
     method: 'POST',
     credentials: 'same-origin',
     body: form,
@@ -1906,6 +1926,31 @@ export async function uploadChatAttachment(file: File): Promise<ChatAttachment> 
   if (resp.status === 401) throw new AuthError();
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.error || `upload failed (${resp.status})`);
+  return data as ChatAttachment;
+}
+
+/**
+ * The same upload, done by the shell from the file still on disk.
+ *
+ * The URL has to be absolute — the shell is building a URLSession request, not
+ * resolving one against a document — so the page's own origin is what makes it
+ * the same endpoint the fetch above would have reached.
+ */
+async function uploadFromShell(item: Picked): Promise<ChatAttachment> {
+  const url = new URL(`${base}/api${CHAT_ATTACHMENT_PATH}`, location.origin).toString();
+  const { status, body } = await uploadFromPath(item, url);
+  if (status === 401) throw new AuthError();
+  let data: { error?: string } & Partial<ChatAttachment> = {};
+  try {
+    data = JSON.parse(body);
+  } catch {
+    // A proxy's own error page rather than the app's JSON — an nginx 413 is
+    // the one that actually happens. There is no message worth relaying, so
+    // the status carries it.
+  }
+  if (status < 200 || status >= 300) {
+    throw new Error(data.error || `upload failed (${status})`);
+  }
   return data as ChatAttachment;
 }
 

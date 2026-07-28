@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { nativePickersAvailable, takePhoto, pickPhotos, pickDocuments } from './nativePicker';
+import {
+  nativePickersAvailable,
+  nativeUploadAvailable,
+  takePhoto,
+  pickPhotos,
+  pickDocuments,
+  uploadFromPath,
+} from './nativePicker';
 
 const PLAIN_SAFARI =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1';
@@ -15,6 +22,7 @@ interface FakePlugins {
   Camera?: Record<string, ReturnType<typeof vi.fn>>;
   Filesystem?: Record<string, ReturnType<typeof vi.fn>>;
   IstotaDocumentPicker?: Record<string, ReturnType<typeof vi.fn>>;
+  IstotaUploader?: Record<string, ReturnType<typeof vi.fn>>;
 }
 
 function installPlugins(p: FakePlugins): FakePlugins {
@@ -84,6 +92,15 @@ function fullBridge(files?: Record<string, number>): FakePlugins {
     Filesystem: fakeFilesystem(files) as unknown as Record<string, ReturnType<typeof vi.fn>>,
     IstotaDocumentPicker: { pick: vi.fn().mockResolvedValue({ files: [] }) },
   });
+}
+
+/** The same bridge, plus the shell that can post a file from disk itself. */
+function bridgeWithUploader(files?: Record<string, number>): FakePlugins {
+  const p = fullBridge(files);
+  p.IstotaUploader = {
+    upload: vi.fn().mockResolvedValue({ status: 200, body: '{"path":"inbox/a.jpg"}' }),
+  };
+  return p;
 }
 
 beforeEach(() => {
@@ -256,7 +273,7 @@ describe('reading a picked file', () => {
 
     const [file] = await pickPhotos();
 
-    const got = new Uint8Array(await file.arrayBuffer());
+    const got = new Uint8Array(await file.blob!.arrayBuffer());
     expect(got.length).toBe(expected.length);
     expect(got[0]).toBe(expected[0]);
     expect(got[CHUNK - 1]).toBe(expected[CHUNK - 1]);
@@ -307,6 +324,83 @@ describe('reading a picked file', () => {
 
     expect(file.size).toBe(3);
     expect(p.Filesystem!.readFile).toHaveBeenCalledWith({ path: 'file:///tmp/a.jpg' });
+  });
+});
+
+describe('with the shell able to upload from disk', () => {
+  it('never reads the file at all', async () => {
+    // The point of the whole exercise. The file goes from the picker to the
+    // server without entering the page: no base64, no bridge traffic, no copy
+    // on the JS heap. Anything read here would be read for nothing.
+    const p = bridgeWithUploader({ 'file:///tmp/a.jpg': 40 * 1024 * 1024 });
+
+    const [picked] = await pickPhotos();
+
+    expect(p.Filesystem!.readFile).not.toHaveBeenCalled();
+    expect(picked.nativePath).toBe('file:///tmp/a.jpg');
+    expect(picked.blob).toBeUndefined();
+  });
+
+  it('sizes the file with stat so it can still be checked against the limit', async () => {
+    // The composer refuses an oversized file before uploading it, and without
+    // reading the bytes a stat is the only way to know what it weighs.
+    const p = bridgeWithUploader({ 'file:///tmp/a.jpg': 12345 });
+
+    const [picked] = await pickPhotos();
+
+    expect(p.Filesystem!.stat).toHaveBeenCalledWith({ path: 'file:///tmp/a.jpg' });
+    expect(picked.size).toBe(12345);
+  });
+
+  it('takes the size the document picker already reported, without a stat', async () => {
+    const p = bridgeWithUploader();
+    p.IstotaDocumentPicker!.pick.mockResolvedValue({
+      files: [
+        { name: 'notes.pdf', mimeType: 'application/pdf', size: 4096, path: 'file:///tmp/n.pdf' },
+      ],
+    });
+
+    const [picked] = await pickDocuments();
+
+    expect(picked.size).toBe(4096);
+    expect(p.Filesystem!.stat).not.toHaveBeenCalled();
+  });
+
+  it('reads the bytes instead when there is no uploader behind it', async () => {
+    const p = fullBridge();
+
+    const [picked] = await pickPhotos();
+
+    expect(nativeUploadAvailable()).toBe(false);
+    expect(picked.nativePath).toBeUndefined();
+    expect(picked.blob?.size).toBe(3);
+    expect(p.Filesystem!.readFile).toHaveBeenCalled();
+  });
+
+  it('hands the shell an absolute URL and the file details', async () => {
+    const p = bridgeWithUploader();
+    const [picked] = await pickPhotos();
+
+    const result = await uploadFromPath(picked, 'https://example.test/istota/api/chat/attachments');
+
+    expect(p.IstotaUploader!.upload).toHaveBeenCalledWith({
+      url: 'https://example.test/istota/api/chat/attachments',
+      path: 'file:///tmp/a.jpg',
+      name: picked.name,
+      mimeType: 'image/jpeg',
+      fieldName: 'file',
+    });
+    expect(result.status).toBe(200);
+  });
+
+  it('deletes the copy whether the upload worked or not', async () => {
+    const p = bridgeWithUploader();
+    p.IstotaUploader!.upload.mockRejectedValue(new Error('offline'));
+    const [picked] = await pickPhotos();
+
+    await expect(uploadFromPath(picked, 'https://example.test/up')).rejects.toThrow('offline');
+
+    expect(p.Filesystem!.deleteFile).toHaveBeenCalledWith({ path: 'file:///tmp/a.jpg' });
   });
 });
 
