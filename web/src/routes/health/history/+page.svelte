@@ -4,12 +4,18 @@
   import {
     createDiagnosis,
     createEncounter,
+    linkDiagnosisEncounter,
     listDiagnoses,
     listEncounters,
     type Diagnosis,
     type Encounter,
   } from '$lib/api';
   import { Select, type SelectOption } from '$lib/components/ui';
+  import {
+    conditionOptionLabel,
+    linkableConditionOptions,
+    resolveById,
+  } from '$lib/health/conditions';
 
   // Suggested types — the server accepts any free-text encounter_type, so
   // these are just defaults for the dropdowns. Unknown types from the API
@@ -29,8 +35,13 @@
   let loading = $state(true);
   let error = $state('');
   let encounters: Encounter[] = $state([]);
-  let active: Diagnosis[] = $state([]);
-  let chronic: Diagnosis[] = $state([]);
+  // One fetch of every condition; the two panels below are slices of it, and
+  // the create form's link picker needs the whole pool (resolved included).
+  // `list_diagnoses` already sorts active → chronic → resolved, so filtering
+  // preserves the order each panel used to get from its own request.
+  let allDiagnoses: Diagnosis[] = $state([]);
+  const active = $derived(allDiagnoses.filter((d) => d.status === 'active'));
+  const chronic = $derived(allDiagnoses.filter((d) => d.status === 'chronic'));
 
   let typeFilter = $state('');
   let sinceFilter = $state('');
@@ -47,24 +58,46 @@
   let formNotes = $state('');
   let saving = $state(false);
   let formError = $state('');
+  let formWarning = $state('');
+  // Conditions staged for linking. The encounter does not exist yet, so these
+  // are held until it does and then linked one PUT each.
+  let formConditionIds: number[] = $state([]);
+  let formConditionPick = $state('');
+
+  const stagedConditions = $derived(resolveById(allDiagnoses, formConditionIds));
+
+  const conditionOptions: SelectOption[] = $derived(
+    linkableConditionOptions(allDiagnoses, formConditionIds),
+  );
+
+  function stageCondition(v: string) {
+    const id = Number(v);
+    if (!Number.isFinite(id) || formConditionIds.includes(id)) return;
+    formConditionIds = [...formConditionIds, id];
+    // The picker is a staging control, not a value: clearing it leaves the
+    // placeholder showing so the next pick reads as another addition.
+    formConditionPick = '';
+  }
+
+  function unstageCondition(id: number) {
+    formConditionIds = formConditionIds.filter((x) => x !== id);
+  }
 
   async function load() {
     loading = true;
     error = '';
     try {
-      const [encResp, actResp, chrResp] = await Promise.all([
+      const [encResp, diagResp] = await Promise.all([
         listEncounters({
           type: typeFilter || undefined,
           since: sinceFilter || undefined,
           until: untilFilter || undefined,
           limit: 200,
         }),
-        listDiagnoses({ status: 'active', limit: 200 }),
-        listDiagnoses({ status: 'chronic', limit: 200 }),
+        listDiagnoses({ status: 'all', limit: 500 }),
       ]);
       encounters = encResp.encounters;
-      active = actResp.diagnoses;
-      chronic = chrResp.diagnoses;
+      allDiagnoses = diagResp.diagnoses;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load history';
     } finally {
@@ -75,9 +108,10 @@
   async function submit(e: Event) {
     e.preventDefault();
     formError = '';
+    formWarning = '';
     saving = true;
     try {
-      await createEncounter({
+      const { id } = await createEncounter({
         encounter_date: formDate,
         encounter_type: formType,
         provider: formProvider || undefined,
@@ -86,11 +120,32 @@
         reason: formReason || undefined,
         notes: formNotes || undefined,
       });
+
+      // There is no server-side "create with diagnoses" call, so linking is one
+      // request per condition after the fact. The encounter is already saved by
+      // this point, so a link failure must not be reported as a failed save —
+      // it is named separately and the form still closes.
+      const failed: string[] = [];
+      await Promise.all(
+        stagedConditions.map(async (d) => {
+          try {
+            await linkDiagnosisEncounter(d.id, id);
+          } catch {
+            failed.push(d.name);
+          }
+        }),
+      );
+      if (failed.length) {
+        formWarning = `Encounter saved, but could not link ${failed.join(', ')}. Link from the encounter page.`;
+      }
+
       formProvider = '';
       formFacility = '';
       formSpecialty = '';
       formReason = '';
       formNotes = '';
+      formConditionIds = [];
+      formConditionPick = '';
       formOpen = false;
       await load();
     } catch (e) {
@@ -174,6 +229,11 @@
   </div>
 {/if}
 
+{#if formWarning}
+  <!-- Outside the form: it reports on a save that already closed the form. -->
+  <div class="msg warn">{formWarning}</div>
+{/if}
+
 {#if formOpen}
   <form class="quick-form" onsubmit={submit}>
     <div class="row">
@@ -216,6 +276,37 @@
       <span>Notes</span>
       <textarea bind:value={formNotes} rows="3" placeholder="Findings, follow-ups, …"></textarea>
     </label>
+
+    <div class="full conditions-field">
+      <span class="field-label">Conditions</span>
+      {#if stagedConditions.length}
+        <ul class="staged">
+          {#each stagedConditions as d (d.id)}
+            <li>
+              <span>{conditionOptionLabel(d)}</span>
+              <button
+                type="button"
+                class="unstage"
+                onclick={() => unstageCondition(d.id)}
+                aria-label="Remove {d.name}">×</button
+              >
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <Select
+        value={formConditionPick}
+        options={conditionOptions}
+        onValueChange={stageCondition}
+        placeholder={conditionOptions.length
+          ? 'Link an existing condition…'
+          : 'No conditions to link'}
+        disabled={conditionOptions.length === 0}
+        ariaLabel="Link an existing condition"
+        fullWidth
+      />
+    </div>
+
     {#if formError}
       <div class="msg error">{formError}</div>
     {/if}
@@ -430,6 +521,59 @@
   .form-actions {
     display: flex;
     justify-content: flex-end;
+  }
+
+  /* Not a <label>: the control is a Select whose trigger is a button, and
+     wrapping it would make clicking the field name open the dropdown. */
+  .conditions-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+  .conditions-field .field-label {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+  }
+  .staged {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .staged li {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.1rem 0.3rem 0.1rem 0.55rem;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-pill);
+    font-size: var(--text-xs);
+    /* A condition name can be a full clinical phrase — wrap inside the chip
+       rather than letting one chip run past the page gutter on a phone. */
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+  .staged li span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .unstage {
+    background: none;
+    border: none;
+    padding: 0 0.15rem;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: var(--text-sm);
+    line-height: 1;
+    cursor: pointer;
+  }
+  .unstage:hover {
+    color: var(--text-primary);
   }
 
   /* Mirrors the location-history controls bar: inline labels rather than
@@ -714,6 +858,10 @@
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
     color: var(--status-danger-fg);
+  }
+  .msg.warn {
+    background: var(--status-warn-bg);
+    color: var(--status-warn-fg);
   }
   /* design-lint-allow: not a color — a theme-conditional `filter` on a UA
      pseudo-element we cannot restyle directly. The icon ships dark, so the dark

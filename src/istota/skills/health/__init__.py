@@ -1025,7 +1025,7 @@ def _encounter_to_dict(e) -> dict:
     }
 
 
-def _diagnosis_to_dict(d) -> dict:
+def _diagnosis_to_dict(d, encounter_ids: list[int] | None = None) -> dict:
     return {
         "id": d.id,
         "name": d.name,
@@ -1033,7 +1033,10 @@ def _diagnosis_to_dict(d) -> dict:
         "status": d.status,
         "date_diagnosed": d.date_diagnosed,
         "date_resolved": d.date_resolved,
+        # Deprecated in favour of `encounter_ids` — a condition is routinely
+        # seen at several visits, and this only ever held the first.
         "encounter_id": d.encounter_id,
+        "encounter_ids": encounter_ids if encounter_ids is not None else [],
         "severity": d.severity,
         "notes": d.notes,
     }
@@ -1172,9 +1175,16 @@ def cmd_diagnoses(args: argparse.Namespace) -> None:
         rows = health_db.list_diagnoses(
             conn, status=args.status, limit=args.limit,
         )
+        links = health_db.encounter_ids_for_diagnoses(
+            conn, [d.id for d in rows],
+        )
     finally:
         conn.close()
-    _emit({"diagnoses": [_diagnosis_to_dict(d) for d in rows]})
+    _emit({
+        "diagnoses": [
+            _diagnosis_to_dict(d, links.get(d.id, [])) for d in rows
+        ],
+    })
 
 
 def cmd_diagnosis(args: argparse.Namespace) -> None:
@@ -1189,9 +1199,76 @@ def cmd_diagnosis(args: argparse.Namespace) -> None:
     finally:
         conn.close()
     _emit({
-        "diagnosis": _diagnosis_to_dict(d),
-        "encounter": _encounter_to_dict(linked[0]) if linked else None,
+        "diagnosis": _diagnosis_to_dict(d, [e.id for e in linked]),
+        "encounters": [_encounter_to_dict(e) for e in linked],
     })
+
+
+def _resolve_encounter_arg(op: dict, raw: str) -> None:
+    """Put an encounter operand on an op as either a ref or a real id.
+
+    ``@name`` refers to an encounter created earlier in the same sandboxed
+    batch (the deferred replayer resolves it), matching ``add-panel --ref`` and
+    ``attach-document --to encounter:@name``.
+    """
+    if raw.startswith("@"):
+        op["encounter_ref"] = raw[1:]
+        return
+    try:
+        op["encounter_id"] = int(raw)
+    except (TypeError, ValueError):
+        _fail(f"encounter must be an integer id or @ref, got {raw!r}")
+
+
+def cmd_link_encounter(args: argparse.Namespace) -> None:
+    op = {"op": "link_diagnosis_encounter", "diagnosis_id": int(args.id)}
+    _resolve_encounter_arg(op, args.encounter)
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    if "encounter_ref" in op:
+        _fail("@ref only resolves inside a task; pass a numeric encounter id")
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        if health_db.get_diagnosis(conn, args.id) is None:
+            _fail(f"diagnosis {args.id} not found")
+        if health_db.get_encounter(conn, op["encounter_id"]) is None:
+            _fail(f"encounter {op['encounter_id']} not found")
+        created = health_db.link_diagnosis_encounter(
+            conn, int(args.id), op["encounter_id"],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _emit({"status": "ok", "created": created})
+
+
+def cmd_unlink_encounter(args: argparse.Namespace) -> None:
+    op = {"op": "unlink_diagnosis_encounter", "diagnosis_id": int(args.id)}
+    _resolve_encounter_arg(op, args.encounter)
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+    if "encounter_ref" in op:
+        _fail("@ref only resolves inside a task; pass a numeric encounter id")
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.unlink_diagnosis_encounter(
+            conn, int(args.id), op["encounter_id"],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    if not n:
+        _fail(
+            f"diagnosis {args.id} is not linked to encounter "
+            f"{op['encounter_id']}",
+        )
+    _emit({"status": "ok"})
 
 
 def cmd_add_diagnosis(args: argparse.Namespace) -> None:
@@ -1878,6 +1955,26 @@ def build_parser() -> argparse.ArgumentParser:
     del_diag = sub.add_parser("delete-diagnosis", help="Delete a diagnosis")
     del_diag.add_argument("id", type=int)
 
+    link_enc = sub.add_parser(
+        "link-encounter",
+        help="Link a condition to another encounter it was seen at",
+    )
+    link_enc.add_argument("id", type=int, help="Diagnosis id")
+    link_enc.add_argument(
+        "--encounter", required=True,
+        help="Encounter id, or @ref for one created earlier in this task",
+    )
+
+    unlink_enc = sub.add_parser(
+        "unlink-encounter",
+        help="Remove one encounter link (the condition itself is kept)",
+    )
+    unlink_enc.add_argument("id", type=int, help="Diagnosis id")
+    unlink_enc.add_argument(
+        "--encounter", required=True,
+        help="Encounter id, or @ref for one created earlier in this task",
+    )
+
     sub.add_parser(
         "history-summary",
         help="New-doctor packet: active conditions + recent encounters",
@@ -2029,6 +2126,8 @@ def main() -> None:
         "update-diagnosis": cmd_update_diagnosis,
         "resolve-diagnosis": cmd_resolve_diagnosis,
         "delete-diagnosis": cmd_delete_diagnosis,
+        "link-encounter": cmd_link_encounter,
+        "unlink-encounter": cmd_unlink_encounter,
         "history-summary": cmd_history_summary,
         "garmin-status": cmd_garmin_status,
         "garmin-sync": cmd_garmin_sync,

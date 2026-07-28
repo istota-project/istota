@@ -877,7 +877,14 @@ export interface Diagnosis {
   status: 'active' | 'resolved' | 'chronic';
   date_diagnosed: string | null;
   date_resolved: string | null;
+  /**
+   * Deprecated. A condition is seen at several encounters — GP, specialist,
+   * follow-up — so `encounter_ids` is the real answer. The server still emits
+   * this legacy single id, but nothing here should read it.
+   */
   encounter_id: number | null;
+  /** Every encounter this condition has been seen at, newest first. */
+  encounter_ids: number[];
   severity: 'mild' | 'moderate' | 'severe' | null;
   notes: string | null;
   created_at?: string;
@@ -1278,9 +1285,29 @@ export async function createDiagnosis(
   });
 }
 
+export async function linkDiagnosisEncounter(
+  diagnosisId: number,
+  encounterId: number,
+): Promise<{ status: string; created: boolean }> {
+  return healthFetch(`/diagnoses/${diagnosisId}/encounters`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ encounter_id: encounterId }),
+  });
+}
+
+export async function unlinkDiagnosisEncounter(
+  diagnosisId: number,
+  encounterId: number,
+): Promise<{ status: string }> {
+  return healthFetch(`/diagnoses/${diagnosisId}/encounters/${encounterId}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function getDiagnosis(
   id: number,
-): Promise<{ diagnosis: Diagnosis; encounter: Encounter | null; documents: HealthDocument[] }> {
+): Promise<{ diagnosis: Diagnosis; encounters: Encounter[]; documents: HealthDocument[] }> {
   return healthFetch(`/diagnoses/${id}`);
 }
 

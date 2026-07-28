@@ -141,7 +141,7 @@ def _encounter_to_dict(e) -> dict:
     }
 
 
-def _diagnosis_to_dict(d) -> dict:
+def _diagnosis_to_dict(d, encounter_ids: list[int] | None = None) -> dict:
     return {
         "id": d.id,
         "name": d.name,
@@ -149,11 +149,38 @@ def _diagnosis_to_dict(d) -> dict:
         "status": d.status,
         "date_diagnosed": d.date_diagnosed,
         "date_resolved": d.date_resolved,
+        # Deprecated: a condition can be seen at several encounters, so
+        # `encounter_ids` is the real answer. Kept because an older client
+        # (and the legacy column it mirrors) still reads a single id.
         "encounter_id": d.encounter_id,
+        "encounter_ids": encounter_ids if encounter_ids is not None else [],
         "severity": d.severity,
         "notes": d.notes,
         "created_at": d.created_at,
     }
+
+
+def _coerce_encounter_ids(raw) -> list[int]:
+    """Parse an `encounter_ids` payload field. Raises ValueError on junk."""
+    if not isinstance(raw, list):
+        raise ValueError("encounter_ids must be a list of integers")
+    out: list[int] = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, (int, str)):
+            raise ValueError("encounter_ids must be a list of integers")
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            raise ValueError("encounter_ids must be a list of integers") from None
+    return list(dict.fromkeys(out))
+
+
+def _missing_encounter(conn, encounter_ids: list[int]) -> int | None:
+    """First id in the list that names no encounter, if any."""
+    for eid in encounter_ids:
+        if health_db.get_encounter(conn, eid) is None:
+            return eid
+    return None
 
 
 _ENCOUNTER_TYPES = {
@@ -1783,12 +1810,18 @@ async def api_list_diagnoses(
             counts = health_db.document_counts_for_entities(
                 conn, "diagnosis", [d.id for d in rows],
             )
-        return rows, counts
+            links = health_db.encounter_ids_for_diagnoses(
+                conn, [d.id for d in rows],
+            )
+        return rows, counts, links
 
-    diagnoses, doc_counts = await asyncio.to_thread(_query)
+    diagnoses, doc_counts, links = await asyncio.to_thread(_query)
     return {
         "diagnoses": [
-            {**_diagnosis_to_dict(d), "document_count": doc_counts.get(d.id, 0)}
+            {
+                **_diagnosis_to_dict(d, links.get(d.id, [])),
+                "document_count": doc_counts.get(d.id, 0),
+            }
             for d in diagnoses
         ],
     }
@@ -1815,12 +1848,25 @@ async def api_create_diagnosis(
             return JSONResponse(
                 {"error": "encounter_id must be an integer"}, status_code=400,
             )
+    # `encounter_ids` is the real field; the singular one above is legacy
+    # shorthand for a one-element list. Supplying both unions them.
+    try:
+        encounter_ids = (
+            _coerce_encounter_ids(body["encounter_ids"])
+            if "encounter_ids" in body
+            else []
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if encounter_id is not None and encounter_id not in encounter_ids:
+        encounter_ids = [encounter_id, *encounter_ids]
 
     def _insert():
         with health_db.connect(ctx.db_path) as conn:
-            if encounter_id is not None and health_db.get_encounter(
-                conn, encounter_id,
-            ) is None:
+            # Validate every id before inserting anything, so a bad one in the
+            # list cannot leave a half-linked condition behind.
+            missing = _missing_encounter(conn, encounter_ids)
+            if missing is not None:
                 return None
             did = health_db.insert_diagnosis(
                 conn,
@@ -1833,6 +1879,8 @@ async def api_create_diagnosis(
                 severity=body.get("severity") or None,
                 notes=body.get("notes") or None,
             )
+            for eid in encounter_ids:
+                health_db.link_diagnosis_encounter(conn, did, eid)
             conn.commit()
         return did
 
@@ -1863,8 +1911,8 @@ async def api_get_diagnosis(
         raise HTTPException(404, "diagnosis not found")
     d, linked_encs, docs = result
     return {
-        "diagnosis": _diagnosis_to_dict(d),
-        "encounter": _encounter_to_dict(linked_encs[0]) if linked_encs else None,
+        "diagnosis": _diagnosis_to_dict(d, [e.id for e in linked_encs]),
+        "encounters": [_encounter_to_dict(e) for e in linked_encs],
         "documents": [_document_to_dict(x) for x in docs],
     }
 
@@ -1894,6 +1942,14 @@ async def api_update_diagnosis(
                 {"error": "encounter_id must be an integer or null"},
                 status_code=400,
             )
+    # `encounter_ids` replaces the whole link set (an empty list clears it) and
+    # wins over the legacy scalar when both are sent.
+    replace_ids: list[int] | None = None
+    if "encounter_ids" in body:
+        try:
+            replace_ids = _coerce_encounter_ids(body["encounter_ids"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     def _update():
         with health_db.connect(ctx.db_path) as conn:
@@ -1903,7 +1959,16 @@ async def api_update_diagnosis(
                 and health_db.get_encounter(conn, kwargs["encounter_id"]) is None
             ):
                 return "encounter_not_found"
+            if replace_ids is not None and _missing_encounter(conn, replace_ids) is not None:
+                return "encounter_not_found"
             n = health_db.update_diagnosis(conn, diagnosis_id, **kwargs)
+            if replace_ids is not None:
+                if health_db.get_diagnosis(conn, diagnosis_id) is None:
+                    return 0
+                health_db.set_diagnosis_encounters(conn, diagnosis_id, replace_ids)
+                # A links-only edit changes no diagnoses column, so
+                # update_diagnosis reports 0 rows — that must not read as 404.
+                n = n or 1
             conn.commit()
         return n
 
@@ -1935,6 +2000,71 @@ async def api_delete_diagnosis(
     n = await asyncio.to_thread(_delete)
     if not n:
         raise HTTPException(404, "diagnosis not found")
+    return {"status": "ok"}
+
+
+# A condition's encounters, as add/remove verbs rather than whole-set writes.
+# Same shape as the document-links routes, and what the UI uses so linking one
+# more visit never has to send (and risk clobbering) the existing set.
+
+
+@router.post("/diagnoses/{diagnosis_id}/encounters")
+async def api_link_diagnosis_encounter(
+    diagnosis_id: int,
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    try:
+        encounter_id = int(body.get("encounter_id"))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"error": "encounter_id must be an integer"}, status_code=400,
+        )
+
+    def _link():
+        with health_db.connect(ctx.db_path) as conn:
+            if health_db.get_diagnosis(conn, diagnosis_id) is None:
+                return "diagnosis_not_found"
+            if health_db.get_encounter(conn, encounter_id) is None:
+                return "encounter_not_found"
+            # Re-linking an existing pair is a no-op rather than an error, so a
+            # repeated click reports success — same contract as link_document.
+            created = health_db.link_diagnosis_encounter(
+                conn, diagnosis_id, encounter_id,
+            )
+            conn.commit()
+        return created
+
+    outcome = await asyncio.to_thread(_link)
+    if outcome == "diagnosis_not_found":
+        raise HTTPException(404, "diagnosis not found")
+    if outcome == "encounter_not_found":
+        return JSONResponse({"error": "encounter not found"}, status_code=400)
+    return {"status": "ok", "created": bool(outcome)}
+
+
+@router.delete("/diagnoses/{diagnosis_id}/encounters/{encounter_id}")
+async def api_unlink_diagnosis_encounter(
+    diagnosis_id: int,
+    encounter_id: int,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _unlink():
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_db.unlink_diagnosis_encounter(
+                conn, diagnosis_id, encounter_id,
+            )
+            conn.commit()
+        return n
+
+    n = await asyncio.to_thread(_unlink)
+    if not n:
+        raise HTTPException(404, "link not found")
     return {"status": "ok"}
 
 

@@ -3858,6 +3858,33 @@ const handlers: MockHandler[] = [
       },
     ];
 
+    // Many-to-many: a condition is seen by a GP, a specialist and a follow-up.
+    // Seeded from each row's legacy scalar, exactly as the server migration
+    // does, plus one extra link so multi-encounter conditions are visible in
+    // dev without having to click one together first.
+    const diagnosisEncounters: { diagnosis_id: number; encounter_id: number }[] = diagnoses
+      .filter((d) => d.encounter_id !== null)
+      .map((d) => ({ diagnosis_id: d.id, encounter_id: d.encounter_id as number }));
+    // Iron deficiency anemia: found at encounter 2, followed up at 1.
+    diagnosisEncounters.push({ diagnosis_id: 5, encounter_id: 1 });
+
+    /** Linked encounter ids for one condition, newest encounter first. */
+    const encounterIdsFor = (diagnosisId: number): number[] =>
+      diagnosisEncounters
+        .filter((l) => l.diagnosis_id === diagnosisId)
+        .map((l) => l.encounter_id)
+        .sort((a, b) => {
+          const ea = encounters.find((e) => e.id === a);
+          const eb = encounters.find((e) => e.id === b);
+          const da = ea?.encounter_date ?? '';
+          const db = eb?.encounter_date ?? '';
+          if (da !== db) return db.localeCompare(da);
+          return b - a;
+        });
+
+    /** Serialize a diagnosis the way the server does. */
+    const withLinks = (d: Diagnosis) => ({ ...d, encounter_ids: encounterIdsFor(d.id) });
+
     interface Immunization {
       id: number;
       name: string;
@@ -5231,7 +5258,10 @@ const handlers: MockHandler[] = [
           const id = Number(encMatch[1]);
           const enc = encounters.find((e) => e.id === id);
           if (!enc) return { error: 'encounter not found' };
-          const linkedDiag = diagnoses.filter((d) => d.encounter_id === id);
+          const linkedIds = new Set(
+            diagnosisEncounters.filter((l) => l.encounter_id === id).map((l) => l.diagnosis_id),
+          );
+          const linkedDiag = diagnoses.filter((d) => linkedIds.has(d.id)).map(withLinks);
           const linkedPanels = panels
             .filter((p) => p.encounter_id === id)
             .slice()
@@ -5303,9 +5333,14 @@ const handlers: MockHandler[] = [
         const idx = encounters.findIndex((e) => e.id === id);
         if (idx < 0) return { error: 'encounter not found' };
         encounters.splice(idx, 1);
-        // Mirror ON DELETE SET NULL on diagnoses.encounter_id + panels.encounter_id.
+        // Mirror ON DELETE SET NULL on diagnoses.encounter_id + panels.encounter_id,
+        // and ON DELETE CASCADE on diagnosis_encounters — the condition itself
+        // survives, along with its links to any other encounter.
         for (const d of diagnoses) {
           if (d.encounter_id === id) d.encounter_id = null;
+        }
+        for (let i = diagnosisEncounters.length - 1; i >= 0; i--) {
+          if (diagnosisEncounters[i].encounter_id === id) diagnosisEncounters.splice(i, 1);
         }
         for (const p of panels) {
           if (p.encounter_id === id) p.encounter_id = null;
@@ -5320,10 +5355,14 @@ const handlers: MockHandler[] = [
           const id = Number(diagMatch[1]);
           const d = diagnoses.find((x) => x.id === id);
           if (!d) return { error: 'diagnosis not found' };
-          const enc = d.encounter_id
-            ? encounters.find((e) => e.id === d.encounter_id) || null
-            : null;
-          return { diagnosis: d, encounter: enc, documents: documentsFor('diagnosis', id) };
+          const linked = encounterIdsFor(id)
+            .map((eid) => encounters.find((e) => e.id === eid))
+            .filter((e): e is Encounter => e !== undefined);
+          return {
+            diagnosis: withLinks(d),
+            encounters: linked,
+            documents: documentsFor('diagnosis', id),
+          };
         }
         const u = new URL(url, 'http://x');
         const status = u.searchParams.get('status');
@@ -5338,7 +5377,7 @@ const handlers: MockHandler[] = [
         });
         return {
           diagnoses: rows.map((d) => ({
-            ...d,
+            ...withLinks(d),
             document_count: documentCount('diagnosis', d.id),
           })),
         };
@@ -5351,8 +5390,18 @@ const handlers: MockHandler[] = [
         if (!['active', 'resolved', 'chronic'].includes(status)) {
           return { error: 'unknown status' };
         }
-        if (body.encounter_id != null && !encounters.find((e) => e.id === body.encounter_id)) {
-          return { error: 'encounter not found' };
+        // `encounter_ids` is the real field; `encounter_id` is legacy shorthand
+        // for one link. Validate the whole set before creating anything.
+        const wanted: number[] = Array.isArray(body.encounter_ids)
+          ? body.encounter_ids.map((x: unknown) => Number(x))
+          : [];
+        if (body.encounter_id != null && !wanted.includes(Number(body.encounter_id))) {
+          wanted.unshift(Number(body.encounter_id));
+        }
+        for (const eid of wanted) {
+          if (!Number.isFinite(eid) || !encounters.some((e) => e.id === eid)) {
+            return { error: 'encounter not found', __status: 400 };
+          }
         }
         const d: Diagnosis = {
           id: nextDiagnosisId++,
@@ -5367,6 +5416,9 @@ const handlers: MockHandler[] = [
           created_at: new Date().toISOString(),
         };
         diagnoses.push(d);
+        for (const eid of new Set(wanted)) {
+          diagnosisEncounters.push({ diagnosis_id: d.id, encounter_id: eid });
+        }
         return { status: 'ok', id: d.id };
       }
       const diagUpdMatch = url.match(/^\/istota\/api\/health\/diagnoses\/(\d+)$/);
@@ -5374,6 +5426,30 @@ const handlers: MockHandler[] = [
         const id = Number(diagUpdMatch[1]);
         const d = diagnoses.find((x) => x.id === id);
         if (!d) return { error: 'diagnosis not found' };
+        // Mirrors the server: a non-null encounter_id must name a real
+        // encounter, so the link pickers exercise that 400 under the mock.
+        if (body && body.encounter_id !== undefined && body.encounter_id !== null) {
+          const eid = Number(body.encounter_id);
+          if (!Number.isFinite(eid)) {
+            return { error: 'encounter_id must be an integer or null', __status: 400 };
+          }
+          if (!encounters.some((e) => e.id === eid)) {
+            return { error: 'encounter not found', __status: 400 };
+          }
+        }
+        // `encounter_ids` replaces the whole set; the legacy scalar replaces it
+        // with a single link (or clears it when null).
+        let replace: number[] | null = null;
+        if (body && Array.isArray(body.encounter_ids)) {
+          replace = body.encounter_ids.map((x: unknown) => Number(x));
+          for (const eid of replace as number[]) {
+            if (!Number.isFinite(eid) || !encounters.some((e) => e.id === eid)) {
+              return { error: 'encounter not found', __status: 400 };
+            }
+          }
+        } else if (body && 'encounter_id' in body) {
+          replace = body.encounter_id === null ? [] : [Number(body.encounter_id)];
+        }
         const allowed = [
           'name',
           'icd10',
@@ -5387,6 +5463,14 @@ const handlers: MockHandler[] = [
         for (const k of allowed) {
           if (body && k in body) (d as any)[k] = body[k];
         }
+        if (replace !== null) {
+          for (let i = diagnosisEncounters.length - 1; i >= 0; i--) {
+            if (diagnosisEncounters[i].diagnosis_id === id) diagnosisEncounters.splice(i, 1);
+          }
+          for (const eid of new Set(replace)) {
+            diagnosisEncounters.push({ diagnosis_id: id, encounter_id: eid });
+          }
+        }
         return { status: 'ok' };
       }
       if (diagUpdMatch && method === 'DELETE') {
@@ -5394,6 +5478,40 @@ const handlers: MockHandler[] = [
         const idx = diagnoses.findIndex((x) => x.id === id);
         if (idx < 0) return { error: 'diagnosis not found' };
         diagnoses.splice(idx, 1);
+        for (let i = diagnosisEncounters.length - 1; i >= 0; i--) {
+          if (diagnosisEncounters[i].diagnosis_id === id) diagnosisEncounters.splice(i, 1);
+        }
+        return { status: 'ok' };
+      }
+
+      // Add / remove one encounter link without touching the rest of the set.
+      const diagLinkMatch = url.match(/^\/istota\/api\/health\/diagnoses\/(\d+)\/encounters$/);
+      if (diagLinkMatch && method === 'POST') {
+        const did = Number(diagLinkMatch[1]);
+        if (!diagnoses.some((x) => x.id === did)) {
+          return { error: 'diagnosis not found', __status: 404 };
+        }
+        const eid = Number(body?.encounter_id);
+        if (!Number.isFinite(eid) || !encounters.some((e) => e.id === eid)) {
+          return { error: 'encounter not found', __status: 400 };
+        }
+        const exists = diagnosisEncounters.some(
+          (l) => l.diagnosis_id === did && l.encounter_id === eid,
+        );
+        if (!exists) diagnosisEncounters.push({ diagnosis_id: did, encounter_id: eid });
+        return { status: 'ok', created: !exists };
+      }
+      const diagUnlinkMatch = url.match(
+        /^\/istota\/api\/health\/diagnoses\/(\d+)\/encounters\/(\d+)$/,
+      );
+      if (diagUnlinkMatch && method === 'DELETE') {
+        const did = Number(diagUnlinkMatch[1]);
+        const eid = Number(diagUnlinkMatch[2]);
+        const idx = diagnosisEncounters.findIndex(
+          (l) => l.diagnosis_id === did && l.encounter_id === eid,
+        );
+        if (idx < 0) return { error: 'link not found', __status: 404 };
+        diagnosisEncounters.splice(idx, 1);
         return { status: 'ok' };
       }
 

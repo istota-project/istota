@@ -946,6 +946,32 @@ def _process_deferred_health_ops(
                         conn, int(entry["diagnosis_id"]),
                     )
                     count += 1
+                elif op in ("link_diagnosis_encounter", "unlink_diagnosis_encounter"):
+                    # A condition is seen at several visits, so these add and
+                    # remove one link without disturbing the rest. `@ref`
+                    # resolves an encounter created earlier in this same batch,
+                    # matching attach_document's grammar.
+                    enc_ref = entry.get("encounter_ref")
+                    if enc_ref is not None:
+                        resolved = encounter_refs.get(str(enc_ref))
+                        if resolved is None:
+                            raise KeyError(
+                                f"unresolved encounter_ref {enc_ref!r} "
+                                f"(known refs: {sorted(encounter_refs)})"
+                            )
+                        eid = resolved
+                    else:
+                        eid = int(entry["encounter_id"])
+                    did = int(entry["diagnosis_id"])
+                    if op == "link_diagnosis_encounter":
+                        if health_db.get_diagnosis(conn, did) is None:
+                            raise ValueError(f"unknown diagnosis: {did}")
+                        if health_db.get_encounter(conn, eid) is None:
+                            raise ValueError(f"unknown encounter: {eid}")
+                        health_db.link_diagnosis_encounter(conn, did, eid)
+                    else:
+                        health_db.unlink_diagnosis_encounter(conn, did, eid)
+                    count += 1
                 elif op == "insert_immunization":
                     enc_id = entry.get("encounter_id")
                     health_db.insert_immunization(

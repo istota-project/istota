@@ -6,13 +6,23 @@
   import {
     deleteEncounter,
     getEncounter,
+    linkDiagnosisEncounter,
+    listDiagnoses,
+    unlinkDiagnosisEncounter,
     updateEncounter,
     type Diagnosis,
     type Encounter,
     type HealthDocument,
     type HealthPanel,
   } from '$lib/api';
-  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
+  import {
+    Select,
+    ConfirmDialog,
+    KebabMenu,
+    type KebabItem,
+    type SelectOption,
+  } from '$lib/components/ui';
+  import { linkableConditionOptions } from '$lib/health/conditions';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
   let loading = $state(true);
@@ -26,6 +36,15 @@
   let editing = $state(false);
   let form: Partial<Encounter> = $state({});
   let confirmDelete = $state(false);
+
+  // Condition linking. The pool is every condition, not just the ones on this
+  // encounter, so it is loaded separately from `getEncounter`.
+  let allDiagnoses: Diagnosis[] = $state([]);
+  let linkPick = $state('');
+  let linking = $state(false);
+  let linkError = $state('');
+  let unlinkTarget: Diagnosis | null = $state(null);
+  let confirmUnlink = $state(false);
 
   const CANONICAL_TYPES = [
     'visit',
@@ -95,6 +114,76 @@
     }
   }
 
+  /**
+   * The pool for the link picker.
+   *
+   * Deliberately non-fatal and separate from `load()`: an encounter that
+   * renders without its picker is still usable, so a failure here must not
+   * replace the page with an error.
+   */
+  async function loadConditions() {
+    try {
+      const resp = await listDiagnoses({ status: 'all', limit: 500 });
+      allDiagnoses = resp.diagnoses;
+    } catch {
+      allDiagnoses = [];
+    }
+  }
+
+  // A condition already linked to some *other* encounter is still offered:
+  // that is the point of the many-to-many. Only what is on THIS encounter is
+  // excluded, so the picker never offers a no-op.
+  const linkOptions: SelectOption[] = $derived(
+    linkableConditionOptions(
+      allDiagnoses,
+      diagnoses.map((d) => d.id),
+    ),
+  );
+
+  async function linkCondition() {
+    if (!linkPick || encounterId === null) return;
+    linking = true;
+    linkError = '';
+    try {
+      await linkDiagnosisEncounter(Number(linkPick), encounterId);
+      linkPick = '';
+      await Promise.all([load(), loadConditions()]);
+    } catch (e) {
+      linkError = e instanceof Error ? e.message : 'Failed to link condition';
+    } finally {
+      linking = false;
+    }
+  }
+
+  async function unlinkCondition(d: Diagnosis) {
+    if (encounterId === null) return;
+    linking = true;
+    linkError = '';
+    try {
+      await unlinkDiagnosisEncounter(d.id, encounterId);
+      await Promise.all([load(), loadConditions()]);
+    } catch (e) {
+      linkError = e instanceof Error ? e.message : 'Failed to unlink condition';
+    } finally {
+      linking = false;
+      unlinkTarget = null;
+      confirmUnlink = false;
+    }
+  }
+
+  function conditionMenu(d: Diagnosis): KebabItem[] {
+    return [
+      { label: 'Open conditions', href: `${base}/health/history/diagnoses` },
+      {
+        label: 'Unlink from this encounter',
+        onSelect: () => {
+          unlinkTarget = d;
+          confirmUnlink = true;
+        },
+      },
+    ];
+  }
+
   function startEdit() {
     if (!encounter) return;
     form = { ...encounter };
@@ -141,6 +230,7 @@
     }
   }
 
+  onMount(loadConditions);
   onMount(load);
   $effect(() => {
     encounterId;
@@ -270,23 +360,43 @@
       <div class="empty small">None.</div>
     {:else}
       <!-- Same card shape as the conditions list: name, then tags on their own
-           line, then the date line. -->
-      <ul class="card-grid">
+           line, then the date line. Unlike the panels grid below, the card is
+           not itself a link — the kebab lives inside it, and a nested
+           interactive element inside an anchor is not addressable. -->
+      <ul class="card-grid dx-grid">
         {#each diagnoses as d (d.id)}
-          <li>
-            <a href="{base}/health/history/diagnoses">
-              <h3 class="name">{d.name}</h3>
-              <div class="tags">
-                {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
-                <span class="badge status-{d.status}">{d.status}</span>
-              </div>
-              <div class="card-meta">
-                {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
-              </div>
-            </a>
+          <li class="dx-card">
+            <div class="card-head">
+              <a class="name" href="{base}/health/history/diagnoses">{d.name}</a>
+              <KebabMenu items={conditionMenu(d)} ariaLabel="Condition actions" />
+            </div>
+            <div class="tags">
+              {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
+              <span class="badge status-{d.status}">{d.status}</span>
+            </div>
+            <div class="card-meta">
+              {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
+            </div>
           </li>
         {/each}
       </ul>
+    {/if}
+
+    <div class="link-row">
+      <Select
+        value={linkPick}
+        options={linkOptions}
+        onValueChange={(v) => (linkPick = v)}
+        placeholder={linkOptions.length ? 'Link an existing condition…' : 'No conditions to link'}
+        disabled={linking || linkOptions.length === 0}
+        ariaLabel="Link an existing condition"
+      />
+      <button class="btn" type="button" onclick={linkCondition} disabled={!linkPick || linking}>
+        {linking ? 'Linking…' : 'Link'}
+      </button>
+    </div>
+    {#if linkError}
+      <div class="msg error">{linkError}</div>
     {/if}
   </section>
 
@@ -329,6 +439,19 @@
   message="Are you sure you want to delete this encounter? Linked panels, diagnoses and documents keep their data but lose the link."
   confirmLabel="Delete"
   onConfirm={destroy}
+/>
+
+<!-- Unlinking keeps the condition, so this takes the primary confirm rather
+     than the red one: it is the "did you mean that" gate a document detach
+     gets, not a destructive action. -->
+<ConfirmDialog
+  bind:open={confirmUnlink}
+  title="Unlink condition"
+  message={`Are you sure you want to unlink ${unlinkTarget?.name ?? 'this condition'} from this encounter? The condition is kept, along with its links to any other encounters.`}
+  confirmLabel="Unlink"
+  confirmVariant="primary"
+  onConfirm={() => unlinkTarget && unlinkCondition(unlinkTarget)}
+  onCancel={() => (unlinkTarget = null)}
 />
 
 <style>
@@ -457,7 +580,9 @@
       grid-template-columns: minmax(0, 1fr);
     }
   }
-  .card-grid li a {
+  /* Direct child only: the diagnoses cards below hold their name in a nested
+     anchor beside a kebab, and must not each pick up the card chrome. */
+  .card-grid li > a {
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
@@ -471,7 +596,7 @@
     color: var(--text-primary);
     min-width: 0;
   }
-  .card-grid li a:hover {
+  .card-grid li > a:hover {
     border-color: var(--border-hover);
   }
   .card-grid .name {
@@ -605,5 +730,44 @@
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
     color: var(--status-danger-fg);
+  }
+  /* The diagnoses grid keeps the shared grid geometry but moves the card
+     chrome from the anchor onto the <li>, since the card holds a kebab
+     alongside the name rather than being one big link. */
+  .dx-grid li.dx-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    height: 100%;
+    box-sizing: border-box;
+    padding: 0.7rem 0.9rem;
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-card);
+    min-width: 0;
+  }
+  .dx-grid li.dx-card:hover {
+    border-color: var(--border-hover);
+  }
+  .dx-card .card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .dx-card .name {
+    color: var(--text-primary);
+    text-decoration: none;
+  }
+  .dx-card .name:hover {
+    text-decoration: underline;
+  }
+
+  .link-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.75rem;
   }
 </style>

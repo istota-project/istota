@@ -267,6 +267,46 @@ class TestBulkRoute:
         # date_diagnosed defaults to the encounter date.
         assert d["date_diagnosed"] == "2020-01-15"
 
+    def test_same_condition_at_two_visits_links_both(self, client):
+        """Importing paperwork that mentions one condition twice.
+
+        `reconcile=True` folds the second mention onto the same condition —
+        correct — but it used to return before recording the link, so the
+        second visit vanished from the condition's history and the condition
+        vanished from that visit's page.
+        """
+        rows = [
+            self._row(
+                encounter_date="2026-06-02",
+                provider="Dr. GP",
+                diagnoses=[{"name": "Iron deficiency anemia", "icd10": "D50.9"}],
+            ),
+            self._row(
+                encounter_date="2026-07-14",
+                provider="Dr. Haem",
+                diagnoses=[{"name": "Iron deficiency anemia", "icd10": "D50.9"}],
+            ),
+        ]
+        body = client.post(
+            "/istota/api/health/encounters/bulk", json={"rows": rows},
+        ).json()
+        assert body["count"] == 2
+        gp, spec = body["ids"]
+
+        # One condition, not two.
+        listing = client.get(
+            "/istota/api/health/diagnoses", params={"status": "all"},
+        ).json()["diagnoses"]
+        assert [d["name"] for d in listing] == ["Iron deficiency anemia"]
+
+        # ...carrying both visits, and showing up under each of them.
+        assert sorted(listing[0]["encounter_ids"]) == sorted([gp, spec])
+        for eid in (gp, spec):
+            detail = client.get(f"/istota/api/health/encounters/{eid}").json()
+            assert [d["name"] for d in detail["diagnoses"]] == [
+                "Iron deficiency anemia",
+            ]
+
     def test_bulk_rejects_missing_date(self, client):
         resp = client.post(
             "/istota/api/health/encounters/bulk",

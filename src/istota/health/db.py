@@ -43,7 +43,7 @@ from istota.health.models import (
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 SCHEMA_SQL = """
@@ -249,6 +249,31 @@ CREATE TABLE IF NOT EXISTS document_links (
 CREATE INDEX IF NOT EXISTS idx_document_links_entity
     ON document_links(entity_type, entity_id);
 
+-- Which encounters a condition was seen at. New in SCHEMA_VERSION 4.
+--
+-- A condition is routinely managed across several visits — the GP who found
+-- it, the specialist it was referred to, the follow-up six weeks later — so
+-- the relationship is many-to-many. It began life as the scalar
+-- `diagnoses.encounter_id`, which silently kept only the first link (the
+-- importer's `reconcile=True` path deliberately would not overwrite it, so
+-- every later mention of the same condition was dropped).
+--
+-- That column is still written by `insert_diagnosis` for the benefit of
+-- anything reading an old DB, but nothing here reads it any more: this table
+-- is the source of truth. `_migrate_diagnosis_encounters` backfills it once.
+--
+-- Unlike `document_links`, both columns carry real foreign keys, so deletes
+-- cascade on their own — every caller goes through `connect()`, which sets
+-- `PRAGMA foreign_keys = ON`.
+CREATE TABLE IF NOT EXISTS diagnosis_encounters (
+    diagnosis_id INTEGER NOT NULL REFERENCES diagnoses(id) ON DELETE CASCADE,
+    encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (diagnosis_id, encounter_id)
+);
+CREATE INDEX IF NOT EXISTS idx_diagnosis_encounters_encounter
+    ON diagnosis_encounters(encounter_id);
+
 """
 
 
@@ -269,6 +294,7 @@ def init_db(db_path: Path) -> None:
         _migrate_add_content_hash(conn)
         _migrate_add_panel_encounter_fk(conn)
         _migrate_add_history_dedup_keys(conn)
+        _migrate_diagnosis_encounters(conn)
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
             (str(SCHEMA_VERSION),),
@@ -334,6 +360,45 @@ def _migrate_add_panel_encounter_fk(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_panels_encounter "
         "ON panels(encounter_id)",
+    )
+
+
+def _migrate_diagnosis_encounters(conn: sqlite3.Connection) -> None:
+    """Seed ``diagnosis_encounters`` from the legacy scalar column. Once only.
+
+    The table itself is created by ``CREATE TABLE IF NOT EXISTS`` in
+    ``SCHEMA_SQL``; all this adds is the one-time backfill of links that were
+    recorded before the relationship became many-to-many.
+
+    Gated on the stored schema version rather than on the table being empty.
+    ``diagnoses.encounter_id`` is deliberately *not* cleared by the migration
+    (an old DB stays readable by old code), so a backfill that ran on every
+    open would silently re-create any link the user later removed — the next
+    unlink would appear to work and then come back. Running strictly below
+    version 4 means it happens exactly once.
+
+    A DB with no recorded version is either brand new (``diagnoses`` empty, so
+    the backfill is a no-op) or pre-dates ``schema_meta``, which is precisely
+    the case that wants backfilling — both are handled by treating a missing
+    version as 0.
+    """
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = 'version'",
+    ).fetchone()
+    try:
+        current = int(row[0]) if row and row[0] is not None else 0
+    except (TypeError, ValueError):
+        current = 0
+    if current >= 4:
+        return
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO diagnosis_encounters (diagnosis_id, encounter_id)
+        SELECT d.id, d.encounter_id
+        FROM diagnoses d
+        JOIN encounters e ON e.id = d.encounter_id
+        WHERE d.encounter_id IS NOT NULL
+        """,
     )
 
 
@@ -1344,7 +1409,10 @@ def insert_diagnosis(
             "SELECT id FROM diagnoses WHERE dedup_key = ?", (dedup_key,),
         ).fetchone()
         if row is not None:
-            return int(row[0])
+            did = int(row[0])
+            if encounter_id is not None:
+                link_diagnosis_encounter(conn, did, encounter_id)
+            return did
     if reconcile:
         existing = _find_matching_diagnosis(conn, name=name, icd10=icd10)
         if existing is not None:
@@ -1356,7 +1424,15 @@ def insert_diagnosis(
                     "date_resolved": date_resolved,
                 },
             )
-            return int(existing["id"])
+            did = int(existing["id"])
+            # The whole point of the many-to-many: a condition mentioned again
+            # at a later visit reconciles onto the same row, and that visit is
+            # an ADDITIONAL link. This used to return here, and because
+            # `_backfill_null_columns` deliberately leaves a populated
+            # `encounter_id` alone, every encounter after the first was lost.
+            if encounter_id is not None:
+                link_diagnosis_encounter(conn, did, encounter_id)
+            return did
     cur = conn.execute(
         """
         INSERT INTO diagnoses(
@@ -1370,7 +1446,12 @@ def insert_diagnosis(
             encounter_id, severity, notes, dedup_key,
         ),
     )
-    return int(cur.lastrowid)
+    did = int(cur.lastrowid)
+    # `encounter_id` is still written above so an older build reading this DB
+    # keeps working; the join row is what anything current reads.
+    if encounter_id is not None:
+        link_diagnosis_encounter(conn, did, encounter_id)
+    return did
 
 
 def get_diagnosis(conn: sqlite3.Connection, diagnosis_id: int) -> Diagnosis | None:
@@ -1439,6 +1520,13 @@ def update_diagnosis(
     cur = conn.execute(
         f"UPDATE diagnoses SET {', '.join(fields)} WHERE id = ?", params,
     )
+    # Legacy shorthand kept working: setting the scalar means "this is now the
+    # one encounter", clearing it means "no encounters". A caller that wants to
+    # ADD a link without disturbing the others calls
+    # `link_diagnosis_encounter` (or passes `encounter_ids`) instead.
+    if "encounter_id" in kwargs and cur.rowcount:
+        eid = kwargs["encounter_id"]
+        set_diagnosis_encounters(conn, diagnosis_id, [] if eid is None else [int(eid)])
     return cur.rowcount
 
 
@@ -1453,8 +1541,10 @@ def diagnoses_for_encounter(
     conn: sqlite3.Connection, encounter_id: int,
 ) -> list[Diagnosis]:
     rows = conn.execute(
-        "SELECT * FROM diagnoses WHERE encounter_id = ? "
-        "ORDER BY COALESCE(date_diagnosed, '') DESC, id DESC",
+        "SELECT d.* FROM diagnoses d "
+        "JOIN diagnosis_encounters de ON de.diagnosis_id = d.id "
+        "WHERE de.encounter_id = ? "
+        "ORDER BY COALESCE(d.date_diagnosed, '') DESC, d.id DESC",
         (encounter_id,),
     ).fetchall()
     return [_row_to_diagnosis(r) for r in rows]
@@ -1463,16 +1553,80 @@ def diagnoses_for_encounter(
 def encounters_for_diagnosis(
     conn: sqlite3.Connection, diagnosis_id: int,
 ) -> list[Encounter]:
-    """Return the single linked encounter (as a list for consistency)."""
-    row = conn.execute(
+    """Every encounter this condition has been seen at, newest first."""
+    rows = conn.execute(
         "SELECT e.* FROM encounters e "
-        "JOIN diagnoses d ON d.encounter_id = e.id "
-        "WHERE d.id = ?",
+        "JOIN diagnosis_encounters de ON de.encounter_id = e.id "
+        "WHERE de.diagnosis_id = ? "
+        "ORDER BY e.encounter_date DESC, e.id DESC",
         (diagnosis_id,),
-    ).fetchone()
-    if not row:
-        return []
-    return [_row_to_encounter(row)]
+    ).fetchall()
+    return [_row_to_encounter(r) for r in rows]
+
+
+def link_diagnosis_encounter(
+    conn: sqlite3.Connection, diagnosis_id: int, encounter_id: int,
+) -> bool:
+    """Link a condition to an encounter. True when the link is new.
+
+    Raises ``sqlite3.IntegrityError`` when either id does not exist, so a
+    caller cannot quietly create a link pointing at nothing.
+    """
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO diagnosis_encounters (diagnosis_id, encounter_id) "
+        "VALUES (?, ?)",
+        (diagnosis_id, encounter_id),
+    )
+    return cur.rowcount > 0
+
+
+def unlink_diagnosis_encounter(
+    conn: sqlite3.Connection, diagnosis_id: int, encounter_id: int,
+) -> int:
+    """Drop one link. The condition and the encounter both survive."""
+    cur = conn.execute(
+        "DELETE FROM diagnosis_encounters "
+        "WHERE diagnosis_id = ? AND encounter_id = ?",
+        (diagnosis_id, encounter_id),
+    )
+    return cur.rowcount
+
+
+def set_diagnosis_encounters(
+    conn: sqlite3.Connection, diagnosis_id: int, encounter_ids: list[int],
+) -> None:
+    """Replace a condition's whole link set. An empty list clears it."""
+    conn.execute(
+        "DELETE FROM diagnosis_encounters WHERE diagnosis_id = ?",
+        (diagnosis_id,),
+    )
+    for eid in dict.fromkeys(encounter_ids):
+        link_diagnosis_encounter(conn, diagnosis_id, eid)
+
+
+def encounter_ids_for_diagnoses(
+    conn: sqlite3.Connection, diagnosis_ids: list[int],
+) -> dict[int, list[int]]:
+    """Linked encounter ids per diagnosis, so a list view costs no N+1.
+
+    Mirrors ``document_counts_for_entities``: chunked, and a diagnosis with no
+    links is simply absent rather than mapped to an empty list.
+    """
+    out: dict[int, list[int]] = {}
+    ids = [i for i in dict.fromkeys(diagnosis_ids) if i is not None]
+    for start in range(0, len(ids), _ENTITY_ID_CHUNK):
+        chunk = ids[start:start + _ENTITY_ID_CHUNK]
+        marks = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"SELECT de.diagnosis_id, de.encounter_id FROM diagnosis_encounters de "
+            f"JOIN encounters e ON e.id = de.encounter_id "
+            f"WHERE de.diagnosis_id IN ({marks}) "
+            f"ORDER BY e.encounter_date DESC, e.id DESC",
+            chunk,
+        ).fetchall()
+        for r in rows:
+            out.setdefault(r["diagnosis_id"], []).append(r["encounter_id"])
+    return out
 
 
 # -- immunizations -----------------------------------------------------------

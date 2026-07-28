@@ -16,6 +16,15 @@
     ariaLabel?: string;
     /** Render as a full-width control matching text inputs (settings forms). */
     fullWidth?: boolean;
+    /**
+     * Which trigger edge the popover lines up with.
+     *
+     * `start` by default: the list is at least as wide as the trigger
+     * (`--bits-select-anchor-width`) and often wider, and a centred popover
+     * then overhangs both sides of a compact trigger instead of reading as
+     * belonging to it.
+     */
+    align?: 'start' | 'center' | 'end';
   }
 
   let {
@@ -26,6 +35,7 @@
     disabled = false,
     ariaLabel,
     fullWidth = false,
+    align = 'start',
   }: Props = $props();
 
   const selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? placeholder);
@@ -40,7 +50,11 @@
     <ChevronDown size={12} />
   </BitsSelect.Trigger>
   <BitsSelect.Portal>
-    <BitsSelect.Content class="ui-select-content" sideOffset={4}>
+    <!-- collisionPadding matches the tightest page gutter in the app (the
+         health frame's 0.75rem mobile padding), so on a phone the popover
+         stops at the same inset as the content it belongs to rather than
+         running to the screen edge. -->
+    <BitsSelect.Content class="ui-select-content" sideOffset={4} {align} collisionPadding={12}>
       <BitsSelect.Viewport class="ui-select-viewport">
         {#each options as opt (opt.value)}
           <BitsSelect.Item value={opt.value} label={opt.label} class="ui-select-item">
@@ -67,6 +81,12 @@
     line-height: 1.2;
     cursor: pointer;
     transition: background var(--transition-fast);
+    /* The label below caps at 220px, which on a narrow phone is most of the
+       screen — keep the trigger inside its container so a long selection
+       cannot push a flex row past the page gutter. */
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
   }
   :global(.ui-select-trigger:hover) {
     background: var(--surface-raised);
@@ -100,6 +120,10 @@
   }
   :global(.ui-select-label) {
     max-width: 220px;
+    /* Flex children floor at their content width, so without this the label
+       refuses to shrink and the 220px cap wins over the trigger's max-width
+       on a narrow screen. */
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -113,6 +137,11 @@
     z-index: 100;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     min-width: var(--bits-select-anchor-width, 8rem);
+    /* Never wider than the space left after collisionPadding. Option labels
+       are content (a condition name, a provider), so without this a long one
+       sets the popover width and pushes it off a phone screen. */
+    max-width: var(--bits-select-content-available-width, 100vw);
+    box-sizing: border-box;
     max-height: 18rem;
     overflow: auto;
     outline: none;
@@ -132,6 +161,10 @@
     cursor: pointer;
     outline: none;
     user-select: none;
+    /* Wrap rather than widen: once the popover is capped above, a long label
+       has to fold onto a second line or it would be clipped. */
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   :global(.ui-select-item[data-highlighted]) {
     background: var(--surface-raised);

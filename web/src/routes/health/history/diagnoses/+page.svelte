@@ -18,6 +18,11 @@
     type KebabItem,
     type SelectOption,
   } from '$lib/components/ui';
+  import {
+    encounterOptionLabel,
+    linkableEncounterOptions,
+    resolveById,
+  } from '$lib/health/conditions';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
   import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
   import { Paperclip } from 'lucide-svelte';
@@ -53,7 +58,10 @@
   let formIcd10 = $state('');
   let formDateDiagnosed = $state(new Date().toISOString().slice(0, 10));
   let formDateResolved = $state('');
-  let formEncounterId = $state<string>('');
+  // A condition is seen at several visits, so this is a set the form builds up
+  // rather than a single value.
+  let formEncounterIds = $state<number[]>([]);
+  let formEncounterPick = $state('');
   let formSeverity = $state<'' | 'mild' | 'moderate' | 'severe'>('');
   let formNotes = $state('');
   let saving = $state(false);
@@ -81,13 +89,24 @@
   const chronic = $derived(diagnoses.filter((d) => d.status === 'chronic'));
   const resolved = $derived(diagnoses.filter((d) => d.status === 'resolved'));
 
-  const encounterOptions: SelectOption[] = $derived([
-    { value: '', label: '—' },
-    ...encounters.map((e) => ({
-      value: String(e.id),
-      label: `${formatDate(e.encounter_date)} · ${e.encounter_type}`,
-    })),
-  ]);
+  const encounterLabelFor = (e: Encounter) => encounterOptionLabel(e, formatDate, (t) => t);
+
+  const encounterOptions: SelectOption[] = $derived(
+    linkableEncounterOptions(encounters, formEncounterIds, encounterLabelFor),
+  );
+
+  const stagedEncounters = $derived(resolveById(encounters, formEncounterIds));
+
+  function stageEncounter(v: string) {
+    const id = Number(v);
+    if (!Number.isFinite(id) || formEncounterIds.includes(id)) return;
+    formEncounterIds = [...formEncounterIds, id];
+    formEncounterPick = '';
+  }
+
+  function unstageEncounter(id: number) {
+    formEncounterIds = formEncounterIds.filter((x) => x !== id);
+  }
 
   function resetForm() {
     editing = null;
@@ -96,7 +115,8 @@
     formIcd10 = '';
     formDateDiagnosed = new Date().toISOString().slice(0, 10);
     formDateResolved = '';
-    formEncounterId = '';
+    formEncounterIds = [];
+    formEncounterPick = '';
     formSeverity = '';
     formNotes = '';
     formError = '';
@@ -119,7 +139,8 @@
     formIcd10 = d.icd10 ?? '';
     formDateDiagnosed = d.date_diagnosed ?? '';
     formDateResolved = d.date_resolved ?? '';
-    formEncounterId = d.encounter_id ? String(d.encounter_id) : '';
+    formEncounterIds = [...d.encounter_ids];
+    formEncounterPick = '';
     formSeverity = d.severity ?? '';
     formNotes = d.notes ?? '';
     formError = '';
@@ -136,15 +157,16 @@
     try {
       if (editing) {
         // Send explicit nulls rather than dropping the key: the API clears a
-        // field only when it is present and null, so an emptied ICD-10 or
-        // unlinked encounter has to be sent to actually take.
+        // field only when it is present and null, so an emptied ICD-10 has to
+        // be sent to actually take. `encounter_ids` is likewise a full
+        // replacement, so an emptied list clears the links.
         await updateDiagnosis(editing.id, {
           name: formName,
           status: formStatus,
           icd10: formIcd10 || null,
           date_diagnosed: formDateDiagnosed || null,
           date_resolved: formStatus === 'resolved' ? formDateResolved || null : null,
-          encounter_id: formEncounterId ? Number(formEncounterId) : null,
+          encounter_ids: formEncounterIds,
           severity: formSeverity || null,
           notes: formNotes || null,
         });
@@ -155,7 +177,7 @@
           icd10: formIcd10 || undefined,
           date_diagnosed: formDateDiagnosed || undefined,
           date_resolved: formDateResolved || undefined,
-          encounter_id: formEncounterId ? Number(formEncounterId) : undefined,
+          encounter_ids: formEncounterIds,
           severity: formSeverity || undefined,
           notes: formNotes || undefined,
         });
@@ -300,16 +322,35 @@
           <input type="date" bind:value={formDateResolved} />
         </label>
       {/if}
-      <label>
-        <span>Linked encounter</span>
-        <Select
-          value={formEncounterId}
-          options={encounterOptions}
-          onValueChange={(v) => (formEncounterId = v)}
-          ariaLabel="Linked encounter"
-          fullWidth
-        />
-      </label>
+    </div>
+    <!-- Not a <label>: the control is a Select whose trigger is a button, and
+         wrapping it would make clicking the field name open the dropdown. -->
+    <div class="full encounters-field">
+      <span class="field-label">Linked encounters</span>
+      {#if stagedEncounters.length}
+        <ul class="staged">
+          {#each stagedEncounters as e (e.id)}
+            <li>
+              <span>{encounterLabelFor(e)}</span>
+              <button
+                type="button"
+                class="unstage"
+                onclick={() => unstageEncounter(e.id)}
+                aria-label="Remove {encounterLabelFor(e)}">×</button
+              >
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <Select
+        value={formEncounterPick}
+        options={encounterOptions}
+        onValueChange={stageEncounter}
+        placeholder={encounterOptions.length ? 'Link an encounter…' : 'No encounters to link'}
+        disabled={encounterOptions.length === 0}
+        ariaLabel="Link an encounter"
+        fullWidth
+      />
     </div>
     <label class="full">
       <span>Notes</span>
@@ -356,11 +397,12 @@
         {#if d.date_resolved}<span>Resolved {formatDate(d.date_resolved)}</span>{/if}
       {:else}
         {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
-        {#if d.encounter_id}
-          <a href="{base}/health/history/encounter?id={d.encounter_id}" class="enc">
-            {encounterLabel(d.encounter_id)}
+        <!-- Every visit this condition was seen at, not just the first. -->
+        {#each d.encounter_ids as eid (eid)}
+          <a href="{base}/health/history/encounter?id={eid}" class="enc">
+            {encounterLabel(eid)}
           </a>
-        {/if}
+        {/each}
       {/if}
     </div>
     {#if d.notes}<p class="notes">{d.notes}</p>{/if}
@@ -598,6 +640,57 @@
   .form-actions {
     display: flex;
     justify-content: flex-end;
+  }
+
+  .encounters-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+  .encounters-field .field-label {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+  }
+  .staged {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .staged li {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.1rem 0.3rem 0.1rem 0.55rem;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-pill);
+    font-size: var(--text-xs);
+    /* An encounter label carries date, type and provider — wrap inside the
+       chip rather than running past the page gutter on a phone. */
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+  .staged li span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .unstage {
+    background: none;
+    border: none;
+    padding: 0 0.15rem;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: var(--text-sm);
+    line-height: 1;
+    cursor: pointer;
+  }
+  .unstage:hover {
+    color: var(--text-primary);
   }
 
   .list {

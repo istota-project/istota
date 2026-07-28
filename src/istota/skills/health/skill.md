@@ -86,6 +86,11 @@ istota-skill health resolve-diagnosis 7 --date 2026-06-15
 istota-skill health update-diagnosis 7 --status chronic
 istota-skill health delete-diagnosis 7
 
+# A condition is usually seen at more than one visit — link each of them.
+istota-skill health link-encounter 7 --encounter 12
+istota-skill health link-encounter 7 --encounter @followup   # created this task
+istota-skill health unlink-encounter 7 --encounter 12
+
 istota-skill health history-summary                       # new-doctor packet
 
 # Immunizations
@@ -179,6 +184,7 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 | "I saw the GI doctor today, colonoscopy was clean" | `add-encounter --date 2026-05-15 --type procedure --specialty gastroenterology --reason "Colonoscopy" --notes "Clean, no findings"` |
 | "Diagnosed with X today" | `add-diagnosis "X" --status active --date-diagnosed 2026-05-15` (plus `add-encounter` if visit details given) |
 | "The hemorrhoids cleared up" | `resolve-diagnosis <id> --date 2026-05-15` |
+| "Saw a specialist about my anemia" | `add-encounter …` then `link-encounter <diagnosis-id> --encounter @that-visit` — link, never create a second copy of the condition |
 | "What are my active conditions?" | `diagnoses --status active` |
 | "When was my last eye exam?" | `encounters --since … --type screening` and filter |
 | "Give me a summary for my new doctor" | `history-summary` |
@@ -195,6 +201,15 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 | "Steps yesterday?" | `stats --metric steps --limit 1` |
 
 When the user uploads a photo or PDF of a lab report through the web UI, the upload pipeline runs the OCR + LLM extraction automatically and the user confirms the extraction in the web UI. From a Talk message with an image attachment, you can transcribe the image and call `add-panel` + `add-biomarker` directly, or recommend they upload via the web UI for the full review-and-edit flow.
+
+## One condition, several visits
+
+A condition and an encounter are many-to-many. Someone is diagnosed by their GP, referred to a specialist, and seen again at a follow-up — that is one condition linked to three encounters, not three conditions.
+
+- When the user mentions an existing condition in the context of a new visit, `link-encounter` that visit to the existing diagnosis. Do **not** `add-diagnosis` again: a second row splits the condition's history in two, and its trend, documents and resolution date then live on whichever copy you happened to update.
+- Check `diagnoses --status all` for a match by name or ICD-10 code before adding one.
+- `--encounter` takes a numeric id, or `@ref` naming an encounter you created earlier in the same task.
+- `unlink-encounter` removes one link only; the condition and the encounter both survive. Removing the last link does not delete the condition.
 
 ## Filing paperwork
 

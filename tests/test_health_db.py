@@ -1,5 +1,6 @@
 """Tests for the per-user health SQLite layer."""
 
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
@@ -569,6 +570,216 @@ class TestDiagnoses:
             conn.commit()
             d = health_db.get_diagnosis(conn, did)
         assert d.encounter_id is None
+
+
+class TestDiagnosisEncounterLinks:
+    """Many-to-many between diagnoses and encounters.
+
+    A condition is routinely seen by several people — GP, then a specialist,
+    then a follow-up — so the link is a set, not a scalar. ``diagnoses.
+    encounter_id`` survives as an unread legacy column; ``diagnosis_encounters``
+    is the source of truth.
+    """
+
+    def _encounter(self, conn, date, kind="visit"):
+        return health_db.insert_encounter(
+            conn, encounter_date=date, encounter_type=kind,
+        )
+
+    def test_links_several_encounters_to_one_diagnosis(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            gp = self._encounter(conn, "2026-06-02")
+            spec = self._encounter(conn, "2026-07-14")
+            followup = self._encounter(conn, "2026-09-01")
+            did = health_db.insert_diagnosis(conn, name="Iron deficiency anemia")
+            for eid in (gp, spec, followup):
+                health_db.link_diagnosis_encounter(conn, did, eid)
+            conn.commit()
+            linked = health_db.encounters_for_diagnosis(conn, did)
+        # Newest encounter first, matching how encounters list elsewhere.
+        assert [e.id for e in linked] == [followup, spec, gp]
+
+    def test_link_is_idempotent(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = self._encounter(conn, "2026-06-02")
+            did = health_db.insert_diagnosis(conn, name="Asthma")
+            assert health_db.link_diagnosis_encounter(conn, did, eid) is True
+            assert health_db.link_diagnosis_encounter(conn, did, eid) is False
+            conn.commit()
+            assert len(health_db.encounters_for_diagnosis(conn, did)) == 1
+
+    def test_unlink_leaves_the_other_links(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            gp = self._encounter(conn, "2026-06-02")
+            spec = self._encounter(conn, "2026-07-14")
+            did = health_db.insert_diagnosis(conn, name="Asthma")
+            health_db.link_diagnosis_encounter(conn, did, gp)
+            health_db.link_diagnosis_encounter(conn, did, spec)
+            conn.commit()
+            assert health_db.unlink_diagnosis_encounter(conn, did, gp) == 1
+            conn.commit()
+            assert [e.id for e in health_db.encounters_for_diagnosis(conn, did)] == [spec]
+            # The condition itself is untouched by an unlink.
+            assert health_db.get_diagnosis(conn, did) is not None
+
+    def test_one_encounter_carries_several_diagnoses(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = self._encounter(conn, "2026-06-02")
+            a = health_db.insert_diagnosis(conn, name="Anemia")
+            b = health_db.insert_diagnosis(conn, name="Asthma")
+            health_db.insert_diagnosis(conn, name="Unrelated")
+            health_db.link_diagnosis_encounter(conn, a, eid)
+            health_db.link_diagnosis_encounter(conn, b, eid)
+            conn.commit()
+            linked = health_db.diagnoses_for_encounter(conn, eid)
+        assert {d.id for d in linked} == {a, b}
+
+    def test_insert_with_encounter_id_creates_a_link(self, tmp_path):
+        """The legacy scalar argument is shorthand for one link."""
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = self._encounter(conn, "2026-06-02")
+            did = health_db.insert_diagnosis(
+                conn, name="Anemia", encounter_id=eid,
+            )
+            conn.commit()
+            assert [e.id for e in health_db.encounters_for_diagnosis(conn, did)] == [eid]
+            assert [d.id for d in health_db.diagnoses_for_encounter(conn, eid)] == [did]
+
+    def test_set_replaces_the_whole_set(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = self._encounter(conn, "2026-06-02")
+            b = self._encounter(conn, "2026-07-14")
+            c = self._encounter(conn, "2026-09-01")
+            did = health_db.insert_diagnosis(conn, name="Anemia", encounter_id=a)
+            health_db.set_diagnosis_encounters(conn, did, [b, c])
+            conn.commit()
+            assert {e.id for e in health_db.encounters_for_diagnosis(conn, did)} == {b, c}
+
+    def test_set_to_empty_clears_every_link(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = self._encounter(conn, "2026-06-02")
+            did = health_db.insert_diagnosis(conn, name="Anemia", encounter_id=eid)
+            health_db.set_diagnosis_encounters(conn, did, [])
+            conn.commit()
+            assert health_db.encounters_for_diagnosis(conn, did) == []
+
+    def test_deleting_an_encounter_drops_only_its_own_links(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            gp = self._encounter(conn, "2026-06-02")
+            spec = self._encounter(conn, "2026-07-14")
+            did = health_db.insert_diagnosis(conn, name="Anemia")
+            health_db.link_diagnosis_encounter(conn, did, gp)
+            health_db.link_diagnosis_encounter(conn, did, spec)
+            conn.commit()
+            health_db.delete_encounter(conn, gp)
+            conn.commit()
+            assert [e.id for e in health_db.encounters_for_diagnosis(conn, did)] == [spec]
+
+    def test_deleting_a_diagnosis_drops_its_links(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = self._encounter(conn, "2026-06-02")
+            did = health_db.insert_diagnosis(conn, name="Anemia", encounter_id=eid)
+            conn.commit()
+            health_db.delete_diagnosis(conn, did)
+            conn.commit()
+            assert health_db.diagnoses_for_encounter(conn, eid) == []
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM diagnosis_encounters WHERE diagnosis_id = ?",
+                (did,),
+            ).fetchone()[0]
+        assert rows == 0
+
+    def test_encounter_ids_for_diagnoses_batches(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = self._encounter(conn, "2026-06-02")
+            b = self._encounter(conn, "2026-07-14")
+            one = health_db.insert_diagnosis(conn, name="Anemia")
+            two = health_db.insert_diagnosis(conn, name="Asthma")
+            unlinked = health_db.insert_diagnosis(conn, name="Eczema")
+            health_db.link_diagnosis_encounter(conn, one, a)
+            health_db.link_diagnosis_encounter(conn, one, b)
+            health_db.link_diagnosis_encounter(conn, two, b)
+            conn.commit()
+            got = health_db.encounter_ids_for_diagnoses(conn, [one, two, unlinked])
+        assert got[one] == [b, a]   # newest encounter first
+        assert got[two] == [b]
+        assert unlinked not in got  # absent rather than an empty list
+
+    def test_unknown_encounter_is_rejected(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            did = health_db.insert_diagnosis(conn, name="Anemia")
+            with pytest.raises(sqlite3.IntegrityError):
+                health_db.link_diagnosis_encounter(conn, did, 9999)
+
+
+class TestDiagnosisEncounterBackfill:
+    def test_backfills_the_legacy_scalar_column(self, tmp_path):
+        """A v3 DB's single links become join rows exactly once."""
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-06-02", encounter_type="visit",
+            )
+            did = health_db.insert_diagnosis(
+                conn, name="Anemia", encounter_id=eid,
+            )
+            # Rewind to the pre-migration state: join table empty, version 3.
+            conn.execute("DELETE FROM diagnosis_encounters")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', '3')",
+            )
+            conn.commit()
+
+        health_db.init_db(ctx.db_path)
+
+        with health_db.connect(ctx.db_path) as conn:
+            assert [e.id for e in health_db.encounters_for_diagnosis(conn, did)] == [eid]
+
+    def test_backfill_does_not_resurrect_a_deliberate_unlink(self, tmp_path):
+        """Re-running init_db at the current version must not re-add links.
+
+        The legacy column is left populated on migrated rows, so a backfill
+        that ran on every open would undo the user's next unlink.
+        """
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-06-02", encounter_type="visit",
+            )
+            did = health_db.insert_diagnosis(
+                conn, name="Anemia", encounter_id=eid,
+            )
+            health_db.unlink_diagnosis_encounter(conn, did, eid)
+            conn.commit()
+
+        health_db.init_db(ctx.db_path)
+
+        with health_db.connect(ctx.db_path) as conn:
+            assert health_db.encounters_for_diagnosis(conn, did) == []
 
 
 class TestDiagnosisReconcile:

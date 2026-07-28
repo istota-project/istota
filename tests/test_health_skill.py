@@ -310,7 +310,50 @@ class TestDiagnosesCli:
             env,
         )["id"]
         detail = _run(["diagnosis", str(did)], env)
-        assert detail["encounter"]["id"] == eid
+        assert [e["id"] for e in detail["encounters"]] == [eid]
+        assert detail["diagnosis"]["encounter_ids"] == [eid]
+
+    def test_link_and_unlink_several_encounters(self, ready):
+        """A condition seen by a GP and a specialist keeps both visits."""
+        _db, env = ready
+        gp = _run(
+            ["add-encounter", "--date", "2026-06-02", "--type", "visit"], env,
+        )["id"]
+        spec = _run(
+            ["add-encounter", "--date", "2026-07-14", "--type", "visit"], env,
+        )["id"]
+        did = _run(
+            ["add-diagnosis", "Anemia", "--encounter-id", str(gp)], env,
+        )["id"]
+
+        _run(["link-encounter", str(did), "--encounter", str(spec)], env)
+        detail = _run(["diagnosis", str(did)], env)
+        assert [e["id"] for e in detail["encounters"]] == [spec, gp]
+
+        _run(["unlink-encounter", str(did), "--encounter", str(gp)], env)
+        detail = _run(["diagnosis", str(did)], env)
+        assert [e["id"] for e in detail["encounters"]] == [spec]
+
+    def test_link_rejects_unknown_encounter(self, ready):
+        _db, env = ready
+        did = _run(["add-diagnosis", "Anemia"], env)["id"]
+        out = _run(
+            ["link-encounter", str(did), "--encounter", "9999"],
+            env, expect_success=False,
+        )
+        assert out["status"] == "error"
+
+    def test_listing_carries_encounter_ids(self, ready):
+        _db, env = ready
+        eid = _run(
+            ["add-encounter", "--date", "2026-06-02", "--type", "visit"], env,
+        )["id"]
+        _run(["add-diagnosis", "Anemia", "--encounter-id", str(eid)], env)
+        _run(["add-diagnosis", "Eczema"], env)
+        rows = _run(["diagnoses", "--status", "all"], env)["diagnoses"]
+        by_name = {d["name"]: d for d in rows}
+        assert by_name["Anemia"]["encounter_ids"] == [eid]
+        assert by_name["Eczema"]["encounter_ids"] == []
 
 
 class TestHistorySummaryCli:
