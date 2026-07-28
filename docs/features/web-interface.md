@@ -168,7 +168,7 @@ A light/dark theme toggle in the shell header switches the whole UI between them
 | `/istota/api/chat/tasks/{id}/stream` | SSE stream of a task's events (tool use, text deltas) |
 | `/istota/api/chat/tasks/{id}/events` | Snapshot of a task's events |
 | `/istota/api/chat/tasks/{id}/confirm` · `/cancel` | Confirm / cancel a chat task |
-| `/istota/api/chat/attachments/upload` | Attachment upload (multipart) |
+| `/istota/api/chat/attachments` | Attachment upload (multipart, one file per request) |
 
 The SvelteKit build is served as static files for all other `/istota/*` paths.
 
