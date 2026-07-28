@@ -1181,6 +1181,161 @@ class TestChatAttachmentPersistence:
 
 
 @_needs_web_deps
+class TestChatAttachmentLinks:
+    """An attachment chip should open the file it names.
+
+    The link is the session-scoped `/chat/files` endpoint — the user opening a
+    file they already own — never a minted Nextcloud share, which would turn a
+    private file public to solve a display problem. A file the endpoint can't
+    serve (another user's, or one outside the workspace) carries no path, and
+    the chip stays inert rather than becoming a dead link.
+    """
+
+    async def _room(self, client, cookies):
+        return (await client.get("/istota/api/chat/rooms", cookies=cookies)).json()["rooms"][0]
+
+    async def _send(self, client, cookies, room, payload):
+        return await client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json=payload, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+    async def _history(self, client, cookies, room):
+        return (await client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )).json()["messages"]
+
+    async def _upload(self, client, cookies, filename, body=b"hello world"):
+        return (await client.post(
+            "/istota/api/chat/attachments",
+            files={"file": (filename, body, "text/plain")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )).json()
+
+    async def test_upload_returns_the_workspace_path(self, chat_client):
+        """The composer needs it to link the chip it renders optimistically —
+        the host path it already gets back is not what `/chat/files` takes."""
+        cookies = await _login(chat_client, "alice")
+        up = await self._upload(chat_client, cookies, "note.txt")
+        assert up["workspace_path"].startswith("/Users/alice/inbox/web-chat/")
+        assert up["workspace_path"].endswith(".txt")
+
+    async def test_history_carries_the_link_path(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        up = await self._upload(chat_client, cookies, "note.txt")
+        await self._send(chat_client, cookies, room, {
+            "text": "read this", "attachments": [up["path"]],
+            "attachment_names": ["note.txt"],
+        })
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        assert user_msgs[0]["attachments"] == ["note.txt"]
+        assert user_msgs[0]["attachment_paths"] == [up["workspace_path"]]
+
+    async def test_the_link_path_actually_downloads(self, chat_client):
+        """End to end: what history hands the chip is what `/chat/files` takes."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        up = await self._upload(chat_client, cookies, "note.txt", b"file bytes")
+        await self._send(chat_client, cookies, room, {
+            "text": "read this", "attachments": [up["path"]],
+            "attachment_names": ["note.txt"],
+        })
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        resp = await chat_client.get(
+            "/istota/api/chat/files",
+            params={"path": user_msgs[0]["attachment_paths"][0]}, cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.content == b"file bytes"
+
+    async def test_link_survives_task_retention_cleanup(self, chat_client):
+        """The paths live only on the `tasks` row retention deletes, so the
+        link has to be persisted beside the display names or it rots."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        up = await self._upload(chat_client, cookies, "invoice.pdf")
+        resp = await self._send(chat_client, cookies, room, {
+            "text": "file this", "attachments": [up["path"]],
+            "attachment_names": ["invoice.pdf"],
+        })
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            c.execute("DELETE FROM tasks WHERE id = ?", (resp.json()["task_id"],))
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        assert user_msgs[0]["attachment_paths"] == [up["workspace_path"]]
+
+    async def test_attachment_outside_the_workspace_has_no_link(self, chat_client):
+        """The temp-dir upload root (a mountless deployment's fallback) is not
+        under `/Users/<uid>/`, so the endpoint can't serve it."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        import istota.web_app as mod
+        root = mod._chat_upload_roots("alice")[1]
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "stray.png").write_bytes(b"\x00")
+        await self._send(chat_client, cookies, room, {
+            "text": "look", "attachments": [str(root / "stray.png")],
+        })
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        assert user_msgs[0]["attachments"] == ["stray.png"]
+        assert user_msgs[0].get("attachment_paths") is None
+
+    async def test_turn_without_attachments_omits_the_field(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        await self._send(chat_client, cookies, room, {"text": "just text"})
+        user_msgs = [m for m in await self._history(chat_client, cookies, room)
+                     if m["role"] == "user"]
+        assert user_msgs and "attachment_paths" not in user_msgs[0]
+
+    async def test_aggregate_view_carries_the_link_path(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        up = await self._upload(chat_client, cookies, "shot.png")
+        await self._send(chat_client, cookies, room, {
+            "text": "see this", "attachments": [up["path"]],
+            "attachment_names": ["shot.png"],
+        })
+        data = (await chat_client.get(
+            "/istota/api/chat/messages?view=all", cookies=cookies,
+        )).json()
+        user_msgs = [m for m in data["messages"] if m["role"] == "user"]
+        assert user_msgs[0]["attachment_paths"] == [up["workspace_path"]]
+
+    async def test_a_co_members_attachment_is_not_linked(self, chat_client):
+        """Rooms are shared. Bob may see alice's chip, but `/chat/files` is
+        scoped to the caller's own workspace and would refuse the path — so it
+        must not be offered as a link to him."""
+        import istota.web_app as mod
+        alice = await _login(chat_client, "alice")
+        room = await self._room(chat_client, alice)
+        up = await self._upload(chat_client, alice, "note.txt")
+        await self._send(chat_client, alice, room, {
+            "text": "shared", "attachments": [up["path"]],
+            "attachment_names": ["note.txt"],
+        })
+        with db.get_db(mod._config.db_path) as c:
+            db.add_room_member(c, room["token"], "bob")
+            db.ensure_web_chat_handle(c, "bob", room["token"], "general")
+        bob = await _login(chat_client, "bob")
+        bob_room = next(
+            r for r in (await chat_client.get(
+                "/istota/api/chat/rooms", cookies=bob,
+            )).json()["rooms"] if r["token"] == room["token"]
+        )
+        user_msgs = [m for m in await self._history(chat_client, bob, bob_room)
+                     if m["role"] == "user"]
+        assert user_msgs[0]["attachments"] == ["note.txt"]
+        assert user_msgs[0].get("attachment_paths") is None
+
+
+@_needs_web_deps
 class TestChatDeleteApi:
     async def _create_room(self, client, cookies, name):
         return (await client.post(

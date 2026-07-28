@@ -729,6 +729,12 @@ CREATE TABLE IF NOT EXISTS messages (
     -- retention GCs the task row, and the transcript has to keep showing that
     -- a file was part of the turn.
     attachments   TEXT,
+    -- JSON [workspace_path | null], positional against `attachments`, so a
+    -- chip can link at the session-scoped /chat/files endpoint. Stored beside
+    -- the names for the same reason: the host paths live on the `tasks` row
+    -- retention deletes. A null entry = not servable (another user's file, or
+    -- one outside a workspace) → the chip stays inert.
+    attachment_paths TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);

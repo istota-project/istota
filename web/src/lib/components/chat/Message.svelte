@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Star } from 'lucide-svelte';
+  import { chatFileUrl } from '$lib/api';
   import { renderMarkdown } from '$lib/markdown';
   import type { ChatMessage } from '$lib/stores/chat';
   import { renderGroups } from '$lib/stores/segments';
@@ -225,8 +226,19 @@
         {#if message.text}<div class="body user-body">{message.text}</div>{/if}
         {#if message.attachments?.length}
           <div class="attachments">
-            {#each message.attachments as name}
-              <span class="attachment">📎 {name}</span>
+            {#each message.attachments as name, i}
+              {@const href = message.attachmentPaths?.[i]}
+              <!-- A chip is a link only when the file endpoint can serve it to
+							     this user (their own workspace). Anything else — a co-member's
+							     upload, a deployment with no local workspace — stays the inert
+							     label it was, rather than becoming a link that 403s. -->
+              {#if href}
+                <a class="attachment attachment-link" href={chatFileUrl(href)} download={name}>
+                  📎 {name}
+                </a>
+              {:else}
+                <span class="attachment">📎 {name}</span>
+              {/if}
             {/each}
           </div>
         {/if}
@@ -648,6 +660,15 @@
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-pill);
     padding: 0.1rem 0.45rem;
+  }
+  .attachment-link {
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .attachment-link:hover,
+  .attachment-link:focus-visible {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
   }
 
   .progress {

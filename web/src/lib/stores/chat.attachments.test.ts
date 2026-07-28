@@ -128,12 +128,81 @@ describe('chat store — attachment chips', () => {
     api.getTaskEvents.mockResolvedValue({ events: [] });
     const s = await freshSession();
     await s.init();
-    await s.send('read this', [{ path: '/inbox/note-a1b2c3d4.txt', name: 'note.txt' }]);
+    await s.send('read this', [{ path: '/inbox/note-a1b2c3d4.txt', name: 'note.txt', size: 11 }]);
     expect(api.sendChatMessage).toHaveBeenCalledWith(
       1,
       'read this',
       ['/inbox/note-a1b2c3d4.txt'],
       ['note.txt'],
     );
+  });
+
+  it('carries a history turn’s link paths onto the message', async () => {
+    api.getRoomMessages.mockResolvedValue(
+      history([
+        {
+          role: 'user',
+          text: 'read this',
+          task_id: 12,
+          created_at: '2026-06-10T12:00:00Z',
+          attachments: ['note.txt', 'shared.png'],
+          attachment_paths: ['/Users/alice/inbox/web-chat/note-a1.txt', null],
+        },
+      ]),
+    );
+    const s = await freshSession();
+    await s.init();
+    const user = get(s.messages).find((m) => m.role === 'user');
+    // Positional, nulls preserved: an unlinkable file holds its slot rather
+    // than shifting a link onto the wrong chip.
+    expect(user?.attachmentPaths).toEqual(['/Users/alice/inbox/web-chat/note-a1.txt', null]);
+  });
+
+  it('leaves link paths undefined for a turn the server can’t serve', async () => {
+    api.getRoomMessages.mockResolvedValue(
+      history([
+        {
+          role: 'user',
+          text: 'look',
+          task_id: 13,
+          created_at: '2026-06-10T12:00:00Z',
+          attachments: ['stray.png'],
+        },
+      ]),
+    );
+    const s = await freshSession();
+    await s.init();
+    expect(get(s.messages).find((m) => m.role === 'user')?.attachmentPaths).toBeUndefined();
+  });
+
+  it('links the optimistic chip from the upload’s own answer', async () => {
+    // Otherwise a just-sent chip stays inert for the whole session: the
+    // optimistic row is deduped against the streamed echo, not replaced by it.
+    api.getRoomMessages.mockResolvedValue(history([]));
+    api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 14 });
+    api.getTaskEvents.mockResolvedValue({ events: [] });
+    const s = await freshSession();
+    await s.init();
+    await s.send('read this', [
+      {
+        path: '/mnt/nc/Users/alice/inbox/web-chat/note-a1.txt',
+        name: 'note.txt',
+        size: 11,
+        workspace_path: '/Users/alice/inbox/web-chat/note-a1.txt',
+      },
+    ]);
+    const user = get(s.messages).find((m) => m.role === 'user');
+    expect(user?.attachmentPaths).toEqual(['/Users/alice/inbox/web-chat/note-a1.txt']);
+  });
+
+  it('leaves the optimistic chip inert when the upload gave no path', async () => {
+    api.getRoomMessages.mockResolvedValue(history([]));
+    api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 15 });
+    api.getTaskEvents.mockResolvedValue({ events: [] });
+    const s = await freshSession();
+    await s.init();
+    await s.send('read this', [{ path: '/tmp/stray.png', name: 'stray.png', size: 1 }]);
+    const user = get(s.messages).find((m) => m.role === 'user');
+    expect(user?.attachmentPaths).toEqual([null]);
   });
 });

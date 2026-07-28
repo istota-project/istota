@@ -695,7 +695,11 @@ describe('Composer voice message', () => {
     // An audio-only message is sendable with no text at all.
     expect(btn(container, 'Send')!.disabled).toBe(false);
     await fireEvent.click(btn(container, 'Send')!);
-    expect(onSend).toHaveBeenCalledWith('', [{ path: 'inbox/voice.webm', name: 'voice.webm' }]);
+    // The upload's whole answer is handed on, `workspace_path` included, so the
+    // chip can link at the file endpoint without a second round trip.
+    expect(onSend).toHaveBeenCalledWith('', [
+      { path: 'inbox/voice.webm', name: 'voice.webm', size: 12 },
+    ]);
   });
 
   it('discarding a recording uploads nothing', async () => {

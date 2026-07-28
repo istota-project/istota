@@ -33,7 +33,7 @@
     busy = false,
     placeholder = 'Message Istota…',
   }: {
-    onSend: (text: string, attachments: { path: string; name: string }[]) => void;
+    onSend: (text: string, attachments: ChatAttachment[]) => void;
     onCancel?: () => void;
     busy?: boolean;
     placeholder?: string;
@@ -346,10 +346,7 @@
   function submit() {
     const t = text.trim();
     if (!t && attachments.length === 0) return;
-    onSend(
-      t,
-      attachments.map((a) => ({ path: a.path, name: a.name })),
-    );
+    onSend(t, attachments);
     text = '';
     attachments = [];
     queueMicrotask(autoGrow);

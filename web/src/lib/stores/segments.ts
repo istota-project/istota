@@ -70,6 +70,10 @@ export interface ChatMessage {
   // Ack verb shown before the first segment exists.
   progress?: string;
   attachments?: string[];
+  // Positional against `attachments`: the workspace path each chip opens, or
+  // null for one the file endpoint can't serve (another member's upload, a
+  // deployment with no local workspace) — that chip stays inert.
+  attachmentPaths?: (string | null)[];
   createdAt?: string;
   // Total wall time in seconds, from the task's terminal `done` event.
   durationSeconds?: number;

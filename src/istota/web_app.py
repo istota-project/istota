@@ -2143,7 +2143,7 @@ def _room_events_batch(
     events: list[dict] = []
     total = 0
     for r in rows[:want]:
-        d = _cross_room_message_dict(r)
+        d = _cross_room_message_dict(r, username)
         total += len(json.dumps(d))
         if total > max_bytes:
             truncated = True
@@ -2780,7 +2780,8 @@ _SPINE_COLUMNS = (
     "  t.actions_taken AS actions_taken, t.execution_trace AS execution_trace, "
     "  t.started_at AS started_at, t.completed_at AS completed_at, "
     "  t.model_used AS model_used, (s.message_id IS NOT NULL) AS starred, "
-    "  m.attachments AS attachments, t.attachments AS task_attachments "
+    "  m.attachments AS attachments, t.attachments AS task_attachments, "
+    "  m.attachment_paths AS attachment_paths "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
 )
@@ -2823,6 +2824,68 @@ def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | No
     if not isinstance(paths, list) or not paths:
         return None
     return [os.path.basename(str(p)) for p in paths]
+
+
+def _row_attachment_paths(row, username: str, *, message_column: bool = True):
+    """Workspace paths the caller's attachment chips can be linked at, parallel
+    to `_row_attachment_names`, or None when none of them can be.
+
+    Two sources, in order: the paths stored on the canonical `messages` row at
+    ingest (which outlive the `tasks` row retention deletes), then — for turns
+    predating that column, and for the `tasks` gap-fill rows — a derivation
+    from the host paths still on the task.
+
+    Both are re-scoped to **the caller's own** workspace, because a room is
+    shared: a co-member sees the chip, but `/chat/files` serves only the
+    caller's own files and would refuse the path. Offering it as a link would
+    promise a download the endpoint then 403s.
+    """
+    from .transport.ingest import workspace_attachment_paths
+
+    keys = row.keys()
+    if message_column and "attachment_paths" in keys and row["attachment_paths"]:
+        try:
+            stored = json.loads(row["attachment_paths"])
+        except (TypeError, ValueError):
+            stored = None
+        if isinstance(stored, list) and stored:
+            prefix = f"/Users/{username}/"
+            scoped = [
+                p if isinstance(p, str) and p.startswith(prefix) else None
+                for p in stored
+            ]
+            return scoped if any(scoped) else None
+    raw_paths = None
+    if not message_column and "attachments" in keys:
+        raw_paths = row["attachments"]
+    elif "task_attachments" in keys:
+        raw_paths = row["task_attachments"]
+    if not raw_paths:
+        return None
+    try:
+        paths = json.loads(raw_paths)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(paths, list) or not paths:
+        return None
+    return workspace_attachment_paths(_config, username, [str(p) for p in paths])
+
+
+def _row_attachment_fields(row, username: str, *, message_column: bool = True) -> dict:
+    """The attachment keys a history row contributes to its payload, if any.
+
+    `attachments` are the chip labels; `attachment_paths` is the positional
+    companion telling the client which of them are openable. Both are omitted
+    wholesale for a turn that carried no files.
+    """
+    names = _row_attachment_names(row, message_column=message_column)
+    if not names:
+        return {}
+    out: dict = {"attachments": names}
+    paths = _row_attachment_paths(row, username, message_column=message_column)
+    if paths:
+        out["attachment_paths"] = paths
+    return out
 
 
 def _chat_room_messages(
@@ -3015,9 +3078,7 @@ def _chat_room_messages(
                 "created_at": r["created_at"],
                 "msg_id": r["msg_id"], "starred": bool(r["starred"]),
             }
-            names = _row_attachment_names(r)
-            if names:
-                d["attachments"] = names
+            d.update(_row_attachment_fields(r, username))
             messages.append(d)
         else:  # assistant — a stored assistant row is by definition a completed turn
             messages.append(_assistant_message_dict(r, r["body"], r["status"] or "completed"))
@@ -3037,9 +3098,7 @@ def _chat_room_messages(
                 "role": "user", "text": r["prompt"], "task_id": tid,
                 "created_at": r["created_at"],
             }
-            names = _row_attachment_names(r, message_column=False)
-            if names:
-                d["attachments"] = names
+            d.update(_row_attachment_fields(r, username, message_column=False))
             messages.append(d)
             seen.add(("user", tid))
         status = r["status"]
@@ -3657,7 +3716,7 @@ def _chat_set_message_star(username: str, message_id: int, starred: bool) -> boo
     return True
 
 
-def _cross_room_message_dict(r) -> dict:
+def _cross_room_message_dict(r, username: str) -> dict:
     """One `db._CROSS_ROOM_COLUMNS` row → the history payload shape.
 
     Shared by the paginated aggregate views and the live room-event stream, so
@@ -3677,9 +3736,7 @@ def _cross_room_message_dict(r) -> dict:
             "role": "user", "text": r["body"], "task_id": r["task_id"],
             "status": r["status"], "created_at": r["created_at"], **base,
         }
-        names = _row_attachment_names(r)
-        if names:
-            d["attachments"] = names
+        d.update(_row_attachment_fields(r, username))
     elif r["role"] == "assistant":
         d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
         d.update(base)
@@ -3719,7 +3776,7 @@ def _chat_aggregate_messages(
     oldest_cursor = (
         {"ts": rows[-1]["created_at"], "id": rows[-1]["msg_id"]} if rows else None
     )
-    messages = [_cross_room_message_dict(r) for r in reversed(rows)]
+    messages = [_cross_room_message_dict(r, username) for r in reversed(rows)]
     return {
         "messages": messages,
         "has_more": has_more,
@@ -4040,8 +4097,20 @@ async def chat_upload_attachment(
         return JSONResponse(
             {"error": f"file exceeds {chat.max_attachment_mb} MB"}, status_code=413,
         )
-    path = await asyncio.to_thread(_save_chat_attachment, user["username"], name, data)
-    return {"path": path, "name": name, "size": len(data)}
+    username = user["username"]
+    path = await asyncio.to_thread(_save_chat_attachment, username, name, data)
+    # `workspace_path` is what `/chat/files` takes, so the composer can link the
+    # chip it renders optimistically instead of waiting for the turn to come
+    # back from history. None on a mountless deployment, where nothing is
+    # servable and the chip stays inert.
+    from .transport.ingest import workspace_attachment_paths
+    resolved = workspace_attachment_paths(_config, username, [path])
+    return {
+        "path": path,
+        "name": name,
+        "size": len(data),
+        "workspace_path": resolved[0] if resolved else None,
+    }
 
 
 # ---- Chat file download (authenticated handover) ----

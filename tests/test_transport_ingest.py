@@ -114,3 +114,81 @@ class TestIngestMessage:
             first = ingest_message(conn, config, msg)
             second = ingest_message(conn, config, msg)
         assert first == second
+
+
+class TestWorkspaceAttachmentPaths:
+    """A turn's attachment chips become links only when the file sits in the
+    sender's own workspace, so the web UI can serve it back through the
+    session-scoped `/chat/files` endpoint (never a public share)."""
+
+    def _config(self, tmp_path, db_path):
+        cfg = Config()
+        cfg.db_path = db_path
+        cfg.nextcloud_mount_path = tmp_path / "mount"
+        return cfg
+
+    def test_maps_a_workspace_file_to_its_workspace_path(self, tmp_path, db_path):
+        from istota.transport.ingest import workspace_attachment_paths
+
+        cfg = self._config(tmp_path, db_path)
+        host = str(cfg.nextcloud_mount_path / "Users" / "alice" / "inbox" / "web-chat" / "n-1.txt")
+        assert workspace_attachment_paths(cfg, "alice", [host]) == [
+            "/Users/alice/inbox/web-chat/n-1.txt"
+        ]
+
+    def test_file_outside_the_workspace_has_no_path(self, tmp_path, db_path):
+        """A Talk attachment lives under /Talk, and a mountless deployment
+        stores uploads in temp — neither is servable, so the chip stays inert
+        rather than becoming a dead link."""
+        from istota.transport.ingest import workspace_attachment_paths
+
+        cfg = self._config(tmp_path, db_path)
+        outside = str(cfg.nextcloud_mount_path / "Talk" / "shared.png")
+        own = str(cfg.nextcloud_mount_path / "Users" / "alice" / "b.png")
+        assert workspace_attachment_paths(cfg, "alice", [outside, own]) == [
+            None, "/Users/alice/b.png",
+        ]
+
+    def test_another_users_file_has_no_path(self, tmp_path, db_path):
+        from istota.transport.ingest import workspace_attachment_paths
+
+        cfg = self._config(tmp_path, db_path)
+        host = str(cfg.nextcloud_mount_path / "Users" / "bob" / "inbox" / "x.txt")
+        own = str(cfg.nextcloud_mount_path / "Users" / "alice" / "b.png")
+        assert workspace_attachment_paths(cfg, "alice", [host, own]) == [
+            None, "/Users/alice/b.png",
+        ]
+
+    def test_entries_stay_positional(self, tmp_path, db_path):
+        """The list is parallel to the display names, so an unresolvable file
+        holds its slot instead of shifting a link onto the wrong chip."""
+        from istota.transport.ingest import workspace_attachment_paths
+
+        cfg = self._config(tmp_path, db_path)
+        root = cfg.nextcloud_mount_path / "Users" / "alice"
+        paths = [str(cfg.nextcloud_mount_path / "Talk" / "a.png"), str(root / "b.png")]
+        assert workspace_attachment_paths(cfg, "alice", paths) == [
+            None, "/Users/alice/b.png",
+        ]
+
+    def test_all_unresolvable_returns_none(self, tmp_path, db_path):
+        from istota.transport.ingest import workspace_attachment_paths
+
+        cfg = self._config(tmp_path, db_path)
+        outside = str(cfg.nextcloud_mount_path / "Talk" / "a.png")
+        assert workspace_attachment_paths(cfg, "alice", [outside]) is None
+
+    def test_no_attachments_returns_none(self, tmp_path, db_path):
+        from istota.transport.ingest import workspace_attachment_paths
+
+        cfg = self._config(tmp_path, db_path)
+        assert workspace_attachment_paths(cfg, "alice", None) is None
+
+    def test_no_mount_returns_none(self, db_path):
+        """An rclone deployment has no local workspace, so nothing is linkable."""
+        from istota.transport.ingest import workspace_attachment_paths
+
+        cfg = Config()
+        cfg.db_path = db_path
+        cfg.nextcloud_mount_path = None
+        assert workspace_attachment_paths(cfg, "alice", ["/tmp/x.png"]) is None

@@ -54,6 +54,46 @@ def display_attachment_names(
     return [os.path.basename(p) for p in attachments]
 
 
+def workspace_attachment_paths(
+    config: "Config",
+    user_id: str,
+    attachments: list[str] | None,
+) -> list[str | None] | None:
+    """The workspace paths a turn's attachment chips can be *linked* at, or
+    None when none of them can be.
+
+    A chip should open the file it names, and the way to do that without
+    minting a public share is the web app's session-scoped `/chat/files`
+    endpoint — the user opening a file they already own. That endpoint takes a
+    Nextcloud-style workspace path (`/Users/<uid>/…`), while the stored
+    attachment is a host path, so the translation happens once here, at ingest,
+    and rides the message row: the paths themselves live only on the `tasks`
+    row, which retention deletes long before the transcript stops showing the
+    turn.
+
+    An attachment outside the sender's own workspace resolves to None rather
+    than being dropped — the list is positional against the display names, and
+    an inert chip is the intended outcome for a file the endpoint could not
+    serve anyway (a Talk attachment under `/Talk`, an upload that fell back to
+    the temp dir on a mountless deployment).
+    """
+    if not attachments:
+        return None
+    root = config.workspace_root(user_id)
+    if root is None:  # rclone deployment — no local workspace to serve from
+        return None
+    real_root = os.path.normpath(str(root))
+    out: list[str | None] = []
+    for host_path in attachments:
+        real = os.path.normpath(str(host_path))
+        if real.startswith(real_root + os.sep):
+            relative = real[len(real_root) + 1:].replace(os.sep, "/")
+            out.append(f"/Users/{user_id}/{relative}")
+        else:
+            out.append(None)
+    return out if any(out) else None
+
+
 def record_inbound(
     conn,
     config: "Config",
@@ -199,6 +239,9 @@ def record_inbound(
                     else None
                 ),
                 attachments=display_attachment_names(attachments, attachment_names),
+                attachment_paths=workspace_attachment_paths(
+                    config, user_id, attachments,
+                ),
             )
 
     return room_token, task_id

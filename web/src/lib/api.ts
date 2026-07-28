@@ -1612,6 +1612,9 @@ export interface ChatHistoryMessage {
   // Display names of files a user turn carried, so the attachment chips
   // survive a transcript rebuild (the composer's in-memory names don't).
   attachments?: string[];
+  // Positional against `attachments`: the workspace path to open each chip at,
+  // or null for one this user can't be served (see `chatFileUrl`).
+  attachment_paths?: (string | null)[];
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */
@@ -1895,6 +1898,21 @@ export interface ChatAttachment {
   path: string;
   name: string;
   size: number;
+  // Where the same file is reachable through `chatFileUrl`, or null when it
+  // isn't (a deployment with no local workspace). Distinct from `path`, which
+  // is the host path the brain reads and the download endpoint won't take.
+  workspace_path?: string | null;
+}
+
+/**
+ * Download URL for one of the caller's own workspace files.
+ *
+ * The whole point of routing a chip here rather than at a Nextcloud share is
+ * that nothing becomes public: the endpoint serves the file inside the logged-in
+ * session, so the user opens a file they already own.
+ */
+export function chatFileUrl(path: string): string {
+  return `${base}/api/chat/files?path=${encodeURIComponent(path)}`;
 }
 
 const CHAT_ATTACHMENT_PATH = '/chat/attachments';

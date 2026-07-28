@@ -30,6 +30,7 @@ import {
   setChatMessageStarred,
   updateChatRoom,
   promoteChatRoom,
+  type ChatAttachment,
   type ChatRoom,
   type ChatHistory,
   type ChatView,
@@ -206,7 +207,7 @@ export interface ChatSession {
   promoteRoom: (id: number) => Promise<void>;
   archiveRoom: (id: number) => Promise<void>;
   deleteRoom: (id: number) => Promise<void>;
-  send: (text: string, attachments?: { path: string; name: string }[]) => Promise<void>;
+  send: (text: string, attachments?: ChatAttachment[]) => Promise<void>;
   cancel: () => Promise<void>;
   confirm: (cid: number, taskId: number) => Promise<void>;
   reject: (cid: number, taskId: number) => Promise<void>;
@@ -1076,6 +1077,7 @@ function createSession(): ChatSession {
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,
+      attachmentPaths: m.attachment_paths?.length ? m.attachment_paths : undefined,
     };
   }
 
@@ -1499,7 +1501,7 @@ function createSession(): ChatSession {
     }
   }
 
-  async function send(text: string, attachments: { path: string; name: string }[] = []) {
+  async function send(text: string, attachments: ChatAttachment[] = []) {
     const roomId = get(activeRoomId);
     const trimmed = text.trim();
     if (!roomId || (!trimmed && attachments.length === 0)) return;
@@ -1514,6 +1516,10 @@ function createSession(): ChatSession {
         segments: [],
         streaming: false,
         attachments: attachments.map((x) => x.name),
+        // The upload already told us where each file is reachable, so a chip
+        // is a working link the moment it appears rather than only after the
+        // turn comes back from history.
+        attachmentPaths: attachments.map((x) => x.workspace_path ?? null),
         createdAt: new Date().toISOString(),
       },
     ]);
@@ -1553,7 +1559,7 @@ function createSession(): ChatSession {
   async function sendTurn(
     roomId: number,
     trimmed: string,
-    attachments: { path: string; name: string }[],
+    attachments: ChatAttachment[],
     userCid: number,
     phCid: number,
   ) {

@@ -148,6 +148,14 @@ interface MockChatTask {
   /** Attachment chip labels, persisted the way the backend persists them, so
    * a chip in dev survives leaving the room and coming back. */
   attachments?: string[];
+  /** Positional workspace paths for those chips (null = not linkable). */
+  attachmentPaths?: (string | null)[];
+}
+
+/** Stored upload path → the workspace path `/chat/files` would take, or null
+ * for one that isn't under the user's own workspace. */
+function mockWorkspacePath(stored: string): string | null {
+  return stored.startsWith('inbox/') ? `/Users/alice/${stored}` : null;
 }
 const mockChatRooms: MockChatRoom[] = [
   {
@@ -534,6 +542,7 @@ function mockFinishedTurn(t: MockChatTask): { user: any; assistant: any } {
       msg_id: mockUserMsgId(t),
       starred: mockStars.has(mockUserMsgId(t)),
       ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+      ...(t.attachmentPaths?.length ? { attachment_paths: t.attachmentPaths } : {}),
     },
     assistant: {
       role: 'assistant',
@@ -787,6 +796,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
           task_id: t.id,
           created_at: new Date(t.createdAt).toISOString(),
           ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+          ...(t.attachmentPaths?.length ? { attachment_paths: t.attachmentPaths } : {}),
         });
         active = { id: t.id, status: 'running' };
       }
@@ -814,6 +824,9 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         ? rawNames.map(String)
         : attachments.map((p) => p.split('/').pop() || p)
       : [];
+    // Mirrors the server's ingest-time translation: an upload under the user's
+    // own workspace becomes a linkable path, anything else stays inert.
+    const attachmentPaths = attachments.map(mockWorkspacePath);
     // An attachment-only send (a composer voice memo) is a real message: the
     // recording is the content. Mirrors the server's descriptor stand-in.
     let text = String(body?.text || '').trim();
@@ -837,6 +850,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       createdAt: Date.now(),
       variant,
       attachments: attachmentNames,
+      attachmentPaths: attachmentPaths.some(Boolean) ? attachmentPaths : undefined,
     });
     return {
       task_id: id,
@@ -875,7 +889,8 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     // ASCII at the front, so the filename survives the utf8 decode.
     const name =
       (typeof body === 'string' ? body : '').match(/filename="([^"]*)"/)?.[1] || 'upload';
-    return { path: `inbox/web-chat/mock/${Date.now()}-${name}`, name, size: 0 };
+    const stored = `inbox/web-chat/mock/${Date.now()}-${name}`;
+    return { path: stored, name, size: 0, workspace_path: mockWorkspacePath(stored) };
   }
 
   return undefined;
