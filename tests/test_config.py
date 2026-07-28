@@ -2090,3 +2090,19 @@ class TestResourceConfigGrepGuard:
         )
         assert rc2.extra["base_url"] == "https://k.example"
         assert rc2.extra["api_key"] == "secret"
+
+
+class TestBriefingEmailHtmlFor:
+    """Config.briefing_email_html_for — per-user HTML briefing email preference."""
+
+    def test_defaults_on(self):
+        cfg = Config(users={"alice": UserConfig()})
+        assert cfg.briefing_email_html_for("alice") is True
+
+    def test_unknown_user_defaults_on(self):
+        cfg = Config(users={})
+        assert cfg.briefing_email_html_for("nobody") is True
+
+    def test_opt_out(self):
+        cfg = Config(users={"alice": UserConfig(briefing_email_html=False)})
+        assert cfg.briefing_email_html_for("alice") is False

@@ -687,6 +687,7 @@ export interface UserProfile {
   max_background_workers: number;
   default_destination: string;
   routing: Record<string, string>;
+  briefing_email_html: boolean;
   // Read-only hint from the server: surfaces available for delivery routing.
   delivery_surfaces?: string[];
 }

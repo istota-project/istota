@@ -840,3 +840,74 @@ class TestBuiltinMarkets:
         gs = bi.resolve_markets({}, ctx)
         assert gs.ok is False
         assert "weekend" in gs.provenance.lower()
+
+
+class TestCleanBody:
+    """_clean_body routes HTML newsletters through the link-preserving converter."""
+
+    def test_html_body_keeps_article_links(self):
+        from istota.briefings.sources.email import _clean_body
+        body = (
+            '<html><body><div>'
+            '<a href="https://semafor.com/a/iran">Iran tensions</a>'
+            '</div><p>Body text.</p></body></html>'
+        )
+        out = _clean_body(body)
+        assert "[Iran tensions](https://semafor.com/a/iran)" in out
+        assert "Body text." in out
+
+    def test_plain_body_passes_through(self):
+        from istota.briefings.sources.email import _clean_body
+        assert _clean_body("just words\nsecond line") == "just words\nsecond line"
+
+    def test_max_links_is_threaded(self):
+        from istota.briefings.sources.email import _clean_body
+        body = "<html><body>" + "".join(
+            f'<div><a href="https://x.com/{i}">item {i}</a></div>' for i in range(5)
+        ) + "</body></html>"
+        out = _clean_body(body, max_links=2)
+        assert out.count("](https://x.com/") == 2
+
+    def test_converter_failure_falls_back_to_strip_html(self, monkeypatch):
+        from istota.briefings.sources import email as email_mod
+
+        def boom(*a, **kw):
+            raise RuntimeError("nope")
+
+        monkeypatch.setattr(email_mod, "html_to_markdown", boom)
+        out = email_mod._clean_body("<html><body><p>Body text.</p></body></html>")
+        assert "Body text." in out
+        assert "<p>" not in out
+
+    def test_resolve_threads_the_config_cap(self, tmp_path, monkeypatch):
+        """The `[briefings] newsletter_max_links_per_source` knob reaches the body."""
+        import istota.briefings.sources.email as email_mod
+        from istota.config import BriefingsModuleConfig
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            nextcloud_mount_path=tmp_path / "mount",
+            email=EmailConfig(enabled=True, imap_host="imap.x", bot_email="bot@x.com"),
+            users={"alice": UserConfig()},
+        )
+        cfg.briefings = BriefingsModuleConfig(newsletter_max_links_per_source=1)
+        ctx = SourceContext(app_config=cfg, user_id="alice", conn=object())
+
+        html = "<html><body>" + "".join(
+            f'<div><a href="https://x.com/{i}">item {i}</a></div>' for i in range(4)
+        ) + "</body></html>"
+
+        monkeypatch.setattr("istota.email_support.get_email_config", lambda c: cfg.email)
+        monkeypatch.setattr(
+            "istota.skills.email.list_emails", lambda **kw: [_Env("1", "n@semafor.com")],
+        )
+        monkeypatch.setattr(
+            "istota.skills.email.fetch_emails_full", lambda **kw: [_Full("1", html)],
+        )
+        monkeypatch.setattr(
+            "istota.email_ownership.resolve_email_owner", lambda config, conn, e: None,
+        )
+
+        gs = _call_email(email_mod, {"mode": "shared"}, ctx)
+        assert gs.ok is True
+        assert gs.items[0]["body"].count("](https://x.com/") == 1

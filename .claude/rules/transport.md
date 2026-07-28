@@ -258,6 +258,31 @@ behaviour (attributed repost, web-only read state) on any failure.
   because its scheduler callers check the success flag, which the
   `Transport.deliver` protocol (`int | None`) discards for a surface with no
   message-id concept.
+
+### Briefing email bodies
+
+Briefing bodies are chat markdown, so email has always flattened them with
+`skills/briefing.strip_markdown` — which also destroys the article links the
+news sections carry. `transport/email/outbound._briefing_email_bodies(config,
+task, body, fmt)` is the single decision point: it maps a task to
+`(plain_body, html_body, content_type)` and all three send sites (the legacy
+unstructured-briefing branch, the reply-to-thread branch, the fresh-send branch)
+pass its output straight through.
+
+- Non-briefing task → `(body, None, fmt)`, i.e. today's behaviour untouched.
+- Briefing + `briefing_email_html` on (default) + `format == "plain"` →
+  `(strip_markdown(body), render_briefing_html(body) or None, "plain")`, sent
+  `multipart/alternative` so a mail client shows clickable links and a
+  plain-only client still gets readable text.
+- Briefing + on + `format == "html"` (the rare hand-authored case) → the HTML
+  passes through as the rich part and `_strip_html` derives the plain fallback.
+- Briefing + off → exactly the pre-feature single-part plain send.
+
+`html_body` of `None` means single-part, and `skills/email._set_body` treats an
+**empty** `html_body` as none supplied — which is what makes the renderer's
+failure signal (`render_briefing_html` returns `""` on any error) degrade to
+plain text rather than shipping an empty HTML part. See AGENTS.md "Briefings"
+for the renderer's grammar + safety rules.
 - **`process_one_task`** gates the progress-ack subscriber on
   `transport.capabilities.supports_progress_ack` (resolved via the registry),
   keeping the `source_type == "talk"` guard so only interactive Talk tasks get

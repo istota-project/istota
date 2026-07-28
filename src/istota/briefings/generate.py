@@ -189,9 +189,12 @@ def _default_directive(block: BriefingBlock) -> str:
     return (
         "Synthesize the sources below into one coherent section. Group related "
         "items, attribute across sources, and lead with what's new. When a "
-        "source item carries an article URL (shown as '[article: <url>]'), link "
-        "that source's attribution to the specific article it came from; use a "
-        "plain-text source name when no URL is available."
+        "source supplies an article URL, link that source's attribution to the "
+        "specific article the story came from; use a plain-text source name "
+        "when no URL is available. Two shapes carry a URL: an RSS/feed item "
+        "ends in '[article: <url>]', and a newsletter body has its links inline "
+        "as markdown '[text](url)' — in a newsletter, pick the link on the story "
+        "itself, not the newsletter's own home or web-version link."
     )
 
 

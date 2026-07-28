@@ -120,6 +120,25 @@ class TestLoadConfigSeeding:
         cfg_path.write_text(tomli_w.dumps({"briefings": {"max_browse_chars": 6000}}))
         assert load_config(cfg_path).briefings.max_browse_chars == 6000
 
+    def test_newsletter_max_links_default_and_override(self, tmp_path):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(tomli_w.dumps({"bot_name": "Istota"}))
+        assert load_config(cfg_path).briefings.newsletter_max_links_per_source == 20
+
+        cfg_path.write_text(tomli_w.dumps({
+            "briefings": {"newsletter_max_links_per_source": 5},
+        }))
+        assert load_config(cfg_path).briefings.newsletter_max_links_per_source == 5
+
+    def test_briefing_email_html_parsed_from_user_block(self, tmp_path):
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(tomli_w.dumps({
+            "users": {"alice": {"briefing_email_html": False}, "bob": {}},
+        }))
+        config = load_config(cfg_path)
+        assert config.briefing_email_html_for("alice") is False
+        assert config.briefing_email_html_for("bob") is True
+
 
 class TestApplySharedBlocksOverlay:
     def _base_config(self, tmp_path):

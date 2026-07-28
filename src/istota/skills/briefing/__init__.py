@@ -108,6 +108,135 @@ def strip_markdown(text: str) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# Markdown → HTML (briefing email delivery)
+# ---------------------------------------------------------------------------
+#
+# A briefing body is markdown from a *constrained* subset the briefing skill
+# defines (bold, italic, links, single-level bullets, `---`, emoji section
+# labels). `render_briefing_html` converts exactly that subset so briefing email
+# can be sent multipart/alternative with clickable links; `strip_markdown` stays
+# the plain-text part.
+#
+# It is deliberately NOT a general markdown engine. Anything outside the subset
+# is emitted as escaped literal text, which is also what makes it safe: the
+# input is escaped *first*, so newsletter-derived `<script>` or a quote inside a
+# URL can never become markup. Only http/https/mailto reach an `href`.
+#
+# There is no styling of any kind — no `style` attributes, no `<head>`/`<style>`
+# block — so each mail client's own default typography renders the message.
+
+_HTML_LINK_RE = re.compile(r"\[([^\[\]]+)\]\(([^)\s]*)\)")
+_HTML_SAFE_SCHEME_RE = re.compile(r"(?:https?|mailto):", re.IGNORECASE)
+_HTML_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_HTML_STAR_ITALIC_RE = re.compile(r"\*([^*\n]+)\*")
+# Underscore emphasis only at word boundaries, so `snake_case_name` and an
+# underscored URL path survive intact.
+_HTML_UNDER_ITALIC_RE = re.compile(r"(?<![\w])_([^_\n]+)_(?![\w])")
+_HTML_RULE_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
+_HTML_BULLET_RE = re.compile(r"^[-*+]\s+(.*)$")
+# Headings are forbidden by the skill, but structured sources emit `## ` verbatim
+# (the same leak `strip_markdown` guards against). Drop the marker and render the
+# line as an ordinary paragraph rather than leaking `## ` into the mail.
+_HTML_ATX_RE = re.compile(r"^#{1,6}[ \t]+")
+
+
+def _render_emphasis(escaped: str) -> str:
+    """Apply bold/italic markers to already-escaped, link-free text."""
+    out = _HTML_BOLD_RE.sub(r"<strong>\1</strong>", escaped)
+    out = _HTML_STAR_ITALIC_RE.sub(r"<em>\1</em>", out)
+    out = _HTML_UNDER_ITALIC_RE.sub(r"<em>\1</em>", out)
+    return out
+
+
+def _render_inline(line: str) -> str:
+    """Render one line of briefing markdown to HTML.
+
+    Escaping happens up front, so every subsequent substitution operates on
+    text that cannot contain markup. Links are handled by walking the matches
+    rather than by a single ``re.sub`` so emphasis never runs over an emitted
+    ``href`` (a URL with underscores would otherwise sprout an ``<em>``).
+    """
+    escaped = html.escape(line, quote=True)
+    parts: list[str] = []
+    pos = 0
+    for match in _HTML_LINK_RE.finditer(escaped):
+        parts.append(_render_emphasis(escaped[pos:match.start()]))
+        label, url = match.group(1), match.group(2)
+        if url and _HTML_SAFE_SCHEME_RE.match(url):
+            parts.append(f'<a href="{url}">{_render_emphasis(label)}</a>')
+        else:
+            # Unsupported scheme (javascript:/data:) or an empty target: keep
+            # the anchor text, drop the destination entirely.
+            parts.append(_render_emphasis(label))
+        pos = match.end()
+    parts.append(_render_emphasis(escaped[pos:]))
+    return "".join(parts)
+
+
+def _render_blocks(lines: list[str]) -> list[str]:
+    """Group briefing lines into ``<p>`` / ``<ul>`` / ``<hr>`` blocks.
+
+    Line-oriented on purpose: a briefing section is a label line followed by
+    content lines (markets quotes are one per line), so consecutive lines join
+    with ``<br>`` inside one paragraph rather than collapsing to a space.
+    """
+    out: list[str] = []
+    para: list[str] = []
+    items: list[str] = []
+
+    def flush() -> None:
+        if para:
+            out.append("<p>" + "<br>\n".join(para) + "</p>")
+            para.clear()
+        if items:
+            out.append(
+                "<ul>\n" + "\n".join(f"<li>{i}</li>" for i in items) + "\n</ul>"
+            )
+            items.clear()
+
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            flush()
+            continue
+        if _HTML_RULE_RE.match(line):
+            flush()
+            out.append("<hr>")
+            continue
+        bullet = _HTML_BULLET_RE.match(line)
+        if bullet:
+            if para:
+                flush()
+            items.append(_render_inline(bullet.group(1)))
+            continue
+        if items:
+            flush()
+        para.append(_render_inline(_HTML_ATX_RE.sub("", line)))
+
+    flush()
+    return out
+
+
+def render_briefing_html(md: str) -> str:
+    """Render a briefing markdown body as bare HTML for multipart email.
+
+    Returns ``""`` for empty input or on any rendering failure — the caller
+    then sends plain-text only, which is exactly the pre-feature behaviour. A
+    briefing is never failed by a rendering error.
+    """
+    if not md or not md.strip():
+        return ""
+    try:
+        blocks = _render_blocks(md.split("\n"))
+    except Exception as e:  # noqa: BLE001 - never break delivery over markup
+        logger.warning("render_briefing_html failed, falling back to plain: %s", e)
+        return ""
+    if not blocks:
+        return ""
+    return "<html><body>\n" + "\n".join(blocks) + "\n</body></html>"
+
+
 def parse_briefing_json(text: str) -> dict | None:
     """Parse structured JSON output from a briefing task.
 

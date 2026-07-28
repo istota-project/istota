@@ -356,6 +356,7 @@ location_ping_retention_days = {{ istota_scheduler_location_ping_retention_days 
    up with their day. #}
 [briefings]
 shared_block_timezone = "{{ istota_briefing_shared_tz | default('UTC') }}"
+newsletter_max_links_per_source = {{ istota_briefing_newsletter_max_links | default(20) }}
 
 {# Module-owned shared briefing blocks (shared-kv-curated-content). Rendered as
    the top-level [[briefing_shared_blocks]] section; generated once globally by

@@ -417,6 +417,17 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # User profiles: per-user HTML briefing email opt-out (briefing-newsletter-
+    # links-html-email spec). Default-on; when true a briefing email is sent
+    # multipart/alternative (HTML + plain fallback) so links are clickable.
+    try:
+        conn.execute(
+            "ALTER TABLE user_profiles ADD COLUMN "
+            "briefing_email_html INTEGER NOT NULL DEFAULT 1"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Briefing configs: real `output` delivery column (retire-legacy-briefing-
     # components spec). Previously smuggled into components JSON under the
     # reserved `__output__` key. Add the column, then hoist `__output__` out of

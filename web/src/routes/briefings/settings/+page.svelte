@@ -3,6 +3,8 @@
   import { base } from '$app/paths';
   import {
     getMe,
+    getProfile,
+    updateProfile,
     getBriefings,
     upsertBriefing,
     deleteBriefing,
@@ -39,6 +41,7 @@
     type SelectOption,
   } from '$lib/components/ui';
   import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SourceConfigFields from '$lib/components/briefings/SourceConfigFields.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
 
@@ -46,6 +49,38 @@
   let error = $state('');
   let moduleEnabled = $state(true);
   let isAdmin = $state(false);
+
+  // --- Email delivery (per-user profile preference, not per-briefing) ---
+  // Lives here rather than on /settings because it only governs how a briefing
+  // reaches the inbox. It writes the profile endpoint, so unlike the per-record
+  // forms on this page it registers with the app bar's single Save.
+  let emailHtml = $state(true);
+  let emailHtmlSaved = $state(true);
+  let emailHtmlSaving = $state(false);
+  let emailHtmlError = $state('');
+
+  async function saveEmailHtml() {
+    emailHtmlSaving = true;
+    emailHtmlError = '';
+    try {
+      await updateProfile({ briefing_email_html: emailHtml });
+      emailHtmlSaved = emailHtml;
+    } catch (e) {
+      emailHtmlError = (e as Error).message || 'Save failed';
+    } finally {
+      emailHtmlSaving = false;
+    }
+  }
+
+  useSettingsSave(() =>
+    moduleEnabled
+      ? {
+          dirty: emailHtml !== emailHtmlSaved,
+          saving: emailHtmlSaving,
+          save: saveEmailHtml,
+        }
+      : null,
+  );
 
   // --- Schedule & delivery ---
   let briefings: UserBriefingRow[] = $state([]);
@@ -415,6 +450,12 @@
         getSharedBlockOptions()
           .then((r) => (sharedBlockOptions = r.options))
           .catch(() => (sharedBlockOptions = [])),
+        getProfile()
+          .then((r) => {
+            emailHtml = r.profile?.briefing_email_html !== false;
+            emailHtmlSaved = emailHtml;
+          })
+          .catch(() => {}),
       ]);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load settings';
@@ -985,6 +1026,20 @@
           <div class="banner error">{briefingError}</div>
         {/if}
       </form>
+    </SettingsCard>
+
+    <SettingsCard
+      title="Email delivery"
+      description="Applies to every briefing you have delivered by email."
+    >
+      <SettingsField
+        label="Send as HTML"
+        checkbox
+        hint="Renders the briefing as formatted mail, so a news source that supplied an article URL becomes a clickable link. A plain-text copy is always sent alongside it for clients that prefer one. Untick for plain text only."
+        error={emailHtmlError}
+      >
+        <input type="checkbox" bind:checked={emailHtml} />
+      </SettingsField>
     </SettingsCard>
 
     <SettingsCard

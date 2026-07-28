@@ -385,6 +385,7 @@ class UserConfig:
     default_destination: str = "talk"  # fallback delivery descriptor
     email_reply_routing: str = "origin+thread"  # origin+thread | origin | thread
     default_briefings: bool = True  # seed the shared [[default_briefings]] set into this user
+    briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
 
 
 @dataclass
@@ -881,6 +882,11 @@ class BriefingsModuleConfig:
     default_lookback_hours: int = 12
     max_source_chars: int = 5000
     max_browse_chars: int = 20000
+    # Inline `[anchor](url)` links preserved per newsletter body. Newsletters are
+    # link soup (unsubscribe / social / tracking chrome), so the converter
+    # filters hard and this caps what survives the filter — an over-cap anchor
+    # keeps its text and loses only the destination. 0 = unlimited.
+    newsletter_max_links_per_source: int = 20
     # Timezone shared briefing blocks evaluate their cron in. Shared blocks are
     # global (generated once, no per-user timezone) so this is a single
     # operator-chosen zone — typically the operator's local zone so the
@@ -1186,6 +1192,20 @@ class Config:
             )
             return "origin+thread"
         return value
+
+    def briefing_email_html_for(self, user_id: str) -> bool:
+        """Whether this user's briefing email is sent as HTML + plain multipart.
+
+        Default on — the point of the feature is clickable article links, and
+        the plain-text part is always present so nothing is lost for a
+        plain-only client. Off restores the pre-feature single-part plain
+        delivery. Unknown users default on (matches the docker auto-seed path,
+        as with :meth:`is_module_enabled`).
+        """
+        user = self.users.get(user_id)
+        if user is None:
+            return True
+        return bool(getattr(user, "briefing_email_html", True))
 
     @property
     def caldav_url(self) -> str:
@@ -1583,6 +1603,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         routing=dict(user_data.get("routing", {}) or {}),
         default_destination=user_data.get("default_destination", "talk") or "talk",
         email_reply_routing=user_data.get("email_reply_routing", "origin+thread") or "origin+thread",
+        briefing_email_html=bool(user_data.get("briefing_email_html", True)),
     )
 
 
@@ -2014,6 +2035,9 @@ def load_config(config_path: Path | None = None) -> Config:
             default_lookback_hours=br.get("default_lookback_hours", 12),
             max_source_chars=br.get("max_source_chars", 5000),
             max_browse_chars=br.get("max_browse_chars", 20000),
+            newsletter_max_links_per_source=br.get(
+                "newsletter_max_links_per_source", 20,
+            ),
             shared_block_timezone=br.get("shared_block_timezone", "UTC"),
         )
 

@@ -2032,6 +2032,39 @@ class TestProfileEndpoints:
         body = resp.json()
         assert body["profile"]["user_id"] == "alice"
         assert body["profile"]["timezone"] == "UTC"
+        assert body["profile"]["briefing_email_html"] is True
+
+    async def test_update_profile_briefing_email_html(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"briefing_email_html": False},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import user_profiles
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.briefing_email_html is False
+
+        got = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert got.json()["profile"]["briefing_email_html"] is False
+
+    async def test_update_profile_briefing_email_html_rejects_non_bool(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"briefing_email_html": 3},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
 
     async def test_update_profile_partial(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)

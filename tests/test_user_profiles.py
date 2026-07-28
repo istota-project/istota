@@ -364,3 +364,58 @@ class TestEmailReplyRouting:
         assert n == 1
         p = user_profiles.get_profile(db_path, "alice")
         assert p.email_reply_routing == "thread"
+
+
+class TestBriefingEmailHtml:
+    """briefing_email_html bool round-trip + merge (default on)."""
+
+    def test_migration_adds_column(self, tmp_path):
+        from istota import db as _db
+        path = tmp_path / "fresh.db"
+        _db.init_db(path)
+        with _db.get_db(path) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(user_profiles)")}
+        assert "briefing_email_html" in cols
+
+    def test_default_on_fresh_row(self, db_path):
+        p = user_profiles.ensure_profile(db_path, "alice")
+        assert p.briefing_email_html is True
+
+    def test_round_trip_off(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice")
+        p = user_profiles.update_profile(db_path, "alice", briefing_email_html=False)
+        assert p.briefing_email_html is False
+        again = user_profiles.get_profile(db_path, "alice")
+        assert again.briefing_email_html is False
+
+    def test_stored_as_integer(self, db_path):
+        from istota import db as _db
+        user_profiles.ensure_profile(db_path, "alice")
+        user_profiles.update_profile(db_path, "alice", briefing_email_html=False)
+        with _db.get_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT briefing_email_html FROM user_profiles WHERE user_id='alice'"
+            ).fetchone()
+        assert row[0] == 0
+
+    def test_noop_detection(self, db_path):
+        user_profiles.update_profile_with_status(
+            db_path, "alice", briefing_email_html=False,
+        )
+        _, state = user_profiles.update_profile_with_status(
+            db_path, "alice", briefing_email_html=False,
+        )
+        assert state == "noop"
+
+    def test_merge_db_owns_it(self):
+        uc = UserConfig()
+        profile = UserProfile(user_id="alice", briefing_email_html=False)
+        user_profiles.merge_into_user_config(profile, uc)
+        assert uc.briefing_email_html is False
+
+    def test_import_from_toml_seeds_value(self, db_path):
+        uc = UserConfig(briefing_email_html=False)
+        n = user_profiles.import_from_user_configs(db_path, {"alice": uc})
+        assert n == 1
+        p = user_profiles.get_profile(db_path, "alice")
+        assert p.briefing_email_html is False

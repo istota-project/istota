@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatch
 
 from istota.briefings.sources import GatheredSource, SourceContext
+from istota.briefings.sources._html import DEFAULT_MAX_LINKS, html_to_markdown
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,9 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
         config.get("lookback_hours", ctx.module_config.default_lookback_hours)
     )
     max_chars = int(ctx.module_config.max_source_chars)
+    max_links = int(
+        getattr(ctx.module_config, "newsletter_max_links_per_source", DEFAULT_MAX_LINKS)
+    )
     title = "Newsletters" if mode == "shared" else "Newsletters (selected senders)"
 
     # Fail closed: ownership resolution needs the framework DB. Without it we
@@ -149,7 +153,7 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
     items: list[dict] = []
     for env in kept:
         raw = bodies.get(env.id, "")
-        body = _clean_body(raw) if raw else (env.snippet or "")
+        body = _clean_body(raw, max_links=max_links) if raw else (env.snippet or "")
         if max_chars and len(body) > max_chars:
             body = body[:max_chars] + "\n[...truncated]"
         items.append({
@@ -165,13 +169,25 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
     )
 
 
-def _clean_body(body: str) -> str:
-    """Strip HTML from a newsletter body when it looks like HTML."""
+def _clean_body(body: str, *, max_links: int = DEFAULT_MAX_LINKS) -> str:
+    """Flatten a newsletter body, keeping its article links inline.
+
+    HTML bodies go through :func:`html_to_markdown`, which preserves each
+    surviving ``<a href>`` as inline ``[anchor](url)`` so the model can cite a
+    newsletter story to its own article (the plain tag-strip this replaced threw
+    every URL away). Plain-text bodies pass through untouched, and any converter
+    failure falls back to the old tag-strip — a briefing is never failed by a
+    parsing error.
+    """
     lo = body.lower()
     if "<html" in lo or "<body" in lo or "<div" in lo or "<table" in lo:
         try:
-            from istota.skills.briefing import _strip_html
-            return _strip_html(body)
-        except Exception:  # noqa: BLE001
-            return body
+            return html_to_markdown(body, max_links=max_links)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("newsletter body conversion failed: %s", e)
+            try:
+                from istota.skills.briefing import _strip_html
+                return _strip_html(body)
+            except Exception:  # noqa: BLE001
+                return body
     return body

@@ -4574,6 +4574,7 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "max_background_workers": {"type": "int"},
     "default_destination":    {"type": "descriptor"},
     "routing":                {"type": "routing"},
+    "briefing_email_html":    {"type": "bool"},
 }
 
 
@@ -4761,6 +4762,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "max_background_workers": profile.max_background_workers,
         "default_destination": profile.default_destination,
         "routing": profile.routing,
+        "briefing_email_html": profile.briefing_email_html,
         "delivery_surfaces": _registered_delivery_surfaces(),
     }}
 

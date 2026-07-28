@@ -919,6 +919,8 @@ def cmd_user_ensure(args):
         updates["email_reply_routing"] = args.email_reply_routing
     if getattr(args, "default_briefings", None) is not None:
         updates["default_briefings"] = args.default_briefings
+    if getattr(args, "briefing_email_html", None) is not None:
+        updates["briefing_email_html"] = args.briefing_email_html
 
     profile, state = user_profiles.update_profile_with_status(db_path, user_id, **updates)
 
@@ -943,6 +945,8 @@ def cmd_user_ensure(args):
         print(f"  email_reply_routing: {profile.email_reply_routing}")
     if not profile.default_briefings:
         print("  default_briefings: off")
+    if not profile.briefing_email_html:
+        print("  briefing_email_html: off")
     if profile.routing:
         print(f"  routing: {', '.join(f'{k}={v}' for k, v in sorted(profile.routing.items()))}")
     print(f"STATE: {state}")
@@ -980,6 +984,7 @@ def cmd_user_show(args):
         "default_destination": profile.default_destination,
         "email_reply_routing": profile.email_reply_routing,
         "default_briefings": profile.default_briefings,
+        "briefing_email_html": profile.briefing_email_html,
     }, indent=2))
 
 
@@ -1660,6 +1665,16 @@ def main():
             "Seed the shared [[default_briefings]] set into this user (default on). "
             "Pass --no-default-briefings to opt out; already-seeded briefings are "
             "left intact."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--briefing-email-html",
+        dest="briefing_email_html", default=None,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Send briefing email as multipart/alternative — HTML with clickable "
+            "links plus a plain-text fallback (default on). Pass "
+            "--no-briefing-email-html for plain text only."
         ),
     )
     # user show  (Phase 6: dump the DB row as JSON)

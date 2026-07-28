@@ -1807,6 +1807,7 @@ const handlers: MockHandler[] = [
       max_background_workers: 0,
       default_destination: 'talk',
       routing: {},
+      briefing_email_html: true,
       purposes: ['reply', 'alert', 'log', 'briefing', 'notification'],
       delivery_surfaces: ['email', 'ntfy', 'talk'],
     };

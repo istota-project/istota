@@ -19,8 +19,9 @@ from ... import db
 from ...email_support import get_email_config
 from ...skills.email import reply_to_email, send_email
 
-# NOTE: ``strip_markdown`` (from the briefing skill) is imported function-locally
-# inside ``deliver_email_result``, not here. A transport must not structurally
+# NOTE: the briefing skill's body helpers (``strip_markdown`` /
+# ``render_briefing_html`` / ``_strip_html``) are imported function-locally
+# inside ``_briefing_email_bodies``, not here. A transport must not structurally
 # depend on a sibling feature-skill at import time — keeping it lazy stops
 # ``import istota.transport`` from eagerly dragging in ``skills.briefing`` and
 # averts a latent import cycle (the email client + storage imports above are the
@@ -204,6 +205,46 @@ def _legacy_briefing_subject(task: db.Task) -> str:
     return f"{briefing_type} Briefing".strip()
 
 
+def _briefing_email_bodies(
+    config: "Config", task: db.Task, body: str, fmt: str,
+) -> tuple[str, str | None, str]:
+    """Resolve ``(plain_body, html_body, content_type)`` for a briefing email.
+
+    Briefing bodies are markdown written for chat, so email has always
+    flattened them with ``strip_markdown`` — which also destroys the article
+    links the news sections now carry. With the per-user preference on (the
+    default) the flattened text becomes the ``text/plain`` fallback and a
+    rendered HTML part rides alongside it, so the links are clickable without
+    losing anything for a plain-only client.
+
+    ``html_body`` of ``None`` means "send single-part exactly as before": the
+    preference is off, the render failed (it returns ``""``), or this is not a
+    briefing task.
+    """
+    from ...skills.briefing import (
+        _strip_html,
+        render_briefing_html,
+        strip_markdown,
+    )
+
+    if task.source_type != "briefing":
+        return body, None, fmt
+
+    want_html = config.briefing_email_html_for(task.user_id)
+
+    if fmt == "html":
+        # Rare hand-authored path: the model already produced HTML. Pass it
+        # through as the rich part and derive a tag-stripped plain fallback.
+        if not want_html:
+            return body, None, "html"
+        return _strip_html(body), body, "plain"
+
+    plain = strip_markdown(body)
+    if not want_html:
+        return plain, None, "plain"
+    return plain, render_briefing_html(body) or None, "plain"
+
+
 async def deliver_email_result(
     config: "Config", task: db.Task, message: str, *, subject: str | None = None,
 ) -> bool:
@@ -216,8 +257,6 @@ async def deliver_email_result(
 
     Returns True on success, False on failure.
     """
-    from ...skills.briefing import strip_markdown
-
     # Prefer deferred email output file (tool-based, no transcription risk)
     # over inline JSON parsing (legacy, subject to smart-quote corruption).
     # If neither source provides structured output, fall back to legacy briefing
@@ -231,15 +270,19 @@ async def deliver_email_result(
         if not user_config or not user_config.email_addresses:
             logger.warning("No email address for user %s (task %d)", task.user_id, task.id)
             return False
+        plain, html_body, content_type = _briefing_email_bodies(
+            config, task, message, "plain",
+        )
         try:
             email_config = get_email_config(config)
             send_email(
                 to=user_config.email_addresses[0],
                 subject=subject or _legacy_briefing_subject(task),
-                body=strip_markdown(message),
+                body=plain,
                 config=email_config,
                 from_addr=config.email.bot_email,
-                content_type="plain",
+                content_type=content_type,
+                html_body=html_body,
             )
             return True
         except Exception as e:
@@ -253,10 +296,12 @@ async def deliver_email_result(
         )
         return True
 
-    # Safety net: strip markdown from briefing plain text emails (briefing content
-    # is generated with Talk formatting; strip it for email delivery)
-    if task.source_type == "briefing" and parsed["format"] == "plain":
-        parsed["body"] = strip_markdown(parsed["body"])
+    # Briefing bodies are chat markdown: flatten for the plain part and, when
+    # the user's preference allows it, render an HTML alternative alongside.
+    # Non-briefing tasks come back untouched (html_body None).
+    body_text, html_body, content_type = _briefing_email_bodies(
+        config, task, parsed["body"], parsed["format"],
+    )
 
     with db.get_db(config.db_path) as conn:
         processed_email = db.get_email_for_task(conn, task.id)
@@ -280,12 +325,13 @@ async def deliver_email_result(
             sent_message_id = reply_to_email(
                 to_addr=processed_email.sender_email,
                 subject=subject,
-                body=parsed["body"],
+                body=body_text,
                 config=email_config,
                 from_addr=config.email.bot_email,
                 in_reply_to=processed_email.message_id,
                 references=references,
-                content_type=parsed["format"],
+                content_type=content_type,
+                html_body=html_body,
             )
             _record_sent_email(
                 config, task, sent_message_id,
@@ -313,10 +359,11 @@ async def deliver_email_result(
             sent_message_id = send_email(
                 to=user_config.email_addresses[0],
                 subject=subject,
-                body=parsed["body"],
+                body=body_text,
                 config=email_config,
                 from_addr=config.email.bot_email,
-                content_type=parsed["format"],
+                content_type=content_type,
+                html_body=html_body,
             )
             _record_sent_email(
                 config, task, sent_message_id,

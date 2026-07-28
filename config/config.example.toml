@@ -753,6 +753,11 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # max_browse_chars = 20000        # same cap for a browse source, which gathers markdown
                                   # rather than flattened text (the URLs it keeps cost
                                   # characters, and a frontpage opens with masthead chrome)
+# newsletter_max_links_per_source = 20  # inline [anchor](url) links kept per newsletter body.
+                                  # Newsletters are link soup, so the converter drops
+                                  # unsubscribe / social / web-version chrome and this caps
+                                  # what survives; an over-cap anchor keeps its text and
+                                  # loses only the destination. 0 = unlimited
 # shared_block_timezone = "UTC"   # timezone shared (global) blocks evaluate their cron in;
                                   # typically the operator's own zone so the morning/evening
                                   # regeneration windows line up with their day
@@ -768,6 +773,11 @@ email_addresses = ["alice@example.com", "alice.work@company.com"]
 timezone = "America/New_York"  # IANA timezone for briefing scheduling
 # alerts_channel = "alertsroom456"  # Talk room for confirmations and security alerts
 # trusted_email_senders = ["*@company.com"]  # trusted senders bypass email confirmation gate
+# briefing_email_html = false  # briefing email as plain text only. Default (true) sends
+                               # multipart/alternative — HTML with clickable article links
+                               # plus a plain-text fallback part. Also settable per user via
+                               # `istota user ensure --no-briefing-email-html` or the web UI
+                               # (Briefings → settings → Email delivery).
 
 # Alice's resources — only `folder` (an out-of-workspace sandbox mount)
 # is declarable after the Resources sunset. todo/reminders/notes are

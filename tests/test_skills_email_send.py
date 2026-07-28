@@ -257,3 +257,92 @@ class TestGatedViaMain:
         with pytest.raises(SystemExit) as exc:
             main(["delete", "5"])
         assert exc.value.code == 1
+
+
+# --- multipart/alternative (HTML briefing email) ---------------------------
+
+
+def _capture_sent(fn):
+    """Run ``fn`` with SMTP mocked; return the serialized EmailMessage."""
+    captured = {}
+    server = MagicMock()
+    server.__enter__ = MagicMock(return_value=server)
+    server.__exit__ = MagicMock(return_value=False)
+    server.send_message.side_effect = (
+        lambda m, to_addrs=None: captured.__setitem__("msg", m)
+    )
+    with patch("smtplib.SMTP", return_value=server), \
+         patch("istota.skills.email._save_to_sent"):
+        fn()
+    return captured["msg"]
+
+
+class TestMultipartAlternative:
+    """``html_body`` turns a send into multipart/alternative (plain + HTML)."""
+
+    def test_send_email_builds_both_parts(self, econf):
+        msg = _capture_sent(lambda: send_email(
+            to="a@out.com", subject="S", body="plain text", config=econf,
+            html_body="<html><body><p>rich</p></body></html>",
+        ))
+        assert msg.get_content_type() == "multipart/alternative"
+        types = [p.get_content_type() for p in msg.iter_parts()]
+        assert types == ["text/plain", "text/html"]
+        parts = list(msg.iter_parts())
+        assert "plain text" in parts[0].get_content()
+        assert "<p>rich</p>" in parts[1].get_content()
+
+    def test_send_email_without_html_body_stays_single_part(self, econf):
+        msg = _capture_sent(lambda: send_email(
+            to="a@out.com", subject="S", body="plain text", config=econf,
+        ))
+        assert msg.get_content_type() == "text/plain"
+        assert not msg.is_multipart()
+
+    def test_blank_html_body_stays_single_part(self, econf):
+        """An empty render (the renderer's failure signal) must not go multipart."""
+        msg = _capture_sent(lambda: send_email(
+            to="a@out.com", subject="S", body="plain", config=econf, html_body="",
+        ))
+        assert msg.get_content_type() == "text/plain"
+
+    def test_multipart_with_attachment_keeps_both_alternatives(self, econf, tmp_path):
+        f = tmp_path / "report.txt"
+        f.write_text("data")
+        msg = _capture_sent(lambda: send_email(
+            to="a@out.com", subject="S", body="plain", config=econf,
+            html_body="<html><body><p>rich</p></body></html>",
+            attachments=[str(f)],
+        ))
+        assert msg.get_content_type() == "multipart/mixed"
+        assert "report.txt" in [p.get_filename() for p in msg.iter_attachments()]
+        body = msg.get_body(preferencelist=("html",))
+        assert body is not None and "<p>rich</p>" in body.get_content()
+
+    def test_reply_to_email_builds_both_parts(self, econf):
+        from istota.skills.email import reply_to_email
+        msg = _capture_sent(lambda: reply_to_email(
+            to_addr="a@out.com", subject="Orig", body="plain text", config=econf,
+            in_reply_to="<orig@x>",
+            html_body="<html><body><p>rich</p></body></html>",
+        ))
+        assert msg.get_content_type() == "multipart/alternative"
+        assert msg["Subject"] == "Re: Orig"
+        assert msg["In-Reply-To"] == "<orig@x>"
+        types = [p.get_content_type() for p in msg.iter_parts()]
+        assert types == ["text/plain", "text/html"]
+
+    def test_reply_to_email_without_html_body_stays_single_part(self, econf):
+        from istota.skills.email import reply_to_email
+        msg = _capture_sent(lambda: reply_to_email(
+            to_addr="a@out.com", subject="Orig", body="plain", config=econf,
+        ))
+        assert msg.get_content_type() == "text/plain"
+
+    def test_html_content_type_still_sends_single_part_html(self, econf):
+        """The existing single-part HTML path (``content_type='html'``) is intact."""
+        msg = _capture_sent(lambda: send_email(
+            to="a@out.com", subject="S", body="<p>x</p>", config=econf,
+            content_type="html",
+        ))
+        assert msg.get_content_type() == "text/html"

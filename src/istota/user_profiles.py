@@ -59,6 +59,8 @@ class UserProfile:
     email_reply_routing: str = "origin+thread"
     # Seed the shared [[default_briefings]] set into this user (default on).
     default_briefings: bool = True
+    # Deliver briefing email as multipart/alternative (HTML + plain) — default on.
+    briefing_email_html: bool = True
 
 
 _PROFILE_COLUMNS = (
@@ -68,7 +70,7 @@ _PROFILE_COLUMNS = (
     "disabled_skills", "trusted_email_senders", "quiet_email_senders",
     "disabled_modules",
     "routing", "default_destination", "email_reply_routing",
-    "default_briefings",
+    "default_briefings", "briefing_email_html",
 )
 
 # Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
@@ -78,7 +80,7 @@ _LIST_COLUMNS = frozenset({
     "quiet_email_senders", "disabled_modules",
 })
 # Columns stored as INTEGER 0/1 booleans.
-_BOOL_COLUMNS = frozenset({"default_briefings"})
+_BOOL_COLUMNS = frozenset({"default_briefings", "briefing_email_html"})
 
 
 def _coerce_bool(value: object, default: bool = True) -> bool:
@@ -127,6 +129,9 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         default_destination=row["default_destination"] or "talk",
         email_reply_routing=row["email_reply_routing"] or "origin+thread",
         default_briefings=_coerce_bool(_row_get(row, "default_briefings"), True),
+        briefing_email_html=_coerce_bool(
+            _row_get(row, "briefing_email_html"), True,
+        ),
     )
 
 
@@ -262,6 +267,9 @@ def ensure_profile(
         default_destination=_attr(seed_from, "default_destination") or "talk",
         email_reply_routing=_attr(seed_from, "email_reply_routing") or "origin+thread",
         default_briefings=_coerce_bool(_attr(seed_from, "default_briefings"), True),
+        briefing_email_html=_coerce_bool(
+            _attr(seed_from, "briefing_email_html"), True,
+        ),
     )
     _insert(db_path, profile)
     logger.info("ensured user_profile user=%s (new row)", user_id)
@@ -482,6 +490,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         profile.default_destination or "talk",
         profile.email_reply_routing or "origin+thread",
         1 if profile.default_briefings else 0,
+        1 if profile.briefing_email_html else 0,
     )
     cols_sql = ", ".join(insert_cols)
     if replace:
@@ -545,6 +554,9 @@ def import_from_user_configs(
             default_destination=getattr(user_config, "default_destination", "") or "talk",
             email_reply_routing=getattr(user_config, "email_reply_routing", "") or "origin+thread",
             default_briefings=_coerce_bool(getattr(user_config, "default_briefings", True), True),
+            briefing_email_html=_coerce_bool(
+                getattr(user_config, "briefing_email_html", True), True,
+            ),
         )
         try:
             _insert(db_path, profile, replace=False)
@@ -579,6 +591,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "default_destination", profile.default_destination or "talk")
     setattr(user_config, "email_reply_routing", profile.email_reply_routing or "origin+thread")
     setattr(user_config, "default_briefings", bool(profile.default_briefings))
+    setattr(user_config, "briefing_email_html", bool(profile.briefing_email_html))
     for attr in (
         "log_channel", "alerts_channel",
         "max_foreground_workers", "max_background_workers",

@@ -307,3 +307,94 @@ class TestExecutorRouting:
         cfg.users["alice"].disabled_modules = ["briefings"]
         task = self._task()
         assert build_deferred_briefing_prompt(task, cfg) is None
+
+
+class TestNewsletterInlineLinks:
+    """Inline `[anchor](url)` links in a newsletter body must reach the model."""
+
+    def test_render_source_keeps_inline_links(self):
+        from istota.briefings.generate import _render_source
+        from istota.briefings.sources import GatheredSource
+
+        gs = GatheredSource(
+            kind="email", title="Newsletters",
+            items=[{
+                "sender": "news@semafor.com", "subject": "Flagship",
+                "body": (
+                    "[Iran tensions escalate](https://semafor.com/a/iran)\n"
+                    "Tehran warned that forces have their fingers on the trigger."
+                ),
+            }],
+            provenance="1 newsletters (past 12h)",
+        )
+        rendered = _render_source(gs)
+        assert "[Iran tensions escalate](https://semafor.com/a/iran)" in rendered
+
+    def test_default_directive_covers_both_link_shapes(self):
+        """The directive must name the newsletter inline form, not only RSS's."""
+        from istota.briefings.generate import _default_directive
+        from istota.briefings.models import BriefingBlock
+
+        block = BriefingBlock(
+            id=1, briefing_name="M", position=0, title="World",
+            render_mode="synthesis",
+        )
+        directive = _default_directive(block)
+        assert "[article: <url>]" in directive
+        assert "[text](url)" in directive
+
+    def test_assembled_prompt_carries_a_newsletter_article_url(
+        self, tmp_path, monkeypatch,
+    ):
+        """End-to-end: an HTML newsletter's article URL survives into the prompt."""
+        import istota.briefings.sources.email as email_mod
+
+        cfg = _config(tmp_path)
+        cfg.users["alice"].email_addresses = ["alice@x.com"]
+        cfg.email.enabled = True
+        cfg.email.imap_host = "imap.x"
+        cfg.email.bot_email = "bot@x.com"
+
+        class _Env:
+            id = "1"
+            sender = "news@semafor.com"
+            subject = "Flagship"
+            date = None
+            snippet = "snip"
+            to = ()
+            cc = ()
+            references = None
+
+        class _Full:
+            id = "1"
+            body = (
+                "<html><body><div>"
+                '<a href="https://link.semafor.com/click/abc?url='
+                'https%3A%2F%2Fsemafor.com%2Fa%2Firan">Iran tensions</a>'
+                "</div><p>Tehran warned.</p>"
+                '<div><a href="https://link.semafor.com/unsubscribe/z">Unsubscribe</a>'
+                "</div></body></html>"
+            )
+
+        monkeypatch.setattr("istota.email_support.get_email_config", lambda c: cfg.email)
+        monkeypatch.setattr("istota.skills.email.list_emails", lambda **kw: [_Env()])
+        monkeypatch.setattr(
+            "istota.skills.email.fetch_emails_full", lambda **kw: [_Full()],
+        )
+        monkeypatch.setattr(
+            "istota.email_ownership.resolve_email_owner", lambda config, conn, e: None,
+        )
+        # The dispatcher caches resolver modules; call through it so the block
+        # wiring is exercised, with the module's own names patched above.
+        monkeypatch.setattr(email_mod, "resolve", email_mod.resolve)
+
+        ctx = _ctx_with_blocks(cfg, [{
+            "title": "World",
+            "sources": [{"kind": "email", "config": {"mode": "shared"}}],
+        }])
+        with db.get_db(cfg.db_path) as conn:
+            result = assemble_briefing_input(ctx, "M", cfg, conn=conn)
+
+        assert result is not None
+        assert "[Iran tensions](https://semafor.com/a/iran)" in result.prompt
+        assert "unsubscribe/z" not in result.prompt

@@ -446,9 +446,16 @@ class TestBriefingMarkdownStripSafetyNet:
 
     @pytest.mark.asyncio
     async def test_structured_briefing_html_body_not_stripped(self, db_path, tmp_path):
+        """With HTML briefing email off, a `format=="html"` body is sent verbatim.
+
+        The HTML-on path instead passes it through as the ``html_body``
+        alternative — see ``TestBriefingHtmlEmail``.
+        """
         config = _config(
             db_path, tmp_path,
-            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+            users={"alice": UserConfig(
+                email_addresses=["alice@example.com"], briefing_email_html=False,
+            )},
         )
         task = _make_task(
             db_path, source_type="briefing",
@@ -536,3 +543,200 @@ class TestDeferredOutputPrecedence:
         kwargs = mock_send.call_args.kwargs
         assert kwargs["subject"] == "From deferred file"
         assert kwargs["body"] == "deferred body"
+
+
+# ---------------------------------------------------------------------------
+# HTML briefing email (multipart/alternative) + the per-user opt-out
+# ---------------------------------------------------------------------------
+
+
+_BRIEFING_MD = (
+    "\U0001f4f0 World News\n"
+    "**IRAN:** Tensions escalate. "
+    "[[Semafor](https://semafor.com/a/iran), NYT]\n"
+    "\n"
+    "- **10:00 Standup** (30 min)"
+)
+
+
+class TestBriefingHtmlEmail:
+    @pytest.mark.asyncio
+    async def test_legacy_briefing_path_sends_multipart(self, db_path, tmp_path):
+        """Unstructured briefing output: plain part stripped, HTML part rendered."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(
+            db_path, source_type="briefing",
+            prompt="Generate a morning briefing for the user",
+        )
+
+        with (
+            patch("istota.transport.email.outbound.send_email") as mock_send,
+            patch("istota.transport.email.outbound.reply_to_email"),
+        ):
+            ok = await deliver_email_result(config, task, _BRIEFING_MD)
+
+        assert ok is True
+        kwargs = mock_send.call_args.kwargs
+        # Plain part: markdown flattened, URL gone (today's behaviour).
+        assert "**" not in kwargs["body"]
+        assert "https://semafor.com" not in kwargs["body"]
+        # HTML part: the article link is a real anchor.
+        assert '<a href="https://semafor.com/a/iran">Semafor</a>' in kwargs["html_body"]
+        assert "<strong>IRAN:</strong>" in kwargs["html_body"]
+        assert "<li><strong>10:00 Standup</strong> (30 min)</li>" in kwargs["html_body"]
+        assert "style=" not in kwargs["html_body"]
+
+    @pytest.mark.asyncio
+    async def test_structured_plain_briefing_sends_multipart(self, db_path, tmp_path):
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path, source_type="briefing", prompt="Generate a briefing")
+
+        with (
+            patch(
+                "istota.transport.email.outbound.send_email", return_value="<b@bot>",
+            ) as mock_send,
+            patch("istota.transport.email.outbound.reply_to_email"),
+        ):
+            ok = await deliver_email_result(config, task, _structured(
+                subject="Morning", body=_BRIEFING_MD, fmt="plain",
+            ))
+
+        assert ok is True
+        kwargs = mock_send.call_args.kwargs
+        assert "**" not in kwargs["body"]
+        assert '<a href="https://semafor.com/a/iran">' in kwargs["html_body"]
+
+    @pytest.mark.asyncio
+    async def test_preference_off_is_single_part_plain(self, db_path, tmp_path):
+        """Opt-out restores today's exact plain-only delivery."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(
+                email_addresses=["alice@example.com"], briefing_email_html=False,
+            )},
+        )
+        task = _make_task(db_path, source_type="briefing", prompt="Generate a briefing")
+
+        with (
+            patch(
+                "istota.transport.email.outbound.send_email", return_value="<b@bot>",
+            ) as mock_send,
+            patch("istota.transport.email.outbound.reply_to_email"),
+        ):
+            ok = await deliver_email_result(config, task, _BRIEFING_MD)
+
+        assert ok is True
+        kwargs = mock_send.call_args.kwargs
+        assert kwargs.get("html_body") is None
+        assert kwargs["content_type"] == "plain"
+        assert "**" not in kwargs["body"]
+
+    @pytest.mark.asyncio
+    async def test_non_briefing_task_gets_no_html(self, db_path, tmp_path):
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path, source_type="scheduled", prompt="job")
+
+        with (
+            patch(
+                "istota.transport.email.outbound.send_email", return_value="<b@bot>",
+            ) as mock_send,
+            patch("istota.transport.email.outbound.reply_to_email"),
+        ):
+            ok = await deliver_email_result(config, task, _structured(
+                subject="Job", body="**not** stripped", fmt="plain",
+            ))
+
+        assert ok is True
+        kwargs = mock_send.call_args.kwargs
+        assert kwargs.get("html_body") is None
+        # Non-briefing bodies are not markdown-stripped either (unchanged).
+        assert kwargs["body"] == "**not** stripped"
+
+    @pytest.mark.asyncio
+    async def test_reply_thread_briefing_gets_html_body(self, db_path, tmp_path):
+        """A briefing landing in an existing thread still goes multipart."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path, source_type="briefing", prompt="Generate a briefing")
+        _link_inbound_email(db_path, task.id)
+
+        with (
+            patch("istota.transport.email.outbound.send_email"),
+            patch(
+                "istota.transport.email.outbound.reply_to_email",
+                return_value="<r@bot>",
+            ) as mock_reply,
+        ):
+            ok = await deliver_email_result(config, task, _structured(
+                subject="Morning", body=_BRIEFING_MD, fmt="plain",
+            ))
+
+        assert ok is True
+        kwargs = mock_reply.call_args.kwargs
+        assert '<a href="https://semafor.com/a/iran">' in kwargs["html_body"]
+        assert "**" not in kwargs["body"]
+        assert kwargs["in_reply_to"] == "<orig@example.com>"
+
+    @pytest.mark.asyncio
+    async def test_structured_html_format_passes_through_as_html_part(
+        self, db_path, tmp_path,
+    ):
+        """A hand-authored `format=="html"` briefing: HTML part verbatim, plain derived."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path, source_type="briefing", prompt="Generate a briefing")
+
+        html = "<p><strong>Bold</strong> and a <a href='http://x'>link</a></p>"
+        with (
+            patch(
+                "istota.transport.email.outbound.send_email", return_value="<b@bot>",
+            ) as mock_send,
+            patch("istota.transport.email.outbound.reply_to_email"),
+        ):
+            ok = await deliver_email_result(config, task, _structured(
+                subject="Weekly", body=html, fmt="html",
+            ))
+
+        assert ok is True
+        kwargs = mock_send.call_args.kwargs
+        assert kwargs["html_body"] == html
+        # Plain fallback is a tag-stripped copy (the rare hand-authored path).
+        assert "<p>" not in kwargs["body"]
+        assert "Bold" in kwargs["body"]
+        assert kwargs["content_type"] == "plain"
+
+    @pytest.mark.asyncio
+    async def test_renderer_failure_degrades_to_plain(self, db_path, tmp_path):
+        """An empty render (renderer's failure signal) must not send an empty part."""
+        config = _config(
+            db_path, tmp_path,
+            users={"alice": UserConfig(email_addresses=["alice@example.com"])},
+        )
+        task = _make_task(db_path, source_type="briefing", prompt="Generate a briefing")
+
+        with (
+            patch(
+                "istota.transport.email.outbound.send_email", return_value="<b@bot>",
+            ) as mock_send,
+            patch("istota.transport.email.outbound.reply_to_email"),
+            patch(
+                "istota.skills.briefing.render_briefing_html", return_value="",
+            ),
+        ):
+            ok = await deliver_email_result(config, task, _BRIEFING_MD)
+
+        assert ok is True
+        assert mock_send.call_args.kwargs.get("html_body") is None

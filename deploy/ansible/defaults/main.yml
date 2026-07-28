@@ -355,6 +355,9 @@ istota_experimental_features: []
 #         permissions: "write"
 #     # Opt this user out of the shared [[default_briefings]] set (default on).
 #     default_briefings: false
+#     # Briefing email as multipart/alternative — HTML (clickable article links)
+#     # plus a plain-text fallback part. Default on; false = plain text only.
+#     briefing_email_html: false
 #     briefings:
 #       # Content is blocks-only (legacy `components:` authoring is retired).
 #       # A briefing declaring `blocks:` seeds them ONCE into the user's module
@@ -507,6 +510,13 @@ istota_briefing_shared_blocks:
 # since blocks are generated globally). Set to the operator's local zone so the
 # regeneration windows line up. Maps to [briefings] shared_block_timezone.
 istota_briefing_shared_tz: "UTC"
+
+# Inline [anchor](url) links preserved per newsletter body in a briefing source.
+# Newsletters are link soup, so the converter filters unsubscribe / social /
+# web-version chrome and this caps what survives; an over-cap anchor keeps its
+# text and loses only the destination. 0 = unlimited. Maps to [briefings]
+# newsletter_max_links_per_source.
+istota_briefing_newsletter_max_links: 20
 
 # rclone remote name for Nextcloud
 istota_rclone_remote: "nextcloud"

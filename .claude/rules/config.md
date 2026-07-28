@@ -295,6 +295,15 @@ Naming convention: `module_<x>` for module gates, `skill_<x>` for skill
 gates, free-form for CLI subcommand gates (`money_tax`, `money_wash_sales`).
 See `docs/EXPERIMENTAL.md` for the registry and graduation policy.
 
+### `BriefingsModuleConfig` (`[briefings]`)
+
+Beyond the archive/lookback/char caps documented in AGENTS.md:
+`newsletter_max_links_per_source: int = 20` caps the inline `[anchor](url)` links
+`briefings/sources/_html.html_to_markdown` preserves per newsletter body
+(`0` = unlimited). A filtered-out or over-cap anchor keeps its text and loses only
+the destination, so the cap bounds prompt size without dropping content. Ansible
+`istota_briefing_newsletter_max_links`.
+
 ### `BriefingConfig`
 ```
 name: str                    cron: str                   conversation_token: str = ""
@@ -359,9 +368,12 @@ disabled_skills: list[str] = []           # per-user skills to exclude
 trusted_email_senders: list[str] = []     # patterns for trusted senders (email gate)
 disabled_modules: list[str] = []          # modules to opt out of (default-on otherwise)
 email_reply_routing: str = "origin+thread" # email-reply mirror policy: origin+thread | origin | thread
+briefing_email_html: bool = True          # briefing email as multipart/alternative (HTML + plain)
 ```
 
 `email_reply_routing` is a `user_profiles` column read via `Config.email_reply_routing_for(user_id)` (invalid value → default + warning). It controls where a reply to a bot-sent email is delivered — the origin surface (`web:`/`talk:` descriptor stored on `sent_emails.origin_target`), the email thread, or both. Set via `istota user ensure --email-reply-routing`. See `.claude/rules/transport.md` "Email-reply origin routing".
+
+`briefing_email_html` is a `user_profiles` bool read via `Config.briefing_email_html_for(user_id)` (unknown user → True, matching `is_module_enabled`'s docker auto-seed rule). On (the default) a briefing email is sent `multipart/alternative` — `skills/briefing.render_briefing_html` output plus the `strip_markdown` plain fallback — so article links are clickable in a mail client; off is byte-identical to the pre-feature single-part plain send. Set via `istota user ensure --briefing-email-html/--no-briefing-email-html`, the `[users.X] briefing_email_html` TOML key (Ansible `briefing_email_html:`), or the **Email delivery** card on `/briefings/settings` (it governs briefing delivery, so it lives with the briefings module rather than in the general profile card). See `.claude/rules/transport.md` "Briefing email bodies".
 
 ### `MemorySearchConfig`
 ```

@@ -327,6 +327,29 @@ def _attach_files(msg: EmailMessage, attachments: list[str]) -> None:
         msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=path.name)
 
 
+def _set_body(
+    msg: EmailMessage,
+    body: str,
+    *,
+    content_type: str = "plain",
+    html_body: str | None = None,
+) -> None:
+    """Set the message body, going multipart/alternative when HTML is supplied.
+
+    With ``html_body`` the plain text is always the fallback part (a
+    ``content_type`` of ``html`` would be meaningless there), so an HTML-capable
+    client renders the rich version while a plain-only one still gets readable
+    text. Without it, the historical single-part ``set_content`` is used
+    verbatim — an empty ``html_body`` counts as "none supplied" so the briefing
+    renderer's failure signal degrades to plain rather than an empty HTML part.
+    """
+    if html_body:
+        msg.set_content(body)
+        msg.add_alternative(html_body, subtype="html")
+        return
+    msg.set_content(body, subtype=content_type)
+
+
 def _recipients(to: str, cc=None, bcc=None) -> list[str]:
     """Flatten To/Cc/Bcc into a de-duplicated envelope recipient list."""
     seen: list[str] = []
@@ -353,6 +376,7 @@ def send_email(
     reply_to: str | None = None,
     in_reply_to: str | None = None,
     references: str | None = None,
+    html_body: str | None = None,
 ) -> str:
     """Send an email. Returns the generated Message-ID.
 
@@ -361,6 +385,11 @@ def send_email(
     ``in_reply_to`` / ``references`` set the threading headers (used by the
     reply verbs). Bcc recipients receive the mail but the Bcc header is never
     transmitted.
+
+    ``html_body``, when non-empty, makes the message ``multipart/alternative``:
+    ``body`` becomes the ``text/plain`` fallback and ``html_body`` the
+    ``text/html`` part (``content_type`` is then unused). Omitted or empty, the
+    single-part behaviour is unchanged.
     """
     if config is None:
         raise ValueError("config is required")
@@ -385,7 +414,7 @@ def send_email(
         msg["References"] = _sanitize_header(references)
     elif in_reply_to:
         msg["References"] = _sanitize_header(in_reply_to)
-    msg.set_content(body, subtype=content_type)
+    _set_body(msg, body, content_type=content_type, html_body=html_body)
     if attachments:
         _attach_files(msg, attachments)
 
@@ -427,8 +456,12 @@ def reply_to_email(
     in_reply_to: str | None = None,
     references: str | None = None,
     content_type: str = "plain",
+    html_body: str | None = None,
 ) -> str:
     """Send a reply email with proper threading headers.
+
+    ``html_body`` behaves as in :func:`send_email` — non-empty makes the reply
+    ``multipart/alternative`` with ``body`` as the plain-text fallback.
 
     Returns the generated Message-ID.
     """
@@ -461,7 +494,7 @@ def reply_to_email(
         # If no references but we have in_reply_to, use that as references
         msg["References"] = _sanitize_header(in_reply_to)
 
-    msg.set_content(body, subtype=content_type)
+    _set_body(msg, body, content_type=content_type, html_body=html_body)
 
     _send_smtp(msg, config)
     return message_id
