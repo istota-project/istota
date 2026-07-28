@@ -503,8 +503,14 @@ class WebChatConfig:
     # composer's voice-message button (iOS records audio/mp4, which we name
     # `.m4a`). Audio lands as an ordinary attachment and is transcribed by
     # `executor._pre_transcribe_attachments` on the way into the prompt.
+    #
+    # `heic` is what an iPhone photo actually is. The mobile shell's gallery
+    # picker re-encodes to JPEG so one normally never arrives, but that is the
+    # picker's behaviour rather than a guarantee — a HEIC dragged in from a Mac,
+    # or a shell whose picker changed underneath it, would otherwise be refused
+    # for its extension with no hint that the format was the problem.
     attachment_extensions: list[str] = field(default_factory=lambda: [
-        "pdf", "png", "jpg", "jpeg", "webp", "gif", "txt", "md",
+        "pdf", "png", "jpg", "jpeg", "heic", "webp", "gif", "txt", "md",
         "csv", "wav", "mp3", "m4a", "ogg", "webm", "docx", "xlsx",
     ])
     rate_limit_messages: int = 30

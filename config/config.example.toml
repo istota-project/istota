@@ -706,7 +706,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # [web.chat]
 # max_prompt_chars = 32000
 # max_attachment_mb = 25
-# attachment_extensions = ["pdf", "png", "jpg", "jpeg", "webp", "gif", "txt", "md", "csv", "wav", "mp3", "m4a", "ogg", "docx", "xlsx"]
+# attachment_extensions = ["pdf", "png", "jpg", "jpeg", "heic", "webp", "gif", "txt", "md", "csv", "wav", "mp3", "m4a", "ogg", "webm", "docx", "xlsx"]
 # rate_limit_messages = 30                          # per window, per user
 # rate_limit_window_seconds = 300
 # sse_poll_interval_ms = 200                        # server-side SSE generator cadence

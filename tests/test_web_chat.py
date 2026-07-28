@@ -420,6 +420,18 @@ class TestWebChatConfig:
         assert chat.rate_limit_messages == 30
         assert "pdf" in chat.attachment_extensions
 
+    def test_camera_formats_are_accepted(self):
+        """The formats a phone actually produces.
+
+        `heic` is what an iPhone photo is before anything re-encodes it, and
+        `webm` is what MediaRecorder hands the voice button on Chrome and
+        Firefox. Either one falling out of this list is a 400 on the extension
+        alone, which says nothing about the format having been the problem.
+        """
+        chat = WebChatConfig()
+        for ext in ("heic", "jpeg", "webm", "m4a"):
+            assert ext in chat.attachment_extensions, ext
+
     def test_parsed_from_toml(self, tmp_path):
         toml = tmp_path / "config.toml"
         toml.write_text(
