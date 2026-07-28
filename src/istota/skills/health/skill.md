@@ -108,6 +108,21 @@ istota-skill health import-immunizations --paste @clipboard.txt --confirm
 
 istota-skill health explain-immunization Influenza        # educational primer
 
+# Documents — the paperwork behind a record
+istota-skill health documents                             # everything stored
+istota-skill health documents --entity encounter:42
+istota-skill health document 9                            # one doc + its links
+istota-skill health attach-document --path /Users/{user_id}/inbox/card.jpg \
+    --to immunization:5 --notes "Pharmacy record"
+istota-skill health detach-document 9 --from encounter:42
+
+# Attaching to an encounter created earlier in the SAME sandboxed task: the
+# encounter id doesn't exist yet (the write is deferred), so name it with
+# --ref and reference it as encounter:@name.
+istota-skill health add-encounter --date 2026-06-29 --type visit --ref visit
+istota-skill health attach-document --path /Users/{user_id}/inbox/letter.pdf \
+    --to encounter:@visit
+
 # Garmin (initial connect happens in the web UI — health settings page)
 istota-skill health garmin-status
 istota-skill health garmin-sync --days-back 7
@@ -181,6 +196,17 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 
 When the user uploads a photo or PDF of a lab report through the web UI, the upload pipeline runs the OCR + LLM extraction automatically and the user confirms the extraction in the web UI. From a Talk message with an image attachment, you can transcribe the image and call `add-panel` + `add-biomarker` directly, or recommend they upload via the web UI for the full review-and-edit flow.
 
+## Filing paperwork
+
+A health record and the document that proves it are separate things. `attach-document` links a file the user gave you to the record it evidences — a discharge summary to its encounter, a referral to the condition it names, a vaccination card to the immunization it shows.
+
+- `--to` / `--from` take a `TYPE:ID` token. Types are `encounter`, `diagnosis`, `immunization`. Nothing else (lab panels keep their own source file).
+- **Attach to the most specific record the document evidences.** A vaccination card belongs on the immunization, not merely on the visit where the shot was given. One document can be attached to several records — a visit summary covering a diagnosis and a vaccine is one file linked three ways, not three copies.
+- If no record exists yet, create it first (`add-encounter` / `add-diagnosis` / `add-immunization`), then attach.
+- **Only attach files the user supplied** — an email attachment, a photo they sent, a file they named. Never go looking through the workspace for medical documents to file; a document the user did not hand you is not yours to put in their medical record.
+- Attaching the same bytes twice costs one file: the store recognises it and just adds the link.
+- Deleting a document removes it from *every* record it is attached to, so it is a web-UI action behind a confirmation. Use `detach-document` when you only want it off one record.
+
 ## Privacy
 
 Health data is the most sensitive data in the system. The health DB is the single source of truth — quantitative health data must not be duplicated elsewhere.
@@ -189,4 +215,4 @@ Health data is the most sensitive data in the system. The health DB is the singl
 - Don't include biomarker values in news / briefings / log channels.
 - When another skill or response needs a current value, call `istota-skill health latest` or `health trend NAME` at the moment of use rather than caching the number.
 - Stable identity-level medical facts (allergies, named chronic conditions) stay in the knowledge graph via the `memory` skill — see its classification rules. The detailed encounter/diagnosis registry stays in the health DB; only the identity-level fact (`has_condition: hypertension`) belongs in the KG.
-- Source files for uploaded labs are only served through the auth-gated `/panels/{id}/source` route, never via static file serving.
+- Source files for uploaded labs are only served through the auth-gated `/panels/{id}/source` route, never via static file serving. Attached documents likewise go through `/documents/{id}/file`. Never mint a public share link for either.

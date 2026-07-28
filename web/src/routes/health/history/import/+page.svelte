@@ -39,6 +39,9 @@
   ];
 
   let file: File | null = $state(null);
+  // The kept upload from /extract, threaded into /bulk so it is linked to
+  // every encounter and diagnosis the import creates.
+  let documentId: number | null = $state(null);
   let fileInput: HTMLInputElement | undefined = $state();
   let extracting = $state(false);
   let extractMode: 'text' | 'vision' | null = $state(null);
@@ -68,6 +71,7 @@
 
   function clearFile() {
     file = null;
+    documentId = null;
     if (fileInput) fileInput.value = '';
   }
 
@@ -80,9 +84,11 @@
     warnings = [];
     parsed = [];
     extractMode = null;
+    documentId = null;
     extracting = true;
     try {
       const out = await extractEncounters(file);
+      documentId = out.document_id;
       parsed = out.rows;
       warnings = out.warnings || [];
       extractMode = out.mode;
@@ -102,7 +108,7 @@
     }
     importing = true;
     try {
-      const out = await bulkInsertEncounters(parsed);
+      const out = await bulkInsertEncounters(parsed, documentId);
       if (out.status === 'ok') {
         await goto(`${base}/health/history`);
       }
@@ -211,6 +217,12 @@
       <span class="meta">Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span>
     {/if}
   </div>
+
+  {#if documentId !== null && file}
+    <p class="attach-note">
+      <strong>{file.name}</strong> will be kept and attached to the records below.
+    </p>
+  {/if}
 
   {#each parsed as row, i (i)}
     <div class="enc-card" class:warn={!row.encounter_date}>
@@ -532,6 +544,11 @@
     padding-left: 1.1rem;
   }
 
+  .attach-note {
+    margin: 0 0 0.75rem;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
   .review-head {
     display: flex;
     align-items: baseline;

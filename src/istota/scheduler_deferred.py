@@ -541,6 +541,98 @@ def _process_deferred_kg_ops(
     return count
 
 
+def _health_max_document_bytes(config: Config) -> int:
+    """The operator's document cap, for the agent paths.
+
+    Only the web routes read this before; the deferred replayer fell through
+    to the library default, so ``max_document_bytes = 0`` ("unlimited, for a
+    scanner that produces genuinely large files") silently didn't apply to a
+    document the agent filed — and a lowered cap wasn't enforced there either.
+    """
+    from istota.health.documents import DEFAULT_MAX_DOCUMENT_BYTES
+
+    health_cfg = getattr(config, "health", None)
+    raw = getattr(health_cfg, "max_document_bytes", None)
+    if raw is None:
+        return DEFAULT_MAX_DOCUMENT_BYTES
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_DOCUMENT_BYTES
+
+
+def _resolved_source_path(
+    src: Path, user_temp_dir: Path, config: Config, user_id: str, ctx,
+) -> Path | None:
+    """The symlink-resolved path, or ``None`` if it isn't ours to read.
+
+    Callers must read *this* path rather than the original: resolving twice
+    leaves a window in which a symlink under the workspace is swapped between
+    the check and the read, and the daemon doing the reading is not sandboxed.
+    """
+    try:
+        resolved = src.resolve()
+    except OSError:
+        return None
+    if not resolved.is_file():
+        return None
+    if not _source_path_allowed(resolved, user_temp_dir, config, user_id, ctx):
+        return None
+    return resolved
+
+
+def _source_path_allowed(
+    src: Path, user_temp_dir: Path, config: Config, user_id: str, ctx,
+) -> bool:
+    """Is ``src`` somewhere a sandboxed task legitimately produced a file?
+
+    The deferred op file is written from inside the sandbox, so its
+    ``source_path`` is attacker-influenced text. The daemon replaying it is
+    *not* sandboxed, so without this an op could name any readable file on
+    the host and have its bytes filed into the user's health records.
+
+    Two roots: the task's own deferred dir, and the user's base workspace
+    (``{mount}/Users/{uid}``) — not merely the *bot* subdir, because the
+    driving case is an email attachment the executor dropped in
+    ``inbox/``. Symlinks are resolved first, so a link inside the workspace
+    pointing out of it is caught too.
+    """
+    user_root = None
+    resolver = getattr(config, "workspace_root", None)
+    if callable(resolver):
+        try:
+            user_root = resolver(user_id)
+        except (TypeError, ValueError):
+            user_root = None
+    if user_root is None:
+        # Fall back to the bot workspace's parent — the same directory
+        # `workspace_root(user_id)` would have named.
+        bot_workspace = getattr(ctx, "workspace_root", None)
+        user_root = Path(bot_workspace).parent if bot_workspace else None
+
+    roots: list[Path] = []
+    for candidate in (user_temp_dir, user_root):
+        if not candidate:
+            continue
+        try:
+            roots.append(Path(candidate).resolve())
+        except OSError:
+            continue
+    if not roots:
+        return False
+    try:
+        resolved = src.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def _process_deferred_health_ops(
     config: Config, task: db.Task, user_temp_dir: Path,
 ) -> int:
@@ -558,6 +650,7 @@ def _process_deferred_health_ops(
     try:
         from . import health as _health
         from .health import db as health_db
+        from .health.documents import DocumentError
     except ImportError as e:
         logger.warning(
             "Health module unavailable for deferred ops on task %d: %s",
@@ -585,6 +678,10 @@ def _process_deferred_health_ops(
     # declare a symbolic `ref` and the biomarker op a `panel_ref`; here we
     # capture each panel's real id under its ref and substitute it in.
     refs: dict[str, int] = {}
+    # Same mechanism for encounters, so an `attach_document` op can name an
+    # encounter created earlier in the same batch. Kept in its own dict so a
+    # panel ref and an encounter ref sharing a name can't cross-resolve.
+    encounter_refs: dict[str, int] = {}
     with health_db.connect(ctx.db_path) as conn:
         for entry in data:
             if not isinstance(entry, dict):
@@ -650,11 +747,18 @@ def _process_deferred_health_ops(
                     import mimetypes
                     import shutil as _shutil
 
-                    src = Path(entry["source_path"])
-                    if not src.is_file():
+                    # Same untrusted-path rule as attach_document: the op
+                    # file is written inside the sandbox and the daemon
+                    # replaying it is not.
+                    src = _resolved_source_path(
+                        Path(entry["source_path"]), user_temp_dir, config,
+                        task.user_id, ctx,
+                    )
+                    if src is None:
                         logger.warning(
-                            "register_upload skipped for task %d: source missing %s",
-                            task.id, src,
+                            "register_upload skipped for task %d: source "
+                            "missing or outside the user's workspace: %s",
+                            task.id, entry.get("source_path"),
                         )
                         continue
                     mime = (
@@ -685,6 +789,68 @@ def _process_deferred_health_ops(
                         (rel, pid),
                     )
                     count += 1
+                elif op == "attach_document":
+                    from .health import documents as _health_documents
+
+                    # Validate the reference before a single byte is written:
+                    # attach_document refuses an unknown type/entity anyway,
+                    # and doing it here keeps a bad op from costing disk.
+                    entity_type = entry["entity_type"]
+                    if entity_type not in health_db.DOCUMENT_ENTITY_TYPES:
+                        raise ValueError(
+                            f"unknown entity type: {entity_type!r}"
+                        )
+                    enc_ref = entry.get("encounter_ref")
+                    if enc_ref is not None:
+                        resolved = encounter_refs.get(str(enc_ref))
+                        if resolved is None:
+                            # Fail loudly rather than mis-file paperwork
+                            # against whatever id happens to be around.
+                            raise KeyError(
+                                f"unresolved encounter_ref {enc_ref!r} "
+                                f"(known refs: {sorted(encounter_refs)})"
+                            )
+                        entity_id = resolved
+                    else:
+                        entity_id = int(entry["entity_id"])
+
+                    # The op file is written inside the sandbox, so the path
+                    # is untrusted: confine it to the task's own deferred dir
+                    # or the user's workspace before the daemon (which is not
+                    # sandboxed) reads the bytes. Read the *resolved* path the
+                    # guard approved, not the original — re-resolving would
+                    # reopen the symlink-swap window the check just closed.
+                    src = _resolved_source_path(
+                        Path(entry["source_path"]), user_temp_dir, config,
+                        task.user_id, ctx,
+                    )
+                    if src is None:
+                        logger.warning(
+                            "attach_document skipped for task %d: source "
+                            "missing or outside the user's workspace: %s",
+                            task.id, entry.get("source_path"),
+                        )
+                        continue
+                    _health_documents.attach_document(
+                        conn, ctx,
+                        raw=src.read_bytes(),
+                        filename=entry.get("filename") or src.name,
+                        mime=None,
+                        entity_type=entity_type,
+                        entity_id=entity_id,
+                        source="agent",
+                        notes=entry.get("notes"),
+                        max_bytes=_health_max_document_bytes(config),
+                    )
+                    count += 1
+                elif op == "detach_document":
+                    health_db.unlink_document(
+                        conn,
+                        int(entry["document_id"]),
+                        entry["entity_type"],
+                        int(entry["entity_id"]),
+                    )
+                    count += 1
                 elif op == "import_csv":
                     from .health import csv_io as _csv_io
 
@@ -707,7 +873,7 @@ def _process_deferred_health_ops(
                     )
                     count += 1
                 elif op == "insert_encounter":
-                    health_db.insert_encounter(
+                    eid = health_db.insert_encounter(
                         conn,
                         encounter_date=entry["encounter_date"],
                         encounter_type=entry["encounter_type"],
@@ -718,6 +884,9 @@ def _process_deferred_health_ops(
                         notes=entry.get("notes"),
                         dedup_key=entry.get("dedup_key"),
                     )
+                    enc_ref = entry.get("ref")
+                    if enc_ref:
+                        encounter_refs[str(enc_ref)] = eid
                     count += 1
                 elif op == "update_encounter":
                     health_db.update_encounter(
@@ -867,7 +1036,21 @@ def _process_deferred_health_ops(
                     )
                     continue
                 conn.commit()
-            except (KeyError, ValueError, sqlite3.Error) as e:
+            except (
+                KeyError, ValueError, OSError, sqlite3.Error, DocumentError,
+            ) as e:
+                # OSError + DocumentError cover the document ops, which touch
+                # the filesystem and can refuse a type / size — one bad
+                # attachment must not abort the rest of the batch.
+                #
+                # Discard whatever the failing op wrote before it raised.
+                # Without this its partial work is still open on the
+                # connection, and the *next* op's commit would sweep it in —
+                # so an attach_document that inserted its row and then failed
+                # to write the bytes would silently persist a row pointing at
+                # a file that never landed. Prior ops are already committed,
+                # so this can only ever discard the failed one.
+                conn.rollback()
                 # Log at ERROR so operators see silent op losses (health
                 # records are non-idempotent — "silently lost" is a sharp
                 # failure mode). Also persist the failing entry to a

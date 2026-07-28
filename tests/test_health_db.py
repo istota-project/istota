@@ -983,3 +983,203 @@ class TestPanelEncounterMigration:
             conn.commit()
             panel = health_db.get_panel(conn, pid)
         assert panel.encounter_id is None
+
+
+class TestDocuments:
+    def _doc(self, conn, *, content_hash="h1", filename="a.pdf"):
+        return health_db.insert_document(
+            conn, filename=filename, mime="application/pdf", byte_size=10,
+            content_hash=content_hash,
+            stored_path=f"documents/x/{filename}",
+        )
+
+    def test_init_creates_document_tables(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ctx.ensure_dirs()
+        health_db.init_db(ctx.db_path)
+        with health_db.connect(ctx.db_path) as conn:
+            tables = {
+                r["name"]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        assert {"documents", "document_links"} <= tables
+
+    def test_existing_db_picks_up_the_tables_without_a_migration(self, tmp_path):
+        """A pre-documents DB gains both tables on the next init_db.
+
+        Both are brand new, so `CREATE TABLE IF NOT EXISTS` inside
+        executescript covers it — no migration function needed.
+        """
+        import sqlite3
+
+        ctx = _ctx(tmp_path)
+        ctx.ensure_dirs()
+        health_db.init_db(ctx.db_path)
+        with health_db.connect(ctx.db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-01-01", encounter_type="visit",
+            )
+            conn.execute("DROP TABLE document_links")
+            conn.execute("DROP TABLE documents")
+            conn.commit()
+
+        health_db.init_db(ctx.db_path)
+
+        with health_db.connect(ctx.db_path) as conn:
+            assert conn.execute(
+                "SELECT name FROM sqlite_master WHERE name='documents'"
+            ).fetchone() is not None
+            # Pre-existing rows untouched.
+            assert health_db.get_encounter(conn, eid) is not None
+
+    def test_link_and_unlink_are_idempotent(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            did = self._doc(conn)
+            assert health_db.link_document(conn, did, "encounter", 1) is True
+            assert health_db.link_document(conn, did, "encounter", 1) is False
+            assert health_db.unlink_document(conn, did, "encounter", 1) == 1
+            assert health_db.unlink_document(conn, did, "encounter", 1) == 0
+
+    def test_documents_for_entity_is_type_scoped(self, tmp_path):
+        """encounter 1 and diagnosis 1 share a numeric id and must not bleed."""
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            enc_doc = self._doc(conn, content_hash="h-enc", filename="e.pdf")
+            dx_doc = self._doc(conn, content_hash="h-dx", filename="d.pdf")
+            health_db.link_document(conn, enc_doc, "encounter", 1)
+            health_db.link_document(conn, dx_doc, "diagnosis", 1)
+            enc = health_db.documents_for_entity(conn, "encounter", 1)
+            dx = health_db.documents_for_entity(conn, "diagnosis", 1)
+        assert [d.id for d in enc] == [enc_doc]
+        assert [d.id for d in dx] == [dx_doc]
+
+    def test_documents_for_entity_is_newest_first(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            first = self._doc(conn, content_hash="h1", filename="a.pdf")
+            second = self._doc(conn, content_hash="h2", filename="b.pdf")
+            conn.execute(
+                "UPDATE documents SET created_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00+00:00", first),
+            )
+            conn.execute(
+                "UPDATE documents SET created_at = ? WHERE id = ?",
+                ("2026-01-01T00:00:00+00:00", second),
+            )
+            health_db.link_document(conn, first, "encounter", 1)
+            health_db.link_document(conn, second, "encounter", 1)
+            docs = health_db.documents_for_entity(conn, "encounter", 1)
+        assert [d.id for d in docs] == [second, first]
+
+    def test_counts_for_entities(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            a = self._doc(conn, content_hash="ha", filename="a.pdf")
+            b = self._doc(conn, content_hash="hb", filename="b.pdf")
+            health_db.link_document(conn, a, "encounter", 1)
+            health_db.link_document(conn, b, "encounter", 1)
+            health_db.link_document(conn, a, "encounter", 2)
+            counts = health_db.document_counts_for_entities(
+                conn, "encounter", [1, 2, 3],
+            )
+        assert counts == {1: 2, 2: 1}
+
+    def test_counts_for_entities_empty_list(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            assert health_db.document_counts_for_entities(
+                conn, "encounter", [],
+            ) == {}
+
+    def test_counts_chunk_past_the_sqlite_variable_limit(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            did = self._doc(conn)
+            health_db.link_document(conn, did, "encounter", 600)
+            counts = health_db.document_counts_for_entities(
+                conn, "encounter", range(1, 601),
+            )
+        assert counts == {600: 1}
+
+    @pytest.mark.parametrize("fn,args", [
+        ("documents_for_entity", (1,)),
+        ("document_counts_for_entities", ([1],)),
+        ("link_document", ("panel", 1)),
+        ("unlink_document", ("panel", 1)),
+        ("unlink_entity_documents", (1,)),
+    ])
+    def test_entity_type_is_validated(self, tmp_path, fn, args):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            func = getattr(health_db, fn)
+            with pytest.raises(ValueError, match="unknown entity type"):
+                if fn in ("link_document", "unlink_document"):
+                    func(conn, 1, *args)
+                else:
+                    func(conn, "panel", *args)
+
+    def test_delete_document_clears_links(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            did = self._doc(conn)
+            health_db.link_document(conn, did, "encounter", 1)
+            assert health_db.delete_document(conn, did) == 1
+            assert health_db.entity_links_for_document(conn, did) == []
+
+    def test_entity_deletes_clear_links(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            did = self._doc(conn)
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-01-01", encounter_type="visit",
+            )
+            dxid = health_db.insert_diagnosis(conn, name="Asthma")
+            iid = health_db.insert_immunization(
+                conn, name="Influenza", date_given="2026-01-05",
+            )
+            health_db.link_document(conn, did, "encounter", eid)
+            health_db.link_document(conn, did, "diagnosis", dxid)
+            health_db.link_document(conn, did, "immunization", iid)
+
+            health_db.delete_encounter(conn, eid)
+            health_db.delete_diagnosis(conn, dxid)
+            health_db.delete_immunization(conn, iid)
+
+            assert health_db.entity_links_for_document(conn, did) == []
+            # The document itself survives — it may be linked elsewhere later.
+            assert health_db.get_document(conn, did) is not None
+
+    def test_orphan_ids_respect_the_window_and_links(self, tmp_path):
+        from datetime import timedelta
+
+        ctx = _ctx(tmp_path)
+        ensure_initialised(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            old = self._doc(conn, content_hash="ho", filename="o.pdf")
+            fresh = self._doc(conn, content_hash="hf", filename="f.pdf")
+            linked = self._doc(conn, content_hash="hl", filename="l.pdf")
+            health_db.link_document(conn, linked, "encounter", 1)
+            stale = (
+                datetime.now(timezone.utc) - timedelta(hours=48)
+            ).isoformat()
+            for d in (old, linked):
+                conn.execute(
+                    "UPDATE documents SET created_at = ?, last_touched_at = ? "
+                    "WHERE id = ?",
+                    (stale, stale, d),
+                )
+            ids = health_db.orphan_document_ids(conn, older_than_hours=24)
+        assert ids == [old]
+        assert fresh not in ids

@@ -251,7 +251,11 @@
   }
 
   .card {
-    padding: 0.85rem 1rem;
+    /* The layout owns .card's box and reads its padding from this hook. A
+		   plain `padding` here is dead: `.health-frame :global(.card)` scopes to
+		   (0,3,0) and beats a page-local `.card` at (0,2,0), so the declaration
+		   never applied and every card sat at the layout default. */
+    --card-padding: 0.85rem 1rem;
     margin-bottom: 1rem;
   }
   .coverage-card .status-row {
@@ -301,7 +305,11 @@
     font-weight: 500;
   }
   details.explainer {
-    padding: 0;
+    /* Zero the panel's own padding — via the hook, for the same specificity
+		   reason — so the summary and the content can each carry the full card
+		   padding themselves. Without this the two stacked and the panel was
+		   inset roughly twice as far as the coverage card above it. */
+    --card-padding: 0;
   }
   details.explainer > summary {
     list-style: none;
@@ -310,7 +318,11 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    padding: 0.7rem 1rem;
+    /* Matches .card's padding so the collapsed panel is the same box as the
+		   coverage card above it. The padding lives on the summary and the
+		   content rather than on the <details>, or the click target would stop
+		   short of the panel's edges. */
+    padding: 0.85rem 1rem;
     user-select: none;
   }
   details.explainer > summary::-webkit-details-marker {
@@ -337,7 +349,9 @@
     color: var(--text-muted);
   }
   details.explainer > .content {
-    padding: 0.6rem 1rem 0.85rem;
+    /* No top padding: the summary's own bottom padding already separates the
+		   label from the body, so adding more would double it once open. */
+    padding: 0 1rem 0.85rem;
   }
   .explainer h3 {
     margin: 0.85rem 0 0.35rem;
@@ -349,7 +363,7 @@
   }
   .explainer .summary {
     margin: 0;
-    font-size: var(--text-sm);
+    font-size: var(--text-base);
     color: var(--text-secondary);
     line-height: 1.55;
     max-width: 75ch;
@@ -357,12 +371,16 @@
   .explainer ul {
     margin: 0;
     padding-left: 1.1rem;
-    font-size: var(--text-sm);
+    font-size: var(--text-base);
     color: var(--text-secondary);
     line-height: 1.55;
   }
   .explainer li {
     margin: 0.2rem 0;
+    /* Same measure as .summary above, applied to the item rather than the
+		   list: the <ul>'s marker indent would otherwise eat into the width and
+		   wrap each bullet a little earlier than the paragraph. */
+    max-width: 75ch;
   }
   .explainer .disclaimer {
     margin: 0.85rem 0 0;

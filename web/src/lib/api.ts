@@ -866,6 +866,8 @@ export interface Encounter {
   reason: string | null;
   notes: string | null;
   created_at?: string;
+  /** Attached-document count; present on list responses. */
+  document_count?: number;
 }
 
 export interface Diagnosis {
@@ -879,6 +881,8 @@ export interface Diagnosis {
   severity: 'mild' | 'moderate' | 'severe' | null;
   notes: string | null;
   created_at?: string;
+  /** Attached-document count; present on list responses. */
+  document_count?: number;
 }
 
 export interface HistorySummary {
@@ -1181,9 +1185,12 @@ export async function createEncounter(
   });
 }
 
-export async function getEncounter(
-  id: number,
-): Promise<{ encounter: Encounter; diagnoses: Diagnosis[]; panels: HealthPanel[] }> {
+export async function getEncounter(id: number): Promise<{
+  encounter: Encounter;
+  diagnoses: Diagnosis[];
+  panels: HealthPanel[];
+  documents: HealthDocument[];
+}> {
   return healthFetch(`/encounters/${id}`);
 }
 
@@ -1225,6 +1232,8 @@ export async function extractEncounters(file: File): Promise<{
   rows: ParsedEncounter[];
   mode: 'text' | 'vision';
   warnings: string[];
+  /** The kept upload. Null when storing it failed — see `warnings`. */
+  document_id: number | null;
 }> {
   const form = new FormData();
   form.append('file', file);
@@ -1233,11 +1242,18 @@ export async function extractEncounters(file: File): Promise<{
 
 export async function bulkInsertEncounters(
   rows: ParsedEncounter[],
-): Promise<{ status: string; ids: number[]; count: number; diagnosis_ids: number[] }> {
+  documentId?: number | null,
+): Promise<{
+  status: string;
+  ids: number[];
+  count: number;
+  diagnosis_ids: number[];
+  document_id: number | null;
+}> {
   return healthFetch('/encounters/bulk', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rows }),
+    body: JSON.stringify({ rows, document_id: documentId ?? null }),
   });
 }
 
@@ -1264,7 +1280,7 @@ export async function createDiagnosis(
 
 export async function getDiagnosis(
   id: number,
-): Promise<{ diagnosis: Diagnosis; encounter: Encounter | null }> {
+): Promise<{ diagnosis: Diagnosis; encounter: Encounter | null; documents: HealthDocument[] }> {
   return healthFetch(`/diagnoses/${id}`);
 }
 
@@ -1306,6 +1322,8 @@ export interface Immunization {
   notes: string | null;
   source: string;
   created_at?: string;
+  /** Attached-document count; present on list responses. */
+  document_count?: number;
 }
 
 export interface ImmunizationRef {
@@ -1383,9 +1401,11 @@ export async function createImmunization(
   });
 }
 
-export async function getImmunization(
-  id: number,
-): Promise<{ immunization: Immunization; encounter: Encounter | null }> {
+export async function getImmunization(id: number): Promise<{
+  immunization: Immunization;
+  encounter: Encounter | null;
+  documents: HealthDocument[];
+}> {
   return healthFetch(`/immunizations/${id}`);
 }
 
@@ -1427,6 +1447,8 @@ export async function extractImmunizations(file: File): Promise<{
   rows: ParsedImmunization[];
   mode: 'text' | 'vision';
   warnings: string[];
+  /** The kept upload. Null when storing it failed — see `warnings`. */
+  document_id: number | null;
 }> {
   const form = new FormData();
   form.append('file', file);
@@ -1435,16 +1457,102 @@ export async function extractImmunizations(file: File): Promise<{
 
 export async function bulkInsertImmunizations(
   rows: ParsedImmunization[],
-): Promise<{ status: string; ids: number[]; count: number }> {
+  documentId?: number | null,
+): Promise<{ status: string; ids: number[]; count: number; document_id: number | null }> {
   return healthFetch('/immunizations/bulk', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rows }),
+    body: JSON.stringify({ rows, document_id: documentId ?? null }),
   });
 }
 
 export async function getImmunizationExplainer(name: string): Promise<ImmunizationExplainer> {
   return healthFetch(`/immunizations/${encodeURIComponent(name)}/explainer`);
+}
+
+// ---- Documents -----------------------------------------------------------
+
+export type DocumentEntity = 'encounter' | 'diagnosis' | 'immunization';
+
+export interface HealthDocument {
+  id: number;
+  filename: string;
+  original_filename: string | null;
+  mime: string;
+  byte_size: number;
+  source: 'manual' | 'import' | 'agent';
+  notes: string | null;
+  created_at: string;
+  /** Auth-gated stream route. Never a filesystem path. */
+  url: string;
+}
+
+export interface DocumentLink {
+  entity_type: DocumentEntity;
+  entity_id: number;
+  label: string;
+}
+
+export interface EntityRef {
+  type: DocumentEntity;
+  id: number;
+}
+
+export async function listDocuments(entity?: EntityRef): Promise<{
+  documents: HealthDocument[];
+}> {
+  const q = new URLSearchParams();
+  if (entity) {
+    q.set('entity_type', entity.type);
+    q.set('entity_id', String(entity.id));
+  }
+  const qs = q.toString();
+  return healthFetch(`/documents${qs ? `?${qs}` : ''}`);
+}
+
+export async function getDocument(
+  id: number,
+): Promise<{ document: HealthDocument; links: DocumentLink[] }> {
+  return healthFetch(`/documents/${id}`);
+}
+
+export async function uploadDocument(
+  file: File,
+  entity?: EntityRef,
+  notes?: string,
+): Promise<HealthDocument & { status: string; created: boolean; linked: boolean }> {
+  const form = new FormData();
+  form.append('file', file);
+  if (entity) {
+    form.append('entity_type', entity.type);
+    form.append('entity_id', String(entity.id));
+  }
+  if (notes) form.append('notes', notes);
+  return healthFetch('/documents', { method: 'POST', body: form });
+}
+
+export async function linkDocument(
+  id: number,
+  entity: EntityRef,
+): Promise<{ status: string; created: boolean }> {
+  return healthFetch(`/documents/${id}/links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entity_type: entity.type, entity_id: entity.id }),
+  });
+}
+
+export async function unlinkDocument(
+  id: number,
+  entity: EntityRef,
+): Promise<{ status: string; removed: boolean }> {
+  return healthFetch(`/documents/${id}/links/${entity.type}/${entity.id}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function deleteDocument(id: number): Promise<{ status: string }> {
+  return healthFetch(`/documents/${id}`, { method: 'DELETE' });
 }
 
 // ---- Garmin --------------------------------------------------------------

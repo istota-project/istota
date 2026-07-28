@@ -572,3 +572,150 @@ class TestGarminSyncDelegated:
         err = json.loads(out)["error"]
         assert "readonly" in err.lower() or "Sandboxed" in err
         assert "/garmin/sync" in err
+
+
+class TestDocumentsCli:
+    def _paperwork(self, tmp_path, name="discharge.pdf") -> Path:
+        p = tmp_path / name
+        p.write_bytes(b"%PDF-1.4 discharge summary")
+        return p
+
+    def test_attach_and_list_direct(self, ready, tmp_path):
+        db_path, env = ready
+        from istota.health import db as health_db
+
+        with health_db.connect(db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-06-29", encounter_type="visit",
+            )
+            conn.commit()
+
+        src = self._paperwork(tmp_path)
+        out = _run(
+            ["attach-document", "--path", str(src), "--to", f"encounter:{eid}"],
+            env,
+        )
+        assert out["status"] == "ok"
+        assert out["created"] is True
+        assert out["filename"] == "discharge.pdf"
+
+        with health_db.connect(db_path) as conn:
+            docs = health_db.documents_for_entity(conn, "encounter", eid)
+        assert [d.id for d in docs] == [out["id"]]
+        assert docs[0].source == "agent"
+
+        listed = _run(["documents", "--entity", f"encounter:{eid}"], env)
+        assert [d["id"] for d in listed["documents"]] == [out["id"]]
+
+        detail = _run(["document", str(out["id"])], env)
+        assert detail["links"] == [
+            {"entity_type": "encounter", "entity_id": eid},
+        ]
+
+    def test_detach_direct(self, ready, tmp_path):
+        db_path, env = ready
+        from istota.health import db as health_db
+
+        with health_db.connect(db_path) as conn:
+            eid = health_db.insert_encounter(
+                conn, encounter_date="2026-06-29", encounter_type="visit",
+            )
+            conn.commit()
+        src = self._paperwork(tmp_path)
+        did = _run(
+            ["attach-document", "--path", str(src), "--to", f"encounter:{eid}"],
+            env,
+        )["id"]
+        out = _run(
+            ["detach-document", str(did), "--from", f"encounter:{eid}"], env,
+        )
+        assert out == {"status": "ok", "removed": True}
+        with health_db.connect(db_path) as conn:
+            assert health_db.documents_for_entity(conn, "encounter", eid) == []
+
+    def test_attach_defers_under_sandbox(self, ready, tmp_path):
+        """Sandboxed, the health DB is read-only — the write must defer."""
+        db_path, env = ready
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = {**env, "ISTOTA_DEFERRED_DIR": str(deferred), "ISTOTA_TASK_ID": "77"}
+        src = self._paperwork(tmp_path)
+
+        out = _run(
+            ["attach-document", "--path", str(src), "--to", "immunization:5",
+             "--notes", "Pharmacy record"],
+            env,
+        )
+        assert out["deferred"] is True
+        ops = json.loads((deferred / "task_77_health_ops.json").read_text())
+        assert ops == [{
+            "op": "attach_document",
+            "source_path": str(src),
+            "filename": "discharge.pdf",
+            "entity_type": "immunization",
+            "notes": "Pharmacy record",
+            "entity_id": 5,
+        }]
+
+    def test_encounter_ref_defers_as_a_ref(self, ready, tmp_path):
+        db_path, env = ready
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = {**env, "ISTOTA_DEFERRED_DIR": str(deferred), "ISTOTA_TASK_ID": "78"}
+        src = self._paperwork(tmp_path)
+
+        _run(
+            ["add-encounter", "--date", "2026-06-29", "--type", "visit",
+             "--ref", "visit"],
+            env,
+        )
+        _run(
+            ["attach-document", "--path", str(src), "--to", "encounter:@visit"],
+            env,
+        )
+        ops = json.loads((deferred / "task_78_health_ops.json").read_text())
+        assert ops[0]["ref"] == "visit"
+        assert ops[1]["encounter_ref"] == "visit"
+        assert "entity_id" not in ops[1]
+
+    def test_detach_defers_under_sandbox(self, ready, tmp_path):
+        db_path, env = ready
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        env = {**env, "ISTOTA_DEFERRED_DIR": str(deferred), "ISTOTA_TASK_ID": "79"}
+        out = _run(["detach-document", "3", "--from", "diagnosis:8"], env)
+        assert out["deferred"] is True
+        ops = json.loads((deferred / "task_79_health_ops.json").read_text())
+        assert ops == [{
+            "op": "detach_document",
+            "document_id": 3,
+            "entity_type": "diagnosis",
+            "entity_id": 8,
+        }]
+
+    def test_missing_file_is_an_error(self, ready, tmp_path):
+        db_path, env = ready
+        out = _run(
+            ["attach-document", "--path", str(tmp_path / "nope.pdf"),
+             "--to", "encounter:1"],
+            env, expect_success=False,
+        )
+        assert out["status"] == "error"
+        assert "file not found" in out["error"]
+
+    @pytest.mark.parametrize("ref,fragment", [
+        ("panel:1", "unknown entity type"),
+        ("encounter:abc", "must be an integer"),
+        ("encounter", "expected TYPE:ID"),
+        ("", "expected TYPE:ID"),
+        ("diagnosis:@x", "only supported for encounter"),
+    ])
+    def test_bad_entity_ref_is_an_error(self, ready, tmp_path, ref, fragment):
+        db_path, env = ready
+        src = self._paperwork(tmp_path)
+        out = _run(
+            ["attach-document", "--path", str(src), "--to", ref],
+            env, expect_success=False,
+        )
+        assert out["status"] == "error"
+        assert fragment in out["error"]

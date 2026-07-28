@@ -13,6 +13,10 @@ Subcommands cover both body stats and bloodwork:
   workspace) as a draft panel for later web-UI review.
 * ``summary`` — dashboard-style snapshot.
 * ``settings`` / ``set KEY VALUE`` — profile + display preferences.
+* ``documents`` / ``document <id>`` — list/show stored paperwork.
+* ``attach-document --path P --to TYPE:ID`` / ``detach-document <id>
+  --from TYPE:ID`` — file paperwork against an encounter, condition, or
+  immunization.
 
 Per-user health DB resolved via ``HEALTH_DB_PATH`` (set by the
 ``setup_env`` hook below). Writes go through the deferred-op pattern when
@@ -476,6 +480,257 @@ def cmd_upload(args: argparse.Namespace) -> None:
     _emit({"status": "ok", "id": pid, "draft": True})
 
 
+def _parse_entity_ref(raw: str) -> tuple[str, int | str]:
+    """Parse a ``TYPE:ID`` token (``encounter:42``) into its two parts.
+
+    ``encounter:@NAME`` is also accepted and returns the ``@NAME`` string
+    unchanged, mirroring ``add-biomarker``'s ``@ref``: a deferred
+    ``add-encounter --ref NAME`` can't hand its new id back to the sandboxed
+    CLI, so the scheduler resolves the name at replay time.
+
+    Emits the standard error envelope and exits on anything malformed — a
+    mis-parsed reference would file paperwork against the wrong record.
+    """
+    from istota.health.db import DOCUMENT_ENTITY_TYPES
+
+    text = (raw or "").strip()
+    if ":" not in text:
+        _fail(
+            f"expected TYPE:ID (e.g. encounter:42), got {raw!r}; "
+            f"types: {', '.join(DOCUMENT_ENTITY_TYPES)}"
+        )
+    entity_type, _, id_part = text.partition(":")
+    entity_type = entity_type.strip().lower()
+    id_part = id_part.strip()
+    if entity_type not in DOCUMENT_ENTITY_TYPES:
+        _fail(
+            f"unknown entity type: {entity_type!r}; "
+            f"expected one of {', '.join(DOCUMENT_ENTITY_TYPES)}"
+        )
+    if id_part.startswith("@"):
+        if entity_type != "encounter":
+            _fail(f"@ref is only supported for encounter, not {entity_type}")
+        if len(id_part) < 2:
+            _fail("@ref must name an encounter (e.g. encounter:@visit)")
+        return entity_type, id_part
+    try:
+        entity_id = int(id_part)
+    except (TypeError, ValueError):
+        _fail(f"entity id must be an integer, got {id_part!r}")
+    return entity_type, entity_id
+
+
+def cmd_documents(args: argparse.Namespace) -> None:
+    """List stored documents, optionally scoped to one record."""
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        if args.entity:
+            entity_type, entity_id = _parse_entity_ref(args.entity)
+            if isinstance(entity_id, str):
+                _fail("--entity needs a numeric id, not an @ref")
+            docs = health_db.documents_for_entity(conn, entity_type, entity_id)
+            docs = docs[: args.limit]
+        else:
+            docs = health_db.list_documents(conn, limit=args.limit)
+    finally:
+        conn.close()
+    _emit({
+        "status": "ok",
+        "documents": [
+            {
+                "id": d.id,
+                "filename": d.filename,
+                "mime": d.mime,
+                "byte_size": d.byte_size,
+                "source": d.source,
+                "notes": d.notes,
+                "created_at": d.created_at,
+            }
+            for d in docs
+        ],
+    })
+
+
+def cmd_document(args: argparse.Namespace) -> None:
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        doc = health_db.get_document(conn, args.document_id)
+        if doc is None:
+            _fail(f"document {args.document_id} not found")
+        links = health_db.entity_links_for_document(conn, args.document_id)
+    finally:
+        conn.close()
+    _emit({
+        "status": "ok",
+        "document": {
+            "id": doc.id,
+            "filename": doc.filename,
+            "original_filename": doc.original_filename,
+            "mime": doc.mime,
+            "byte_size": doc.byte_size,
+            "source": doc.source,
+            "notes": doc.notes,
+            "created_at": doc.created_at,
+        },
+        "links": [{"entity_type": t, "entity_id": i} for t, i in links],
+    })
+
+
+def cmd_attach_document(args: argparse.Namespace) -> None:
+    """File a workspace file against an encounter / condition / immunization.
+
+    Sandboxed, the health DB is read-only and ``uploads_dir`` is not ours to
+    write, so this defers an ``attach_document`` op the scheduler replays
+    (the same shape ``upload`` uses for ``register_upload``).
+    """
+    entity_type, entity_id = _parse_entity_ref(args.to)
+    path = Path(args.path)
+    if not path.exists():
+        _fail(f"file not found: {path}")
+    if not path.is_file():
+        _fail(f"not a regular file: {path}")
+
+    op: dict[str, Any] = {
+        "op": "attach_document",
+        "source_path": str(path),
+        "filename": path.name,
+        "entity_type": entity_type,
+        "notes": args.notes,
+    }
+    if isinstance(entity_id, str):
+        op["encounter_ref"] = entity_id.lstrip("@")
+    else:
+        op["entity_id"] = entity_id
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+
+    if isinstance(entity_id, str):
+        _fail(
+            "encounter:@ref only resolves inside a sandboxed task; pass a "
+            "numeric encounter id directly"
+        )
+
+    import mimetypes
+
+    from istota.health import documents as health_documents
+
+    ctx = _direct_context()
+    raw = path.read_bytes()
+    conn = _connect()
+    try:
+        # attach_document validates the target exists before writing bytes;
+        # an UnknownEntity surfaces here as the standard error envelope.
+        doc, created = health_documents.attach_document(
+            conn, ctx, raw=raw, filename=path.name,
+            mime=mimetypes.guess_type(path.name)[0],
+            entity_type=entity_type, entity_id=entity_id,
+            source="agent", notes=args.notes,
+            max_bytes=_document_max_bytes(),
+        )
+        conn.commit()
+    except health_documents.DocumentError as e:
+        _fail(str(e))
+    finally:
+        conn.close()
+    _emit({
+        "status": "ok",
+        "id": doc.id,
+        "created": created,
+        "filename": doc.filename,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+    })
+
+
+def cmd_detach_document(args: argparse.Namespace) -> None:
+    entity_type, entity_id = _parse_entity_ref(getattr(args, "from"))
+    if isinstance(entity_id, str):
+        _fail("detach-document needs a numeric id, not an @ref")
+    op = {
+        "op": "detach_document",
+        "document_id": args.document_id,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+    }
+    if _defer_op(op):
+        _emit({"status": "ok", "deferred": True, "op": op})
+        return
+
+    from istota.health import db as health_db
+
+    conn = _connect()
+    try:
+        n = health_db.unlink_document(
+            conn, args.document_id, entity_type, entity_id,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _emit({"status": "ok", "removed": bool(n)})
+
+
+def _document_max_bytes() -> int:
+    """The operator's ``[health] max_document_bytes``, or the library default.
+
+    Read here rather than left to the library default so an operator who set
+    `0` (unlimited) or lowered the cap gets it honoured on the agent path too,
+    not only through the web routes.
+    """
+    from istota.health.documents import DEFAULT_MAX_DOCUMENT_BYTES
+
+    try:
+        from istota.config import load_config
+
+        raw = getattr(getattr(load_config(), "health", None),
+                      "max_document_bytes", None)
+    except Exception:  # noqa: BLE001 — any config failure keeps the default
+        return DEFAULT_MAX_DOCUMENT_BYTES
+    if raw is None:
+        return DEFAULT_MAX_DOCUMENT_BYTES
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_DOCUMENT_BYTES
+
+
+def _direct_context():
+    """Resolve a HealthContext for the unsandboxed path.
+
+    Prefers the real loader, because on a server deploy the DB lives on
+    local disk (``Config.module_db_path``) while ``uploads_dir`` stays on
+    the mount — deriving one from the other would file documents where the
+    web route can't find them. Falls back to the ``HEALTH_DB_PATH``-relative
+    layout (``{workspace}/health/data/health.db``) when no config is
+    reachable, matching ``_cmd_garmin_sync_direct``.
+    """
+    from istota.health.models import HealthContext
+
+    user_id = os.environ.get("ISTOTA_USER_ID", "")
+    if user_id:
+        try:
+            from istota.config import load_config
+            from istota.health import _loader as health_loader
+
+            return health_loader.resolve_for_user(user_id, load_config())
+        except Exception:  # noqa: BLE001 — any config failure falls back
+            pass
+
+    db_path = Path(_db_path())
+    data_dir = db_path.parent.parent
+    return HealthContext(
+        user_id=user_id,
+        workspace_root=data_dir.parent,
+        data_dir=data_dir,
+        db_path=db_path,
+        uploads_dir=data_dir / "uploads",
+    )
+
+
 def cmd_import_csv(args: argparse.Namespace) -> None:
     """Import a bloodwork CSV from a workspace-accessible file path.
 
@@ -836,6 +1091,8 @@ def cmd_add_encounter(args: argparse.Namespace) -> None:
         "reason": args.reason,
         "notes": args.notes,
     }
+    if getattr(args, "ref", None):
+        op["ref"] = args.ref
     if _defer_op(op):
         _emit({"status": "ok", "deferred": True, "op": op})
         return
@@ -1540,6 +1797,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_enc.add_argument("--specialty")
     add_enc.add_argument("--reason")
     add_enc.add_argument("--notes")
+    add_enc.add_argument(
+        "--ref",
+        help="Symbolic name for this encounter so a later attach-document "
+             "in the same sandboxed task can reference it as "
+             "encounter:@NAME before the real id exists",
+    )
 
     upd_enc = sub.add_parser("update-encounter", help="Update an encounter")
     upd_enc.add_argument("id", type=int)
@@ -1694,6 +1957,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     expl.add_argument("name", help="Vaccine name (canonical or alias)")
 
+    docs_p = sub.add_parser(
+        "documents", help="List stored documents (scans, letters, cards)",
+    )
+    docs_p.add_argument(
+        "--entity",
+        help="Scope to one record, as TYPE:ID (e.g. encounter:42)",
+    )
+    docs_p.add_argument("--limit", type=int, default=50)
+
+    doc_p = sub.add_parser("document", help="Show one document + its links")
+    doc_p.add_argument("document_id", type=int)
+
+    attach_p = sub.add_parser(
+        "attach-document",
+        help="File a workspace file against a health record",
+    )
+    attach_p.add_argument(
+        "--path", required=True, help="Path to the file to attach",
+    )
+    attach_p.add_argument(
+        "--to", required=True, metavar="TYPE:ID",
+        help="Record to attach it to (encounter:42, diagnosis:7, immunization:5)",
+    )
+    attach_p.add_argument("--notes", default=None)
+
+    detach_p = sub.add_parser(
+        "detach-document", help="Remove a document from one record",
+    )
+    detach_p.add_argument("document_id", type=int)
+    detach_p.add_argument(
+        "--from", dest="from", required=True, metavar="TYPE:ID",
+        help="Record to detach it from",
+    )
+
     sub.add_parser("garmin-status", help="Show Garmin Connect link status")
     g_sync = sub.add_parser("garmin-sync", help="Manually trigger a Garmin daily-summary sync")
     g_sync.add_argument("--days-back", dest="days_back", type=int, default=7)
@@ -1745,6 +2042,10 @@ def main() -> None:
         "coverage": cmd_coverage,
         "import-immunizations": cmd_import_immunizations,
         "explain-immunization": cmd_explain_immunization,
+        "documents": cmd_documents,
+        "document": cmd_document,
+        "attach-document": cmd_attach_document,
+        "detach-document": cmd_detach_document,
     }
 
     fn = commands.get(args.command)

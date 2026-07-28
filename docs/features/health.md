@@ -48,6 +48,10 @@ Per-user SQLite at `{workspace}/health/data/health.db`. Tables:
 | `encounters` | Medical encounters (visits, procedures, screenings) |
 | `diagnoses` | Diagnoses with status (active, resolved, chronic) |
 | `health_settings` | Key/value store for profile (DOB, height, sex) and unit display preferences |
+| `documents` | Stored paperwork — scans, discharge summaries, vaccination cards |
+| `document_links` | Which records a document evidences (encounter / diagnosis / immunization) |
+
+Document bytes live at `{workspace}/health/uploads/documents/{id}/{filename}` — beside the panel sources, under the one path root the file-serving routes guard. A document is stored once and can be linked to several records, so a visit summary covering a diagnosis and a vaccine given at the same visit is one file, not three copies. Size is capped by `[health] max_document_bytes` (default 25 MiB; `0` = unlimited). A document that ends up attached to nothing is deleted 24 hours after the last thing that referenced it — long enough that detaching a file on the way to re-attaching it elsewhere is safe, short enough that an import you abandoned doesn't linger.
 
 Garmin Connect OAuth tokens are not stored here — they live in the framework-level encrypted `secrets` table under `service="garmin"` (Fernet via `ISTOTA_SECRET_KEY`).
 
@@ -61,6 +65,9 @@ Garmin Connect OAuth tokens are not stored here — they live in the framework-l
 | `/health/bloodwork/upload` | Drag-and-drop OCR review-and-confirm |
 | `/health/bloodwork/marker?name=…` | Trend chart, related markers, clinical description, explainer card |
 | `/health/immunizations` | Registry table, coverage status, import controls |
+| `/health/history/encounter?id=…` | Encounter detail — linked diagnoses, panels, and its documents |
+| `/health/history/diagnoses` | Conditions list; a paperclip badge opens that condition's documents |
+| `/health/immunizations/detail?id=…` | Per-record edit plus "Proof of immunization" |
 | `/health/settings` | DOB/height/sex, display preferences (Garmin connect/sync lives on Settings → Connected services) |
 
 ## Skill CLI
@@ -78,6 +85,9 @@ The `health` skill exposes `istota-skill health <subcommand>`. Key subcommands:
 - `vaccine-refs`, `coverage`, `explain-immunization` — reference data and coverage
 - `import-immunizations` — bulk import from clipboard/paste
 - `garmin-status`, `garmin-sync`, `garmin-disconnect` — Garmin integration
+- `documents`, `document`, `attach-document`, `detach-document` — file paperwork against a record
+
+Attaching takes a `TYPE:ID` token: `istota-skill health attach-document --path ~/inbox/card.jpg --to immunization:5`. Types are `encounter`, `diagnosis`, `immunization`. The agent attaches files the user supplied; deleting a document stays a web-UI action behind a confirmation, since it removes the file from every record it is attached to.
 
 All mutating operations are deferred under sandbox (written to `task_<id>_health_ops.json`, replayed post-task by the scheduler).
 
@@ -87,5 +97,5 @@ Health data is the most sensitive data in the system. The health DB is the singl
 
 - Quantitative health data (measurements, biomarker values, lab dates, symptoms) must never be written to USER.md, the knowledge graph, dated memories, or KV.
 - Biomarker values are excluded from briefings and log channels.
-- Source files for uploaded labs are served only through the auth-gated `/panels/{id}/source` route.
+- Source files for uploaded labs are served only through the auth-gated `/panels/{id}/source` route; attached documents likewise through `/documents/{id}/file`. Neither is ever a public share link. Documents are always served as a download with `nosniff`, because one may have arrived from outside (an email attachment the agent filed).
 - Stable identity-level medical facts (allergies, named chronic conditions) belong in the knowledge graph; detailed records stay in the health DB.

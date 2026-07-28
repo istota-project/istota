@@ -8,9 +8,11 @@
     getImmunization,
     updateImmunization,
     type Encounter,
+    type HealthDocument,
     type Immunization,
   } from '$lib/api';
   import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
+  import DocumentList from '$lib/components/health/DocumentList.svelte';
 
   const routeOptions: SelectOption[] = [
     { value: '', label: '' },
@@ -27,6 +29,7 @@
   let formError = $state('');
   let immunization: Immunization | null = $state(null);
   let encounter: Encounter | null = $state(null);
+  let documents: HealthDocument[] = $state([]);
 
   async function load() {
     if (!id) return;
@@ -36,6 +39,7 @@
       const out = await getImmunization(id);
       immunization = out.immunization;
       encounter = out.encounter;
+      documents = out.documents ?? [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load';
     } finally {
@@ -240,6 +244,11 @@
       </button>
     </div>
   </form>
+
+  <section class="linked">
+    <h2>Proof of immunization</h2>
+    <DocumentList entityType="immunization" entityId={immunization.id} {documents} />
+  </section>
 
   {#if encounter}
     <section class="linked">

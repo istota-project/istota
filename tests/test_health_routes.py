@@ -721,3 +721,266 @@ class TestDashboardHistory:
         d = client.get("/istota/api/health/dashboard").json()
         assert d["active_diagnoses_count"] == 2  # active + chronic, not resolved
         assert d["recent_encounters"][0]["provider"] == "Dr. Smith"
+
+
+PDF_BYTES = b"%PDF-1.4 fake pdf"
+
+
+def _make_encounter(client) -> int:
+    return client.post(
+        "/istota/api/health/encounters",
+        json={"encounter_date": "2026-06-29", "encounter_type": "visit"},
+    ).json()["id"]
+
+
+def _upload(client, *, data=PDF_BYTES, filename="discharge.pdf",
+            mime="application/pdf", **form):
+    return client.post(
+        "/istota/api/health/documents",
+        files={"file": (filename, data, mime)},
+        data=form,
+    )
+
+
+class TestDocumentRoutes:
+    def test_upload_and_list_for_entity(self, client):
+        eid = _make_encounter(client)
+        resp = _upload(client, entity_type="encounter", entity_id=str(eid))
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["created"] is True
+        assert body["linked"] is True
+        assert body["filename"] == "discharge.pdf"
+        assert body["byte_size"] == len(PDF_BYTES)
+        assert body["url"].endswith(f"/documents/{body['id']}/file")
+        # Never leak a filesystem path.
+        assert "stored_path" not in body
+
+        listing = client.get(
+            "/istota/api/health/documents",
+            params={"entity_type": "encounter", "entity_id": eid},
+        ).json()
+        assert [d["id"] for d in listing["documents"]] == [body["id"]]
+
+    def test_upload_without_entity_is_unlinked(self, client):
+        body = _upload(client).json()
+        assert body["linked"] is False
+        detail = client.get(f"/istota/api/health/documents/{body['id']}").json()
+        assert detail["links"] == []
+
+    def test_file_route_serves_bytes_as_attachment(self, client):
+        did = _upload(client).json()["id"]
+        resp = client.get(f"/istota/api/health/documents/{did}/file")
+        assert resp.status_code == 200
+        assert resp.content == PDF_BYTES
+        assert resp.headers["content-type"].startswith("application/pdf")
+        assert "attachment" in resp.headers["content-disposition"]
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+    def test_unsupported_mime_is_415(self, client):
+        resp = _upload(
+            client, data=b"<script>alert(1)</script>",
+            filename="x.html", mime="text/html",
+        )
+        assert resp.status_code == 415
+        assert "unsupported document type" in resp.json()["error"]
+
+    def test_oversize_is_413(self, client, ctx, monkeypatch):
+        from istota.health import routes as health_routes
+
+        monkeypatch.setattr(
+            health_routes, "_max_document_bytes", lambda request: 10,
+        )
+        resp = _upload(client, data=b"x" * 30)
+        assert resp.status_code == 413
+        assert "exceeds 10 bytes" in resp.json()["error"]
+
+    def test_empty_upload_is_400(self, client):
+        resp = _upload(client, data=b"")
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "empty upload"
+
+    def test_unknown_entity_type_is_400(self, client):
+        resp = _upload(client, entity_type="panel", entity_id="1")
+        assert resp.status_code == 400
+        assert "unknown entity type" in resp.json()["error"]
+
+    def test_upload_to_missing_entity_is_404(self, client):
+        resp = _upload(client, entity_type="encounter", entity_id="999")
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "encounter not found"
+
+    def test_extensionless_upload_is_sniffed(self, client):
+        resp = _upload(client, filename="attachment", mime=None)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["mime"] == "application/pdf"
+
+    def test_duplicate_bytes_report_created_false(self, client):
+        eid = _make_encounter(client)
+        first = _upload(client, filename="a.pdf").json()
+        second = _upload(
+            client, filename="b.pdf", entity_type="encounter",
+            entity_id=str(eid),
+        ).json()
+        assert second["id"] == first["id"]
+        assert second["created"] is False
+        assert second["linked"] is True
+
+    def test_link_route(self, client):
+        eid = _make_encounter(client)
+        did = _upload(client).json()["id"]
+        resp = client.post(
+            f"/istota/api/health/documents/{did}/links",
+            json={"entity_type": "encounter", "entity_id": eid},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "created": True}
+        # Re-linking is idempotent, not an error.
+        again = client.post(
+            f"/istota/api/health/documents/{did}/links",
+            json={"entity_type": "encounter", "entity_id": eid},
+        )
+        assert again.json() == {"status": "ok", "created": False}
+
+    def test_link_to_missing_entity_is_404(self, client):
+        did = _upload(client).json()["id"]
+        resp = client.post(
+            f"/istota/api/health/documents/{did}/links",
+            json={"entity_type": "encounter", "entity_id": 999},
+        )
+        assert resp.status_code == 404
+
+    def test_link_unknown_document_is_404(self, client):
+        eid = _make_encounter(client)
+        resp = client.post(
+            "/istota/api/health/documents/999/links",
+            json={"entity_type": "encounter", "entity_id": eid},
+        )
+        assert resp.status_code == 404
+
+    def test_unlink_leaves_the_document(self, client):
+        eid = _make_encounter(client)
+        did = _upload(client, entity_type="encounter", entity_id=str(eid)).json()["id"]
+        resp = client.delete(
+            f"/istota/api/health/documents/{did}/links/encounter/{eid}",
+        )
+        assert resp.json() == {"status": "ok", "removed": True}
+        assert client.get(
+            "/istota/api/health/documents",
+            params={"entity_type": "encounter", "entity_id": eid},
+        ).json()["documents"] == []
+        listing = client.get("/istota/api/health/documents").json()
+        assert [d["id"] for d in listing["documents"]] == [did]
+
+    def test_delete_removes_from_list(self, client):
+        did = _upload(client).json()["id"]
+        assert client.delete(f"/istota/api/health/documents/{did}").status_code == 200
+        assert client.get("/istota/api/health/documents").json()["documents"] == []
+        assert client.delete(f"/istota/api/health/documents/{did}").status_code == 404
+
+    def test_detail_reports_links_with_labels(self, client):
+        eid = _make_encounter(client)
+        did = _upload(client, entity_type="encounter", entity_id=str(eid)).json()["id"]
+        detail = client.get(f"/istota/api/health/documents/{did}").json()
+        assert detail["document"]["id"] == did
+        assert detail["links"] == [
+            {
+                "entity_type": "encounter",
+                "entity_id": eid,
+                "label": "2026-06-29 — visit",
+            },
+        ]
+
+    def test_missing_bytes_404s_but_row_still_listed(self, client, ctx):
+        did = _upload(client).json()["id"]
+        with health_db.connect(ctx.db_path) as conn:
+            doc = health_db.get_document(conn, did)
+        (ctx.uploads_dir / doc.stored_path).unlink()
+        resp = client.get(f"/istota/api/health/documents/{did}/file")
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "source file missing"
+        assert client.get(
+            "/istota/api/health/documents",
+        ).json()["documents"][0]["id"] == did
+
+    def test_escaping_stored_path_is_400(self, client, ctx):
+        with health_db.connect(ctx.db_path) as conn:
+            did = health_db.insert_document(
+                conn, filename="passwd", mime="text/plain", byte_size=1,
+                content_hash="cafe", stored_path="../../../etc/passwd",
+            )
+            conn.commit()
+        resp = client.get(f"/istota/api/health/documents/{did}/file")
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "invalid source path"
+
+    def test_document_unknown_is_404(self, client):
+        assert client.get("/istota/api/health/documents/999").status_code == 404
+        assert client.get(
+            "/istota/api/health/documents/999/file",
+        ).status_code == 404
+
+
+class TestDocumentCountsOnLists:
+    def test_encounter_list_carries_document_count(self, client):
+        eid = _make_encounter(client)
+        rows = client.get("/istota/api/health/encounters").json()["encounters"]
+        assert rows[0]["document_count"] == 0
+        _upload(client, entity_type="encounter", entity_id=str(eid))
+        rows = client.get("/istota/api/health/encounters").json()["encounters"]
+        assert rows[0]["document_count"] == 1
+
+    def test_diagnosis_list_carries_document_count(self, client):
+        did = client.post(
+            "/istota/api/health/diagnoses", json={"name": "Asthma"},
+        ).json()["id"]
+        _upload(client, entity_type="diagnosis", entity_id=str(did))
+        rows = client.get("/istota/api/health/diagnoses").json()["diagnoses"]
+        assert rows[0]["document_count"] == 1
+
+    def test_immunization_list_carries_document_count(self, client):
+        iid = client.post(
+            "/istota/api/health/immunizations",
+            json={"name": "Influenza", "date_given": "2026-01-05"},
+        ).json()["id"]
+        _upload(client, entity_type="immunization", entity_id=str(iid))
+        rows = client.get(
+            "/istota/api/health/immunizations",
+        ).json()["immunizations"]
+        assert rows[0]["document_count"] == 1
+
+    def test_detail_routes_carry_documents(self, client):
+        eid = _make_encounter(client)
+        dx = client.post(
+            "/istota/api/health/diagnoses",
+            json={"name": "Asthma", "encounter_id": eid},
+        ).json()["id"]
+        iid = client.post(
+            "/istota/api/health/immunizations",
+            json={"name": "Influenza", "date_given": "2026-01-05"},
+        ).json()["id"]
+        did = _upload(client, entity_type="encounter", entity_id=str(eid)).json()["id"]
+        client.post(
+            f"/istota/api/health/documents/{did}/links",
+            json={"entity_type": "diagnosis", "entity_id": dx},
+        )
+        client.post(
+            f"/istota/api/health/documents/{did}/links",
+            json={"entity_type": "immunization", "entity_id": iid},
+        )
+        enc = client.get(f"/istota/api/health/encounters/{eid}").json()
+        assert [d["id"] for d in enc["documents"]] == [did]
+        diag = client.get(f"/istota/api/health/diagnoses/{dx}").json()
+        assert [d["id"] for d in diag["documents"]] == [did]
+        imm = client.get(f"/istota/api/health/immunizations/{iid}").json()
+        assert [d["id"] for d in imm["documents"]] == [did]
+
+    def test_entity_delete_clears_links_but_keeps_the_document(self, client):
+        eid = _make_encounter(client)
+        did = _upload(client, entity_type="encounter", entity_id=str(eid)).json()["id"]
+        assert client.delete(
+            f"/istota/api/health/encounters/{eid}",
+        ).status_code == 200
+        detail = client.get(f"/istota/api/health/documents/{did}").json()
+        assert detail["links"] == []

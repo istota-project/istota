@@ -230,6 +230,26 @@ def ensure_initialised(ctx: HealthContext) -> None:
     recanonicalize_biomarker_names(ctx)
     seed_immunization_refs(ctx)
     _backfill_content_hashes(ctx)
+    _sweep_orphan_documents(ctx)
+
+
+def _sweep_orphan_documents(ctx: HealthContext) -> None:
+    """Collect linkless documents — abandoned imports, detached leftovers.
+
+    Rides this once-per-touch hook rather than getting its own scheduler job:
+    the work is tiny (an indexed anti-join returning nothing on almost every
+    call) and the window is 24h, so opportunistic timing is enough. Never
+    fatal — a sweep failure must not stop the module initialising.
+    """
+    from istota.health import documents as health_documents
+
+    try:
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_documents.sweep_orphan_documents(conn, ctx)
+            if n:
+                conn.commit()
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("health_document_sweep_failed error=%s", e)
 
 
 def _backfill_content_hashes(ctx: HealthContext) -> None:

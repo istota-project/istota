@@ -228,26 +228,24 @@
 {/if}
 
 <div class="filter-bar">
-  <label>
-    <span>Type</span>
-    <Select
-      value={typeFilter}
-      options={typeFilterOptions}
-      onValueChange={(v) => {
-        typeFilter = v;
-        load();
-      }}
-      ariaLabel="Type filter"
-    />
-  </label>
-  <label>
-    <span>Since</span>
-    <input type="date" bind:value={sinceFilter} onchange={load} />
-  </label>
-  <label>
-    <span>Until</span>
-    <input type="date" bind:value={untilFilter} onchange={load} />
-  </label>
+  <Select
+    value={typeFilter}
+    options={typeFilterOptions}
+    onValueChange={(v) => {
+      typeFilter = v;
+      load();
+    }}
+    ariaLabel="Type filter"
+  />
+  <div class="date-inputs">
+    <!-- The leading field needs no label: a date input followed by "to" and a
+         second date input reads as a range on its own, and dropping the word
+         buys most of a phone's width back. The inputs keep aria-labels so the
+         range is still named for a screen reader. -->
+    <input type="date" bind:value={sinceFilter} onchange={load} aria-label="From date" />
+    <span class="range-sep">to</span>
+    <input type="date" bind:value={untilFilter} onchange={load} aria-label="To date" />
+  </div>
 </div>
 
 {#if loading}
@@ -333,6 +331,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 1rem;
     margin-bottom: 1rem;
   }
   h1 {
@@ -344,6 +343,23 @@
     display: flex;
     gap: 0.5rem;
     align-items: center;
+  }
+  /* Three pill buttons plus the title do not fit a phone on one line, and
+	   letting them wrap inside the flex row leaves them ragged against the
+	   title. Give the row its own line instead. */
+  @media (max-width: 768px) {
+    .header {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.6rem;
+    }
+    .actions {
+      flex-wrap: wrap;
+    }
+    .actions > * {
+      flex: 1 1 auto;
+      text-align: center;
+    }
   }
   .btn {
     padding: 0.4rem 0.85rem;
@@ -416,46 +432,44 @@
     justify-content: flex-end;
   }
 
+  /* Mirrors the location-history controls bar: inline labels rather than
+	   stacked ones, everything at --text-xs, and the <Select> left on its own
+	   default trigger. The previous version pinned a 2rem --text-sm box on
+	   both the trigger and the date inputs, which read as a form rather than
+	   a filter strip and cost most of a phone's width. */
   .filter-bar {
     display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 0.75rem;
     margin-bottom: 1rem;
-    flex-wrap: wrap;
-    align-items: flex-end;
   }
-  .filter-bar label {
+  .date-inputs {
     display: flex;
-    flex-direction: column;
-    font-size: var(--text-sm);
-    gap: 0.15rem;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35rem;
     min-width: 0;
   }
-  .filter-bar label > span {
-    color: var(--text-dim);
+  .range-sep {
     font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    color: var(--text-dim);
   }
-  /* The Type filter is a <Select> (inline-flex trigger + chevron); the Since/
-	   Until fields are native date inputs. They derive different heights from
-	   the same padding, so pin an explicit shared box: same height, border-box,
-	   horizontal-only padding. Both then render an identical 2rem-tall field. */
-  .filter-bar input,
-  .filter-bar :global(.ui-select-trigger) {
-    box-sizing: border-box;
-    height: 2rem;
-    padding: 0 0.5rem;
-    background: var(--surface-raised);
+  .date-inputs input[type='date'] {
+    background: var(--surface-card);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
     color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
+    font-family: inherit;
+    font-size: var(--text-xs);
+    padding: 0.2rem 0.4rem;
+    border-radius: 0.25rem;
+    /* iOS renders a date input at its intrinsic width, which is wider than a
+		   phone once two of them sit on one row. */
+    min-width: 0;
+    max-width: 100%;
   }
-  .filter-bar :global(.ui-select-trigger) {
-    min-width: 9rem;
-    /* Push the chevron to the right edge instead of hugging the label. */
-    justify-content: space-between;
+  .date-inputs input[type='date']::-webkit-calendar-picker-indicator {
+    filter: invert(0.7);
   }
 
   .layout {
@@ -469,8 +483,7 @@
     }
   }
 
-  .timeline ul,
-  .conditions {
+  .timeline ul {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -596,31 +609,78 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .conditions li a {
+  /* Cards, not flat rows. A condition name is routinely long ("Bilateral
+	   patellofemoral pain syndrome with anterior knee crepitus") and the old
+	   single-line row ellipsised it away rather than wrapping. `auto-fill` with
+	   a `min()` floor keeps one column inside the 280px desktop sidebar and
+	   goes multi-column once the sidebar becomes full width under 768px —
+	   without the floor a name wider than the track would push the grid past
+	   the viewport. */
+  .conditions {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
+    gap: 0.4rem;
+  }
+  /* Equal heights only where cards actually sit beside each other. Above the
+	   breakpoint this is the 280px sidebar — a single column, where `1fr` rows
+	   would stretch every card to match the longest condition name in the list
+	   and leave most of them mostly empty. Below it the sidebar is full width
+	   and goes multi-column, where a ragged bottom edge across a row reads as
+	   damage. */
+  @media (max-width: 768px) {
+    .conditions {
+      grid-auto-rows: 1fr;
+    }
+  }
+  .conditions li {
+    min-width: 0;
+    /* The grid stretches the <li>, but the <a> inside it is height:auto and
+		   would sit short inside a stretched cell — so the card would still
+		   render at its own content height. Make the li a flex parent and let
+		   the anchor fill it. */
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.35rem 0.55rem;
-    border-radius: 0.3rem;
+  }
+  .conditions li a {
+    flex: 1;
+    box-sizing: border-box;
+    /* Name on its own line with the severity chip under it. Side by side, a
+		   long name and a chip competed for one 200px track, and the chip's
+		   width varied per card ("mild" vs "moderate") so no two names got the
+		   same wrap point. */
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.35rem;
+    padding: 0.5rem 0.65rem;
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-card);
     text-decoration: none;
     color: var(--text-primary);
     font-size: var(--text-sm);
   }
   .conditions li a:hover {
-    background: var(--surface-raised);
+    border-color: var(--border-hover);
   }
   .conditions .name {
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
   }
+  /* Metrics copied from the admin dashboard's .effort-chip / .admin-badge so
+	   the small identity chips read as one family across the app. */
   .severity {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    padding: 0 0.4rem;
-    border-radius: var(--radius-pill);
+    display: inline-block;
     flex: 0 0 auto;
+    padding: 0.05rem 0.4rem;
+    font-size: 0.55rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-radius: var(--radius-pill);
   }
   .severity.sev-mild {
     background: hsla(145, 40%, 55%, 0.18);
@@ -654,6 +714,14 @@
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
     color: var(--status-danger-fg);
+  }
+  /* design-lint-allow: not a color — a theme-conditional `filter` on a UA
+     pseudo-element we cannot restyle directly. The icon ships dark, so the dark
+     theme inverts it and the light theme must undo that. */
+  :global(:root[data-theme='light'])
+    .date-inputs
+    input[type='date']::-webkit-calendar-picker-indicator {
+    filter: none;
   }
   /* design-lint-allow-begin: light half of the categorical encounter-type
      palette above. */

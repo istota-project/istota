@@ -9,9 +9,11 @@
     updateEncounter,
     type Diagnosis,
     type Encounter,
+    type HealthDocument,
     type HealthPanel,
   } from '$lib/api';
   import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
+  import DocumentList from '$lib/components/health/DocumentList.svelte';
 
   let loading = $state(true);
   let error = $state('');
@@ -19,6 +21,7 @@
   let encounter: Encounter | null = $state(null);
   let diagnoses: Diagnosis[] = $state([]);
   let panels: HealthPanel[] = $state([]);
+  let documents: HealthDocument[] = $state([]);
 
   let editing = $state(false);
   let form: Partial<Encounter> = $state({});
@@ -84,6 +87,7 @@
       encounter = resp.encounter;
       diagnoses = resp.diagnoses;
       panels = resp.panels;
+      documents = resp.documents ?? [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load encounter';
     } finally {
@@ -265,12 +269,20 @@
     {#if diagnoses.length === 0}
       <div class="empty small">None.</div>
     {:else}
-      <ul>
+      <!-- Same card shape as the conditions list: name, then tags on their own
+           line, then the date line. -->
+      <ul class="card-grid">
         {#each diagnoses as d (d.id)}
           <li>
             <a href="{base}/health/history/diagnoses">
-              <span class="name">{d.name}</span>
-              <span class="badge status-{d.status}">{d.status}</span>
+              <h3 class="name">{d.name}</h3>
+              <div class="tags">
+                {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
+                <span class="badge status-{d.status}">{d.status}</span>
+              </div>
+              <div class="card-meta">
+                {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
+              </div>
             </a>
           </li>
         {/each}
@@ -283,19 +295,30 @@
     {#if panels.length === 0}
       <div class="empty small">None.</div>
     {:else}
-      <ul>
+      <ul class="card-grid">
         {#each panels as p (p.id)}
           <li>
             <a href="{base}/health/bloodwork/panel?id={p.id}">
-              <span>{formatDate(p.drawn_at)}</span>
-              <span class="muted">{p.lab_name || ''}</span>
-              <span class="muted"
-                >{p.biomarker_count} marker{p.biomarker_count === 1 ? '' : 's'}</span
-              >
+              <h3 class="name">{formatDate(p.drawn_at)}</h3>
+              <div class="tags">
+                <span class="count-tag">
+                  {p.biomarker_count} marker{p.biomarker_count === 1 ? '' : 's'}
+                </span>
+              </div>
+              <div class="card-meta">
+                {#if p.lab_name}<span>{p.lab_name}</span>{/if}
+              </div>
             </a>
           </li>
         {/each}
       </ul>
+    {/if}
+  </section>
+
+  <section class="related">
+    <h2>Documents</h2>
+    {#if encounter}
+      <DocumentList entityType="encounter" entityId={encounter.id} {documents} />
     {/if}
   </section>
 {/if}
@@ -303,7 +326,7 @@
 <ConfirmDialog
   bind:open={confirmDelete}
   title="Delete encounter"
-  message="Are you sure you want to delete this encounter? Linked panels and diagnoses keep their data but lose the link."
+  message="Are you sure you want to delete this encounter? Linked panels, diagnoses and documents keep their data but lose the link."
   confirmLabel="Delete"
   onConfirm={destroy}
 />
@@ -414,36 +437,79 @@
     color: var(--text-primary);
   }
 
-  .related ul {
+  /* Three across on desktop, two on a narrow window, one on a phone —
+     matching the conditions list. */
+  .card-grid {
     list-style: none;
     margin: 0;
     padding: 0;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
+  }
+  @media (max-width: 1100px) {
+    .card-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 768px) {
+    .card-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .card-grid li a {
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-  }
-  .related li a {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 1rem;
-    padding: 0.5rem 0.75rem;
+    height: 100%;
+    box-sizing: border-box;
+    padding: 0.7rem 0.9rem;
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
     text-decoration: none;
     color: var(--text-primary);
-    font-size: var(--text-sm);
+    min-width: 0;
   }
-  .related li a:hover {
+  .card-grid li a:hover {
     border-color: var(--border-hover);
   }
-  .related .name {
+  .card-grid .name {
+    margin: 0;
+    font-size: var(--text-sm);
     font-weight: 500;
+    line-height: 1.35;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
-  .related .muted {
-    color: var(--text-muted);
+  .card-grid .tags {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+  .card-grid .card-meta {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
     font-size: var(--text-xs);
+    color: var(--text-dim);
+    flex-wrap: wrap;
+  }
+  .icd {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--surface-raised);
+    padding: 0.05rem 0.45rem;
+    border-radius: 0.25rem;
+    font-family: var(--font-mono, ui-monospace, 'SF Mono', monospace);
+  }
+  .count-tag {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--surface-raised);
+    padding: 0.05rem 0.45rem;
+    border-radius: 0.25rem;
   }
 
   .badge {

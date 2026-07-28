@@ -518,6 +518,12 @@ istota_briefing_shared_tz: "UTC"
 # newsletter_max_links_per_source.
 istota_briefing_newsletter_max_links: 20
 
+# Cap on a single health document (a scan, discharge summary, vaccination
+# card) attached to an encounter / condition / immunization. 0 = unlimited,
+# for a user whose scanner produces genuinely large files. Maps to
+# [health] max_document_bytes.
+istota_health_max_document_bytes: 26214400 # 25 MiB
+
 # rclone remote name for Nextcloud
 istota_rclone_remote: "nextcloud"
 

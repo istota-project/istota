@@ -176,6 +176,30 @@ class Immunization:
     created_at: str = ""
 
 
+@dataclass(frozen=True)
+class Document:
+    """A stored piece of paperwork.
+
+    ``stored_path`` is relative to ``HealthContext.uploads_dir`` and is
+    never handed to a client — the API serves bytes through
+    ``/documents/{id}/file`` instead.
+    """
+    id: int
+    filename: str
+    original_filename: str | None
+    mime: str
+    byte_size: int
+    content_hash: str
+    stored_path: str
+    ocr_text: str | None
+    source: str
+    notes: str | None
+    created_at: str = ""
+    # Last time anything referenced this document (create / link / unlink /
+    # dedup hit). The orphan sweep's window is measured from here.
+    last_touched_at: str = ""
+
+
 @dataclass
 class ImmunizationRef:
     name: str

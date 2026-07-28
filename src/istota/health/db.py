@@ -11,6 +11,8 @@ Tables:
 * ``biomarkers``      — individual values from a panel
 * ``biomarker_refs``  — canonical names + Istota-curated reference ranges
 * ``health_settings`` — DOB, height, biological sex, display unit prefs
+* ``documents``       — stored paperwork (scans, discharge summaries, cards)
+* ``document_links``  — polymorphic join to encounter / diagnosis / immunization
 * ``schema_meta``     — schema version + migration sentinels
 """
 
@@ -21,7 +23,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
@@ -29,6 +31,7 @@ from istota.health.models import (
     Biomarker,
     BiomarkerRef,
     Diagnosis,
+    Document,
     Encounter,
     Immunization,
     ImmunizationRef,
@@ -40,7 +43,7 @@ from istota.health.models import (
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA_SQL = """
@@ -203,6 +206,48 @@ CREATE TABLE IF NOT EXISTS immunization_refs (
     description TEXT,
     typical_age_range TEXT
 );
+
+-- Stored paperwork: one row per blob, independent of what it evidences.
+-- Bytes live at {uploads_dir}/documents/{id}/{filename}; `stored_path` is
+-- relative to uploads_dir, matching how panels.source_file stores its path.
+-- New in SCHEMA_VERSION 3. No migration function is needed: both tables are
+-- brand new, so `CREATE TABLE IF NOT EXISTS` inside executescript(SCHEMA_SQL)
+-- creates them on an existing DB too. (Contrast panels.content_hash, which
+-- needed an ALTER because the table already existed.)
+CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,          -- sanitized, as stored on disk
+    original_filename TEXT,          -- as supplied by the client, for display
+    mime TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    stored_path TEXT NOT NULL,       -- relative to uploads_dir
+    ocr_text TEXT,
+    source TEXT NOT NULL DEFAULT 'manual',  -- manual | import | agent
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Last time anything referenced this document: created, deduped onto by a
+    -- fresh upload, linked, or unlinked. The orphan sweep measures its window
+    -- from HERE, not from created_at. Measuring from creation would mean a
+    -- document older than the window is destroyed the instant its last link
+    -- goes — which is exactly the detach-then-reattach-elsewhere correction
+    -- flow the delay exists to protect (D5).
+    last_touched_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash);
+
+-- Polymorphic join. `entity_id` carries no FK — it points at one of three
+-- tables — so an entity delete must clear its links by hand (see
+-- delete_encounter / delete_diagnosis / delete_immunization).
+CREATE TABLE IF NOT EXISTS document_links (
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    entity_type TEXT NOT NULL,       -- encounter | diagnosis | immunization
+    entity_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (document_id, entity_type, entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_document_links_entity
+    ON document_links(entity_type, entity_id);
 
 """
 
@@ -1175,6 +1220,8 @@ def update_encounter(
 
 def delete_encounter(conn: sqlite3.Connection, encounter_id: int) -> int:
     cur = conn.execute("DELETE FROM encounters WHERE id = ?", (encounter_id,))
+    if cur.rowcount:
+        unlink_entity_documents(conn, "encounter", encounter_id)
     return cur.rowcount
 
 
@@ -1397,6 +1444,8 @@ def update_diagnosis(
 
 def delete_diagnosis(conn: sqlite3.Connection, diagnosis_id: int) -> int:
     cur = conn.execute("DELETE FROM diagnoses WHERE id = ?", (diagnosis_id,))
+    if cur.rowcount:
+        unlink_entity_documents(conn, "diagnosis", diagnosis_id)
     return cur.rowcount
 
 
@@ -1611,6 +1660,8 @@ def delete_immunization(
     cur = conn.execute(
         "DELETE FROM immunizations WHERE id = ?", (immunization_id,),
     )
+    if cur.rowcount:
+        unlink_entity_documents(conn, "immunization", immunization_id)
     return cur.rowcount
 
 
@@ -1714,3 +1765,291 @@ def find_immunization_ref_by_alias(
     return None
 
 
+
+
+# -- documents ---------------------------------------------------------------
+
+
+# Closed set. An entity_id carries no foreign key (it points at one of three
+# tables), so this tuple is the only thing standing between a typo and a link
+# row nothing will ever read. `panel` is deliberately absent — panels keep
+# their own source_file column and /panels/{id}/source route (D1).
+DOCUMENT_ENTITY_TYPES = ("encounter", "diagnosis", "immunization")
+
+# Chunk size for the IN (...) in document_counts_for_entities. SQLite's
+# default SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds.
+_ENTITY_ID_CHUNK = 500
+
+
+def _check_entity_type(entity_type: str) -> str:
+    if entity_type not in DOCUMENT_ENTITY_TYPES:
+        raise ValueError(f"unknown entity type: {entity_type!r}")
+    return entity_type
+
+
+def entity_exists(
+    conn: sqlite3.Connection, entity_type: str, entity_id: int,
+) -> bool:
+    """Does the record a document would attach to actually exist?
+
+    ``document_links.entity_id`` is polymorphic and carries no FK, so nothing
+    in SQLite stops a link pointing at a row that was never there. A link to a
+    nonexistent entity is worse than a plain error: the document is invisible
+    on every page *and* permanently exempt from the orphan sweep, because it
+    does have a link. Every writer checks this first.
+    """
+    _check_entity_type(entity_type)
+    table = {
+        "encounter": "encounters",
+        "diagnosis": "diagnoses",
+        "immunization": "immunizations",
+    }[entity_type]
+    row = conn.execute(
+        f"SELECT 1 FROM {table} WHERE id = ?", (int(entity_id),),
+    ).fetchone()
+    return row is not None
+
+
+def _row_to_document(row: sqlite3.Row) -> Document:
+    return Document(
+        id=row["id"],
+        filename=row["filename"],
+        original_filename=row["original_filename"],
+        mime=row["mime"],
+        byte_size=row["byte_size"],
+        content_hash=row["content_hash"],
+        stored_path=row["stored_path"],
+        ocr_text=row["ocr_text"],
+        source=row["source"],
+        notes=row["notes"],
+        created_at=row["created_at"],
+        last_touched_at=(
+            row["last_touched_at"]
+            if "last_touched_at" in row.keys() else row["created_at"]
+        ),
+    )
+
+
+def insert_document(
+    conn: sqlite3.Connection,
+    *,
+    filename: str,
+    mime: str,
+    byte_size: int,
+    content_hash: str,
+    stored_path: str,
+    original_filename: str | None = None,
+    ocr_text: str | None = None,
+    source: str = "manual",
+    notes: str | None = None,
+) -> int:
+    now = _now()
+    cur = conn.execute(
+        "INSERT INTO documents(filename, original_filename, mime, byte_size, "
+        "content_hash, stored_path, ocr_text, source, notes, created_at, "
+        "last_touched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            filename, original_filename, mime, int(byte_size), content_hash,
+            stored_path, ocr_text, source, notes, now, now,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def touch_document(conn: sqlite3.Connection, document_id: int) -> None:
+    """Restart the document's orphan clock.
+
+    Called whenever something references it — a link, an unlink, or a fresh
+    upload that deduped onto it. The sweep measures its window from this
+    stamp, so touching is what keeps a mid-correction or mid-import document
+    alive (see the column comment in SCHEMA_SQL).
+    """
+    conn.execute(
+        "UPDATE documents SET last_touched_at = ? WHERE id = ?",
+        (_now(), int(document_id)),
+    )
+
+
+def get_document(
+    conn: sqlite3.Connection, document_id: int,
+) -> Document | None:
+    row = conn.execute(
+        "SELECT * FROM documents WHERE id = ?", (document_id,),
+    ).fetchone()
+    return _row_to_document(row) if row else None
+
+
+def find_document_by_hash(
+    conn: sqlite3.Connection, content_hash: str,
+) -> Document | None:
+    row = conn.execute(
+        "SELECT * FROM documents WHERE content_hash = ?", (content_hash,),
+    ).fetchone()
+    return _row_to_document(row) if row else None
+
+
+def list_documents(
+    conn: sqlite3.Connection, *, limit: int = 200, offset: int = 0,
+) -> list[Document]:
+    rows = conn.execute(
+        "SELECT * FROM documents ORDER BY created_at DESC, id DESC "
+        "LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    return [_row_to_document(r) for r in rows]
+
+
+def documents_for_entity(
+    conn: sqlite3.Connection, entity_type: str, entity_id: int,
+) -> list[Document]:
+    _check_entity_type(entity_type)
+    rows = conn.execute(
+        "SELECT d.* FROM documents d "
+        "JOIN document_links l ON l.document_id = d.id "
+        "WHERE l.entity_type = ? AND l.entity_id = ? "
+        "ORDER BY d.created_at DESC, d.id DESC",
+        (entity_type, int(entity_id)),
+    ).fetchall()
+    return [_row_to_document(r) for r in rows]
+
+
+def document_counts_for_entities(
+    conn: sqlite3.Connection,
+    entity_type: str,
+    entity_ids: Iterable[int],
+) -> dict[int, int]:
+    """Per-entity attached-document counts, for list views.
+
+    Exists so a list page can render a paperclip badge per row without one
+    query per row. Ids with no documents are absent from the result.
+    """
+    _check_entity_type(entity_type)
+    ids = [int(i) for i in entity_ids]
+    out: dict[int, int] = {}
+    for start in range(0, len(ids), _ENTITY_ID_CHUNK):
+        chunk = ids[start:start + _ENTITY_ID_CHUNK]
+        if not chunk:
+            continue
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            "SELECT entity_id, COUNT(*) AS n FROM document_links "
+            f"WHERE entity_type = ? AND entity_id IN ({placeholders}) "
+            "GROUP BY entity_id",
+            [entity_type, *chunk],
+        ).fetchall()
+        for r in rows:
+            out[int(r["entity_id"])] = int(r["n"])
+    return out
+
+
+def link_document(
+    conn: sqlite3.Connection,
+    document_id: int,
+    entity_type: str,
+    entity_id: int,
+) -> bool:
+    """Attach a document to an entity. Returns True when a row was created.
+
+    Re-linking an existing pair is a no-op, not an error — the UI reports
+    "already attached" rather than failing a drag-drop the user repeated.
+    """
+    _check_entity_type(entity_type)
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO document_links(document_id, entity_type, "
+        "entity_id, created_at) VALUES (?, ?, ?, ?)",
+        (int(document_id), entity_type, int(entity_id), _now()),
+    )
+    touch_document(conn, document_id)
+    return cur.rowcount > 0
+
+
+def unlink_document(
+    conn: sqlite3.Connection,
+    document_id: int,
+    entity_type: str,
+    entity_id: int,
+) -> int:
+    _check_entity_type(entity_type)
+    cur = conn.execute(
+        "DELETE FROM document_links WHERE document_id = ? "
+        "AND entity_type = ? AND entity_id = ?",
+        (int(document_id), entity_type, int(entity_id)),
+    )
+    if cur.rowcount:
+        touch_document(conn, document_id)
+    return cur.rowcount
+
+
+def unlink_entity_documents(
+    conn: sqlite3.Connection, entity_type: str, entity_id: int,
+) -> int:
+    """Clear every link pointing at one entity. Called on entity delete.
+
+    ``document_links.entity_id`` has no FK (it is polymorphic), so nothing
+    cascades — this is the hand-rolled cleanup. The documents themselves
+    survive; the orphan sweep collects any that are now unreferenced.
+    """
+    _check_entity_type(entity_type)
+    affected = [
+        int(r["document_id"])
+        for r in conn.execute(
+            "SELECT document_id FROM document_links "
+            "WHERE entity_type = ? AND entity_id = ?",
+            (entity_type, int(entity_id)),
+        ).fetchall()
+    ]
+    cur = conn.execute(
+        "DELETE FROM document_links WHERE entity_type = ? AND entity_id = ?",
+        (entity_type, int(entity_id)),
+    )
+    for did in affected:
+        touch_document(conn, did)
+    return cur.rowcount
+
+
+def entity_links_for_document(
+    conn: sqlite3.Connection, document_id: int,
+) -> list[tuple[str, int]]:
+    rows = conn.execute(
+        "SELECT entity_type, entity_id FROM document_links "
+        "WHERE document_id = ? ORDER BY entity_type, entity_id",
+        (int(document_id),),
+    ).fetchall()
+    return [(r["entity_type"], int(r["entity_id"])) for r in rows]
+
+
+def delete_document(conn: sqlite3.Connection, document_id: int) -> int:
+    """Delete the row and its links. Bytes are the caller's problem —
+    :func:`istota.health.documents.delete_document_fully` does both."""
+    conn.execute(
+        "DELETE FROM document_links WHERE document_id = ?", (int(document_id),),
+    )
+    cur = conn.execute("DELETE FROM documents WHERE id = ?", (int(document_id),))
+    return cur.rowcount
+
+
+def orphan_document_ids(
+    conn: sqlite3.Connection, *, older_than_hours: float,
+) -> list[int]:
+    """Documents with no links, created more than ``older_than_hours`` ago.
+
+    Measured from ``last_touched_at`` — stamped on create, link, unlink, and
+    on a dedup hit — not from ``created_at``. The delay is deliberate (D5):
+    detach-then-reattach-elsewhere is a normal correction flow, and deleting
+    bytes the instant the last link goes would make it lossy. Keying on
+    creation instead would have destroyed any document older than the window
+    the moment it was detached — the opposite of the promise. An abandoned
+    import upload is still collected: nothing ever touches it after insert.
+    """
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=float(older_than_hours))
+    ).isoformat()
+    rows = conn.execute(
+        "SELECT d.id FROM documents d "
+        "LEFT JOIN document_links l ON l.document_id = d.id "
+        "WHERE l.document_id IS NULL "
+        "AND COALESCE(d.last_touched_at, d.created_at) < ? "
+        "ORDER BY d.id",
+        (cutoff,),
+    ).fetchall()
+    return [int(r["id"]) for r in rows]

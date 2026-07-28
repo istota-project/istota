@@ -3591,6 +3591,95 @@ const handlers: MockHandler[] = [
       return d.toISOString();
     };
 
+    // --- Documents (health-document-attachments) --------------------------
+    interface MockDocument {
+      id: number;
+      filename: string;
+      original_filename: string | null;
+      mime: string;
+      byte_size: number;
+      source: 'manual' | 'import' | 'agent';
+      notes: string | null;
+      created_at: string;
+    }
+    interface MockDocumentLink {
+      document_id: number;
+      entity_type: 'encounter' | 'diagnosis' | 'immunization';
+      entity_id: number;
+    }
+    const documents: MockDocument[] = [
+      {
+        id: 1,
+        filename: 'after-visit-summary.pdf',
+        original_filename: 'After Visit Summary.pdf',
+        mime: 'application/pdf',
+        byte_size: 184320,
+        source: 'import',
+        notes: null,
+        created_at: iso(40),
+      },
+      {
+        id: 2,
+        filename: 'vaccination-card.jpg',
+        original_filename: 'vaccination-card.jpg',
+        mime: 'image/jpeg',
+        byte_size: 921600,
+        source: 'agent',
+        notes: 'Filed from email',
+        created_at: iso(12),
+      },
+    ];
+    const documentLinks: MockDocumentLink[] = [
+      { document_id: 1, entity_type: 'encounter', entity_id: 1 },
+      { document_id: 1, entity_type: 'diagnosis', entity_id: 1 },
+      { document_id: 2, entity_type: 'immunization', entity_id: 1 },
+    ];
+    let nextDocumentId = 3;
+
+    // The extract routes keep their upload; the review screen passes the id
+    // back to /bulk, which links it to every row the import creates.
+    const storeImportDocument = (body: unknown): number => {
+      const rawBody = typeof body === 'string' ? body : '';
+      const name = rawBody.match(/filename="([^"]*)"/)?.[1] || 'import.pdf';
+      const doc: MockDocument = {
+        id: nextDocumentId++,
+        filename: name.replace(/[^A-Za-z0-9._-]/g, '_'),
+        original_filename: name,
+        mime: name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg',
+        byte_size: rawBody.length,
+        source: 'import',
+        notes: null,
+        created_at: new Date().toISOString(),
+      };
+      documents.push(doc);
+      return doc.id;
+    };
+    const linkImportDocument = (
+      documentId: unknown,
+      entityType: MockDocumentLink['entity_type'],
+      ids: number[],
+    ) => {
+      const id = Number(documentId);
+      if (!id || !documents.some((d) => d.id === id)) return null;
+      for (const entityId of ids) {
+        documentLinks.push({ document_id: id, entity_type: entityType, entity_id: entityId });
+      }
+      return id;
+    };
+
+    const documentDict = (d: MockDocument) => ({
+      ...d,
+      url: `/istota/api/health/documents/${d.id}/file`,
+    });
+    const documentsFor = (entityType: string, entityId: number) =>
+      documentLinks
+        .filter((l) => l.entity_type === entityType && l.entity_id === entityId)
+        .map((l) => documents.find((d) => d.id === l.document_id))
+        .filter((d): d is MockDocument => Boolean(d))
+        .map(documentDict);
+    const documentCount = (entityType: string, entityId: number) =>
+      documentLinks.filter((l) => l.entity_type === entityType && l.entity_id === entityId).length;
+
     interface Stat {
       id: number;
       metric: string;
@@ -3726,6 +3815,45 @@ const handlers: MockHandler[] = [
         encounter_id: null,
         severity: null,
         notes: null,
+        created_at: new Date().toISOString(),
+      },
+      // The three below exist to stress the conditions card grid: a name long
+      // enough to wrap several lines, a bare row with no tags and no encounter,
+      // and a severe one carrying notes.
+      {
+        id: nextDiagnosisId++,
+        name: 'Bilateral patellofemoral pain syndrome with anterior knee crepitus',
+        icd10: 'M22.2X9',
+        status: 'active',
+        date_diagnosed: '2026-05-19',
+        date_resolved: null,
+        encounter_id: 1,
+        severity: 'moderate',
+        notes: null,
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: nextDiagnosisId++,
+        name: 'Tension headache',
+        icd10: null,
+        status: 'active',
+        date_diagnosed: '2026-02-11',
+        date_resolved: null,
+        encounter_id: null,
+        severity: null,
+        notes: null,
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: nextDiagnosisId++,
+        name: 'Iron deficiency anemia',
+        icd10: 'D50.9',
+        status: 'active',
+        date_diagnosed: '2026-06-02',
+        date_resolved: null,
+        encounter_id: 2,
+        severity: 'severe',
+        notes: 'Ferritin 11 ng/mL. Started oral iron; recheck ferritin in 12 weeks.',
         created_at: new Date().toISOString(),
       },
     ];
@@ -4259,6 +4387,111 @@ const handlers: MockHandler[] = [
     };
 
     return ({ url, method, body }: { url: string; method: string; body?: any }) => {
+      // --- /documents ---------------------------------------------------
+      const fileMatch = url.match(/^\/istota\/api\/health\/documents\/(\d+)\/file$/);
+      if (fileMatch && method === 'GET') {
+        const doc = documents.find((d) => d.id === Number(fileMatch[1]));
+        if (!doc) return { error: 'document not found', __status: 404 };
+        // A one-page PDF, so the dev browser has something real to open.
+        return {
+          __raw: '%PDF-1.4\n% mock document\n',
+          __contentType: doc.mime,
+        };
+      }
+      const linkMatch = url.match(
+        /^\/istota\/api\/health\/documents\/(\d+)\/links\/([a-z]+)\/(\d+)$/,
+      );
+      if (linkMatch && method === 'DELETE') {
+        const id = Number(linkMatch[1]);
+        const before = documentLinks.length;
+        for (let i = documentLinks.length - 1; i >= 0; i--) {
+          const l = documentLinks[i];
+          if (
+            l.document_id === id &&
+            l.entity_type === linkMatch[2] &&
+            l.entity_id === Number(linkMatch[3])
+          ) {
+            documentLinks.splice(i, 1);
+          }
+        }
+        return { status: 'ok', removed: documentLinks.length < before };
+      }
+      const linksMatch = url.match(/^\/istota\/api\/health\/documents\/(\d+)\/links$/);
+      if (linksMatch && method === 'POST') {
+        const id = Number(linksMatch[1]);
+        if (!documents.some((d) => d.id === id)) {
+          return { error: 'document not found', __status: 404 };
+        }
+        const entityType = body?.entity_type;
+        const entityId = Number(body?.entity_id);
+        if (!['encounter', 'diagnosis', 'immunization'].includes(entityType)) {
+          return { error: `unknown entity type: ${entityType}`, __status: 400 };
+        }
+        const exists = documentLinks.some(
+          (l) => l.document_id === id && l.entity_type === entityType && l.entity_id === entityId,
+        );
+        if (!exists)
+          documentLinks.push({ document_id: id, entity_type: entityType, entity_id: entityId });
+        return { status: 'ok', created: !exists };
+      }
+      const docMatch = url.match(/^\/istota\/api\/health\/documents\/(\d+)$/);
+      if (docMatch && method === 'GET') {
+        const doc = documents.find((d) => d.id === Number(docMatch[1]));
+        if (!doc) return { error: 'document not found', __status: 404 };
+        const links = documentLinks
+          .filter((l) => l.document_id === doc.id)
+          .map((l) => ({ ...l, label: `${l.entity_type} ${l.entity_id}` }));
+        return { document: documentDict(doc), links };
+      }
+      if (docMatch && method === 'DELETE') {
+        const id = Number(docMatch[1]);
+        const idx = documents.findIndex((d) => d.id === id);
+        if (idx === -1) return { error: 'document not found', __status: 404 };
+        documents.splice(idx, 1);
+        for (let i = documentLinks.length - 1; i >= 0; i--) {
+          if (documentLinks[i].document_id === id) documentLinks.splice(i, 1);
+        }
+        return { status: 'ok' };
+      }
+      if (url === '/istota/api/health/documents' && method === 'POST') {
+        // Multipart arrives as the raw payload; the part headers are ASCII
+        // at the front, so the filename survives the utf8 decode.
+        const rawBody = typeof body === 'string' ? body : '';
+        const name = rawBody.match(/filename="([^"]*)"/)?.[1] || 'upload.pdf';
+        const entityType = rawBody.match(/name="entity_type"\r?\n\r?\n([^\r\n-]*)/)?.[1];
+        const entityId = rawBody.match(/name="entity_id"\r?\n\r?\n(\d+)/)?.[1];
+        const doc: MockDocument = {
+          id: nextDocumentId++,
+          filename: name.replace(/[^A-Za-z0-9._-]/g, '_'),
+          original_filename: name,
+          mime: name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg',
+          byte_size: rawBody.length,
+          source: 'manual',
+          notes: null,
+          created_at: new Date().toISOString(),
+        };
+        documents.push(doc);
+        let linked = false;
+        if (entityType && entityId) {
+          documentLinks.push({
+            document_id: doc.id,
+            entity_type: entityType as MockDocumentLink['entity_type'],
+            entity_id: Number(entityId),
+          });
+          linked = true;
+        }
+        return { ...documentDict(doc), status: 'ok', created: true, linked };
+      }
+      if (url.startsWith('/istota/api/health/documents') && method === 'GET') {
+        const u = new URL(url, 'http://x');
+        const entityType = u.searchParams.get('entity_type');
+        const entityId = Number(u.searchParams.get('entity_id') || 0);
+        if (entityType && entityId) {
+          return { documents: documentsFor(entityType, entityId) };
+        }
+        return { documents: documents.map(documentDict) };
+      }
+
       // /stats endpoints
       if (url.startsWith('/istota/api/health/stats/latest') && method === 'GET') {
         return { stats: latestByMetric() };
@@ -4913,6 +5146,7 @@ const handlers: MockHandler[] = [
         // Dev fixture: pretend the LLM extracted a single visit from the
         // uploaded paperwork. Real backend route runs OCR + brain call.
         return {
+          document_id: storeImportDocument(body),
           mode: 'vision',
           rows: [
             {
@@ -4978,7 +5212,18 @@ const handlers: MockHandler[] = [
             diagIds.push(dx.id);
           }
         }
-        return { status: 'ok', ids: encIds, count: encIds.length, diagnosis_ids: diagIds };
+        if (body.document_id != null && !documents.some((d) => d.id === Number(body.document_id))) {
+          return { error: 'document not found', __status: 400 };
+        }
+        linkImportDocument(body.document_id, 'encounter', encIds);
+        linkImportDocument(body.document_id, 'diagnosis', diagIds);
+        return {
+          status: 'ok',
+          ids: encIds,
+          count: encIds.length,
+          diagnosis_ids: diagIds,
+          document_id: body.document_id ?? null,
+        };
       }
       if (url.startsWith('/istota/api/health/encounters') && method === 'GET') {
         const encMatch = url.match(/^\/istota\/api\/health\/encounters\/(\d+)$/);
@@ -4992,7 +5237,12 @@ const handlers: MockHandler[] = [
             .slice()
             .sort((a, b) => b.drawn_at.localeCompare(a.drawn_at))
             .map(panelDict);
-          return { encounter: enc, diagnoses: linkedDiag, panels: linkedPanels };
+          return {
+            encounter: enc,
+            diagnoses: linkedDiag,
+            panels: linkedPanels,
+            documents: documentsFor('encounter', id),
+          };
         }
         const u = new URL(url, 'http://x');
         const since = u.searchParams.get('since');
@@ -5003,7 +5253,12 @@ const handlers: MockHandler[] = [
         if (until) rows = rows.filter((e) => e.encounter_date <= until);
         if (t) rows = rows.filter((e) => e.encounter_type === t);
         rows.sort((a, b) => b.encounter_date.localeCompare(a.encounter_date) || b.id - a.id);
-        return { encounters: rows };
+        return {
+          encounters: rows.map((e) => ({
+            ...e,
+            document_count: documentCount('encounter', e.id),
+          })),
+        };
       }
       if (url === '/istota/api/health/encounters' && method === 'POST') {
         if (!body || typeof body !== 'object') return { error: 'bad body' };
@@ -5068,7 +5323,7 @@ const handlers: MockHandler[] = [
           const enc = d.encounter_id
             ? encounters.find((e) => e.id === d.encounter_id) || null
             : null;
-          return { diagnosis: d, encounter: enc };
+          return { diagnosis: d, encounter: enc, documents: documentsFor('diagnosis', id) };
         }
         const u = new URL(url, 'http://x');
         const status = u.searchParams.get('status');
@@ -5081,7 +5336,12 @@ const handlers: MockHandler[] = [
           if (sa !== sb) return sa - sb;
           return (b.date_diagnosed || '').localeCompare(a.date_diagnosed || '');
         });
-        return { diagnoses: rows };
+        return {
+          diagnoses: rows.map((d) => ({
+            ...d,
+            document_count: documentCount('diagnosis', d.id),
+          })),
+        };
       }
       if (url === '/istota/api/health/diagnoses' && method === 'POST') {
         if (!body || typeof body !== 'object' || !body.name) {
@@ -5386,6 +5646,7 @@ const handlers: MockHandler[] = [
         // reachable in offline development. The real backend route
         // runs OCR / vision against the uploaded file.
         return {
+          document_id: storeImportDocument(body),
           mode: 'vision',
           rows: [
             {
@@ -5443,7 +5704,11 @@ const handlers: MockHandler[] = [
           immunizations.push(imm);
           ids.push(imm.id);
         }
-        return { status: 'ok', ids, count: ids.length };
+        if (body.document_id != null && !documents.some((d) => d.id === Number(body.document_id))) {
+          return { error: 'document not found', __status: 400 };
+        }
+        linkImportDocument(body.document_id, 'immunization', ids);
+        return { status: 'ok', ids, count: ids.length, document_id: body.document_id ?? null };
       }
       const immExplainerMatch = url.match(
         /^\/istota\/api\/health\/immunizations\/([^/?]+)\/explainer$/,
@@ -5493,7 +5758,11 @@ const handlers: MockHandler[] = [
           const enc = row.encounter_id
             ? encounters.find((e) => e.id === row.encounter_id) || null
             : null;
-          return { immunization: row, encounter: enc };
+          return {
+            immunization: row,
+            encounter: enc,
+            documents: documentsFor('immunization', id),
+          };
         }
         const u = new URL(url, 'http://x');
         const filterName = u.searchParams.get('name');
@@ -5504,7 +5773,12 @@ const handlers: MockHandler[] = [
         if (since) rows = rows.filter((r) => r.date_given >= since);
         if (until) rows = rows.filter((r) => r.date_given <= until);
         rows.sort((a, b) => b.date_given.localeCompare(a.date_given) || b.id - a.id);
-        return { immunizations: rows };
+        return {
+          immunizations: rows.map((r) => ({
+            ...r,
+            document_count: documentCount('immunization', r.id),
+          })),
+        };
       }
       if (url === '/istota/api/health/immunizations' && method === 'POST') {
         if (!body || !body.name || !body.date_given) {
@@ -5598,6 +5872,18 @@ export function mockApi(): Plugin {
 
         const method = req.method ?? 'GET';
         const respond = (body: unknown) => {
+          // A handler signals a non-JSON body (a file stream) by returning
+          // `__raw` + `__contentType`. Needed so the health document routes
+          // can hand the dev browser something it will actually open.
+          if (body && typeof body === 'object' && '__raw' in (body as any)) {
+            const { __raw, __contentType } = body as any;
+            res.setHeader('Content-Type', __contentType || 'application/octet-stream');
+            res.setHeader('Content-Disposition', 'attachment');
+            res.setHeader('X-Content-Type-Options', 'nosniff');
+            res.statusCode = 200;
+            res.end(__raw);
+            return;
+          }
           res.setHeader('Content-Type', 'application/json');
           // A handler signals a non-200 by returning `__status`; the key is
           // stripped so the payload matches what the real API returns.

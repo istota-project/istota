@@ -10,9 +10,11 @@ read off ``request.app.state.istota_config``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import mimetypes
 import re
 import shutil
+import sqlite3
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -30,6 +32,7 @@ from fastapi import Form
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from istota.health import db as health_db
+from istota.health import documents as health_documents
 from istota.health import garmin_sync as health_garmin_sync
 from istota.health._loader import UserNotFoundError, resolve_for_user
 from istota.health._migrate import ensure_initialised
@@ -46,6 +49,9 @@ from istota.health.units import (
 # ---------------------------------------------------------------------------
 # Auth / CSRF — host app overrides via dependency_overrides
 # ---------------------------------------------------------------------------
+
+
+logger = logging.getLogger(__name__)
 
 
 def require_auth(request: Request) -> dict:
@@ -170,6 +176,116 @@ def _biomarker_to_dict(b) -> dict:
         "ref_range_high": b.ref_range_high,
         "flag": b.flag,
     }
+
+
+def _document_to_dict(doc, *, links: list[dict] | None = None) -> dict:
+    """Client-facing shape. Never emits ``stored_path`` — the browser gets a
+    route to stream from, not a filesystem path."""
+    out = {
+        "id": doc.id,
+        "filename": doc.filename,
+        "original_filename": doc.original_filename,
+        "mime": doc.mime,
+        "byte_size": doc.byte_size,
+        "source": doc.source,
+        "notes": doc.notes,
+        "created_at": doc.created_at,
+        "url": f"/istota/api/health/documents/{doc.id}/file",
+    }
+    if links is not None:
+        out["links"] = links
+    return out
+
+
+def _max_document_bytes(request: Request) -> int:
+    cfg = getattr(request.app.state, "istota_config", None)
+    health_cfg = getattr(cfg, "health", None) if cfg is not None else None
+    raw = getattr(health_cfg, "max_document_bytes", None)
+    if raw is None:
+        return health_documents.DEFAULT_MAX_DOCUMENT_BYTES
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return health_documents.DEFAULT_MAX_DOCUMENT_BYTES
+
+
+def _entity_exists(conn, entity_type: str, entity_id: int) -> bool:
+    """Thin shim over the DB helper the agent paths also use, so the web and
+    the agent can't drift on what counts as a valid attach target."""
+    try:
+        return health_db.entity_exists(conn, entity_type, entity_id)
+    except ValueError:
+        return False
+
+
+def _entity_label(conn, entity_type: str, entity_id: int) -> str:
+    """Human string for "what else is this attached to"."""
+    if entity_type == "encounter":
+        e = health_db.get_encounter(conn, entity_id)
+        if e:
+            return f"{e.encounter_date} — {e.encounter_type}"
+    elif entity_type == "diagnosis":
+        d = health_db.get_diagnosis(conn, entity_id)
+        if d:
+            return d.name
+    elif entity_type == "immunization":
+        i = health_db.get_immunization(conn, entity_id)
+        if i:
+            return f"{i.name} ({i.date_given})"
+    return f"{entity_type} {entity_id}"
+
+
+async def _attach_import_document(
+    ctx: HealthContext,
+    result,
+    *,
+    raw: bytes,
+    filename: str,
+    mime: str | None,
+    max_bytes: int,
+) -> dict:
+    """Persist an extract-route upload and stamp ``document_id`` on its payload.
+
+    A storage failure must not cost the user the extraction they just waited
+    for — losing the file is bad, losing both is worse. So the rows come back
+    with ``document_id: null`` and a warning appended instead.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    ocr_text = result.get("ocr_text") or result.get("text") or None
+
+    def _store():
+        with health_db.connect(ctx.db_path) as conn:
+            doc, _created = health_documents.store_document(
+                conn, ctx, raw=raw, filename=filename, mime=mime,
+                source="import", ocr_text=ocr_text, max_bytes=max_bytes,
+            )
+            conn.commit()
+        return doc
+
+    try:
+        doc = await asyncio.to_thread(_store)
+    except (health_documents.DocumentError, OSError, sqlite3.Error) as e:
+        logger.error(
+            "health_import_document_store_failed user=%s filename=%s error=%s",
+            ctx.user_id, filename, e,
+        )
+        warnings = list(result.get("warnings") or [])
+        warnings.append(f"The uploaded file could not be kept: {e}")
+        return {**result, "document_id": None, "warnings": warnings}
+    return {**result, "document_id": doc.id}
+
+
+def _links_payload(conn, document_id: int) -> list[dict]:
+    return [
+        {
+            "entity_type": t,
+            "entity_id": eid,
+            "label": _entity_label(conn, t, eid),
+        }
+        for t, eid in health_db.entity_links_for_document(conn, document_id)
+    ]
 
 
 _VALID_METRIC = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -1298,9 +1414,9 @@ async def api_list_encounters(
     limit: int = Query(default=50, le=500, ge=1),
     offset: int = Query(default=0, ge=0),
 ):
-    def _query():
+    def _query_with_counts():
         with health_db.connect(ctx.db_path) as conn:
-            return health_db.list_encounters(
+            rows = health_db.list_encounters(
                 conn,
                 since=since or None,
                 until=until or None,
@@ -1308,9 +1424,18 @@ async def api_list_encounters(
                 limit=limit,
                 offset=offset,
             )
+            counts = health_db.document_counts_for_entities(
+                conn, "encounter", [e.id for e in rows],
+            )
+        return rows, counts
 
-    encounters = await asyncio.to_thread(_query)
-    return {"encounters": [_encounter_to_dict(e) for e in encounters]}
+    encounters, doc_counts = await asyncio.to_thread(_query_with_counts)
+    return {
+        "encounters": [
+            {**_encounter_to_dict(e), "document_count": doc_counts.get(e.id, 0)}
+            for e in encounters
+        ],
+    }
 
 
 @router.post("/encounters")
@@ -1359,9 +1484,13 @@ async def api_encounter_extract(
 ):
     """OCR/vision extraction for a doctor's-visit document.
 
-    Source files are processed transiently (no persisted source — encounters
-    are stand-alone metadata rows). Returns rows in the review-and-confirm
-    shape consumed by ``/encounters/bulk``.
+    The upload is **kept** as a document (``source="import"``) and its id is
+    returned so ``/encounters/bulk`` can link it to every row this import
+    creates. A document nobody confirms is left linkless and collected by
+    the orphan sweep.
+
+    Returns rows in the review-and-confirm shape consumed by
+    ``/encounters/bulk``.
     """
     raw = await file.read()
     if not raw:
@@ -1376,6 +1505,7 @@ async def api_encounter_extract(
     )
 
     config = getattr(request.app.state, "istota_config", None)
+    max_bytes = _max_document_bytes(request)
 
     def _run():
         import tempfile
@@ -1398,7 +1528,11 @@ async def api_encounter_extract(
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    return await asyncio.to_thread(_run)
+    result = await asyncio.to_thread(_run)
+    return await _attach_import_document(
+        ctx, result, raw=raw, filename=file.filename or "",
+        mime=file.content_type, max_bytes=max_bytes,
+    )
 
 
 @router.post("/encounters/bulk")
@@ -1448,6 +1582,15 @@ async def api_encounter_bulk(
                 {"error": f"row {i} missing encounter_type"}, status_code=400,
             )
 
+    document_id = body.get("document_id") if isinstance(body, dict) else None
+    if document_id is not None:
+        try:
+            document_id = int(document_id)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "document_id must be an integer"}, status_code=400,
+            )
+
     prefix = (
         client_import_id.strip() if client_import_id else uuid.uuid4().hex
     )
@@ -1456,6 +1599,13 @@ async def api_encounter_bulk(
         encounter_ids: list[int] = []
         diagnosis_ids: list[int] = []
         with health_db.connect(ctx.db_path) as conn:
+            # Check the document *before* any insert — a bad id must not
+            # leave half an import behind.
+            if (
+                document_id is not None
+                and health_db.get_document(conn, document_id) is None
+            ):
+                return "document_missing"
             for i, r in enumerate(rows):
                 eid = health_db.insert_encounter(
                     conn,
@@ -1493,15 +1643,30 @@ async def api_encounter_bulk(
                         reconcile=True,
                     )
                     diagnosis_ids.append(did)
+            if document_id is not None:
+                for eid in encounter_ids:
+                    health_db.link_document(
+                        conn, document_id, "encounter", eid,
+                    )
+                for did in diagnosis_ids:
+                    health_db.link_document(
+                        conn, document_id, "diagnosis", did,
+                    )
             conn.commit()
         return encounter_ids, diagnosis_ids
 
-    encounter_ids, diagnosis_ids = await asyncio.to_thread(_insert_all)
+    result = await asyncio.to_thread(_insert_all)
+    if result == "document_missing":
+        return JSONResponse(
+            {"error": "document not found"}, status_code=400,
+        )
+    encounter_ids, diagnosis_ids = result
     return {
         "status": "ok",
         "ids": encounter_ids,
         "count": len(encounter_ids),
         "diagnosis_ids": diagnosis_ids,
+        "document_id": document_id,
     }
 
 
@@ -1523,16 +1688,20 @@ async def api_get_encounter(
                 panel_dicts.append(_panel_to_dict(
                     p, biomarker_count=total, flagged_count=flagged,
                 ))
-            return enc, diagnoses, panel_dicts
+            docs = health_db.documents_for_entity(
+                conn, "encounter", encounter_id,
+            )
+            return enc, diagnoses, panel_dicts, docs
 
     result = await asyncio.to_thread(_query)
     if result is None:
         raise HTTPException(404, "encounter not found")
-    enc, diagnoses, panel_dicts = result
+    enc, diagnoses, panel_dicts, docs = result
     return {
         "encounter": _encounter_to_dict(enc),
         "diagnoses": [_diagnosis_to_dict(d) for d in diagnoses],
         "panels": panel_dicts,
+        "documents": [_document_to_dict(d) for d in docs],
     }
 
 
@@ -1605,15 +1774,24 @@ async def api_list_diagnoses(
 
     def _query():
         with health_db.connect(ctx.db_path) as conn:
-            return health_db.list_diagnoses(
+            rows = health_db.list_diagnoses(
                 conn,
                 status=status or None,
                 limit=limit,
                 offset=offset,
             )
+            counts = health_db.document_counts_for_entities(
+                conn, "diagnosis", [d.id for d in rows],
+            )
+        return rows, counts
 
-    diagnoses = await asyncio.to_thread(_query)
-    return {"diagnoses": [_diagnosis_to_dict(d) for d in diagnoses]}
+    diagnoses, doc_counts = await asyncio.to_thread(_query)
+    return {
+        "diagnoses": [
+            {**_diagnosis_to_dict(d), "document_count": doc_counts.get(d.id, 0)}
+            for d in diagnoses
+        ],
+    }
 
 
 @router.post("/diagnoses")
@@ -1675,15 +1853,19 @@ async def api_get_diagnosis(
             if not d:
                 return None
             linked_encs = health_db.encounters_for_diagnosis(conn, diagnosis_id)
-        return d, linked_encs
+            docs = health_db.documents_for_entity(
+                conn, "diagnosis", diagnosis_id,
+            )
+        return d, linked_encs, docs
 
     result = await asyncio.to_thread(_query)
     if result is None:
         raise HTTPException(404, "diagnosis not found")
-    d, linked_encs = result
+    d, linked_encs, docs = result
     return {
         "diagnosis": _diagnosis_to_dict(d),
         "encounter": _encounter_to_dict(linked_encs[0]) if linked_encs else None,
+        "documents": [_document_to_dict(x) for x in docs],
     }
 
 
@@ -1896,7 +2078,7 @@ async def api_list_immunizations(
 ):
     def _query():
         with health_db.connect(ctx.db_path) as conn:
-            return health_db.list_immunizations(
+            rows = health_db.list_immunizations(
                 conn,
                 name=name or None,
                 since=since or None,
@@ -1904,9 +2086,18 @@ async def api_list_immunizations(
                 limit=limit,
                 offset=offset,
             )
+            counts = health_db.document_counts_for_entities(
+                conn, "immunization", [r.id for r in rows],
+            )
+        return rows, counts
 
-    rows = await asyncio.to_thread(_query)
-    return {"immunizations": [_immunization_to_dict(r) for r in rows]}
+    rows, doc_counts = await asyncio.to_thread(_query)
+    return {
+        "immunizations": [
+            {**_immunization_to_dict(r), "document_count": doc_counts.get(r.id, 0)}
+            for r in rows
+        ],
+    }
 
 
 @router.post("/immunizations")
@@ -2060,10 +2251,11 @@ async def api_immunization_extract(
 ):
     """OCR/vision extraction for an immunization-list screenshot or PDF.
 
-    The file is processed transiently — unlike lab panels, immunization
-    rows don't carry a stored source file. Returns the same ``rows``
-    shape as ``/parse`` so the review-and-confirm UI is identical for
-    both paths.
+    The upload is **kept** as a document (``source="import"``) and its id
+    returned, so ``/immunizations/bulk`` can link it to every row it creates
+    — proof of immunization is a document people are asked to produce, not
+    merely a fact to recall. Returns the same ``rows`` shape as ``/parse``
+    so the review-and-confirm UI is identical for both paths.
     """
     raw = await file.read()
     if not raw:
@@ -2078,6 +2270,7 @@ async def api_immunization_extract(
     )
 
     config = getattr(request.app.state, "istota_config", None)
+    max_bytes = _max_document_bytes(request)
 
     def _run():
         import tempfile
@@ -2086,10 +2279,10 @@ async def api_immunization_extract(
 
         with health_db.connect(ctx.db_path) as conn:
             refs = health_db.list_immunization_refs(conn)
-        # Process-scoped tmp — uploads are transient (no source file is
-        # persisted for immunizations) so they must not land in the
-        # uploads_dir alongside confirmed panel sources where a crash
-        # between write and unlink would leak them.
+        # Process-scoped tmp for the *extractor's* copy. The kept copy goes
+        # through store_document into {uploads_dir}/documents/, so a crash
+        # between write and unlink here can't leak a file next to the
+        # confirmed panel sources.
         tmp_dir = (
             Path(config.temp_dir)
             if config is not None and getattr(config, "temp_dir", None)
@@ -2106,7 +2299,11 @@ async def api_immunization_extract(
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    return await asyncio.to_thread(_run)
+    result = await asyncio.to_thread(_run)
+    return await _attach_import_document(
+        ctx, result, raw=raw, filename=file.filename or "",
+        mime=file.content_type, max_bytes=max_bytes,
+    )
 
 
 @router.post("/immunizations/bulk")
@@ -2167,6 +2364,15 @@ async def api_immunization_bulk(
     # the dedup_key partial unique index. Without one, every row still
     # gets a stable dedup_key (matching the skill CLI pattern at
     # skills/health/__init__.py:1175) for future replay safety.
+    document_id = body.get("document_id") if isinstance(body, dict) else None
+    if document_id is not None:
+        try:
+            document_id = int(document_id)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "document_id must be an integer"}, status_code=400,
+            )
+
     prefix = (
         client_import_id.strip() if client_import_id else uuid.uuid4().hex
     )
@@ -2174,6 +2380,13 @@ async def api_immunization_bulk(
     def _insert_all():
         ids: list[int] = []
         with health_db.connect(ctx.db_path) as conn:
+            # Checked before any insert — a bad id must not leave half an
+            # import behind.
+            if (
+                document_id is not None
+                and health_db.get_document(conn, document_id) is None
+            ):
+                return "document_missing"
             for i, r in enumerate(rows):
                 iid = health_db.insert_immunization(
                     conn,
@@ -2194,11 +2407,25 @@ async def api_immunization_bulk(
                     reconcile=True,
                 )
                 ids.append(iid)
+            if document_id is not None:
+                for iid in ids:
+                    health_db.link_document(
+                        conn, document_id, "immunization", iid,
+                    )
             conn.commit()
         return ids
 
-    ids = await asyncio.to_thread(_insert_all)
-    return {"status": "ok", "ids": ids, "count": len(ids)}
+    result = await asyncio.to_thread(_insert_all)
+    if result == "document_missing":
+        return JSONResponse(
+            {"error": "document not found"}, status_code=400,
+        )
+    return {
+        "status": "ok",
+        "ids": result,
+        "count": len(result),
+        "document_id": document_id,
+    }
 
 
 @router.get("/immunizations/{immunization_id}")
@@ -2210,16 +2437,22 @@ async def api_get_immunization(
         with health_db.connect(ctx.db_path) as conn:
             row = health_db.get_immunization(conn, immunization_id)
             encounter = None
+            docs: list = []
             if row and row.encounter_id is not None:
                 encounter = health_db.get_encounter(conn, row.encounter_id)
-        return row, encounter
+            if row:
+                docs = health_db.documents_for_entity(
+                    conn, "immunization", immunization_id,
+                )
+        return row, encounter, docs
 
-    row, encounter = await asyncio.to_thread(_query)
+    row, encounter, docs = await asyncio.to_thread(_query)
     if not row:
         raise HTTPException(404, "immunization not found")
     return {
         "immunization": _immunization_to_dict(row),
         "encounter": _encounter_to_dict(encounter) if encounter else None,
+        "documents": [_document_to_dict(d) for d in docs],
     }
 
 
@@ -2304,6 +2537,261 @@ async def api_immunization_explainer(
     if result is None:
         raise HTTPException(404, "vaccine not found")
     return result
+
+
+# ---- Documents ------------------------------------------------------------
+
+
+def _document_error_response(e: health_documents.DocumentError) -> JSONResponse:
+    if isinstance(e, health_documents.UnsupportedDocumentType):
+        return JSONResponse({"error": str(e)}, status_code=415)
+    if isinstance(e, health_documents.DocumentTooLarge):
+        return JSONResponse({"error": str(e)}, status_code=413)
+    if isinstance(e, health_documents.UnknownEntity):
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@router.post("/documents")
+async def api_create_document(
+    request: Request,
+    file: UploadFile = FastAPIFile(...),
+    entity_type: str = Form(""),
+    entity_id: str = Form(""),
+    notes: str = Form(""),
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    """Store a document, optionally attaching it to one record."""
+    raw = await file.read()
+    if not raw:
+        return JSONResponse({"error": "empty upload"}, status_code=400)
+
+    target: tuple[str, int] | None = None
+    if entity_type or entity_id:
+        if entity_type not in health_db.DOCUMENT_ENTITY_TYPES:
+            return JSONResponse(
+                {"error": f"unknown entity type: {entity_type}"},
+                status_code=400,
+            )
+        try:
+            target = (entity_type, int(entity_id))
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "entity_id must be an integer"}, status_code=400,
+            )
+
+    max_bytes = _max_document_bytes(request)
+
+    def _store():
+        with health_db.connect(ctx.db_path) as conn:
+            if target is not None and not _entity_exists(conn, *target):
+                return "entity_missing"
+            doc, created = health_documents.store_document(
+                conn, ctx, raw=raw, filename=file.filename or "",
+                mime=file.content_type, source="manual",
+                notes=notes or None, max_bytes=max_bytes,
+            )
+            linked = False
+            if target is not None:
+                linked = health_db.link_document(conn, doc.id, *target)
+            conn.commit()
+        return doc, created, linked
+
+    try:
+        result = await asyncio.to_thread(_store)
+    except health_documents.DocumentError as e:
+        return _document_error_response(e)
+    if result == "entity_missing":
+        return JSONResponse(
+            {"error": f"{target[0]} not found"}, status_code=404,
+        )
+    doc, created, linked = result
+    return {
+        **_document_to_dict(doc),
+        "status": "ok",
+        "created": created,
+        "linked": linked,
+    }
+
+
+@router.get("/documents")
+async def api_list_documents(
+    ctx: HealthContext = Depends(get_user_context),
+    entity_type: str = Query(default=""),
+    entity_id: int = Query(default=0),
+    limit: int = Query(default=200, le=1000, ge=1),
+    offset: int = Query(default=0, ge=0),
+):
+    if entity_type or entity_id:
+        if entity_type not in health_db.DOCUMENT_ENTITY_TYPES:
+            return JSONResponse(
+                {"error": f"unknown entity type: {entity_type}"},
+                status_code=400,
+            )
+        if entity_id <= 0:
+            return JSONResponse(
+                {"error": "entity_id must be a positive integer"},
+                status_code=400,
+            )
+
+        def _for_entity():
+            with health_db.connect(ctx.db_path) as conn:
+                return health_db.documents_for_entity(
+                    conn, entity_type, entity_id,
+                )
+
+        docs = await asyncio.to_thread(_for_entity)
+        return {"documents": [_document_to_dict(d) for d in docs]}
+
+    def _all():
+        with health_db.connect(ctx.db_path) as conn:
+            return health_db.list_documents(conn, limit=limit, offset=offset)
+
+    docs = await asyncio.to_thread(_all)
+    return {"documents": [_document_to_dict(d) for d in docs]}
+
+
+@router.get("/documents/{document_id}")
+async def api_get_document(
+    document_id: int,
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            doc = health_db.get_document(conn, document_id)
+            if doc is None:
+                return None
+            return doc, _links_payload(conn, document_id)
+
+    result = await asyncio.to_thread(_query)
+    if result is None:
+        raise HTTPException(404, "document not found")
+    doc, links = result
+    return {"document": _document_to_dict(doc), "links": links}
+
+
+@router.get("/documents/{document_id}/file")
+async def api_document_file(
+    document_id: int,
+    ctx: HealthContext = Depends(get_user_context),
+):
+    """Stream a document's bytes. Auth-gated; path resolved server-side.
+
+    Always ``Content-Disposition: attachment`` + ``nosniff``, unlike
+    ``/panels/{id}/source``: a document may be an email attachment the agent
+    filed, i.e. content from outside the trust boundary, and serving
+    attacker-supplied HTML/SVG inline on the app's own origin would run it
+    against the session cookie. ``<iframe>`` / ``<img>`` render PDFs and
+    images regardless of the disposition header (D6).
+    """
+    def _query():
+        with health_db.connect(ctx.db_path) as conn:
+            return health_db.get_document(conn, document_id)
+
+    doc = await asyncio.to_thread(_query)
+    if doc is None:
+        raise HTTPException(404, "document not found")
+    try:
+        candidate = health_documents.resolve_document_path(ctx, doc)
+    except ValueError:
+        raise HTTPException(400, "invalid source path")
+    if not candidate.is_file():
+        raise HTTPException(404, "source file missing")
+    return FileResponse(
+        candidate,
+        media_type=doc.mime or "application/octet-stream",
+        filename=doc.filename,
+        headers={"X-Content-Type-Options": "nosniff"},
+        content_disposition_type="attachment",
+    )
+
+
+@router.post("/documents/{document_id}/links")
+async def api_link_document(
+    document_id: int,
+    request: Request,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    entity_type = body.get("entity_type")
+    if entity_type not in health_db.DOCUMENT_ENTITY_TYPES:
+        return JSONResponse(
+            {"error": f"unknown entity type: {entity_type}"}, status_code=400,
+        )
+    try:
+        entity_id = int(body.get("entity_id"))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"error": "entity_id must be an integer"}, status_code=400,
+        )
+
+    def _link():
+        with health_db.connect(ctx.db_path) as conn:
+            if health_db.get_document(conn, document_id) is None:
+                return "document_missing"
+            if not _entity_exists(conn, entity_type, entity_id):
+                return "entity_missing"
+            created = health_db.link_document(
+                conn, document_id, entity_type, entity_id,
+            )
+            conn.commit()
+        return created
+
+    result = await asyncio.to_thread(_link)
+    if result == "document_missing":
+        return JSONResponse({"error": "document not found"}, status_code=404)
+    if result == "entity_missing":
+        return JSONResponse(
+            {"error": f"{entity_type} not found"}, status_code=404,
+        )
+    return {"status": "ok", "created": result}
+
+
+@router.delete("/documents/{document_id}/links/{entity_type}/{entity_id}")
+async def api_unlink_document(
+    document_id: int,
+    entity_type: str,
+    entity_id: int,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    if entity_type not in health_db.DOCUMENT_ENTITY_TYPES:
+        return JSONResponse(
+            {"error": f"unknown entity type: {entity_type}"}, status_code=400,
+        )
+
+    def _unlink():
+        with health_db.connect(ctx.db_path) as conn:
+            n = health_db.unlink_document(
+                conn, document_id, entity_type, entity_id,
+            )
+            conn.commit()
+        return n
+
+    n = await asyncio.to_thread(_unlink)
+    return {"status": "ok", "removed": bool(n)}
+
+
+@router.delete("/documents/{document_id}")
+async def api_delete_document(
+    document_id: int,
+    _csrf: None = Depends(verify_origin),
+    ctx: HealthContext = Depends(get_user_context),
+):
+    def _delete():
+        with health_db.connect(ctx.db_path) as conn:
+            ok = health_documents.delete_document_fully(conn, ctx, document_id)
+            conn.commit()
+        return ok
+
+    ok = await asyncio.to_thread(_delete)
+    if not ok:
+        raise HTTPException(404, "document not found")
+    return {"status": "ok"}
 
 
 # ---- Garmin ---------------------------------------------------------------

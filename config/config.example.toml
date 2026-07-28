@@ -762,6 +762,13 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
                                   # typically the operator's own zone so the morning/evening
                                   # regeneration windows line up with their day
 
+# Health module. Only knob is the per-document size cap for paperwork
+# attached to an encounter / condition / immunization (scans, discharge
+# summaries, vaccination cards).
+# [health]
+# max_document_bytes = 26214400   # 25 MiB. 0 = unlimited, for a scanner that
+                                  # produces genuinely large files
+
 # User configuration
 # Map Nextcloud usernames to their settings
 # Only messages from configured users will be processed

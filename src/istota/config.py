@@ -900,6 +900,17 @@ class BriefingsModuleConfig:
 
 
 @dataclass
+class HealthModuleConfig:
+    """Module-level config for the health module (``[health]``).
+
+    ``max_document_bytes`` caps a single stored document (scan, discharge
+    summary, vaccination card). ``0`` means unlimited — the documented
+    escape hatch for a user whose scanner produces genuinely large files.
+    """
+    max_document_bytes: int = 25 * 1024 * 1024
+
+
+@dataclass
 class ModelsConfig:
     """Operator-controlled model alias registry (``[models.aliases]``).
 
@@ -952,6 +963,7 @@ class Config:
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
+    health: HealthModuleConfig = field(default_factory=HealthModuleConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
@@ -2042,6 +2054,26 @@ def load_config(config_path: Path | None = None) -> Config:
             ),
             shared_block_timezone=br.get("shared_block_timezone", "UTC"),
         )
+
+    if "health" in data:
+        h = data["health"]
+        default_max_doc = 25 * 1024 * 1024
+        try:
+            max_doc = int(h.get("max_document_bytes", default_max_doc))
+        except (TypeError, ValueError):
+            logger.warning(
+                "[health] max_document_bytes must be an integer; using default"
+            )
+            max_doc = default_max_doc
+        if max_doc < 0:
+            # Clamping to 0 would read as "unlimited" — the opposite of what
+            # someone typing a negative number meant.
+            logger.warning(
+                "[health] max_document_bytes must be >= 0 (0 = unlimited); "
+                "using default"
+            )
+            max_doc = default_max_doc
+        config.health = HealthModuleConfig(max_document_bytes=max_doc)
 
     if "logging" in data:
         log = data["logging"]

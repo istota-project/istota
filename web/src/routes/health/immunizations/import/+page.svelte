@@ -17,6 +17,9 @@
 
   // File path
   let file: File | null = $state(null);
+  // The kept upload from /extract, threaded into /bulk so every imported
+  // row carries the card that proves it. Null on the paste-text path.
+  let documentId: number | null = $state(null);
   let fileInput: HTMLInputElement | undefined = $state();
   let extracting = $state(false);
   let extractMode: 'text' | 'vision' | null = $state(null);
@@ -68,6 +71,7 @@
 
   function clearFile() {
     file = null;
+    documentId = null;
     if (fileInput) fileInput.value = '';
   }
 
@@ -80,9 +84,11 @@
     warnings = [];
     parsed = [];
     extractMode = null;
+    documentId = null;
     extracting = true;
     try {
       const out = await extractImmunizations(file);
+      documentId = out.document_id;
       parsed = out.rows;
       warnings = out.warnings || [];
       extractMode = out.mode;
@@ -97,6 +103,7 @@
     error = '';
     warnings = [];
     parsing = true;
+    documentId = null;
     try {
       const out = await parseImmunizations(raw);
       parsed = out.rows;
@@ -116,7 +123,7 @@
     }
     importing = true;
     try {
-      const out = await bulkInsertImmunizations(parsed);
+      const out = await bulkInsertImmunizations(parsed, documentId);
       if (out.status === 'ok') {
         await goto(`${base}/health/immunizations`);
       }
@@ -138,6 +145,7 @@
     warnings = [];
     error = '';
     extractMode = null;
+    documentId = null;
   }
 </script>
 
@@ -257,6 +265,12 @@
       <span class="meta">Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span>
     {/if}
   </div>
+
+  {#if documentId !== null && file}
+    <p class="attach-note">
+      <strong>{file.name}</strong> will be kept as proof and attached to the rows below.
+    </p>
+  {/if}
 
   <div class="table-scroll">
     <table class="grid">
@@ -506,6 +520,11 @@
     padding-left: 1.1rem;
   }
 
+  .attach-note {
+    margin: 0 0 0.75rem;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
   .review-head {
     display: flex;
     align-items: baseline;

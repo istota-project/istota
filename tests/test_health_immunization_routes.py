@@ -539,3 +539,98 @@ class TestStaticExplainerData:
         explainers = _load_explainers()
         missing = [r["name"] for r in refs if r["name"] not in explainers]
         assert not missing, f"missing static explainer for: {missing}"
+
+
+class TestImmunizationImportDocumentAttachment:
+    """Proof of immunization is a document, so the upload is kept."""
+
+    def _extract(self, client, monkeypatch, *, rows=None):
+        def _fake(path, mime, refs, *, config=None):
+            return {
+                "rows": rows if rows is not None else [],
+                "mode": "vision",
+                "warnings": [],
+            }
+
+        import istota.health.immunization_ocr as ocr_mod
+        monkeypatch.setattr(ocr_mod, "extract_from_file", _fake)
+        return client.post(
+            "/istota/api/health/immunizations/extract",
+            files={"file": ("card.png", b"\x89PNG\r\n\x1a\ncard", "image/png")},
+        )
+
+    def test_extract_keeps_the_file_and_returns_its_id(
+        self, client, ctx, monkeypatch,
+    ):
+        resp = self._extract(client, monkeypatch)
+        assert resp.status_code == 200, resp.text
+        document_id = resp.json()["document_id"]
+        assert isinstance(document_id, int)
+        with health_db.connect(ctx.db_path) as conn:
+            doc = health_db.get_document(conn, document_id)
+        assert doc is not None
+        assert doc.source == "import"
+        assert (ctx.uploads_dir / doc.stored_path).is_file()
+
+    def test_storage_failure_still_returns_the_rows(
+        self, client, ctx, monkeypatch,
+    ):
+        from istota.health import documents as health_documents
+
+        def _boom(*a, **kw):
+            raise health_documents.DocumentError("disk on fire")
+
+        monkeypatch.setattr(health_documents, "store_document", _boom)
+        resp = self._extract(
+            client, monkeypatch,
+            rows=[{"name": "Influenza", "date_given": "2026-01-05"}],
+        )
+        body = resp.json()
+        assert body["document_id"] is None
+        assert len(body["rows"]) == 1
+        assert any("could not be kept" in w for w in body["warnings"])
+
+    def test_bulk_links_the_document_to_every_row(
+        self, client, ctx, monkeypatch,
+    ):
+        document_id = self._extract(client, monkeypatch).json()["document_id"]
+        resp = client.post(
+            "/istota/api/health/immunizations/bulk",
+            json={
+                "document_id": document_id,
+                "rows": [
+                    {"name": "Influenza", "date_given": "2026-01-05"},
+                    {"name": "Tetanus", "date_given": "2025-03-11"},
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["document_id"] == document_id
+        with health_db.connect(ctx.db_path) as conn:
+            links = set(health_db.entity_links_for_document(conn, document_id))
+        assert links == {("immunization", i) for i in body["ids"]}
+
+    def test_bulk_without_a_document_id_creates_no_links(self, client, ctx):
+        client.post(
+            "/istota/api/health/immunizations/bulk",
+            json={"rows": [{"name": "Influenza", "date_given": "2026-01-05"}]},
+        )
+        with health_db.connect(ctx.db_path) as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM document_links",
+            ).fetchone()["n"]
+        assert n == 0
+
+    def test_unknown_document_id_is_400_and_inserts_nothing(self, client, ctx):
+        resp = client.post(
+            "/istota/api/health/immunizations/bulk",
+            json={
+                "document_id": 4242,
+                "rows": [{"name": "Influenza", "date_given": "2026-01-05"}],
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "document not found"
+        with health_db.connect(ctx.db_path) as conn:
+            assert health_db.list_immunizations(conn) == []

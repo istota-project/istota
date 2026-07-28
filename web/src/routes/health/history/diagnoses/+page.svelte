@@ -14,9 +14,15 @@
     Select,
     ConfirmDialog,
     KebabMenu,
+    Modal,
     type KebabItem,
     type SelectOption,
   } from '$lib/components/ui';
+  import DocumentList from '$lib/components/health/DocumentList.svelte';
+  import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
+  import { Paperclip } from 'lucide-svelte';
+
+  const getScrollRoot = getShellScrollRoot();
 
   const statusOptions: SelectOption[] = [
     { value: 'active', label: 'Active' },
@@ -33,12 +39,15 @@
   let loading = $state(true);
   let error = $state('');
   let diagnoses: Diagnosis[] = $state([]);
+  // Conditions have no detail page, so their documents open in a modal.
+  let documentsFor: Diagnosis | null = $state(null);
   let encounters: Encounter[] = $state([]);
 
   let showResolved = $state(false);
 
-  // Add form
+  // Add / edit form. `editing` is the record being edited; null = adding.
   let formOpen = $state(false);
+  let editing: Diagnosis | null = $state(null);
   let formName = $state('');
   let formStatus = $state<'active' | 'chronic' | 'resolved'>('active');
   let formIcd10 = $state('');
@@ -80,27 +89,79 @@
     })),
   ]);
 
+  function resetForm() {
+    editing = null;
+    formName = '';
+    formStatus = 'active';
+    formIcd10 = '';
+    formDateDiagnosed = new Date().toISOString().slice(0, 10);
+    formDateResolved = '';
+    formEncounterId = '';
+    formSeverity = '';
+    formNotes = '';
+    formError = '';
+  }
+
+  function toggleForm() {
+    if (formOpen) {
+      formOpen = false;
+      resetForm();
+    } else {
+      resetForm();
+      formOpen = true;
+    }
+  }
+
+  function startEdit(d: Diagnosis) {
+    editing = d;
+    formName = d.name;
+    formStatus = d.status;
+    formIcd10 = d.icd10 ?? '';
+    formDateDiagnosed = d.date_diagnosed ?? '';
+    formDateResolved = d.date_resolved ?? '';
+    formEncounterId = d.encounter_id ? String(d.encounter_id) : '';
+    formSeverity = d.severity ?? '';
+    formNotes = d.notes ?? '';
+    formError = '';
+    formOpen = true;
+    // The form lives at the top of the page, so a kebab clicked from a card
+    // further down would otherwise open it out of view.
+    getScrollRoot?.()?.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
   async function submit(e: Event) {
     e.preventDefault();
     formError = '';
     saving = true;
     try {
-      await createDiagnosis({
-        name: formName,
-        status: formStatus,
-        icd10: formIcd10 || undefined,
-        date_diagnosed: formDateDiagnosed || undefined,
-        date_resolved: formDateResolved || undefined,
-        encounter_id: formEncounterId ? Number(formEncounterId) : undefined,
-        severity: formSeverity || undefined,
-        notes: formNotes || undefined,
-      });
-      formName = '';
-      formIcd10 = '';
-      formNotes = '';
-      formEncounterId = '';
-      formSeverity = '';
+      if (editing) {
+        // Send explicit nulls rather than dropping the key: the API clears a
+        // field only when it is present and null, so an emptied ICD-10 or
+        // unlinked encounter has to be sent to actually take.
+        await updateDiagnosis(editing.id, {
+          name: formName,
+          status: formStatus,
+          icd10: formIcd10 || null,
+          date_diagnosed: formDateDiagnosed || null,
+          date_resolved: formStatus === 'resolved' ? formDateResolved || null : null,
+          encounter_id: formEncounterId ? Number(formEncounterId) : null,
+          severity: formSeverity || null,
+          notes: formNotes || null,
+        });
+      } else {
+        await createDiagnosis({
+          name: formName,
+          status: formStatus,
+          icd10: formIcd10 || undefined,
+          date_diagnosed: formDateDiagnosed || undefined,
+          date_resolved: formDateResolved || undefined,
+          encounter_id: formEncounterId ? Number(formEncounterId) : undefined,
+          severity: formSeverity || undefined,
+          notes: formNotes || undefined,
+        });
+      }
       formOpen = false;
+      resetForm();
       await load();
     } catch (e) {
       formError = e instanceof Error ? e.message : 'Failed to save';
@@ -112,12 +173,13 @@
   // The status-transition action differs per section (active → resolve,
   // resolved → reactivate, chronic → neither); Delete is common to all three.
   function diagnosisMenu(d: Diagnosis, transition: 'resolve' | 'reactivate' | null): KebabItem[] {
-    const items: KebabItem[] = [];
+    const items: KebabItem[] = [{ label: 'Edit', onSelect: () => startEdit(d) }];
     if (transition === 'resolve') {
       items.push({ label: 'Resolve', onSelect: () => void resolveOne(d) });
     } else if (transition === 'reactivate') {
       items.push({ label: 'Reactivate', onSelect: () => void reactivate(d) });
     }
+    items.push({ label: 'Documents', onSelect: () => (documentsFor = d) });
     items.push({ label: 'Delete', danger: true, onSelect: () => (deleteTarget = d) });
     return items;
   }
@@ -188,7 +250,7 @@
       <a class="back" href="{base}/health/history">← Medical history</a>
       <h1>Conditions</h1>
     </div>
-    <button class="btn" type="button" onclick={() => (formOpen = !formOpen)}>
+    <button class="btn" type="button" onclick={toggleForm}>
       {formOpen ? 'Cancel' : '+ Add diagnosis'}
     </button>
   </div>
@@ -196,6 +258,9 @@
 
 {#if formOpen}
   <form class="form" onsubmit={submit}>
+    {#if editing}
+      <div class="form-title">Editing <strong>{editing.name}</strong></div>
+    {/if}
     <div class="row">
       <label class="full">
         <span>Name *</span>
@@ -255,11 +320,52 @@
     {/if}
     <div class="form-actions">
       <button type="submit" class="btn primary" disabled={saving}>
-        {saving ? 'Saving…' : 'Save'}
+        {saving ? 'Saving…' : editing ? 'Save changes' : 'Save'}
       </button>
     </div>
   </form>
 {/if}
+
+{#snippet conditionCard(d: Diagnosis, transition: 'resolve' | 'reactivate' | null)}
+  <li>
+    <!-- The kebab is a sibling of the name rather than of the whole card body,
+         so it pins to the top-right corner however tall the card grows. -->
+    <div class="card-head">
+      <h3 class="name">{d.name}</h3>
+      <KebabMenu items={diagnosisMenu(d, transition)} ariaLabel="Diagnosis actions" />
+    </div>
+    {#if d.icd10 || d.severity || (d.document_count ?? 0) > 0}
+      <div class="tags">
+        {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
+        {#if d.severity}<span class="sev sev-{d.severity}">{d.severity}</span>{/if}
+        {#if (d.document_count ?? 0) > 0}
+          <button
+            type="button"
+            class="docs"
+            onclick={() => (documentsFor = d)}
+            title="{d.document_count} attached document{d.document_count === 1 ? '' : 's'}"
+          >
+            <Paperclip size={11} aria-hidden="true" />
+            {d.document_count}
+          </button>
+        {/if}
+      </div>
+    {/if}
+    <div class="d-meta">
+      {#if transition === 'reactivate'}
+        {#if d.date_resolved}<span>Resolved {formatDate(d.date_resolved)}</span>{/if}
+      {:else}
+        {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
+        {#if d.encounter_id}
+          <a href="{base}/health/history/encounter?id={d.encounter_id}" class="enc">
+            {encounterLabel(d.encounter_id)}
+          </a>
+        {/if}
+      {/if}
+    </div>
+    {#if d.notes}<p class="notes">{d.notes}</p>{/if}
+  </li>
+{/snippet}
 
 {#if loading}
   <div class="center-msg">Loading…</div>
@@ -273,27 +379,7 @@
     {:else}
       <ul class="list">
         {#each active as d (d.id)}
-          <li>
-            <div class="d-row">
-              <div class="d-main">
-                <span class="name">{d.name}</span>
-                {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
-                {#if d.severity}<span class="sev sev-{d.severity}">{d.severity}</span>{/if}
-              </div>
-              <div class="d-meta">
-                {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
-                {#if d.encounter_id}
-                  <a href="{base}/health/history/encounter?id={d.encounter_id}" class="enc">
-                    {encounterLabel(d.encounter_id)}
-                  </a>
-                {/if}
-              </div>
-              <div class="d-actions">
-                <KebabMenu items={diagnosisMenu(d, 'resolve')} ariaLabel="Diagnosis actions" />
-              </div>
-            </div>
-            {#if d.notes}<p class="notes">{d.notes}</p>{/if}
-          </li>
+          {@render conditionCard(d, 'resolve')}
         {/each}
       </ul>
     {/if}
@@ -306,26 +392,7 @@
     {:else}
       <ul class="list">
         {#each chronic as d (d.id)}
-          <li>
-            <div class="d-row">
-              <div class="d-main">
-                <span class="name">{d.name}</span>
-                {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
-              </div>
-              <div class="d-meta">
-                {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
-                {#if d.encounter_id}
-                  <a href="{base}/health/history/encounter?id={d.encounter_id}" class="enc">
-                    {encounterLabel(d.encounter_id)}
-                  </a>
-                {/if}
-              </div>
-              <div class="d-actions">
-                <KebabMenu items={diagnosisMenu(d, null)} ariaLabel="Diagnosis actions" />
-              </div>
-            </div>
-            {#if d.notes}<p class="notes">{d.notes}</p>{/if}
-          </li>
+          {@render conditionCard(d, null)}
         {/each}
       </ul>
     {/if}
@@ -344,24 +411,30 @@
       {:else}
         <ul class="list resolved">
           {#each resolved as d (d.id)}
-            <li>
-              <div class="d-row">
-                <div class="d-main">
-                  <span class="name">{d.name}</span>
-                </div>
-                <div class="d-meta">
-                  {#if d.date_resolved}<span>resolved {formatDate(d.date_resolved)}</span>{/if}
-                </div>
-                <div class="d-actions">
-                  <KebabMenu items={diagnosisMenu(d, 'reactivate')} ariaLabel="Diagnosis actions" />
-                </div>
-              </div>
-            </li>
+            {@render conditionCard(d, 'reactivate')}
           {/each}
         </ul>
       {/if}
     {/if}
   </section>
+{/if}
+
+{#if documentsFor}
+  <Modal
+    open={true}
+    title="Documents — {documentsFor.name}"
+    width="42rem"
+    onOpenChange={(open) => {
+      if (!open) {
+        documentsFor = null;
+        // The paperclip counts come from the list endpoint, so a change made
+        // in here has to be reflected on the cards behind it.
+        void load();
+      }
+    }}
+  >
+    <DocumentList entityType="diagnosis" entityId={documentsFor.id} autoload />
+  </Modal>
 {/if}
 
 {#if deleteTarget}
@@ -479,6 +552,14 @@
     flex-direction: column;
     gap: 0.65rem;
   }
+  .form-title {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+  }
+  .form-title strong {
+    color: var(--text-primary);
+    font-weight: 500;
+  }
   .form .row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
@@ -523,36 +604,55 @@
     list-style: none;
     margin: 0;
     padding: 0;
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.5rem;
+  }
+  @media (max-width: 1100px) {
+    .list {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 768px) {
+    .list {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
   .list li {
     padding: 0.7rem 0.9rem;
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    min-width: 0;
   }
   .list.resolved li {
     opacity: 0.7;
   }
-  .d-row {
+  .card-head {
     display: flex;
+    align-items: flex-start;
     justify-content: space-between;
-    align-items: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-  }
-  .d-main {
-    display: flex;
-    align-items: center;
     gap: 0.5rem;
-    flex-wrap: wrap;
-    min-width: 0;
   }
   .name {
+    margin: 0;
+    font-size: var(--text-sm);
     font-weight: 500;
     color: var(--text-primary);
+    line-height: 1.35;
+    /* Long condition names wrap rather than pushing the kebab out of the
+       corner. */
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .tags {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
   }
   .icd {
     font-size: var(--text-xs);
@@ -585,8 +685,11 @@
     color: var(--status-danger-fg);
   }
   .d-meta {
+    /* Date and source stay on one line together, directly under the tags —
+       the card's content stacks from the top rather than being spread to fill
+       the (stretched) card height. */
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 0.75rem;
     font-size: var(--text-xs);
     color: var(--text-dim);
@@ -600,13 +703,8 @@
     color: var(--accent-blue);
     text-decoration: underline;
   }
-  .d-actions {
-    display: flex;
-    gap: 0.3rem;
-    flex: 0 0 auto;
-  }
   .notes {
-    margin: 0.5rem 0 0;
+    margin: 0;
     font-size: var(--text-sm);
     white-space: pre-wrap;
     color: var(--text-muted);
@@ -632,5 +730,24 @@
   .msg.error {
     background: rgba(204, 102, 102, 0.1);
     color: var(--status-danger-fg);
+  }
+  .docs {
+    /* A button does not inherit font, so without this the em-relative
+       sizing resolves against the UA default and stops tracking the
+       text-scale preference. */
+    font: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--surface-raised);
+    border: none;
+    padding: 0.05rem 0.45rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+  }
+  .docs:hover {
+    color: var(--accent-blue);
   }
 </style>

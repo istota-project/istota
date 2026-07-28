@@ -358,6 +358,11 @@ location_ping_retention_days = {{ istota_scheduler_location_ping_retention_days 
 shared_block_timezone = "{{ istota_briefing_shared_tz | default('UTC') }}"
 newsletter_max_links_per_source = {{ istota_briefing_newsletter_max_links | default(20) }}
 
+{# Health module config. max_document_bytes caps one attached document
+   (scan / discharge summary / vaccination card); 0 = unlimited. #}
+[health]
+max_document_bytes = {{ istota_health_max_document_bytes | default(26214400) }}
+
 {# Module-owned shared briefing blocks (shared-kv-curated-content). Rendered as
    the top-level [[briefing_shared_blocks]] section; generated once globally by
    the scheduler and written into shared_kv. An empty/undefined var renders

@@ -363,3 +363,119 @@ class TestBulkRoute:
         assert row is not None
         assert row["dedup_key"] is not None
         assert ":" in row["dedup_key"]
+
+
+class TestImportDocumentAttachment:
+    """The uploaded source is kept and linked to everything it produced."""
+
+    def _extract(self, client, monkeypatch, *, rows=None):
+        def _fake(path: Path, mime: str, *, config=None) -> dict:
+            return {
+                "rows": rows if rows is not None else [],
+                "mode": "vision",
+                "warnings": [],
+            }
+
+        from istota.health import encounter_ocr as enc_mod
+        monkeypatch.setattr(enc_mod, "extract_from_file", _fake)
+        return client.post(
+            "/istota/api/health/encounters/extract",
+            files={"file": ("visit.pdf", b"%PDF-1.4 visit", "application/pdf")},
+        )
+
+    def test_extract_keeps_the_file_and_returns_its_id(
+        self, client, ctx, monkeypatch,
+    ):
+        resp = self._extract(client, monkeypatch)
+        assert resp.status_code == 200, resp.text
+        document_id = resp.json()["document_id"]
+        assert isinstance(document_id, int)
+
+        with health_db.connect(ctx.db_path) as conn:
+            doc = health_db.get_document(conn, document_id)
+        assert doc is not None
+        assert doc.source == "import"
+        assert doc.filename == "visit.pdf"
+        # The whole point: the bytes survive the call.
+        assert (ctx.uploads_dir / doc.stored_path).read_bytes() == b"%PDF-1.4 visit"
+
+    def test_storage_failure_still_returns_the_rows(
+        self, client, ctx, monkeypatch,
+    ):
+        from istota.health import documents as health_documents
+
+        def _boom(*a, **kw):
+            raise health_documents.DocumentError("disk on fire")
+
+        monkeypatch.setattr(health_documents, "store_document", _boom)
+        resp = self._extract(
+            client, monkeypatch,
+            rows=[{"encounter_date": "2026-06-29", "encounter_type": "visit"}],
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["document_id"] is None
+        assert len(body["rows"]) == 1
+        assert any("could not be kept" in w for w in body["warnings"])
+
+    def test_bulk_links_the_document_to_every_row_it_creates(
+        self, client, ctx, monkeypatch,
+    ):
+        document_id = self._extract(client, monkeypatch).json()["document_id"]
+        resp = client.post(
+            "/istota/api/health/encounters/bulk",
+            json={
+                "document_id": document_id,
+                "rows": [{
+                    "encounter_date": "2026-06-29",
+                    "encounter_type": "visit",
+                    "diagnoses": [{"name": "Asthma"}, {"name": "Eczema"}],
+                }],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["document_id"] == document_id
+        with health_db.connect(ctx.db_path) as conn:
+            links = set(health_db.entity_links_for_document(conn, document_id))
+        expected = {("encounter", body["ids"][0])} | {
+            ("diagnosis", d) for d in body["diagnosis_ids"]
+        }
+        assert links == expected
+
+    def test_bulk_without_a_document_id_creates_no_links(self, client, ctx):
+        resp = client.post(
+            "/istota/api/health/encounters/bulk",
+            json={"rows": [{
+                "encounter_date": "2026-06-29", "encounter_type": "visit",
+            }]},
+        )
+        assert resp.json()["document_id"] is None
+        with health_db.connect(ctx.db_path) as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM document_links",
+            ).fetchone()["n"]
+        assert n == 0
+
+    def test_unknown_document_id_is_400_and_inserts_nothing(self, client, ctx):
+        resp = client.post(
+            "/istota/api/health/encounters/bulk",
+            json={
+                "document_id": 4242,
+                "rows": [{
+                    "encounter_date": "2026-06-29", "encounter_type": "visit",
+                }],
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "document not found"
+        with health_db.connect(ctx.db_path) as conn:
+            assert health_db.list_encounters(conn) == []
+
+    def test_non_integer_document_id_is_400(self, client):
+        resp = client.post(
+            "/istota/api/health/encounters/bulk",
+            json={"document_id": "abc", "rows": []},
+        )
+        assert resp.status_code == 400
+        assert "document_id must be an integer" in resp.json()["error"]
