@@ -868,7 +868,9 @@ class BriefingsModuleConfig:
     ``archive_retention_days`` — prune archived briefings older than this per
     insert (0 = keep forever). ``default_lookback_hours`` seeds the email/rss
     source lookback window when a source omits it. ``max_source_chars`` caps a
-    single source's gathered text.
+    single source's gathered text — for the list-shaped ``todos`` source it is
+    spent item by item and an item is never split, since a cut mid-line would
+    render as a todo the file never contained.
 
     ``max_browse_chars`` is the same cap for a ``browse`` source, which is
     separate because that source gathers *markdown* rather than flattened

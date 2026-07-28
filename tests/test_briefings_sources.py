@@ -956,6 +956,13 @@ class TestTodoFrontmatter:
         gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
         assert [i["text"] for i in gs.items] == ["- a", "- b"]
 
+    def test_frontmatter_only_stripped_at_the_top(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        # A rule further down the file is still a rule, not a block opener.
+        _write_user_file(ctx, "TODO.md", "- a\n---\nnotes: x\n---\n- b\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == ["- a", "- b"]
+
     def test_rule_delimited_list_is_not_mistaken_for_frontmatter(self, tmp_path):
         ctx = _ctx(tmp_path)
         # Opens with a horizontal rule and closes with another, but carries no
@@ -963,6 +970,119 @@ class TestTodoFrontmatter:
         _write_user_file(ctx, "TODO.md", "---\n- a\n---\n- b\n")
         gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
         assert [i["text"] for i in gs.items] == ["- a", "- b"]
+
+
+class TestTodoSizeCap:
+    """``max_source_chars`` applies to todos, dropping whole items.
+
+    The other sources cut mid-string, which is fine for prose and wrong for a
+    list — a half-line renders as a todo that says something the file doesn't.
+    """
+
+    def _capped_ctx(self, tmp_path, max_chars):
+        from istota.config import BriefingsModuleConfig
+
+        return _ctx(
+            tmp_path,
+            briefings=BriefingsModuleConfig(max_source_chars=max_chars),
+        )
+
+    def test_under_the_cap_keeps_everything(self, tmp_path):
+        ctx = self._capped_ctx(tmp_path, 1000)
+        _write_user_file(ctx, "TODO.md", "- a\n- b\n- c\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == ["- a", "- b", "- c"]
+        assert gs.provenance == "3 pending"
+
+    def test_over_the_cap_drops_whole_items_from_the_tail(self, tmp_path):
+        ctx = self._capped_ctx(tmp_path, 30)
+        _write_user_file(
+            ctx, "TODO.md", "".join(f"- item number {n}\n" for n in range(10)),
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert 0 < len(gs.items) < 10
+        # Document order preserved, and every kept line is a whole original.
+        assert [i["text"] for i in gs.items] == [
+            f"- item number {n}" for n in range(len(gs.items))
+        ]
+
+    def test_no_item_is_ever_split(self, tmp_path):
+        ctx = self._capped_ctx(tmp_path, 25)
+        lines = ["- a short one", "- a considerably longer item here", "- x"]
+        _write_user_file(ctx, "TODO.md", "\n".join(lines) + "\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        for item in gs.items:
+            assert item["text"] in lines
+
+    def test_at_least_one_item_survives_a_tiny_cap(self, tmp_path):
+        ctx = self._capped_ctx(tmp_path, 1)
+        _write_user_file(ctx, "TODO.md", "- a reasonably long first item\n- b\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        # Reporting "no pending todos" for a file full of them would be a lie.
+        assert gs.ok is True
+        assert [i["text"] for i in gs.items] == ["- a reasonably long first item"]
+
+    def test_provenance_reports_what_was_omitted(self, tmp_path):
+        ctx = self._capped_ctx(tmp_path, 30)
+        _write_user_file(
+            ctx, "TODO.md", "".join(f"- item number {n}\n" for n in range(10)),
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        omitted = 10 - len(gs.items)
+        assert f"{omitted} more omitted" in gs.provenance
+        assert "size cap" in gs.provenance
+
+    def test_zero_means_unlimited(self, tmp_path):
+        ctx = self._capped_ctx(tmp_path, 0)
+        _write_user_file(
+            ctx, "TODO.md", "".join(f"- item number {n}\n" for n in range(50)),
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert len(gs.items) == 50
+        assert "omitted" not in gs.provenance
+
+    def test_section_count_reflects_kept_items_only(self, tmp_path):
+        ctx = self._capped_ctx(tmp_path, 20)
+        _write_user_file(
+            ctx, "TODO.md", "### NOW\n- keep me\n### BACKLOG\n- dropped\n",
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["section"] for i in gs.items] == ["NOW"]
+        assert "2 sections" not in gs.provenance
+
+
+class TestCapTodoItems:
+    """Unit coverage for the budget itself."""
+
+    def _items(self, *pairs):
+        return [{"text": t, "section": s} for t, s in pairs]
+
+    def test_section_labels_count_against_the_budget(self):
+        from istota.briefings.sources.builtins import _cap_todo_items
+
+        # Items alone are 2 x ("- a" + newline) = 8 chars; the two section
+        # labels a renderer emits cost another 12. A budget of 10 fits the
+        # items but not the labels, so the second item goes.
+        labelled = self._items(("- a", "ALPHA"), ("- b", "BRAVO"))
+        kept, dropped = _cap_todo_items(labelled, 10)
+        assert (len(kept), dropped) == (1, 1)
+        # The same items with no labels fit comfortably.
+        kept, dropped = _cap_todo_items(
+            self._items(("- a", None), ("- b", None)), 10,
+        )
+        assert (len(kept), dropped) == (2, 0)
+
+    def test_repeated_section_is_charged_once(self):
+        from istota.briefings.sources.builtins import _cap_todo_items
+
+        same = self._items(("- a", "NOW"), ("- b", "NOW"), ("- c", "NOW"))
+        kept, dropped = _cap_todo_items(same, 21)  # 5 (label) + 3 x 4 = 17
+        assert (len(kept), dropped) == (3, 0)
+
+    def test_empty_input_is_not_reported_as_truncated(self):
+        from istota.briefings.sources.builtins import _cap_todo_items
+
+        assert _cap_todo_items([], 100) == ([], 0)
 
 
 class TestBuiltinReminders:

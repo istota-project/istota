@@ -321,6 +321,42 @@ def _extract_todo_items(content: str) -> list[dict]:
     return items
 
 
+def _cap_todo_items(items: list[dict], max_chars: int) -> tuple[list[dict], int]:
+    """Trim ``items`` to fit ``max_chars``, dropping whole items from the tail.
+
+    Returns ``(kept, dropped_count)``. ``max_chars`` of 0 is unlimited.
+
+    The other sources cap by slicing their text, which is right for prose and
+    wrong for a list: a cut mid-line renders as a todo asserting something the
+    file doesn't say. So the budget is spent item by item and an item is never
+    split — an item that doesn't fit is dropped whole, along with everything
+    after it, keeping document order (which usually puts the live section
+    first).
+
+    The budget counts what the renderer will actually emit, so a section label
+    is charged once per group it introduces. The first item is always kept:
+    reporting "no pending todos" for a file full of them because the cap is
+    set low would be a lie, and a single item over the whole budget means the
+    budget is unachievable regardless.
+    """
+    if not max_chars or not items:
+        return items, 0
+    kept: list[dict] = []
+    used = 0
+    current: str | None = None
+    for item in items:
+        section = item.get("section")
+        cost = len(item["text"]) + 1  # the line plus its newline
+        if section and section != current:
+            cost += len(section) + 2  # the "NOW:" label line
+        if kept and used + cost > max_chars:
+            break
+        used += cost
+        current = section
+        kept.append(item)
+    return kept, len(items) - len(kept)
+
+
 def resolve_todos(config: dict, ctx: SourceContext) -> GatheredSource:
     path = _workspace_file(ctx, config.get("path"))
     if not path:
@@ -340,10 +376,13 @@ def resolve_todos(config: dict, ctx: SourceContext) -> GatheredSource:
             kind="todos", title="Todos",
             provenance="(no pending todos)", ok=False,
         )
+    items, dropped = _cap_todo_items(items, int(ctx.module_config.max_source_chars))
     provenance = f"{len(items)} pending"
     sections = {item["section"] for item in items if item["section"]}
     if sections:
         provenance += f" in {len(sections)} section{'s' if len(sections) > 1 else ''}"
+    if dropped:
+        provenance += f" ({dropped} more omitted — over the size cap)"
     return GatheredSource(
         kind="todos", title="Todos", items=items, provenance=provenance,
     )
