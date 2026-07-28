@@ -161,21 +161,110 @@ _BULLET_RE = re.compile(r"^[-*+]\s+\S")
 # A numbered list item: "1. " or "1) ".
 _NUMBERED_RE = re.compile(r"^\d+[.)]\s+\S")
 _HORIZONTAL_RULES = {"---", "***", "___"}
-# An ATX heading: 1-6 hashes, a space, the title, optional closing hashes.
-_HEADING_RE = re.compile(r"^#{1,6}\s+(?P<title>.*?)\s*#*\s*$")
+
+# Section headings, one regex per dialect (see _heading_dialect).
+# ATX: 1-6 hashes, the title, optional closing hashes. The space after the
+# hashes is optional *here* but required to establish the dialect, so "#urgent"
+# never turns a tag-using file into an ATX one while "#NOW" still labels inside
+# a file that plainly uses headings.
+_ATX_RE = re.compile(r"^#{1,6}\s*(?P<title>.*?)\s*#*\s*$")
+_ATX_STRICT_RE = re.compile(r"^#{1,6}\s+\S")
+# Setext: the title line is underlined by "===" / "---" on the next line.
+_SETEXT_UNDERLINE_RE = re.compile(r"^(?:={2,}|-{2,})$")
+# A whole line in bold, the usual section marker in files that avoid markdown
+# headings: "**NOW**" / "__NOW__".
+_BOLD_LINE_RE = re.compile(r"^(?:\*\*|__)(?P<title>.+?)(?:\*\*|__)$")
+# A bare label line: "NOW:" and nothing after the colon.
+_LABEL_LINE_RE = re.compile(r"^(?P<title>[^:]{1,60}):$")
 
 
-def _heading_label(line: str) -> str | None:
-    """The section name a heading line declares, or None if it names nothing.
+def _is_item_line(line: str) -> bool:
+    """Whether a stripped line is a list item (so never a heading)."""
+    return bool(_BULLET_RE.match(line) or _NUMBERED_RE.match(line))
 
-    ``### NOW`` and ``### NOW ###`` both yield ``"NOW"``. A bare ``###`` (or
-    any hash run without a title) yields None, which *clears* the current
-    section rather than leaving later items attributed to the section above it.
+
+# A YAML mapping key ("tags:", "created: 2026-07-28") — what tells frontmatter
+# apart from a list that merely opens with a horizontal rule.
+_YAML_KEY_RE = re.compile(r"^[A-Za-z_][\w .-]*:(\s|$)")
+
+
+def _strip_frontmatter(lines: list[str]) -> list[str]:
+    """Drop a leading YAML frontmatter block.
+
+    A todo file kept in a notes vault opens with one, and its sequence values
+    (``tags:`` then ``  - personal``) are indistinguishable from bullets — so
+    the block would lead with two todos named after the file's own tags. Its
+    mapping keys also read as label-style headings.
+
+    Only stripped when the delimited block actually contains a mapping key, so
+    a list that merely opens with a horizontal rule keeps all of its content.
     """
-    match = _HEADING_RE.match(line)
-    if not match:
-        return None
-    return match.group("title").strip() or None
+    if not lines or lines[0].strip() != "---":
+        return lines
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() in ("---", "..."):
+            block = lines[1:idx]
+            if any(_YAML_KEY_RE.match(raw.strip()) for raw in block):
+                return lines[idx + 1:]
+            return lines  # rule-delimited content, not frontmatter
+    return lines  # unterminated — a rule, not frontmatter
+
+
+def _heading_dialect(lines: list[str]) -> str | None:
+    """How this file marks its sections, or None if it marks none.
+
+    A file is parsed in **one** dialect, picked by what it actually contains.
+    Trying every style everywhere would let a stray ``Blockers:`` line in a
+    ``###``-headed file steal the items under ``### NOW`` — which is exactly
+    the attribution the caller is about to filter on. Priority runs from the
+    most explicit marker to the least: ATX, setext, bold, label.
+    """
+    found: set[str] = set()
+    for idx, raw in enumerate(lines):
+        line = raw.strip()
+        if not line or line in _HORIZONTAL_RULES or _is_item_line(line):
+            continue
+        if _ATX_STRICT_RE.match(line):
+            return "atx"  # highest priority — no need to look further
+        if _BOLD_LINE_RE.match(line):
+            found.add("bold")
+            continue
+        following = lines[idx + 1].strip() if idx + 1 < len(lines) else ""
+        if _SETEXT_UNDERLINE_RE.match(following):
+            found.add("setext")
+            continue
+        if _LABEL_LINE_RE.match(line):
+            found.add("label")
+    for dialect in ("setext", "bold", "label"):
+        if dialect in found:
+            return dialect
+    return None
+
+
+def _heading_at(lines: list[str], idx: int, dialect: str | None) -> tuple[bool, str | None, int]:
+    """Read line ``idx`` as a heading in ``dialect``.
+
+    Returns ``(is_heading, label, extra_lines_consumed)``. A heading with no
+    title (a bare ``###``) is ``(True, None, 0)`` — it *clears* the current
+    section rather than leaving later items attributed to the one above it.
+    """
+    line = lines[idx].strip()
+    if dialect == "atx":
+        if not line.startswith("#"):
+            return False, None, 0
+        match = _ATX_RE.match(line)
+        return True, (match.group("title").strip() or None) if match else None, 0
+    if dialect == "setext":
+        following = lines[idx + 1].strip() if idx + 1 < len(lines) else ""
+        if _SETEXT_UNDERLINE_RE.match(following):
+            return True, line or None, 1  # also swallow the underline
+        return False, None, 0
+    if dialect in ("bold", "label"):
+        pattern = _BOLD_LINE_RE if dialect == "bold" else _LABEL_LINE_RE
+        match = pattern.match(line)
+        if match:
+            return True, match.group("title").strip() or None, 0
+    return False, None, 0
 
 
 def _extract_todo_items(content: str) -> list[dict]:
@@ -197,23 +286,38 @@ def _extract_todo_items(content: str) -> list[dict]:
     "Most recent heading at any level" is deliberately flat rather than a
     nested breadcrumb: it is what a person means by "the section this item is
     under", and a breadcrumb would prefix every group with the document title.
+
+    Headings are read in the file's own dialect (:func:`_heading_dialect`), so
+    a todo list that marks its sections with ``**NOW**``, ``NOW:`` or a setext
+    underline is understood as well as one using ``### NOW``. Items are matched
+    before headings, so a bullet is never also read as a section, and YAML
+    frontmatter is dropped first (:func:`_strip_frontmatter`) so a notes-vault
+    file's own tags don't arrive as the first two todos.
     """
+    lines = _strip_frontmatter(content.splitlines())
+    dialect = _heading_dialect(lines)
     items: list[dict] = []
     section: str | None = None
-    for raw in content.splitlines():
+    skip = 0
+    for idx, raw in enumerate(lines):
+        if skip:
+            skip -= 1
+            continue
         line = raw.strip()
         if not line or line in _HORIZONTAL_RULES:
-            continue
-        if line.startswith("#"):
-            section = _heading_label(line)
             continue
         checkbox = _CHECKBOX_RE.match(line)
         if checkbox:
             if checkbox.group("mark") == " ":  # unchecked → pending
                 items.append({"text": line, "section": section})
             continue  # checked → done, skip
-        if _BULLET_RE.match(line) or _NUMBERED_RE.match(line):
+        if _is_item_line(line):
             items.append({"text": line, "section": section})
+            continue
+        is_heading, label, consumed = _heading_at(lines, idx, dialect)
+        if is_heading:
+            section = label
+            skip = consumed
     return items
 
 

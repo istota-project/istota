@@ -846,6 +846,125 @@ class TestTodoSectionMembership:
         assert gs.provenance == "2 pending"
 
 
+class TestTodoHeadingDialects:
+    """Not every todo file marks its sections with ``###``.
+
+    A file is parsed in a single heading dialect, chosen by what it actually
+    contains (ATX > setext > bold > label). One dialect per file is what keeps
+    a stray ``Blockers:`` line in a ``###``-headed file from stealing items
+    from the section above it.
+    """
+
+    def _sections(self, ctx, content):
+        _write_user_file(ctx, "TODO.md", content)
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        return [i["section"] for i in gs.items]
+
+    def test_setext_underlined_headings(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        assert self._sections(
+            ctx, "NOW\n===\n- a\n\nBACKLOG\n-------\n- b\n",
+        ) == ["NOW", "BACKLOG"]
+
+    def test_setext_underline_is_not_an_item_or_a_rule(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "NOW\n---\n- only item\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == ["- only item"]
+
+    def test_bold_only_lines_as_headings(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        assert self._sections(
+            ctx, "**NOW**\n- a\n\n__LATER__\n- b\n",
+        ) == ["NOW", "LATER"]
+
+    def test_label_lines_as_headings(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        assert self._sections(ctx, "NOW:\n- a\n\nBACKLOG:\n- b\n") == [
+            "NOW", "BACKLOG",
+        ]
+
+    def test_atx_wins_over_other_styles_in_the_same_file(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        # The bold line and the colon line are prose here, not section
+        # changes — otherwise "only show NOW" would lose the last two items.
+        assert self._sections(
+            ctx, "### NOW\n- a\n**Reminder**\n- b\nBlockers:\n- c\n",
+        ) == ["NOW", "NOW", "NOW"]
+
+    def test_hashtag_lines_do_not_make_a_file_atx(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        # "#urgent" is a tag, not a heading — it has no space. A file whose
+        # only hashes are tags is still parsed in its real dialect.
+        assert self._sections(ctx, "**NOW**\n#urgent\n- a\n") == ["NOW"]
+
+    def test_unspaced_hash_still_labels_inside_an_atx_file(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        # Detection is strict (a real heading establishes the dialect),
+        # labelling is lenient (a file that clearly uses ATX gets the benefit
+        # of the doubt on a sloppy one).
+        assert self._sections(ctx, "# Todos\n- a\n#NOW\n- b\n") == [
+            "Todos", "NOW",
+        ]
+
+    def test_list_item_is_never_read_as_a_heading(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        # "- NOW:" is an item; it must not also open a section.
+        _write_user_file(ctx, "TODO.md", "- NOW:\n- b\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == ["- NOW:", "- b"]
+        assert [i["section"] for i in gs.items] == [None, None]
+
+    def test_plain_file_with_no_headings_has_no_sections(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        assert self._sections(ctx, "- a\n- b\nsome prose\n- c\n") == [
+            None, None, None,
+        ]
+
+
+class TestTodoFrontmatter:
+    """A todo file kept in a notes vault opens with YAML frontmatter.
+
+    Its sequence values (``tags:\\n  - personal``) read as bullets and its
+    mapping keys read as label-style headings, so the block would otherwise
+    open with two todos named after the file's own tags.
+    """
+
+    def test_frontmatter_values_are_not_todo_items(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(
+            ctx,
+            "TODO.md",
+            "---\ncreated: 2026-07-28\ntags:\n  - todos\n  - personal\n---\n\n"
+            "### NOW\n- [ ] real task\n",
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == ["- [ ] real task"]
+        assert gs.items[0]["section"] == "NOW"
+
+    def test_frontmatter_keys_are_not_sections(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(
+            ctx, "TODO.md", "---\ntags:\n  - x\n---\n**NOW**\n- [ ] task\n",
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["section"] for i in gs.items] == ["NOW"]
+
+    def test_unterminated_leading_rule_keeps_the_content(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "---\n- a\n- b\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == ["- a", "- b"]
+
+    def test_rule_delimited_list_is_not_mistaken_for_frontmatter(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        # Opens with a horizontal rule and closes with another, but carries no
+        # mapping key — it's a list, not frontmatter, so nothing is dropped.
+        _write_user_file(ctx, "TODO.md", "---\n- a\n---\n- b\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == ["- a", "- b"]
+
+
 class TestBuiltinReminders:
     def test_no_path_returns_not_configured(self, tmp_path):
         gs = resolve_source("reminders", {}, _ctx(tmp_path))
