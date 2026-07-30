@@ -17,9 +17,10 @@
   } from '$lib/api';
   import {
     Button,
-    Modal,
     ConfirmDialog,
+    IconButton,
     KebabMenu,
+    Modal,
     Select,
     type KebabItem,
     type SelectOption,
@@ -464,19 +465,19 @@
                   </td>
                   <td class="num col-count">{count}</td>
                   <td class="actions col-order">
-                    <button
-                      class="icon-btn"
+                    <IconButton
+                      size="sm"
+                      label="Move up"
                       title="Move up"
                       onclick={() => moveCategory(idx, -1)}
-                      disabled={idx === 0}
-                      type="button">↑</button
+                      disabled={idx === 0}>↑</IconButton
                     >
-                    <button
-                      class="icon-btn"
+                    <IconButton
+                      size="sm"
+                      label="Move down"
                       title="Move down"
                       onclick={() => moveCategory(idx, 1)}
-                      disabled={idx === config.categories.length - 1}
-                      type="button">↓</button
+                      disabled={idx === config.categories.length - 1}>↓</IconButton
                     >
                   </td>
                   <td class="actions col-remove">
@@ -942,10 +943,6 @@
     .grid th,
     .grid td {
       padding: 0.4rem 0.35rem;
-    }
-
-    .icon-btn {
-      padding: 0.25rem 0.3rem;
     }
   }
 

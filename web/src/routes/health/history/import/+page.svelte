@@ -7,7 +7,8 @@
     type ParsedDiagnosis,
     type ParsedEncounter,
   } from '$lib/api';
-  import { Select, type SelectOption } from '$lib/components/ui';
+  import { Badge, Select, type SelectOption } from '$lib/components/ui';
+  import { confidenceVariant } from '$lib/health/status';
 
   const ENCOUNTER_TYPES = [
     'visit',
@@ -227,7 +228,7 @@
   {#each parsed as row, i (i)}
     <div class="enc-card" class:warn={!row.encounter_date}>
       <div class="enc-head">
-        <span class="badge conf-{row.confidence}">{row.confidence}</span>
+        <Badge variant={confidenceVariant(row.confidence)}>{row.confidence}</Badge>
         <button class="btn small" type="button" onclick={() => removeRow(i)}>
           Remove encounter
         </button>
@@ -653,32 +654,5 @@
   th.row-actions {
     text-align: right;
     white-space: nowrap;
-  }
-
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.1rem 0.5rem;
-    border-radius: var(--radius-pill);
-    font-weight: 500;
-  }
-  .badge.conf-high {
-    background: hsla(145, 40%, 55%, 0.22);
-    color: var(--status-success-fg);
-  }
-  .badge.conf-medium {
-    background: hsla(35, 60%, 60%, 0.22);
-    color: var(--status-warn-fg);
-  }
-  .badge.conf-low {
-    background: hsla(0, 60%, 55%, 0.28);
-    color: var(--status-danger-fg);
-  }
-  .badge.conf-manual {
-    background: hsla(220, 8%, 60%, 0.18);
-    color: var(--text-muted);
   }
 </style>

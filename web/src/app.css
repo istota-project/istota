@@ -74,7 +74,12 @@
   --status-success-bg: #204028;
   --status-info-fg: #9cc7f8;
   --status-info-bg: #20384a;
-  /* A fifth step above danger, for a value that is not merely out of range but
+  /* An off-severity state: part-done rather than late. The immunization badges
+	   need it distinct from the danger/warn/success ramp, or "series incomplete"
+	   reads as a worse "overdue". Purple keeps it off the ramp. */
+  --status-partial-bg: hsla(280, 45%, 65%, 0.22);
+  --status-partial-fg: #d0aeec;
+  /* A step above danger, for a value that is not merely out of range but
 	   clinically critical (the bloodwork flag-C cell). Unlike the four above it
 	   is a *solid saturated fill* rather than a tint, so `-fg` is the text laid
 	   on `-bg` — white in both themes, like --accent-amber-fill-fg. */
@@ -337,6 +342,8 @@
   --status-info-bg: #dbe9fb;
   /* Lighter than the dark theme's near-black block, which lands as a hole on a
 	   white table. --status-critical-fg stays white on both. */
+  --status-partial-bg: hsla(280, 45%, 88%, 0.6);
+  --status-partial-fg: #7c3aed;
   --status-critical-bg: #b3261e;
 
   /* Money direction */

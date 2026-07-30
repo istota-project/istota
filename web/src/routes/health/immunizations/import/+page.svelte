@@ -10,7 +10,8 @@
     type ImmunizationRef,
     type ParsedImmunization,
   } from '$lib/api';
-  import { Select, type SelectOption } from '$lib/components/ui';
+  import { Badge, Select, type SelectOption } from '$lib/components/ui';
+  import { confidenceVariant } from '$lib/health/status';
 
   type Mode = 'file' | 'paste';
   let mode: Mode = $state('file');
@@ -310,7 +311,7 @@
               />
             </td>
             <td>
-              <span class="badge conf-{row.confidence}">{row.confidence}</span>
+              <Badge variant={confidenceVariant(row.confidence)}>{row.confidence}</Badge>
             </td>
             {#if mode === 'paste'}
               <td class="src">{row.source_line}</td>
@@ -591,32 +592,5 @@
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
-  }
-
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.1rem 0.5rem;
-    border-radius: var(--radius-pill);
-    font-weight: 500;
-  }
-  .badge.conf-high {
-    background: hsla(145, 40%, 55%, 0.22);
-    color: var(--status-success-fg);
-  }
-  .badge.conf-medium {
-    background: hsla(35, 60%, 60%, 0.22);
-    color: var(--status-warn-fg);
-  }
-  .badge.conf-low {
-    background: hsla(0, 60%, 55%, 0.28);
-    color: var(--status-danger-fg);
-  }
-  .badge.conf-manual {
-    background: hsla(220, 8%, 60%, 0.18);
-    color: var(--text-muted);
   }
 </style>

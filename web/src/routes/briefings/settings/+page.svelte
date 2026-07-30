@@ -32,11 +32,12 @@
     type SharedBlock,
   } from '$lib/api';
   import {
+    AutocompleteInput,
     Button,
     ConfirmDialog,
+    IconButton,
     KebabMenu,
     Select,
-    AutocompleteInput,
     type KebabItem,
     type SelectOption,
   } from '$lib/components/ui';
@@ -1091,19 +1092,19 @@
                   {#each currentBlocks as block, idx (block.id)}
                     <tr class:expanded={expandedId === block.id}>
                       <td class="col-order actions">
-                        <button
-                          class="icon-btn"
+                        <IconButton
+                          size="sm"
+                          label="Move up"
                           title="Move up"
-                          type="button"
                           disabled={idx === 0}
-                          onclick={() => move(block, -1)}>↑</button
+                          onclick={() => move(block, -1)}>↑</IconButton
                         >
-                        <button
-                          class="icon-btn"
+                        <IconButton
+                          size="sm"
+                          label="Move down"
                           title="Move down"
-                          type="button"
                           disabled={idx === currentBlocks.length - 1}
-                          onclick={() => move(block, 1)}>↓</button
+                          onclick={() => move(block, 1)}>↓</IconButton
                         >
                       </td>
                       <td>

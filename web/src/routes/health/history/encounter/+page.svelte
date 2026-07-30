@@ -16,12 +16,14 @@
     type HealthPanel,
   } from '$lib/api';
   import {
-    Select,
+    Badge,
     ConfirmDialog,
     KebabMenu,
+    Select,
     type KebabItem,
     type SelectOption,
   } from '$lib/components/ui';
+  import { diagnosisStatusVariant } from '$lib/health/status';
   import { linkableConditionOptions } from '$lib/health/conditions';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
@@ -372,7 +374,7 @@
             </div>
             <div class="tags">
               {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
-              <span class="badge status-{d.status}">{d.status}</span>
+              <Badge variant={diagnosisStatusVariant(d.status)}>{d.status}</Badge>
             </div>
             <div class="card-meta">
               {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
@@ -635,29 +637,6 @@
     background: var(--surface-raised);
     padding: 0.05rem 0.45rem;
     border-radius: 0.25rem;
-  }
-
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.1rem 0.5rem;
-    border-radius: var(--radius-pill);
-    font-weight: 500;
-  }
-  .badge.status-active {
-    background: hsla(0, 55%, 60%, 0.22);
-    color: var(--status-danger-fg);
-  }
-  .badge.status-chronic {
-    background: hsla(35, 60%, 60%, 0.22);
-    color: var(--status-warn-fg);
-  }
-  .badge.status-resolved {
-    background: hsla(145, 40%, 55%, 0.18);
-    color: var(--status-success-fg);
   }
 
   .form {

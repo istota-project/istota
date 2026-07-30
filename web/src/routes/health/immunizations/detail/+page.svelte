@@ -11,7 +11,7 @@
     type HealthDocument,
     type Immunization,
   } from '$lib/api';
-  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
+  import { Badge, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
   const routeOptions: SelectOption[] = [
@@ -417,18 +417,6 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 0.35rem;
-  }
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.1rem 0.5rem;
-    border-radius: var(--radius-pill);
-    font-weight: 500;
-    background: hsla(220, 8%, 60%, 0.18);
-    color: var(--text-muted);
   }
   .date {
     font-size: var(--text-xs);

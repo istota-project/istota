@@ -14,7 +14,7 @@
     type Encounter,
     type HealthPanel,
   } from '$lib/api';
-  import { Select, ConfirmDialog, type SelectOption } from '$lib/components/ui';
+  import { Badge, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
 
   // Read the panel id from ?id=… so the page is statically prerenderable
   // under adapter-static; the actual lookup happens client-side.
@@ -250,7 +250,7 @@
             </div>
           {/if}
         {/if}
-        {#if panel.draft}<span class="badge draft">DRAFT — review and confirm</span>{/if}
+        {#if panel.draft}<Badge variant="warn">Draft — review and confirm</Badge>{/if}
       </div>
       <div class="actions">
         {#if !editing}
@@ -458,15 +458,6 @@
   }
   .encounter-link a:hover {
     text-decoration: underline;
-  }
-  .badge {
-    font-size: var(--text-xs);
-    padding: 0.1rem 0.5rem;
-    border-radius: var(--radius-pill);
-  }
-  .badge.draft {
-    background: var(--status-warn-bg);
-    color: var(--status-warn-fg);
   }
   /* Buttons sit under the header (not pinned to the right) at the compact
 	   size used by the main bloodwork header on mobile. */

@@ -70,11 +70,13 @@
   font-size: var(--text-sm);
 }
 .banner.error {
-  background: rgba(204, 102, 102, 0.15);
+  background: var(--status-danger-bg);
   color: var(--status-danger-fg);
 }
+/* `.info` is the success-coloured one: it reports a completed action ("secret
+   saved"), not a neutral note. Named for the slot, coloured for the meaning. */
 .banner.info {
-  background: rgba(110, 184, 132, 0.15);
+  background: var(--status-success-bg);
   color: var(--status-success-fg);
 }
 
@@ -212,32 +214,6 @@
 
 .settings .muted {
   color: var(--text-dim);
-}
-
-.settings .icon-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  cursor: pointer;
-  padding: 0.1rem 0.35rem;
-  border-radius: 0.2rem;
-  font: inherit;
-  font-size: var(--text-base);
-  line-height: 1;
-}
-
-.settings .icon-btn:hover:not(:disabled) {
-  color: var(--text-primary);
-  background: var(--surface-raised);
-}
-
-.settings .icon-btn.danger:hover:not(:disabled) {
-  color: var(--status-danger-fg);
-}
-
-.settings .icon-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
 }
 
 @media (max-width: 768px) {

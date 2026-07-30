@@ -10,6 +10,7 @@
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
+  import { Badge } from '$lib/components/ui';
 
   let loading = $state(true);
   let error = $state('');
@@ -208,7 +209,7 @@
         {#each drafts as p (p.id)}
           <li>
             <a href="{base}/health/bloodwork/panel?id={p.id}">
-              <span class="badge">DRAFT</span>
+              <Badge variant="warn">Draft</Badge>
               <span>{formatDate(p.drawn_at)}</span>
               <span class="muted">{p.lab_name || '—'}</span>
               <span class="muted">{p.panel_type || ''}</span>
@@ -385,13 +386,6 @@
   }
   .drafts a:hover {
     background: var(--surface-raised);
-  }
-  .badge {
-    font-size: var(--text-xs);
-    padding: 0 0.4rem;
-    border-radius: var(--radius-pill);
-    background: var(--status-warn-bg);
-    color: var(--status-warn-fg);
   }
   .muted {
     color: var(--text-muted);

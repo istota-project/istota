@@ -12,7 +12,8 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { KebabMenu } from '$lib/components/ui';
+  import { Badge, KebabMenu } from '$lib/components/ui';
+  import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
 
   let name = $derived(page.url.searchParams.get('name') || '');
   let loading = $state(true);
@@ -75,20 +76,6 @@
     }
   }
 
-  function statusLabel(s: ImmunizationStatus): string {
-    const m: Record<ImmunizationStatus, string> = {
-      up_to_date: 'Up to date',
-      due_soon: 'Due soon',
-      overdue: 'Overdue',
-      series_incomplete: 'Series incomplete',
-      never_recorded: 'Never recorded',
-      expired: 'Expired',
-      risk_based: 'Risk-based',
-      recorded: 'Recorded',
-    };
-    return m[s] ?? s;
-  }
-
   $effect(() => {
     if (name) load();
   });
@@ -116,7 +103,9 @@
   <section class="card coverage-card">
     {#if entry}
       <div class="status-row">
-        <span class="badge status-{entry.status}">{statusLabel(entry.status)}</span>
+        <Badge variant={immunizationStatusVariant(entry.status)}
+          >{immunizationStatusLabel(entry.status)}</Badge
+        >
         <span class="muted small">{ref.category} · {ref.schedule}</span>
       </div>
       <dl class="grid-stats">
@@ -244,10 +233,6 @@
   }
   .btn:hover:not(:disabled) {
     background: var(--surface-raised);
-  }
-  .btn.small {
-    padding: 0.2rem 0.55rem;
-    font-size: var(--text-xs);
   }
 
   .card {
@@ -436,45 +421,6 @@
     white-space: nowrap;
   }
 
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.1rem 0.5rem;
-    border-radius: var(--radius-pill);
-    font-weight: 500;
-  }
-  .badge.status-overdue,
-  .badge.status-expired {
-    background: hsla(0, 60%, 55%, 0.28);
-    color: var(--status-danger-fg);
-  }
-  .badge.status-due_soon {
-    background: hsla(35, 60%, 60%, 0.22);
-    color: var(--status-warn-fg);
-  }
-  /* design-lint-allow-begin: categorical — the neighbouring badges use the
-     status scale (up-to-date / due / overdue), but "series incomplete" is a
-     different axis: the schedule is part-done, not late. The purple keeps it
-     off the severity ramp so it cannot be misread as a worse "overdue". */
-  .badge.status-series_incomplete {
-    background: hsla(280, 45%, 65%, 0.22);
-    color: #d0aeec;
-  }
-  /* design-lint-allow-end */
-  .badge.status-up_to_date {
-    background: hsla(145, 40%, 55%, 0.22);
-    color: var(--status-success-fg);
-  }
-  .badge.status-never_recorded,
-  .badge.status-recorded,
-  .badge.status-risk_based {
-    background: hsla(220, 8%, 60%, 0.18);
-    color: var(--text-muted);
-  }
-
   .empty {
     color: var(--text-dim);
     font-size: var(--text-base);
@@ -496,10 +442,4 @@
   }
 
   /* Light theme overrides — dark rules above untouched. */
-  /* design-lint-allow-begin: light half of the categorical series_incomplete
-     badge above. */
-  :global(:root[data-theme='light']) .badge.status-series_incomplete {
-    color: #7c3aed;
-  }
-  /* design-lint-allow-end */
 </style>
