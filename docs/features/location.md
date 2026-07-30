@@ -26,6 +26,10 @@ Per-user ingest tokens are stored as connected services in the encrypted `secret
 istota secret ensure --user alice --service overland --key ingest_token --value secret-token-here
 ```
 
+The settings page can also mint one for you (`POST /api/settings/secrets/overland/ingest_token/generate`), which returns the token and the assembled webhook URL. That response is the only time either is readable — afterwards the secret is write-only like every other one. Generating again rotates: the previous token stops working immediately, on every device using it, which is also how you revoke a lost phone.
+
+Either way the receiver picks the token up on its next ingest request. It holds the token map in memory and runs in a different process from the web app, so a write leaves a stamped sentinel next to `istota.db` that the receiver checks. Before that existed, a freshly provisioned token was refused until the receiver restarted.
+
 Install the location extras:
 
 ```bash
@@ -57,13 +61,19 @@ Location data lives in per-user SQLite files at `{workspace}/location/data/locat
 
 | Table | Purpose |
 |---|---|
-| `location_pings` | Raw GPS data (carries a `source` column: `overland` for native phone pings, `garmin` for imported watch tracks) |
+| `location_pings` | Raw GPS data (carries a `source` column: `overland` for native phone pings, `garmin` for imported watch tracks; and an optional `client_id` — see below) |
 | `places` | Named geofences with coordinates and radius |
 | `visits` | Detected place visits (arrival/departure) |
 | `location_state` | Per-user tracking state |
 | `dismissed_clusters` | Clusters the user chose not to save as places |
 
 Old pings are cleaned after `location_ping_retention_days` (default 365).
+
+### Re-sent batches
+
+A client that keeps points in a queue and deletes them only once the server acknowledges the batch will re-send a batch whose response was lost. If the point's GeoJSON properties carry a `client_id` — a value the client mints once per point — the second delivery is recognised and writes nothing. Uniqueness is enforced by a partial index, so points without one (stock Overland, the Garmin importer) never collide with each other and genuinely repeated fixes all land.
+
+This matters beyond a duplicate row: every ping at your current place increments the open visit's `ping_count`, so a re-sent batch would otherwise inflate a visit that never grew.
 
 The two Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) remain in the framework `istota.db` for cross-user dedup. Skill subcommands and web routes that need reverse geocoding open a second connection via `location.db.with_geocode_conn(framework_db_path)`.
 
