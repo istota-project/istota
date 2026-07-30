@@ -22,6 +22,7 @@
   import {
     Button,
     ConfirmDialog,
+    HintPopover,
     KebabMenu,
     NoticeBanner,
     type KebabItem,
@@ -48,7 +49,14 @@
   let loginMfa = $state('');
   let loginBusy = $state(false);
   let loginMessage = $state('');
-  let loginErrorKind = $state<'' | 'auth' | 'mfa' | 'cloudflare' | 'captcha' | 'other'>('');
+  let loginErrorKind = $state<
+    '' | 'auth' | 'mfa' | 'cloudflare' | 'captcha' | 'other' | 'challenge'
+  >('');
+  // A pending one-time-code step. Non-empty means the password was *accepted*
+  // and Monarch is waiting on a code, which is a different thing from a failed
+  // login and has to look different.
+  let loginChallenge = $state<'' | 'email_otp' | 'mfa'>('');
+  let loginCode = $state('');
 
   async function loadServices() {
     const mod = await getModuleServices('money');
@@ -87,34 +95,67 @@
     void loadBusiness();
   });
 
+  function resetLogin() {
+    loginChallenge = '';
+    loginCode = '';
+    loginPassword = '';
+    loginMfa = '';
+    loginMessage = '';
+    loginErrorKind = '';
+  }
+
   async function submitLogin() {
     if (!loginEmail || !loginPassword) return;
+    if (loginChallenge && !loginCode) return;
     loginBusy = true;
     loginMessage = '';
     loginErrorKind = '';
+    // On the code step the field carries whichever challenge is live; before
+    // it, the optional MFA box lets someone with an authenticator skip a round
+    // trip. Sending both would be wrong — they are different credentials.
+    const codes =
+      loginChallenge === 'email_otp'
+        ? { emailOtp: loginCode }
+        : loginChallenge === 'mfa'
+          ? { mfaTotp: loginCode }
+          : { mfaTotp: loginMfa };
     try {
-      await monarchLogin(loginEmail, loginPassword, loginMfa);
-      loginMessage = 'Logged in — session_id and csrftoken saved.';
-      loginPassword = '';
-      loginMfa = '';
-      await loadServices();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Login failed';
-      // FastAPI HTTPException details flow through apiFetch's error
-      // message — match on status hints we surface server-side.
-      const lower = msg.toLowerCase();
-      if (msg.includes('MFA required')) {
-        loginErrorKind = 'mfa';
-      } else if (lower.includes('captcha')) {
-        loginErrorKind = 'captcha';
-      } else if (lower.includes('cloudflare')) {
-        loginErrorKind = 'cloudflare';
-      } else if (msg.match(/HTTP 4\d\d/) || msg.includes('rejected')) {
-        loginErrorKind = 'auth';
-      } else {
-        loginErrorKind = 'other';
+      const result = await monarchLogin(loginEmail, loginPassword, codes);
+      if (result.status === 'ok') {
+        resetLogin();
+        loginMessage = 'Logged in — session_id and csrftoken saved.';
+        loginErrorKind = '';
+        await loadServices();
+        return;
       }
-      loginMessage = msg;
+      if (result.status === 'challenge') {
+        // Re-issuing the same challenge means the code we just sent was
+        // refused. Say so, rather than silently re-rendering an identical
+        // form that looks like nothing happened.
+        const retry = loginChallenge === result.kind;
+        loginChallenge = result.kind;
+        loginCode = '';
+        loginErrorKind = retry ? 'auth' : 'challenge';
+        loginMessage = retry
+          ? result.kind === 'email_otp'
+            ? 'That code was not accepted. Codes expire — check for a newer email and try again.'
+            : 'That code was not accepted. Wait for your authenticator to show a new one.'
+          : result.kind === 'email_otp'
+            ? `Email and password accepted. Monarch emailed a 6-digit code to ${loginEmail} — enter it below to finish.`
+            : 'Email and password accepted. Enter the 6-digit code from your authenticator app to finish.';
+        return;
+      }
+      // A real failure: drop the code step, since the password itself is now
+      // in question and re-sending a code against it would only waste one.
+      loginChallenge = '';
+      loginCode = '';
+      loginErrorKind = result.kind === 'blocked' ? 'other' : result.kind;
+      loginMessage = result.message;
+    } catch (e) {
+      loginChallenge = '';
+      loginCode = '';
+      loginErrorKind = 'other';
+      loginMessage = e instanceof Error ? e.message : 'Login failed';
     } finally {
       loginBusy = false;
     }
@@ -290,13 +331,15 @@
           </p>
 
           <details open>
-            <summary>Option A — Login with email and password</summary>
-            <p class="hint">
-              We call Monarch's <code>/auth/login/</code> on your behalf and store the resulting
-              <code>session_id</code>
-              + <code>csrftoken</code>. Your password is used once and never written to disk. If
-              Cloudflare blocks the request from this server, fall back to Option B.
-            </p>
+            <summary>
+              <span class="summary-label">
+                Option A — Login with email and password
+                <HintPopover
+                  label="About logging in with email and password"
+                  text="We sign in to Monarch on your behalf and store the session cookies it returns (session_id and csrftoken). Your password is used once and is never written to disk. If Monarch doesn't recognise this device it emails you a 6-digit code — enter it when asked. If Cloudflare blocks the request from this server, fall back to Option B."
+                />
+              </span>
+            </summary>
             <form
               class="login-form"
               onsubmit={(e) => {
@@ -324,27 +367,61 @@
                   required
                 />
               </label>
-              <label>
-                <span>MFA code <small>(if MFA enabled)</small></span>
-                <input
-                  type="text"
-                  inputmode="numeric"
-                  pattern="[0-9]*"
-                  bind:value={loginMfa}
-                  autocomplete="off"
-                  disabled={loginBusy}
-                  placeholder="6-digit code"
-                />
-              </label>
+              {#if loginChallenge}
+                <label>
+                  <span>
+                    {loginChallenge === 'email_otp' ? 'Emailed code' : 'Authenticator code'}
+                  </span>
+                  <!-- svelte-ignore a11y_autofocus -->
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    maxlength="6"
+                    bind:value={loginCode}
+                    autocomplete="one-time-code"
+                    disabled={loginBusy}
+                    placeholder="6-digit code"
+                    autofocus
+                  />
+                </label>
+              {:else}
+                <label>
+                  <span>MFA code <small>(if MFA enabled)</small></span>
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    bind:value={loginMfa}
+                    autocomplete="off"
+                    disabled={loginBusy}
+                    placeholder="6-digit code"
+                  />
+                </label>
+              {/if}
               <div class="login-actions">
                 <Button
                   variant="primary"
                   size="sm"
-                  disabled={loginBusy || !loginEmail || !loginPassword}
+                  disabled={loginBusy ||
+                    !loginEmail ||
+                    !loginPassword ||
+                    (!!loginChallenge && !loginCode)}
                   type="submit"
                 >
-                  {loginBusy ? 'Logging in…' : 'Login & save cookies'}
+                  {loginBusy
+                    ? loginChallenge
+                      ? 'Verifying…'
+                      : 'Logging in…'
+                    : loginChallenge
+                      ? 'Verify code'
+                      : 'Login & save cookies'}
                 </Button>
+                {#if loginChallenge}
+                  <Button variant="ghost" size="sm" disabled={loginBusy} onclick={resetLogin}>
+                    Start over
+                  </Button>
+                {/if}
               </div>
               {#if loginMessage}
                 <div class="login-status" data-kind={loginErrorKind || 'ok'}>
@@ -685,6 +762,16 @@
     color: var(--text-primary);
   }
 
+  /* The hint trigger rides inside the <summary> so it sits beside the label
+     rather than below the disclosure. `display: inline-flex` on a wrapper —
+     not on the summary itself, which would drop the disclosure triangle in
+     some engines — keeps the "?" aligned to the text baseline box. */
+  .monarch-help .summary-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
   .monarch-help .hint {
     color: var(--text-dim);
     font-size: var(--text-xs);
@@ -745,6 +832,13 @@
   .login-status[data-kind='cloudflare'] {
     color: var(--text-secondary);
     background: var(--surface-base);
+  }
+
+  /* A pending code step is progress, not a problem — it reads as info so a
+     user isn't told their correct password failed. */
+  .login-status[data-kind='challenge'] {
+    color: var(--status-info-fg);
+    border-color: var(--status-info-bg);
   }
 
   .grid th.num,

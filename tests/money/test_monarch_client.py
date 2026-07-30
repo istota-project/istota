@@ -17,9 +17,12 @@ from istota.money._vendor import monarch_client
 from istota.money._vendor.monarch_client import (
     APP_ORIGIN,
     APP_REFERER,
+    CLIENT_PLATFORM,
     CLIENT_VERSION,
+    CSRF_URL,
     GRAPHQL_URL,
-    LOGIN_URL,
+    LEGACY_LOGIN_URL,
+    WEB_LOGIN_URL,
     GRAPHQL_CLIENT_NAME,
     REST_CLIENT_NAME,
     USER_AGENT,
@@ -32,6 +35,7 @@ from istota.money._vendor.monarch_client import (
     MonarchClientOutdated,
     MonarchCloudflareBlocked,
     MonarchCookieAuth,
+    MonarchEmailOTPRequired,
     MonarchMFARequired,
 )
 from istota.money.core.importers import monarch_api
@@ -79,6 +83,9 @@ class _FakeSession:
     _get_responses: list[_FakeResponse] | None = None
     _default_get: _FakeResponse | None = None
     _set_cookies_on_post: dict | None = None
+    _set_cookies_on_get: dict | None = None
+    _csrf_response: _FakeResponse | None = None
+    csrf_get_calls: list[dict] = []
     _cookies_after_post: int = 0
     _captured_jar = None
 
@@ -118,7 +125,25 @@ class _FakeSession:
         )
 
     def get(self, url, *, headers=None):
-        type(self).get_calls.append({"url": url, "headers": dict(headers or {})})
+        call = {"url": url, "headers": dict(headers or {})}
+        # The CSRF bootstrap is routed by URL rather than sharing the version
+        # queue: a login now issues *two* unrelated GETs, and letting the
+        # bootstrap consume a response queued for version discovery would make
+        # the discovery tests assert on the wrong request.
+        if url == CSRF_URL:
+            type(self).csrf_get_calls.append(call)
+            # The bootstrap learns its token from a Set-Cookie, so the fake
+            # seeds the jar the same way the POST does.
+            if (
+                type(self)._set_cookies_on_get
+                and type(self)._captured_jar is not None
+            ):
+                type(self)._captured_jar.update_cookies(
+                    type(self)._set_cookies_on_get,
+                )
+            return type(self)._csrf_response or _FakeResponse(404, "")
+
+        type(self).get_calls.append(call)
         return type(self)._pop(
             type(self)._get_responses, type(self)._default_get,
         )
@@ -152,6 +177,9 @@ def _reset_fake_session():
     _FakeSession._get_responses = None
     _FakeSession._default_get = None
     _FakeSession._set_cookies_on_post = None
+    _FakeSession._set_cookies_on_get = None
+    _FakeSession._csrf_response = None
+    _FakeSession.csrf_get_calls = []
     _FakeSession._cookies_after_post = 0
     _FakeSession._captured_jar = None
 
@@ -159,6 +187,7 @@ def _reset_fake_session():
 def _install_fake_session(
     monkeypatch, *, status=200, body=None, set_cookies=None,
     post_responses=None, get_responses=None, cookies_after_post=0,
+    set_cookies_on_get=None,
 ):
     body = body if body is not None else json.dumps({"data": {}})
     _reset_fake_session()
@@ -175,6 +204,12 @@ def _install_fake_session(
     # which is the shape the pre-existing login tests were written against.
     _FakeSession._default_get = _FakeResponse(404, "")
     _FakeSession._set_cookies_on_post = set_cookies
+    _FakeSession._set_cookies_on_get = set_cookies_on_get
+    # A bootstrap only yields a token when the test seeds one; otherwise it
+    # 404s, which is the "proceed without the header" path.
+    _FakeSession._csrf_response = (
+        _FakeResponse(200, "{}") if set_cookies_on_get else _FakeResponse(404, "")
+    )
     _FakeSession._cookies_after_post = cookies_after_post
     monkeypatch.setattr(
         "istota.money._vendor.monarch_client.aiohttp.ClientSession",
@@ -381,11 +416,11 @@ class TestLoginWithCredentials:
         )
 
         call = _FakeSession.last_call
-        assert call["url"] == LOGIN_URL
-        # Headers Django CSRF + the API expect on /auth/login/.
+        assert call["url"] == WEB_LOGIN_URL
+        # Headers Django CSRF + the API expect on the login route.
         assert call["headers"]["Origin"] == APP_ORIGIN
         assert call["headers"]["Referer"] == APP_REFERER
-        # /auth/login/ rejects with "Please update to the latest version of
+        # The login route rejects with "Please update to the latest version of
         # the app" if these are missing — verified live 2026-05-15.
         assert call["headers"]["monarch-client"]
         assert call["headers"]["monarch-client-version"]
@@ -394,7 +429,9 @@ class TestLoginWithCredentials:
             "username": "alice@example.com",
             "password": "hunter2",
             "supports_mfa": True,
-            "trusted_device": True,
+            "supports_email_otp": True,
+            "supports_recaptcha": True,
+            "web_stay_signed_in": True,
         }
         # Returned cookie pair is what /graphql needs.
         assert isinstance(out, MonarchCookieAuth)
@@ -456,6 +493,175 @@ class TestLoginWithCredentials:
         headers = _FakeSession.last_call["headers"]
         assert headers["monarch-client"] == REST_CLIENT_NAME
         assert headers["monarch-client-version"] == CLIENT_VERSION
+
+
+class TestWebLoginEndpoint:
+    """The endpoint + header set the live web app actually uses.
+
+    Monarch moved browser login from the token endpoint ``/auth/login/`` to the
+    cookie endpoint ``/auth/web/login/``. The old route still exists and still
+    validates credentials, but now refuses a *web* client afterwards with
+    "Please update to the latest version of the app" — regardless of the
+    version sent. That message is what made this look like a stale-version bug
+    for a second time: on 2026-07-30 prod sent ``v1.0.3698``, byte-identical to
+    the value the live bundle hardcodes, and was still refused (ISSUE: Monarch
+    503 on correct credentials).
+
+    Everything pinned here was read off a real browser request capture.
+    """
+
+    @pytest.mark.asyncio
+    async def test_login_posts_to_the_web_cookie_endpoint(self, monkeypatch):
+        """The token endpoint cannot serve this flow: it returns a bearer
+        token, while every downstream call needs the session cookie pair."""
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"id": "u1"}),
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+
+        await MonarchClient.login_with_credentials(
+            email="a@b.com", password="pw",
+        )
+
+        assert _FakeSession.last_call["url"] == WEB_LOGIN_URL
+        assert _FakeSession.last_call["url"] != LEGACY_LOGIN_URL
+
+    @pytest.mark.asyncio
+    async def test_login_sends_platform_and_device_headers(self, monkeypatch):
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"id": "u1"}),
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+
+        await MonarchClient.login_with_credentials(
+            email="a@b.com", password="pw",
+        )
+
+        headers = _FakeSession.last_call["headers"]
+        assert headers["Client-Platform"] == CLIENT_PLATFORM
+        assert headers["Device-UUID"]
+
+    @pytest.mark.asyncio
+    async def test_login_bootstraps_csrf_and_echoes_it(self, monkeypatch):
+        """Django's double-submit check compares the header against the
+        cookie, so the token has to be fetched first and echoed back."""
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"id": "u1"}),
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+            set_cookies_on_get={"csrftoken": "CSRF-BOOT"},
+        )
+
+        await MonarchClient.login_with_credentials(
+            email="a@b.com", password="pw",
+        )
+
+        assert len(_FakeSession.csrf_get_calls) == 1
+        assert _FakeSession.last_call["headers"]["X-CSRFToken"] == "CSRF-BOOT"
+
+    @pytest.mark.asyncio
+    async def test_login_proceeds_when_csrf_bootstrap_fails(self, monkeypatch):
+        """Verified live: the endpoint reaches credential validation without a
+        CSRF token, so a failed bootstrap must not block the attempt —
+        degrading to no header beats refusing to try."""
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"id": "u1"}),
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+
+        out = await MonarchClient.login_with_credentials(
+            email="a@b.com", password="pw",
+        )
+
+        assert "X-CSRFToken" not in _FakeSession.last_call["headers"]
+        assert out.session_id == "s"
+
+    @pytest.mark.asyncio
+    async def test_login_payload_matches_the_web_app(self, monkeypatch):
+        """The app advertises the challenge types it can handle; omitting them
+        lets Monarch pick one we cannot answer."""
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"id": "u1"}),
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+
+        await MonarchClient.login_with_credentials(
+            email="alice@example.com", password="hunter2",
+        )
+
+        assert json.loads(_FakeSession.last_call["data"]) == {
+            "username": "alice@example.com",
+            "password": "hunter2",
+            "supports_mfa": True,
+            "supports_email_otp": True,
+            "supports_recaptcha": True,
+            "web_stay_signed_in": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_email_otp_challenge_is_distinct_from_mfa(self, monkeypatch):
+        """Live-confirmed 2026-07-30: with a device Monarch doesn't know, a
+        *correct* password comes back as this. Reporting it as an auth error
+        tells the user their password is wrong when it isn't."""
+        _install_fake_session(
+            monkeypatch, status=403,
+            body=json.dumps({
+                "detail": "Retrieve the code from your email to continue login.",
+                "error_code": "EMAIL_OTP_REQUIRED",
+            }),
+        )
+
+        with pytest.raises(MonarchEmailOTPRequired):
+            await MonarchClient.login_with_credentials(
+                email="a@b.com", password="pw",
+            )
+
+    @pytest.mark.asyncio
+    async def test_email_otp_is_sent_in_its_own_field(self, monkeypatch):
+        """`email_otp`, not `totp` — Monarch validates them separately, so
+        putting an emailed code in the TOTP field fails as a bad code."""
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"id": "u1"}),
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+
+        await MonarchClient.login_with_credentials(
+            email="a@b.com", password="pw", email_otp="820512",
+        )
+
+        body = json.loads(_FakeSession.last_call["data"])
+        assert body["email_otp"] == "820512"
+        assert "totp" not in body
+
+    @pytest.mark.asyncio
+    async def test_email_otp_challenge_does_not_burn_a_version_retry(
+        self, monkeypatch,
+    ):
+        """The challenge must not be mistaken for a client rejection: retrying
+        would spend a second attempt against a rate-limited endpoint and, worse,
+        invalidate the code the user is in the middle of typing."""
+        _install_fake_session(
+            monkeypatch, status=403,
+            body=json.dumps({
+                "detail": "Retrieve the code from your email to continue login.",
+                "error_code": "EMAIL_OTP_REQUIRED",
+            }),
+        )
+
+        with pytest.raises(MonarchEmailOTPRequired):
+            await MonarchClient.login_with_credentials(
+                email="a@b.com", password="pw",
+            )
+
+        assert len(_FakeSession.post_calls) == 1
+
+    def test_device_uuid_is_stable_per_account(self):
+        """Monarch treats the device id as an identity. A value that changed
+        every call would present each login as a brand-new device, which is
+        what escalates a login into an MFA challenge."""
+        first = monarch_client.device_uuid_for("alice@example.com")
+        assert first == monarch_client.device_uuid_for("  Alice@Example.com  ")
+        assert first != monarch_client.device_uuid_for("bob@example.com")
+        assert len(first) == 36
 
 
 class TestClientVersionDiscovery:

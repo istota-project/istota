@@ -1787,6 +1787,37 @@ const handlers: MockHandler[] = [
       if (!resp) return { error: `Unknown module: ${moduleSvcMatch[1]}` };
       return resp;
     }
+    // Monarch login. Mirrors the real endpoint's challenge flow so the code
+    // step is reachable in dev: any password is "accepted" and then asks for
+    // an emailed code, which must be 6 digits. Without this the mock 404s and
+    // the login form can only ever be seen in its failed state.
+    if (url === '/istota/api/money/monarch/login' && method === 'POST') {
+      const b = (body ?? {}) as Record<string, string>;
+      if (!b.email || !b.password) {
+        return { __status: 400, detail: 'email and password required' };
+      }
+      if (b.password === 'wrong') {
+        return { __status: 401, detail: 'Invalid email and password combination' };
+      }
+      const code = (b.email_otp || '').trim();
+      if (!code) {
+        return {
+          __status: 412,
+          detail: {
+            code: 'email_otp_required',
+            message: 'Retrieve the code from your email to continue login.',
+          },
+        };
+      }
+      if (!/^\d{6}$/.test(code)) {
+        return {
+          __status: 412,
+          detail: { code: 'email_otp_required', message: 'That code was not accepted.' },
+        };
+      }
+      mockSecrets.monarch = { session_id: 'mock-session', csrftoken: 'mock-csrf' };
+      return { ok: true };
+    }
     // Before the generic secret matcher: the generate path is a longer form of
     // the same prefix, and the generic pattern would otherwise claim it and
     // treat "generate" as a key name.

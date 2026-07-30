@@ -672,20 +672,95 @@ export async function deleteSecret(
  * is dropped at the end of the request. The MFA code (if any) is the
  * *current* 6-digit TOTP, not the secret.
  */
+/** What a login attempt can come back as.
+ *
+ * `challenge` is deliberately not an error: Monarch accepted the password and
+ * wants a one-time code, which is a step in the flow rather than a failure.
+ * Throwing for it is what produced the old "login failed" message on a
+ * perfectly good password.
+ */
+export type MonarchLoginResult =
+  | { status: 'ok' }
+  | { status: 'challenge'; kind: 'email_otp' | 'mfa'; message: string }
+  | {
+      status: 'error';
+      kind: 'auth' | 'captcha' | 'cloudflare' | 'blocked' | 'other';
+      message: string;
+    };
+
+/** Read `detail` out of a FastAPI error body, structured or plain. */
+function monarchDetail(body: unknown): { code: string; message: string } {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (detail && typeof detail === 'object') {
+    const d = detail as { code?: unknown; message?: unknown };
+    return {
+      code: typeof d.code === 'string' ? d.code : '',
+      message: typeof d.message === 'string' ? d.message : '',
+    };
+  }
+  return { code: '', message: typeof detail === 'string' ? detail : '' };
+}
+
 export async function monarchLogin(
   email: string,
   password: string,
-  mfaTotp?: string,
-): Promise<{ ok: true }> {
-  return apiFetch(`/money/monarch/login`, {
+  codes: { mfaTotp?: string; emailOtp?: string } = {},
+): Promise<MonarchLoginResult> {
+  // Not apiFetch: this endpoint's whole contract is in the response *body*
+  // (which apiFetch discards) and it answers a wrong Monarch password with
+  // 401 (which apiFetch turns into an AuthError, bouncing the user to the
+  // istota login page as though their own session had expired).
+  const resp = await fetch(`${base}/api/money/monarch/login`, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       email,
       password,
-      mfa_totp: mfaTotp ?? '',
+      mfa_totp: codes.mfaTotp ?? '',
+      email_otp: codes.emailOtp ?? '',
     }),
   });
+
+  if (resp.ok) return { status: 'ok' };
+
+  let body: unknown = null;
+  try {
+    body = await resp.json();
+  } catch {
+    // A proxy error page or an empty body — fall through to the status-based
+    // wording rather than surfacing a JSON parse failure to the user.
+  }
+  const { code, message } = monarchDetail(body);
+
+  if (resp.status === 412) {
+    return {
+      status: 'challenge',
+      kind: code === 'mfa_required' ? 'mfa' : 'email_otp',
+      message,
+    };
+  }
+  if (resp.status === 401) {
+    return {
+      status: 'error',
+      kind: 'auth',
+      message: message || 'Monarch rejected that email and password.',
+    };
+  }
+  if (resp.status === 503) {
+    const lower = message.toLowerCase();
+    const kind = lower.includes('captcha')
+      ? 'captcha'
+      : lower.includes('cloudflare')
+        ? 'cloudflare'
+        : 'blocked';
+    return { status: 'error', kind, message };
+  }
+  return {
+    status: 'error',
+    kind: 'other',
+    message: message || `Login failed (HTTP ${resp.status}).`,
+  };
 }
 
 // --- Phase 6: profile + resources ---

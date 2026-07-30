@@ -4597,9 +4597,10 @@ async def money_monarch_login(
 ) -> dict:
     """Derive Monarch session cookies from email+password and store them.
 
-    Body: ``{"email": "...", "password": "...", "mfa_totp": "..."}``.
-    Only ``email`` and ``password`` are required; ``mfa_totp`` is the
-    *current* 6-digit code (we never store the TOTP secret).
+    Body: ``{"email", "password", "mfa_totp", "email_otp"}``. Only ``email``
+    and ``password`` are required. ``mfa_totp`` is the *current* 6-digit code
+    from an authenticator (we never store the TOTP secret); ``email_otp`` is
+    the code Monarch emails when it doesn't recognise the device.
 
     On success: persists ``session_id`` + ``csrftoken`` to the encrypted
     secrets table and returns ``{"ok": True}``. The plaintext credentials
@@ -4610,7 +4611,9 @@ async def money_monarch_login(
     messages:
     - 400: invalid input (missing email/password, etc.)
     - 401: Monarch rejected the credentials
-    - 412: MFA required, or the supplied code was spent on a retried attempt
+    - 412: a *challenge*, not a failure — the credentials were accepted and a
+      code is needed. ``detail.code`` is ``email_otp_required`` (emailed code)
+      or ``mfa_required`` (authenticator code, or one spent on a retry)
     - 503: three distinct conditions the user can't act on — Cloudflare blocked
       the server IP, Monarch's CAPTCHA gate is up, or the client-version
       contract moved. Only the message text tells them apart.
@@ -4621,32 +4624,56 @@ async def money_monarch_login(
     from . import secrets_store
     from .money._vendor.monarch_client import (
         MonarchAuthError, MonarchCaptchaRequired, MonarchClient,
-        MonarchClientOutdated, MonarchCloudflareBlocked, MonarchMFARequired,
+        MonarchClientOutdated, MonarchCloudflareBlocked,
+        MonarchEmailOTPRequired, MonarchMFARequired,
     )
 
     email = (payload.get("email") or "").strip() if isinstance(payload, dict) else ""
     password = payload.get("password") or "" if isinstance(payload, dict) else ""
     mfa_totp = (payload.get("mfa_totp") or "").strip() if isinstance(payload, dict) else ""
+    email_otp = (payload.get("email_otp") or "").strip() if isinstance(payload, dict) else ""
     if not (email and password):
         raise HTTPException(status_code=400, detail="email and password required")
 
     try:
         auth = await MonarchClient.login_with_credentials(
             email=email, password=password, mfa_totp=mfa_totp or None,
+            email_otp=email_otp or None,
+        )
+    except MonarchEmailOTPRequired as exc:
+        # A challenge, not a failure: the credentials were accepted and Monarch
+        # has emailed a code. The detail is structured so the client can tell
+        # this from a wrong password without matching on prose — the previous
+        # string-matching never worked, because the generic fetch wrapper
+        # surfaces only the status code.
+        raise HTTPException(
+            status_code=412,
+            detail={
+                "code": "email_otp_required",
+                "message": str(exc),
+            },
         )
     except MonarchMFARequired as exc:
         raise HTTPException(
-            status_code=412, detail=f"MFA required: {exc}",
+            status_code=412,
+            detail={
+                "code": "mfa_required",
+                "message": str(exc),
+            },
         )
     except MonarchClientOutdated as exc:
         # 503 because the user can't fix this. The client already re-read the
-        # live version and retried once, so reaching here means the header
-        # contract moved — an operator, not the user, has to act.
-        logger.error("monarch_login_client_outdated msg=%s", exc)
+        # live version and retried once, so reaching here means Monarch's login
+        # contract moved — an operator, not the user, has to act. The message
+        # deliberately doesn't name the version as the cause: Monarch's own
+        # wording says "outdated" for any client identity it won't accept, and
+        # taking that at face value has cost two misdiagnoses.
+        logger.error("monarch_login_client_rejected msg=%s", exc)
         raise HTTPException(
             status_code=503,
-            detail=f"Monarch client is outdated and login is blocked. "
-                   f"This needs an operator-side fix. {exc}",
+            detail=f"Monarch refused this app's login request. Your email and "
+                   f"password were not the problem. This needs an "
+                   f"operator-side fix. {exc}",
         )
     except MonarchCaptchaRequired as exc:
         # Monarch's bot-protection gate is sticky once tripped. There is no

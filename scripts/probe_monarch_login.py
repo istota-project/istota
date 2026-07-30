@@ -36,6 +36,7 @@ from istota.money._vendor.monarch_client import (
     MonarchClientOutdated,
     MonarchCloudflareBlocked,
     MonarchCookieAuth,
+    MonarchEmailOTPRequired,
     MonarchMFARequired,
     fetch_live_client_version,
 )
@@ -50,6 +51,7 @@ async def _probe() -> int:
     email = os.environ.get("MM_EMAIL", "").strip()
     password = os.environ.get("MM_PASSWORD", "")
     mfa_totp = os.environ.get("MM_MFA_TOTP", "").strip() or None
+    email_otp = os.environ.get("MM_EMAIL_OTP", "").strip() or None
 
     if not (email and password):
         print(
@@ -62,6 +64,7 @@ async def _probe() -> int:
         "email": email,
         "password_present": True,
         "mfa_totp_present": bool(mfa_totp),
+        "email_otp_present": bool(email_otp),
     })
 
     # Phase 0 — client version. Reported before the login because a stale
@@ -76,6 +79,7 @@ async def _probe() -> int:
     try:
         auth: MonarchCookieAuth = await MonarchClient.login_with_credentials(
             email=email, password=password, mfa_totp=mfa_totp,
+            email_otp=email_otp,
         )
     except MonarchCloudflareBlocked as exc:
         _emit("login_result", {
@@ -88,14 +92,24 @@ async def _probe() -> int:
             "hint": "Re-run with MM_MFA_TOTP set to the current 6-digit code.",
         })
         return 4
+    except MonarchEmailOTPRequired as exc:
+        _emit("login_result", {
+            "ok": False, "kind": "email_otp_required", "error": str(exc),
+            "hint": "Credentials were accepted. Re-run with MM_EMAIL_OTP set "
+                    "to the 6-digit code Monarch just emailed.",
+        })
+        return 9
     except MonarchClientOutdated as exc:
         # The condition this script exists to diagnose — it used to escape as
         # a bare traceback, which is the least useful outcome for the one
         # failure mode nobody can debug from the UI.
         _emit("login_result", {
             "ok": False, "kind": "client_outdated", "error": str(exc),
-            "hint": "Set CLIENT_VERSION in monarch_client.py, or investigate "
-                    "whether the header contract itself changed.",
+            "hint": "Despite the wording, this is rarely the version — the "
+                    "same 403 covers any unaccepted client identity. Compare "
+                    "the login URL and the full header set against a browser "
+                    "capture of the login request before touching "
+                    "CLIENT_VERSION.",
         })
         return 7
     except MonarchCaptchaRequired as exc:

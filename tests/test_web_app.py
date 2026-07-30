@@ -2077,7 +2077,11 @@ class TestMonarchLoginRoute:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 412
-        assert "MFA required" in resp.json()["detail"]
+        # Structured rather than prose: the client distinguishes the two
+        # challenge kinds (and both from a bad password) on this code.
+        detail = resp.json()["detail"]
+        assert detail["code"] == "mfa_required"
+        assert "MFA token required" in detail["message"]
 
     async def test_login_returns_503_when_cloudflare_blocks(
         self, monkeypatch, tmp_path, client, app,
@@ -2126,6 +2130,60 @@ class TestMonarchLoginRoute:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 401
+
+    async def test_login_returns_structured_email_otp_challenge(
+        self, monkeypatch, tmp_path, client, app,
+    ):
+        """The UI has to tell "we emailed you a code" apart from "wrong
+        password" without matching on prose, so the code is machine-readable."""
+        from istota.money._vendor.monarch_client import MonarchEmailOTPRequired
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        async def fake_login(**kw):
+            raise MonarchEmailOTPRequired("Retrieve the code from your email")
+        monkeypatch.setattr(
+            "istota.money._vendor.monarch_client.MonarchClient.login_with_credentials",
+            staticmethod(fake_login),
+        )
+
+        resp = await client.post(
+            "/istota/api/money/monarch/login",
+            json={"email": "a@b.com", "password": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 412
+        assert resp.json()["detail"]["code"] == "email_otp_required"
+
+    async def test_login_forwards_the_email_otp_code(
+        self, monkeypatch, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        seen: dict = {}
+
+        async def fake_login(**kw):
+            seen.update(kw)
+            from istota.money._vendor.monarch_client import MonarchCookieAuth
+            return MonarchCookieAuth(session_id="s", csrftoken="c")
+        monkeypatch.setattr(
+            "istota.money._vendor.monarch_client.MonarchClient.login_with_credentials",
+            staticmethod(fake_login),
+        )
+
+        resp = await client.post(
+            "/istota/api/money/monarch/login",
+            json={"email": "a@b.com", "password": "x", "email_otp": "820512"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert seen["email_otp"] == "820512"
 
     async def test_login_returns_400_on_missing_fields(
         self, tmp_path, client, app,

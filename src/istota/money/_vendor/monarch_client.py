@@ -12,24 +12,38 @@ Local probing (see PR description) confirmed:
 - The two cookies above are the entire durable credential set;
   ``cf_clearance`` and ``__cf_bm`` are only needed at login time.
 - ``/graphql`` tolerates but ignores the ``monarch-client*`` headers.
-  ``/auth/login/`` does **not** — see below.
+  The login route does **not** — see below.
 
-Client-version gate (2026-07-30). ``/auth/login/`` validates
-``monarch-client-version`` and rejects a stale value with 403 "Please update to
-the latest version of the app to continue login." Three properties make this
-nastier than it looks:
+Login route + client identity (2026-07-30). Browser login lives at
+``/auth/web/login/``, the cookie endpoint. The older ``/auth/login/`` still
+exists and still validates credentials, but it issues a bearer token rather
+than the cookie pair, and it no longer serves web clients at all: it answers a
+valid login with 403 "Please update to the latest version of the app to
+continue login."
+
+That message is about the client *identity*, not the version specifically —
+which is what made this misread twice. Three properties make it nasty:
 
 - It is checked **after** the credentials are validated. A probe with a bogus
   password gets 404 "Invalid email and password combination" and never reaches
-  the gate, so no credential-free test can tell you the version is stale.
+  the gate, so no credential-free test can tell you anything is wrong.
 - The web route turns it into a 503, so the only symptom is a *correct* login
   failing in a way that reads like a Monarch outage.
-- The accepted value moves fast. ``2025.10.0`` was live-verified as accepted in
-  2026-05 (Monarch validated the field loosely then) and had silently stopped
-  working by 2026-07. Observing ``VERSION_URL`` over a single afternoon caught
-  it going ``v1.0.3697`` → ``v1.0.3696`` — it moves within hours, and not
-  always forwards.
+- It names the one cause that isn't the cause. The first fix chased the
+  version; on 2026-07-30 prod sent ``v1.0.3698`` — byte-identical to the value
+  the live bundle hardcodes — and was refused just the same. The endpoint had
+  moved.
 
+So the identity we present is the whole set the live app sends, captured from a
+real browser request: ``Client-Platform``, ``Device-UUID``, ``Monarch-Client``
+and ``Monarch-Client-Version``, plus an ``X-CSRFToken`` bootstrapped from
+``CSRF_URL``. Sending a subset is indistinguishable, from here, from sending a
+stale version.
+
+The version is still validated, and its accepted value moves fast: ``2025.10.0``
+was live-verified in 2026-05 (Monarch validated the field loosely then) and had
+stopped working by 2026-07; watching ``VERSION_URL`` over one afternoon caught
+it going ``v1.0.3697`` → ``v1.0.3696`` — within hours, and not always forwards.
 A compile-time constant therefore cannot be right for long, so it is only a
 cold-start fallback: the version is read from ``VERSION_URL`` *before*
 attempting a login, and re-read once if the attempt is rejected anyway. The
@@ -47,6 +61,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,7 +72,17 @@ logger = logging.getLogger(__name__)
 
 
 GRAPHQL_URL = "https://api.monarch.com/graphql"
-LOGIN_URL = "https://api.monarch.com/auth/login/"
+# Browser login is the *cookie* endpoint. `/auth/web/login/` sets the
+# session_id + csrftoken pair every downstream call needs; the older
+# `/auth/login/` returns a bearer token instead and no longer serves web
+# clients at all (see the module docstring). Kept as a named constant rather
+# than deleted so the retired route is greppable from the logs it produced.
+WEB_LOGIN_URL = "https://api.monarch.com/auth/web/login/"
+LEGACY_LOGIN_URL = "https://api.monarch.com/auth/login/"
+
+# Issues a csrftoken cookie on a plain GET; Django then compares that cookie
+# against the X-CSRFToken header on the login POST.
+CSRF_URL = "https://api.monarch.com/auth/csrf/"
 APP_ORIGIN = "https://app.monarch.com"
 APP_REFERER = "https://app.monarch.com/"
 
@@ -73,6 +98,13 @@ VERSION_URL = "https://app.monarch.com/version.json"
 # too so the request looks like what the app actually issues.
 REST_CLIENT_NAME = "monarch-core-web-app-rest"
 GRAPHQL_CLIENT_NAME = "monarch-core-web-app-graphql"
+
+# Sent alongside the client name/version on every app request.
+CLIENT_PLATFORM = "web"
+
+# Namespace for deriving a stable per-account device id. Random constant with
+# no meaning beyond keeping uuid5 output distinct from other namespaces.
+_DEVICE_UUID_NAMESPACE = uuid.UUID("6f4d9c1e-3b7a-4c25-9d18-0a5e2f7b6c34")
 
 # Cold-start fallback only — used when VERSION_URL can't be reached. Expect it
 # to be stale (the value moved twice on the day it was set); it exists so an
@@ -128,6 +160,17 @@ class MonarchMFARequired(Exception):
     """Raised when /auth/login/ demands a TOTP code we weren't given."""
 
 
+class MonarchEmailOTPRequired(Exception):
+    """Raised when Monarch wants a code it just emailed to the account.
+
+    Distinct from ``MonarchMFARequired``: that one is a TOTP code from an
+    authenticator app, this one is a one-time code sent by email, and they are
+    submitted in different fields. Monarch chooses this challenge when it does
+    not recognise the ``Device-UUID`` — so it fires on the first login from a
+    given install and then stops, provided the device id stays stable.
+    """
+
+
 class MonarchCloudflareBlocked(Exception):
     """Raised when Cloudflare challenges the request before it reaches Monarch.
 
@@ -137,17 +180,20 @@ class MonarchCloudflareBlocked(Exception):
 
 
 class MonarchClientOutdated(Exception):
-    """Raised when /auth/login/ refuses our monarch-client-version *and*
-    discovery couldn't produce one it accepts.
+    """Raised when the login route refuses our client identity.
 
-    ``login_with_credentials`` already resolved the version from
-    ``VERSION_URL`` before attempting, re-read it after the refusal, and
-    retried once if the re-read differed — so reaching this means the manifest
-    is unreachable, or agrees with the value that was just refused. Either way
-    a version bump alone may not be the fix; check whether the header contract
-    changed (``curl https://app.monarch.com/version.json``, and DevTools →
-    Network → any api.monarch.com request → Request Headers).
-    ``scripts/probe_monarch_login.py`` reports both values.
+    Named for the message Monarch sends ("update to the latest version"), which
+    is *not* a reliable description of the cause: the same 403 covers any part
+    of the client identity the server doesn't accept, and has been raised twice
+    while the version we sent exactly matched the live web app's.
+
+    ``login_with_credentials`` already resolved the version from ``VERSION_URL``
+    before attempting, re-read it after the refusal, and retried once if the
+    re-read differed — so reaching this means the version is almost certainly
+    not the problem. Check the rest of the contract first: whether the login
+    URL still matches ``WEB_LOGIN_URL``, and whether the header set still
+    matches what the browser sends (DevTools → Network → the login request →
+    Request Headers). ``scripts/probe_monarch_login.py`` reports the versions.
     """
 
 
@@ -190,6 +236,53 @@ def _looks_like_cloudflare(status: int, body: str) -> bool:
              or "cf-ray" in body.lower()[:2000]
              or "attention required" in body.lower()[:2000])
     )
+
+
+def device_uuid_for(email: str) -> str:
+    """A stable device id for an account.
+
+    Monarch treats ``Device-UUID`` as an identity: the browser generates one
+    once and keeps it, so a returning login looks like a known device. A value
+    that changed per call would present every sync as a new device, which is
+    what turns an ordinary login into an MFA challenge.
+
+    Derived rather than stored so it survives a restart without needing
+    somewhere to persist it, and case/whitespace-normalised so the same account
+    typed differently is still the same device.
+    """
+    return str(uuid.uuid5(_DEVICE_UUID_NAMESPACE, email.strip().lower()))
+
+
+async def _fetch_csrf_token(
+    session: "aiohttp.ClientSession", jar: "aiohttp.CookieJar",
+) -> str | None:
+    """Prime the jar with a csrftoken cookie and hand back its value.
+
+    Best-effort: returns ``None`` on any failure. Live probing showed the login
+    route reaches credential validation without a CSRF token, so a bootstrap
+    failure must not block the attempt — sending no header is strictly better
+    than refusing to try. Shares the caller's session (and its jar) so the
+    cookie it sets is the one the login POST sends back.
+    """
+    try:
+        async with session.get(
+            CSRF_URL,
+            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+        ) as resp:
+            if resp.status != 200:
+                logger.warning(
+                    "monarch_csrf_bootstrap_status status=%s", resp.status,
+                )
+                return None
+    except Exception as exc:  # noqa: BLE001 — bootstrap is best-effort
+        logger.warning("monarch_csrf_bootstrap_failed error=%s", exc)
+        return None
+
+    for cookie in jar:
+        if cookie.key == "csrftoken" and cookie.value:
+            return cookie.value
+    logger.warning("monarch_csrf_bootstrap_no_cookie")
+    return None
 
 
 def _current_client_version() -> str:
@@ -425,9 +518,10 @@ class MonarchClient:
         email: str,
         password: str,
         mfa_totp: str | None = None,
+        email_otp: str | None = None,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECS,
     ) -> MonarchCookieAuth:
-        """Programmatic login via /auth/login/.
+        """Programmatic login via the web login route.
 
         Captures session cookies from the response. Returns the cookie pair
         the rest of this module needs.
@@ -454,6 +548,7 @@ class MonarchClient:
         try:
             return await MonarchClient._login_once(
                 email=email, password=password, mfa_totp=mfa_totp,
+                email_otp=email_otp,
                 timeout_seconds=timeout_seconds, client_version=attempted,
             )
         except MonarchClientOutdated as first_exc:
@@ -463,10 +558,12 @@ class MonarchClient:
                 # or it agrees with what was just refused. Retrying identical
                 # bytes would only burn a second attempt.
                 raise MonarchClientOutdated(
-                    f"Monarch rejected client version {attempted}, which is "
-                    f"the best value available from {VERSION_URL}. The header "
-                    f"contract has likely changed — a version bump alone may "
-                    f"not fix this. Server response: {first_exc}"
+                    f"Monarch refused our client at {WEB_LOGIN_URL} while "
+                    f"sending version {attempted}, which is the best value "
+                    f"available from {VERSION_URL}. The version is therefore "
+                    f"unlikely to be the cause — check the login URL and the "
+                    f"header set against a browser capture. "
+                    f"Server response: {first_exc}"
                 ) from first_exc
 
             logger.warning(
@@ -476,6 +573,7 @@ class MonarchClient:
             try:
                 return await MonarchClient._login_once(
                     email=email, password=password, mfa_totp=mfa_totp,
+                    email_otp=email_otp,
                     timeout_seconds=timeout_seconds, client_version=live,
                 )
             except MonarchClientOutdated as retry_exc:
@@ -484,9 +582,11 @@ class MonarchClient:
                 # above after one attempt instead of repeating this two-attempt
                 # sequence indefinitely.
                 raise MonarchClientOutdated(
-                    f"Monarch rejected both {attempted} and the live version "
-                    f"{live} from {VERSION_URL}. The header contract has "
-                    f"likely changed. Server response: {retry_exc}"
+                    f"Monarch refused our client at {WEB_LOGIN_URL} on both "
+                    f"{attempted} and the live version {live} from "
+                    f"{VERSION_URL}. The version is therefore unlikely to be "
+                    f"the cause — check the login URL and the header set "
+                    f"against a browser capture. Server response: {retry_exc}"
                 ) from retry_exc
             except MonarchAuthError as retry_exc:
                 if not mfa_totp:
@@ -508,22 +608,33 @@ class MonarchClient:
         email: str,
         password: str,
         mfa_totp: str | None,
+        email_otp: str | None,
         timeout_seconds: int,
         client_version: str,
     ) -> MonarchCookieAuth:
-        """One /auth/login/ round trip with a given client version.
+        """One login round trip with a given client version.
 
         Raises the same exception set as ``login_with_credentials``; the
         caller owns the retry policy for ``MonarchClientOutdated``.
         """
+        # Mirrors the web app's own webLogin payload. The `supports_*` flags
+        # advertise which challenge types we can answer — omitting one lets
+        # Monarch choose a challenge this client has no way to complete.
         payload: dict[str, Any] = {
             "username": email,
             "password": password,
             "supports_mfa": True,
-            "trusted_device": True,
+            "supports_email_otp": True,
+            "supports_recaptcha": True,
+            # The app's "stay signed in" box. We want the long-lived session:
+            # this cookie pair is the durable credential a background sync
+            # runs on, so a short session would expire between syncs.
+            "web_stay_signed_in": True,
         }
         if mfa_totp:
             payload["totp"] = mfa_totp
+        if email_otp:
+            payload["email_otp"] = email_otp
 
         # CookieJar(unsafe=True) so cookies set by api.monarch.com (an IP-less
         # public host where aiohttp's default jar drops cookies) actually stick.
@@ -535,8 +646,12 @@ class MonarchClient:
             "User-Agent": USER_AGENT,
             "Origin": APP_ORIGIN,
             "Referer": APP_REFERER,
-            # Required at /auth/login/ — the API rejects missing/stale clients
-            # with "Please update to the latest version of the app".
+            # The login route rejects a client it doesn't recognise with
+            # "Please update to the latest version of the app". That message
+            # covers the whole client identity, not just the version — all
+            # four of these are part of what the live app presents.
+            "Client-Platform": CLIENT_PLATFORM,
+            "Device-UUID": device_uuid_for(email),
             "monarch-client": REST_CLIENT_NAME,
             "monarch-client-version": client_version,
         }
@@ -547,8 +662,12 @@ class MonarchClient:
             max_line_size=_MAX_HEADER_FIELD_BYTES,
             max_field_size=_MAX_HEADER_FIELD_BYTES,
         ) as session:
+            csrftoken = await _fetch_csrf_token(session, jar)
+            if csrftoken:
+                headers["X-CSRFToken"] = csrftoken
+
             async with session.post(
-                LOGIN_URL, data=body, headers=headers,
+                WEB_LOGIN_URL, data=body, headers=headers,
             ) as resp:
                 text = await resp.text()
                 snippet = text[:_MAX_BODY_LOG_CHARS]
@@ -571,9 +690,24 @@ class MonarchClient:
                     #  - Everything else (bad creds, etc.)
                     parsed = _safe_json(text)
                     detail = parsed.get("detail", "") if text else ""
-                    if "mfa" in detail.lower() or parsed.get(
-                        "error_code", "",
-                    ) == "REQUIRES_MFA":
+                    error_code = parsed.get("error_code", "")
+                    # Monarch emails a one-time code when it doesn't recognise
+                    # the device. Distinct from TOTP: different field, and the
+                    # user has to go and fetch it rather than read it off an
+                    # authenticator. Checked before the MFA branch because the
+                    # detail text ("Retrieve the code from your email to
+                    # continue login") contains no "mfa" marker but the two
+                    # challenges are otherwise easy to conflate.
+                    if error_code == "EMAIL_OTP_REQUIRED":
+                        logger.warning(
+                            "monarch_login_email_otp_required body=%s", snippet,
+                        )
+                        raise MonarchEmailOTPRequired(
+                            detail or "Email one-time code required"
+                        )
+                    if "mfa" in detail.lower() or error_code in (
+                        "REQUIRES_MFA", "MFA_REQUIRED",
+                    ):
                         logger.warning(
                             "monarch_login_mfa_required body=%s", snippet,
                         )
