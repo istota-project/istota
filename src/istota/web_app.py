@@ -4521,8 +4521,10 @@ async def money_monarch_login(
     messages:
     - 400: invalid input (missing email/password, etc.)
     - 401: Monarch rejected the credentials
-    - 412: MFA required and no code supplied
-    - 503: Cloudflare blocked (server IP can't reach login endpoint)
+    - 412: MFA required, or the supplied code was spent on a retried attempt
+    - 503: three distinct conditions the user can't act on — Cloudflare blocked
+      the server IP, Monarch's CAPTCHA gate is up, or the client-version
+      contract moved. Only the message text tells them apart.
     """
     import asyncio
     from fastapi import HTTPException
@@ -4548,8 +4550,9 @@ async def money_monarch_login(
             status_code=412, detail=f"MFA required: {exc}",
         )
     except MonarchClientOutdated as exc:
-        # 503 because the user can't fix this — the operator needs to bump
-        # CLIENT_VERSION in the source. Surface it loudly.
+        # 503 because the user can't fix this. The client already re-read the
+        # live version and retried once, so reaching here means the header
+        # contract moved — an operator, not the user, has to act.
         logger.error("monarch_login_client_outdated msg=%s", exc)
         raise HTTPException(
             status_code=503,
