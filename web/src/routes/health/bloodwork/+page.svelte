@@ -204,7 +204,7 @@
 {:else if matrix}
   {#if drafts.length > 0}
     <section class="drafts">
-      <h2>Pending review</h2>
+      <h2 class="micro-label">Pending review</h2>
       <ul>
         {#each drafts as p (p.id)}
           <li>
@@ -316,12 +316,7 @@
     margin-bottom: 1rem;
   }
   .drafts h2 {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
     margin: 0 0 0.5rem;
-    font-weight: 500;
   }
   .drafts ul {
     list-style: none;
@@ -347,12 +342,6 @@
   }
   .muted {
     color: var(--text-muted);
-  }
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
   }
 
   .spreadsheet {

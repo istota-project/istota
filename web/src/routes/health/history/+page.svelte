@@ -373,7 +373,7 @@
     </section>
 
     <aside class="sidebar">
-      <h2>Active conditions</h2>
+      <h2 class="micro-label">Active conditions</h2>
       {#if active.length === 0 && chronic.length === 0}
         <div class="empty small">No active conditions on file.</div>
       {:else}
@@ -698,11 +698,6 @@
   }
   .sidebar h2 {
     margin: 0 0 0.5rem;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-    font-weight: 500;
   }
   .sidebar h3 {
     margin: 0.85rem 0 0.4rem;
@@ -798,16 +793,6 @@
     color: var(--status-danger-fg);
   }
 
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
-  .empty.small {
-    padding: 0.75rem 0;
-    font-size: var(--text-sm);
-  }
   /* design-lint-allow: not a color — a theme-conditional `filter` on a UA
      pseudo-element we cannot restyle directly. The icon ships dark, so the dark
      theme inverts it and the light theme must undo that. */

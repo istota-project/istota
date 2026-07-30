@@ -502,13 +502,6 @@
     color: var(--text-dim);
   }
 
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
-
   @media (max-width: 640px) {
     .txn-account {
       display: none;

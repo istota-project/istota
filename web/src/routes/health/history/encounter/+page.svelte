@@ -341,14 +341,14 @@
 
     {#if encounter.notes}
       <section class="notes">
-        <h2>Notes</h2>
+        <h2 class="micro-label">Notes</h2>
         <p>{encounter.notes}</p>
       </section>
     {/if}
   {/if}
 
   <section class="related">
-    <h2>Linked diagnoses</h2>
+    <h2 class="micro-label">Linked diagnoses</h2>
     {#if diagnoses.length === 0}
       <div class="empty small">None.</div>
     {:else}
@@ -397,7 +397,7 @@
   </section>
 
   <section class="related">
-    <h2>Linked panels</h2>
+    <h2 class="micro-label">Linked panels</h2>
     {#if panels.length === 0}
       <div class="empty small">None.</div>
     {:else}
@@ -422,7 +422,7 @@
   </section>
 
   <section class="related">
-    <h2>Documents</h2>
+    <h2 class="micro-label">Documents</h2>
     {#if encounter}
       <DocumentList entityType="encounter" entityId={encounter.id} {documents} />
     {/if}
@@ -474,11 +474,6 @@
     margin: 0;
   }
   h2 {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-    font-weight: 500;
     margin: 1.25rem 0 0.5rem;
   }
 
@@ -647,16 +642,6 @@
     gap: 0.5rem;
   }
 
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
-  .empty.small {
-    padding: 0.5rem 0;
-    font-size: var(--text-sm);
-  }
   /* The diagnoses grid keeps the shared grid geometry but moves the card
      chrome from the anchor onto the <li>, since the card holds a kebab
      alongside the name rather than being one big link. */

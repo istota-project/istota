@@ -674,12 +674,6 @@
     background: var(--status-critical-bg);
     color: var(--status-critical-fg);
   }
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
 
   /* Light theme overrides — dark rules above untouched. */
 </style>

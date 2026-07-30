@@ -235,7 +235,7 @@
   <div class="banner error">{error}</div>
 {:else}
   <section class="coverage">
-    <h2>Coverage</h2>
+    <h2 class="micro-label">Coverage</h2>
     <ul class="cards card-grid">
       {#each visibleCoverage as c (c.name)}
         <li>
@@ -326,7 +326,7 @@
 
   <section class="history">
     <div class="history-head">
-      <h2>History</h2>
+      <h2 class="micro-label">History</h2>
       <input
         type="text"
         class="filter-input"
@@ -468,11 +468,6 @@
   .coverage h2,
   .history h2 {
     margin: 0 0 0.5rem;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-    font-weight: 500;
   }
   .coverage h3 {
     margin: 0.85rem 0 0.4rem;
@@ -575,16 +570,5 @@
   a.link:hover {
     color: var(--accent-hover);
     border-bottom-color: var(--text-muted);
-  }
-
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
-  .empty.small {
-    padding: 0.75rem 0;
-    font-size: var(--text-sm);
   }
 </style>

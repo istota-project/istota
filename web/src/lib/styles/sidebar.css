@@ -20,7 +20,7 @@
 
    The item rows *below* the views (`.feed-btn`, `.room-btn`) are per-sidebar
    and intentionally not shared: feeds runs its list at --text-sm, chat at
-   --text-base. */
+   --text-base. Their *container* is shared, though — see `.list-row`. */
 .sidebar .views {
   display: flex;
   flex-direction: column;
@@ -58,4 +58,22 @@
 .sidebar .view-name {
   flex: 1;
   min-width: 0;
+}
+
+/* The row a sidebar item sits in: the item button plus whatever trails it (a
+   count chip, a kebab). Chat's `.room-row` and the briefings archive's
+   `.archive-row` were this rule twice, byte for byte, hover included. The
+   button inside stays per-sidebar for the type-size reason above. */
+.sidebar .list-row {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  border-radius: 0.3rem;
+  padding-right: 0.2rem;
+  transition: background var(--transition-fast);
+}
+
+.sidebar .list-row:hover,
+.sidebar .list-row.active {
+  background: var(--surface-raised);
 }

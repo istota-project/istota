@@ -410,7 +410,7 @@
   <div class="banner error">{error}</div>
 {:else}
   <section>
-    <h2>Active <span class="count">{active.length}</span></h2>
+    <h2 class="micro-label">Active <span class="count">{active.length}</span></h2>
     {#if active.length === 0}
       <div class="empty small">No active conditions on file.</div>
     {:else}
@@ -423,7 +423,7 @@
   </section>
 
   <section>
-    <h2>Chronic <span class="count">{chronic.length}</span></h2>
+    <h2 class="micro-label">Chronic <span class="count">{chronic.length}</span></h2>
     {#if chronic.length === 0}
       <div class="empty small">No chronic conditions on file.</div>
     {:else}
@@ -436,7 +436,7 @@
   </section>
 
   <section>
-    <h2>
+    <h2 class="micro-label">
       Resolved <span class="count">{resolved.length}</span>
       <button class="toggle" type="button" onclick={() => (showResolved = !showResolved)}>
         {showResolved ? 'hide' : 'show'}
@@ -515,11 +515,6 @@
     margin: 0;
   }
   h2 {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-    font-weight: 500;
     margin: 1.5rem 0 0.5rem;
     display: flex;
     align-items: center;
@@ -757,16 +752,6 @@
     line-height: 1.45;
   }
 
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
-  .empty.small {
-    padding: 0.5rem 0;
-    font-size: var(--text-sm);
-  }
   .docs {
     /* A button does not inherit font, so without this the em-relative
        sizing resolves against the UA default and stops tracking the

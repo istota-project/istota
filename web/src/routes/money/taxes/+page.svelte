@@ -669,13 +669,6 @@
     line-height: 1.5;
   }
 
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
-
   .empty code {
     background: var(--surface-raised);
     padding: 0.1rem 0.3rem;

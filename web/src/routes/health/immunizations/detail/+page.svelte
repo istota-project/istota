@@ -242,7 +242,7 @@
 
   {#if encounter}
     <section class="linked">
-      <h2>Linked encounter</h2>
+      <h2 class="micro-label">Linked encounter</h2>
       <a class="card linked-card" href="{base}/health/history/encounter?id={encounter.id}">
         <div class="card-head">
           <span class="badge type-other">{encounter.encounter_type}</span>
@@ -301,7 +301,9 @@
     grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
     gap: 0.65rem;
   }
-  :global(.field.full) {
+  /* Scoped to this page's own form: a bare :global(.field.full) leaks
+     app-wide, which is the hazard the money report pages already hit. */
+  .form :global(.field.full) {
     grid-column: 1 / -1;
   }
   input,
@@ -327,23 +329,12 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
   }
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
 
   .linked {
     margin-top: 1.25rem;
   }
   .linked h2 {
     margin: 0 0 0.5rem;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-    font-weight: 500;
   }
   .linked-card {
     display: block;

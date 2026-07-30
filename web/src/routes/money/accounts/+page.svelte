@@ -184,11 +184,4 @@
   .account-balance.expense {
     color: var(--money-expense);
   }
-
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
 </style>

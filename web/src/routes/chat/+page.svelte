@@ -561,7 +561,7 @@
         {@const isTalk = room.origin === 'talk' || !!room.talk_token}
         {@const unreadCount = room.unread_count ?? 0}
         {@const unread = unreadCount > 0 && room.id !== $activeRoomId}
-        <div class="room-row" class:active={room.id === $activeRoomId}>
+        <div class="list-row room-row" class:active={room.id === $activeRoomId}>
           <button class="room-btn" onclick={() => selectRoom(room.id)} type="button">
             {#if isTalk}
               <!-- Leading origin glyph: a tinted cloud marks a room mirrored
@@ -1001,21 +1001,6 @@
     font-size: var(--text-sm);
     padding: 0.35rem 0.5rem;
     border-radius: 0.35rem;
-  }
-
-  .room-row {
-    display: flex;
-    align-items: center;
-    gap: 0.15rem;
-    border-radius: 0.3rem;
-    padding-right: 0.2rem;
-    transition: background var(--transition-fast);
-  }
-  .room-row:hover {
-    background: var(--surface-raised);
-  }
-  .room-row.active {
-    background: var(--surface-raised);
   }
 
   .room-btn {

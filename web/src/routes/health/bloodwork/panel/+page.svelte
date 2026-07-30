@@ -548,10 +548,4 @@
     font-size: var(--text-xs);
     color: var(--text-muted);
   }
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
 </style>

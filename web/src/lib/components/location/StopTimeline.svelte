@@ -45,7 +45,7 @@
     {/each}
   </div>
 {:else}
-  <div class="empty">No stops today</div>
+  <div class="empty small">No stops today</div>
 {/if}
 
 <style>
@@ -119,11 +119,5 @@
   .stop-duration {
     color: var(--text-dim);
     margin-left: 0.35rem;
-  }
-
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-sm);
-    padding: 0.5rem;
   }
 </style>

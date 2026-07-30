@@ -75,7 +75,7 @@
   {:else if loading || $briefingArchiveCount === null}
     <p class="center-msg">Loading…</p>
   {:else}
-    <div class="empty">
+    <div class="empty-state">
       <h1>No briefings yet</h1>
       <p class="muted">
         Once a scheduled briefing runs it will appear here. Set up the schedule and content blocks
@@ -181,11 +181,11 @@
     color: var(--status-danger-fg);
   }
 
-  .empty {
+  .empty-state {
     max-width: 32rem;
   }
 
-  .empty h1 {
+  .empty-state h1 {
     font-size: 1.1rem;
     margin: 0 0 0.5rem;
   }

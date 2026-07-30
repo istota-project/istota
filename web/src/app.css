@@ -370,6 +370,59 @@
   box-sizing: border-box;
 }
 
+/* The small uppercase heading over a section, a sidebar list, or a definition
+   term. Written out in some form 43 times across 23 files — the typography was
+   consistent (dim, --text-xs, uppercase, 0.04-0.05em) and only the margins
+   varied, so the type lives here and the spacing stays at the call site.
+
+   Deliberately typography-only: a section heading and a <dt> want different
+   space around them, and folding that in is what produced the variants. */
+.micro-label {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* "Nothing here yet" inside a card or a section — a list with no rows, a
+   panel with no data. Fourteen files carried this verbatim.
+
+   Distinct from .center-msg below, which is for a state that IS the whole
+   pane. `.small` is the tighter variant for a sub-list inside a card; the
+   three copies at 0.75rem win over the two at 0.5rem. */
+.empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-base);
+  padding: 2rem 1rem;
+  text-align: center;
+}
+
+.empty.small {
+  padding: 0.75rem 0;
+  font-size: var(--text-sm);
+}
+
+/* An inline "working…" spinner, beside its label. Declared in three files,
+   and @keyframes is scoped per component in Svelte — so the three were three
+   separate animations driving three separate rules. */
+.spinner {
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--text-muted);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* A tinted inline message box: a form error, a "module disabled" note, the
    result of an action. Global rather than scoped to a settings page — the same
    shape was independently reimplemented as `.msg` on twelve health pages, each

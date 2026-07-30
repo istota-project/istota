@@ -365,20 +365,6 @@
     align-items: center;
     gap: 0.5rem;
   }
-  .spinner {
-    display: inline-block;
-    width: 0.85rem;
-    height: 0.85rem;
-    border: 2px solid var(--border-default);
-    border-top-color: var(--text-muted);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
   .split {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -409,12 +395,6 @@
   }
   .del:hover {
     color: var(--status-danger-fg);
-  }
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
   }
   .source {
     background: var(--surface-card);

@@ -139,7 +139,7 @@
 
   {#if explainerLoading}
     <section class="card explainer placeholder">
-      <h2>About this vaccine</h2>
+      <h2 class="micro-label">About this vaccine</h2>
       <p class="muted">Loading…</p>
     </section>
   {:else if explainer && explainer.summary}
@@ -166,7 +166,7 @@
   {/if}
 
   <section class="history">
-    <h2>Dose history</h2>
+    <h2 class="micro-label">Dose history</h2>
     {#if history.length === 0}
       <div class="empty small">No doses recorded yet.</div>
     {:else}
@@ -268,11 +268,6 @@
 
   .explainer h2 {
     margin: 0 0 0.5rem;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-    font-weight: 500;
   }
   details.explainer {
     /* Zero the panel's own padding — via the hook, for the same specificity
@@ -364,11 +359,6 @@
 
   .history h2 {
     margin: 0 0 0.5rem;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-    font-weight: 500;
   }
   td.notes {
     max-width: 260px;
@@ -381,17 +371,6 @@
   th.row-actions {
     text-align: right;
     white-space: nowrap;
-  }
-
-  .empty {
-    color: var(--text-dim);
-    font-size: var(--text-base);
-    padding: 2rem 1rem;
-    text-align: center;
-  }
-  .empty.small {
-    padding: 0.75rem 0;
-    font-size: var(--text-sm);
   }
 
   /* Light theme overrides — dark rules above untouched. */

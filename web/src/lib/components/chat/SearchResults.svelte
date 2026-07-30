@@ -46,7 +46,7 @@
 
 <div class="search-results">
   {#if data.results.length === 0}
-    <p class="empty">No results for “{data.query}”.</p>
+    <p class="empty small">No results for “{data.query}”.</p>
   {:else}
     <p class="head">
       {data.results.length} result{data.results.length === 1 ? '' : 's'} for “{data.query}”
@@ -102,11 +102,6 @@
     max-width: 46rem;
   }
   .head,
-  .empty {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
   .cards {
     list-style: none;
     margin: 0;

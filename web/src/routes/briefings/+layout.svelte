@@ -212,7 +212,7 @@
           <p class="sidebar-empty">No briefings yet.</p>
         {:else}
           {#each items as item (item.id)}
-            <div class="archive-row" class:active={item.id === $selectedBriefingId}>
+            <div class="list-row archive-row" class:active={item.id === $selectedBriefingId}>
               <button class="archive-btn" type="button" onclick={() => pickItem(item.id)}>
                 <span class="archive-subject">{item.subject || item.briefing_name}</span>
                 <span class="archive-date">{fmtDate(item.generated_at)}</span>
@@ -249,22 +249,9 @@
 
 <style>
   /* Row = clickable title button (flex:1) + a kebab sibling. A KebabMenu is
-     itself a <button>, so it can't be nested inside .archive-btn; hover/active
-     background lives on the row (mirrors the chat sidebar's .room-row). */
-  .archive-row {
-    display: flex;
-    align-items: center;
-    gap: 0.15rem;
-    border-radius: 0.3rem;
-    padding-right: 0.2rem;
-    transition: background var(--transition-fast);
-  }
-
-  .archive-row:hover,
-  .archive-row.active {
-    background: var(--surface-raised);
-  }
-
+     itself a <button>, so it can't be nested inside .archive-btn; the row's
+     layout and hover come from `.sidebar .list-row` in lib/styles/sidebar.css,
+     shared with the chat sidebar. */
   .archive-btn {
     display: flex;
     flex-direction: column;

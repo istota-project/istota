@@ -220,7 +220,7 @@
 
 {#if parsed.length > 0}
   <div class="review-head">
-    <h2>Review {parsed.length} row{parsed.length === 1 ? '' : 's'}</h2>
+    <h2 class="micro-label">Review {parsed.length} row{parsed.length === 1 ? '' : 's'}</h2>
     {#if extractMode}
       <span class="meta">Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span>
     {/if}
@@ -304,11 +304,6 @@
     margin: 0;
   }
   h2 {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-    font-weight: 500;
     margin: 0;
   }
 
@@ -386,20 +381,6 @@
     gap: 0.5rem;
     color: var(--text-muted);
     font-size: var(--text-sm);
-  }
-  .spinner {
-    display: inline-block;
-    width: 0.85rem;
-    height: 0.85rem;
-    border: 2px solid var(--border-default);
-    border-top-color: var(--text-muted);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 
   .attach-note {
