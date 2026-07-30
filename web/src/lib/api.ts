@@ -624,6 +624,24 @@ export async function getLocationSettingsInfo(): Promise<LocationSettingsInfo> {
   return apiFetch<LocationSettingsInfo>('/location/settings-info');
 }
 
+export interface GeneratedIngestToken {
+  ok: boolean;
+  /** Returned once and never again — the secret is write-only from here on. */
+  token: string;
+  webhook_url: string;
+}
+
+/**
+ * Mint a location ingest token, rotating any existing one.
+ *
+ * The only call in this file whose response carries a secret. The token has to
+ * reach a phone, and the alternative is the user transcribing 43 random
+ * characters; the page renders it as a QR and never asks for it again.
+ */
+export async function generateIngestToken(): Promise<GeneratedIngestToken> {
+  return apiFetch('/settings/secrets/overland/ingest_token/generate', { method: 'POST' });
+}
+
 export async function setSecret(
   service: string,
   key: string,

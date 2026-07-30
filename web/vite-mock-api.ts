@@ -1787,6 +1787,32 @@ const handlers: MockHandler[] = [
       if (!resp) return { error: `Unknown module: ${moduleSvcMatch[1]}` };
       return resp;
     }
+    // Before the generic secret matcher: the generate path is a longer form of
+    // the same prefix, and the generic pattern would otherwise claim it and
+    // treat "generate" as a key name.
+    if (
+      url === '/istota/api/settings/secrets/overland/ingest_token/generate' &&
+      method === 'POST'
+    ) {
+      if (mockDisabledModules.has('location')) {
+        return {
+          error:
+            'The location module is off for this user, so an ingest token would not be accepted.',
+        };
+      }
+      // Shaped like the real one: 43 url-safe characters, returned once.
+      const token = Array.from({ length: 43 }, () =>
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'.charAt(
+          Math.floor(Math.random() * 64),
+        ),
+      ).join('');
+      mockSecrets.overland = { ...(mockSecrets.overland ?? {}), ingest_token: token };
+      return {
+        ok: true,
+        token,
+        webhook_url: `https://example.invalid/webhooks/location?token=${token}`,
+      };
+    }
     const m = url.match(/^\/istota\/api\/settings\/secrets\/([^/]+)\/([^/?]+)$/);
     if (!m) return undefined;
     const [, service, key] = m;

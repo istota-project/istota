@@ -1,0 +1,309 @@
+<script lang="ts">
+  /**
+   * The background tracker on *this* device.
+   *
+   * Everything here reads and writes the native plugin directly — no server
+   * round trip, because there is no server-side place to put it. One account
+   * can have two phones, so a tracker setting kept in the profile would have
+   * the two devices overwriting each other's row.
+   *
+   * In a browser the card renders one line saying so, rather than nothing at
+   * all: a user who set this up on their phone and later opens the page on a
+   * laptop would otherwise find the section simply missing and have no way to
+   * tell whether that is by design.
+   */
+  import { onMount } from 'svelte';
+  import { SettingsCard, SettingsField } from '$lib/components/settings';
+  import { Button, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    trackerAvailable,
+    scannerAvailable,
+    trackerStatus,
+    startTracking,
+    stopTracking,
+    sendNow,
+    requestPermissions,
+    openAppSettings,
+    configureTracker,
+    scanAndDecode,
+    type TrackerStatus,
+    type TrackingProfile,
+  } from '$lib/platform/nativeLocation';
+
+  let status: TrackerStatus | null = $state(null);
+  let busy = $state(false);
+  let error = $state('');
+  let note = $state('');
+
+  const available = trackerAvailable();
+  const canScan = scannerAvailable();
+
+  const PROFILES: SelectOption[] = [
+    { value: 'detailed', label: 'Detailed' },
+    { value: 'places', label: 'Places' },
+  ];
+
+  const PROFILE_HINT: Record<TrackingProfile, string> = {
+    detailed: 'A continuous line on the map. Sends every minute, at a battery cost.',
+    places: 'Arrivals and departures only — no trace between them. Sends every five minutes.',
+  };
+
+  /**
+   * Every action funnels through here so the readout can never drift from the
+   * device: each one ends by adopting whatever the plugin last reported, and a
+   * refusal (authorization missing, camera denied) lands in one place.
+   */
+  async function run(action: () => Promise<TrackerStatus | null | void>) {
+    busy = true;
+    error = '';
+    try {
+      const result = await action();
+      status = result ?? (await trackerStatus());
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function refresh() {
+    await run(() => trackerStatus());
+  }
+
+  async function scan() {
+    note = '';
+    await run(async () => {
+      const result = await scanAndDecode();
+      if (!result.ok) {
+        // A cancel is a decision, not a failure — say nothing about it.
+        if (result.reason === 'unrecognised') {
+          error = 'That code is not an Istota provisioning code.';
+        }
+        return null;
+      }
+      await configureTracker(result.provisioning);
+      note = `Provisioned against ${result.provisioning.endpoint}.`;
+      return null;
+    });
+  }
+
+  async function flush() {
+    note = '';
+    await run(async () => {
+      const sent = await sendNow();
+      note = sent === 0 ? 'Nothing queued to send.' : `Sent ${sent} point${sent === 1 ? '' : 's'}.`;
+      return null;
+    });
+  }
+
+  /**
+   * iOS refuses the Always prompt as a first ask, so this is normally two
+   * taps: When In Use, then Always. The button label follows the state rather
+   * than pretending one tap will finish it.
+   */
+  async function askPermission() {
+    await run(async () => {
+      await requestPermissions();
+      return null;
+    });
+  }
+
+  function formatSent(iso: string | null): string {
+    if (!iso) return 'never';
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime())) return iso;
+    const minutes = Math.round((Date.now() - at.getTime()) / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours} h ago`;
+    return at.toLocaleString();
+  }
+
+  const authorizationWarning = $derived.by(() => {
+    if (!status) return '';
+    if (status.authorization === 'denied')
+      return 'Location access is denied. Only iOS Settings can restore it.';
+    if (status.authorization === 'whenInUse')
+      return 'Only granted while the app is open, so nothing is logged in the background.';
+    if (status.authorization === 'notDetermined')
+      return 'Location access has not been granted yet.';
+    return '';
+  });
+
+  onMount(() => {
+    if (available) void refresh();
+  });
+</script>
+
+{#if !available}
+  <SettingsCard title="This device">
+    <p class="hint">
+      Background tracking is set up per device, in the Istota app. Open the app on the phone you
+      want to track and come back to this page there.
+    </p>
+  </SettingsCard>
+{:else}
+  <SettingsCard title="This device" description="Background tracking on this phone.">
+    {#snippet actions()}
+      <Button variant="ghost" size="sm" onclick={refresh} disabled={busy}>Refresh</Button>
+    {/snippet}
+
+    {#if error}<p class="tracker-error">{error}</p>{/if}
+    {#if note}<p class="tracker-note">{note}</p>{/if}
+
+    {#if !status}
+      <p class="hint">Reading the tracker…</p>
+    {:else if !status.configured}
+      <p class="hint">
+        Not provisioned yet. Generate a token above on another screen, then scan the code it shows.
+      </p>
+      {#if canScan}
+        <div class="tracker-actions">
+          <Button variant="primary" size="sm" onclick={scan} disabled={busy}>
+            Scan provisioning code
+          </Button>
+        </div>
+      {:else}
+        <p class="tracker-warning">
+          This version of the app cannot scan a code. Update it from TestFlight.
+        </p>
+      {/if}
+    {:else}
+      <SettingsField label="Tracking" warning={authorizationWarning}>
+        <div class="tracker-row">
+          <span class="tracker-state" class:on={status.tracking}>
+            {status.tracking ? 'On' : 'Off'}
+          </span>
+          {#if status.authorization === 'denied'}
+            <Button variant="secondary" size="sm" onclick={() => run(openAppSettings)}>
+              Open iOS Settings
+            </Button>
+          {:else if status.authorization !== 'always'}
+            <Button variant="secondary" size="sm" onclick={askPermission} disabled={busy}>
+              {status.authorization === 'whenInUse' ? 'Allow always' : 'Allow location'}
+            </Button>
+          {:else if status.tracking}
+            <Button variant="secondary" size="sm" onclick={() => run(stopTracking)} disabled={busy}>
+              Stop
+            </Button>
+          {:else}
+            <Button
+              variant="primary"
+              size="sm"
+              onclick={() => run(() => startTracking())}
+              disabled={busy}
+            >
+              Start
+            </Button>
+          {/if}
+        </div>
+      </SettingsField>
+
+      <SettingsField label="Profile" hint={PROFILE_HINT[status.profile]}>
+        <Select
+          value={status.profile}
+          options={PROFILES}
+          fullWidth
+          disabled={busy}
+          ariaLabel="Tracking profile"
+          onValueChange={(v) => run(() => startTracking(v as TrackingProfile))}
+        />
+      </SettingsField>
+
+      <dl class="kv">
+        <dt>Queued points</dt>
+        <dd>{status.queuedPoints}</dd>
+        <dt>Last sent</dt>
+        <dd>{formatSent(status.lastSentAt)}</dd>
+        {#if status.droppedPoints > 0}
+          <dt>Dropped</dt>
+          <dd class="tracker-bad">{status.droppedPoints}</dd>
+        {/if}
+        {#if status.lastError}
+          <dt>Last error</dt>
+          <dd class="tracker-bad">{status.lastError}</dd>
+        {/if}
+        <dt>Sending to</dt>
+        <dd>{status.endpointHost ?? 'not set'}</dd>
+        <dt>Device</dt>
+        <dd class="tracker-id">{status.deviceId}</dd>
+      </dl>
+
+      <div class="tracker-actions">
+        <Button variant="secondary" size="sm" onclick={flush} disabled={busy}>Send now</Button>
+        {#if canScan}
+          <Button variant="ghost" size="sm" onclick={scan} disabled={busy}>Rescan code</Button>
+        {/if}
+      </div>
+    {/if}
+  </SettingsCard>
+{/if}
+
+<style>
+  .tracker-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .tracker-state {
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+  }
+
+  .tracker-state.on {
+    color: var(--status-success-fg);
+  }
+
+  .tracker-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .tracker-error {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--status-danger-fg);
+  }
+
+  .tracker-warning {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--status-warn-fg);
+  }
+
+  .tracker-note {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+
+  .tracker-bad {
+    color: var(--status-warn-fg);
+  }
+
+  .tracker-id {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: var(--text-xs);
+    word-break: break-all;
+  }
+
+  .kv {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.25rem 0.75rem;
+    margin: 0;
+    font-size: var(--text-sm);
+  }
+
+  .kv dt {
+    color: var(--text-dim);
+  }
+
+  .kv dd {
+    margin: 0;
+    color: var(--text-secondary);
+  }
+</style>
