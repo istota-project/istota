@@ -147,12 +147,27 @@ def build_uvicorn_server(host: str, port: int):
 
 
 def _maybe_mount_webhooks(web_app) -> None:
-    """Mount the GPS webhook receiver as a sub-app when location is enabled.
+    """Serve the GPS webhook receiver from the web app when location is on.
 
-    Off by default in the lean footprint (``[location] enabled = false``). The
-    receiver serves ``/webhooks/location``; mounting it on the same uvicorn
-    server keeps the local install a single port. No-op (and never imports the
-    webhook module) when location is disabled or already mounted.
+    Off by default in the lean footprint (``[location] enabled = false``).
+    Running it on the same uvicorn server is what keeps the local install a
+    single port. No-op (and never imports the webhook module) when location
+    is disabled or already attached.
+
+    The receiver's **router** is included rather than its FastAPI app being
+    mounted, because mounting got both halves wrong. The router already
+    carries ``prefix="/webhooks/location"``, so a mount at ``/webhooks``
+    served ``/webhooks/webhooks/location`` — a 404 at the documented URL.
+    And Starlette does not run a mounted sub-app's lifespan, so
+    ``reload_config()`` never fired and the token map stayed permanently
+    empty, making every correctly-tokened request a 403. Neither surfaced in
+    production, which runs the receiver as its own uvicorn behind nginx.
+
+    Including the router puts the path where it belongs and leaves the
+    startup call to the parent, below. Note the receiver's SIGHUP handler
+    lives in *its* lifespan and so is absent here; the ingest sentinel
+    (:mod:`istota.location.ingest_signal`) is the reload path in this shape,
+    and it is the one that works in every shape.
     """
     from .web_app import _config as web_config
 
@@ -160,16 +175,20 @@ def _maybe_mount_webhooks(web_app) -> None:
         return
     if not web_config.location.enabled:
         return
-    # Avoid a double mount on a serve restart in the same process.
-    if any(getattr(r, "path", "") == "/webhooks" for r in web_app.routes):
+    # Avoid a double attach on a serve restart in the same process.
+    if any(
+        getattr(r, "path", "").startswith("/webhooks/location")
+        for r in web_app.routes
+    ):
         return
     try:
-        from .webhook_receiver import app as webhook_app
+        from . import webhook_receiver
 
-        web_app.mount("/webhooks", webhook_app)
-        logger.info("Mounted GPS webhook receiver at /webhooks")
+        web_app.include_router(webhook_receiver.location_router)
+        web_app.add_event_handler("startup", webhook_receiver.reload_config)
+        logger.info("Serving GPS webhook receiver at /webhooks/location")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not mount webhook receiver: %s", exc)
+        logger.warning("Could not attach webhook receiver: %s", exc)
 
 
 # ---------------------------------------------------------------------------
