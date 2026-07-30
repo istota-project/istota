@@ -46,7 +46,7 @@ logger = logging.getLogger("istota.llm.openai_compat")
 # chunk with NO ``error`` object, so the mid-stream error-frame guard never
 # fires. Without this entry ``.get("error", "end_turn")`` would launder a
 # provider error into a clean ``end_turn`` and the half-built (often empty)
-# response would be delivered as a silent success (ISSUE: <production-host> #270956).
+# response would be delivered as a silent success (seen in production).
 _FINISH_REASON_MAP = {
     "stop": "end_turn",
     "tool_calls": "tool_use",

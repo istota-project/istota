@@ -1,7 +1,7 @@
 /**
  * The native iOS shell, as the web app sees it.
  *
- * The shell (`istota-mobile`) is a Capacitor WebView pointed at this
+ * The shell (the `istota-mobile` repo) is a Capacitor WebView pointed at this
  * deployment, so it serves these exact bytes — there is no mobile build of this
  * app and there is not going to be one. What the shell adds is capabilities a
  * webview does not have, and this module is the only place that knows about

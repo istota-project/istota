@@ -1279,7 +1279,7 @@ Built TDD stage by stage; full Python suite green (7750 passed, 7 skipped) and `
 
 ## 2026-07-20: Native-brain coding enhancements
 
-The `NativeBrain` (istota's in-process agent loop against any OpenAI-compatible model) empirically underperformed the pi coding harness (`pi`) on coding tasks, even though the loop was modelled on pi's `runLoop`. A side-by-side investigation traced the gap to four thin spots pi had invested in. This spec (`Specs/Done/native-brain-coding-enhancements.md`) closes all four, native-path only — the `claude_code`/`tmux_claude` brains take their prompt + tools from the `claude` CLI and are byte-unchanged.
+The `NativeBrain` (istota's in-process agent loop against any OpenAI-compatible model) empirically underperformed the pi coding harness on coding tasks, even though the loop was modelled on pi's `runLoop`. A side-by-side investigation traced the gap to four thin spots pi had invested in. This spec (`Specs/Done/native-brain-coding-enhancements.md`) closes all four, native-path only — the `claude_code`/`tmux_claude` brains take their prompt + tools from the `claude` CLI and are byte-unchanged.
 
 **Stage 1 — fuzzy, multi-edit Edit tool.** The old `Edit` was exact `str.replace` only: any trailing-whitespace/smart-quote/dash drift between the model's remembered `old_string` and the file bytes hard-failed, driving the classic fail→re-read→retry loop that burns turns (worst on weaker models). Ported pi's `edit-diff.ts` matching engine to a new pure-logic module `session/tools/edit_engine.py`: exact-match-first, then a bounded fuzzy fallback (Unicode NFKC, trailing-whitespace strip, smart-quotes/dashes/exotic-spaces → ASCII) that deliberately does *not* tolerate indentation/internal-whitespace reflow (so it can't silently hit the wrong region). `make_edit_tool` gained an optional `edits[]` array for several disjoint edits in one call (uniqueness + overlap enforced, applied in reverse offset order), while keeping the legacy `old_string`/`new_string`/`replace_all` shape. Two subtleties bit during implementation: (1) the tool must read/write **raw bytes**, not `read_text`, because Python's universal-newline translation strips CRLF before `detect_line_ending` can preserve it; (2) when any edit is fuzzy the batch matches in normalized space but writes via `apply_replacements_preserving_unchanged_lines` so untouched lines keep their exact bytes (a fuzzy edit never reflows quotes on neighbouring lines). A `prepare_arguments` shim coerces `edits`-as-JSON-string and legacy→one-element-`edits`; the synthesis is also duplicated inside `_edit` so the tool is correct whether or not the shim ran.
 
@@ -2444,7 +2444,7 @@ Full suite green (6,353 passed, 7 skipped); no new lint findings.
 
 ## 2026-06-10: Make progressive disclosure the default + widen the index to replace Pass 2
 
-Follow-up to the disclosure work below, prompted by a production check on <production-host>: Pass 2 semantic routing was timing out on 100% of tasks. Root cause is structural, not tuning — `classify_skills` spawns a fresh `claude -p -` subprocess per task (`_claude_cli_classify`), so the 3s budget is eaten by CLI cold-start (Node boot, auth, model init), not inference. Raising the timeout to 5–10s just pays that boot tax on every task. Since the same-day disclosure feature makes surfacing a skill nearly free (a cached one-line index entry), the per-task pre-router no longer earns its latency.
+Follow-up to the disclosure work below, prompted by a production check: Pass 2 semantic routing was timing out on 100% of tasks. Root cause is structural, not tuning — `classify_skills` spawns a fresh `claude -p -` subprocess per task (`_claude_cli_classify`), so the 3s budget is eaten by CLI cold-start (Node boot, auth, model init), not inference. Raising the timeout to 5–10s just pays that boot tax on every task. Since the same-day disclosure feature makes surfacing a skill nearly free (a cached one-line index entry), the per-task pre-router no longer earns its latency.
 
 **Change.** Flipped the defaults and widened the index:
 - `SkillsConfig.semantic_routing` default `True → False`; `progressive_disclosure` default `False → True`.
@@ -4204,7 +4204,7 @@ The open visit is still untouched (DELETE excludes `exited_at IS NULL`; the exis
 
 **Why the existing tests didn't catch this.** Every test in `TestReconcileVisits` ran a single reconcile call over a window that fully contained the visit's pings. The bug only manifests after multiple sequential runs with `since` advancing past `entered_at` — the case the daemon actually runs. Added `test_idempotent_across_sliding_windows`, `test_visit_straddling_since_not_truncated`, `test_visit_entirely_before_window_untouched`, and `test_cleans_up_phantoms_from_prior_buggy_runs`. The first two failed before the fix; all four pass after.
 
-**Production cleanup.** A targeted SQL pass on `<production-host>:/srv/app/istota/data/zorg.db` removes existing phantom rows during deploy. (The deployed fix would also delete them on the next nightly pass via the new overlap-aware DELETE — running it manually shortens the window where the dashboard shows duplicates.)
+**Production cleanup.** A targeted SQL pass on the production database removes existing phantom rows during deploy. (The deployed fix would also delete them on the next nightly pass via the new overlap-aware DELETE — running it manually shortens the window where the dashboard shows duplicates.)
 
 **Files modified:**
 - `src/istota/db.py` — `reconcile_visits` reads pings from `since - read_lookback_hours`, filters segments by `last_ts >= since`, DELETE switched to overlap-aware. New `read_lookback_hours` parameter (default 24).
@@ -4483,7 +4483,7 @@ Verified: the four failing channel-gate tests now pass on PDT, and the full 3448
 
 ## 2026-04-26: Adversarial defense spec + DNS hardening for browse container
 
-Wrote `Notes/Projects/Istota/Adversarial agent defense spec.md` covering five ranked layers for protecting against prompt-injected agents (not fat-finger leaks — the [outbound scrubbing spec](Notes/Projects/Istota/Outbound%20secret%20scrubbing%20spec.md) covers that). Output scrubbing is trivially defeated by an adversarial agent (reverse the string, ROT13, encode in URL paths, smuggle in choice of words); the leverage is in narrowing what the agent *can* do.
+Wrote `Notes/Projects/Istota/Adversarial agent defense spec.md` covering five ranked layers for protecting against prompt-injected agents (not fat-finger leaks — the outbound secret scrubbing spec covers that). Output scrubbing is trivially defeated by an adversarial agent (reverse the string, ROT13, encode in URL paths, smuggle in choice of words); the leverage is in narrowing what the agent *can* do.
 
 Layers, ranked by leverage: (A) recipient allowlists on email/Nextcloud/ntfy egress, (B) browse skill containment + URL logging, (C) dual-context content processing (CaMeL pattern: stripped extractor LLM with no tools consumes untrusted content, main agent only sees structured summary), (D) pre-action LLM review by a separate Haiku call before sensitive actions execute, (E) trust tagging on tasks (`high`/`medium`/`low`/`untrusted` based on source). Spec ranks build order: Layer A first (cheapest, biggest realistic-attack reduction), then B logging, then D for email/subtasks, then C for inbound email, then E for cleanup, then C for everything else.
 
@@ -6510,7 +6510,7 @@ Reviewed the new garmin skill committed from the Zorg fork. Fixed several issues
 - Fixed env var names: `NEXTCLOUD_MOUNT` → `NEXTCLOUD_MOUNT_PATH`, `ISTOTA_USER` → `ISTOTA_USER_ID`
 - Removed `_default_config_path()` that hardcoded `zorg` workspace name — skill now requires `GARMIN_CONFIG` env var (set by executor) or `--config` flag
 - Added `GARMIN_CONFIG` wiring in executor.py, following same pattern as `INVOICING_CONFIG`/`ACCOUNTING_CONFIG` (resolves via `storage.get_user_config_path()`)
-- Token cache now uses `$ISTOTA_DEFERRED_DIR/garmin_tokens` (per-user temp dir) instead of global `/srv/app/istota/data/garmin_tokens`
+- Token cache now uses `$ISTOTA_DEFERRED_DIR/garmin_tokens` (per-user temp dir) instead of a global path under the install directory
 - Updated skill.toml: fixed description, removed incorrect `resource_types = ["calendar"]`, added more keywords
 - Added `garminconnect>=0.2.0` dependency (was already in pyproject.toml, ran `uv sync`)
 
@@ -8167,7 +8167,7 @@ INVOICING.md lives in the user's `zorg/config/` folder by convention and invoici
 
 ## 2026-02-09: Website Hosting Migration to Nextcloud Mount
 
-Migrated static website hosting so user tilde pages (`~user`) are served from the Nextcloud mount instead of a standalone `/srv/app/istota/html` directory. Fixed the zorg-scheduler service failing to start due to a stale `ReadWritePaths` referencing the removed directory.
+Migrated static website hosting so user tilde pages (`~user`) are served from the Nextcloud mount instead of a standalone directory under the install root/html` directory. Fixed the zorg-scheduler service failing to start due to a stale `ReadWritePaths` referencing the removed directory.
 
 **Key changes:**
 - Fixed zorg-scheduler NAMESPACE error (systemd couldn't mount non-existent `/srv/www/bot.example.com`)
@@ -8898,8 +8898,8 @@ Added a periodic health check system that evaluates user-defined conditions and 
 - `src/zorg/storage.py` — Added `HEARTBEAT_TEMPLATE`, `_build_heartbeat_seed()`, workspace seeding, updated README
 - `config/skills/_index.toml` — Registered heartbeat skill with keywords
 - `CLAUDE.md` — Documented heartbeat system
-- `ansible-server/roles/zorg/defaults/main.yml` — Added `zorg_scheduler_heartbeat_check_interval`
-- `ansible-server/roles/zorg/templates/config.toml.j2` — Added heartbeat config line
+- `ansible-server: roles/zorg/defaults/main.yml` — Added `zorg_scheduler_heartbeat_check_interval`
+- `ansible-server: roles/zorg/templates/config.toml.j2` — Added heartbeat config line
 
 ## 2026-02-02: BRIEFINGS.md (Markdown with embedded TOML)
 
@@ -8975,8 +8975,8 @@ Converted Zorg's single-worker FIFO queue into per-user concurrent queues using 
 - `config/config.example.toml` - Added worker pool config examples
 - `tests/test_db.py` - Added `TestClaimTaskUserFilter` (5 tests), `TestGetUsersWithPendingTasks` (4 tests)
 - `tests/test_scheduler.py` - Added `TestGetWorkerId` (3 tests), `TestWorkerPool` (4 tests)
-- `ansible-server/roles/zorg/defaults/main.yml` - Added worker pool defaults
-- `ansible-server/roles/zorg/templates/config.toml.j2` - Added worker pool template lines
+- `ansible-server: roles/zorg/defaults/main.yml` - Added worker pool defaults
+- `ansible-server: roles/zorg/templates/config.toml.j2` - Added worker pool template lines
 
 ## 2026-02-02: Fix email header newline injection
 
@@ -9016,8 +9016,8 @@ Replaced the `reminders_file` string field on `UserConfig` with a `reminders_fil
 - `tests/test_config.py` - Replaced assertion with backward-compat migration test
 - `tests/conftest.py` - Removed `reminders_file` from fixture defaults
 - `CLAUDE.md` - Added `reminders_file` to resource types list
-- `ansible-server/roles/zorg/templates/user.toml.j2` - Emit as resource block
-- `ansible-server/roles/zorg/defaults/main.yml` - Updated example comment
+- `ansible-server: roles/zorg/templates/user.toml.j2` - Emit as resource block
+- `ansible-server: roles/zorg/defaults/main.yml` - Updated example comment
 
 ## 2026-02-02: Briefing Bug Fixes + Memory Isolation
 
@@ -9106,8 +9106,8 @@ Two new features: user-editable briefing schedules via workspace BRIEFINGS.toml,
 - `config/config.example.toml` — Added `[briefing_defaults]` section
 - `config/users/alice.example.toml` — Note about workspace BRIEFINGS.toml alternative
 - `CLAUDE.md` — Documented workspace briefings, defaults, precedence, hydration, updated structure
-- `ansible-server/roles/zorg/defaults/main.yml` — Added `zorg_briefing_defaults` variable
-- `ansible-server/roles/zorg/templates/config.toml.j2` — Added `[briefing_defaults]` section
+- `ansible-server: roles/zorg/defaults/main.yml` — Added `zorg_briefing_defaults` variable
+- `ansible-server: roles/zorg/templates/config.toml.j2` — Added `[briefing_defaults]` section
 
 ## 2026-02-01: Direct Email Sending from Claude Code via CLI
 
@@ -9180,9 +9180,9 @@ Added a headless browser skill backed by a Dockerized Playwright container with 
 - `config/skills/_index.toml` — Added `[browse]` entry with keyword triggers
 - `src/zorg/config.py` — Added `BrowserConfig` dataclass and `[browser]` parsing
 - `src/zorg/executor.py` — Browser env vars and prompt integration
-- `ansible-server/roles/zorg/defaults/main.yml` — Added `zorg_browser_*` variables
-- `ansible-server/roles/zorg/templates/config.toml.j2` — Added `[browser]` section
-- `ansible-server/roles/zorg/tasks/main.yml` — Conditional Docker compose tasks
+- `ansible-server: roles/zorg/defaults/main.yml` — Added `zorg_browser_*` variables
+- `ansible-server: roles/zorg/templates/config.toml.j2` — Added `[browser]` section
+- `ansible-server: roles/zorg/tasks/main.yml` — Conditional Docker compose tasks
 
 ## 2026-01-30: Add Nextcloud OCS API skill
 
@@ -9223,7 +9223,7 @@ Moved the user-facing files (USER.md, TASKS.md) from the user root directory int
 - `README.md` — Updated user memory and TASKS.md path references
 - `tests/test_storage.py` — Updated path assertions, added 6 migration tests (124 total)
 - `tests/test_tasks_file_poller.py` — Updated all path references, verified workspace scanning
-- `ansible-server/roles/zorg/defaults/main.yml` — Updated example TASKS.md path
+- `ansible-server: roles/zorg/defaults/main.yml` — Updated example TASKS.md path
 
 ## 2026-01-30: Rename notes/ to workspace/
 
@@ -9244,7 +9244,7 @@ Renamed the bot-managed `notes/` directory to `workspace/` and reframed it as a 
 - `config/users/alice.example.toml` — Updated example paths
 - `CLAUDE.md` — Updated directory structure and prose
 - `tests/test_storage.py` — Updated all notes → workspace references, added 2 migration tests (71 total)
-- `ansible-server/roles/zorg/defaults/main.yml` — Updated example reminders_file path
+- `ansible-server: roles/zorg/defaults/main.yml` — Updated example reminders_file path
 
 ## 2026-01-30: Channel Directory Restructure & Prompt Metadata
 
@@ -9385,8 +9385,8 @@ Switched from `subprocess.run` to `subprocess.Popen` with `--output-format strea
 - `src/zorg/scheduler.py` - `_make_talk_progress_callback()`, wired into `process_one_task`
 - `config/config.example.toml` - Documented progress settings
 - `CLAUDE.md` - Added Ansible deployment role sync reminder, updated structure
-- `ansible-server/roles/zorg/defaults/main.yml` - Progress config variables
-- `ansible-server/roles/zorg/templates/config.toml.j2` - Progress template lines
+- `ansible-server: roles/zorg/defaults/main.yml` - Progress config variables
+- `ansible-server: roles/zorg/templates/config.toml.j2` - Progress template lines
 
 ---
 
@@ -9455,8 +9455,8 @@ Stuck and old tasks now fail fast instead of being endlessly retried. Previously
 - `src/zorg/config.py` - Added `max_retry_age_minutes`, changed `stale_pending_fail_hours` default to 2
 - `src/zorg/db.py` - Split stuck-task recovery in `claim_task()` into age-based retry vs fail paths
 - `src/zorg/scheduler.py` - Pass `max_retry_age_minutes` config to `claim_task()`
-- `ansible-server/roles/zorg/defaults/main.yml` - Updated defaults
-- `ansible-server/roles/zorg/templates/config.toml.j2` - Added `max_retry_age_minutes` line
+- `ansible-server: roles/zorg/defaults/main.yml` - Updated defaults
+- `ansible-server: roles/zorg/templates/config.toml.j2` - Added `max_retry_age_minutes` line
 
 ---
 

@@ -24,7 +24,7 @@ The most common case today: **network diagnostics**. The main sandbox has `dig`,
 
 ```bash
 # Run any command
-istota-skill devbox exec "dig MX cynium.com +short"
+istota-skill devbox exec "dig MX example.com +short"
 istota-skill devbox exec "pip install --user pandas && python -c 'import pandas; print(pandas.__version__)'"
 
 # Run a local script file (copies it into /workspace, runs it, returns output)
@@ -65,9 +65,9 @@ The proxy is host-side and per-user — the in-container scripts are thin client
 ## Network diagnostics — examples
 
 ```bash
-istota-skill devbox exec "dig MX cynium.com +short"
-istota-skill devbox exec "host -t TXT cynium.com"
-istota-skill devbox exec "whois cynium.com"
+istota-skill devbox exec "dig MX example.com +short"
+istota-skill devbox exec "host -t TXT example.com"
+istota-skill devbox exec "whois example.com"
 istota-skill devbox exec "ping -c 4 host.example.com"
 istota-skill devbox exec "mtr --report --report-cycles 10 example.com"
 istota-skill devbox exec "nmap -sT -p 22,80,443 example.com"

@@ -1,7 +1,7 @@
 """Fuzzy, multi-edit matching engine for the native brain's ``Edit`` tool.
 
 Model-free pure logic ported from pi's ``edit-diff.ts``
-(``pi/packages/coding-agent/src/core/tools/edit-diff.ts``). The tool
+(``pi``'s ``packages/coding-agent/src/core/tools/edit-diff.ts``). The tool
 layer (``files.make_edit_tool``) handles path resolution / confinement / I/O;
 this module only decides *what bytes to write* given the current file content
 and a list of edits.

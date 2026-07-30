@@ -432,7 +432,7 @@ class TestWireIntegrity:
         # chunk, with NO ``error`` object (so the mid-stream error-frame guard
         # never fires). Before the fix, ``_FINISH_REASON_MAP.get("error",
         # "end_turn")`` laundered this into a clean ``end_turn`` and the empty /
-        # half-built response was delivered as a silent success (<production-host> task
+        # half-built response was delivered as a silent success (a production task
         # #270956). It must surface as ``stop_reason="error"`` with a
         # descriptive message so the task fails + retries instead.
         lines = [

@@ -602,7 +602,7 @@ class TestTrustedEmailSenders:
 
     def test_own_email_case_insensitive(self):
         cfg = Config(users={
-            "alice": UserConfig(email_addresses=["Alice@Cynium.COM"]),
+            "alice": UserConfig(email_addresses=["Alice@Example.COM"]),
         })
         assert cfg.is_trusted_email_sender("alice", "alice@example.com") is True
 
@@ -640,11 +640,11 @@ class TestTrustedEmailSenders:
         cfg = Config(users={
             "alice": UserConfig(trusted_email_senders=[
                 "alice@example.com",
-                "*@cynium.com",
+                "*@example.org",
             ]),
         })
         assert cfg.is_trusted_email_sender("alice", "alice@example.com") is True
-        assert cfg.is_trusted_email_sender("alice", "bob@cynium.com") is True
+        assert cfg.is_trusted_email_sender("alice", "bob@example.org") is True
         assert cfg.is_trusted_email_sender("alice", "bob@evil.com") is False
 
     def test_alerts_channel_default_empty(self):
