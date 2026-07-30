@@ -1861,6 +1861,48 @@ class TestGenerateIngestToken:
         assert body["webhook_url"].startswith("https://example.com/webhooks/location")
         assert body["token"] in body["webhook_url"]
 
+    def _standalone_config(self, tmp_path):
+        """The one shape that can actually reach the hostname guard.
+
+        Under Nextcloud auth a blank ``[site] hostname`` already 403s every
+        request at ``_verify_origin``, so the endpoint is unreachable. In
+        no-auth mode that check is a deliberate no-op — which is what leaves
+        the standalone local install able to mint a token whose URL is
+        relative, and therefore a QR the phone can only reject.
+        """
+        from istota.config import SiteConfig, WebConfig
+
+        cfg = self._make_test_config(tmp_path)
+        cfg.site = SiteConfig(hostname="")
+        cfg.web = WebConfig(enabled=True, port=8766, auth="none")
+        cfg.users = {"alice": UserConfig(display_name="Alice")}
+        return cfg
+
+    async def test_generate_refuses_without_a_public_hostname(self, tmp_path, client, app):
+        """A relative webhook URL is a QR the phone can only reject.
+
+        The payload decoder refuses an endpoint that is not https, so the
+        device would report "not an Istota provisioning code" and blame the
+        code rather than the missing config.
+        """
+        _patch_app(self._standalone_config(tmp_path))
+        resp = await client.post(self._URL)
+        assert resp.status_code == 409
+        assert "hostname" in resp.json()["detail"]
+
+    async def test_a_refused_generate_does_not_rotate_the_token(self, tmp_path, client, app):
+        """Refusing after minting would cut off working devices for nothing."""
+        from istota import secrets_store
+
+        secrets_store.set_secret(
+            self._db_path, "alice", "overland", "ingest_token", "still-working",
+        )
+        _patch_app(self._standalone_config(tmp_path))
+        await client.post(self._URL)
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "overland", "ingest_token",
+        ) == "still-working"
+
     async def test_generate_rotates_an_existing_token(self, tmp_path, client, app):
         from istota import secrets_store
         secrets_store.set_secret(

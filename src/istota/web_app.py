@@ -4553,6 +4553,23 @@ async def settings_generate_ingest_token(
                    "token would not be accepted. Enable it in Settings first.",
         )
 
+    if not _config.site.hostname:
+        # Checked before minting, not after: rotating the user's token and
+        # then refusing would cut off their working devices for nothing.
+        #
+        # With no hostname the URL below is *relative*, which the QR payload's
+        # decoder rejects for not being https — so the phone reports "not an
+        # Istota provisioning code" and blames the code rather than the
+        # missing config. A tracker cannot post to a relative URL either, so
+        # there is no token worth issuing here. Hits the standalone local
+        # install, where hostname is routinely blank.
+        raise HTTPException(
+            status_code=409,
+            detail="This deployment has no public hostname configured, so the "
+                   "webhook URL a device posts to cannot be built. Set "
+                   "[site] hostname and try again.",
+        )
+
     token = _secrets.token_urlsafe(32)
     try:
         secrets_store.set_secret(

@@ -639,7 +639,22 @@ export interface GeneratedIngestToken {
  * characters; the page renders it as a QR and never asks for it again.
  */
 export async function generateIngestToken(): Promise<GeneratedIngestToken> {
-  return apiFetch('/settings/secrets/overland/ingest_token/generate', { method: 'POST' });
+  // Not apiFetch: this endpoint's refusal is a 409 whose *message* is the
+  // whole point ("the location module is off for this user, so an ingest
+  // token would not be accepted"). apiFetch discards the body and throws
+  // "API error: 409", which tells the user nothing they can act on.
+  const resp = await fetch(`${base}/api/settings/secrets/overland/ingest_token/generate`, {
+    method: 'POST',
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) {
+    const detail = await resp
+      .json()
+      .then((body: { detail?: unknown }) => (typeof body?.detail === 'string' ? body.detail : ''))
+      .catch(() => '');
+    throw new Error(detail || `Could not generate a token (HTTP ${resp.status}).`);
+  }
+  return resp.json();
 }
 
 export async function setSecret(

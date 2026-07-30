@@ -29,7 +29,7 @@
    * device needs a new one. That is the whole reason the card says so out
    * loud rather than assuming anyone would guess.
    */
-  let minted = $state<{ token: string; endpoint: string } | null>(null);
+  let minted = $state<{ token: string; endpoint: string; webhookUrl: string } | null>(null);
   let minting = $state(false);
   let mintError = $state('');
   let confirmRotate = $state(false);
@@ -45,6 +45,11 @@
   );
 
   async function mint() {
+    // ConfirmDialog does not close itself on confirm, so its button stays
+    // live for the whole round trip. Without this guard a double-tap mints
+    // twice and the QR can end up showing the token that lost the race —
+    // which the phone would accept and then 401 on forever.
+    if (minting) return;
     minting = true;
     mintError = '';
     try {
@@ -52,6 +57,7 @@
       minted = {
         token: result.token,
         endpoint: endpointFromWebhookUrl(result.webhook_url),
+        webhookUrl: result.webhook_url,
       };
       await reloadServices();
     } catch (e) {
@@ -115,6 +121,11 @@
       <ServiceCard service={svc} onChanged={reloadServices} />
     {/each}
 
+    <!-- Outside the `info` guard below: this card reads the device, not the
+         server, and it is the readout that says whether tracking silently
+         stopped. A transient server failure must not be what hides it. -->
+    <DeviceTrackerCard />
+
     {#if info}
       <SettingsCard
         title="Provision a device"
@@ -136,7 +147,11 @@
                 Scan this from <strong>This device</strong> below, in the app on the phone. It is shown
                 once — leaving this page loses it, and the next device needs a new token.
               </p>
-              <code class="webhook-url">{minted.endpoint}</code>
+              <p class="hint">
+                For the third-party Overland app, which cannot scan, paste this URL instead. It
+                carries the same token and is shown only now, for the same reason.
+              </p>
+              <code class="webhook-url">{minted.webhookUrl}</code>
             </div>
           </div>
         {:else}
@@ -148,8 +163,6 @@
           <code class="webhook-url">{info.webhook_url}</code>
         {/if}
       </SettingsCard>
-
-      <DeviceTrackerCard />
 
       <SettingsCard
         title="Place detection"
@@ -172,6 +185,7 @@
   message="Are you sure? The current token stops working immediately, on every device using it. Any phone still tracking with the old one will stop sending until you rescan its code."
   confirmLabel="Generate"
   confirmVariant="danger"
+  confirmDisabled={minting}
   onConfirm={mint}
 />
 

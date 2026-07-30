@@ -1818,17 +1818,23 @@ const handlers: MockHandler[] = [
       mockSecrets.monarch = { session_id: 'mock-session', csrftoken: 'mock-csrf' };
       return { ok: true };
     }
-    // Before the generic secret matcher: the generate path is a longer form of
-    // the same prefix, and the generic pattern would otherwise claim it and
-    // treat "generate" as a key name.
+    // Ahead of the generic secret matcher below, which this path resembles.
+    // (It could not actually be claimed by it — that pattern is anchored with
+    // `/` excluded from both groups, so it cannot match three segments — but
+    // reading the two in the other order invites the assumption that it can.)
     if (
       url === '/istota/api/settings/secrets/overland/ingest_token/generate' &&
       method === 'POST'
     ) {
       if (mockDisabledModules.has('location')) {
+        // __status, not a bare {error}: the real endpoint answers 409 and the
+        // page reads the message off it. Returning 200 here would make the
+        // dev-mode failure a TypeError on an absent webhook_url instead.
         return {
-          error:
-            'The location module is off for this user, so an ingest token would not be accepted.',
+          __status: 409,
+          detail:
+            'The location module is off for this user, so an ingest token ' +
+            'would not be accepted. Enable it in Settings first.',
         };
       }
       // Shaped like the real one: 43 url-safe characters, returned once.
