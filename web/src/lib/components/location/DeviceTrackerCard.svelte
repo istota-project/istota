@@ -26,10 +26,13 @@
     openAppSettings,
     configureTracker,
     scanAndDecode,
+    wifiZoneAvailable,
+    configureWifiZone,
     type TrackerStatus,
     type TrackingProfile,
   } from '$lib/platform/nativeLocation';
   import { hostOf } from '$lib/location/provisioning';
+  import { getLocationPlaces, type Place } from '$lib/api';
 
   let status: TrackerStatus | null = $state(null);
   let busy = $state(false);
@@ -51,6 +54,19 @@
 
   const available = trackerAvailable();
   const canScan = scannerAvailable();
+  const canPinWifi = wifiZoneAvailable();
+
+  /**
+   * The user's places, for the zone picker.
+   *
+   * A zone is a coordinate, but nobody wants to type one — and the coordinate
+   * they mean is almost always a place the server already knows, which is also
+   * the place the override exists to keep them inside. Loaded lazily and
+   * failing to nothing: a places request that errors leaves the picker empty
+   * with an explanation, and the rest of the card unaffected.
+   */
+  let places: Place[] = $state([]);
+  let placesError = $state('');
 
   const PROFILES: SelectOption[] = [
     { value: 'detailed', label: 'Detailed' },
@@ -196,8 +212,94 @@
     return '';
   });
 
+  /**
+   * The zone picker's options: off, plus one per place.
+   *
+   * Keyed by place id as a string because `Select` is string-valued. A zone
+   * whose coordinates match no current place still shows as configured in the
+   * summary line below — the picker just cannot name it, which is honest: the
+   * place it referred to has been renamed or deleted.
+   */
+  const ZONE_OFF = '';
+  const zoneOptions: SelectOption[] = $derived([
+    { value: ZONE_OFF, label: 'Off' },
+    ...places.map((p) => ({ value: String(p.id), label: p.name })),
+  ]);
+
+  /** Which place the stored zone points at, or '' for none. */
+  const zoneChoice = $derived.by(() => {
+    if (!status?.wifiZoneSsid) return ZONE_OFF;
+    const lat = status.wifiZoneLatitude;
+    const lon = status.wifiZoneLongitude;
+    if (lat == null || lon == null) return ZONE_OFF;
+    // Compared rather than stored by id, because the device holds coordinates
+    // and nothing else — it has no idea places exist. A tenth of a metre of
+    // slack absorbs the float round-trip through JSON and NSUserDefaults.
+    const match = places.find((p) => Math.abs(p.lat - lat) < 1e-6 && Math.abs(p.lon - lon) < 1e-6);
+    return match ? String(match.id) : ZONE_OFF;
+  });
+
+  /**
+   * Set or clear the zone.
+   *
+   * The SSID is always the network the device is on right now, never typed.
+   * That is a real restriction — a zone cannot be set up for the office from
+   * the sofa — and it is worth it: an SSID typed from memory that differs by a
+   * character produces a zone that silently never matches, which is precisely
+   * the failure mode this whole feature is prone to.
+   */
+  async function chooseZone(next: string) {
+    if (next === ZONE_OFF) {
+      await run(() => configureWifiZone(null));
+      return;
+    }
+    const place = places.find((p) => String(p.id) === next);
+    if (!place) return;
+    const ssid = status?.currentWifi;
+    if (!ssid) {
+      error = 'Join the network you want to pin before setting a zone.';
+      return;
+    }
+    await run(async () => {
+      const result = await configureWifiZone({ ssid, latitude: place.lat, longitude: place.lon });
+      note = `While on ${ssid}, this phone reports ${place.name}.`;
+      return result;
+    });
+  }
+
+  /**
+   * Why the zone controls cannot be used, or ''.
+   *
+   * The capability case comes first and is the one that matters: without
+   * Access WiFi Information the device reads no network name at all, so a zone
+   * would store fine and then never match anything. Saying "not on wifi" is
+   * the same observation from the device's side — it genuinely cannot tell the
+   * two apart — so the sentence names both.
+   */
+  const zoneWarning = $derived.by(() => {
+    if (!status) return '';
+    if (placesError) return placesError;
+    if (!status.currentWifi) {
+      return status.wifiZoneSsid
+        ? `Set for ${status.wifiZoneSsid}, but this phone cannot read a network name — ` +
+            'either it is not on wifi, or this build lacks the Access WiFi Information ' +
+            'capability. The zone does nothing until it can.'
+        : 'No network name is readable, so there is nothing to pin. Join a wifi network, ' +
+            'or update the app if this persists on one.';
+    }
+    if (status.wifiZoneSsid && !status.wifiZoneActive)
+      return `Set for ${status.wifiZoneSsid}; this phone is on ${status.currentWifi}.`;
+    return '';
+  });
+
   onMount(() => {
-    if (available) void refresh();
+    if (!available) return;
+    void refresh();
+    if (canPinWifi) {
+      getLocationPlaces()
+        .then((r) => (places = r.places))
+        .catch(() => (placesError = 'Could not load your places, so there is nothing to pin to.'));
+    }
   });
 </script>
 
@@ -308,6 +410,29 @@
           onValueChange={(v) => chooseProfile(v as TrackingProfile)}
         />
       </SettingsField>
+
+      {#if canPinWifi}
+        <!-- labelled={false} for the same reason as Tracking above: the slot
+             holds a Select, whose bits-ui trigger is a <button>. -->
+        <SettingsField
+          label="Wifi zone"
+          hint={'While joined to this phone’s current network, report a fixed place instead of ' +
+            'a measured position. Indoors a fix wanders tens of metres between readings, which ' +
+            'can walk you across a place boundary and back all evening; being on the network is ' +
+            'better proof of being there than any one fix.'}
+          warning={zoneWarning}
+          labelled={false}
+        >
+          <Select
+            value={zoneChoice}
+            options={zoneOptions}
+            fullWidth
+            disabled={busy || !status.currentWifi || places.length === 0}
+            ariaLabel="Wifi zone place"
+            onValueChange={chooseZone}
+          />
+        </SettingsField>
+      {/if}
 
       <dl class="kv">
         <dt>Queued points</dt>

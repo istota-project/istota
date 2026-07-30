@@ -3,6 +3,23 @@ import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import DeviceTrackerCard from './DeviceTrackerCard.svelte';
 import { encodeProvisioning } from '$lib/location/provisioning';
 import type { TrackerStatus } from '$lib/platform/nativeLocation';
+import type { Place } from '$lib/api';
+
+/**
+ * The card reads the user's places to fill the wifi-zone picker. Mocked
+ * through `importOriginal` rather than a bare factory so anything else in the
+ * component tree that reaches for `$lib/api` still gets the real module.
+ */
+const placesMock = vi.fn();
+vi.mock('$lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/api')>()),
+  getLocationPlaces: () => placesMock(),
+}));
+
+const PLACES: Place[] = [
+  { id: 1, name: 'Home', lat: 52.23, lon: 21.01, radius_meters: 100, category: 'home' },
+  { id: 2, name: 'Office', lat: 52.24, lon: 21.02, radius_meters: 100, category: 'work' },
+];
 
 const PLAIN_SAFARI =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1';
@@ -24,8 +41,8 @@ const STATUS: TrackerStatus = {
   deviceId: 'ABC-123',
 };
 
-function installShell(status: Partial<TrackerStatus> = {}, scanner = true) {
-  setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.7.0`);
+function installShell(status: Partial<TrackerStatus> = {}, scanner = true, version = '0.7.0') {
+  setUserAgent(`${PLAIN_SAFARI} IstotaApp/${version}`);
   const merged = { ...STATUS, ...status };
   const tracker = {
     configure: vi.fn().mockResolvedValue(undefined),
@@ -35,6 +52,7 @@ function installShell(status: Partial<TrackerStatus> = {}, scanner = true) {
     sendNow: vi.fn().mockResolvedValue({ sent: 12 }),
     requestPermissions: vi.fn().mockResolvedValue({ authorization: 'always' }),
     openAppSettings: vi.fn().mockResolvedValue(undefined),
+    configureWifiZone: vi.fn().mockResolvedValue(merged),
   };
   const qr = { scan: vi.fn().mockResolvedValue({ value: null }) };
   (globalThis as Record<string, unknown>).Capacitor = {
@@ -54,6 +72,8 @@ async function settle() {
 beforeEach(() => {
   setUserAgent(PLAIN_SAFARI);
   delete (globalThis as Record<string, unknown>).Capacitor;
+  placesMock.mockReset();
+  placesMock.mockResolvedValue({ places: PLACES });
 });
 
 afterEach(async () => {
@@ -356,5 +376,86 @@ describe('provisioning', () => {
     await settle();
     expect(screen.queryByText('Scan provisioning code')).toBeNull();
     expect(screen.getByText(/update it from testflight/i)).toBeTruthy();
+  });
+});
+
+describe('the wifi zone', () => {
+  // A bits-ui Select cannot be opened under jsdom (it needs pointer-capture
+  // APIs the environment does not implement), so these assert on what the card
+  // renders and on what it asks the device for, never by driving the dropdown.
+  // Same constraint the profile-picker tests work around, recorded here so the
+  // absence of a click-through test does not read as an oversight.
+
+  it('is absent on a shell that predates it, rather than shown and broken', async () => {
+    installShell({ currentWifi: 'HomeNet' }, true, '0.8.0');
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.queryByText('Wifi zone')).toBeNull();
+    // And it does not go asking the server for places it has no use for.
+    expect(placesMock).not.toHaveBeenCalled();
+  });
+
+  it('appears on a new enough shell and loads places to pin to', async () => {
+    installShell({ currentWifi: 'HomeNet' }, true, '0.9.0');
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText('Wifi zone')).toBeTruthy();
+    expect(placesMock).toHaveBeenCalled();
+  });
+
+  it('names both causes when no network name is readable', async () => {
+    // The capability failure is invisible from the device's side — it looks
+    // exactly like being off wifi — so the card cannot pick one and must say
+    // both. Getting this wrong leaves a zone that silently never matches.
+    installShell({ currentWifi: null }, true, '0.9.0');
+    render(DeviceTrackerCard);
+    await settle();
+    // One sentence covering both: join a network (you may not be on one) and
+    // update the app (the build may not be able to read the name at all).
+    expect(screen.getByText(/join a wifi network.*update the app/i)).toBeTruthy();
+  });
+
+  it('says a configured zone is doing nothing while the name is unreadable', async () => {
+    installShell({ currentWifi: null, wifiZoneSsid: 'HomeNet' }, true, '0.9.0');
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText(/does nothing until it can/i)).toBeTruthy();
+  });
+
+  it('says which network a zone is set for when on a different one', async () => {
+    installShell(
+      { currentWifi: 'CafeNet', wifiZoneSsid: 'HomeNet', wifiZoneActive: false },
+      true,
+      '0.9.0',
+    );
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText(/set for HomeNet; this phone is on CafeNet/i)).toBeTruthy();
+  });
+
+  it('is silent when the zone is set and active', async () => {
+    installShell(
+      {
+        currentWifi: 'HomeNet',
+        wifiZoneSsid: 'HomeNet',
+        wifiZoneActive: true,
+        wifiZoneLatitude: 52.23,
+        wifiZoneLongitude: 21.01,
+      },
+      true,
+      '0.9.0',
+    );
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.queryByText(/this phone is on/i)).toBeNull();
+    expect(screen.queryByText(/does nothing/i)).toBeNull();
+  });
+
+  it('explains itself rather than showing an empty picker when places fail to load', async () => {
+    placesMock.mockRejectedValue(new Error('nope'));
+    installShell({ currentWifi: 'HomeNet' }, true, '0.9.0');
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText(/could not load your places/i)).toBeTruthy();
   });
 });

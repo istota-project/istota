@@ -10,6 +10,8 @@ import {
   openAppSettings,
   configureTracker,
   scanAndDecode,
+  wifiZoneAvailable,
+  configureWifiZone,
   type TrackerStatus,
 } from './nativeLocation';
 import { encodeProvisioning } from '$lib/location/provisioning';
@@ -51,6 +53,7 @@ function fakeTracker(overrides: Partial<Record<string, unknown>> = {}) {
     sendNow: vi.fn().mockResolvedValue({ sent: 7 }),
     requestPermissions: vi.fn().mockResolvedValue({ authorization: 'always' }),
     openAppSettings: vi.fn().mockResolvedValue(undefined),
+    configureWifiZone: vi.fn().mockResolvedValue(STATUS),
     ...overrides,
   };
 }
@@ -205,6 +208,83 @@ describe('every export is version-gated, not merely plugin-gated', () => {
 
   it('scanAndDecode reports unavailable', async () => {
     await expect(scanAndDecode()).resolves.toEqual({ ok: false, reason: 'unavailable' });
+  });
+
+  it('configureWifiZone answers null and never reaches the plugin', async () => {
+    const plugins = (
+      globalThis as { Capacitor?: { Plugins?: Record<string, ReturnType<typeof fakeTracker>> } }
+    ).Capacitor!.Plugins!;
+    await expect(
+      configureWifiZone({ ssid: 'Home', latitude: 52.2, longitude: 21.0 }),
+    ).resolves.toBeNull();
+    expect(plugins.IstotaLocation.configureWifiZone).not.toHaveBeenCalled();
+  });
+});
+
+describe('wifi zone', () => {
+  it('is unavailable on a shell that predates it, even with the method present', () => {
+    // The gate that matters. 0.8.x carries a tracker and no zone; calling into
+    // it would reject every time, and the card would show a control that
+    // cannot work rather than omitting it.
+    shell('0.8.0');
+    installPlugins({ IstotaLocation: fakeTracker() });
+    expect(trackerAvailable()).toBe(true);
+    expect(wifiZoneAvailable()).toBe(false);
+  });
+
+  it('is unavailable on a new enough shell whose plugin lacks the method', () => {
+    shell('0.9.0');
+    const tracker = fakeTracker();
+    delete (tracker as Record<string, unknown>).configureWifiZone;
+    installPlugins({ IstotaLocation: tracker });
+    expect(wifiZoneAvailable()).toBe(false);
+  });
+
+  it('passes the zone through and returns what the device reports', async () => {
+    shell('0.9.0');
+    const zoned = { ...STATUS, wifiZoneSsid: 'Home', wifiZoneActive: true };
+    const tracker = fakeTracker({ configureWifiZone: vi.fn().mockResolvedValue(zoned) });
+    installPlugins({ IstotaLocation: tracker });
+
+    await expect(
+      configureWifiZone({ ssid: 'Home', latitude: 52.23, longitude: 21.01 }),
+    ).resolves.toEqual(zoned);
+    expect(tracker.configureWifiZone).toHaveBeenCalledWith({
+      ssid: 'Home',
+      latitude: 52.23,
+      longitude: 21.01,
+    });
+  });
+
+  it('clears with an empty SSID rather than an omitted one', async () => {
+    // The native signature is total: a clear still carries coordinates, which
+    // it ignores. Sending `undefined` would read as 0,0 off the coast of
+    // Africa if the native side ever stopped special-casing the empty name.
+    shell('0.9.0');
+    const tracker = fakeTracker();
+    installPlugins({ IstotaLocation: tracker });
+
+    await configureWifiZone(null);
+    expect(tracker.configureWifiZone).toHaveBeenCalledWith({
+      ssid: '',
+      latitude: 0,
+      longitude: 0,
+    });
+  });
+
+  it('propagates a refusal instead of swallowing it', async () => {
+    // An out-of-range coordinate is refused natively rather than clamped, so
+    // the caller has to see the rejection — a silently-dropped zone would look
+    // exactly like one that was stored.
+    shell('0.9.0');
+    installPlugins({
+      IstotaLocation: fakeTracker({
+        configureWifiZone: vi.fn().mockRejectedValue(new Error('INVALID_WIFI_ZONE')),
+      }),
+    });
+    await expect(configureWifiZone({ ssid: 'Home', latitude: 999, longitude: 21 })).rejects.toThrow(
+      /INVALID_WIFI_ZONE/,
+    );
   });
 });
 

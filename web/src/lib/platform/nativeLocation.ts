@@ -57,11 +57,46 @@ export interface TrackerStatus {
   /** Host only — the token is never echoed back, matching the server-side rule. */
   endpointHost: string | null;
   deviceId: string;
+
+  /**
+   * The wifi zone: while joined to `wifiZoneSsid`, reported position is pinned
+   * to the stored coordinates instead of measured.
+   *
+   * All five are optional for the same reason `paused` is — a shell older than
+   * 0.9.0 omits them, and absent reads as "no zone", which is that shell's
+   * actual behaviour.
+   */
+  wifiZoneSsid?: string | null;
+  wifiZoneLatitude?: number | null;
+  wifiZoneLongitude?: number | null;
+  /** The device is on the zone's network *now*, so the override is in effect. */
+  wifiZoneActive?: boolean;
+  /**
+   * The network the device is joined to, or null.
+   *
+   * Null has two causes the device cannot tell apart: not on wifi, or a build
+   * without the Access WiFi Information capability — which is also the state in
+   * which a configured zone silently never matches. The card has to name both.
+   */
+  currentWifi?: string | null;
+}
+
+export interface WifiZone {
+  ssid: string;
+  latitude: number;
+  longitude: number;
 }
 
 interface LocationPlugins {
   IstotaLocation?: {
     configure(opts: { endpoint: string; token: string }): Promise<void>;
+    // Optional because an 0.8.x shell's plugin genuinely lacks it, which is
+    // what `wifiZoneAvailable` probes for alongside the version.
+    configureWifiZone?(opts: {
+      ssid: string;
+      latitude: number;
+      longitude: number;
+    }): Promise<TrackerStatus>;
     start(opts?: { profile?: TrackingProfile }): Promise<TrackerStatus>;
     stop(): Promise<TrackerStatus>;
     status(): Promise<TrackerStatus>;
@@ -159,6 +194,41 @@ export async function requestPermissions(): Promise<string | null> {
  */
 export async function openAppSettings(): Promise<void> {
   await tracker()?.openAppSettings();
+}
+
+/** Shell 0.9.0 shipped the wifi zone. */
+const SHELL_WITH_WIFI_ZONE = '0.9.0';
+
+/**
+ * Can this client pin position to a network?
+ *
+ * Gated separately from the tracker for the usual reason — an 0.8.x app tracks
+ * perfectly well and should show a card without the zone controls rather than
+ * controls that reject every call.
+ */
+export function wifiZoneAvailable(): boolean {
+  return shellAtLeast(SHELL_WITH_WIFI_ZONE) && !!plugins()?.IstotaLocation?.configureWifiZone;
+}
+
+/**
+ * Set or clear the wifi zone; `null` clears it.
+ *
+ * Returns the status the device reports afterwards, so the caller adopts what
+ * was actually stored rather than assuming its own input took. Rejects on an
+ * out-of-range coordinate — the device refuses rather than clamping, since a
+ * clamped zone would declare the phone to be somewhere it has never been.
+ */
+export async function configureWifiZone(zone: WifiZone | null): Promise<TrackerStatus | null> {
+  if (!wifiZoneAvailable()) return null;
+  const plugin = plugins()?.IstotaLocation;
+  if (!plugin?.configureWifiZone) return null;
+  return await plugin.configureWifiZone(
+    zone
+      ? { ssid: zone.ssid, latitude: zone.latitude, longitude: zone.longitude }
+      : // Empty SSID is the clear, and the coordinates are ignored — sending
+        // 0,0 rather than omitting them keeps the native signature total.
+        { ssid: '', latitude: 0, longitude: 0 },
+  );
 }
 
 export async function configureTracker(p: Provisioning): Promise<void> {
