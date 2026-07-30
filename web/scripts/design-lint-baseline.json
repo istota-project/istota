@@ -1,8 +1,27 @@
 {
-  "src/lib/styles/settings.css": {
-    "raw-color": 2
+  "src/lib/components/briefings/SourceConfigFields.svelte": {
+    "redefined-primitive": 2
+  },
+  "src/lib/components/chat/Composer.svelte": {
+    "redefined-primitive": 8
+  },
+  "src/lib/components/chat/RoomSettings.svelte": {
+    "redefined-primitive": 3
+  },
+  "src/lib/components/FeedReader.svelte": {
+    "redefined-primitive": 3
+  },
+  "src/lib/components/location/PlaceForm.svelte": {
+    "redefined-primitive": 5
+  },
+  "src/lib/components/money/TransactionForm.svelte": {
+    "redefined-primitive": 3
+  },
+  "src/lib/components/money/WorkEntryForm.svelte": {
+    "redefined-primitive": 3
   },
   "src/routes/admin/+page.svelte": {
+    "redefined-primitive": 1,
     "raw-color": 1
   },
   "src/routes/feeds/settings/+page.svelte": {
@@ -21,28 +40,29 @@
     "raw-color": 3
   },
   "src/routes/health/history/+page.svelte": {
+    "redefined-primitive": 2,
     "raw-color": 5
   },
   "src/routes/health/history/diagnoses/+page.svelte": {
     "raw-color": 4
   },
   "src/routes/health/history/encounter/+page.svelte": {
-    "raw-color": 4
+    "raw-color": 1
   },
   "src/routes/health/history/import/+page.svelte": {
-    "raw-color": 7
+    "raw-color": 3
   },
   "src/routes/health/immunizations/+page.svelte": {
-    "raw-color": 5
+    "raw-color": 1
   },
   "src/routes/health/immunizations/detail/+page.svelte": {
-    "raw-color": 2
+    "raw-color": 1
   },
   "src/routes/health/immunizations/import/+page.svelte": {
-    "raw-color": 7
+    "raw-color": 3
   },
   "src/routes/health/immunizations/vaccine/+page.svelte": {
-    "raw-color": 5
+    "raw-color": 1
   },
   "src/routes/health/stats/+page.svelte": {
     "raw-color": 2

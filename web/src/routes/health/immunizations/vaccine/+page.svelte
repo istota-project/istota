@@ -12,7 +12,7 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Badge, KebabMenu } from '$lib/components/ui';
+  import { Badge, Button, KebabMenu } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
 
   let name = $derived(page.url.searchParams.get('name') || '');
@@ -87,7 +87,7 @@
        this header. -->
   <div class="header">
     <h1>{ref?.display_name || name}</h1>
-    <a class="btn" href="{base}/health/immunizations">Back</a>
+    <Button href="{base}/health/immunizations">Back</Button>
   </div>
 {/if}
 
@@ -218,21 +218,6 @@
     font-size: var(--text-lg);
     font-weight: 500;
     margin: 0;
-  }
-  .btn {
-    padding: 0.4rem 0.85rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    text-decoration: none;
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    line-height: 1.2;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
   }
 
   .card {

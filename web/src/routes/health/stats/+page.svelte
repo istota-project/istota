@@ -29,7 +29,7 @@
     metricLabel,
     toCanonical,
   } from '$lib/health/units';
-  import { Select } from '$lib/components/ui';
+  import { Button, Select } from '$lib/components/ui';
 
   Chart.register(
     LineController,
@@ -494,12 +494,8 @@
         </label>
         {#if formError}<div class="msg error inline">{formError}</div>{/if}
         <div class="modal-actions">
-          <button class="btn" type="button" onclick={() => (modalOpen = false)} disabled={saving}
-            >Cancel</button
-          >
-          <button class="btn primary" type="submit" disabled={saving}>
-            {saving ? 'Saving…' : 'Save'}
-          </button>
+          <Button onclick={() => (modalOpen = false)} disabled={saving}>Cancel</Button>
+          <Button variant="primary" type="submit" loading={saving}>Save</Button>
         </div>
       </form>
     </div>
@@ -698,27 +694,6 @@
     justify-content: flex-end;
     gap: 0.5rem;
     margin-top: 0.5rem;
-  }
-  .btn {
-    padding: 0.4rem 0.85rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
   }
 
   /* Light theme overrides — dark rules above untouched. */

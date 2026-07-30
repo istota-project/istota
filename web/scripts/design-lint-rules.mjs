@@ -85,6 +85,14 @@ function undefinedTokensOn(line, ctx, wantFallback) {
   return names.length ? names : null;
 }
 
+// A page redefining a primitive's class name is how health ended up with a
+// second .btn system that inverted what `primary` meant — filled in one, an
+// outlined blue in the other — and with .btn.danger rendering red on three
+// pages and grey-until-hover on two. The rule names the classes the ui/
+// primitives own; each is exempt in the component that defines it.
+const REDEFINED_PRIMITIVE =
+  /^\s*(?::global\()?\.(?:btn|badge|icon-btn|field|chip)\b(?![\w-])[^{]*\{\s*$/;
+
 // `exempt` is the file that legitimately owns a pattern — the shell definition
 // site, as opposed to EXEMPT_FILES which is global across every rule.
 // `strip` blanks a span before the rule is tested, so a line carrying both a
@@ -114,6 +122,21 @@ export const RULES = [
     test: MONEY_GLOBAL,
     exempt: ['src/routes/money/+layout.svelte'],
     hint: 'the money table shell is defined once in routes/money/+layout.svelte',
+  },
+  {
+    id: 'redefined-primitive',
+    test: REDEFINED_PRIMITIVE,
+    exempt: [
+      'src/lib/components/ui/Button.svelte',
+      'src/lib/components/ui/Badge.svelte',
+      'src/lib/components/ui/IconButton.svelte',
+      'src/lib/components/ui/Field.svelte',
+      'src/lib/components/ui/Chip.svelte',
+      // The settings-page shell styles a `.field` a caller composes by hand;
+      // it predates Field and is the section's documented contract.
+      'src/lib/styles/settings.css',
+    ],
+    hint: 'this class belongs to a ui/ primitive — use the component instead',
   },
   {
     id: 'undefined-token',

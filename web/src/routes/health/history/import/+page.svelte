@@ -7,7 +7,7 @@
     type ParsedDiagnosis,
     type ParsedEncounter,
   } from '$lib/api';
-  import { Badge, Select, type SelectOption } from '$lib/components/ui';
+  import { Badge, Button, Select, type SelectOption } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
 
   const ENCOUNTER_TYPES = [
@@ -145,7 +145,7 @@
 
 <div class="header">
   <h1>Import encounter</h1>
-  <a class="btn" href="{base}/health/history">Back</a>
+  <Button href="{base}/health/history">Back</Button>
 </div>
 
 <div class="card">
@@ -184,9 +184,13 @@
   </div>
 
   <div class="actions">
-    <button class="btn primary" type="button" disabled={!file || extracting} onclick={doExtract}>
-      {extracting ? 'Extracting…' : 'Extract'}
-    </button>
+    <Button
+      variant="primary"
+      disabled={!file || extracting}
+      onclick={doExtract}
+      loading={extracting}
+      loadingLabel="Extracting…">Extract</Button
+    >
   </div>
 </div>
 
@@ -229,9 +233,7 @@
     <div class="enc-card" class:warn={!row.encounter_date}>
       <div class="enc-head">
         <Badge variant={confidenceVariant(row.confidence)}>{row.confidence}</Badge>
-        <button class="btn small" type="button" onclick={() => removeRow(i)}>
-          Remove encounter
-        </button>
+        <Button size="sm" onclick={() => removeRow(i)}>Remove encounter</Button>
       </div>
 
       <div class="grid">
@@ -295,9 +297,7 @@
 
       <div class="diag-head">
         <h3>Diagnoses ({row.diagnoses.length})</h3>
-        <button class="btn small" type="button" onclick={() => addDiagnosis(row)}>
-          + Add diagnosis
-        </button>
+        <Button size="sm" onclick={() => addDiagnosis(row)}>+ Add diagnosis</Button>
       </div>
 
       {#if row.diagnoses.length > 0}
@@ -367,9 +367,7 @@
                     />
                   </td>
                   <td class="row-actions">
-                    <button class="btn small" type="button" onclick={() => removeDiagnosis(row, j)}>
-                      Remove
-                    </button>
+                    <Button size="sm" onclick={() => removeDiagnosis(row, j)}>Remove</Button>
                   </td>
                 </tr>
               {/each}
@@ -381,11 +379,11 @@
   {/each}
 
   <div class="actions">
-    <button class="btn primary" type="button" disabled={importing} onclick={doImport}>
+    <Button variant="primary" disabled={importing} onclick={doImport}>
       {importing
         ? 'Importing…'
         : `Import ${parsed.length} encounter${parsed.length === 1 ? '' : 's'}`}
-    </button>
+    </Button>
   </div>
 {/if}
 
@@ -416,34 +414,6 @@
     color: var(--text-dim);
     font-weight: 500;
     margin: 0;
-  }
-
-  .btn {
-    padding: 0.4rem 0.85rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    text-decoration: none;
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    line-height: 1.2;
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
-  }
-  .btn.small {
-    padding: 0.2rem 0.55rem;
-    font-size: var(--text-xs);
   }
 
   .card {

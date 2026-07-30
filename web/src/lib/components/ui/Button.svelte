@@ -8,6 +8,17 @@
     variant?: Variant;
     size?: Size;
     type?: 'button' | 'submit' | 'reset';
+    /**
+     * Renders a real `<a>` rather than a button. An action that navigates
+     * should use this: it keeps middle-click, open-in-new-tab and the
+     * status-bar URL preview, none of which an onclick + goto() has.
+     * `KebabItem` takes the same option for the same reason.
+     */
+    href?: string;
+    /** Passed through on an `href` button — for a download or an external tab. */
+    download?: string;
+    target?: string;
+    rel?: string;
     onclick?: (e: MouseEvent) => void;
     title?: string;
     disabled?: boolean;
@@ -27,6 +38,10 @@
     variant = 'pill',
     size = 'md',
     type = 'button',
+    href,
+    download,
+    target,
+    rel,
     onclick,
     title,
     disabled,
@@ -37,21 +52,47 @@
   }: Props = $props();
 </script>
 
-<button
-  class="btn btn-{variant} btn-{size}"
-  {type}
-  {onclick}
-  {title}
-  disabled={disabled || loading}
-  aria-busy={loading || undefined}
-  aria-label={ariaLabel}
->
-  {#if loading}{loadingLabel}{:else}{@render children()}{/if}
-</button>
+{#if href}
+  <!-- A disabled link is not a thing the platform has, so a disabled href
+       renders as a real disabled button instead of an inert-looking anchor
+       that still navigates. -->
+  {#if disabled || loading}
+    <button class="btn btn-{variant} btn-{size}" type="button" disabled aria-label={ariaLabel}>
+      {#if loading}{loadingLabel}{:else}{@render children()}{/if}
+    </button>
+  {:else}
+    <a
+      class="btn btn-{variant} btn-{size}"
+      {href}
+      {download}
+      {target}
+      {rel}
+      {title}
+      {onclick}
+      aria-label={ariaLabel}
+    >
+      {@render children()}
+    </a>
+  {/if}
+{:else}
+  <button
+    class="btn btn-{variant} btn-{size}"
+    {type}
+    {onclick}
+    {title}
+    disabled={disabled || loading}
+    aria-busy={loading || undefined}
+    aria-label={ariaLabel}
+  >
+    {#if loading}{loadingLabel}{:else}{@render children()}{/if}
+  </button>
+{/if}
 
 <style>
   .btn {
     display: inline-flex;
+    /* An <a> carries link chrome the button variants do not want. */
+    text-decoration: none;
     align-items: center;
     justify-content: center;
     gap: 0.35rem;

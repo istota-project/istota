@@ -11,7 +11,7 @@
     type HealthDocument,
     type Immunization,
   } from '$lib/api';
-  import { Badge, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import { Badge, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
   const routeOptions: SelectOption[] = [
@@ -104,17 +104,14 @@
   <div class="header">
     <h1>Immunization detail</h1>
     <div class="actions">
-      <a class="btn" href="{base}/health/immunizations">Back</a>
+      <Button href="{base}/health/immunizations">Back</Button>
       {#if immunization}
-        <a
-          class="btn"
+        <Button
           href="{base}/health/immunizations/vaccine?name={encodeURIComponent(immunization.name)}"
         >
           View all {immunization.name}
-        </a>
-        <button class="btn danger" type="button" onclick={() => (confirmDelete = true)}
-          >Delete</button
-        >
+        </Button>
+        <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
       {/if}
     </div>
   </div>
@@ -239,9 +236,7 @@
       <div class="msg error">{formError}</div>
     {/if}
     <div class="form-actions">
-      <button class="btn primary" type="submit" disabled={saving}>
-        {saving ? 'Saving…' : 'Save'}
-      </button>
+      <Button variant="primary" type="submit" loading={saving}>Save</Button>
     </div>
   </form>
 
@@ -298,35 +293,6 @@
     display: flex;
     gap: 0.5rem;
     flex-wrap: wrap;
-  }
-  .btn {
-    padding: 0.4rem 0.85rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    text-decoration: none;
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    line-height: 1.2;
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
-  }
-  .btn.danger {
-    color: var(--text-muted);
-  }
-  .btn.danger:hover:not(:disabled) {
-    color: var(--status-danger-fg);
   }
 
   .card {

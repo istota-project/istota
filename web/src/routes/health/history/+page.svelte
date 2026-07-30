@@ -10,7 +10,7 @@
     type Diagnosis,
     type Encounter,
   } from '$lib/api';
-  import { Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Select, type SelectOption } from '$lib/components/ui';
   import {
     conditionOptionLabel,
     linkableConditionOptions,
@@ -220,11 +220,11 @@
   <div class="header">
     <h1>Medical history</h1>
     <div class="actions">
-      <button class="btn" type="button" onclick={() => (formOpen = !formOpen)}>
+      <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Add encounter'}
-      </button>
-      <a class="btn" href="{base}/health/history/import">Import</a>
-      <a class="btn" href="{base}/health/history/diagnoses">Conditions</a>
+      </Button>
+      <Button href="{base}/health/history/import">Import</Button>
+      <Button href="{base}/health/history/diagnoses">Conditions</Button>
     </div>
   </div>
 {/if}
@@ -311,9 +311,7 @@
       <div class="msg error">{formError}</div>
     {/if}
     <div class="form-actions">
-      <button type="submit" class="btn primary" disabled={saving}>
-        {saving ? 'Saving…' : 'Save'}
-      </button>
+      <Button variant="primary" type="submit" loading={saving}>Save</Button>
     </div>
   </form>
 {/if}
@@ -447,33 +445,12 @@
     .actions {
       flex-wrap: wrap;
     }
-    .actions > * {
+    /* :global because the children are <Button>s now; Svelte prunes a rule
+       whose subject it cannot see, and this one silently stopped applying. */
+    .actions > :global(*) {
       flex: 1 1 auto;
       text-align: center;
     }
-  }
-  .btn {
-    padding: 0.4rem 0.85rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    text-decoration: none;
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    line-height: 1.2;
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
   }
 
   .quick-form {

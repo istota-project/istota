@@ -14,7 +14,7 @@
     type Encounter,
     type HealthPanel,
   } from '$lib/api';
-  import { Badge, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import { Badge, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
 
   // Read the panel id from ?id=… so the page is statically prerenderable
   // under adapter-static; the actual lookup happens client-side.
@@ -254,21 +254,17 @@
       </div>
       <div class="actions">
         {#if !editing}
-          <button class="btn" type="button" onclick={startEditing}>Edit panel</button>
+          <Button onclick={startEditing}>Edit panel</Button>
           {#if panel.draft}
-            <button class="btn primary" type="button" onclick={confirmDraftOnly}>Confirm</button>
+            <Button variant="primary" onclick={confirmDraftOnly}>Confirm</Button>
           {/if}
         {:else}
-          <button class="btn" type="button" onclick={() => (editing = false)} disabled={saving}
-            >Cancel</button
-          >
-          <button class="btn primary" type="button" onclick={() => save(true)} disabled={saving}>
+          <Button onclick={() => (editing = false)} disabled={saving}>Cancel</Button>
+          <Button variant="primary" onclick={() => save(true)} disabled={saving}>
             {saving ? 'Saving…' : 'Save + confirm'}
-          </button>
+          </Button>
         {/if}
-        <button class="btn danger" type="button" onclick={() => (confirmDelete = true)}
-          >Delete</button
-        >
+        <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
       </div>
     </div>
 
@@ -350,7 +346,7 @@
           </tbody>
         </table>
         {#if editing}
-          <button class="btn add" type="button" onclick={addRow}>+ Add biomarker</button>
+          <Button onclick={addRow}>+ Add biomarker</Button>
         {/if}
       </div>
 
@@ -465,32 +461,6 @@
     display: flex;
     gap: 0.3rem;
     flex-wrap: wrap;
-  }
-  .btn {
-    padding: 0.2rem 0.5rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-xs);
-    white-space: nowrap;
-    cursor: pointer;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
-  }
-  .btn.danger {
-    border-color: var(--status-danger-fg);
-    color: var(--status-danger-fg);
   }
   .split {
     display: grid;

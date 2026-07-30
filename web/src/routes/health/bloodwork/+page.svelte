@@ -10,7 +10,7 @@
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
-  import { Badge } from '$lib/components/ui';
+  import { Badge, Button } from '$lib/components/ui';
 
   let loading = $state(true);
   let error = $state('');
@@ -142,9 +142,9 @@
   <div class="header">
     <h1>Bloodwork</h1>
     <div class="actions">
-      <button class="btn" type="button" onclick={triggerCsvPick} disabled={csvImporting}>
-        {csvImporting ? 'Importing…' : 'Import CSV'}
-      </button>
+      <Button onclick={triggerCsvPick} loading={csvImporting} loadingLabel="Importing…"
+        >Import CSV</Button
+      >
       <input
         bind:this={csvInput}
         type="file"
@@ -152,8 +152,8 @@
         style="display: none"
         onchange={onCsvPicked}
       />
-      <a class="btn" href={healthCsvExportUrl()} download="bloodwork.csv">Export CSV</a>
-      <a class="btn primary" href="{base}/health/bloodwork/upload">Upload lab results</a>
+      <Button href={healthCsvExportUrl()} download="bloodwork.csv">Export CSV</Button>
+      <Button variant="primary" href="{base}/health/bloodwork/upload">Upload lab results</Button>
     </div>
   </div>
 {/if}
@@ -306,28 +306,6 @@
     display: flex;
     gap: 0.5rem;
     align-items: center;
-  }
-  .btn {
-    padding: 0.4rem 0.85rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    text-decoration: none;
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
   }
   .msg {
     font-size: var(--text-sm);
@@ -684,7 +662,10 @@
       gap: 0.3rem;
       flex-wrap: nowrap;
     }
-    .btn {
+    /* The toolbar shrinks its buttons on a phone, which Button has no prop
+       for — a size is a fixed choice, not a responsive one. Scoped to this
+       page's own .actions so it cannot reach another module's buttons. */
+    .actions :global(.btn) {
       padding: 0.2rem 0.5rem;
       font-size: var(--text-xs);
       white-space: nowrap;

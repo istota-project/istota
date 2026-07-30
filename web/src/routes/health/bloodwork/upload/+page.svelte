@@ -9,7 +9,7 @@
     healthPanelSourceUrl,
     type Biomarker,
   } from '$lib/api';
-  import { Select } from '$lib/components/ui';
+  import { Button, Select } from '$lib/components/ui';
 
   const flagOptions = [
     { value: '', label: '—' },
@@ -216,9 +216,13 @@
       {#if info}<div class="msg info">{info}</div>{/if}
 
       <div class="actions">
-        <button class="btn primary" onclick={doUpload} disabled={uploading || !file} type="button">
-          {uploading ? 'Uploading…' : 'Upload + extract'}
-        </button>
+        <Button
+          variant="primary"
+          onclick={doUpload}
+          disabled={uploading || !file}
+          loading={uploading}
+          loadingLabel="Uploading…">Upload + extract</Button
+        >
       </div>
     </div>
   {:else}
@@ -319,17 +323,15 @@
           {#if error}<div class="msg error">{error}</div>{/if}
 
           <div class="actions">
-            <button class="btn" onclick={addRow} type="button">+ Add row</button>
-            <button class="btn" type="button" onclick={doExtract}>Retry extraction</button>
+            <Button onclick={addRow}>+ Add row</Button>
+            <Button onclick={doExtract}>Retry extraction</Button>
             <div class="spacer"></div>
-            <button
-              class="btn primary"
+            <Button
+              variant="primary"
               disabled={saving || extracted.length === 0}
               onclick={confirm}
-              type="button"
+              loading={saving}>Confirm and save</Button
             >
-              {saving ? 'Saving…' : 'Confirm and save'}
-            </button>
           </div>
         {/if}
       </div>
@@ -465,27 +467,6 @@
     to {
       transform: rotate(360deg);
     }
-  }
-  .btn {
-    padding: 0.4rem 0.85rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
   }
   .split {
     display: grid;

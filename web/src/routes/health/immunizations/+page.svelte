@@ -12,7 +12,14 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Badge, ConfirmDialog, KebabMenu, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    KebabMenu,
+    Select,
+    type SelectOption,
+  } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
 
   let loading = $state(true);
@@ -159,10 +166,10 @@
   <div class="header">
     <h1>Immunizations</h1>
     <div class="actions">
-      <button class="btn" type="button" onclick={() => (formOpen = !formOpen)}>
+      <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Log dose'}
-      </button>
-      <a class="btn" href="{base}/health/immunizations/import">Import</a>
+      </Button>
+      <Button href="{base}/health/immunizations/import">Import</Button>
     </div>
   </div>
 {/if}
@@ -224,9 +231,7 @@
       <div class="msg error">{formError}</div>
     {/if}
     <div class="form-actions">
-      <button type="submit" class="btn primary" disabled={saving}>
-        {saving ? 'Saving…' : 'Save'}
-      </button>
+      <Button variant="primary" type="submit" loading={saving}>Save</Button>
     </div>
   </form>
 {/if}
@@ -416,29 +421,6 @@
     display: flex;
     gap: 0.5rem;
     align-items: center;
-  }
-  .btn {
-    padding: 0.4rem 0.85rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    text-decoration: none;
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    line-height: 1.2;
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
   }
 
   .quick-form {

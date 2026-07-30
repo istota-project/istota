@@ -17,6 +17,7 @@
   } from '$lib/api';
   import {
     Badge,
+    Button,
     ConfirmDialog,
     KebabMenu,
     Select,
@@ -251,10 +252,8 @@
     </div>
     {#if encounter && !editing}
       <div class="actions">
-        <button class="btn" type="button" onclick={startEdit}>Edit</button>
-        <button class="btn danger" type="button" onclick={() => (confirmDelete = true)}
-          >Delete</button
-        >
+        <Button onclick={startEdit}>Edit</Button>
+        <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
       </div>
     {/if}
   </div>
@@ -304,10 +303,8 @@
         <textarea bind:value={form.notes} rows="5"></textarea>
       </label>
       <div class="form-actions">
-        <button type="button" class="btn" onclick={() => (editing = false)}>Cancel</button>
-        <button type="submit" class="btn primary" disabled={saving}>
-          {saving ? 'Saving…' : 'Save'}
-        </button>
+        <Button onclick={() => (editing = false)}>Cancel</Button>
+        <Button variant="primary" type="submit" loading={saving}>Save</Button>
       </div>
     </form>
   {:else}
@@ -393,9 +390,12 @@
         disabled={linking || linkOptions.length === 0}
         ariaLabel="Link an existing condition"
       />
-      <button class="btn" type="button" onclick={linkCondition} disabled={!linkPick || linking}>
-        {linking ? 'Linking…' : 'Link'}
-      </button>
+      <Button
+        onclick={linkCondition}
+        disabled={!linkPick || linking}
+        loading={linking}
+        loadingLabel="Linking…">Link</Button
+      >
     </div>
     {#if linkError}
       <div class="msg error">{linkError}</div>
@@ -491,32 +491,6 @@
   .actions {
     display: flex;
     gap: 0.5rem;
-  }
-  .btn {
-    padding: 0.35rem 0.75rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    line-height: 1.2;
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
-  }
-  .btn.danger {
-    border-color: var(--status-danger-fg);
-    color: var(--status-danger-fg);
   }
 
   .meta {

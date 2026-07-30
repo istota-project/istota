@@ -11,10 +11,11 @@
     type Encounter,
   } from '$lib/api';
   import {
-    Select,
+    Button,
     ConfirmDialog,
     KebabMenu,
     Modal,
+    Select,
     type KebabItem,
     type SelectOption,
   } from '$lib/components/ui';
@@ -272,9 +273,9 @@
       <a class="back" href="{base}/health/history">← Medical history</a>
       <h1>Conditions</h1>
     </div>
-    <button class="btn" type="button" onclick={toggleForm}>
+    <Button onclick={toggleForm}>
       {formOpen ? 'Cancel' : '+ Add diagnosis'}
-    </button>
+    </Button>
   </div>
 {/if}
 
@@ -360,9 +361,9 @@
       <div class="msg error">{formError}</div>
     {/if}
     <div class="form-actions">
-      <button type="submit" class="btn primary" disabled={saving}>
+      <Button variant="primary" type="submit" disabled={saving}>
         {saving ? 'Saving…' : editing ? 'Save changes' : 'Save'}
-      </button>
+      </Button>
     </div>
   </form>
 {/if}
@@ -551,37 +552,6 @@
   .toggle:hover {
     color: var(--text-primary);
     text-decoration: underline;
-  }
-
-  .btn {
-    padding: 0.35rem 0.75rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    line-height: 1.2;
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--surface-raised);
-  }
-  .btn.small {
-    padding: 0.15rem 0.5rem;
-    font-size: var(--text-xs);
-  }
-  .btn.primary {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
-  }
-  .btn.danger {
-    border-color: var(--status-danger-fg);
-    color: var(--status-danger-fg);
   }
 
   .form {
