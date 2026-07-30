@@ -319,6 +319,12 @@ function mockTaskEvents(task: MockChatTask) {
     '2. **Tech** — a new on-device model shipped with `tool use` baked in.\n' +
     '3. **Sports** — the tournament bracket is set for the weekend.\n\n' +
     '> Streaming, tools, and `markdown` all render here in real time.\n\n' +
+    // A fenced block, so the preview covers a reply whose copy carries code:
+    // the block copy is the markdown source, fences included.
+    '```bash\n' +
+    'istota task "summarise today" -u alice --output-target both\n' +
+    'istota list --status completed\n' +
+    '```\n\n' +
     'Ask a follow-up, or try `!help` for commands.';
   const answerChunks = reply.match(/.{1,14}/gs) ?? [reply];
 

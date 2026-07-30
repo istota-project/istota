@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { Star } from 'lucide-svelte';
+  import { Copy, Star } from 'lucide-svelte';
   import { chatFileUrl } from '$lib/api';
+  import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
   import type { ChatMessage } from '$lib/stores/chat';
   import { renderGroups } from '$lib/stores/segments';
@@ -117,7 +118,41 @@
   const showMeta = $derived(revealed && meta.length > 0 && !message.streaming);
   const showStar = $derived(starrable && (revealed || !!message.starred));
   const hasActions = $derived(showStar || showMeta);
+
+  // Copy hangs off each *block*, not the turn. A turn is an ordered list of
+  // prose groups separated by activity chips, and a tool trace is never
+  // something you want on the clipboard — so a per-turn copy would have to
+  // decide which parts to include, while a per-block one is exact by
+  // construction. It also matches how the text is actually used: you lift one
+  // paragraph or one snippet out of an answer, not the whole answer.
+  //
+  // Withheld while streaming: a half-written block copies half an answer, and
+  // the button would sit under text that is still moving.
+  const showCopy = $derived(!message.streaming);
 </script>
+
+<!-- Hangs just below the block it copies, at the right edge. Absolute, so it
+     costs no layout at rest and reserves no space; sitting in the gap rather
+     than over the last line is what lets it be a bare icon with no background
+     to separate it from text. -->
+{#snippet copyButton(text: string, label: string)}
+  <button
+    class="copy-block"
+    onclick={(e) => {
+      void copyText(text, { label });
+      // Same reason as the star: a pointer click leaves the button focused,
+      // and a focus ring that also reveals it is a second way for it to sit
+      // there lit after the user has moved on. A keyboard activation reports
+      // detail 0, so this can't take focus away from keyboard use.
+      if (e.detail > 0) e.currentTarget.blur();
+    }}
+    aria-label="Copy this text"
+    title="Copy"
+    type="button"
+  >
+    <Copy size={13} />
+  </button>
+{/snippet}
 
 {#snippet starButton()}
   <button
@@ -175,7 +210,14 @@
     {#if message.searchResults}
       <SearchResults data={message.searchResults} {onJump} />
     {:else}
-      <div class="cmd-output markdown" class:error={message.error}>{@html bodyHtml}</div>
+      <div class="cmd-output markdown" class:error={message.error}>
+        <!-- Before the content, for the `:last-child` reason in the prose
+             branch above. -->
+        {#if showCopy && message.text.trim()}
+          {@render copyButton(message.text, 'Copied')}
+        {/if}
+        {@html bodyHtml}
+      </div>
     {/if}
     {#if showStar}
       <div class="msg-actions cmd-actions">
@@ -223,7 +265,16 @@
       {/if}
 
       {#if isUser}
-        {#if message.text}<div class="body user-body">{message.text}</div>{/if}
+        {#if message.text}
+          <!-- The text carries `pre-wrap`, so it needs its own element: with
+               the whitespace rule on the wrapper, the newlines and indentation
+               around a sibling button would render as leading and trailing
+               blank space in every user message. -->
+          <div class="body user-body">
+            <span class="user-text">{message.text}</span>
+            {#if showCopy}{@render copyButton(message.text, 'Copied')}{/if}
+          </div>
+        {/if}
         {#if message.attachments?.length}
           <div class="attachments">
             {#each message.attachments as name, i}
@@ -265,7 +316,20 @@
               />
             </div>
           {:else}
-            <div class="body markdown">{@html renderMarkdown(g.text)}</div>
+            <!-- Button first, though it renders bottom-right either way: it is
+                 absolutely positioned, so document order doesn't place it, but
+                 as the last child it would be what `.markdown > *:last-child`
+                 matches — and that rule exists to strip the trailing margin off
+                 the last *content* block.
+
+                 The copied text is the group's own markdown source, not the
+                 rendered html. That is also why fenced code needs no copy button
+                 of its own: the source carries the fences, so copying the block
+                 already yields the code as markdown. -->
+            <div class="body markdown">
+              {#if showCopy}{@render copyButton(g.text, 'Copied')}{/if}
+              {@html renderMarkdown(g.text)}
+            </div>
           {/if}
         {/each}
 
@@ -452,8 +516,76 @@
   .msg.touch .star-btn,
   .cmd-row.touch .star-btn,
   .msg.touch .meta-footer,
-  .msg.touch .hover-time {
+  .msg.touch .hover-time,
+  .msg.touch .copy-block,
+  .cmd-row.touch .copy-block {
     transition: none;
+  }
+
+  /* Per-block copy. Follows the star's reveal contract exactly — hidden *and*
+	   inert at rest, revealed by pointer hover or the touch `.active`
+	   surrogate — because it shares the failure mode: a control at zero opacity
+	   is still hit-testable, and this one sits where a thumb scrolling the
+	   transcript naturally lands.
+
+	   Anchored to the block rather than the row so a turn with several prose
+	   groups gets one per group, each copying its own text. */
+  /* The block reserves the strip its copy button sits in, rather than the
+	   button hanging outside the block's box. That single decision is what
+	   makes the affordance behave: the button is inside its own hover target,
+	   so there is no dead gap to cross on the way to it, no angle of approach
+	   that leaves the target early, and nothing overlapping the content below.
+	   Hanging it outside cost a padding bridge, a pseudo-element hover bridge
+	   and a z-index — each fixing a defect the previous one introduced, none
+	   of them checkable by the test suite (jsdom has no hit-testing).
+
+	   The cost is the reserve itself: this much space under every block,
+	   empty when nothing is hovered. `--chat-copy-reserve` is that one number. */
+  .body,
+  .cmd-output {
+    position: relative;
+    padding-bottom: var(--chat-copy-reserve);
+  }
+  .copy-block {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.2rem;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font: inherit;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition:
+      opacity var(--transition-fast),
+      color var(--transition-fast);
+  }
+  /* Scoped to the hovered block, not the row: a turn with several prose groups
+	   would otherwise light every one of its buttons at once, and only the one
+	   under the cursor means anything. Hover still holds while the cursor is on
+	   the button itself — `:hover` follows the DOM ancestor chain, so the button
+	   sitting visually outside its parent's box doesn't break the chain. */
+  @media (hover: hover) {
+    .msg:not(.touch) .body:hover .copy-block,
+    .cmd-row:not(.touch) .cmd-output:hover .copy-block {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .msg:not(.touch) .copy-block:hover,
+    .cmd-row:not(.touch) .copy-block:hover {
+      color: var(--text-primary);
+    }
+  }
+  .msg.active .copy-block,
+  .cmd-row.active .copy-block,
+  .copy-block:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   /* Room label chip (aggregate views): a small clickable room tag in the
@@ -587,7 +719,10 @@
 		   the row itself stays full-width so the hover highlight spans it. */
     max-width: 900px;
   }
-  .user-body {
+  /* On the inner span, not the wrapper: the wrapper also holds the copy
+	   button, and under `pre-wrap` the markup whitespace around that button
+	   would render as real blank space around the message text. */
+  .user-text {
     white-space: pre-wrap;
   }
 
@@ -599,8 +734,13 @@
   .chip-slot {
     margin: 0;
   }
+  /* A chip's preceding neighbour is always a prose block (tool runs coalesce,
+	   so chips never abut), and that block now carries `--chat-copy-reserve`
+	   below its text — which is the separation this margin used to supply. Kept
+	   at a reduced value rather than deleted so the two are tuned together: if
+	   the reserve goes, this goes back up. */
   .chip-slot.gap-above {
-    margin-top: 0.85rem;
+    margin-top: 0.1rem;
   }
   .chip-slot.gap-below {
     margin-bottom: 0.85rem;
