@@ -4492,12 +4492,101 @@ async def settings_set_secret(
             detail="ISTOTA_SECRET_KEY is not set; cannot store secrets.",
         )
 
+    _signal_ingest_reload_if_needed(service, key)
+
     logger.info(
         "settings: %s %s/%s for user=%s",
         "cleared" if not value else "stored",
         service, key, user["username"],
     )
     return {"ok": True, "service": service, "key": key, "configured": bool(value)}
+
+
+def _signal_ingest_reload_if_needed(service: str, key: str) -> None:
+    """Tell the webhook receiver its token map is stale, if this was a token.
+
+    The receiver is a different process (its own systemd unit on the
+    server, its own container under Docker), so a token written here is
+    invisible to it until it reloads. Without this the first ping from a
+    just-provisioned device 403s, which reads as a bad token rather than as
+    a stale cache.
+    """
+    if service != "overland" or key != "ingest_token" or not _config:
+        return
+    from .location import ingest_signal
+
+    ingest_signal.signal_reload(_config.db_path)
+
+
+@api_router.post("/settings/secrets/overland/ingest_token/generate")
+async def settings_generate_ingest_token(
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Mint a fresh location ingest token and return it **once**.
+
+    The only endpoint that puts a secret in a response body. That is the
+    point: the token has to reach a phone, and the alternative is the user
+    transcribing 43 random characters by hand. Returning it here lets the
+    settings page render it as a QR the device scans, after which it is
+    write-only like every other secret — no read path exists.
+
+    Generating rotates: any previous token stops working immediately. That
+    is the revocation mechanism, and with one token per user it also
+    revokes the user's other devices, which is why the UI has to say so.
+    """
+    import secrets as _secrets
+
+    from . import secrets_store
+    from fastapi import HTTPException
+
+    if not _config:
+        raise HTTPException(status_code=503, detail="config not loaded")
+
+    if not _user_has_location(user["username"]):
+        # The receiver only builds a token map for users with the module on,
+        # so a token issued here would be refused on first use. A 409 that
+        # says why beats a token that silently never works.
+        raise HTTPException(
+            status_code=409,
+            detail="The location module is off for this user, so an ingest "
+                   "token would not be accepted. Enable it in Settings first.",
+        )
+
+    token = _secrets.token_urlsafe(32)
+    try:
+        secrets_store.set_secret(
+            _config.db_path, user["username"], "overland", "ingest_token", token,
+        )
+    except secrets_store.SecretKeyMissingError:
+        raise HTTPException(
+            status_code=503,
+            detail="ISTOTA_SECRET_KEY is not set; cannot store secrets.",
+        )
+
+    _signal_ingest_reload_if_needed("overland", "ingest_token")
+
+    logger.info(
+        "settings: generated location ingest token for user=%s", user["username"],
+    )
+    return {
+        "ok": True,
+        "token": token,
+        "webhook_url": _location_webhook_url(token),
+    }
+
+
+def _location_webhook_url(token: str = "<token>") -> str:
+    """The ingest URL a device posts to.
+
+    Shared by the generate endpoint (which fills in the real token so the
+    QR carries a working URL) and ``/location/settings-info`` (which leaves
+    the placeholder, since it must never echo a stored token).
+    """
+    hostname = _config.site.hostname if _config else ""
+    if not hostname:
+        return f"/webhooks/location?token={token}"
+    return f"https://{hostname}/webhooks/location?token={token}"
 
 
 @api_router.post("/money/monarch/login")
@@ -4521,8 +4610,10 @@ async def money_monarch_login(
     messages:
     - 400: invalid input (missing email/password, etc.)
     - 401: Monarch rejected the credentials
-    - 412: MFA required and no code supplied
-    - 503: Cloudflare blocked (server IP can't reach login endpoint)
+    - 412: MFA required, or the supplied code was spent on a retried attempt
+    - 503: three distinct conditions the user can't act on — Cloudflare blocked
+      the server IP, Monarch's CAPTCHA gate is up, or the client-version
+      contract moved. Only the message text tells them apart.
     """
     import asyncio
     from fastapi import HTTPException
@@ -4548,8 +4639,9 @@ async def money_monarch_login(
             status_code=412, detail=f"MFA required: {exc}",
         )
     except MonarchClientOutdated as exc:
-        # 503 because the user can't fix this — the operator needs to bump
-        # CLIENT_VERSION in the source. Surface it loudly.
+        # 503 because the user can't fix this. The client already re-read the
+        # live version and retried once, so reaching here means the header
+        # contract moved — an operator, not the user, has to act.
         logger.error("monarch_login_client_outdated msg=%s", exc)
         raise HTTPException(
             status_code=503,
@@ -5555,15 +5647,9 @@ async def api_location_settings_info(user: dict = Depends(_require_api_auth)):
     """
     if not _config:
         return {"webhook_url": "", "place_detection": {}}
-    hostname = _config.site.hostname or ""
-    scheme = "https" if hostname else ""
-    webhook_url = (
-        f"{scheme}://{hostname}/webhooks/location?token=<token>"
-        if hostname else "/webhooks/location?token=<token>"
-    )
     loc = _config.location
     return {
-        "webhook_url": webhook_url,
+        "webhook_url": _location_webhook_url(),
         "module_enabled": _user_has_location(user["username"]),
         "place_detection": {
             "accuracy_threshold_m": loc.accuracy_threshold_m,

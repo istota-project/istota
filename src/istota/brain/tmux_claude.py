@@ -55,7 +55,7 @@ from .claude_code import (
     _is_root,
     build_claude_cli_flags,
     is_transient_api_error,
-    is_usage_limit_banner,
+    _success_frame_stop_reason,
     is_usage_limit_error,
 )
 
@@ -773,7 +773,13 @@ class TmuxClaudeBrain:
                     BrainResult(
                         success=False,
                         result_text="claude reported an error mid-turn",
-                        stop_reason="error",
+                        # A transient pane error must carry the transient
+                        # stop_reason, not a bare "error" — otherwise it matches
+                        # no fallback trigger and dead-ends once the in-brain
+                        # session retries are spent (ISSUE-212).
+                        stop_reason=(
+                            "transient_api_error" if retryable else "error"
+                        ),
                     ),
                     retryable,
                 )
@@ -935,13 +941,19 @@ class TmuxClaudeBrain:
         # keyword one: ``result_text`` is the real assistant answer here, so a
         # normal reply that merely quotes a limit word (e.g. summarising a past
         # usage-limit incident) must not be misread as an outage.
-        if is_usage_limit_banner(result_text):
-            logger.warning("tmux_brain usage_limit (transcript body)")
+        # Same treatment for a provider API error the CLI delivered as the
+        # final assistant message (ISSUE-212) — on the subscription brain a
+        # capacity banner is exactly what the fallback exists to absorb, and
+        # left alone it is handed to the user verbatim as the answer.
+        reclassified = _success_frame_stop_reason(result_text)
+        if reclassified:
+            logger.warning("tmux_brain %s (transcript body)", reclassified)
             return BrainResult(
                 success=False,
                 result_text=result_text,
-                stop_reason="usage_limit",
+                stop_reason=reclassified,
                 model_used=model_used or req.model,
+                work_committed=True,
             )
 
         return BrainResult(

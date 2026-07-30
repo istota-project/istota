@@ -170,6 +170,13 @@ def process_one_task(config: Config, dry_run: bool = False, user_id: str | None 
    - Check cancellation (`Cancelled by user` → status `cancelled`, no retry)
    - Check policy refusal (`_is_policy_refusal()`: 400 + safety/policy/content/refused/harm/blocked keyword) → mark failed, post alert via `_post_policy_refusal_alert()` (extracts `From:` header for email tasks), no retry
    - Check shutdown collateral (`_is_shutdown_collateral()`: `_shutdown_requested` **and** `is_signal_termination(result)`) → `db.release_task_for_restart` — back to `pending`, liveness cleared, **no attempt charged, no backoff**, deferred-op files purged. Not a task failure: under systemd's default `KillMode=control-group` a `systemctl restart` (the auto-update cron issues one per commit) SIGTERMs the whole cgroup, killing an in-flight task's `claude` child while the daemon shuts down gracefully — so the surviving worker recorded the corpse as a failure, permanently on a final attempt (ISSUE-191). The attempt is not charged because it was aborted by infrastructure, so a terminal attempt recovers too; `fail_ancient_pending_tasks` is the bound. The unit template now also sets `KillMode=mixed`, which converts the same event into the startup orphan-recovery path — this branch is the belt-and-braces (and the half that ships via auto-update, since unit files need an Ansible run). The terminal-events block mirrors the classification (`is_requeued`) and emits a "Scheduler restarting…" `progress_text` instead of a terminal frame.
+   - Check permanent provider error (`is_api_error_banner` **and**
+     `is_permanent_api_error`: a bad model id, an expired key, an oversized
+     prompt) → mark failed, no retry. The ladder would fail identically on
+     every rung, ~21 minutes later (ISSUE-212). Banner-gated for the same
+     reason the masquerading-success guard is: an answer *discussing* a 400
+     must not suppress a legitimate retry. The terminal-events block mirrors
+     the classification (`is_permanent_api`) so no "retrying" notice is emitted
    - Retry with backoff if attempts remain (1, 4, 16 min) — skipped for OOM
    - Mark failed permanently
    - Track scheduled job failures, auto-disable after threshold

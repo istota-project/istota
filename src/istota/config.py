@@ -852,7 +852,11 @@ class BrainConfig:
     # brain._fallback.effective_fallback_kind).
     fallback: str = ""
     # Include a persistent transient_api_error in the reroute trigger set.
-    fallback_on_transient: bool = False
+    # On by default (ISSUE-212): a capacity signal that survived the primary's
+    # own in-brain retries is exactly what the fallback exists to absorb, and
+    # the alternative is handing the user a raw provider error. Not a hair
+    # trigger — the primary has already burned API_RETRY_MAX_ATTEMPTS by then.
+    fallback_on_transient: bool = True
     # Availability-breaker cooldown: once the primary reports a persistent
     # unavailability, subsequent tasks skip it for this long. 0 disables
     # stickiness (every task probes the primary first).
@@ -1976,7 +1980,9 @@ def load_config(config_path: Path | None = None) -> Config:
                 str(k): str(v) for k, v in overrides_raw.items()
             },
             fallback=str(br.get("fallback", "")).strip(),
-            fallback_on_transient=bool(br.get("fallback_on_transient", False)),
+            fallback_on_transient=bool(
+                br.get("fallback_on_transient", BrainConfig.fallback_on_transient)
+            ),
             fallback_cooldown_seconds=int(br.get("fallback_cooldown_seconds", 900)),
         )
 

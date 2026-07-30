@@ -87,7 +87,10 @@ class TestInitDb:
             row = conn.execute(
                 "SELECT value FROM schema_meta WHERE key='version'"
             ).fetchone()
-        assert row["value"] == "2"
+        # Tracks the constant rather than a literal: the point is that a
+        # fresh DB records the version the code is at, and pinning a number
+        # here only means editing it on every additive migration.
+        assert row["value"] == str(location_db.SCHEMA_VERSION)
 
     def test_init_db_writes_schema_only_sentinel_on_fresh(self, location_path):
         location_db.init_db(location_path)

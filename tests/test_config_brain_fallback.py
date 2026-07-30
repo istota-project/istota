@@ -12,8 +12,17 @@ class TestFallbackKeysParse:
         cfg.write_text('[brain]\nkind = "claude_code"\n')
         config = load_config(cfg)
         assert config.brain.fallback == ""
-        assert config.brain.fallback_on_transient is False
+        # ISSUE-212: on by default, and the loader must agree with the dataclass
+        # — a key omitted from TOML previously resolved to False regardless.
+        assert config.brain.fallback_on_transient is True
+        assert config.brain.fallback_on_transient is BrainConfig().fallback_on_transient
         assert config.brain.fallback_cooldown_seconds == 900
+
+    def test_explicit_false_is_honoured(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('[brain]\nkind = "claude_code"\nfallback_on_transient = false\n')
+        config = load_config(cfg)
+        assert config.brain.fallback_on_transient is False
 
     def test_parses_all_three(self, tmp_path):
         cfg = tmp_path / "config.toml"

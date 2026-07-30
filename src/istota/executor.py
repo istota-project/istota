@@ -493,6 +493,26 @@ def _resolve_fallback_model_effort(task, config, fallback_brain, effort):
     return ("", effort, raw)
 
 
+# Prefixed onto a fallback failure text when the fallback was *also* unavailable,
+# so the delivery layer can say "both brains are down" instead of echoing a raw
+# provider error at the user (ISSUE-212). A marker rather than a formatted
+# sentence because the executor's return contract is a plain string — the
+# scheduler owns the user-facing wording, and the underlying cause stays in the
+# text for the logs and the friendly formatter.
+FALLBACK_EXHAUSTED_MARKER = "[brain-fallback-exhausted]"
+
+# The fallback's own stop_reasons that mean "I was unavailable too", as opposed
+# to a task-level outcome (timeout / oom / cancelled) where "both unavailable"
+# would be the wrong thing to tell the user.
+# `not_found` is deliberately absent: it means the fallback brain's binary isn't
+# installed. That is an operator misconfiguration, and telling the user to "try
+# again shortly" would be false — it will never resolve on its own. It flows
+# through the ordinary failure path so the real cause stays visible.
+_FALLBACK_UNAVAILABLE_REASONS = frozenset(
+    {"usage_limit", "fallback", "transient_api_error"}
+)
+
+
 def _run_fallback(config, brain_config, fallback_kind, task, req):
     """Construct the fallback brain and run the same attempt through it.
 
@@ -522,7 +542,7 @@ def _run_fallback(config, brain_config, fallback_kind, task, req):
     )
     fb_req = _dc.replace(req, model=fb_model, effort=fb_effort)
     try:
-        return fb_brain.execute(fb_req), dropped_pin
+        return _mark_if_exhausted(fb_brain.execute(fb_req)), dropped_pin
     except Exception as e:  # noqa: BLE001 — brains shouldn't raise, but be safe
         logger.exception("brain fallback: fallback brain %s raised", fallback_kind)
         return (
@@ -533,6 +553,28 @@ def _run_fallback(config, brain_config, fallback_kind, task, req):
             ),
             dropped_pin,
         )
+
+
+def _mark_if_exhausted(fb_result):
+    """Tag a fallback result that failed for *availability* reasons.
+
+    Both brains being unavailable is the one case the user must be told about
+    plainly — the alternative is delivering whatever raw provider error the
+    fallback produced. A task-level failure (timeout / oom / cancelled) is left
+    alone: it isn't an availability problem and the normal wording applies.
+    """
+    import dataclasses as _dc
+
+    if fb_result.success or fb_result.stop_reason not in _FALLBACK_UNAVAILABLE_REASONS:
+        return fb_result
+    logger.error(
+        "brain fallback: fallback brain also unavailable (reason=%s)",
+        fb_result.stop_reason,
+    )
+    return _dc.replace(
+        fb_result,
+        result_text=f"{FALLBACK_EXHAUSTED_MARKER} {fb_result.result_text}".strip(),
+    )
 
 
 def _fire_fallback_alert(config, task, primary_kind, fallback_kind, reason):

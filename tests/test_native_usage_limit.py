@@ -20,8 +20,17 @@ class TestClassifyNativeError:
             ("billing hard limit reached", "usage_limit"),
             ('HTTP 429: {"error": {"message": "Rate limit exceeded, retry"}}', "transient_api_error"),
             ('HTTP 503: {"error": {"message": "Service overloaded"}}', "transient_api_error"),
-            ("Connection error: timed out", "error"),
+            # ISSUE-212: a network-level failure is a capacity/connectivity
+            # signal, so it reroutes to the fallback rather than dead-ending.
+            ("Connection error: timed out", "transient_api_error"),
+            ("Connection error: [Errno 104] ECONNRESET", "transient_api_error"),
             ("", "error"),
+            # Request-shaped failures must stay permanent — a fallback attempt
+            # would fail identically and double-charge.
+            ('HTTP 400: {"error": {"message": "Invalid request"}}', "error"),
+            ('HTTP 401: {"error": {"message": "Incorrect API key"}}', "error"),
+            ('HTTP 404: {"error": {"message": "Unknown model"}}', "error"),
+            ('HTTP 413: {"error": {"message": "Payload too large"}}', "error"),
         ],
     )
     def test_classification(self, text, expected):
@@ -43,6 +52,13 @@ class TestBuildResultStopReason:
         r = self._build('HTTP 429: {"error": {"message": "Rate limit exceeded"}}')
         assert r.stop_reason == "transient_api_error"
 
-    def test_connection_error_stays_error(self):
+    def test_connection_error_is_transient(self):
+        # ISSUE-212: a network-level failure is a capacity/connectivity signal,
+        # so it retries and then reroutes to the fallback instead of surfacing
+        # as an anonymous error the trigger set can't match.
         r = self._build("Connection error: timed out")
+        assert r.stop_reason == "transient_api_error"
+
+    def test_request_shaped_status_stays_error(self):
+        r = self._build('HTTP 400: {"error": {"message": "Invalid request"}}')
         assert r.stop_reason == "error"

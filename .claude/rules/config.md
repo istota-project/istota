@@ -210,7 +210,7 @@ native: NativeBrainConfig                       # [brain.native] block (native h
 tmux: TmuxBrainConfig                           # [brain.tmux] block (tmux-driven interactive TUI)
 source_type_overrides: dict[str, str] = {}      # [brain.source_type_overrides] — per-source-type routing
 fallback: str = ""                              # brain kind to fall back to when primary unavailable
-fallback_on_transient: bool = False             # also reroute a persistent transient_api_error
+fallback_on_transient: bool = True              # also reroute a persistent transient_api_error (ISSUE-212)
 fallback_cooldown_seconds: int = 900            # skip an unavailable primary this long; 0 disables stickiness
 ```
 `fallback` / `fallback_on_transient` / `fallback_cooldown_seconds` drive

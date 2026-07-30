@@ -235,12 +235,36 @@ produce `(result_text, execution_trace)` and the executor reconciles them.
 ## API error helpers
 | Function | Purpose |
 |---|---|
-| `parse_api_error(text) -> dict \| None` | Match `API Error: (\d{3}) (\{...\})` and parse status_code/message/request_id |
-| `is_transient_api_error(text) -> bool` | True if status_code in `TRANSIENT_STATUS_CODES \| {429}` |
+| `parse_api_error(text) -> dict \| None` | status_code/message/request_id from `API Error: NNN {json}` **or** the bodyless `API Error: NNN <text>` the CLI also emits (ISSUE-212 — matching only the JSON form meant a bare `API Error: 529 Overloaded` parsed as nothing: not transient, not retried, not a fallback trigger). Tail stops at the newline |
+| `is_transient_api_error(text) -> bool` | True for a capacity status (`TRANSIENT_STATUS_CODES \| {429}`) **or** a network-level failure (connection reset / timeout / DNS / `ECONNRESET`-class errno). The network branch is gated on an `API Error` marker (or an unambiguous errno) because this predicate also runs against arbitrary tmux pane text; an explicit status is authoritative, so a 400 quoting "connection reset" stays permanent (NB-13a) |
+| `is_permanent_api_error(text) -> bool` | True for a request-shaped failure: `PERMANENT_STATUS_CODES` (`400/401/403/404/405/413/414/422`), context-length, content-filter, `invalid_request_error`-class bodies. A transient status wins over request-shaped body text |
+| `api_error_stop_reason(text) -> str \| None` | The single classifier every execution path uses: `usage_limit` > `error` (permanent) > `transient_api_error` > `None` (not a provider error). `_failure_stop_reason` is `api_error_stop_reason(text) or "error"` |
+| `_status_is_transient(status) -> bool` | The live transient rule: **every** 5xx, plus 408/425/429. `TRANSIENT_STATUS_CODES` is kept as documentation of the common cases but is no longer the gate — enumerating was a latent second copy of this bug (a Cloudflare-fronted provider emits 520-526, none of which were listed, so each would have dead-ended exactly as 529 did) |
+| `is_api_error_banner(text) -> bool` | True iff the text *is* a bare API-error banner — anchored at the start (past ≤8 chars of decoration) and length-gated, mirroring `is_usage_limit_banner`. `claude -p` reports a provider failure as a **success** result frame with the error as the whole answer, which is how a raw `API Error: 529 Overloaded` reached the user as the final reply; strict so a genuine answer *discussing* an earlier API error isn't converted into a retry + a paid fallback call |
+| `parse_retry_after(text) -> float \| None` | The provider's requested wait, capped at `RETRY_AFTER_MAX_SECONDS` (60s) and treating ≤0 as absent. Both retry loops use it in place of the fixed delay; the cap exists so a worker is never parked on the provider's word for an hour when the task's own retry ladder / the fallback could take over |
 | `is_usage_limit_error(text) -> bool` | True if the text carries a subscription/quota/billing usage-limit signal (keyword set + an "exceeded…limit" regex). Provider-agnostic (works on CLI output, tmux transcript/pane text, and native error bodies). Checked *before* the transient predicate at every call site so a quota 429 classifies as `usage_limit`, not a retry. |
 
-All three are re-exported from `executor` for `scheduler.py` and tests; canonical
-home is `brain/claude_code.py`.
+`parse_api_error`, `is_transient_api_error` and `is_usage_limit_error` are
+re-exported from `executor` for `scheduler.py` and tests; the newer helpers are
+imported from `brain.claude_code` directly (nothing needs a back-compat
+re-export). Canonical home is `brain/claude_code.py` for all of them.
+
+**Consumers must pick the right strictness.** `parse_api_error` answers "does
+this text contain a provider status code" — fine for *formatting* an
+already-known failure, wrong for *deciding* something is a failure.
+`scheduler`'s masquerading-success guard and `_is_policy_refusal` both discard a
+completed answer, so both key on `is_api_error_banner`; widening the parser
+without moving them was the ISSUE-212 fix's own near-miss (an answer summarising
+yesterday's 529 would have been failed and retried three times).
+
+**Retry vs reroute.** `BrainResult.work_committed` marks a failure whose run
+already reached the model and may have executed tools — set by every
+success-frame reclassification, since the CLI ran to completion. `_is_retryable`
+vetoes the in-brain retry on it, so those failures are reroute-only and a task
+that wrote files or sent mail before the provider fell over doesn't repeat that
+work three times. The backoff itself is slept in `_RETRY_SLEEP_SLICE_SECONDS`
+slices with a `cancel_check` poll between them, so `!stop` lands during a
+(now possibly 60s) provider-requested wait rather than after it.
 
 ## Configuration
 ```toml
@@ -248,7 +272,7 @@ home is `brain/claude_code.py`.
 kind = "claude_code"  # "claude_code" | "native" | "tmux_claude"
 # Availability failover (see "Brain fallback" below). "" = none.
 fallback = "native"               # brain kind to fall back to when primary unavailable
-fallback_on_transient = false     # also reroute a persistent transient_api_error
+fallback_on_transient = true      # also reroute a persistent transient_api_error (default on)
 fallback_cooldown_seconds = 900   # skip an unavailable primary this long; 0 disables stickiness
 
 [brain.native]         # only used when kind = "native" (or routed-to/fallen-back-to below)
@@ -328,7 +352,10 @@ same-attempt rerun already lives there). Three cooperating pieces:
   (a `tmux_claude` primary falls back to `claude_code` unless `fallback` is set).
 
 **Trigger set** (reroute this attempt): `{usage_limit, not_found, fallback}` +
-`transient_api_error` iff `fallback_on_transient`. **Cooldown set** (open the
+`transient_api_error` iff `fallback_on_transient` (**on by default** since
+ISSUE-212 — a capacity error that survived the primary's own
+`API_RETRY_MAX_ATTEMPTS` is precisely what the fallback exists to absorb, and the
+alternative is handing the user a raw provider error). **Cooldown set** (open the
 breaker → skip the primary on subsequent tasks for `fallback_cooldown_seconds`):
 `{usage_limit, not_found}` only — `fallback` is excluded so tmux keeps being
 probed per-task (its own breaker decides when to stop). **Never fallback:**
@@ -732,6 +759,15 @@ image installs it.
   a **fresh session** up to `API_RETRY_MAX_ATTEMPTS` (3), `API_RETRY_DELAY_SECONDS`
   (5) apart, **not** counting against the task's `attempt_count` — identical
   contract to `ClaudeCodeBrain`.
+- **Provider-error classification parity (ISSUE-212).** `_build_result` runs the
+  transcript body through the shared `_success_frame_stop_reason`, not just
+  `is_usage_limit_banner` — on the subscription brain a capacity banner
+  delivered as the final assistant message is exactly what the fallback exists
+  to absorb, and left alone it was handed to the user verbatim as the answer.
+  `_wait_for_completion`'s error branch likewise returns
+  `stop_reason="transient_api_error"` when its pane match is retryable, instead
+  of a bare `error` that matched no fallback trigger and dead-ended once the
+  in-brain session retries were spent.
 - **`stop_reason="fallback"` + circuit breaker (§4).** A launch-level failure
   (REPL never ready, markers never matched, missing tmux→`not_found`) returns
   `fallback`/`not_found`; the executor reruns that *same attempt* once through a

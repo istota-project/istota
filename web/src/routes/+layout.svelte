@@ -2,9 +2,10 @@
   import { base } from '$app/paths';
   import { page, updated } from '$app/state';
   import { onMount } from 'svelte';
-  import { LogOut, Menu, Sun, Moon } from 'lucide-svelte';
+  import { Menu, Sun, Moon } from 'lucide-svelte';
   import { DropdownMenu } from 'bits-ui';
   import { getMe, AuthError, type User } from '$lib/api';
+  import LogoutButton from '$lib/components/LogoutButton.svelte';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { installViewportGuard } from '$lib/viewport';
   import { installKeyboardDismiss } from '$lib/platform/input';
@@ -122,7 +123,7 @@
       </a>
       <button
         type="button"
-        class="theme-btn"
+        class="nav-icon-btn theme-btn"
         onclick={toggleTheme}
         title={$theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
         aria-label="Toggle color theme"
@@ -133,13 +134,11 @@
           <Moon size={15} />
         {/if}
       </button>
-      <a href="{base}/logout" class="logout-btn" title="Log out" aria-label="Log out">
-        <LogOut size={14} />
-      </a>
+      <LogoutButton />
       <DropdownMenu.Root>
         <DropdownMenu.Trigger>
           {#snippet child({ props })}
-            <button class="hamburger-btn" aria-label="Open menu" {...props}>
+            <button class="nav-icon-btn hamburger-btn" aria-label="Open menu" {...props}>
               <Menu size={18} />
             </button>
           {/snippet}
@@ -312,45 +311,16 @@
     white-space: nowrap;
   }
 
+  /* Layout, hit area, reset and hover all come from the shared `.nav-icon-btn`
+     rule in app.css — these three siblings only differ in resting color and,
+     for the hamburger, in when they are shown at all. */
   .theme-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: none;
-    border: none;
     color: var(--text-dim);
-    padding: 0.25rem;
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-    transition:
-      color var(--transition-fast),
-      background var(--transition-fast);
-  }
-
-  .theme-btn:hover {
-    color: var(--text-primary);
-    background: var(--surface-raised);
   }
 
   .hamburger-btn {
     display: none;
-    background: none;
-    border: none;
     color: var(--text-muted);
-    padding: 0.25rem;
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-    align-items: center;
-    justify-content: center;
-    transition:
-      color var(--transition-fast),
-      background var(--transition-fast);
-  }
-
-  .hamburger-btn:hover,
-  .hamburger-btn[data-state='open'] {
-    color: var(--text-primary);
-    background: var(--surface-raised);
   }
 
   .nav-user.active {

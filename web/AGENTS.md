@@ -43,7 +43,7 @@ Import everything from the barrel: `import { Button, Modal } from '$lib/componen
 | Component       | Use for                                                             | Notes                                                                                                                                                                         |
 | --------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Modal`         | Any dialog                                                          | bits-ui `Dialog`. Never hand-roll a `.modal-backdrop`                                                                                                                         |
-| `ConfirmDialog` | Every destructive or irreversible action                            | Imperative `title` with no "?", full "Are you sure…" `message`. `confirmVariant="danger"`. `challenge` adds a type-the-name gate for hard deletes. **Never `window.confirm`** |
+| `ConfirmDialog` | Every destructive, irreversible or session-ending action            | Imperative `title` with no "?", full "Are you sure…" `message`. `confirmVariant="danger"`. `challenge` adds a type-the-name gate for hard deletes. **Never `window.confirm`** |
 | `NoticeBanner`  | A single-line collapsible notice with a variant-colored left border | Variants follow the status scale                                                                                                                                              |
 | `HintPopover`   | Optional guidance behind a "?"                                      | See the `SettingsField` rule below before reaching for it directly                                                                                                            |
 
@@ -113,6 +113,7 @@ Not linted at all: `*.test.ts`, which asserts on the very literals the rules for
 - Type and spacing are `rem`; the root font-size percentage is the text-scale preference (`small` unscaled / `medium` 110% default / `large` 120%). Scaling the root is deliberate — type and the space around it grow together. Do not scale only the type tokens.
 - A `<button>` does not inherit font. If you size a control in `em`, set `font: inherit` on it, or the `em` resolves against the UA's ~13px and the control stops tracking the text-scale preference.
 - Fixed `px` is correct for borders and SVG chart labels, which should not scale.
+- A row of small icon controls needs its touch targets reasoned about **together**. Reach the ~44px minimum with an out-of-flow `::before` overlay so the bar keeps its height (`SidebarToggle`, `.nav-icon-btn`), and widen the row's gap to match — overlays that overlap hand the tap in the seam to whichever wins the stacking order, which is the accidental-tap bug rather than a fix for it.
 - A status chip needs a `min-width`, or its variable width shifts every column after it, row by row.
 - A toolbar holding only a result count needs a `min-height` so it matches one holding filters.
 

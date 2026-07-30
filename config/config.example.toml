@@ -116,7 +116,9 @@ features = []
 # tasks skip it for fallback_cooldown_seconds; a successful primary probe closes
 # the cooldown early.
 # fallback = ""                       # "" | "claude_code" | "native" | "tmux_claude"
-# fallback_on_transient = false       # also reroute a persistent transient_api_error
+# fallback_on_transient = true        # also reroute a persistent transient_api_error
+#                                     # (429 / 5xx / 529 / network) after the primary's
+#                                     # own retries are exhausted. Set false to opt out.
 # fallback_cooldown_seconds = 900     # skip an unavailable primary this long; 0 disables stickiness
 #
 # Native-brain settings (only used when kind = "native", or via a routing

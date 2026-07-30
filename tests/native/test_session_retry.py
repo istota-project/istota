@@ -67,6 +67,36 @@ class TestClassifyError:
         c2 = classify_error("bad parameter: timeout must be positive", status_code=400)
         assert c2.retryable is False
 
+    def test_status_recovered_from_http_prefix(self):
+        # ISSUE-212 / NB-13: native calls classify_error with the message only,
+        # but the provider layer stamps the status into it as "HTTP NNN: …".
+        # Recovering it is what keeps a permanent 400 off the retry path and a
+        # 429 on it, without threading a status through every call site.
+        c = classify_error('HTTP 429: {"error":{"message":"slow down"}}')
+        assert c.status_code == 429
+        assert c.is_rate_limit is True
+        assert c.retryable is True
+
+        c2 = classify_error('HTTP 400: {"error":{"message":"connection error in field"}}')
+        assert c2.status_code == 400
+        assert c2.retryable is False
+        assert c2.category == "permanent"
+
+        c3 = classify_error('HTTP 503: {"error":{"message":"nope"}}')
+        assert c3.retryable is True
+
+    def test_explicit_status_wins_over_recovered_one(self):
+        c = classify_error("HTTP 503: upstream said so", status_code=400)
+        assert c.status_code == 400
+        assert c.retryable is False
+
+    def test_retry_after_parsed_on_rate_limit(self):
+        c = classify_error('HTTP 429: {"error":{"message":"slow"},"retry-after":18}')
+        assert c.retry_after == 18.0
+
+    def test_retry_after_absent_is_none(self):
+        assert classify_error("HTTP 429: slow down").retry_after is None
+
     def test_rate_word_inside_another_word_is_not_a_rate_limit(self):
         # NB-13b: "generate" contains "rate" — must not read as a rate limit.
         c = classify_error("failed to generate a response")
@@ -175,6 +205,53 @@ class TestRetryWithBackoff:
         )
         assert seen and all(d <= 0.01 for d in seen)
 
+    @staticmethod
+    async def _delays_for(monkeypatch, error_message, *, max_delay):
+        """Run one retry cycle with sleeping stubbed out; return the delays used."""
+        import istota.session.retry as retry_mod
+
+        slept: list[float] = []
+
+        async def fake_sleep(d):
+            slept.append(d)
+
+        monkeypatch.setattr(retry_mod.asyncio, "sleep", fake_sleep)
+
+        seq = [
+            _Res(success=False, error_message=error_message, status_code=429),
+            _Res(success=True),
+        ]
+        calls = 0
+
+        async def run():
+            nonlocal calls
+            r = seq[calls]
+            calls += 1
+            return r
+
+        await retry_with_backoff(
+            run, max_retries=3, base_delay=0.001, max_delay=max_delay,
+        )
+        return slept
+
+    @pytest.mark.asyncio
+    async def test_retry_after_overrides_the_backoff(self, monkeypatch):
+        # ISSUE-212: honour the provider's Retry-After on a 429 instead of
+        # guessing with exponential backoff.
+        slept = await self._delays_for(
+            monkeypatch,
+            '{"error":{"message":"slow"},"retry-after":3}',
+            max_delay=60.0,
+        )
+        assert slept == [3.0]
+
+    @pytest.mark.asyncio
+    async def test_retry_after_capped_by_max_delay(self, monkeypatch):
+        slept = await self._delays_for(
+            monkeypatch, "retry-after: 55", max_delay=2.0,
+        )
+        assert slept == [2.0]
+
     @pytest.mark.asyncio
     async def test_abort_during_sleep_returns_last_error(self):
         abort = asyncio.Event()
@@ -191,3 +268,85 @@ class TestRetryWithBackoff:
         )
         assert res.success is False
         assert calls == 1
+
+
+# ---------------------------------------------------------------------------
+# NativeBrain._RetryingProvider — the live retry path on the native side.
+# `retry_with_backoff` above has no production caller; this wrapper is what
+# actually runs for a native task, so the Retry-After honouring needs its own
+# coverage here (ISSUE-212).
+# ---------------------------------------------------------------------------
+
+
+class _FakeProvider:
+    def __init__(self, events_per_call):
+        self._events = list(events_per_call)
+        self.calls = 0
+
+    async def stream(self, *a, **kw):
+        batch = self._events[min(self.calls, len(self._events) - 1)]
+        self.calls += 1
+        for ev in batch:
+            yield ev
+
+
+class TestRetryingProviderBackoff:
+    @staticmethod
+    def _error(message):
+        from istota.llm.provider import StreamError
+        from istota.llm.types import AssistantMessage
+
+        return StreamError(
+            message=AssistantMessage(stop_reason="error", error_message=message)
+        )
+
+    @staticmethod
+    def _done():
+        from istota.llm.provider import StreamDone
+        from istota.llm.types import AssistantMessage
+
+        return StreamDone(message=AssistantMessage(stop_reason="end_turn"))
+
+    async def _run(self, monkeypatch, message):
+        import istota.brain.native as native_mod
+
+        slept: list[float] = []
+
+        async def fake_sleep(d):
+            slept.append(d)
+
+        monkeypatch.setattr(native_mod.asyncio, "sleep", fake_sleep)
+        provider = _FakeProvider([[self._error(message)], [self._done()]])
+        wrapped = native_mod._RetryingProvider(provider, None)
+        events = [e async for e in wrapped.stream("sys", [], [])]
+        return slept, provider.calls, events
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_honoured(self, monkeypatch):
+        slept, calls, _ = await self._run(
+            monkeypatch, 'HTTP 429: {"error":{"message":"slow"},"retry-after":7}',
+        )
+        assert calls == 2
+        assert slept == [7.0]
+
+    @pytest.mark.asyncio
+    async def test_retry_after_capped_by_max_delay(self, monkeypatch):
+        import istota.brain.native as native_mod
+
+        slept, calls, _ = await self._run(monkeypatch, "HTTP 429: retry-after: 9999")
+        assert calls == 2
+        assert slept == [native_mod._API_RETRY_MAX_DELAY]
+
+    @pytest.mark.asyncio
+    async def test_exponential_backoff_without_retry_after(self, monkeypatch):
+        slept, calls, _ = await self._run(monkeypatch, "HTTP 503: overloaded")
+        assert calls == 2
+        assert slept == [5.0]
+
+    @pytest.mark.asyncio
+    async def test_permanent_status_is_not_retried(self, monkeypatch):
+        slept, calls, events = await self._run(
+            monkeypatch, 'HTTP 400: {"error":{"message":"connection error in field"}}',
+        )
+        assert calls == 1
+        assert slept == []

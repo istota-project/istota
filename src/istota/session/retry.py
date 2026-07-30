@@ -61,14 +61,59 @@ _RATE_LIMIT_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# The provider layer stamps the HTTP status into its StreamError text as
+# ``HTTP NNN: <body>``, but native's own call site passes the message *only*.
+# Recovering the status here (rather than threading it through every caller) is
+# what keeps a permanent 400 whose body quotes "connection error" off the retry
+# path, and a 429 on it (ISSUE-212, closing the NB-13 call-site gap).
+_HTTP_STATUS_PREFIX = re.compile(r"\bHTTP (\d{3})\b")
+
+# `retry-after: 30`, `"retry_after": 30`, `Retry-After 30`. `[ \t]*` rather than
+# `\s*`: the pair `\s*[:=]?\s*` is ambiguous and backtracks quadratically on a
+# long whitespace run, and provider error bodies are unbounded.
+# Deliberately duplicated from brain/claude_code.py rather than shared: `brain`
+# imports `session`, so the dependency can only run that way, and a `session`
+# module importing from `brain` would invert the layering.
+_RETRY_AFTER_RE = re.compile(
+    r"retry[-_ ]?after[\"']?[ \t]*[:=]?[ \t]*[\"']?(\d+(?:\.\d+)?)", re.IGNORECASE
+)
+
+
+def extract_status_code(error_message: str) -> int | None:
+    """The HTTP status the provider layer encoded into an error message, if any."""
+    if not error_message:
+        return None
+    match = _HTTP_STATUS_PREFIX.search(error_message)
+    return int(match.group(1)) if match else None
+
+
+def _extract_retry_after(error_message: str) -> float | None:
+    """The provider's requested wait in seconds, or None. Non-positive is absent."""
+    if not error_message:
+        return None
+    match = _RETRY_AFTER_RE.search(error_message)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
 
 def classify_error(error_message: str, status_code: int | None = None) -> ErrorClassification:
     """Classify an LLM error for retry / compaction decisions.
 
     Overflow is checked first so a ``400`` carrying a context-length message is
     routed to compaction rather than treated as a permanent client error.
+
+    An explicit ``status_code`` wins; when the caller has none, one encoded in
+    the message as ``HTTP NNN:`` is recovered.
     """
     error_message = error_message or ""
+    if status_code is None:
+        status_code = extract_status_code(error_message)
+    retry_after = _extract_retry_after(error_message)
 
     # A hard rate-limit status wins over any overflow-looking text: a tokens-
     # per-minute 429 may read "too many tokens" but it's a rate limit, not a
@@ -81,6 +126,7 @@ def classify_error(error_message: str, status_code: int | None = None) -> ErrorC
             is_auth_error=False,
             category="transient",
             status_code=status_code,
+            retry_after=retry_after,
         )
 
     if _OVERFLOW_PATTERNS.search(error_message):
@@ -103,7 +149,25 @@ def classify_error(error_message: str, status_code: int | None = None) -> ErrorC
             status_code=status_code,
         )
 
-    if status_code is None and _RATE_LIMIT_PATTERNS.search(error_message):
+    # 408 Request Timeout / 425 Too Early are timing signals, not request-shaped
+    # failures — retry them the way a 429 or a 5xx is retried.
+    if status_code in (408, 425):
+        return ErrorClassification(
+            retryable=True,
+            is_context_overflow=False,
+            is_rate_limit=False,
+            is_auth_error=False,
+            category="transient",
+            status_code=status_code,
+            retry_after=retry_after,
+        )
+
+    # A rate limit can arrive under a non-429 status (Cloudflare fronts one as a
+    # 403, which the auth branch above has already claimed, so this covers the
+    # remaining 4xx). Checked on the text because there is no status to key on.
+    if (status_code is None or status_code < 500) and _RATE_LIMIT_PATTERNS.search(
+        error_message
+    ):
         return ErrorClassification(
             retryable=True,
             is_context_overflow=False,
@@ -111,6 +175,7 @@ def classify_error(error_message: str, status_code: int | None = None) -> ErrorC
             is_auth_error=False,
             category="transient",
             status_code=status_code,
+            retry_after=retry_after,
         )
 
     if status_code is not None and status_code >= 500:
@@ -121,9 +186,15 @@ def classify_error(error_message: str, status_code: int | None = None) -> ErrorC
             is_auth_error=False,
             category="transient",
             status_code=status_code,
+            retry_after=retry_after,
         )
 
-    if _OVERLOADED_PATTERNS.search(error_message):
+    # Text-shaped transient signals are the last resort, and only when no
+    # explicit status contradicts them: a 4xx is authoritative, so a permanent
+    # 400 whose body happens to quote "connection error" or a 5xx code must not
+    # read as transient (NB-13a — the status branches above already claimed
+    # every retryable status).
+    if status_code is None and _OVERLOADED_PATTERNS.search(error_message):
         return ErrorClassification(
             retryable=True,
             is_context_overflow=False,
@@ -131,6 +202,7 @@ def classify_error(error_message: str, status_code: int | None = None) -> ErrorC
             is_auth_error=False,
             category="transient",
             status_code=status_code,
+            retry_after=retry_after,
         )
 
     return ErrorClassification(
@@ -180,10 +252,16 @@ async def retry_with_backoff(
             return result
 
         retry_count += 1
-        # Jitter first, then cap — so max_delay is a true ceiling, not 1.5× it
-        # (NB-13). Multiplier in [0.5, 1.5).
-        delay = base_delay * (2 ** (retry_count - 1)) * (0.5 + random.random())
-        delay = min(delay, max_delay)
+        if classification.retry_after is not None:
+            # The provider told us when to come back — obey it rather than
+            # guessing (ISSUE-212). Still capped: max_delay is a hard ceiling on
+            # how long a worker may be parked on the provider's word.
+            delay = min(classification.retry_after, max_delay)
+        else:
+            # Jitter first, then cap — so max_delay is a true ceiling, not 1.5× it
+            # (NB-13). Multiplier in [0.5, 1.5).
+            delay = base_delay * (2 ** (retry_count - 1)) * (0.5 + random.random())
+            delay = min(delay, max_delay)
 
         if on_retry:
             on_retry(retry_count, max_retries, delay, getattr(result, "error_message", "") or "")

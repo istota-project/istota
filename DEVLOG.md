@@ -2,6 +2,100 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-30: A 529 that never reached the fallback, and the fix that nearly ate every answer mentioning one
+
+ISSUE-212 read as a routing gap — "a transient 529 should trigger a fallback attempt". The routing was fine. `parse_api_error` only matched `API Error: NNN {json}`, and the CLI does not always attach a body, so `API Error: 529 Overloaded` parsed as **nothing**: not transient, so not retried; classified as a generic `error`, which isn't in the fallback trigger set. Every layer downstream was reasoning correctly about a provider outage it had no idea was one.
+
+**Why the raw text reached the user is a second bug, not the same one.** A failed task's error is friendly-formatted before delivery, so a failure could never have surfaced verbatim as "the answer". `claude -p` reports some provider errors as a *successful* result frame with the error as the whole answer — exactly what it does for subscription limits, which `is_usage_limit_banner` already caught on that branch. The API-error case had no such guard, so it was delivered as the reply. Both halves needed fixing; only the first is what the issue described.
+
+**The enumerated status set was the same bug in waiting.** `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` looks exhaustive until a Cloudflare-fronted provider emits 520–526 — none listed, each dead-ending precisely as the 529 did. The live rule is now "every 5xx, plus 408/425/429"; the constant survives as documentation.
+
+**The fix's own near-miss is the part worth remembering.** Widening `parse_api_error` silently weaponised three pre-existing consumers written against the narrow shape: the scheduler's masquerading-success guard, its twin on the inline path, and `_is_policy_refusal`. All three *discard a completed answer*. So an ordinary reply mentioning `API Error: 529` — a log summary, an ops question, a briefing about yesterday's outage — would have been failed, retried three times producing the same answer, failed permanently, and (via the policy path) told the user their content had been blocked. Both reviewers found it independently; nothing in the suite covered that guard at all. The lesson generalises past this issue: **widening a parser is a change to every consumer's decision, and the consumers that act destructively need the strict predicate, not the permissive one.**
+
+**Making the strict predicate actually strict took a third gate.** Anchoring at the start and capping the length still admits `API Error: 529 means the provider is overloaded; retry shortly.` — a plausible answer to "what does a 529 mean?". The discriminator that works is *case*: every real banner's tail is a Title-cased reason phrase or a JSON body (`529 Overloaded`, `500 Internal Server Error`, `Connection error.`), while prose continues in lowercase. HTTP reason phrases are Title Case by convention and provider messages follow; a sentence continuing after a number is not.
+
+**A success-frame reclassification must not be retried.** The CLI ran to completion, so it may have executed tools — re-running the same prompt repeats them (a re-sent email, a re-applied edit), three times per attempt on top of the task-level ladder. `BrainResult.work_committed` marks that case and vetoes the in-brain retry, making it reroute-only.
+
+**The marker leaked where only one surface formats errors.** "Both brains unavailable" is carried as a prefix on the failure text, because `execute_task` returns a plain string and the scheduler owns the wording. But only the Talk push path calls `_format_error_for_user` — web chat and the REPL render the terminal `error` event directly, so they'd have shown `[brain-fallback-exhausted] API Error: 503` verbatim. Fixed with a second consumer at the event site that rewords provider-availability failures only, leaving every other failure its original text (useful in the REPL) and `tasks.error` raw either way.
+
+**Not done, deliberately:** the briefing `pin` posture is declared in `brain/_postures.py` but unimplemented (ISSUE-180's scope), so default-on transient fallback lets a briefing ride the fallback more often. Production behaviour is unchanged — the Ansible default was already `true` — but this is the one place the change makes an existing gap easier to hit.
+
+**Key changes:**
+- `parse_api_error` accepts the bodyless `API Error: NNN <text>` form; `_status_is_transient` replaces the enumerated set as the live rule.
+- New classifiers: `is_permanent_api_error`, `api_error_stop_reason` (the single one every path calls), `is_api_error_banner`, `parse_retry_after`.
+- Success-frame guards on all four `claude_code` branches and on the tmux brain, which had the identical hole; the tmux pane-error branch now returns `transient_api_error` rather than a bare `error` no trigger matched.
+- The scheduler's two masquerading-success guards and `_is_policy_refusal` key on the strict banner detector.
+- `BrainResult.work_committed` makes a success-frame reclassification reroute-only; the backoff is slept in slices so `!stop` lands during a provider-requested wait.
+- Native side: `classify_error` recovers the `HTTP NNN:` status the provider layer stamps into the message, closing the NB-13 call-site gap; Retry-After honoured and capped on both brains.
+- Permanent provider errors skip the task-level 1/4/16-minute ladder as well as the in-brain retry.
+- `fallback_on_transient` defaults on — Ansible shipped `true` while the code default *and* the TOML loader both stayed `false`, so every non-Ansible deployment disagreed with the documented default.
+
+**Files added/modified:**
+- `src/istota/brain/claude_code.py` - classifiers, banner detector, retry-after, sliced interruptible backoff
+- `src/istota/brain/tmux_claude.py` - success-frame parity + transient stop_reason on pane errors
+- `src/istota/brain/native.py` - status-authoritative classification, network errors transient, Retry-After
+- `src/istota/brain/_types.py` - `BrainResult.work_committed`
+- `src/istota/session/retry.py` - `extract_status_code`, Retry-After, 408/425, text branch gated on absent status
+- `src/istota/executor.py` - `FALLBACK_EXHAUSTED_MARKER` + `_mark_if_exhausted`
+- `src/istota/scheduler.py` - banner-gated guards, `_error_event_message`, permanent-error no-retry
+- `src/istota/config.py` - `fallback_on_transient` default + loader default
+- `tests/test_api_error_classification.py` - new; classifiers, banner, retry loops, work_committed
+- `tests/native/test_session_retry.py` - status recovery, Retry-After, `_RetryingProvider` coverage
+
+## 2026-07-30: Gating logout, and why the obvious touch-target fix reproduces the bug it fixes
+
+ISSUE-209: the logout icon sits next to the menu trigger in the app nav, both are small on a phone, and a mistap ended the session outright — bounced to the login flow, transient view state gone. Two halves, a guard and the ergonomics underneath it.
+
+The guard was the easy half, and smaller than the issue expected. The write-up proposed building a reusable `confirm({...})` primitive as this feature's first customer; `ConfirmDialog` already existed (bits-ui `Dialog` over `Modal` — focus trap, `role="dialog"`, Esc and backdrop tap both cancelling), built for destructive deletes, so this was a customer rather than a build. Logout became a `<button>` opening it instead of an anchor to `/logout`.
+
+**That it stops being a link is worth its own note.** `/istota/logout` is a GET that clears the session, so as an anchor it was reachable by anything that follows links speculatively — a prefetcher, a link scanner, a crawler with a session cookie. Not the reported bug, and not why the change was made, but the same edit closes it.
+
+**The sizing half is where the interesting mistake lives, because the obvious version of it recreates the bug.** Giving each of the three nav icons a 44px hit area, one control at a time, is the natural reading of "bump both to the ~44px minimum". It is wrong: the icons are 14–18px glyphs at a `0.75rem` gap, so 44px targets *overlap*, and a tap in the seam lands on whichever won the stacking order rather than on what the user aimed at — which is precisely the accidental-logout mechanism, now with a larger seam. Targets in a row have to be sized as a row. So the gap goes to `1.25rem` first (centres ≥44px apart at the default text scale), and only then does each control get its area — as an out-of-flow `::before` overlay, reusing `SidebarToggle`'s device so reaching the minimum costs the nav no height. Scoped to ≤640px; pointer precision on a desktop doesn't need it and oversized invisible targets there would only swallow clicks.
+
+**Consolidating the three controls onto a shared `.nav-icon-btn` rule was not tidying.** Hoisting the repeated reset put `background: none` in a rule with the same specificity as each component's scoped `:hover` — `.app-nav .nav-right .nav-icon-btn` and `.theme-btn.svelte-hash:hover` are both (0,3,0), a tie broken only by stylesheet order, i.e. a hover that works until something reorders CSS. The hover is byte-identical across all three anyway, so it moved up with the reset and the tie is gone.
+
+The one seam added is a `navigate` prop on `LogoutButton`, defaulting to the real `window.location.href` assignment. It exists only because jsdom refuses that assignment and "did it navigate?" is the entire behaviour under test. Verified by mutation: wiring the button straight to `logout()` fails all five tests.
+
+**Not verified:** the ~44px geometry is arithmetic against rendered box sizes, not a measured screenshot — the browser tooling wasn't reachable this session. Worth a look on a real phone.
+
+**Key changes:**
+- Logout is a confirmed action, not a bare link — `LogoutButton.svelte` wrapping the existing shared `ConfirmDialog`.
+- The three nav icon controls share one `.nav-icon-btn` rule carrying layout, reset and hover; only resting colour stays per control.
+- Below 640px each gets a ~44px out-of-flow hit area, and the row's gap widens so those areas stay disjoint.
+- `web/AGENTS.md` gained the size-a-row-of-targets-together rule, since the overlap trap is not obvious from the 44px guideline alone.
+
+**Files added/modified:**
+- `web/src/lib/components/LogoutButton.svelte` - new; button + confirm dialog, injectable `navigate`
+- `web/src/lib/components/LogoutButton.svelte.test.ts` - new; 5 tests, all failing without the gate
+- `web/src/routes/+layout.svelte` - logout markup replaced by the component; scoped styles reduced to resting colour
+- `web/src/app.css` - shared `.nav-icon-btn` rule + the mobile gap and hit-area block
+- `web/AGENTS.md`, `CHANGELOG.md`
+
+## 2026-07-30: Monarch login 503 — a header constant that no test could ever catch going stale
+
+Reported as "503 despite correct info" on the Monarch email/password connect flow. The deployment server's web-unit journal named it on the first look: `monarch_login_client_outdated current=2025.10.0`, with Monarch answering 403 `"Please update to the latest version of the app to continue login."` We send a `monarch-client-version` header; ours had gone stale.
+
+**The interesting part is why it rotted invisibly.** Monarch checks the version *after* validating credentials. Probing `/auth/login/` with a bogus email returns 404 "Invalid email and password combination" and never reaches the gate — confirmed from the deployment host with both the old and new header values, which behave identically against a bad account. So no credential-free probe can detect staleness, no unit test can, and the only symptom is a *correct* login 503-ing, which reads like a Monarch outage rather than our bug. That is a defect class worth naming: a value that is only exercised on the success path, behind a gate you can't reach without real credentials.
+
+**The value is not stable enough to hardcode, which changed the design mid-session.** The plan was to bump the constant and self-heal on rejection. Then `app.monarch.com/version.json` — a 23-byte `{"version": …}` manifest carrying exactly the `clientVersion` the app bundle sends — returned `v1.0.3697` early in the session and `v1.0.3696` a couple of hours later, consistently, from two hosts. It moves within hours and not always forwards. So discovery moved *ahead* of the login rather than being a recovery path: resolve from the manifest first (cached per process), attempt, and only on rejection re-read and retry once. Pre-fetching is what avoids spending a failed credential submission on every cold process against an endpoint the module itself documents as rate-limited behind a sticky CAPTCHA gate. The constant survives purely as a cold-start fallback for an unreachable manifest. Exactly one retry, never a loop.
+
+DEVLOG 2026-05-15 recorded the original value as live-verified — Monarch validated the field loosely then ("anything reasonable-looking is accepted"). That's worth keeping straight: `2025.10.0` was accepted when chosen and later refused, not wrong from the start. It sets the expectation that this will drift again.
+
+**Two bugs that would have made the whole fix silently inert**, both found by running the real function against the live endpoint rather than trusting green tests. Cloudflare 403s aiohttp's default `Python/3.x aiohttp/3.y` User-Agent while curl from the same host gets a 200 — so discovery would have failed everywhere and quietly fallen back to the stale constant. And Monarch's ~9.5 KB CSP header exceeds aiohttp's 8190-byte field cap, which aborts the read as a bogus `400 Got more than 8190 bytes when reading` before the body is ever parsed. Both are now pinned by tests, because both are the kind of thing that looks like an unrelated network flake.
+
+**Review (Mulder + Scully) found three real defects in the first cut.** `_safe_json` was annotated `-> dict` but only guarded `JSONDecodeError`, so a valid non-object body (`[]`, `null`, `123`) raised `AttributeError` on the following `.get` — from inside error-handling code, which would have converted the actionable 503 into a masked 500. A refused retry that carried a TOTP reported "bad credentials", when the first attempt had already validated and therefore consumed the code; it now asks for a fresh one, since telling an MFA user their password is wrong sends them somewhere useless. And the give-up path reset the cached version, which meant every subsequent call repeated the whole two-attempt sequence — doubling the sustained failed-login rate against precisely the gate the one-retry cap exists to protect. Keeping the value makes the next call short-circuit after one attempt.
+
+Scully also caught that a full revert of the GraphQL header change survived the suite, so the request-shape test now pins that pair too. Nine mutations were checked against the new assertions; all nine fail.
+
+**Deliberately not done.** Persisting the discovered version across restarts — each process pays one 23-byte GET, which is cheaper than coordinating shared state. And Mulder's point that a Chrome UA over an aiohttp TLS fingerprint is a UA/JA3 mismatch that could *raise* Cloudflare's bot score on the API path: the browser UA was an explicit instruction and it verifies working from the deployment host, but it's the first thing to revisit if Monarch sync starts getting challenged.
+
+**Files added/modified:**
+- `src/istota/money/_vendor/monarch_client.py` - manifest-backed version resolution (`fetch_live_client_version`, `_resolve_client_version`), pre-fetch + single retry, per-transport client names, browser UA, header-size ceiling on all three sessions, `_safe_json` non-object guard
+- `src/istota/web_app.py` - route docstring now names all three conditions behind its 503
+- `scripts/probe_monarch_login.py` - reports the live version, and handles the outdated/CAPTCHA cases instead of tracebacking on the one failure mode it exists to diagnose
+- `tests/money/test_monarch_client.py` - 40 → 53 tests; strict response queue so an over-consuming regression fails instead of replaying
+- `CHANGELOG.md`
+
 ## 2026-07-30: Reviewing the ntfy header fix against the real receiver, then giving push notifications formatting
 
 Two halves: verifying yesterday's ISSUE-213 fix against something other than its own tests, and adding the markdown capability the transport never had.

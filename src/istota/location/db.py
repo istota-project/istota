@@ -36,7 +36,7 @@ from istota.location.models import (
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 # Tables in FK-target-first order: places -> visits -> location_pings,
@@ -82,9 +82,12 @@ CREATE TABLE IF NOT EXISTS location_pings (
     wifi TEXT,
     place_id INTEGER REFERENCES places(id),
     visit_id INTEGER REFERENCES visits(id),
-    source TEXT NOT NULL DEFAULT 'overland'
+    source TEXT NOT NULL DEFAULT 'overland',
+    client_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_location_pings_time ON location_pings(timestamp);
+-- The client_id uniqueness index is created in _migrate_schema, not here.
+-- See the note there.
 
 CREATE TABLE IF NOT EXISTS dismissed_clusters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,6 +178,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     source) pings are distinguishable by a plain predicate. Existing rows
     predate multi-source ingest and are all Overland, so the DEFAULT
     backfills them correctly.
+
+    v3 (native-ios-app): ``location_pings.client_id`` — an id the sending
+    client mints per point, so a batch that was stored but whose response
+    was lost can be re-sent without landing twice. Nullable, because stock
+    Overland and the Garmin importer send none; existing rows correctly
+    backfill to NULL, which the partial unique index excludes.
+
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(location_pings)")}
     if "source" not in cols:
@@ -182,6 +192,22 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE location_pings "
             "ADD COLUMN source TEXT NOT NULL DEFAULT 'overland'"
         )
+    if "client_id" not in cols:
+        conn.execute("ALTER TABLE location_pings ADD COLUMN client_id TEXT")
+
+    # This index cannot live in SCHEMA_SQL: executescript runs before this
+    # function, so on a pre-v3 DB it would index a column the ALTER above
+    # has not added yet and the whole init would fail. IF NOT EXISTS makes
+    # it a no-op on every subsequent open, fresh DBs included.
+    #
+    # Partial so NULLs never participate. SQLite already treats NULLs as
+    # distinct in a UNIQUE index, but the WHERE clause keeps the index to
+    # client-identified pings only and states the intent: dedup applies to
+    # points from a client that mints ids, and to nothing else.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_location_pings_client_id "
+        "ON location_pings(client_id) WHERE client_id IS NOT NULL"
+    )
 
 
 @contextmanager
@@ -383,40 +409,64 @@ def insert_ping(
     visit_id: int | None = None,
     source: str = "overland",
     received_at: str | None = None,
+    client_id: str | None = None,
 ) -> int:
-    """Insert a ping. ``source`` tags provenance ('overland' native, 'garmin'
-    imported). ``received_at`` overrides the schema ``datetime('now')``
-    default — the Garmin importer passes the point's own historical
-    timestamp so retention (which deletes by ``received_at``) treats a
-    backfilled ping as contemporaneous, not as 'arrived today'."""
+    """Insert a ping, returning its rowid — or ``0`` when nothing was written.
+
+    ``source`` tags provenance ('overland' native, 'garmin' imported).
+    ``received_at`` overrides the schema ``datetime('now')`` default — the
+    Garmin importer passes the point's own historical timestamp so retention
+    (which deletes by ``received_at``) treats a backfilled ping as
+    contemporaneous, not as 'arrived today'.
+
+    ``client_id`` is an id the sending client mints per point. The insert is
+    ``OR IGNORE`` against the partial unique index on it, which makes a
+    replayed batch idempotent: a device that stored a batch but lost the
+    response re-sends it, and the second delivery writes nothing.
+
+    **A caller that acts on the ping must branch on the return value.**
+    ``0`` means the point was already here, and treating it as a fresh id
+    would run whatever follows a second time — the visit state machine in
+    particular, where a replay would manufacture an arrival. ``lastrowid``
+    is not a substitute: after an ignored insert it still holds the previous
+    successful one, so the rowcount is what distinguishes them.
+
+    A ``NULL`` client_id never collides (the index excludes it), so stock
+    Overland and the Garmin importer are unaffected — including their
+    byte-identical repeat points, which are genuine and must all land.
+    """
     if received_at is None:
         cur = conn.execute(
             """
-            INSERT INTO location_pings (
+            INSERT OR IGNORE INTO location_pings (
                 timestamp, lat, lon, altitude, accuracy, speed, course,
-                battery, activity_type, wifi, place_id, visit_id, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                battery, activity_type, wifi, place_id, visit_id, source,
+                client_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 timestamp, lat, lon, altitude, accuracy, speed, course,
                 battery, activity_type, wifi, place_id, visit_id, source,
+                client_id,
             ),
         )
     else:
         cur = conn.execute(
             """
-            INSERT INTO location_pings (
+            INSERT OR IGNORE INTO location_pings (
                 timestamp, received_at, lat, lon, altitude, accuracy, speed,
                 course, battery, activity_type, wifi, place_id, visit_id,
-                source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source, client_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 timestamp, received_at, lat, lon, altitude, accuracy, speed,
                 course, battery, activity_type, wifi, place_id, visit_id,
-                source,
+                source, client_id,
             ),
         )
+    if cur.rowcount == 0:
+        return 0
     return int(cur.lastrowid or 0)
 
 
@@ -436,7 +486,8 @@ def get_latest_ping(conn: sqlite3.Connection) -> LocationPing | None:
     row = conn.execute(
         """
         SELECT id, timestamp, received_at, lat, lon, altitude, accuracy,
-               speed, course, battery, activity_type, wifi, place_id, visit_id
+               speed, course, battery, activity_type, wifi, place_id,
+               visit_id, client_id
         FROM location_pings
         ORDER BY timestamp DESC
         LIMIT 1
@@ -467,7 +518,8 @@ def get_pings(
     rows = conn.execute(
         f"""
         SELECT id, timestamp, received_at, lat, lon, altitude, accuracy,
-               speed, course, battery, activity_type, wifi, place_id, visit_id
+               speed, course, battery, activity_type, wifi, place_id,
+               visit_id, client_id
         FROM location_pings
         {where}
         ORDER BY timestamp DESC

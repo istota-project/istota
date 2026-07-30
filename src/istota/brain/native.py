@@ -72,7 +72,7 @@ from istota.session.compaction import (
 )
 from istota.session.loop_detection import detect_repeated_tool_calls
 from istota.session.messages import CompactionSummaryMessage
-from istota.session.retry import classify_error
+from istota.session.retry import classify_error, extract_status_code
 from istota.session.usage import TaskUsage
 
 from ._aliases import CANONICAL_ROLES, split_effort
@@ -164,21 +164,47 @@ _DOCUMENTED_STOP_REASONS = frozenset(
 # ``StreamError`` text (``HTTP 429: …`` / ``HTTP 503: …``).
 _NATIVE_TRANSIENT_STATUS_RE = re.compile(r"HTTP (429|5\d\d)\b")
 
+# The provider layer wraps every connect/timeout/transport failure as
+# ``Connection error: <exc>``. That is a capacity/connectivity signal, not a
+# request-shaped one, so it reroutes to the fallback brain rather than
+# dead-ending (ISSUE-212).
+_NATIVE_NETWORK_RE = re.compile(
+    r"connection error|connection (?:reset|refused|aborted|closed)|"
+    r"time[d]? ?out|socket hang ?up|fetch failed|getaddrinfo|"
+    r"\b(ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND)\b",
+    re.IGNORECASE,
+)
+
 
 def _classify_native_error(text: str) -> str:
     """Classify a native error body into ``usage_limit`` / ``transient_api_error``
     / ``error``.
 
     A quota/billing/subscription exhaustion → ``usage_limit`` (reroutes to the
-    fallback brain). A plain transient overload/rate-limit 429 or 5xx →
-    ``transient_api_error``. Anything else stays a generic ``error``. Usage-limit
-    is checked first so a quota 429 doesn't read as a plain transient. Best-effort
-    and tunable against the operator's actual endpoint.
+    fallback brain). A transient overload/rate-limit 429, a 5xx, or a
+    network-level failure → ``transient_api_error``. Anything else stays a
+    generic ``error``. Usage-limit is checked first so a quota 429 doesn't read
+    as a plain transient. Best-effort and tunable against the operator's actual
+    endpoint.
+
+    A request-shaped status (400/401/403/404/413 …) is authoritative and short-
+    circuits the text heuristics: retrying it, or paying for a fallback attempt
+    that would fail identically, buys nothing (ISSUE-212).
     """
     if is_usage_limit_error(text):
         return "usage_limit"
+    status = extract_status_code(text or "")
+    if status is not None:
+        if status == 429 or status >= 500:
+            return "transient_api_error"
+        return "error"
     low = (text or "").lower()
-    if _NATIVE_TRANSIENT_STATUS_RE.search(text or "") or "overloaded" in low or "rate limit" in low:
+    if (
+        _NATIVE_TRANSIENT_STATUS_RE.search(text or "")
+        or "overloaded" in low
+        or "rate limit" in low
+        or _NATIVE_NETWORK_RE.search(text or "")
+    ):
         return "transient_api_error"
     return "error"
 
@@ -393,7 +419,13 @@ class _RetryingProvider:
                 return
 
             attempt += 1
-            delay = min(_API_RETRY_BASE_DELAY * (2 ** (attempt - 1)), _API_RETRY_MAX_DELAY)
+            if cls.retry_after is not None:
+                # Obey the provider's own Retry-After (ISSUE-212), still capped.
+                delay = min(cls.retry_after, _API_RETRY_MAX_DELAY)
+            else:
+                delay = min(
+                    _API_RETRY_BASE_DELAY * (2 ** (attempt - 1)), _API_RETRY_MAX_DELAY
+                )
             logger.warning(
                 "native provider transient error (attempt %d/%d), waiting %.1fs: %s",
                 attempt,

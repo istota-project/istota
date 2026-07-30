@@ -109,11 +109,11 @@ Wraps the `claude` CLI subprocess. Owns:
 
 When the primary brain is **unavailable**, the executor reruns the *same attempt* — no new DB row, no `attempt_count` increment — through a configured fallback brain. Three cooperating pieces:
 
-- **Classification.** Each brain maps "I am unavailable" onto a `stop_reason`. `usage_limit` (a shared `is_usage_limit_error` detector, so it works on CLI output, tmux pane text, and native error bodies) covers subscription/quota/billing exhaustion; `not_found` a missing binary; `fallback` a tmux launch failure.
+- **Classification.** Each brain maps "I am unavailable" onto a `stop_reason`. `usage_limit` (a shared `is_usage_limit_error` detector, so it works on CLI output, tmux pane text, and native error bodies) covers subscription/quota/billing exhaustion; `not_found` a missing binary; `fallback` a tmux launch failure; `transient_api_error` a provider capacity signal (429 / 5xx / 529 / network-level) that survived the primary's own in-brain retries.
 - **Portable aliases.** `CANONICAL_ROLES = ("fast", "general", "smart")` is the single source of truth every brain's `DEFAULT_ALIASES` imports. A requested model that is a canonical tier — or a custom alias the operator flagged `portable = true` — re-resolves in the fallback's namespace (model *and* effort). A non-portable pin (`opus`, `claude-opus-4-8`) can't cross the boundary: the fallback's own default is used and the reply carries a one-line italic note naming the dropped pin.
-- **Availability breaker.** A process-global, thread-safe breaker keyed by primary kind. The **trigger set** (reroute this attempt) is `{usage_limit, not_found, fallback}`, plus `transient_api_error` when `fallback_on_transient`. The **cooldown set** (skip the primary entirely on later tasks for `fallback_cooldown_seconds`) is `{usage_limit, not_found}` only — `fallback` is excluded so tmux keeps being probed per task and its own launch circuit breaker decides when to stop. `oom` / `timeout` / `cancelled` / `error` never trigger fallback; they are task outcomes.
+- **Availability breaker.** A process-global, thread-safe breaker keyed by primary kind. The **trigger set** (reroute this attempt) is `{usage_limit, not_found, fallback}`, plus `transient_api_error` when `fallback_on_transient` (**on by default**). The **cooldown set** (skip the primary entirely on later tasks for `fallback_cooldown_seconds`) is `{usage_limit, not_found}` only — `fallback` is excluded so tmux keeps being probed per task and its own launch circuit breaker decides when to stop, and `transient_api_error` is excluded because it is transient by definition. `oom` / `timeout` / `cancelled` / `error` never trigger fallback; they are task outcomes.
 
-Config: `[brain] fallback` (`""` = none; a `tmux_claude` primary still defaults to `claude_code`), `fallback_on_transient`, `fallback_cooldown_seconds`. An unknown kind or a self-fallback is neutralized at config load with one warning. There is a single fallback level — if the fallback is also unavailable the task fails or retries normally.
+Config: `[brain] fallback` (`""` = none; a `tmux_claude` primary still defaults to `claude_code`), `fallback_on_transient`, `fallback_cooldown_seconds`. An unknown kind or a self-fallback is neutralized at config load with one warning. There is a single fallback level — if the fallback is also unavailable for the *same* class of reason, its failure text is tagged `executor.FALLBACK_EXHAUSTED_MARKER` and `scheduler._format_error_for_user` turns it into "both my primary and backup brains are unavailable" rather than echoing a raw provider error. Otherwise the task fails or retries normally.
 
 ### Degraded-brain policy for automatic work
 
@@ -125,10 +125,14 @@ The sleep cycle and shared-block synthesis call the primary brain *directly* rat
 
 | Function | Purpose |
 |---|---|
-| `parse_api_error(text)` | Match `API Error: (\d{3}) (\{...\})` and parse status_code / message / request_id |
-| `is_transient_api_error(text)` | True if `status_code in {500, 502, 503, 504, 529, 429}` |
+| `parse_api_error(text)` | status_code / message / request_id from `API Error: NNN {json}` **or** the bodyless `API Error: NNN <text>` the CLI also emits |
+| `is_transient_api_error(text)` | True for a capacity status (`429`, `5xx`, `529`) or a network-level failure (connection reset / timeout / DNS). The network branch is gated on the `API Error` marker (or an unambiguous errno) so prose can't trip it, and an explicit status wins over the body text |
+| `is_permanent_api_error(text)` | True for a request-shaped failure — `400/401/403/404/405/413/414/422`, context-length, content-filter. No retry, no fallback attempt |
+| `api_error_stop_reason(text)` | The single classifier: `usage_limit` > `error` (permanent) > `transient_api_error` > `None` when the text is not a provider error at all |
+| `is_api_error_banner(text)` | True iff the text *is* a bare API-error banner. `claude -p` can report a provider failure as a **success** result frame with the error as the whole answer; without this it is delivered to the user verbatim and can never reach the fallback |
+| `parse_retry_after(text)` | The provider's requested wait, capped at `RETRY_AFTER_MAX_SECONDS` (60s). Honoured by both brains' retry loops in place of the fixed/exponential delay |
 
-Both are re-exported from `executor` for `scheduler.py` and tests; canonical home is `brain/claude_code.py`.
+`parse_api_error` and `is_transient_api_error` are re-exported from `executor` for `scheduler.py` and tests; canonical home is `brain/claude_code.py`. The native brain has its own equivalents over arbitrary OpenAI-compatible bodies (`_classify_native_error`, `session.retry.classify_error`); `session.retry.extract_status_code` recovers the status the provider layer stamps in as `HTTP NNN:` so native's message-only call site classifies as precisely as a status-carrying one.
 
 ## Configuration
 
@@ -136,7 +140,7 @@ Both are re-exported from `executor` for `scheduler.py` and tests; canonical hom
 [brain]
 kind = "claude_code"  # "claude_code" | "native" | "tmux_claude"
 fallback = "native"               # brain kind to use when the primary is unavailable ("" = none)
-fallback_on_transient = false     # also reroute a persistent transient_api_error
+fallback_on_transient = true      # also reroute a persistent transient_api_error
 fallback_cooldown_seconds = 900   # skip an unavailable primary this long (0 = no stickiness)
 
 [brain.native]         # only when kind = "native" (or routed-to)

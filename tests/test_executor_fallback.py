@@ -14,7 +14,7 @@ import pytest
 from istota.brain._fallback import get_availability_breaker, reset_availability_breaker
 from istota.brain._types import BrainResult
 from istota.config import BrainConfig
-from istota.executor import execute_task
+from istota.executor import FALLBACK_EXHAUSTED_MARKER, execute_task
 
 # Reuse the streaming test harness (config/task/patches).
 from tests.test_executor_streaming import (
@@ -164,9 +164,22 @@ class TestNoReroute:
 
 
 class TestTransientGate:
-    def test_transient_not_rerouted_by_default(self, tmp_path):
+    def test_transient_rerouted_by_default(self, tmp_path):
+        # ISSUE-212: a persistent capacity error (529) is exactly what the
+        # fallback exists to absorb, so the reroute is on out of the box.
+        assert BrainConfig().fallback_on_transient is True
         results, primary, fb, _a = _run(
             tmp_path,
+            fallback_on_transient=BrainConfig().fallback_on_transient,
+            primary_result=BrainResult(False, "API Error: 529 Overloaded", stop_reason="transient_api_error"),
+        )
+        assert fb.calls == 1
+        assert results[0][0] is True
+
+    def test_transient_not_rerouted_when_disabled(self, tmp_path):
+        results, primary, fb, _a = _run(
+            tmp_path,
+            fallback_on_transient=False,
             primary_result=BrainResult(False, "API Error: 529 {}", stop_reason="transient_api_error"),
         )
         assert fb.calls == 0
@@ -260,6 +273,49 @@ class TestVisibleNote:
         _s, result, _a2, _t = results[0]
         assert _s is False
         assert "Ran on" not in result
+
+
+class TestBothBrainsUnavailable:
+    """ISSUE-212: the user must never be handed a bare provider error as the
+    final message. When the fallback is *also* unavailable, the failure text
+    carries a marker the scheduler turns into a legible "both unavailable"."""
+
+    def test_marker_prefixed_when_fallback_also_unavailable(self, tmp_path):
+        results, primary, fb, _a = _run(
+            tmp_path,
+            fallback_on_transient=True,
+            primary_result=BrainResult(
+                False, "API Error: 529 Overloaded", stop_reason="transient_api_error",
+            ),
+            fallback_result=BrainResult(
+                False, "API Error: 503 Service Unavailable",
+                stop_reason="transient_api_error",
+            ),
+        )
+        success, result, _a2, _t = results[0]
+        assert success is False
+        assert FALLBACK_EXHAUSTED_MARKER in result
+        # The underlying cause survives for the friendly formatter + the logs.
+        assert "503" in result
+
+    def test_no_marker_for_task_level_fallback_failure(self, tmp_path):
+        # A fallback that timed out is a task-level outcome, not an availability
+        # failure — the "both unavailable" wording would be wrong.
+        results, primary, fb, _a = _run(
+            tmp_path,
+            primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+            fallback_result=BrainResult(
+                False, "Task execution timed out after 30 minutes", stop_reason="timeout",
+            ),
+        )
+        assert FALLBACK_EXHAUSTED_MARKER not in results[0][1]
+
+    def test_no_marker_on_successful_fallback(self, tmp_path):
+        results, primary, fb, _a = _run(
+            tmp_path,
+            primary_result=BrainResult(False, "usage limit reached", stop_reason="usage_limit"),
+        )
+        assert FALLBACK_EXHAUSTED_MARKER not in results[0][1]
 
 
 class TestStickiness:
