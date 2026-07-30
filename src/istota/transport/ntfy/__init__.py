@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from ... import ntfy_headers
 from .._types import DeliveryOptions, IncomingMessage, TransportCapabilities
 
 if TYPE_CHECKING:
@@ -69,12 +70,18 @@ def ntfy_settings(config: "Config", user_id: str) -> dict[str, str] | None:
     }
 
 
-def _post_ntfy_blocking(
-    settings: dict[str, str], message: str, options: DeliveryOptions,
-) -> bool:
-    """The blocking httpx POST. Runs in a thread executor so it never blocks the
-    persistent asyncio loop the transport is awaited on."""
-    url = f"{settings['server_url'].rstrip('/')}/{settings['topic']}"
+def _build_headers(
+    settings: dict[str, str], options: DeliveryOptions, *, ascii_only: bool = False,
+) -> dict[str, str]:
+    """Assemble the request headers.
+
+    Free-text values go through ``encode_header_value``, which RFC 2047-encodes
+    anything non-ASCII — httpx serializes headers as ASCII, so an emoji title
+    would otherwise raise and take the whole notification with it (ISSUE-213).
+    ``ascii_only`` is the lossy fallback used by the retry below.
+    """
+    encode = ntfy_headers.ascii_header_value if ascii_only else ntfy_headers.encode_header_value
+
     headers: dict[str, str] = {}
     if settings["token"]:
         headers["Authorization"] = f"Bearer {settings['token']}"
@@ -84,20 +91,48 @@ def _post_ntfy_blocking(
         ).decode()
         headers["Authorization"] = f"Basic {credentials}"
     if options.title:
-        headers["Title"] = options.title.replace("\r", "").replace("\n", " ")
+        title = encode(options.title)
+        if title:
+            headers["Title"] = title
     headers["Priority"] = str(
         options.priority if options.priority is not None else _NTFY_DEFAULT_PRIORITY
     )
     if options.tags:
-        headers["Tags"] = options.tags.replace("\r", "").replace("\n", " ")
+        tags = encode(options.tags)
+        if tags:
+            headers["Tags"] = tags
+    return headers
 
-    try:
-        response = httpx.post(url, content=message, headers=headers, timeout=10)
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error("Failed to send ntfy notification: %s", e)
-        return False
+
+def _post_ntfy_blocking(
+    settings: dict[str, str], message: str, options: DeliveryOptions,
+) -> bool:
+    """The blocking httpx POST. Runs in a thread executor so it never blocks the
+    persistent asyncio loop the transport is awaited on."""
+    url = f"{settings['server_url'].rstrip('/')}/{settings['topic']}"
+
+    for ascii_only in (False, True):
+        try:
+            response = httpx.post(
+                url, content=message,
+                headers=_build_headers(settings, options, ascii_only=ascii_only),
+                timeout=10,
+            )
+            response.raise_for_status()
+            return True
+        except UnicodeEncodeError as e:
+            # Shouldn't happen — encode_header_value emits pure ASCII — but a
+            # title must never cost us the body, so flatten and try once more.
+            if ascii_only:
+                logger.error("Failed to send ntfy notification: %s", e)
+                return False
+            logger.warning(
+                "ntfy header encoding failed (%s); retrying with ASCII-only headers", e,
+            )
+        except Exception as e:
+            logger.error("Failed to send ntfy notification: %s", e)
+            return False
+    return False
 
 
 async def send_ntfy_async(

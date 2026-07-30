@@ -29,6 +29,8 @@ import sys
 
 import httpx
 
+from ... import ntfy_headers
+
 DEFAULT_SERVER = "https://ntfy.sh"
 REQUEST_TIMEOUT = 10.0
 
@@ -68,7 +70,14 @@ def _build_auth_header() -> str | None:
 
 
 def _scrub(value: str) -> str:
-    return value.replace("\r", "").replace("\n", " ")
+    """Strip newlines, and RFC 2047-encode anything non-ASCII.
+
+    httpx serializes header values as ASCII, so an emoji/arrow/em-dash title
+    would otherwise raise ``UnicodeEncodeError`` and lose the send; ntfy decodes
+    the encoded-word back to the original glyphs (ISSUE-213). The helper is
+    total, so this can't raise.
+    """
+    return ntfy_headers.encode_header_value(value)
 
 
 def cmd_send(args: argparse.Namespace) -> int:
