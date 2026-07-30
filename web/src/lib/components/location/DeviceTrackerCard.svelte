@@ -168,7 +168,15 @@
     return at.toLocaleString();
   }
 
-  const authorizationWarning = $derived.by(() => {
+  /**
+   * One line under the Tracking row, and only one.
+   *
+   * A permission problem outranks a pause: the pause is working as intended
+   * and resolves itself, while the permission is why nothing will be logged at
+   * all. Showing both would put the reassuring sentence next to the alarming
+   * one and make neither land.
+   */
+  const trackingWarning = $derived.by(() => {
     if (!status) return '';
     if (status.authorization === 'denied')
       return 'Location access is denied. Only iOS Settings can restore it.';
@@ -176,6 +184,15 @@
       return 'Only granted while the app is open, so nothing is logged in the background.';
     if (status.authorization === 'notDetermined')
       return 'Location access has not been granted yet.';
+    if (status.tracking && status.paused)
+      // Says "nothing is wrong" out loud, because the readout beside it — an
+      // empty queue and a last-sent time hours old — is what a broken tracker
+      // looks like, and that is the reading someone opens this card to check.
+      return (
+        'This phone has not moved for a while, so iOS has paused updates to save ' +
+        'battery. Nothing is queued or sent until it moves again, which resumes ' +
+        'tracking on its own.'
+      );
     return '';
   });
 
@@ -221,10 +238,18 @@
       <!-- labelled={false} because this slot holds buttons: inside a <label>
            a <button> becomes the label's implicit control, and clicking the
            caption "Tracking" would stop the tracker. -->
-      <SettingsField label="Tracking" warning={authorizationWarning} labelled={false}>
+      <SettingsField label="Tracking" warning={trackingWarning} labelled={false}>
         <div class="tracker-row">
-          <span class="tracker-state" class:on={status.tracking}>
-            {status.tracking ? 'On' : 'Off'}
+          <!-- "Paused" rather than "On", because On beside an hours-old
+               last-sent time is the reading that sends someone looking for a
+               fault. It is deliberately not styled as a problem: nothing is
+               wrong, and Stop stays available throughout. -->
+          <span
+            class="tracker-state"
+            class:on={status.tracking && !status.paused}
+            class:paused={status.tracking && status.paused}
+          >
+            {status.tracking ? (status.paused ? 'Paused' : 'On') : 'Off'}
           </span>
           <!-- Start/Stop is present in every state a user can act on. Only a
                denied authorization replaces it, because there the tracker
@@ -327,6 +352,11 @@
 
   .tracker-state.on {
     color: var(--status-success-fg);
+  }
+
+  /* Info, not warning: a pause is the battery saving working. */
+  .tracker-state.paused {
+    color: var(--status-info-fg);
   }
 
   .tracker-actions {
