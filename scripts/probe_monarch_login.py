@@ -28,12 +28,16 @@ import json
 import os
 import sys
 
+from istota.money._vendor import monarch_client
 from istota.money._vendor.monarch_client import (
     MonarchAuthError,
+    MonarchCaptchaRequired,
     MonarchClient,
+    MonarchClientOutdated,
     MonarchCloudflareBlocked,
     MonarchCookieAuth,
     MonarchMFARequired,
+    fetch_live_client_version,
 )
 
 
@@ -60,6 +64,14 @@ async def _probe() -> int:
         "mfa_totp_present": bool(mfa_totp),
     })
 
+    # Phase 0 — client version. Reported before the login because a stale
+    # version is only detectable *after* credentials validate, so this is the
+    # one number worth seeing even when the login below succeeds.
+    _emit("client_version", {
+        "live": await fetch_live_client_version(),
+        "fallback_constant": monarch_client.CLIENT_VERSION,
+    })
+
     # Phase 1 — login
     try:
         auth: MonarchCookieAuth = await MonarchClient.login_with_credentials(
@@ -76,6 +88,23 @@ async def _probe() -> int:
             "hint": "Re-run with MM_MFA_TOTP set to the current 6-digit code.",
         })
         return 4
+    except MonarchClientOutdated as exc:
+        # The condition this script exists to diagnose — it used to escape as
+        # a bare traceback, which is the least useful outcome for the one
+        # failure mode nobody can debug from the UI.
+        _emit("login_result", {
+            "ok": False, "kind": "client_outdated", "error": str(exc),
+            "hint": "Set CLIENT_VERSION in monarch_client.py, or investigate "
+                    "whether the header contract itself changed.",
+        })
+        return 7
+    except MonarchCaptchaRequired as exc:
+        _emit("login_result", {
+            "ok": False, "kind": "captcha_required", "error": str(exc),
+            "hint": "Sticky for this (account, IP). Use the cookie-paste "
+                    "workflow in the money settings page.",
+        })
+        return 8
     except MonarchAuthError as exc:
         _emit("login_result", {
             "ok": False, "kind": "auth_error", "error": str(exc),

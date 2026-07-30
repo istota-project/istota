@@ -13,11 +13,18 @@ from unittest.mock import patch
 
 import pytest
 
+from istota.money._vendor import monarch_client
 from istota.money._vendor.monarch_client import (
     APP_ORIGIN,
     APP_REFERER,
+    CLIENT_VERSION,
     GRAPHQL_URL,
     LOGIN_URL,
+    GRAPHQL_CLIENT_NAME,
+    REST_CLIENT_NAME,
+    USER_AGENT,
+    VERSION_URL,
+    fetch_live_client_version,
     MonarchAPIError,
     MonarchAuthError,
     MonarchCaptchaRequired,
@@ -57,15 +64,29 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    """Captures every call so tests can assert on cookies + headers."""
+    """Captures every call so tests can assert on cookies + headers.
+
+    ``post_calls`` / ``get_calls`` accumulate across a test so the retry path
+    (login → version discovery → login again) can be asserted turn by turn;
+    ``last_call`` keeps the single-call shape the older tests read.
+    """
 
     last_call: dict | None = None
+    post_calls: list[dict] = []
+    get_calls: list[dict] = []
     _next_response: _FakeResponse | None = None
+    _post_responses: list[_FakeResponse] | None = None
+    _get_responses: list[_FakeResponse] | None = None
+    _default_get: _FakeResponse | None = None
     _set_cookies_on_post: dict | None = None
+    _cookies_after_post: int = 0
     _captured_jar = None
 
-    def __init__(self, *, cookies=None, cookie_jar=None, timeout=None) -> None:  # noqa: D401, ARG002
+    session_kwargs: list[dict] = []
+
+    def __init__(self, *, cookies=None, cookie_jar=None, timeout=None, **kwargs) -> None:  # noqa: D401, ARG002
         type(self).last_call = {"cookies": dict(cookies) if cookies else {}}
+        type(self).session_kwargs.append(dict(kwargs))
         if cookie_jar is not None:
             type(self)._captured_jar = cookie_jar
 
@@ -79,28 +100,100 @@ class _FakeSession:
         type(self).last_call.update({
             "url": url, "data": data, "headers": dict(headers),
         })
+        type(self).post_calls.append(dict(type(self).last_call))
         # Simulate Monarch setting cookies on the response. We do this by
         # injecting cookies into the captured jar via update_cookies(), which
-        # is what aiohttp would call internally.
-        if type(self)._set_cookies_on_post and type(self)._captured_jar is not None:
+        # is what aiohttp would call internally. `_cookies_after_post` lets a
+        # retry test set them only on the attempt that is meant to succeed.
+        should_set = (
+            type(self)._set_cookies_on_post
+            and len(type(self).post_calls) > type(self)._cookies_after_post
+        )
+        if should_set and type(self)._captured_jar is not None:
             type(self)._captured_jar.update_cookies(
                 type(self)._set_cookies_on_post,
             )
-        return type(self)._next_response
+        return type(self)._pop(
+            type(self)._post_responses, type(self)._next_response,
+        )
+
+    def get(self, url, *, headers=None):
+        type(self).get_calls.append({"url": url, "headers": dict(headers or {})})
+        return type(self)._pop(
+            type(self)._get_responses, type(self)._default_get,
+        )
+
+    @classmethod
+    def _pop(cls, queue, default):
+        """Pop one queued response, or fall back to this method's default.
+
+        A queue is consumed strictly: over-consumption raises rather than
+        replaying the last element forever. Without that, a regression which
+        retried twice (or fetched the version twice) would quietly receive a
+        fresh response and pass — the "exactly once" tests would be asserting
+        nothing.
+        """
+        if queue is None:
+            return default
+        if not queue:
+            raise AssertionError(
+                "fake session over-consumed: more requests than queued responses"
+            )
+        return queue.pop(0)
+
+
+def _reset_fake_session():
+    _FakeSession.last_call = None
+    _FakeSession.post_calls = []
+    _FakeSession.get_calls = []
+    _FakeSession.session_kwargs = []
+    _FakeSession._next_response = None
+    _FakeSession._post_responses = None
+    _FakeSession._get_responses = None
+    _FakeSession._default_get = None
+    _FakeSession._set_cookies_on_post = None
+    _FakeSession._cookies_after_post = 0
+    _FakeSession._captured_jar = None
 
 
 def _install_fake_session(
     monkeypatch, *, status=200, body=None, set_cookies=None,
+    post_responses=None, get_responses=None, cookies_after_post=0,
 ):
     body = body if body is not None else json.dumps({"data": {}})
-    _FakeSession.last_call = None
+    _reset_fake_session()
     _FakeSession._next_response = _FakeResponse(status, body)
+    _FakeSession._post_responses = [
+        _FakeResponse(s, b) for s, b in (post_responses or [])
+    ] or None
+    _FakeSession._get_responses = [
+        _FakeResponse(s, b) for s, b in (get_responses or [])
+    ] or None
+    # Login now resolves the client version before it posts, so every login
+    # test issues a discovery GET. Unless a test says otherwise, that GET fails
+    # cleanly — the login then proceeds on the compiled-in CLIENT_VERSION,
+    # which is the shape the pre-existing login tests were written against.
+    _FakeSession._default_get = _FakeResponse(404, "")
     _FakeSession._set_cookies_on_post = set_cookies
-    _FakeSession._captured_jar = None
+    _FakeSession._cookies_after_post = cookies_after_post
     monkeypatch.setattr(
         "istota.money._vendor.monarch_client.aiohttp.ClientSession",
         _FakeSession,
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_discovered_version():
+    """The discovered client version is a process-global cache; clear it around
+    every test so ordering can't leak one test's discovery into another."""
+    monarch_client._discovered_version = None
+    yield
+    monarch_client._discovered_version = None
+
+
+_OUTDATED_BODY = json.dumps({
+    "detail": "Please update to the latest version of the app to continue login.",
+})
 
 
 # -----------------------------------------------------------------------------
@@ -139,6 +232,48 @@ class TestRequestShape:
         assert call["headers"]["Content-Type"] == "application/json"
         # We deliberately do NOT send Authorization (cookies replace it).
         assert "Authorization" not in call["headers"]
+        # Pin the client pair on the GraphQL path too. It is believed to be
+        # ignored here, but that belief was established by probing with a value
+        # this diff changed — and "a header we thought was ignored" is exactly
+        # what broke login. A silent revert should fail a test.
+        assert call["headers"]["monarch-client"] == GRAPHQL_CLIENT_NAME
+        assert call["headers"]["monarch-client-version"] == CLIENT_VERSION
+        assert call["headers"]["User-Agent"] == USER_AGENT
+        # Monarch's oversized CSP header would otherwise abort the read.
+        assert _FakeSession.session_kwargs[0]["max_field_size"] > 8190
+        assert _FakeSession.session_kwargs[0]["max_line_size"] > 8190
+
+    @pytest.mark.asyncio
+    async def test_graphql_uses_a_discovered_version_when_one_is_known(
+        self, monkeypatch,
+    ):
+        """`_current_client_version()` feeds both transports, so a version
+        learned during login must show up on the sync path too."""
+        monarch_client._discovered_version = "v1.0.4242"
+        _install_fake_session(monkeypatch, body=json.dumps({"data": {}}))
+        client = MonarchClient(MonarchCookieAuth(session_id="s", csrftoken="c"))
+
+        await client.get_transactions(
+            start_date="2026-04-01", end_date="2026-05-01",
+        )
+
+        assert _FakeSession.last_call["headers"][
+            "monarch-client-version"] == "v1.0.4242"
+
+    @pytest.mark.asyncio
+    async def test_login_session_raises_header_size_ceiling(self, monkeypatch):
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"token": "x"}),
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+
+        await MonarchClient.login_with_credentials(email="a@b.com", password="pw")
+
+        # Every session the module opens, not just the discovery GET.
+        assert all(
+            kw["max_field_size"] > 8190 and kw["max_line_size"] > 8190
+            for kw in _FakeSession.session_kwargs
+        )
 
     @pytest.mark.asyncio
     async def test_get_transactions_passes_date_range_and_paging(
@@ -304,23 +439,387 @@ class TestLoginWithCredentials:
             )
 
     @pytest.mark.asyncio
-    async def test_outdated_client_distinguished(self, monkeypatch):
-        """The 'Please update to the latest version' 403 is the live response
-        when monarch-client* headers are missing or malformed (verified
-        2026-05-15). It surfaces as MonarchClientOutdated so operators know
-        to bump CLIENT_VERSION rather than checking the password."""
+    async def test_login_sends_live_web_app_client_headers(self, monkeypatch):
+        """The header values must be the ones the live web app sends. Monarch
+        checks them *after* validating credentials, so a wrong value can only
+        be caught by a real login — which is how 2025.10.0 went stale
+        unnoticed (ISSUE: 503 on correct credentials, 2026-07-30)."""
         _install_fake_session(
-            monkeypatch, status=403,
-            body=json.dumps({
-                "detail": "Please update to the latest version of the app to continue login.",
-            }),
+            monkeypatch, body=json.dumps({"token": "x"}),
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+
+        await MonarchClient.login_with_credentials(
+            email="a@b.com", password="pw",
+        )
+
+        headers = _FakeSession.last_call["headers"]
+        assert headers["monarch-client"] == REST_CLIENT_NAME
+        assert headers["monarch-client-version"] == CLIENT_VERSION
+
+
+class TestClientVersionDiscovery:
+    """`app.monarch.com/version.json` is a 23-byte manifest carrying exactly
+    the `clientVersion` the app bundle sends. It is what lets a stale constant
+    self-heal instead of returning 503 until an operator ships a bump."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_reads_version_manifest(self, monkeypatch):
+        _install_fake_session(
+            monkeypatch,
+            get_responses=[(200, json.dumps({"version": "v1.0.9999"}))],
+        )
+
+        assert await fetch_live_client_version() == "v1.0.9999"
+        assert _FakeSession.get_calls[0]["url"] == VERSION_URL
+
+    @pytest.mark.asyncio
+    async def test_fetch_sends_explicit_user_agent(self, monkeypatch):
+        """Cloudflare fronts app.monarch.com and 403s aiohttp's default
+        `Python/3.x aiohttp/3.y` UA, so an unset User-Agent makes discovery
+        fail from a host where curl succeeds (verified live 2026-07-30).
+        Without this the whole self-heal is silently dead."""
+        _install_fake_session(
+            monkeypatch,
+            get_responses=[(200, json.dumps({"version": "v1.0.9999"}))],
+        )
+
+        await fetch_live_client_version()
+
+        assert _FakeSession.get_calls[0]["headers"]["User-Agent"] == USER_AGENT
+        assert "aiohttp" not in USER_AGENT.lower()
+        assert "python" not in USER_AGENT.lower()
+
+    @pytest.mark.asyncio
+    async def test_fetch_raises_aiohttp_header_size_ceiling(self, monkeypatch):
+        """app.monarch.com's CSP header exceeds aiohttp's 8190-byte default,
+        which aborts the read as a bogus 400 before the body is parsed
+        (verified live 2026-07-30). A response header's size must not decide
+        whether discovery works."""
+        _install_fake_session(
+            monkeypatch,
+            get_responses=[(200, json.dumps({"version": "v1.0.9999"}))],
+        )
+
+        await fetch_live_client_version()
+
+        kwargs = _FakeSession.session_kwargs[0]
+        assert kwargs["max_field_size"] > 8190
+        assert kwargs["max_line_size"] > 8190
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status,body", [
+        (500, json.dumps({"version": "v1.0.1"})),
+        (200, "not json at all"),
+        (200, json.dumps({})),
+        (200, json.dumps({"version": ""})),
+        (200, json.dumps({"version": "   "})),
+        (200, json.dumps({"version": 17})),
+        (200, json.dumps({"version": "v1.0.1" + "x" * 200})),
+        # Valid JSON that isn't an object: json.loads returns a list/str/int,
+        # and a bare .get() on it would raise AttributeError from inside the
+        # error path, surfacing as a 500 instead of the actionable 503.
+        (200, "[]"),
+        (200, "null"),
+        (200, "123"),
+        (200, '"just a string"'),
+    ])
+    async def test_fetch_returns_none_on_unusable_payload(
+        self, monkeypatch, status, body,
+    ):
+        """Discovery must never raise — a failure just means we keep the
+        compiled-in fallback."""
+        _install_fake_session(monkeypatch, get_responses=[(status, body)])
+
+        assert await fetch_live_client_version() is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_rejects_header_unsafe_version(self, monkeypatch):
+        """The discovered value goes straight into an HTTP request header, so
+        a remote payload carrying CR/LF must be refused rather than smuggled
+        into the request as extra headers."""
+        _install_fake_session(
+            monkeypatch,
+            get_responses=[(200, json.dumps({
+                "version": "v1.0.1\r\nX-Injected: yes",
+            }))],
+        )
+
+        assert await fetch_live_client_version() is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_returns_the_value_it_validated(self, monkeypatch):
+        """The regex runs against `version.strip()`, so the stripped value is
+        what must be returned. Returning the raw one would hand aiohttp a
+        header value with a trailing newline that was never checked."""
+        _install_fake_session(
+            monkeypatch,
+            get_responses=[(200, json.dumps({"version": " v1.0.1\r\n "}))],
+        )
+
+        assert await fetch_live_client_version() == "v1.0.1"
+
+    @pytest.mark.asyncio
+    async def test_fetch_returns_none_on_transport_error(self, monkeypatch):
+        _reset_fake_session()
+
+        class _Boom:
+            def __init__(self, **_kw):
+                raise OSError("network down")
+
+        monkeypatch.setattr(
+            "istota.money._vendor.monarch_client.aiohttp.ClientSession", _Boom,
+        )
+
+        assert await fetch_live_client_version() is None
+
+
+class TestOutdatedClientRecovery:
+    @pytest.mark.asyncio
+    async def test_version_is_resolved_before_the_login_is_attempted(
+        self, monkeypatch,
+    ):
+        """The headline behaviour: discovery happens *first*, so a cold process
+        with a stale constant costs one 23-byte GET rather than a failed
+        credential submission against a CAPTCHA-gated endpoint."""
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"token": "x"}),
+            get_responses=[(200, json.dumps({"version": "v1.0.4242"}))],
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+
+        await MonarchClient.login_with_credentials(email="a@b.com", password="pw")
+
+        assert len(_FakeSession.post_calls) == 1  # no wasted attempt
+        assert _FakeSession.post_calls[0]["headers"][
+            "monarch-client-version"] == "v1.0.4242"
+
+    @pytest.mark.asyncio
+    async def test_login_falls_back_to_constant_when_discovery_fails(
+        self, monkeypatch,
+    ):
+        """An unreachable manifest must not block login — the constant is a
+        worse guess, not a blocker."""
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"token": "x"}),
+            get_responses=[(503, "<html>down</html>")],
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+
+        await MonarchClient.login_with_credentials(email="a@b.com", password="pw")
+
+        assert _FakeSession.post_calls[0]["headers"][
+            "monarch-client-version"] == CLIENT_VERSION
+
+    @pytest.mark.asyncio
+    async def test_outdated_client_retries_with_refreshed_version(
+        self, monkeypatch,
+    ):
+        """If the pre-fetched version is refused anyway (it went stale between
+        the fetch and the post, or the manifest was down), re-read and retry
+        once."""
+        _install_fake_session(
+            monkeypatch,
+            post_responses=[
+                (403, _OUTDATED_BODY),
+                (200, json.dumps({"token": "x"})),
+            ],
+            get_responses=[
+                (200, json.dumps({"version": "v1.0.1000"})),
+                (200, json.dumps({"version": "v1.0.4242"})),
+            ],
+            set_cookies={"session_id": "SID-new", "csrftoken": "CSRF-new"},
+            cookies_after_post=1,  # only the retry sets cookies
+        )
+
+        out = await MonarchClient.login_with_credentials(
+            email="a@b.com", password="pw",
+        )
+
+        assert len(_FakeSession.post_calls) == 2
+        assert _FakeSession.post_calls[0]["headers"][
+            "monarch-client-version"] == "v1.0.1000"
+        assert _FakeSession.post_calls[1]["headers"][
+            "monarch-client-version"] == "v1.0.4242"
+        assert out.session_id == "SID-new"
+        assert out.csrftoken == "CSRF-new"
+
+    @pytest.mark.asyncio
+    async def test_credentials_are_resent_verbatim_on_retry(self, monkeypatch):
+        _install_fake_session(
+            monkeypatch,
+            post_responses=[
+                (403, _OUTDATED_BODY),
+                (200, json.dumps({"token": "x"})),
+            ],
+            get_responses=[
+                (200, json.dumps({"version": "v1.0.1000"})),
+                (200, json.dumps({"version": "v1.0.4242"})),
+            ],
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+            cookies_after_post=1,
+        )
+
+        await MonarchClient.login_with_credentials(
+            email="a@b.com", password="pw", mfa_totp="123456",
+        )
+
+        first, second = (json.loads(c["data"]) for c in _FakeSession.post_calls)
+        assert first == second
+        assert second["totp"] == "123456"
+
+    @pytest.mark.asyncio
+    async def test_spent_totp_on_retry_asks_for_a_new_code(self, monkeypatch):
+        """The first attempt was judged on its client version, so it had
+        already validated — and consumed — the one-time code. Reporting the
+        retry's rejection as bad credentials would send an MFA user off to
+        re-check a password that is fine."""
+        _install_fake_session(
+            monkeypatch,
+            post_responses=[
+                (403, _OUTDATED_BODY),
+                (403, json.dumps({"detail": "Invalid TOTP"})),
+            ],
+            get_responses=[
+                (200, json.dumps({"version": "v1.0.1000"})),
+                (200, json.dumps({"version": "v1.0.4242"})),
+            ],
+        )
+
+        with pytest.raises(MonarchMFARequired) as exc:
+            await MonarchClient.login_with_credentials(
+                email="a@b.com", password="pw", mfa_totp="123456",
+            )
+        assert "new code" in str(exc.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_retry_auth_failure_without_mfa_stays_an_auth_error(
+        self, monkeypatch,
+    ):
+        """Only the MFA case is reinterpreted — a passwordless-account failure
+        must still read as a credential rejection."""
+        _install_fake_session(
+            monkeypatch,
+            post_responses=[
+                (403, _OUTDATED_BODY),
+                (404, json.dumps({"detail": "Invalid email and password"})),
+            ],
+            get_responses=[
+                (200, json.dumps({"version": "v1.0.1000"})),
+                (200, json.dumps({"version": "v1.0.4242"})),
+            ],
+        )
+
+        with pytest.raises(MonarchAuthError):
+            await MonarchClient.login_with_credentials(
+                email="a@b.com", password="pw",
+            )
+
+    @pytest.mark.asyncio
+    async def test_resolved_version_is_reused_by_later_logins(
+        self, monkeypatch,
+    ):
+        """Cached process-wide — a second login must not refetch."""
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"token": "x"}),
+            get_responses=[(200, json.dumps({"version": "v1.0.4242"}))],
+            set_cookies={"session_id": "s", "csrftoken": "c"},
+        )
+        await MonarchClient.login_with_credentials(email="a@b.com", password="pw")
+
+        _install_fake_session(
+            monkeypatch, body=json.dumps({"token": "x"}),
+            set_cookies={"session_id": "s2", "csrftoken": "c2"},
+        )
+        await MonarchClient.login_with_credentials(email="a@b.com", password="pw")
+
+        assert len(_FakeSession.post_calls) == 1
+        assert _FakeSession.get_calls == []
+        assert _FakeSession.post_calls[0]["headers"][
+            "monarch-client-version"] == "v1.0.4242"
+
+    @pytest.mark.asyncio
+    async def test_no_retry_when_refreshed_version_matches_sent(
+        self, monkeypatch,
+    ):
+        """If the re-read agrees with what was just refused — including the
+        case where the manifest is down and we keep the same value — resending
+        identical bytes would only burn a second attempt."""
+        _install_fake_session(
+            monkeypatch, status=403, body=_OUTDATED_BODY,
+            get_responses=[
+                (200, json.dumps({"version": "v1.0.4242"})),
+                (200, json.dumps({"version": "v1.0.4242"})),
+            ],
         )
 
         with pytest.raises(MonarchClientOutdated) as exc:
             await MonarchClient.login_with_credentials(
                 email="a@b.com", password="pw",
             )
-        assert "CLIENT_VERSION" in str(exc.value)
+        assert len(_FakeSession.post_calls) == 1
+        assert "v1.0.4242" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_outdated_with_unreachable_manifest_does_not_retry(
+        self, monkeypatch,
+    ):
+        _install_fake_session(
+            monkeypatch, status=403, body=_OUTDATED_BODY,
+            get_responses=[(503, "<html>nope</html>"), (503, "<html>nope</html>")],
+        )
+
+        with pytest.raises(MonarchClientOutdated) as exc:
+            await MonarchClient.login_with_credentials(
+                email="a@b.com", password="pw",
+            )
+        assert len(_FakeSession.post_calls) == 1
+        assert VERSION_URL in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_retry_that_is_still_outdated_gives_up_but_keeps_version(
+        self, monkeypatch,
+    ):
+        """Exactly one retry, never a loop. The refreshed value is *kept*:
+        reverting to the constant would make the next call repeat this whole
+        two-attempt sequence, doubling the failed-login rate against a gate the
+        module documents as sticky. Keeping it means the next call
+        short-circuits after one attempt."""
+        _install_fake_session(
+            monkeypatch,
+            post_responses=[(403, _OUTDATED_BODY), (403, _OUTDATED_BODY)],
+            get_responses=[
+                (200, json.dumps({"version": "v1.0.1000"})),
+                (200, json.dumps({"version": "v1.0.4242"})),
+            ],
+        )
+
+        with pytest.raises(MonarchClientOutdated) as exc:
+            await MonarchClient.login_with_credentials(
+                email="a@b.com", password="pw",
+            )
+        assert len(_FakeSession.post_calls) == 2
+        assert "v1.0.4242" in str(exc.value)
+        assert monarch_client._discovered_version == "v1.0.4242"
+
+    @pytest.mark.asyncio
+    async def test_non_outdated_403_never_triggers_a_second_attempt(
+        self, monkeypatch,
+    ):
+        """A wrong password costs the one pre-fetch and nothing more — no
+        re-read, no second login attempt."""
+        _install_fake_session(
+            monkeypatch, status=403,
+            body=json.dumps({"detail": "wrong password"}),
+            get_responses=[(200, json.dumps({"version": "v1.0.4242"}))],
+        )
+
+        with pytest.raises(MonarchAuthError):
+            await MonarchClient.login_with_credentials(
+                email="a@b.com", password="pw",
+            )
+        assert len(_FakeSession.post_calls) == 1
+        assert len(_FakeSession.get_calls) == 1
 
     @pytest.mark.asyncio
     async def test_captcha_required_distinguished(self, monkeypatch):
