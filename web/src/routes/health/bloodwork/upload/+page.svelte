@@ -9,7 +9,8 @@
     healthPanelSourceUrl,
     type Biomarker,
   } from '$lib/api';
-  import { Button, Select } from '$lib/components/ui';
+  import { Button, Field, Select } from '$lib/components/ui';
+  import FileDropZone from '$lib/components/health/FileDropZone.svelte';
 
   const flagOptions = [
     { value: '', label: '—' },
@@ -19,7 +20,6 @@
   ];
 
   let file: File | null = $state(null);
-  let fileInput: HTMLInputElement | undefined = $state(undefined);
 
   let uploading = $state(false);
   let extracting = $state(false);
@@ -45,25 +45,6 @@
   function handleFile(e: Event) {
     const input = e.target as HTMLInputElement;
     file = input.files?.[0] ?? null;
-  }
-
-  function handleDrop(e: DragEvent) {
-    e.preventDefault();
-    const f = e.dataTransfer?.files?.[0];
-    if (f) file = f;
-  }
-
-  function handlePaste(e: ClipboardEvent) {
-    const f = e.clipboardData?.files?.[0];
-    if (f) {
-      e.preventDefault();
-      file = f;
-    }
-  }
-
-  function clearFile() {
-    file = null;
-    if (fileInput) fileInput.value = '';
   }
 
   async function doUpload() {
@@ -182,35 +163,12 @@
 
   {#if panelId == null}
     <div class="card">
-      <div
-        class="dropzone"
-        ondragover={(e) => e.preventDefault()}
-        ondrop={handleDrop}
-        onpaste={handlePaste}
-        role="presentation"
-      >
-        {#if file}
-          <div class="picked">
-            {file.name}
-            <span class="hint">({Math.round(file.size / 1024)} KB)</span>
-            <button type="button" class="clear" onclick={clearFile} aria-label="Clear selected file"
-              >×</button
-            >
-          </div>
-        {:else}
-          <p>Drop or paste a PDF or image of the lab report here, or use the file picker.</p>
-          <p class="hint">
-            Date drawn, lab, and panel type are extracted automatically; you'll review them next.
-          </p>
-        {/if}
-        <input
-          bind:this={fileInput}
-          type="file"
-          accept="image/*,application/pdf"
-          onchange={handleFile}
-          class:hidden={file !== null}
-        />
-      </div>
+      <FileDropZone bind:file>
+        <p>Drop or paste a PDF or image of the lab report here, or use the file picker.</p>
+        <p class="hint">
+          Date drawn, lab, and panel type are extracted automatically; you'll review them next.
+        </p>
+      </FileDropZone>
 
       {#if error}<div class="banner error">{error}</div>{/if}
       {#if info}<div class="banner info">{info}</div>{/if}
@@ -239,18 +197,15 @@
       <div class="review-table">
         {#if !extracting}
           <div class="metadata">
-            <label>
-              <span>Date drawn</span>
+            <Field label="Date drawn">
               <input type="date" bind:value={drawnAt} required />
-            </label>
-            <label>
-              <span>Lab</span>
+            </Field>
+            <Field label="Lab">
               <input type="text" bind:value={labName} placeholder="Quest, Kaiser, …" />
-            </label>
-            <label>
-              <span>Panel type</span>
+            </Field>
+            <Field label="Panel type">
               <input type="text" bind:value={panelType} placeholder="CBC, CMP, Lipid, …" />
-            </label>
+            </Field>
           </div>
         {/if}
 
@@ -375,43 +330,9 @@
     flex-direction: column;
     gap: 0.75rem;
   }
-  .dropzone {
-    border: 2px dashed var(--border-default);
-    border-radius: var(--radius-card);
-    padding: 2rem;
-    text-align: center;
-    color: var(--text-muted);
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-  .picked {
-    color: var(--text-primary);
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-  }
   .hint {
     color: var(--text-dim);
     font-size: var(--text-xs);
-  }
-  .clear {
-    background: none;
-    border: 1px solid var(--border-default);
-    border-radius: 50%;
-    color: var(--text-muted);
-    width: 1.4rem;
-    height: 1.4rem;
-    line-height: 1;
-    cursor: pointer;
-    font-size: var(--text-sm);
-  }
-  .clear:hover {
-    background: var(--surface-raised);
-    color: var(--text-primary);
-  }
-  .hidden {
-    display: none;
   }
   .metadata {
     display: grid;
@@ -420,16 +341,6 @@
     margin-bottom: 0.75rem;
     padding-bottom: 0.75rem;
     border-bottom: 1px solid var(--border-subtle);
-  }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    font-size: var(--text-sm);
-  }
-  label > span {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   input {
     background: var(--surface-base);

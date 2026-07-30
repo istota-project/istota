@@ -16,6 +16,7 @@
     Badge,
     Button,
     ConfirmDialog,
+    Field,
     KebabMenu,
     Select,
     type SelectOption,
@@ -177,8 +178,7 @@
 {#if formOpen}
   <form class="quick-form" onsubmit={submit}>
     <div class="row">
-      <label>
-        <span>Vaccine</span>
+      <Field label="Vaccine">
         <Select
           value={formName}
           options={vaccineOptions}
@@ -186,29 +186,24 @@
           ariaLabel="Vaccine"
           fullWidth
         />
-      </label>
-      <label>
-        <span>Date</span>
+      </Field>
+      <Field label="Date">
         <input type="date" bind:value={formDate} required />
-      </label>
-      <label>
-        <span>Product</span>
+      </Field>
+      <Field label="Product">
         <input type="text" bind:value={formProduct} placeholder="Fluzone Quadrivalent" />
-      </label>
-      <label>
-        <span>Facility</span>
+      </Field>
+      <Field label="Facility">
         <input type="text" bind:value={formFacility} placeholder="CVS Pharmacy" />
-      </label>
+      </Field>
     </div>
     <details class="advanced">
       <summary>More fields</summary>
       <div class="row">
-        <label>
-          <span>Lot number</span>
+        <Field label="Lot number">
           <input type="text" bind:value={formLot} />
-        </label>
-        <label>
-          <span>Route</span>
+        </Field>
+        <Field label="Route">
           <Select
             value={formRoute}
             options={routeOptions}
@@ -216,16 +211,14 @@
             ariaLabel="Route"
             fullWidth
           />
-        </label>
-        <label>
-          <span>Site</span>
+        </Field>
+        <Field label="Site">
           <input type="text" bind:value={formSite} placeholder="left deltoid" />
-        </label>
+        </Field>
       </div>
-      <label class="full">
-        <span>Notes</span>
+      <Field label="Notes" class="full">
         <textarea bind:value={formNotes} rows="2"></textarea>
-      </label>
+      </Field>
     </details>
     {#if formError}
       <div class="banner error">{formError}</div>
@@ -438,20 +431,9 @@
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 0.65rem;
   }
-  .quick-form label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-    min-width: 0;
-  }
-  .quick-form label.full {
+  .quick-form :global(.field.full) {
     grid-column: 1 / -1;
     margin-top: 0.25rem;
-  }
-  .quick-form label > span {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   .quick-form input,
   .quick-form textarea {

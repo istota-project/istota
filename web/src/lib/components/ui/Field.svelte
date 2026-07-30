@@ -34,6 +34,13 @@
      * of one input: clicking the caption should focus it.
      */
     labelled?: boolean;
+    /**
+     * Extra classes on the field element, for placement only — a grid span, a
+     * column start. Not for restyling the field itself: that is what the props
+     * are for, and a page reaching in to change the appearance is how the
+     * forked copies of this component came about in the first place.
+     */
+    class?: string;
     children: Snippet;
   }
 
@@ -45,6 +52,7 @@
     wide = false,
     checkbox = false,
     labelled = true,
+    class: className = '',
     children,
   }: Props = $props();
 </script>
@@ -82,6 +90,9 @@
     flex-direction: column;
     gap: 0.2rem;
     font-size: var(--text-sm);
+    /* A flex/grid item floors at its content width without this, so a field
+       in a form grid can push the grid wider than its container. */
+    min-width: 0;
   }
 
   .field-label {

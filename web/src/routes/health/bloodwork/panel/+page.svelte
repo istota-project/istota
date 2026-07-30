@@ -14,7 +14,14 @@
     type Encounter,
     type HealthPanel,
   } from '$lib/api';
-  import { Badge, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    Field,
+    Select,
+    type SelectOption,
+  } from '$lib/components/ui';
 
   // Read the panel id from ?id=… so the page is statically prerenderable
   // under adapter-static; the actual lookup happens client-side.
@@ -212,18 +219,15 @@
         <a href="{base}/health/bloodwork" class="back">← Bloodwork</a>
         {#if editing}
           <div class="header-edit">
-            <label>
-              <span>Date drawn</span>
+            <Field label="Date drawn">
               <input type="date" bind:value={editDrawnAt} />
-            </label>
-            <label>
-              <span>Lab</span>
+            </Field>
+            <Field label="Lab">
               <input type="text" bind:value={editLabName} placeholder="Quest, Kaiser, …" />
-            </label>
-            <label>
-              <span>Panel type</span>
+            </Field>
+            <Field label="Panel type">
               <input type="text" bind:value={editPanelType} placeholder="CBC, CMP, Lipid, …" />
-            </label>
+            </Field>
             <label class="full-row">
               <span>Linked encounter</span>
               <Select
@@ -416,17 +420,6 @@
     grid-template-columns: auto 1fr 1fr;
     gap: 0.5rem 0.75rem;
     max-width: 32rem;
-  }
-  .header-edit label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    font-size: var(--text-sm);
-    min-width: 0;
-  }
-  .header-edit label > span {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   .header-edit input {
     background: var(--surface-base);

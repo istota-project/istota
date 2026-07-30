@@ -10,7 +10,7 @@
     type Diagnosis,
     type Encounter,
   } from '$lib/api';
-  import { Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Field, Select, type SelectOption } from '$lib/components/ui';
   import {
     conditionOptionLabel,
     linkableConditionOptions,
@@ -237,12 +237,10 @@
 {#if formOpen}
   <form class="quick-form" onsubmit={submit}>
     <div class="row">
-      <label>
-        <span>Date</span>
+      <Field label="Date">
         <input type="date" bind:value={formDate} required />
-      </label>
-      <label>
-        <span>Type</span>
+      </Field>
+      <Field label="Type">
         <Select
           value={formType}
           options={formTypeOptions}
@@ -250,32 +248,27 @@
           ariaLabel="Type"
           fullWidth
         />
-      </label>
-      <label>
-        <span>Provider</span>
+      </Field>
+      <Field label="Provider">
         <input type="text" bind:value={formProvider} placeholder="Dr. Smith" />
-      </label>
-      <label>
-        <span>Facility</span>
+      </Field>
+      <Field label="Facility">
         <input type="text" bind:value={formFacility} placeholder="Riverside Clinic" />
-      </label>
-      <label>
-        <span>Specialty</span>
+      </Field>
+      <Field label="Specialty">
         <input type="text" bind:value={formSpecialty} placeholder="cardiology" />
-      </label>
+      </Field>
     </div>
-    <label class="full">
-      <span>Reason</span>
+    <Field label="Reason" class="full">
       <input
         type="text"
         bind:value={formReason}
         placeholder="Chief complaint or reason for visit"
       />
-    </label>
-    <label class="full">
-      <span>Notes</span>
+    </Field>
+    <Field label="Notes" class="full">
       <textarea bind:value={formNotes} rows="3" placeholder="Findings, follow-ups, …"></textarea>
-    </label>
+    </Field>
 
     <div class="full conditions-field">
       <span class="field-label">Conditions</span>
@@ -467,17 +460,6 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: 0.65rem;
-  }
-  .quick-form label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-    min-width: 0;
-  }
-  .quick-form label > span {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   .quick-form input,
   .quick-form textarea {

@@ -12,6 +12,7 @@
   } from '$lib/api';
   import { Badge, Button, Select, type SelectOption } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
+  import FileDropZone from '$lib/components/health/FileDropZone.svelte';
 
   type Mode = 'file' | 'paste';
   let mode: Mode = $state('file');
@@ -21,7 +22,6 @@
   // The kept upload from /extract, threaded into /bulk so every imported
   // row carries the card that proves it. Null on the paste-text path.
   let documentId: number | null = $state(null);
-  let fileInput: HTMLInputElement | undefined = $state();
   let extracting = $state(false);
   let extractMode: 'text' | 'vision' | null = $state(null);
 
@@ -49,32 +49,6 @@
       // non-fatal
     }
   });
-
-  function pickFile(e: Event) {
-    const input = e.target as HTMLInputElement;
-    file = input.files?.[0] ?? null;
-  }
-
-  function handleDrop(e: DragEvent) {
-    e.preventDefault();
-    const f = e.dataTransfer?.files?.[0];
-    if (f) file = f;
-  }
-
-  function handleFilePaste(e: ClipboardEvent) {
-    // Image paste only — the textarea handles plain-text paste itself.
-    const f = e.clipboardData?.files?.[0];
-    if (f) {
-      e.preventDefault();
-      file = f;
-    }
-  }
-
-  function clearFile() {
-    file = null;
-    documentId = null;
-    if (fileInput) fileInput.value = '';
-  }
 
   async function doExtract() {
     if (!file) {
@@ -180,36 +154,13 @@
 
 {#if mode === 'file'}
   <div class="card">
-    <div
-      class="dropzone"
-      ondragover={(e) => e.preventDefault()}
-      ondrop={handleDrop}
-      onpaste={handleFilePaste}
-      role="presentation"
-    >
-      {#if file}
-        <div class="picked">
-          {file.name}
-          <span class="hint">({Math.round(file.size / 1024)} KB)</span>
-          <button type="button" class="clear" onclick={clearFile} aria-label="Clear selected file"
-            >×</button
-          >
-        </div>
-      {:else}
-        <p>Drop, paste, or pick a screenshot or PDF of your immunization list.</p>
-        <p class="hint">
-          The LLM extracts vaccine name + date and matches each row to a canonical family. You'll
-          review the table before anything is saved.
-        </p>
-      {/if}
-      <input
-        bind:this={fileInput}
-        type="file"
-        accept="image/*,application/pdf"
-        onchange={pickFile}
-        class:hidden={file !== null}
-      />
-    </div>
+    <FileDropZone bind:file onClear={() => (documentId = null)}>
+      <p>Drop, paste, or pick a screenshot or PDF of your immunization list.</p>
+      <p class="hint">
+        The LLM extracts vaccine name + date and matches each row to a canonical family. You'll
+        review the table before anything is saved.
+      </p>
+    </FileDropZone>
 
     <div class="actions">
       <Button
@@ -394,45 +345,10 @@
     gap: 0.75rem;
   }
 
-  .dropzone {
-    border: 2px dashed var(--border-default);
-    border-radius: var(--radius-card);
-    padding: 1.5rem;
-    text-align: center;
-    color: var(--text-muted);
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-  .picked {
-    color: var(--text-primary);
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    justify-content: center;
-  }
   .hint {
     color: var(--text-dim);
     font-size: var(--text-xs);
     margin: 0;
-  }
-  .clear {
-    background: none;
-    border: 1px solid var(--border-default);
-    border-radius: 50%;
-    color: var(--text-muted);
-    width: 1.4rem;
-    height: 1.4rem;
-    line-height: 1;
-    cursor: pointer;
-    font-size: var(--text-sm);
-  }
-  .clear:hover {
-    background: var(--surface-raised);
-    color: var(--text-primary);
-  }
-  .hidden {
-    display: none;
   }
 
   .paste {
@@ -461,6 +377,10 @@
   }
 
   .extracting {
+    /* `flex-direction` with no `display: flex` is inert, so the spinner sat
+       above its label on this page and beside it on bloodwork/upload, which
+       had the declaration. */
+    display: flex;
     flex-direction: row;
     align-items: center;
     gap: 0.5rem;

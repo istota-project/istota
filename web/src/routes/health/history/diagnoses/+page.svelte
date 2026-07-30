@@ -13,6 +13,7 @@
   import {
     Button,
     ConfirmDialog,
+    Field,
     KebabMenu,
     Modal,
     Select,
@@ -285,12 +286,10 @@
       <div class="form-title">Editing <strong>{editing.name}</strong></div>
     {/if}
     <div class="row">
-      <label class="full">
-        <span>Name *</span>
+      <Field label="Name *" class="full">
         <input type="text" bind:value={formName} required placeholder="e.g. Hypertension" />
-      </label>
-      <label>
-        <span>Status</span>
+      </Field>
+      <Field label="Status">
         <Select
           value={formStatus}
           options={statusOptions}
@@ -298,13 +297,11 @@
           ariaLabel="Status"
           fullWidth
         />
-      </label>
-      <label>
-        <span>ICD-10</span>
+      </Field>
+      <Field label="ICD-10">
         <input type="text" bind:value={formIcd10} placeholder="K64.0" />
-      </label>
-      <label>
-        <span>Severity</span>
+      </Field>
+      <Field label="Severity">
         <Select
           value={formSeverity}
           options={severityOptions}
@@ -312,16 +309,14 @@
           ariaLabel="Severity"
           fullWidth
         />
-      </label>
-      <label>
-        <span>Date diagnosed</span>
+      </Field>
+      <Field label="Date diagnosed">
         <input type="date" bind:value={formDateDiagnosed} />
-      </label>
+      </Field>
       {#if formStatus === 'resolved'}
-        <label>
-          <span>Date resolved</span>
+        <Field label="Date resolved">
           <input type="date" bind:value={formDateResolved} />
-        </label>
+        </Field>
       {/if}
     </div>
     <!-- Not a <label>: the control is a Select whose trigger is a button, and
@@ -353,10 +348,9 @@
         fullWidth
       />
     </div>
-    <label class="full">
-      <span>Notes</span>
+    <Field label="Notes" class="full">
       <textarea bind:value={formNotes} rows="3"></textarea>
-    </label>
+    </Field>
     {#if formError}
       <div class="banner error">{formError}</div>
     {/if}
@@ -577,18 +571,7 @@
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: 0.65rem;
   }
-  .form label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-    min-width: 0;
-  }
-  .form label > span {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
-  }
-  .form label.full {
+  .form :global(.field.full) {
     grid-column: 1 / -1;
   }
   .form input,

@@ -19,6 +19,7 @@
     Badge,
     Button,
     ConfirmDialog,
+    Field,
     KebabMenu,
     Select,
     type KebabItem,
@@ -267,12 +268,10 @@
   {#if editing}
     <form class="form" onsubmit={save}>
       <div class="row">
-        <label>
-          <span>Date</span>
+        <Field label="Date">
           <input type="date" bind:value={form.encounter_date} required />
-        </label>
-        <label>
-          <span>Type</span>
+        </Field>
+        <Field label="Type">
           <Select
             value={form.encounter_type ?? ''}
             options={editTypeSelectOptions}
@@ -280,28 +279,23 @@
             ariaLabel="Type"
             fullWidth
           />
-        </label>
-        <label>
-          <span>Provider</span>
+        </Field>
+        <Field label="Provider">
           <input type="text" bind:value={form.provider} />
-        </label>
-        <label>
-          <span>Facility</span>
+        </Field>
+        <Field label="Facility">
           <input type="text" bind:value={form.facility} />
-        </label>
-        <label>
-          <span>Specialty</span>
+        </Field>
+        <Field label="Specialty">
           <input type="text" bind:value={form.specialty} />
-        </label>
+        </Field>
       </div>
-      <label class="full">
-        <span>Reason</span>
+      <Field label="Reason" class="full">
         <input type="text" bind:value={form.reason} />
-      </label>
-      <label class="full">
-        <span>Notes</span>
+      </Field>
+      <Field label="Notes" class="full">
         <textarea bind:value={form.notes} rows="5"></textarea>
-      </label>
+      </Field>
       <div class="form-actions">
         <Button onclick={() => (editing = false)}>Cancel</Button>
         <Button variant="primary" type="submit" loading={saving}>Save</Button>
@@ -628,18 +622,7 @@
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: 0.65rem;
   }
-  .form label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-    min-width: 0;
-  }
-  .form label > span {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
-  }
-  .form label.full {
+  .form :global(.field.full) {
     grid-column: 1 / -1;
   }
   .form input,

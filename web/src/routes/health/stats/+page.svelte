@@ -29,7 +29,7 @@
     metricLabel,
     toCanonical,
   } from '$lib/health/units';
-  import { Button, Select } from '$lib/components/ui';
+  import { Button, Field, Input, Modal, Select } from '$lib/components/ui';
 
   Chart.register(
     LineController,
@@ -454,53 +454,46 @@
   </div>
 {/if}
 
-{#if modalOpen}
-  <div class="modal-backdrop overlay-safe" onclick={() => (modalOpen = false)} role="presentation">
-    <div class="modal" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h2>Log measurement</h2>
-      <form onsubmit={submitEntry}>
-        <label>
-          <span>Metric</span>
-          <Select
-            value={formMetric}
-            options={metricOptions}
-            onValueChange={(v) => (formMetric = v)}
-            ariaLabel="Metric"
-            fullWidth
-          />
-        </label>
-        <label>
-          <span>Value</span>
-          <div class="value-row">
-            <input type="number" step="any" bind:value={formValue} required />
-            {#if LOG_UNIT_CHOICES[formMetric]}
-              <select class="unit-select" bind:value={formUnit}>
-                {#each LOG_UNIT_CHOICES[formMetric] as u}
-                  <option value={u}>{u}</option>
-                {/each}
-              </select>
-            {:else}
-              <span class="unit-static">{METRIC_UNITS[formMetric]}</span>
-            {/if}
-          </div>
-        </label>
-        <label>
-          <span>When</span>
-          <input type="datetime-local" bind:value={formDate} />
-        </label>
-        <label>
-          <span>Notes</span>
-          <input type="text" bind:value={formNotes} placeholder="optional" />
-        </label>
-        {#if formError}<div class="banner error">{formError}</div>{/if}
-        <div class="modal-actions">
-          <Button onclick={() => (modalOpen = false)} disabled={saving}>Cancel</Button>
-          <Button variant="primary" type="submit" loading={saving}>Save</Button>
-        </div>
-      </form>
+<Modal bind:open={modalOpen} title="Log measurement" width="26rem">
+  <form onsubmit={submitEntry}>
+    <!-- labelled={false}: the row holds a number input and a unit select, so
+         one implicit label would claim the first and leave the other unnamed. -->
+    <Field label="Metric" labelled={false}>
+      <Select
+        value={formMetric}
+        options={metricOptions}
+        onValueChange={(v) => (formMetric = v)}
+        ariaLabel="Metric"
+        fullWidth
+      />
+    </Field>
+    <Field label="Value" labelled={false}>
+      <div class="value-row">
+        <Input type="number" step="any" bind:value={formValue} required aria-label="Value" />
+        {#if LOG_UNIT_CHOICES[formMetric]}
+          <select class="unit-select" bind:value={formUnit} aria-label="Unit">
+            {#each LOG_UNIT_CHOICES[formMetric] as u}
+              <option value={u}>{u}</option>
+            {/each}
+          </select>
+        {:else}
+          <span class="unit-static">{METRIC_UNITS[formMetric]}</span>
+        {/if}
+      </div>
+    </Field>
+    <Field label="When">
+      <Input type="datetime-local" bind:value={formDate} />
+    </Field>
+    <Field label="Notes">
+      <Input bind:value={formNotes} placeholder="optional" />
+    </Field>
+    {#if formError}<div class="banner error">{formError}</div>{/if}
+    <div class="modal-actions">
+      <Button onclick={() => (modalOpen = false)} disabled={saving}>Cancel</Button>
+      <Button variant="primary" type="submit" loading={saving}>Save</Button>
     </div>
-  </div>
-{/if}
+  </form>
+</Modal>
 
 <style>
   .bar {
@@ -599,83 +592,30 @@
     margin-top: 0.25rem;
   }
 
-  /* Padding comes from .overlay-safe (app.css); these are its no-inset
-     baseline. Without it a tall modal runs under the Dynamic Island. */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    --overlay-pad-block: 1rem;
-    --overlay-pad-inline: 1rem;
-    z-index: var(--z-modal);
-  }
-  .modal {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: 1.5rem;
-    width: 26rem;
-    max-width: 90vw;
-  }
-  .modal h2 {
-    font-size: var(--text-base);
-    font-weight: 500;
-    margin: 0 0 1rem;
-  }
-  .modal form {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-  .modal label {
-    display: grid;
-    grid-template-columns: 6rem 1fr;
-    gap: 0.5rem;
-    align-items: center;
-    font-size: var(--text-sm);
-  }
-  .modal label > span {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
-  }
   .value-row {
     display: flex;
     gap: 0.4rem;
     align-items: center;
   }
-  .value-row input {
+  /* :global because the value input is an <Input> now — Svelte prunes a rule
+     whose subject sits inside a component. */
+  .value-row :global(input) {
     flex: 1;
+    min-width: 0;
   }
-  /* Specificity must beat `.modal select { width: 100% }` below, or this
-	   fixed-width unit picker would take the whole row and collapse the value
-	   input to near-zero. */
-  .value-row .unit-select {
+  /* The element selector takes this to (0,2,1), which beats Field's
+     `.field :global(select) { width: 100% }` deterministically rather than by
+     stylesheet order — without it the fixed-width unit picker takes the whole
+     row and collapses the value input to near-zero. */
+  .value-row select.unit-select {
     width: auto;
     min-width: 4.5rem;
     flex: 0 0 auto;
-  }
-  .value-row input {
-    min-width: 0;
   }
   .unit-static {
     font-size: var(--text-sm);
     color: var(--text-muted);
     padding: 0.3rem 0.2rem;
-  }
-  .modal input,
-  .modal select {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: 0.3rem 0.5rem;
-    width: 100%;
-    box-sizing: border-box;
   }
   .modal-actions {
     display: flex;

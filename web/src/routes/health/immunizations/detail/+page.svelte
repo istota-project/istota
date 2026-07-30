@@ -11,7 +11,14 @@
     type HealthDocument,
     type Immunization,
   } from '$lib/api';
-  import { Badge, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    Field,
+    Select,
+    type SelectOption,
+  } from '$lib/components/ui';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
   const routeOptions: SelectOption[] = [
@@ -124,52 +131,45 @@
 {:else if immunization}
   <form class="card form" onsubmit={save}>
     <div class="row">
-      <label>
-        <span>Vaccine name</span>
+      <Field label="Vaccine name">
         <input type="text" bind:value={immunization.name} required />
-      </label>
-      <label>
-        <span>Date given</span>
+      </Field>
+      <Field label="Date given">
         <input type="date" bind:value={immunization.date_given} required />
-      </label>
-      <label>
-        <span>Product</span>
+      </Field>
+      <Field label="Product">
         <input
           type="text"
           value={immunization.product_name ?? ''}
           oninput={(e) =>
             (immunization!.product_name = (e.currentTarget as HTMLInputElement).value || null)}
         />
-      </label>
-      <label>
-        <span>Manufacturer</span>
+      </Field>
+      <Field label="Manufacturer">
         <input
           type="text"
           value={immunization.manufacturer ?? ''}
           oninput={(e) =>
             (immunization!.manufacturer = (e.currentTarget as HTMLInputElement).value || null)}
         />
-      </label>
-      <label>
-        <span>Dose label</span>
+      </Field>
+      <Field label="Dose label">
         <input
           type="text"
           value={immunization.dose_label ?? ''}
           oninput={(e) =>
             (immunization!.dose_label = (e.currentTarget as HTMLInputElement).value || null)}
         />
-      </label>
-      <label>
-        <span>Lot number</span>
+      </Field>
+      <Field label="Lot number">
         <input
           type="text"
           value={immunization.lot_number ?? ''}
           oninput={(e) =>
             (immunization!.lot_number = (e.currentTarget as HTMLInputElement).value || null)}
         />
-      </label>
-      <label>
-        <span>Route</span>
+      </Field>
+      <Field label="Route">
         <Select
           value={immunization.route ?? ''}
           options={routeOptions}
@@ -179,53 +179,48 @@
           ariaLabel="Route"
           fullWidth
         />
-      </label>
-      <label>
-        <span>Site</span>
+      </Field>
+      <Field label="Site">
         <input
           type="text"
           value={immunization.site ?? ''}
           oninput={(e) =>
             (immunization!.site = (e.currentTarget as HTMLInputElement).value || null)}
         />
-      </label>
-      <label>
-        <span>Administered by</span>
+      </Field>
+      <Field label="Administered by">
         <input
           type="text"
           value={immunization.administered_by ?? ''}
           oninput={(e) =>
             (immunization!.administered_by = (e.currentTarget as HTMLInputElement).value || null)}
         />
-      </label>
-      <label>
-        <span>Facility</span>
+      </Field>
+      <Field label="Facility">
         <input
           type="text"
           value={immunization.facility ?? ''}
           oninput={(e) =>
             (immunization!.facility = (e.currentTarget as HTMLInputElement).value || null)}
         />
-      </label>
-      <label>
-        <span>CVX code</span>
+      </Field>
+      <Field label="CVX code">
         <input
           type="text"
           value={immunization.cvx_code ?? ''}
           oninput={(e) =>
             (immunization!.cvx_code = (e.currentTarget as HTMLInputElement).value || null)}
         />
-      </label>
+      </Field>
     </div>
-    <label class="full">
-      <span>Notes</span>
+    <Field label="Notes" class="full">
       <textarea
         rows="3"
         value={immunization.notes ?? ''}
         oninput={(e) =>
           (immunization!.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
       ></textarea>
-    </label>
+    </Field>
     <div class="meta">
       Source: {immunization.source}
       {#if immunization.created_at}
@@ -306,19 +301,8 @@
     grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
     gap: 0.65rem;
   }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-    min-width: 0;
-  }
-  label.full {
+  :global(.field.full) {
     grid-column: 1 / -1;
-  }
-  label > span {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   input,
   textarea {

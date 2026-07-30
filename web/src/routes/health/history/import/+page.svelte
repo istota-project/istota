@@ -7,8 +7,9 @@
     type ParsedDiagnosis,
     type ParsedEncounter,
   } from '$lib/api';
-  import { Badge, Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Badge, Button, Field, Select, type SelectOption } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
+  import FileDropZone from '$lib/components/health/FileDropZone.svelte';
 
   const ENCOUNTER_TYPES = [
     'visit',
@@ -43,38 +44,12 @@
   // The kept upload from /extract, threaded into /bulk so it is linked to
   // every encounter and diagnosis the import creates.
   let documentId: number | null = $state(null);
-  let fileInput: HTMLInputElement | undefined = $state();
   let extracting = $state(false);
   let extractMode: 'text' | 'vision' | null = $state(null);
   let importing = $state(false);
   let error = $state('');
   let warnings: string[] = $state([]);
   let parsed: ParsedEncounter[] = $state([]);
-
-  function pickFile(e: Event) {
-    const input = e.target as HTMLInputElement;
-    file = input.files?.[0] ?? null;
-  }
-
-  function handleDrop(e: DragEvent) {
-    e.preventDefault();
-    const f = e.dataTransfer?.files?.[0];
-    if (f) file = f;
-  }
-
-  function handleFilePaste(e: ClipboardEvent) {
-    const f = e.clipboardData?.files?.[0];
-    if (f) {
-      e.preventDefault();
-      file = f;
-    }
-  }
-
-  function clearFile() {
-    file = null;
-    documentId = null;
-    if (fileInput) fileInput.value = '';
-  }
 
   async function doExtract() {
     if (!file) {
@@ -149,39 +124,16 @@
 </div>
 
 <div class="card">
-  <div
-    class="dropzone"
-    ondragover={(e) => e.preventDefault()}
-    ondrop={handleDrop}
-    onpaste={handleFilePaste}
-    role="presentation"
-  >
-    {#if file}
-      <div class="picked">
-        {file.name}
-        <span class="hint">({Math.round(file.size / 1024)} KB)</span>
-        <button type="button" class="clear" onclick={clearFile} aria-label="Clear selected file"
-          >×</button
-        >
-      </div>
-    {:else}
-      <p>
-        Drop, paste, or pick a screenshot or PDF of your visit paperwork — after-visit summary,
-        discharge note, referral letter, etc.
-      </p>
-      <p class="hint">
-        The LLM extracts date, provider, facility, reason, and any diagnoses listed, then matches
-        each to the canonical encounter type. You'll review everything before it's saved.
-      </p>
-    {/if}
-    <input
-      bind:this={fileInput}
-      type="file"
-      accept="image/*,application/pdf"
-      onchange={pickFile}
-      class:hidden={file !== null}
-    />
-  </div>
+  <FileDropZone bind:file onClear={() => (documentId = null)}>
+    <p>
+      Drop, paste, or pick a screenshot or PDF of your visit paperwork — after-visit summary,
+      discharge note, referral letter, etc.
+    </p>
+    <p class="hint">
+      The LLM extracts date, provider, facility, reason, and any diagnoses listed, then matches each
+      to the canonical encounter type. You'll review everything before it's saved.
+    </p>
+  </FileDropZone>
 
   <div class="actions">
     <Button
@@ -237,12 +189,10 @@
       </div>
 
       <div class="grid">
-        <label>
-          <span>Date</span>
+        <Field label="Date">
           <input type="date" bind:value={row.encounter_date} />
-        </label>
-        <label>
-          <span>Type</span>
+        </Field>
+        <Field label="Type">
           <Select
             value={row.encounter_type}
             options={encounterTypeOptions}
@@ -250,50 +200,45 @@
             ariaLabel="Type"
             fullWidth
           />
-        </label>
-        <label>
-          <span>Provider</span>
+        </Field>
+        <Field label="Provider">
           <input
             type="text"
             value={row.provider || ''}
             oninput={(e) => (row.provider = (e.currentTarget as HTMLInputElement).value || null)}
           />
-        </label>
-        <label>
-          <span>Facility</span>
+        </Field>
+        <Field label="Facility">
           <input
             type="text"
             value={row.facility || ''}
             oninput={(e) => (row.facility = (e.currentTarget as HTMLInputElement).value || null)}
           />
-        </label>
-        <label>
-          <span>Specialty</span>
+        </Field>
+        <Field label="Specialty">
           <input
             type="text"
             value={row.specialty || ''}
             oninput={(e) => (row.specialty = (e.currentTarget as HTMLInputElement).value || null)}
           />
-        </label>
+        </Field>
       </div>
 
-      <label class="full">
-        <span>Reason</span>
+      <Field label="Reason" class="full">
         <input
           type="text"
           value={row.reason || ''}
           oninput={(e) => (row.reason = (e.currentTarget as HTMLInputElement).value || null)}
         />
-      </label>
+      </Field>
 
-      <label class="full">
-        <span>Notes</span>
+      <Field label="Notes" class="full">
         <textarea
           rows="3"
           value={row.notes || ''}
           oninput={(e) => (row.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
         ></textarea>
-      </label>
+      </Field>
 
       <div class="diag-head">
         <h3>Diagnoses ({row.diagnoses.length})</h3>
@@ -424,45 +369,10 @@
     gap: 0.75rem;
   }
 
-  .dropzone {
-    border: 2px dashed var(--border-default);
-    border-radius: var(--radius-card);
-    padding: 1.5rem;
-    text-align: center;
-    color: var(--text-muted);
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-  .picked {
-    color: var(--text-primary);
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    justify-content: center;
-  }
   .hint {
     color: var(--text-dim);
     font-size: var(--text-xs);
     margin: 0;
-  }
-  .clear {
-    background: none;
-    border: 1px solid var(--border-default);
-    border-radius: 50%;
-    color: var(--text-muted);
-    width: 1.4rem;
-    height: 1.4rem;
-    line-height: 1;
-    cursor: pointer;
-    font-size: var(--text-sm);
-  }
-  .clear:hover {
-    background: var(--surface-raised);
-    color: var(--text-primary);
-  }
-  .hidden {
-    display: none;
   }
 
   .actions {
@@ -475,6 +385,10 @@
   }
 
   .extracting {
+    /* `flex-direction` with no `display: flex` is inert, so the spinner sat
+       above its label on this page and beside it on bloodwork/upload, which
+       had the declaration. */
+    display: flex;
     flex-direction: row;
     align-items: center;
     gap: 0.5rem;
@@ -535,17 +449,6 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: 0.65rem;
-  }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-    min-width: 0;
-  }
-  label > span {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   input,
   textarea {
