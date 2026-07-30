@@ -2,6 +2,46 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-30: A 529 that never reached the fallback, and the fix that nearly ate every answer mentioning one
+
+ISSUE-212 read as a routing gap — "a transient 529 should trigger a fallback attempt". The routing was fine. `parse_api_error` only matched `API Error: NNN {json}`, and the CLI does not always attach a body, so `API Error: 529 Overloaded` parsed as **nothing**: not transient, so not retried; classified as a generic `error`, which isn't in the fallback trigger set. Every layer downstream was reasoning correctly about a provider outage it had no idea was one.
+
+**Why the raw text reached the user is a second bug, not the same one.** A failed task's error is friendly-formatted before delivery, so a failure could never have surfaced verbatim as "the answer". `claude -p` reports some provider errors as a *successful* result frame with the error as the whole answer — exactly what it does for subscription limits, which `is_usage_limit_banner` already caught on that branch. The API-error case had no such guard, so it was delivered as the reply. Both halves needed fixing; only the first is what the issue described.
+
+**The enumerated status set was the same bug in waiting.** `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` looks exhaustive until a Cloudflare-fronted provider emits 520–526 — none listed, each dead-ending precisely as the 529 did. The live rule is now "every 5xx, plus 408/425/429"; the constant survives as documentation.
+
+**The fix's own near-miss is the part worth remembering.** Widening `parse_api_error` silently weaponised three pre-existing consumers written against the narrow shape: the scheduler's masquerading-success guard, its twin on the inline path, and `_is_policy_refusal`. All three *discard a completed answer*. So an ordinary reply mentioning `API Error: 529` — a log summary, an ops question, a briefing about yesterday's outage — would have been failed, retried three times producing the same answer, failed permanently, and (via the policy path) told the user their content had been blocked. Both reviewers found it independently; nothing in the suite covered that guard at all. The lesson generalises past this issue: **widening a parser is a change to every consumer's decision, and the consumers that act destructively need the strict predicate, not the permissive one.**
+
+**Making the strict predicate actually strict took a third gate.** Anchoring at the start and capping the length still admits `API Error: 529 means the provider is overloaded; retry shortly.` — a plausible answer to "what does a 529 mean?". The discriminator that works is *case*: every real banner's tail is a Title-cased reason phrase or a JSON body (`529 Overloaded`, `500 Internal Server Error`, `Connection error.`), while prose continues in lowercase. HTTP reason phrases are Title Case by convention and provider messages follow; a sentence continuing after a number is not.
+
+**A success-frame reclassification must not be retried.** The CLI ran to completion, so it may have executed tools — re-running the same prompt repeats them (a re-sent email, a re-applied edit), three times per attempt on top of the task-level ladder. `BrainResult.work_committed` marks that case and vetoes the in-brain retry, making it reroute-only.
+
+**The marker leaked where only one surface formats errors.** "Both brains unavailable" is carried as a prefix on the failure text, because `execute_task` returns a plain string and the scheduler owns the wording. But only the Talk push path calls `_format_error_for_user` — web chat and the REPL render the terminal `error` event directly, so they'd have shown `[brain-fallback-exhausted] API Error: 503` verbatim. Fixed with a second consumer at the event site that rewords provider-availability failures only, leaving every other failure its original text (useful in the REPL) and `tasks.error` raw either way.
+
+**Not done, deliberately:** the briefing `pin` posture is declared in `brain/_postures.py` but unimplemented (ISSUE-180's scope), so default-on transient fallback lets a briefing ride the fallback more often. Production behaviour is unchanged — the Ansible default was already `true` — but this is the one place the change makes an existing gap easier to hit.
+
+**Key changes:**
+- `parse_api_error` accepts the bodyless `API Error: NNN <text>` form; `_status_is_transient` replaces the enumerated set as the live rule.
+- New classifiers: `is_permanent_api_error`, `api_error_stop_reason` (the single one every path calls), `is_api_error_banner`, `parse_retry_after`.
+- Success-frame guards on all four `claude_code` branches and on the tmux brain, which had the identical hole; the tmux pane-error branch now returns `transient_api_error` rather than a bare `error` no trigger matched.
+- The scheduler's two masquerading-success guards and `_is_policy_refusal` key on the strict banner detector.
+- `BrainResult.work_committed` makes a success-frame reclassification reroute-only; the backoff is slept in slices so `!stop` lands during a provider-requested wait.
+- Native side: `classify_error` recovers the `HTTP NNN:` status the provider layer stamps into the message, closing the NB-13 call-site gap; Retry-After honoured and capped on both brains.
+- Permanent provider errors skip the task-level 1/4/16-minute ladder as well as the in-brain retry.
+- `fallback_on_transient` defaults on — Ansible shipped `true` while the code default *and* the TOML loader both stayed `false`, so every non-Ansible deployment disagreed with the documented default.
+
+**Files added/modified:**
+- `src/istota/brain/claude_code.py` - classifiers, banner detector, retry-after, sliced interruptible backoff
+- `src/istota/brain/tmux_claude.py` - success-frame parity + transient stop_reason on pane errors
+- `src/istota/brain/native.py` - status-authoritative classification, network errors transient, Retry-After
+- `src/istota/brain/_types.py` - `BrainResult.work_committed`
+- `src/istota/session/retry.py` - `extract_status_code`, Retry-After, 408/425, text branch gated on absent status
+- `src/istota/executor.py` - `FALLBACK_EXHAUSTED_MARKER` + `_mark_if_exhausted`
+- `src/istota/scheduler.py` - banner-gated guards, `_error_event_message`, permanent-error no-retry
+- `src/istota/config.py` - `fallback_on_transient` default + loader default
+- `tests/test_api_error_classification.py` - new; classifiers, banner, retry loops, work_committed
+- `tests/native/test_session_retry.py` - status recovery, Retry-After, `_RetryingProvider` coverage
+
 ## 2026-07-30: Gating logout, and why the obvious touch-target fix reproduces the bug it fixes
 
 ISSUE-209: the logout icon sits next to the menu trigger in the app nav, both are small on a phone, and a mistap ended the session outright — bounced to the login flow, transient view state gone. Two halves, a guard and the ergonomics underneath it.
