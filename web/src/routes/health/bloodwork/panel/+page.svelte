@@ -273,7 +273,7 @@
 
     <div class="split">
       <div class="biomarker-table">
-        <table>
+        <table class="grid grid--dense">
           <thead>
             <tr>
               <th>Marker</th>
@@ -471,23 +471,6 @@
     .split {
       grid-template-columns: 1fr;
     }
-  }
-  .biomarker-table table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-  .biomarker-table th,
-  .biomarker-table td {
-    padding: 0.35rem 0.5rem;
-    text-align: left;
-    font-size: var(--text-sm);
-    border-bottom: 1px solid var(--border-subtle);
-  }
-  .biomarker-table th {
-    color: var(--text-dim);
-    text-transform: uppercase;
-    font-size: var(--text-xs);
-    font-weight: 400;
   }
   .biomarker-table input {
     width: 100%;

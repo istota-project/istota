@@ -302,7 +302,7 @@
 
       {#if row.diagnoses.length > 0}
         <div class="table-scroll">
-          <table class="grid-tbl">
+          <table class="grid">
             <thead>
               <tr>
                 <th>Name</th>
@@ -573,32 +573,9 @@
     padding-top: 0.65rem;
   }
 
-  .table-scroll {
-    width: 100%;
-    overflow-x: auto;
-  }
-  table.grid-tbl {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--text-sm);
-  }
-  table.grid-tbl th,
-  table.grid-tbl td {
-    text-align: left;
-    padding: 0.4rem 0.5rem;
-    border-bottom: 1px solid var(--border-subtle);
-    vertical-align: middle;
-  }
-  table.grid-tbl th {
-    color: var(--text-dim);
-    font-weight: 500;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
   /* Compact inputs inside the diagnoses table — mirrors the immunization
 	   review-table sizing so the nested grid doesn't overpower the card. */
-  table.grid-tbl input {
+  table.grid input {
     padding: 0.25rem 0.4rem;
   }
   td.row-actions,

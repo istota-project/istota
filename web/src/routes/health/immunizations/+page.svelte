@@ -568,30 +568,6 @@
     max-width: 240px;
   }
 
-  .table-scroll {
-    width: 100%;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-  table.grid {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--text-sm);
-  }
-  table.grid th,
-  table.grid td {
-    text-align: left;
-    padding: 0.4rem 0.5rem;
-    border-bottom: 1px solid var(--border-subtle);
-    vertical-align: middle;
-  }
-  table.grid th {
-    color: var(--text-dim);
-    font-weight: 500;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
   td.notes {
     max-width: 260px;
     overflow: hidden;

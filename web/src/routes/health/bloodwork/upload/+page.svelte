@@ -276,7 +276,7 @@
               No biomarkers extracted yet. Add rows manually, or retry extraction.
             </div>
           {:else}
-            <table>
+            <table class="grid grid--dense">
               <thead>
                 <tr>
                   <th>Marker</th><th>Value</th><th>Unit</th><th>Range (low / high)</th><th>Flag</th
@@ -477,23 +477,6 @@
     .split {
       grid-template-columns: 1fr;
     }
-  }
-  .review-table table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-  .review-table th,
-  .review-table td {
-    padding: 0.3rem 0.4rem;
-    text-align: left;
-    font-size: var(--text-sm);
-    border-bottom: 1px solid var(--border-subtle);
-  }
-  .review-table th {
-    color: var(--text-dim);
-    text-transform: uppercase;
-    font-size: var(--text-xs);
-    font-weight: 400;
   }
   .range-pair {
     display: flex;
