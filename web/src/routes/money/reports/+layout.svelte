@@ -44,6 +44,40 @@
   </div>
 </div>
 
-<div class="money-section-body">
+<div class="money-section-body report-frame">
   {@render children()}
 </div>
+
+<style>
+  /* The three report pages each declared these — .section-toggle three times
+     byte-for-byte as a :global() rule, which leaks app-wide, so whichever
+     stylesheet loaded last was the one in effect. Defined once here, where the
+     pages that use them live, scoped under a frame class this layout owns.
+     Mirrors .health-frame; deliberately not named .money-*, which is the
+     record-table shell owned by routes/money/+layout.svelte. */
+  :global(.report-frame .section-header) {
+    display: flex;
+    align-items: baseline;
+    padding: 0.75rem 0.75rem 0.4rem;
+    border-bottom: 1px solid var(--border-subtle);
+    margin-top: 0.5rem;
+  }
+
+  :global(.report-frame .section-header:first-child) {
+    margin-top: 0;
+  }
+
+  :global(.report-frame .section-toggle) {
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--text-base);
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+</style>

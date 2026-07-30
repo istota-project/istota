@@ -329,6 +329,15 @@
     outline-offset: calc(-1 * var(--focus-ring-width));
   }
 
+  /* A tree row — an account hierarchy or a report's nested totals. Denser and
+     tighter than a list row because it is a column of many short lines with an
+     indent guide, not a table of records. The four implementations this
+     replaces differed only in these two values. */
+  :global(.money-table-row--tree) {
+    gap: 0.25rem;
+    padding-block: 0.2rem;
+  }
+
   /* Column label that sorts. Sits in .money-table-header, so it has to shed the
      button defaults and inherit the label type. */
   :global(.money-sortable) {

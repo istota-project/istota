@@ -254,7 +254,7 @@
           {@const key = txnKey(txn)}
           {@const isExpanded = expandedKeys.has(key)}
           <div
-            class="txn-row"
+            class="money-table-row"
             class:expanded={isExpanded}
             role="button"
             tabindex="0"
@@ -372,31 +372,6 @@
   .date-header:first-child {
     border-top: none;
     margin-top: 0;
-  }
-
-  .txn-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.3rem 0.75rem;
-    font-size: var(--text-sm);
-    border-radius: 0.25rem;
-    transition: background var(--transition-fast);
-    cursor: pointer;
-    text-align: left;
-    width: 100%;
-  }
-
-  .txn-row:focus-visible {
-    outline-offset: calc(-1 * var(--focus-ring-width));
-  }
-
-  .txn-row:hover {
-    background: var(--surface-card);
-  }
-
-  .txn-row.expanded {
-    background: var(--surface-card);
   }
 
   .txn-main {

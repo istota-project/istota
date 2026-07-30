@@ -683,7 +683,8 @@
     font-size: var(--text-sm);
   }
 
-  @media (max-width: 720px) {
+  /* 640px, the app's narrow breakpoint, rather than a one-off 720px. */
+  @media (max-width: 640px) {
     .tax-layout {
       grid-template-columns: 1fr;
     }

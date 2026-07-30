@@ -495,28 +495,6 @@
     padding: 0 0.75rem;
   }
 
-  .section-header {
-    display: flex;
-    align-items: baseline;
-    padding: 0.75rem 0 0.4rem;
-    border-bottom: 1px solid var(--border-subtle);
-    margin-top: 0.5rem;
-  }
-
-  :global(.section-toggle) {
-    background: none;
-    border: none;
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-base);
-    font-weight: 600;
-    cursor: pointer;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
   .caret {
     font-size: 0.5rem;
     color: var(--text-dim);

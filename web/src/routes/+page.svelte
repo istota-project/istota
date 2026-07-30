@@ -147,11 +147,13 @@
     border-radius: var(--radius-card);
     padding: 1.25rem;
   }
-  /* Three tracks exist from 760px up (200px min + 1rem gap against the 1.5rem
+  /* Three tracks exist from ~760px up (200px min + 1rem gap against the 1.5rem
 	   page padding, with room for a scrollbar), so the span can't spill into an
 	   implicit fourth column. Below it the card is the full row, like every
-	   other card on a phone. */
-  @media (min-width: 760px) {
+	   other card on a phone. Set at 769px, the mobile breakpoint's complement,
+	   rather than the 760px it was derived at — a one-off value that close to
+	   the shared one leaves a 9px band where this page alone changes layout. */
+  @media (min-width: 769px) {
     .welcome-card {
       grid-column: span 3;
     }

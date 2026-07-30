@@ -168,7 +168,10 @@
 {/if}
 
 {#snippet treeNode(node: AccountNode)}
-  <div class="tree-row" style="padding-left: {0.75 + node.depth * 1.25}rem">
+  <div
+    class="money-table-row money-table-row--tree"
+    style="padding-left: {0.75 + node.depth * 1.25}rem"
+  >
     <button class="tree-name" type="button" onclick={() => navigateToAccount(node.fullName)}
       >{node.name}</button
     >
@@ -214,28 +217,6 @@
     color: var(--money-expense);
   }
 
-  .section-header {
-    display: flex;
-    align-items: baseline;
-    padding: 0.75rem 0.75rem 0.4rem;
-    border-bottom: 1px solid var(--border-subtle);
-    margin-top: 0.5rem;
-  }
-
-  :global(.section-toggle) {
-    background: none;
-    border: none;
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-base);
-    font-weight: 600;
-    cursor: pointer;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
   .section-total {
     margin-left: auto;
     font-weight: 600;
@@ -257,20 +238,6 @@
 
   .tree-section {
     padding: 0.25rem 0 0.5rem;
-  }
-
-  .tree-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.25rem;
-    padding: 0.2rem 0.75rem;
-    font-size: var(--text-sm);
-    border-radius: 0.25rem;
-    transition: background var(--transition-fast);
-  }
-
-  .tree-row:hover {
-    background: var(--surface-card);
   }
 
   .tree-name {

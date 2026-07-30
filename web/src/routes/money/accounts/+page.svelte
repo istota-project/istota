@@ -86,7 +86,10 @@
 {:else}
   <div class="account-list">
     {#each visibleNodes as node (node.fullName)}
-      <div class="account-row" style="padding-left: {0.75 + node.depth * 1.25}rem">
+      <div
+        class="money-table-row money-table-row--tree"
+        style="padding-left: {0.75 + node.depth * 1.25}rem"
+      >
         <button
           class="account-toggle"
           type="button"
@@ -121,20 +124,6 @@
     display: flex;
     flex-direction: column;
     padding: 0.25rem 0;
-  }
-
-  .account-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.25rem;
-    padding: 0.3rem 0.75rem;
-    font-size: var(--text-sm);
-    border-radius: 0.25rem;
-    transition: background var(--transition-fast);
-  }
-
-  .account-row:hover {
-    background: var(--surface-card);
   }
 
   .account-toggle {

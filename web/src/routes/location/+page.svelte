@@ -20,9 +20,7 @@
   } from '$lib/stores/location';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
-  import StopTimeline from '$lib/components/location/StopTimeline.svelte';
-  import DayStats from '$lib/components/location/DayStats.svelte';
-  import TripList from '$lib/components/location/TripList.svelte';
+  import StopsPanel from '$lib/components/location/StopsPanel.svelte';
 
   let current = $state<CurrentLocation | null>(null);
   let pings: LocationPing[] = $state([]);
@@ -235,25 +233,13 @@
     </div>
 
     {#if panelOpen && hasDetails}
-      <div class="stops-panel">
-        {#if pings.length > 1}
-          <div class="panel-section">
-            <DayStats {pings} />
-          </div>
-        {/if}
-        {#if trips.length > 0}
-          <div class="panel-section">
-            <div class="panel-label">Trips</div>
-            <TripList {trips} onTripClick={handleTripClick} />
-          </div>
-        {/if}
-        {#if summary && summary.stops.length > 0}
-          <div class="panel-section">
-            <div class="panel-label">Stops</div>
-            <StopTimeline stops={summary.stops} onStopClick={handleStopClick} />
-          </div>
-        {/if}
-      </div>
+      <StopsPanel
+        {pings}
+        {trips}
+        {summary}
+        onStopClick={handleStopClick}
+        onTripClick={handleTripClick}
+      />
     {/if}
   {/if}
 </div>
@@ -322,34 +308,5 @@
 
   .stops-btn:hover {
     color: var(--text-primary);
-  }
-
-  .stops-panel {
-    max-height: 200px;
-    overflow-y: auto;
-    border-top: 1px solid var(--border-subtle);
-    padding: 0.5rem 0.75rem;
-    flex-shrink: 0;
-  }
-
-  .panel-section {
-    padding-bottom: 0.5rem;
-    margin-bottom: 0.25rem;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .panel-section:last-child {
-    border-bottom: none;
-    margin-bottom: 0;
-    padding-bottom: 0;
-  }
-
-  .panel-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
-    margin-bottom: 0.25rem;
   }
 </style>
