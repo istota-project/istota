@@ -558,11 +558,19 @@
     word-break: break-word;
   }
 
-  .reader-content :global(img) {
+  /* A <video> in the body has to be constrained explicitly: the sanitizer
+	   strips width/height, so nothing else bounds it and it lays out at the
+	   clip's intrinsic size — a 1080p clip inside a <figure> ran off the side. */
+  .reader-content :global(img),
+  .reader-content :global(video) {
     max-width: 100%;
     height: auto;
     border-radius: var(--radius-card);
     margin: var(--space-2) 0;
+  }
+
+  .reader-content :global(video) {
+    display: block;
   }
 
   .reader-content :global(p) {

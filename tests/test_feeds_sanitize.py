@@ -2,7 +2,8 @@
 
 Covers the image-dedup + hero-strip helpers that keep the reader from
 painting the same image twice (hero + body) or N times (resolution
-variants). Pure functions — no network, no feedparser.
+variants), plus the inline-``<video>`` rules. Pure functions — no network,
+no feedparser.
 """
 
 from istota.feeds.sanitize import (
@@ -10,6 +11,7 @@ from istota.feeds.sanitize import (
     extract_images,
     image_identity,
     remove_images,
+    sanitize_html,
 )
 
 
@@ -141,3 +143,67 @@ class TestRemoveImages:
     def test_noop_without_targets(self):
         html = '<p><img src="https://x.com/a.jpg"></p>'
         assert remove_images(html, []) == html
+
+
+class TestVideoPlayability:
+    """A stored ``<video>`` must be startable.
+
+    ``video`` has been an allowed tag for a while, but the attribute allowlist
+    dropped everything that makes one usable: ``controls`` survived only if the
+    author happened to set it, and ``loop``/``muted`` were stripped outright. A
+    Tumblr GIF-as-mp4 — authored as an autoplaying muted loop with no controls,
+    precisely so it does not look like a video player — therefore stored as a
+    tag with no way to start it: a dead black box in the card and the reader.
+
+    So ``controls`` is added when the author left it off, and the two
+    attributes describing how it should play once started are kept.
+    """
+
+    def test_adds_controls_when_absent(self):
+        out = sanitize_html('<video src="https://x.test/clip.mp4"></video>')
+        assert "controls" in out
+        assert 'src="https://x.test/clip.mp4"' in out
+
+    def test_keeps_existing_controls_without_duplicating(self):
+        out = sanitize_html('<video controls src="https://x.test/clip.mp4"></video>')
+        assert out.count("controls") == 1
+
+    def test_source_child_video_gets_controls(self):
+        out = sanitize_html('<video><source src="https://x.test/clip.mp4"></video>')
+        assert "<video controls>" in out
+
+    def test_preserves_loop_and_muted(self):
+        out = sanitize_html('<video loop muted src="https://x.test/clip.mp4"></video>')
+        assert "loop" in out
+        assert "muted" in out
+
+    def test_video_mentioned_in_text_is_untouched(self):
+        # Escaped markup is prose, not a tag; it must not sprout an attribute.
+        out = sanitize_html("<p>Use the &lt;video&gt; element</p>")
+        assert "controls" not in out
+
+
+class TestVideoStripping:
+    """What deliberately does *not* survive."""
+
+    def test_strips_autoplay(self):
+        # A grid of feed cards that all start playing on scroll is a different
+        # request from "let me play this one".
+        out = sanitize_html('<video autoplay src="https://x.test/clip.mp4"></video>')
+        assert "autoplay" not in out
+
+    def test_strips_intrinsic_dimensions(self):
+        # The card and the reader bound a video with CSS; stored dimensions
+        # would fight that and are what made a clip overflow its container.
+        out = sanitize_html('<video width="1920" height="1080" src="https://x.test/c.mp4"></video>')
+        assert "1920" not in out
+        assert "1080" not in out
+
+    def test_strips_event_handlers(self):
+        out = sanitize_html('<video onerror="alert(1)" src="https://x.test/c.mp4"></video>')
+        assert "onerror" not in out
+        assert "alert(1)" not in out
+
+    def test_content_without_video_is_unchanged(self):
+        html = '<p>Hello <a href="https://example.com">link</a></p>'
+        assert sanitize_html(html) == html

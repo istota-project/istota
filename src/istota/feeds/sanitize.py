@@ -34,7 +34,13 @@ ALLOWED_ATTRS = {
     "abbr": ["title"],
     "img": ["src", "alt", "title", "loading", "srcset", "sizes"],
     "source": ["src", "srcset", "type", "media"],
-    "video": ["src", "controls", "poster", "preload", "playsinline"],
+    # `loop`/`muted` describe how a clip plays once started and are how a
+    # GIF-as-mp4 is authored; they carry no risk. `autoplay` is deliberately
+    # absent — a grid of cards that all start playing on scroll is a different
+    # thing from letting the reader play one. `width`/`height` stay out too:
+    # the card and the reader bound a video with CSS, and a stored width is
+    # what made a clip run off the side of its container.
+    "video": ["src", "controls", "poster", "preload", "playsinline", "loop", "muted"],
     "time": ["datetime"],
     "th": ["scope"],
 }
@@ -54,8 +60,33 @@ def sanitize_html(html: str | None) -> str | None:
             protocols=ALLOWED_PROTOCOLS,
             strip=True,
         )
-        return cleaned
-    return _fallback_sanitize(html)
+        return _ensure_video_controls(cleaned)
+    return _ensure_video_controls(_fallback_sanitize(html))
+
+
+_VIDEO_TAG_RE = re.compile(r"<video\b([^>]*)>", re.IGNORECASE)
+_CONTROLS_ATTR_RE = re.compile(r"(?:^|\s)controls(?:[\s=]|$)", re.IGNORECASE)
+
+
+def _ensure_video_controls(html: str) -> str:
+    """Give every ``<video>`` a way to be started.
+
+    A clip is routinely authored as an autoplaying muted loop with no
+    controls — a GIF-as-mp4 is not meant to look like a video player. Our
+    allowlist drops ``autoplay``, so left alone that markup stores as a tag
+    nothing can start: a dead black box in the card and the reader.
+
+    Runs after sanitisation, so it only ever sees tags the allowlist already
+    passed — escaped ``&lt;video&gt;`` in prose is text by then and does not
+    match.
+    """
+    def _add(match: re.Match) -> str:
+        attrs = match.group(1)
+        if _CONTROLS_ATTR_RE.search(attrs):
+            return match.group(0)
+        return f"<video controls{attrs}>"
+
+    return _VIDEO_TAG_RE.sub(_add, html)
 
 
 _SCRIPT_RE = re.compile(r"<\s*script\b[^>]*>.*?<\s*/\s*script\s*>", re.IGNORECASE | re.DOTALL)

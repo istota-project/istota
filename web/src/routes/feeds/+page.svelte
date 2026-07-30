@@ -736,7 +736,11 @@
     margin: 0.8rem 0;
   }
 
-  .feed-grid :global(.excerpt img) {
+  /* Video needs the same bound as an image, and needs it stated: the sanitizer
+	   strips width/height, so an unconstrained <video> lays out at the clip's
+	   intrinsic size and runs off the side of the card. */
+  .feed-grid :global(.excerpt img),
+  .feed-grid :global(.excerpt video) {
     max-width: 100%;
     height: auto;
     border-radius: var(--radius-card);
@@ -761,12 +765,15 @@
       display: none;
     }
 
-    /* Body copy arrives as {@html}, so pictures inside it are only reachable
-		   from CSS — without this an images-off view is still full of images.
+    /* Body copy arrives as {@html}, so media inside it is only reachable from
+		   CSS — without this an images-off view is still full of pictures.
 		   Captions survive; an emptied figure loses its margin so it leaves no gap
-		   behind. */
+		   behind. Video goes with them: the chip already hides the embed hero
+		   (.card-video carries .card-image), so leaving an inline clip drawn
+		   would make the toggle mean "some of the media". */
     .feed-grid.hide-images :global(.excerpt img),
-    .feed-grid.hide-images :global(.excerpt picture) {
+    .feed-grid.hide-images :global(.excerpt picture),
+    .feed-grid.hide-images :global(.excerpt video) {
       display: none;
     }
 
