@@ -163,56 +163,6 @@
   margin: 0;
 }
 
-.settings .field {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  font-size: var(--text-sm);
-}
-
-.settings .field > span {
-  color: var(--text-muted);
-}
-
-.settings .field input:not([type='checkbox']),
-.settings .field select,
-.settings .field textarea {
-  background: var(--surface-base);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: 0.3rem;
-  padding: 0.3rem 0.5rem;
-  font: inherit;
-  font-size: var(--text-sm);
-  width: 100%;
-  max-width: 24rem;
-  min-width: 0;
-  box-sizing: border-box;
-}
-
-.settings .field textarea {
-  font-family: var(--font-mono);
-  resize: vertical;
-}
-
-.settings .field-wide textarea,
-.settings .field-wide input {
-  max-width: 36rem;
-}
-
-.settings .field.checkbox {
-  flex-direction: row;
-  align-items: center;
-  gap: 0.4rem;
-  color: var(--text-primary);
-}
-.settings .field.checkbox > span {
-  color: var(--text-primary);
-}
-.settings .field.checkbox input[type='checkbox'] {
-  width: auto;
-}
-
 .settings .row {
   display: flex;
   gap: 0.4rem;
@@ -222,11 +172,6 @@
 .settings .flash {
   font-size: var(--text-xs);
   color: var(--status-success-fg);
-}
-
-.settings .field-error {
-  font-size: var(--text-xs);
-  color: var(--status-danger-fg);
 }
 
 .settings .table-scroll {

@@ -12,7 +12,14 @@
     type UserProfile,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { AppShell, ShellHeader, Button, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    AppShell,
+    ShellHeader,
+    Button,
+    Field,
+    Select,
+    type SelectOption,
+  } from '$lib/components/ui';
   import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
   import {
@@ -396,8 +403,9 @@
           />
         </SettingsField>
         {#if allModules.length > 0}
-          <div class="field">
-            <span>Disabled modules</span>
+          <!-- labelled={false}: one implicit <label> would claim the first
+               checkbox and leave the rest of them unlabelled. -->
+          <Field label="Disabled modules" labelled={false}>
             <div class="module-toggles">
               {#each allModules as m (m)}
                 <label class="module-chip">
@@ -414,7 +422,7 @@
               Modules are on by default. Tick to opt out — the corresponding UI tab and scheduled
               jobs will be hidden / paused.
             </p>
-          </div>
+          </Field>
         {/if}
         <SettingsField
           label="Default delivery destination"
