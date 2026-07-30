@@ -2,6 +2,51 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-30: Provisioning the iOS tracker by QR, and four ways a settings card lied about state it did not own
+
+Stage 4 of the native-iOS spec: mint a location ingest token on `/location/settings`, render it as a QR, scan it from the app on the phone, and drive the background tracker from a card that renders only inside the shell. The server half of provisioning (the generate endpoint, the receiver reload sentinel) landed earlier the same day as Stage 3; this is the surface on top of it.
+
+**The QR payload is JSON, deliberately not the webhook URL.** Encoding `https://host/webhooks/location?token=...` is the obvious move and the wrong one: every generic scanner, including the iOS Camera app's built-in detection, offers to *open* a URL — putting a live secret in Safari's address bar and history in exchange for a 405. A JSON envelope renders as text, which nothing offers to act on. It carries a version because a scanned code is the one input in this system that can be arbitrarily old: a screenshot, a printout, a photo of a monitor.
+
+**The scanner is hand-written against AVFoundation.** The packaged Capacitor plugin is a two-command install but drags a third-party barcode library and its transitive dependencies into the binary, plus a web fallback that never runs. The repo's principle is not "hand-roll everything" — the three existing ObjC plugins exist because the packaged ones *could not do the job* — but the shell lags a TestFlight cycle behind the web app, so fewer moving parts in the binary is worth more here than elsewhere.
+
+**A two-agent review then found fourteen things, and the shape of them is the lesson.** Four of the six most serious were in one component, and all four were the same mistake wearing different clothes: **the card assumed it owned state the device owns**.
+
+- The field caption "Tracking" *stopped background location tracking*. `SettingsField` wraps its label text and its slot in one `<label>`, and a `<button>` is a labelable element, so it became the label's implicit control. `HintPopover` already dodges this — its trigger is a `<span role="button">` and its comment says why — but that only protects the "?", not whatever a caller passes into the slot. Reproduced with a probe before believing it.
+- The permission prompt *replaced* Start/Stop rather than sitting beside it, so a user whose authorization dropped to While Using — precisely the case the card exists to warn about — had no way to stop the tracker.
+- Changing the profile started a tracker that had been deliberately stopped, because `start` is the plugin's only way to set a profile and it also arms. Applying the choice on selection was the same call as switching on.
+- A refused action left the card showing what had been asked for rather than what the device has.
+
+**A relative webhook URL is a QR the phone can only reject.** With `[site] hostname` unset the generate endpoint returned a path with no scheme, which the payload decoder refuses for not being https — so the device reported "not an Istota provisioning code" and blamed the code rather than the config. Where it bites is the interesting part: under Nextcloud auth a blank hostname already 403s every request at the origin check, so the endpoint is unreachable. It is *only* reachable in no-auth mode, which is the standalone local install, which is exactly the shape that leaves hostname blank. The guard runs before minting, since rotating a token and then refusing would cut off working devices for nothing.
+
+**Two tests were named "off-shell" and tested something else.** They removed the plugin while leaving the shell's User Agent in place, so they exercised plugin-absence — and that is not the same test, because a page can carry a `window.Capacitor` shim without being in the shell at all, which is the premise of the first test in the same file. They passed while six of eight facade exports were gated on plugin presence only, against both the spec's rule and the module's own docstring.
+
+**Where a test could not be honest, it says so.** The bits-ui `Select` cannot be opened under jsdom, so the profile *switch* is asserted through what the DOM does expose — the deferred-choice warning, and Start carrying a profile — rather than by driving the widget. A test that appeared to cover it but passed because the plugin was never called at all was removed rather than kept.
+
+**A process note worth more than the code.** Two commits initially swept concurrent uncommitted work into them, because two files had been edited by both sides and a whole-file `git add` takes the other side's hunks with it. Repaired by soft-resetting and staging reconstructed blobs (`git hash-object -w` + `git update-index --cacheinfo`) so the index held only the intended lines while the working tree kept everything. The general form: in a shared tree, "stage specific files" is not sufficient — a shared *file* needs its hunks separated too.
+
+**Key changes:**
+- `provisioning.ts` — the QR payload contract, encode and a defensive decode (version, field types, https scheme, three length bounds) shared by the page that writes codes and the phone that reads them.
+- `QrCode.svelte` — `uqr`'s module matrix rendered as inline `<rect>`s rather than its `renderSVG`, which would mean `{@html}`; the quiet zone lives in the `viewBox` because as CSS padding it would be the page's colour rather than the code's background.
+- `nativeLocation.ts` — the tracker facade, every export behind one accessor so the shell-version gate cannot be present on some calls and absent on others.
+- `DeviceTrackerCard.svelte` — the shell-gated card, plus a one-line browser stand-in so the section is visibly absent by design rather than merely missing.
+- `SettingsField` gains `labelled={false}`, rendering a `<div>` for slots holding buttons; `<label>` stays the default and stays right for one input.
+- The generate endpoint refuses without a public hostname; its 409 message now actually reaches the user (`apiFetch` discarded the body), and the mock reproduces the refusal (it returned 200 against its own `__status` convention).
+- `IstotaQrScanner` in the shell, at 0.7.0.
+
+**Files added/modified:**
+- `web/src/lib/location/provisioning.ts` - payload contract + decoder
+- `web/src/lib/components/location/QrCode.svelte` - matrix to inline SVG
+- `web/src/lib/components/location/DeviceTrackerCard.svelte` - the device card
+- `web/src/lib/platform/nativeLocation.ts` - tracker + scanner facade
+- `web/src/lib/components/settings/SettingsField.svelte` - `labelled` escape
+- `web/src/routes/location/settings/+page.svelte` - generate, QR, rotate confirm
+- `web/src/lib/api.ts` - `generateIngestToken`, reading `detail` off the refusal
+- `web/vite-mock-api.ts` - the generate handler, answering 409 properly
+- `src/istota/web_app.py` - hostname guard before minting
+- `docs/features/location.md` - provisioning by QR, the per-device card
+- (shell repo) `IstotaQrScanner.{h,m}`, `IstotaQrScannerViewController.{h,m}`, `IstotaQrScannerBridge.m`
+
 ## 2026-07-30: A 529 that never reached the fallback, and the fix that nearly ate every answer mentioning one
 
 ISSUE-212 read as a routing gap — "a transient 529 should trigger a fallback attempt". The routing was fine. `parse_api_error` only matched `API Error: NNN {json}`, and the CLI does not always attach a body, so `API Error: 529 Overloaded` parsed as **nothing**: not transient, so not retried; classified as a generic `error`, which isn't in the fallback trigger set. Every layer downstream was reasoning correctly about a provider outage it had no idea was one.

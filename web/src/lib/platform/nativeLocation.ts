@@ -33,6 +33,19 @@ export type TrackingProfile = 'detailed' | 'places';
 
 export interface TrackerStatus {
   tracking: boolean;
+  /**
+   * iOS paused standard updates because the device stopped moving.
+   *
+   * Not the opposite of `tracking`, which stays true throughout — the tracker
+   * is armed and resumes by itself on leaving the area. It is reported because
+   * a pause is otherwise indistinguishable from a tracker that has silently
+   * died: both show an empty queue and a last-sent time ageing for hours,
+   * which is the exact reading this card exists to make trustworthy.
+   *
+   * Optional rather than version-gated: a shell older than 0.8.0 omits it, and
+   * absent reads as false, which is precisely the behaviour that shell has.
+   */
+  paused?: boolean;
   profile: TrackingProfile;
   authorization: 'always' | 'whenInUse' | 'denied' | 'notDetermined';
   queuedPoints: number;

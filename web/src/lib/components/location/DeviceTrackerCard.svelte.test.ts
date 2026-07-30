@@ -151,6 +151,59 @@ describe('permission states', () => {
   });
 });
 
+describe('a pause is not a stall', () => {
+  it('says paused, and says why', async () => {
+    // An empty queue and an ageing last-sent time is what a dead tracker looks
+    // like. Without this the card reads "On" and sends someone hunting a fault
+    // in the battery saving working correctly.
+    installShell({ tracking: true, paused: true });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText('Paused')).toBeTruthy();
+    expect(screen.getByText(/has not moved for a while/i)).toBeTruthy();
+  });
+
+  it('keeps Stop available while paused', async () => {
+    // Tracking is still armed, so the control that turns it off must stay.
+    const { tracker } = installShell({ tracking: true, paused: true });
+    render(DeviceTrackerCard);
+    await settle();
+    await fireEvent.click(screen.getByText('Stop'));
+    await settle();
+    expect(tracker.stop).toHaveBeenCalled();
+  });
+
+  it('lets a permission problem outrank it', async () => {
+    // The pause resolves itself; the permission is why nothing gets logged at
+    // all. Two lines would put the reassuring one beside the alarming one.
+    installShell({ tracking: true, paused: true, authorization: 'whenInUse' });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText(/nothing is logged in the background/i)).toBeTruthy();
+    expect(screen.queryByText(/has not moved for a while/i)).toBeNull();
+  });
+
+  it('reads as On against a shell too old to report a pause', async () => {
+    // `paused` is absent rather than false there, and absent is exactly the
+    // behaviour that shell has — so no version gate, just a falsy read.
+    const status = { ...STATUS, tracking: true };
+    delete (status as { paused?: boolean }).paused;
+    installShell(status);
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText('On')).toBeTruthy();
+    expect(screen.queryByText('Paused')).toBeNull();
+  });
+
+  it('says Off, not Paused, when tracking is stopped', async () => {
+    installShell({ tracking: false, paused: true });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText('Off')).toBeTruthy();
+    expect(screen.queryByText('Paused')).toBeNull();
+  });
+});
+
 describe('the caption is not a control', () => {
   it('clicking the word "Tracking" does not stop the tracker', async () => {
     // SettingsField wraps its label text and its slot in one <label>, and a

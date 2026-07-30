@@ -56,7 +56,7 @@ What it exposes is deliberately smaller than Overland's fifteen settings:
 
 | Setting | Notes |
 |---|---|
-| Tracking on/off | |
+| Tracking on/off | Reads **Paused** rather than On when iOS has suspended updates because the phone hasn't moved — a battery saving, so the card says so as information rather than a warning, and notes that moving resumes it. "On" beside an hours-old last-sent time and an empty queue is what a tracker that has silently died looks like, which is the one reading this card exists to make trustworthy. Stop stays available: tracking is still armed |
 | Profile: Detailed or Places | **Detailed** logs a continuous line and sends every minute, at a battery cost. **Places** logs arrivals and departures only and sends every five minutes. Switching while tracking re-arms in place, so it costs no gap in coverage; switching while stopped is held and applied by the next Start, since starting is the only thing that can set a profile |
 | Permission, and a way into iOS Settings | Only Settings.app can restore a *denied* Always authorization, so that is the one state where the button replaces Start/Stop rather than sitting beside it. **While in use** — the case the card mostly exists to catch — keeps Stop reachable and shows the prompt alongside it |
 | Queued points, points dropped, last sent, last error, endpoint host, device id | The readout that says tracking is still alive. The failure worth preventing is tracking stopping silently and the gap being found weeks later. Only the endpoint's host is shown; the token is never echoed back |
