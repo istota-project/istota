@@ -28,6 +28,8 @@ istota secret ensure --user alice --service overland --key ingest_token --value 
 
 The settings page can also mint one for you (`POST /api/settings/secrets/overland/ingest_token/generate`), which returns the token and the assembled webhook URL. That response is the only time either is readable — afterwards the secret is write-only like every other one. Generating again rotates: the previous token stops working immediately, on every device using it, which is also how you revoke a lost phone.
 
+Having minted one, the page renders it as a QR code the native iOS app scans (Settings → Location → **This device** → Scan). The payload is a small JSON envelope carrying the endpoint and the token, deliberately not the webhook URL itself — a bare `https://` code is offered for opening by every generic scanner, including the iOS Camera app, which would put the token in Safari's address bar and history in exchange for a 405. Leaving the settings page loses the code, because there is nowhere to read the token back from; the next device needs a new one.
+
 Either way the receiver picks the token up on its next ingest request. It holds the token map in memory and runs in a different process from the web app, so a write leaves a stamped sentinel next to `istota.db` that the receiver checks. Before that existed, a freshly provisioned token was refused until the receiver restarted.
 
 Install the location extras:
@@ -41,6 +43,24 @@ Run the receiver:
 ```bash
 uvicorn istota.webhook_receiver:app --port 8765
 ```
+
+## Tracking on the device
+
+The native app's tracker is configured on the phone and nowhere else. That is forced rather than chosen: one account can have two phones, so any tracker setting kept server-side would have the two devices overwriting each other's row. The **This device** card on `/location/settings` therefore talks to the app directly and renders only inside it; in a browser it says so in one line rather than disappearing, so a user who set this up on their phone can tell the section is absent by design.
+
+What it exposes is deliberately smaller than Overland's fifteen settings:
+
+| Setting | Notes |
+|---|---|
+| Tracking on/off | |
+| Profile: Detailed or Places | **Detailed** logs a continuous line and sends every minute, at a battery cost. **Places** logs arrivals and departures only and sends every five minutes. Switching re-arms in place, so it costs no gap in coverage |
+| Permission, and a way into iOS Settings | Only Settings.app can restore a denied Always authorization, so a card without that button would be a dead end |
+| Queued points, last sent, last error | The readout that says tracking is still alive. The failure worth preventing is tracking stopping silently and the gap being found weeks later |
+| Send now, rescan code | |
+
+Send interval and batch size are not separately exposed. The interval follows the profile — there is nothing to send every minute when fixes arrive a kilometre apart — and a numeric field with no basis for setting it invites a five-second interval and a dead battery.
+
+Both profiles request 100 m accuracy, which is not a knob because the server drops any ping worse than `accuracy_threshold_m` (default 100) from place matching. A genuinely coarse profile would keep storing pings — the map would still fill in — while quietly ceasing to detect being anywhere.
 
 ## Places
 
