@@ -2,6 +2,86 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-30: Gating logout, and why the obvious touch-target fix reproduces the bug it fixes
+
+ISSUE-209: the logout icon sits next to the menu trigger in the app nav, both are small on a phone, and a mistap ended the session outright — bounced to the login flow, transient view state gone. Two halves, a guard and the ergonomics underneath it.
+
+The guard was the easy half, and smaller than the issue expected. The write-up proposed building a reusable `confirm({...})` primitive as this feature's first customer; `ConfirmDialog` already existed (bits-ui `Dialog` over `Modal` — focus trap, `role="dialog"`, Esc and backdrop tap both cancelling), built for destructive deletes, so this was a customer rather than a build. Logout became a `<button>` opening it instead of an anchor to `/logout`.
+
+**That it stops being a link is worth its own note.** `/istota/logout` is a GET that clears the session, so as an anchor it was reachable by anything that follows links speculatively — a prefetcher, a link scanner, a crawler with a session cookie. Not the reported bug, and not why the change was made, but the same edit closes it.
+
+**The sizing half is where the interesting mistake lives, because the obvious version of it recreates the bug.** Giving each of the three nav icons a 44px hit area, one control at a time, is the natural reading of "bump both to the ~44px minimum". It is wrong: the icons are 14–18px glyphs at a `0.75rem` gap, so 44px targets *overlap*, and a tap in the seam lands on whichever won the stacking order rather than on what the user aimed at — which is precisely the accidental-logout mechanism, now with a larger seam. Targets in a row have to be sized as a row. So the gap goes to `1.25rem` first (centres ≥44px apart at the default text scale), and only then does each control get its area — as an out-of-flow `::before` overlay, reusing `SidebarToggle`'s device so reaching the minimum costs the nav no height. Scoped to ≤640px; pointer precision on a desktop doesn't need it and oversized invisible targets there would only swallow clicks.
+
+**Consolidating the three controls onto a shared `.nav-icon-btn` rule was not tidying.** Hoisting the repeated reset put `background: none` in a rule with the same specificity as each component's scoped `:hover` — `.app-nav .nav-right .nav-icon-btn` and `.theme-btn.svelte-hash:hover` are both (0,3,0), a tie broken only by stylesheet order, i.e. a hover that works until something reorders CSS. The hover is byte-identical across all three anyway, so it moved up with the reset and the tie is gone.
+
+The one seam added is a `navigate` prop on `LogoutButton`, defaulting to the real `window.location.href` assignment. It exists only because jsdom refuses that assignment and "did it navigate?" is the entire behaviour under test. Verified by mutation: wiring the button straight to `logout()` fails all five tests.
+
+**Not verified:** the ~44px geometry is arithmetic against rendered box sizes, not a measured screenshot — the browser tooling wasn't reachable this session. Worth a look on a real phone.
+
+**Key changes:**
+- Logout is a confirmed action, not a bare link — `LogoutButton.svelte` wrapping the existing shared `ConfirmDialog`.
+- The three nav icon controls share one `.nav-icon-btn` rule carrying layout, reset and hover; only resting colour stays per control.
+- Below 640px each gets a ~44px out-of-flow hit area, and the row's gap widens so those areas stay disjoint.
+- `web/AGENTS.md` gained the size-a-row-of-targets-together rule, since the overlap trap is not obvious from the 44px guideline alone.
+
+**Files added/modified:**
+- `web/src/lib/components/LogoutButton.svelte` - new; button + confirm dialog, injectable `navigate`
+- `web/src/lib/components/LogoutButton.svelte.test.ts` - new; 5 tests, all failing without the gate
+- `web/src/routes/+layout.svelte` - logout markup replaced by the component; scoped styles reduced to resting colour
+- `web/src/app.css` - shared `.nav-icon-btn` rule + the mobile gap and hit-area block
+- `web/AGENTS.md`, `CHANGELOG.md`
+
+## 2026-07-30: Monarch login 503 — a header constant that no test could ever catch going stale
+
+Reported as "503 despite correct info" on the Monarch email/password connect flow. The deployment server's web-unit journal named it on the first look: `monarch_login_client_outdated current=2025.10.0`, with Monarch answering 403 `"Please update to the latest version of the app to continue login."` We send a `monarch-client-version` header; ours had gone stale.
+
+**The interesting part is why it rotted invisibly.** Monarch checks the version *after* validating credentials. Probing `/auth/login/` with a bogus email returns 404 "Invalid email and password combination" and never reaches the gate — confirmed from the deployment host with both the old and new header values, which behave identically against a bad account. So no credential-free probe can detect staleness, no unit test can, and the only symptom is a *correct* login 503-ing, which reads like a Monarch outage rather than our bug. That is a defect class worth naming: a value that is only exercised on the success path, behind a gate you can't reach without real credentials.
+
+**The value is not stable enough to hardcode, which changed the design mid-session.** The plan was to bump the constant and self-heal on rejection. Then `app.monarch.com/version.json` — a 23-byte `{"version": …}` manifest carrying exactly the `clientVersion` the app bundle sends — returned `v1.0.3697` early in the session and `v1.0.3696` a couple of hours later, consistently, from two hosts. It moves within hours and not always forwards. So discovery moved *ahead* of the login rather than being a recovery path: resolve from the manifest first (cached per process), attempt, and only on rejection re-read and retry once. Pre-fetching is what avoids spending a failed credential submission on every cold process against an endpoint the module itself documents as rate-limited behind a sticky CAPTCHA gate. The constant survives purely as a cold-start fallback for an unreachable manifest. Exactly one retry, never a loop.
+
+DEVLOG 2026-05-15 recorded the original value as live-verified — Monarch validated the field loosely then ("anything reasonable-looking is accepted"). That's worth keeping straight: `2025.10.0` was accepted when chosen and later refused, not wrong from the start. It sets the expectation that this will drift again.
+
+**Two bugs that would have made the whole fix silently inert**, both found by running the real function against the live endpoint rather than trusting green tests. Cloudflare 403s aiohttp's default `Python/3.x aiohttp/3.y` User-Agent while curl from the same host gets a 200 — so discovery would have failed everywhere and quietly fallen back to the stale constant. And Monarch's ~9.5 KB CSP header exceeds aiohttp's 8190-byte field cap, which aborts the read as a bogus `400 Got more than 8190 bytes when reading` before the body is ever parsed. Both are now pinned by tests, because both are the kind of thing that looks like an unrelated network flake.
+
+**Review (Mulder + Scully) found three real defects in the first cut.** `_safe_json` was annotated `-> dict` but only guarded `JSONDecodeError`, so a valid non-object body (`[]`, `null`, `123`) raised `AttributeError` on the following `.get` — from inside error-handling code, which would have converted the actionable 503 into a masked 500. A refused retry that carried a TOTP reported "bad credentials", when the first attempt had already validated and therefore consumed the code; it now asks for a fresh one, since telling an MFA user their password is wrong sends them somewhere useless. And the give-up path reset the cached version, which meant every subsequent call repeated the whole two-attempt sequence — doubling the sustained failed-login rate against precisely the gate the one-retry cap exists to protect. Keeping the value makes the next call short-circuit after one attempt.
+
+Scully also caught that a full revert of the GraphQL header change survived the suite, so the request-shape test now pins that pair too. Nine mutations were checked against the new assertions; all nine fail.
+
+**Deliberately not done.** Persisting the discovered version across restarts — each process pays one 23-byte GET, which is cheaper than coordinating shared state. And Mulder's point that a Chrome UA over an aiohttp TLS fingerprint is a UA/JA3 mismatch that could *raise* Cloudflare's bot score on the API path: the browser UA was an explicit instruction and it verifies working from the deployment host, but it's the first thing to revisit if Monarch sync starts getting challenged.
+
+**Files added/modified:**
+- `src/istota/money/_vendor/monarch_client.py` - manifest-backed version resolution (`fetch_live_client_version`, `_resolve_client_version`), pre-fetch + single retry, per-transport client names, browser UA, header-size ceiling on all three sessions, `_safe_json` non-object guard
+- `src/istota/web_app.py` - route docstring now names all three conditions behind its 503
+- `scripts/probe_monarch_login.py` - reports the live version, and handles the outdated/CAPTCHA cases instead of tracebacking on the one failure mode it exists to diagnose
+- `tests/money/test_monarch_client.py` - 40 → 53 tests; strict response queue so an over-consuming regression fails instead of replaying
+- `CHANGELOG.md`
+
+## 2026-07-30: Reviewing the ntfy header fix against the real receiver, then giving push notifications formatting
+
+Two halves: verifying yesterday's ISSUE-213 fix against something other than its own tests, and adding the markdown capability the transport never had.
+
+**The review's method mattered more than its findings.** The fix rests on one claim the unit tests structurally cannot check — that the *receiver* decodes RFC 2047 encoded-words. A test that encodes with Python and decodes with Python proves the encoder is self-consistent, not that ntfy understands it. So the verification went outside: ntfy's docs name RFC 2047 support for title/tags/actions, and its `maybeDecodeHeader` applies the decode to **every** header read through `readParam` — which incidentally covers the skill CLI's `Click` header, the one the docs don't mention. The multi-word split has the same shape of risk, since it relies on the decoder dropping whitespace *between* adjacent encoded-words; confirmed in Go's `mime/encodedword.go` (`betweenWords` / `hasNonWhitespace`), so the space-joined chunks round-trip and the tests' Python model agrees with the real decoder on the one point where they could have diverged. The chunk arithmetic checks out exactly: 12 chars of prefix+suffix plus 60 base64 chars is 72, and 46 raw bytes would overflow to 76 — 45 is the largest safe value, not a round number someone picked.
+
+Two claims in the fix's own write-up were worth confirming rather than accepting: the diagnosis correction (httpx encodes headers as ASCII, not latin-1 — so `Äpfel` failed too) and the widened blast radius (`format_briefing_title` hardcodes an em-dash, so every briefing pushed to a phone had been failing). Both hold.
+
+Findings were all minor and none were fixed, deliberately — the review wasn't asked to change code. Recorded in the issue entry instead: `_MAX_CHUNK_BYTES` is hand-derived from a constant that production code never reads; control characters other than CR/LF still pass through untouched (pre-existing — the old inline scrub replaced exactly the same two characters); the ASCII-retry backstop exists on the transport but not the skill CLI.
+
+**Then markdown, which is mostly a judgement call about a platform caveat.** ntfy renders markdown in its web app only — a phone notification popup shows the source, so `**3 builds failed**` arrives with the asterisks visible. Most pushes are read on a phone, which makes an always-on flag actively worse than plain text, and makes the interesting part of this feature the guidance rather than the header. The skill body therefore tells the model to default to plain text, reach for the flag only when the message is structured enough that the shape carries meaning *and* the markers stay readable in the popup, and never to use it just to bold a word.
+
+Opt-in also protects existing behaviour for a second reason: a plain body like `3 * 4 = 12 #win` would be mangled by a renderer. Two tests pin that — no header and a verbatim body when the flag is absent — which is what makes them regression guards rather than feature tests.
+
+One non-obvious implementation detail. The `Markdown` header is set *outside* the `encode_header_value` path the other free-text headers go through. It is a fixed ASCII literal, so the lossy ASCII-only retry has nothing to flatten, and routing it through there would let a fallback silently downgrade the render mode and deliver raw markup as prose. There's a test for that specific path.
+
+Scope call: `DeliveryOptions.markdown` is reachable by internal producers that construct the object directly (the briefing push does), but no `markdown=` kwarg was threaded through `notifications.send_notification` — that function spans every surface and the request was for the skill path.
+
+**Files added/modified:**
+- `src/istota/transport/_types.py` - `DeliveryOptions.markdown` field + the opt-in rationale
+- `src/istota/transport/ntfy/__init__.py` - emits `Markdown: yes`, outside the encode/flatten path
+- `src/istota/skills/ntfy/__init__.py` - `--markdown` flag on `send`
+- `src/istota/skills/ntfy/skill.md` - "Formatting" section: supported subset, the web-app-only caveat, when not to use it
+- `tests/test_ntfy_transport.py`, `tests/test_skills_ntfy.py` - 5 tests, 3 of them written failing first; 2 are plain-text regression guards
+- `AGENTS.md`, `.claude/rules/transport.md` - ntfy header encoding + markdown; `ntfy_headers.py` added to the module tree (missing from the previous commit)
+
 ## 2026-07-26: Live-testing the nextcloud skill against a real server — five bugs the mocks couldn't see, and an authenticated file handover for web chat
 
 The nextcloud skill shipped with ~350 mocked tests and no run against an actual Nextcloud. Standing one up found five real defects, two of which meant a verb had never worked at all.

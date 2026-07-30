@@ -2,12 +2,21 @@
 
 import base64
 import json
+from email.header import decode_header
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
 from istota.skills.ntfy import build_parser, cmd_send, main
+
+
+def _decode_header(value: str) -> str:
+    """Decode an RFC 2047 header value the way ntfy's Go decoder does."""
+    return "".join(
+        part.decode(charset or "ascii") if isinstance(part, bytes) else part
+        for part, charset in decode_header(value)
+    )
 
 
 def _ok_response():
@@ -114,6 +123,39 @@ class TestNtfySend:
         h = post.call_args.kwargs["headers"]
         assert "\n" not in h["Title"] and "\r" not in h["Title"]
         assert "\n" not in h["Tags"]
+
+    def test_send_rfc2047_encodes_non_ascii_headers(self, monkeypatch):
+        # ISSUE-213: httpx serializes headers as ASCII, so an emoji title used to
+        # blow the send up with UnicodeEncodeError.
+        monkeypatch.setenv("NTFY_TOPIC", "t")
+        args = build_parser().parse_args([
+            "send", "body", "--title", "📈 NOK BUY ↑", "--tags", "über",
+        ])
+        with patch("istota.skills.ntfy.httpx.post", return_value=_ok_response()) as post:
+            rc = cmd_send(args)
+        assert rc == 0
+        h = post.call_args.kwargs["headers"]
+        assert h["Title"].isascii() and h["Tags"].isascii()
+        assert _decode_header(h["Title"]) == "📈 NOK BUY ↑"
+        assert _decode_header(h["Tags"]) == "über"
+        httpx.Headers(h)
+
+    def test_send_markdown_flag_sets_the_header(self, monkeypatch):
+        monkeypatch.setenv("NTFY_TOPIC", "t")
+        args = build_parser().parse_args(["send", "**bold**", "--markdown"])
+        with patch("istota.skills.ntfy.httpx.post", return_value=_ok_response()) as post:
+            assert cmd_send(args) == 0
+        assert post.call_args.kwargs["headers"]["Markdown"] == "yes"
+
+    def test_send_is_plain_text_without_the_flag(self, monkeypatch):
+        # Existing sends must be byte-identical: a body full of *, _ and # keeps
+        # arriving verbatim rather than being reinterpreted as markup.
+        monkeypatch.setenv("NTFY_TOPIC", "t")
+        args = build_parser().parse_args(["send", "3 * 4 = 12 #win"])
+        with patch("istota.skills.ntfy.httpx.post", return_value=_ok_response()) as post:
+            assert cmd_send(args) == 0
+        assert "Markdown" not in post.call_args.kwargs["headers"]
+        assert post.call_args.kwargs["content"] == "3 * 4 = 12 #win"
 
     def test_send_no_topic_returns_error(self, monkeypatch, capsys):
         monkeypatch.delenv("NTFY_TOPIC", raising=False)

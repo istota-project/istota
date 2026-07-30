@@ -48,6 +48,7 @@ src/istota/
 ├── user_profiles.py      # Per-user profile store (Phase 6)
 ├── user_briefings.py     # Per-user briefings store (Phase 7b)
 ├── notifications.py      # Talk / Email / ntfy dispatcher
+├── ntfy_headers.py       # RFC 2047 encoding for ntfy header values (stdlib-only leaf, shared by transport/ntfy + skills/ntfy so the skill subprocess needn't import the transport package)
 ├── skill_proxy.py        # Unix-socket proxy for credential isolation
 ├── network_proxy.py      # CONNECT proxy for network isolation
 ├── devbox_proxy.py       # Per-user host-side daemon: tokens stay out of the devbox container
@@ -130,6 +131,8 @@ Operator-scoped feature flags for in-tree-but-off-by-default work. Configured vi
 
 ### ntfy push notifications
 ntfy is a per-user connected service — there is no global `[ntfy]` block. Each user supplies their own server URL, topic, and (optional) auth via the encrypted `secrets` table (web settings or `istota secret ensure -s ntfy ...`). `notifications._send_ntfy` reads everything from the user's secret rows; if the user has no `topic` set, ntfy is a no-op for them. Default priority is hardcoded to `3`; per-call overrides flow through `send_notification(...)`.
+
+Header values are RFC 2047-encoded by `ntfy_headers.encode_header_value` before they reach httpx, which serializes headers as **ASCII** — an emoji/arrow/em-dash title used to raise `UnicodeEncodeError` and lose the whole notification, body included (ISSUE-213); every briefing pushed to a phone was hit, since a briefing title carries an em-dash before the date. Bodies are opt-in **markdown**: `DeliveryOptions.markdown` on the transport, `--markdown` on the skill CLI, both emitting `Markdown: yes`. Opt-in because a plain-text body routinely carries `*`/`_`/`#`, and because ntfy renders markdown in its **web app only** — a phone popup shows the source, which is why `skills/ntfy/skill.md` tells the model to use it for genuinely structured messages rather than to bold a word.
 
 What it IS: a one-way push channel (bot → device) used by heartbeat alerts, scheduled-job output (when `output_target=ntfy`), and `surface="ntfy"` notifications. What it ISN'T: two-way (you can't reply over ntfy), a Talk replacement, operator-shared infrastructure, or required (most users won't configure it).
 

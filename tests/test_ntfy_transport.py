@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from email.header import decode_header
 from unittest.mock import MagicMock, patch
+
+import httpx
 
 from istota import db
 from istota.config import Config, UserConfig
@@ -41,6 +44,14 @@ def _ntfy_secrets(**values):
         return dict(table) if service == "ntfy" else {}
 
     return fake_get_service_secrets
+
+
+def _decode_header(value: str) -> str:
+    """Decode an RFC 2047 header value the way ntfy's Go decoder does."""
+    return "".join(
+        part.decode(charset or "ascii") if isinstance(part, bytes) else part
+        for part, charset in decode_header(value)
+    )
 
 
 def _task(user_id="alice"):
@@ -117,6 +128,87 @@ class TestPostNtfyBlocking:
     def test_returns_false_on_error(self, mock_httpx):
         mock_httpx.post.side_effect = Exception("connection refused")
         assert _post_ntfy_blocking(_settings(), "m", DeliveryOptions()) is False
+
+    @patch("istota.transport.ntfy.httpx")
+    def test_markdown_opt_in_sets_the_header(self, mock_httpx):
+        mock_httpx.post.return_value = MagicMock(raise_for_status=MagicMock())
+        _post_ntfy_blocking(
+            _settings(), "**bold**", DeliveryOptions(markdown=True),
+        )
+        assert mock_httpx.post.call_args[1]["headers"]["Markdown"] == "yes"
+
+    @patch("istota.transport.ntfy.httpx")
+    def test_plain_text_is_the_default(self, mock_httpx):
+        # A body full of *, _ and # must keep arriving verbatim unless a caller
+        # asks for markdown, so enabling it can't change any existing send.
+        mock_httpx.post.return_value = MagicMock(raise_for_status=MagicMock())
+        _post_ntfy_blocking(_settings(), "3 * 4 = 12 #win", DeliveryOptions())
+        assert "Markdown" not in mock_httpx.post.call_args[1]["headers"]
+
+    @patch("istota.transport.ntfy.httpx")
+    def test_markdown_survives_the_ascii_retry(self, mock_httpx):
+        # The lossy fallback flattens free text; it must not silently drop the
+        # render mode and deliver markup as plain text.
+        mock_httpx.post.side_effect = [
+            UnicodeEncodeError("ascii", "x", 0, 1, "boom"),
+            MagicMock(raise_for_status=MagicMock()),
+        ]
+        assert _post_ntfy_blocking(
+            _settings(), "**bold**", DeliveryOptions(title="📈", markdown=True),
+        ) is True
+        assert mock_httpx.post.call_args_list[1][1]["headers"]["Markdown"] == "yes"
+
+    @patch("istota.transport.ntfy.httpx")
+    def test_non_ascii_title_and_tags_are_rfc2047_encoded(self, mock_httpx):
+        # ISSUE-213: httpx serializes headers as ASCII, so an emoji title used to
+        # raise UnicodeEncodeError and drop the whole push.
+        mock_httpx.post.return_value = MagicMock(raise_for_status=MagicMock())
+        ok = _post_ntfy_blocking(
+            _settings(), "m",
+            DeliveryOptions(title="📈 NOK BUY ↑", tags="chart_increasing,über"),
+        )
+        assert ok is True
+        headers = mock_httpx.post.call_args[1]["headers"]
+        assert headers["Title"].isascii() and headers["Tags"].isascii()
+        assert _decode_header(headers["Title"]) == "📈 NOK BUY ↑"
+        assert _decode_header(headers["Tags"]) == "chart_increasing,über"
+        # Real httpx must accept what we built.
+        httpx.Headers(headers)
+
+    @patch("istota.transport.ntfy.httpx")
+    def test_retries_ascii_only_when_headers_fail_to_encode(self, mock_httpx):
+        # Belt and suspenders: a title must never cost us the body.
+        ok_response = MagicMock(raise_for_status=MagicMock())
+        mock_httpx.post.side_effect = [
+            UnicodeEncodeError("ascii", "x", 0, 1, "boom"), ok_response,
+        ]
+        ok = _post_ntfy_blocking(
+            _settings(), "body", DeliveryOptions(title="📈 NOK BUY ↑"),
+        )
+        assert ok is True
+        assert mock_httpx.post.call_count == 2
+        retry_headers = mock_httpx.post.call_args_list[1][1]["headers"]
+        assert retry_headers["Title"] == "NOK BUY"
+        assert mock_httpx.post.call_args_list[1][1]["content"] == "body"
+
+    @patch("istota.transport.ntfy.httpx")
+    def test_ascii_retry_drops_a_title_that_flattens_to_nothing(self, mock_httpx):
+        ok_response = MagicMock(raise_for_status=MagicMock())
+        mock_httpx.post.side_effect = [
+            UnicodeEncodeError("ascii", "x", 0, 1, "boom"), ok_response,
+        ]
+        assert _post_ntfy_blocking(
+            _settings(), "body", DeliveryOptions(title="📈↑"),
+        ) is True
+        assert "Title" not in mock_httpx.post.call_args_list[1][1]["headers"]
+
+    @patch("istota.transport.ntfy.httpx")
+    def test_returns_false_when_ascii_retry_also_fails(self, mock_httpx):
+        mock_httpx.post.side_effect = UnicodeEncodeError("ascii", "x", 0, 1, "boom")
+        assert _post_ntfy_blocking(
+            _settings(), "m", DeliveryOptions(title="t"),
+        ) is False
+        assert mock_httpx.post.call_count == 2
 
 
 class TestNtfySettings:

@@ -29,6 +29,8 @@ import sys
 
 import httpx
 
+from ... import ntfy_headers
+
 DEFAULT_SERVER = "https://ntfy.sh"
 REQUEST_TIMEOUT = 10.0
 
@@ -68,7 +70,14 @@ def _build_auth_header() -> str | None:
 
 
 def _scrub(value: str) -> str:
-    return value.replace("\r", "").replace("\n", " ")
+    """Strip newlines, and RFC 2047-encode anything non-ASCII.
+
+    httpx serializes header values as ASCII, so an emoji/arrow/em-dash title
+    would otherwise raise ``UnicodeEncodeError`` and lose the send; ntfy decodes
+    the encoded-word back to the original glyphs (ISSUE-213). The helper is
+    total, so this can't raise.
+    """
+    return ntfy_headers.encode_header_value(value)
 
 
 def cmd_send(args: argparse.Namespace) -> int:
@@ -105,6 +114,8 @@ def cmd_send(args: argparse.Namespace) -> int:
         headers["Tags"] = _scrub(args.tags)
     if args.click:
         headers["Click"] = _scrub(args.click)
+    if getattr(args, "markdown", False):
+        headers["Markdown"] = "yes"
 
     try:
         resp = httpx.post(
@@ -148,6 +159,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     send.add_argument("--tags", default=None, help="Comma-separated tags / emoji shortcodes")
     send.add_argument("--click", default=None, help="URL to open when the notification is tapped")
+    send.add_argument(
+        "--markdown", action="store_true",
+        help="Render the body as markdown (ntfy web app only; a phone popup shows the source)",
+    )
 
     return parser
 
