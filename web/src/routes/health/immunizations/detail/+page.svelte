@@ -120,7 +120,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {:else if immunization}
   <form class="card form" onsubmit={save}>
     <div class="row">
@@ -233,7 +233,7 @@
       {/if}
     </div>
     {#if formError}
-      <div class="msg error">{formError}</div>
+      <div class="banner error">{formError}</div>
     {/if}
     <div class="form-actions">
       <Button variant="primary" type="submit" loading={saving}>Save</Button>
@@ -342,15 +342,6 @@
   .meta {
     font-size: var(--text-xs);
     color: var(--text-dim);
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.3rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
   }
   .empty {
     color: var(--text-dim);

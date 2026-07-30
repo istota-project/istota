@@ -228,7 +228,7 @@
       </label>
     </details>
     {#if formError}
-      <div class="msg error">{formError}</div>
+      <div class="banner error">{formError}</div>
     {/if}
     <div class="form-actions">
       <Button variant="primary" type="submit" loading={saving}>Save</Button>
@@ -239,7 +239,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {:else}
   <section class="coverage">
     <h2>Coverage</h2>
@@ -628,15 +628,5 @@
   .empty.small {
     padding: 0.75rem 0;
     font-size: var(--text-sm);
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.3rem;
-    margin-bottom: 0.75rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
   }
 </style>

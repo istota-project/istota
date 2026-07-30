@@ -159,7 +159,7 @@
 {/if}
 
 {#if csvSummary}
-  <div class="msg info">
+  <div class="banner info">
     {#if csvSummary.panels_created > 0}
       Added {csvSummary.panels_created} panel{csvSummary.panels_created === 1 ? '' : 's'}
       ({csvSummary.biomarkers_created} biomarkers).
@@ -195,7 +195,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {:else if matrix && matrix.panels.length === 0 && drafts.length === 0}
   <div class="empty">
     No bloodwork on file yet.
@@ -306,26 +306,6 @@
     display: flex;
     gap: 0.5rem;
     align-items: center;
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.3rem;
-    margin-bottom: 0.5rem;
-  }
-  .msg.info {
-    background: rgba(122, 163, 216, 0.1);
-    color: var(--status-info-fg);
-  }
-  .msg details {
-    margin-top: 0.25rem;
-  }
-  .msg summary {
-    cursor: pointer;
-  }
-  .msg ul {
-    margin: 0.25rem 0 0 1rem;
-    padding: 0;
   }
 
   .drafts {
@@ -642,13 +622,6 @@
     tbody tr:not(.cat-row):hover th {
       box-shadow: inset 0 0 0 9999px rgba(255, 255, 255, 0.025);
     }
-  }
-  .msg.error {
-    font-size: var(--text-sm);
-    padding: 0.5rem;
-    border-radius: 0.3rem;
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
   }
 
   @media (max-width: 768px) {

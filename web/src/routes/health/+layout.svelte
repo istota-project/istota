@@ -87,6 +87,14 @@
 	   this mirrors how settings.css scopes `.settings .card`. Pages set their
 	   own padding/layout on `.card`; this owns surface + border + radius. Add
 	   `class="card interactive"` for a clickable card (cursor + hover border). */
+  /* The .msg boxes this replaced each carried their own margin-bottom —
+     0.75rem on six pages, 0.5rem on one. Restored once for the module rather
+     than as twelve page rules re-forking the primitive; the majority value
+     wins, so the bloodwork toolbar's notice gains 0.25rem. */
+  .health-frame :global(.banner) {
+    margin-bottom: 0.75rem;
+  }
+
   .health-frame :global(.card) {
     background: var(--surface-card);
     border: 1px solid var(--border-default);

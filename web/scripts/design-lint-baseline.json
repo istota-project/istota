@@ -28,43 +28,28 @@
     "raw-color": 1
   },
   "src/routes/health/bloodwork/+page.svelte": {
-    "raw-color": 5
+    "raw-color": 3
   },
   "src/routes/health/bloodwork/marker/+page.svelte": {
-    "raw-color": 10
+    "raw-color": 8
   },
   "src/routes/health/bloodwork/panel/+page.svelte": {
-    "raw-color": 3
-  },
-  "src/routes/health/bloodwork/upload/+page.svelte": {
-    "raw-color": 3
+    "raw-color": 1
   },
   "src/routes/health/history/+page.svelte": {
     "redefined-primitive": 2,
-    "raw-color": 5
-  },
-  "src/routes/health/history/diagnoses/+page.svelte": {
     "raw-color": 4
   },
-  "src/routes/health/history/encounter/+page.svelte": {
-    "raw-color": 1
-  },
-  "src/routes/health/history/import/+page.svelte": {
+  "src/routes/health/history/diagnoses/+page.svelte": {
     "raw-color": 3
   },
-  "src/routes/health/immunizations/+page.svelte": {
-    "raw-color": 1
-  },
-  "src/routes/health/immunizations/detail/+page.svelte": {
+  "src/routes/health/history/import/+page.svelte": {
     "raw-color": 1
   },
   "src/routes/health/immunizations/import/+page.svelte": {
-    "raw-color": 3
-  },
-  "src/routes/health/immunizations/vaccine/+page.svelte": {
     "raw-color": 1
   },
   "src/routes/health/stats/+page.svelte": {
-    "raw-color": 2
+    "raw-color": 1
   }
 }

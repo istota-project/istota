@@ -247,7 +247,7 @@
 {/if}
 
 {#if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {/if}
 
 {#if extracting}
@@ -258,7 +258,7 @@
 {/if}
 
 {#if warnings.length > 0}
-  <div class="msg warn">
+  <div class="banner warn">
     <ul>
       {#each warnings as w (w)}
         <li>{w}</li>
@@ -480,25 +480,6 @@
     to {
       transform: rotate(360deg);
     }
-  }
-
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.3rem;
-    margin-bottom: 0.75rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
-  }
-  .msg.warn {
-    background: rgba(230, 185, 107, 0.1);
-    color: var(--status-warn-fg);
-  }
-  .msg ul {
-    margin: 0;
-    padding-left: 1.1rem;
   }
 
   .attach-note {

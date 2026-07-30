@@ -231,7 +231,7 @@
 
 {#if formWarning}
   <!-- Outside the form: it reports on a save that already closed the form. -->
-  <div class="msg warn">{formWarning}</div>
+  <div class="banner warn">{formWarning}</div>
 {/if}
 
 {#if formOpen}
@@ -308,7 +308,7 @@
     </div>
 
     {#if formError}
-      <div class="msg error">{formError}</div>
+      <div class="banner error">{formError}</div>
     {/if}
     <div class="form-actions">
       <Button variant="primary" type="submit" loading={saving}>Save</Button>
@@ -340,7 +340,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {:else}
   <div class="layout">
     <section class="timeline">
@@ -825,20 +825,6 @@
   .empty.small {
     padding: 0.75rem 0;
     font-size: var(--text-sm);
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.3rem;
-    margin-bottom: 0.75rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
-  }
-  .msg.warn {
-    background: var(--status-warn-bg);
-    color: var(--status-warn-fg);
   }
   /* design-lint-allow: not a color — a theme-conditional `filter` on a UA
      pseudo-element we cannot restyle directly. The icon ships dark, so the dark

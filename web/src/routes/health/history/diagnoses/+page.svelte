@@ -358,7 +358,7 @@
       <textarea bind:value={formNotes} rows="3"></textarea>
     </label>
     {#if formError}
-      <div class="msg error">{formError}</div>
+      <div class="banner error">{formError}</div>
     {/if}
     <div class="form-actions">
       <Button variant="primary" type="submit" disabled={saving}>
@@ -413,7 +413,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {:else}
   <section>
     <h2>Active <span class="count">{active.length}</span></h2>
@@ -783,16 +783,6 @@
   .empty.small {
     padding: 0.5rem 0;
     font-size: var(--text-sm);
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.3rem;
-    margin-bottom: 0.75rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
   }
   .docs {
     /* A button does not inherit font, so without this the em-relative

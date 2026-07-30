@@ -370,6 +370,40 @@
   box-sizing: border-box;
 }
 
+/* A tinted inline message box: a form error, a "module disabled" note, the
+   result of an action. Global rather than scoped to a settings page — the same
+   shape was independently reimplemented as `.msg` on twelve health pages, each
+   with the status fills written out as rgba() literals and so frozen to their
+   dark values.
+
+   Variants are named for the status scale. `.error` is kept as the alias for
+   `.danger` because a dozen call sites use it and the two mean the same thing.
+   `.info` is blue, which it was not: it rendered green, so every "this module
+   is disabled" note read as a confirmation. Anything that genuinely reports a
+   completed action uses `.success`. */
+.banner {
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--radius-card);
+  font-size: var(--text-sm);
+}
+.banner.error,
+.banner.danger {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+.banner.warn {
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
+}
+.banner.info {
+  background: var(--status-info-bg);
+  color: var(--status-info-fg);
+}
+.banner.success {
+  background: var(--status-success-bg);
+  color: var(--status-success-fg);
+}
+
 /* One keyboard-focus ring for everything focusable. :focus-visible, so a mouse
    click never draws it — which is what makes a global rule safe here, and what
    the per-component `outline: none` rules were reaching for by hand.

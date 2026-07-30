@@ -94,7 +94,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {:else if !ref}
   <div class="empty">
     Unknown vaccine "{name}". It may not be in the canonical reference list.
@@ -415,15 +415,6 @@
   .empty.small {
     padding: 0.75rem 0;
     font-size: var(--text-sm);
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.3rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
   }
 
   /* Light theme overrides — dark rules above untouched. */

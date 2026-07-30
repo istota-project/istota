@@ -212,8 +212,8 @@
         />
       </div>
 
-      {#if error}<div class="msg error">{error}</div>{/if}
-      {#if info}<div class="msg info">{info}</div>{/if}
+      {#if error}<div class="banner error">{error}</div>{/if}
+      {#if info}<div class="banner info">{info}</div>{/if}
 
       <div class="actions">
         <Button
@@ -227,7 +227,7 @@
     </div>
   {:else}
     {#if collision}
-      <div class="msg warn">
+      <div class="banner warn">
         A panel from {collision.lab_name || '—'} on {collision.drawn_at} already exists. This upload is
         saved separately;
         <a href="{base}/health/bloodwork/panel?id={collision.existing_id}">view the existing one</a>
@@ -263,7 +263,7 @@
           </div>
         {:else}
           {#if warnings.length > 0}
-            <div class="msg warn">
+            <div class="banner warn">
               <strong>Heads up:</strong>
               <ul>
                 {#each warnings as w}<li>{w}</li>{/each}
@@ -320,7 +320,7 @@
             </table>
           {/if}
 
-          {#if error}<div class="msg error">{error}</div>{/if}
+          {#if error}<div class="banner error">{error}</div>{/if}
 
           <div class="actions">
             <Button onclick={addRow}>+ Add row</Button>
@@ -540,26 +540,5 @@
   .source embed {
     width: 100%;
     height: 600px;
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.3rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
-  }
-  .msg.info {
-    background: rgba(122, 163, 216, 0.1);
-    color: var(--status-info-fg);
-  }
-  .msg.warn {
-    background: rgba(230, 185, 107, 0.1);
-    color: var(--status-warn-fg);
-  }
-  .msg ul {
-    margin: 0.25rem 0 0 1rem;
-    padding: 0;
   }
 </style>

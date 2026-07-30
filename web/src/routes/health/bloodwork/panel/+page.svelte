@@ -205,7 +205,7 @@
   {#if loading}
     <div class="center-msg">Loading…</div>
   {:else if error && !panel}
-    <div class="msg error">{error}</div>
+    <div class="banner error">{error}</div>
   {:else if panel}
     <div class="header">
       <div class="header-meta">
@@ -268,8 +268,8 @@
       </div>
     </div>
 
-    {#if info}<div class="msg info">{info}</div>{/if}
-    {#if error && panel}<div class="msg error">{error}</div>{/if}
+    {#if info}<div class="banner info">{info}</div>{/if}
+    {#if error && panel}<div class="banner error">{error}</div>{/if}
 
     <div class="split">
       <div class="biomarker-table">
@@ -577,18 +577,5 @@
     font-size: var(--text-base);
     padding: 2rem 1rem;
     text-align: center;
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.3rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
-  }
-  .msg.info {
-    background: rgba(122, 163, 216, 0.1);
-    color: var(--status-info-fg);
   }
 </style>

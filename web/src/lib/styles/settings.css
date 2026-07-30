@@ -60,26 +60,6 @@
   color: var(--status-warn-fg);
 }
 
-/* Banners are unscoped so they work both inside .settings wrappers and in
-   Modal contents (e.g. add/edit forms). The two flavours are visually
-   distinct enough that a global .banner / .banner.error / .banner.info is
-   acceptable. */
-.banner {
-  padding: 0.4rem 0.75rem;
-  border-radius: var(--radius-card);
-  font-size: var(--text-sm);
-}
-.banner.error {
-  background: var(--status-danger-bg);
-  color: var(--status-danger-fg);
-}
-/* `.info` is the success-coloured one: it reports a completed action ("secret
-   saved"), not a neutral note. Named for the slot, coloured for the meaning. */
-.banner.info {
-  background: var(--status-success-bg);
-  color: var(--status-success-fg);
-}
-
 .settings .card {
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);

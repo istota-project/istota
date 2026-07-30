@@ -262,7 +262,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {:else if encounter}
   {#if editing}
     <form class="form" onsubmit={save}>
@@ -398,7 +398,7 @@
       >
     </div>
     {#if linkError}
-      <div class="msg error">{linkError}</div>
+      <div class="banner error">{linkError}</div>
     {/if}
   </section>
 
@@ -673,16 +673,6 @@
   .empty.small {
     padding: 0.5rem 0;
     font-size: var(--text-sm);
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.3rem;
-    margin-bottom: 0.75rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
   }
   /* The diagnoses grid keeps the shared grid geometry but moves the card
      chrome from the anchor onto the <li>, since the card holds a kebab

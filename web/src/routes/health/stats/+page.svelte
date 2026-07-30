@@ -387,7 +387,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {:else if metricsToShow().length === 0 && !hasBp()}
   <div class="empty">
     No measurements yet.
@@ -492,7 +492,7 @@
           <span>Notes</span>
           <input type="text" bind:value={formNotes} placeholder="optional" />
         </label>
-        {#if formError}<div class="msg error inline">{formError}</div>{/if}
+        {#if formError}<div class="banner error">{formError}</div>{/if}
         <div class="modal-actions">
           <Button onclick={() => (modalOpen = false)} disabled={saving}>Cancel</Button>
           <Button variant="primary" type="submit" loading={saving}>Save</Button>
@@ -597,18 +597,6 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     margin-top: 0.25rem;
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.3rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
-  }
-  .msg.inline {
-    margin: 0.25rem 0;
   }
 
   /* Padding comes from .overlay-safe (app.css); these are its no-inset

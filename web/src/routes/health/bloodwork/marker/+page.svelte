@@ -297,7 +297,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="msg error">{error}</div>
+  <div class="banner error">{error}</div>
 {:else if trend}
   <header class="page-header">
     <div>
@@ -369,7 +369,7 @@
       <div class="empty">No measurements recorded for this biomarker yet.</div>
     {:else}
       {#if trend.unit_mismatch}
-        <div class="msg warn">
+        <div class="banner warn">
           Measurements use different units across panels — the chart shows raw values without
           conversion.
         </div>
@@ -679,20 +679,6 @@
     font-size: var(--text-base);
     padding: 2rem 1rem;
     text-align: center;
-  }
-  .msg {
-    font-size: var(--text-sm);
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.3rem;
-  }
-  .msg.error {
-    background: rgba(204, 102, 102, 0.1);
-    color: var(--status-danger-fg);
-  }
-  .msg.warn {
-    background: rgba(230, 185, 107, 0.1);
-    color: var(--status-warn-fg);
-    margin-bottom: 0.75rem;
   }
 
   /* Light theme overrides — dark rules above untouched. */

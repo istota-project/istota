@@ -231,7 +231,7 @@
     <div class="banner error">{error}</div>
   {/if}
   {#if info}
-    <div class="banner info">{info}</div>
+    <div class="banner success">{info}</div>
   {/if}
 </SettingsCard>
 
