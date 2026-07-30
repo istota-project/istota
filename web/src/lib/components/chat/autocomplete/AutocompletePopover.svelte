@@ -68,7 +68,7 @@
     border: 1px solid var(--border-default);
     border-radius: 0.4rem;
     box-shadow: var(--shadow-md);
-    z-index: 100;
+    z-index: var(--z-popover);
   }
   .ac-item {
     display: flex;

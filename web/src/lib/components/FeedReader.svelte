@@ -316,7 +316,7 @@
   .reader-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 60;
+    z-index: var(--z-viewer);
     /* design-lint-allow: fixed chrome — a modal scrim is dark in both themes;
        it exists to darken whatever is behind it, not to follow the surface. */
     background: rgba(0, 0, 0, 0.9);
@@ -609,7 +609,7 @@
     color: #fff;
     /* design-lint-allow-end */
     cursor: pointer;
-    z-index: 61;
+    z-index: var(--z-viewer-control);
     transition: background var(--transition-fast);
   }
 

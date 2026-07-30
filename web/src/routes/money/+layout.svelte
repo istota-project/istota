@@ -326,8 +326,7 @@
   }
 
   :global(.money-table-row:focus-visible) {
-    outline: 1px solid var(--border-default);
-    outline-offset: -1px;
+    outline-offset: calc(-1 * var(--focus-ring-width));
   }
 
   /* Column label that sorts. Sits in .money-table-header, so it has to shed the

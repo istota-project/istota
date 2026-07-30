@@ -836,9 +836,7 @@
 
   .grid input[type='text']:focus,
   .grid input[type='text']:hover {
-    border-color: var(--border-default);
     background: var(--surface-base);
-    outline: none;
   }
 
   .type-pill {

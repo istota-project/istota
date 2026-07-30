@@ -489,6 +489,7 @@
     color: var(--text-primary);
     font-size: var(--text-sm);
     font-variant-numeric: tabular-nums;
+    /* .input-field:focus-within below is the affordance for this input. */
     outline: none;
     min-width: 0;
     -moz-appearance: textfield;
@@ -505,10 +506,6 @@
     padding: 0.3rem 0.5rem 0.3rem 0;
     font-size: var(--text-xs);
     color: var(--text-dim);
-  }
-
-  .input-field input:focus {
-    outline: none;
   }
 
   .input-field:focus-within {

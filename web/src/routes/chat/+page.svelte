@@ -1001,7 +1001,6 @@
     font-size: var(--text-sm);
     padding: 0.35rem 0.5rem;
     border-radius: 0.35rem;
-    outline: none;
   }
 
   .room-row {

@@ -76,10 +76,6 @@
     box-sizing: border-box;
   }
 
-  .secret-input:focus {
-    outline: 1px solid var(--accent, var(--accent-blue));
-  }
-
   .secret-clear {
     background: transparent;
     border: none;

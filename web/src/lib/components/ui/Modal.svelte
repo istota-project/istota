@@ -44,7 +44,7 @@
     position: fixed;
     inset: 0;
     background: var(--scrim-bg);
-    z-index: 50;
+    z-index: var(--z-modal);
   }
   :global(.ui-modal-content) {
     position: fixed;
@@ -64,7 +64,7 @@
     max-width: calc(100vw - 2rem - var(--safe-left) - var(--safe-right));
     max-height: calc(100dvh - 2rem - var(--safe-top) - var(--safe-bottom));
     overflow: auto;
-    z-index: 51;
+    z-index: var(--z-modal-panel);
     outline: none;
   }
   :global(.ui-modal-title) {

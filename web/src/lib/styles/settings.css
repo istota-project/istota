@@ -200,12 +200,6 @@
   max-width: 36rem;
 }
 
-.settings .field input:focus,
-.settings .field select:focus,
-.settings .field textarea:focus {
-  outline: 1px solid var(--accent, var(--accent-blue));
-}
-
 .settings .field.checkbox {
   flex-direction: row;
   align-items: center;

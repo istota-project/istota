@@ -84,13 +84,8 @@
     border-color: var(--text-muted);
   }
 
-  .ui-hint-trigger:focus-visible {
-    outline: 1px solid var(--accent-blue);
-    outline-offset: 1px;
-  }
-
   :global(.ui-hint-content) {
-    z-index: 60;
+    z-index: var(--z-popover);
     max-width: 22rem;
     background: var(--surface-card);
     color: var(--text-primary);

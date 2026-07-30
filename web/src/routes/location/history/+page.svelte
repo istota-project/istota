@@ -527,7 +527,7 @@
     padding: 0.45rem 0.9rem;
     border-radius: var(--radius-pill);
     pointer-events: none;
-    z-index: 10;
+    z-index: var(--z-sticky);
   }
 
   @media (max-width: 768px) {

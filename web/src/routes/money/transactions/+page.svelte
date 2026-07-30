@@ -388,8 +388,7 @@
   }
 
   .txn-row:focus-visible {
-    outline: 1px solid var(--border-default);
-    outline-offset: -1px;
+    outline-offset: calc(-1 * var(--focus-ring-width));
   }
 
   .txn-row:hover {

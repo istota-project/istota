@@ -65,7 +65,7 @@
   .lightbox {
     position: fixed;
     inset: 0;
-    z-index: 100;
+    z-index: var(--z-lightbox);
     /* design-lint-allow: fixed chrome — the lightbox is a theme-invariant dark
        overlay over the image; darkening is the whole point of the surface. */
     background: rgba(0, 0, 0, 0.9);

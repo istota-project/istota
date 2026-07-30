@@ -187,6 +187,40 @@
   --safe-left: env(safe-area-inset-left, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
 
+  /* Stacking order, bottom to top. Modal, Select, KebabMenu and Lightbox all
+	   portal to <body>, so their values compete directly in the root stacking
+	   context — six of them used to tie at 100, and which one won was DOM order.
+	   The one hard constraint: --z-popover must clear --z-modal-panel, because a
+	   Select opened inside a dialog has to render above the dialog it is in.
+	   --z-lightbox clears --z-viewer-control for the same reason one step up:
+	   the image zoom opens from inside the feed reader.
+
+	   Small integers *inside* a component's own stacking context — a sticky
+	   table corner, a chat FAB over its transcript — are deliberately not on
+	   this scale. They order siblings, not layers, and naming them after
+	   app-wide chrome would say something false about their reach. */
+  --z-sticky: 10;
+  --z-drawer-backdrop: 19;
+  --z-drawer: 20;
+  --z-modal: 50;
+  --z-modal-panel: 51;
+  --z-viewer: 60;
+  --z-viewer-control: 61;
+  --z-lightbox: 70;
+  --z-popover: 100;
+  --z-toast: 200;
+
+  /* Keyboard focus. One ring, in the interactive accent, applied globally
+	   below — before this, twenty rules covered roughly two hundred focusable
+	   elements and the four that existed disagreed: two rang in --accent (the
+	   near-white primary fill), two in --border-default, which on a card is
+	   almost the resting border and so read as no ring at all.
+	   2px rather than the 1px most of them used: a focus ring that has to be
+	   looked for is not doing its job, and 2px is the WCAG 2.2 floor. */
+  --focus-ring-color: var(--accent-blue);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
   /* Transitions */
   --transition-fast: 0.15s ease;
 
@@ -326,6 +360,16 @@
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+/* One keyboard-focus ring for everything focusable. :focus-visible, so a mouse
+   click never draws it — which is what makes a global rule safe here, and what
+   the per-component `outline: none` rules were reaching for by hand.
+   A full-bleed row (a money table row) pulls the ring inside itself with
+   `outline-offset: calc(-1 * var(--focus-ring-width))` rather than removing it. */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* iOS Safari gives date/time inputs a native control with an intrinsic content

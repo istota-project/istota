@@ -190,7 +190,7 @@
 
   .ac-menu {
     position: fixed;
-    z-index: 50;
+    z-index: var(--z-popover);
     margin: 0;
     padding: 0.25rem;
     list-style: none;

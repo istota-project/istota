@@ -290,7 +290,7 @@
     bottom: calc(1rem + var(--safe-bottom));
     width: fit-content;
     margin-inline: auto;
-    z-index: 200;
+    z-index: var(--z-toast);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -351,7 +351,7 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
     padding: 0.25rem;
-    z-index: 60;
+    z-index: var(--z-popover);
     box-shadow: var(--shadow-md);
     outline: none;
   }

@@ -780,6 +780,8 @@
     font: inherit;
     line-height: 1.4;
     padding: 0.45em var(--ta-pad-x);
+    /* The bordered pill around it carries the focus affordance
+       (.composer-row:focus-within), so a ring here would double it. */
     outline: none;
   }
   textarea::-webkit-scrollbar {
@@ -893,7 +895,7 @@
     border: 1px solid var(--border-default);
     border-radius: 0.4rem;
     box-shadow: var(--shadow-md);
-    z-index: 100;
+    z-index: var(--z-popover);
   }
   .attach-menu-item {
     display: flex;

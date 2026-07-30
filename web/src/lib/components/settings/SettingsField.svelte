@@ -101,12 +101,6 @@
     max-width: 36rem;
   }
 
-  .field :global(input:focus),
-  .field :global(select:focus),
-  .field :global(textarea:focus) {
-    outline: 1px solid var(--accent, var(--accent-blue));
-  }
-
   .field.checkbox {
     flex-direction: row;
     align-items: center;

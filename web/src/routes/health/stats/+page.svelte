@@ -626,7 +626,7 @@
     justify-content: center;
     --overlay-pad-block: 1rem;
     --overlay-pad-inline: 1rem;
-    z-index: 100;
+    z-index: var(--z-modal);
   }
   .modal {
     background: var(--surface-card);

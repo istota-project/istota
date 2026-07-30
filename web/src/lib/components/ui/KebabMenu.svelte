@@ -75,9 +75,10 @@
     border: 1px solid var(--border-default);
     border-radius: 0.4rem;
     padding: 0.25rem;
-    z-index: 100;
+    z-index: var(--z-popover);
     box-shadow: var(--shadow-md);
     min-width: 9rem;
+    /* Focused on open by bits-ui; the roving highlight is the affordance. */
     outline: none;
   }
 

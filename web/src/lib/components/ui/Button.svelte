@@ -11,6 +11,14 @@
     onclick?: (e: MouseEvent) => void;
     title?: string;
     disabled?: boolean;
+    /**
+     * In-flight state. Disables the button and swaps its label for
+     * `loadingLabel`, which is the shape twenty-seven `{saving ? 'Saving…' :
+     * 'Save'}` ternaries were open-coding — each with its own idea of whether
+     * to also disable, so several stayed clickable mid-save.
+     */
+    loading?: boolean;
+    loadingLabel?: string;
     ariaLabel?: string;
     children: Snippet;
   }
@@ -22,6 +30,8 @@
     onclick,
     title,
     disabled,
+    loading = false,
+    loadingLabel = 'Saving…',
     ariaLabel,
     children,
   }: Props = $props();
@@ -32,10 +42,11 @@
   {type}
   {onclick}
   {title}
-  {disabled}
+  disabled={disabled || loading}
+  aria-busy={loading || undefined}
   aria-label={ariaLabel}
 >
-  {@render children()}
+  {#if loading}{loadingLabel}{:else}{@render children()}{/if}
 </button>
 
 <style>

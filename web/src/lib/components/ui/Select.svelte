@@ -134,7 +134,7 @@
     border: 1px solid var(--border-default);
     border-radius: 0.4rem;
     padding: 0.25rem;
-    z-index: 100;
+    z-index: var(--z-popover);
     box-shadow: var(--shadow-md);
     /* design-lint-allow: bits-ui sets --bits-select-* on the popover at open
        time, so it is defined at runtime rather than in the token roster. */
@@ -147,6 +147,8 @@
     box-sizing: border-box;
     max-height: 18rem;
     overflow: auto;
+    /* bits-ui focuses the popover itself on open; the ring belongs on the
+       highlighted item, which is [data-highlighted] below, not on the panel. */
     outline: none;
   }
 

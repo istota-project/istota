@@ -78,7 +78,7 @@
       top: 0;
       left: 0;
       bottom: 0;
-      z-index: 20;
+      z-index: var(--z-drawer);
       width: 220px;
       background: var(--surface-base);
       border-right: 1px solid var(--border-default);
@@ -103,7 +103,7 @@
       border: none;
       padding: 0;
       cursor: default;
-      z-index: 19;
+      z-index: var(--z-drawer-backdrop);
     }
   }
 </style>
