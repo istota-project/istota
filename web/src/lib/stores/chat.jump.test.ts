@@ -69,6 +69,13 @@ function page(msgs: ChatHistory['messages'], over: Partial<ChatHistory> = {}): C
   } as ChatHistory;
 }
 
+// `vi.resetModules()` gives the chat module a fresh copy of every module it
+// imports, notices included — so a statically imported `currentNotice` would be
+// a different singleton from the one chat writes to.
+async function freshNotices() {
+  return await import('./notices');
+}
+
 async function freshSession() {
   vi.resetModules();
   const mod = await import('./chat');
@@ -142,15 +149,19 @@ describe('chat store — jump-to-response', () => {
     expect(get(s.scrollTarget)?.cid).toBe(asst.cid);
   });
 
-  it('returns false and sets an error for an unknown room token', async () => {
+  it('returns false and raises a notice for an unknown room token', async () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
     api.getRoomMessages.mockResolvedValue(page([userTurn(2, 'q2'), asstTurn(2, 'a2')]));
     const s = await freshSession();
+    const notices = await freshNotices();
     await s.init();
+    notices.clearNotices();
 
     const ok = await s.jumpToTask('t-unknown', 2);
     expect(ok).toBe(false);
-    expect(get(s.error)).not.toBe('');
+    // A dead deep link has nowhere inline to report itself — the transcript it
+    // named is the thing that isn't there.
+    expect(get(notices.currentNotice)?.message).toBe("Couldn't open that conversation.");
     expect(get(s.scrollTarget)).toBeNull();
   });
 

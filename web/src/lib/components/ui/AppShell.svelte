@@ -14,6 +14,7 @@
 
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import NoticeDrawer from './NoticeDrawer.svelte';
 
   interface Props {
     header: Snippet;
@@ -34,7 +35,13 @@
 </script>
 
 <div class="shell">
-  <div class="shell-header">{@render header()}</div>
+  <div class="shell-header">
+    {@render header()}
+    <!-- The app's transient-feedback surface, hung here so every route gets the
+         same anchor for free: a shell is what a top-level route renders, and its
+         header is always the band directly above the content. -->
+    <NoticeDrawer />
+  </div>
   {#if extras}{@render extras()}{/if}
   <div class="shell-body">
     {#if sidebar}{@render sidebar()}{/if}
@@ -67,8 +74,11 @@
     overflow: hidden;
   }
 
+  /* Positioned so the notice drawer can hang off its bottom edge, whatever the
+     header's height works out to at the user's text scale. */
   .shell-header {
     flex-shrink: 0;
+    position: relative;
   }
 
   .shell-body {

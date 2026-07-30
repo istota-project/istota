@@ -28,6 +28,7 @@
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from 'lucide-svelte';
+  import { notifyError } from '$lib/stores/notices';
 
   let { children } = $props();
 
@@ -125,6 +126,7 @@
       feedsRefreshNonce.update((n) => n + 1);
     } catch (e) {
       console.error('mark-all-read failed', e);
+      notifyError("Couldn't mark these as read.");
     }
   }
 

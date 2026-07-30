@@ -1,5 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
+  import { afterNavigate } from '$app/navigation';
   import { page, updated } from '$app/state';
   import { onMount } from 'svelte';
   import { Menu, Sun, Moon } from 'lucide-svelte';
@@ -7,6 +8,7 @@
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
   import { theme, toggleTheme } from '$lib/stores/theme';
+  import { clearNotices } from '$lib/stores/notices';
   import { installViewportGuard } from '$lib/viewport';
   import { installKeyboardDismiss } from '$lib/platform/input';
   import '../app.css';
@@ -16,6 +18,13 @@
   let user: User | null = $state(null);
   let loading = $state(true);
   let error = $state('');
+
+  // A notice comments on the surface that raised it, so leaving that surface
+  // retires it: an error is pinned until acknowledged, and without this one
+  // raised on /chat would sit under the Feeds header describing nothing on
+  // screen. The corollary for callers is that a notice meant to survive a
+  // navigation has to be raised after it, not before.
+  afterNavigate(() => clearNotices());
 
   // App-wide, because a soft keyboard is raised from every section that has a
   // filter box or a form — not just the chat composer, which is where the first

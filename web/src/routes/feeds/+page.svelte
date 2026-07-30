@@ -22,6 +22,7 @@
   import FeedReader from '$lib/components/FeedReader.svelte';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
+  import { notifyError } from '$lib/stores/notices';
 
   const getScrollRoot = getShellScrollRoot();
 
@@ -334,6 +335,7 @@
         await updateEntryStarred(target.id, next);
       } catch {
         handleStarToggle(target.id, !next);
+        notifyError("Couldn't update star.");
       }
     }
   }

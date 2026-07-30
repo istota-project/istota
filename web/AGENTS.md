@@ -46,6 +46,17 @@ Import everything from the barrel: `import { Button, Modal } from '$lib/componen
 | `ConfirmDialog` | Every destructive, irreversible or session-ending action            | Imperative `title` with no "?", full "Are you sure…" `message`. `confirmVariant="danger"`. `challenge` adds a type-the-name gate for hard deletes. **Never `window.confirm`** |
 | `NoticeBanner`  | A single-line collapsible notice with a variant-colored left border | Variants follow the status scale                                                                                                                                              |
 | `HintPopover`   | Optional guidance behind a "?"                                      | See the `SettingsField` rule below before reaching for it directly                                                                                                            |
+| `NoticeDrawer`  | Nothing — `AppShell` mounts it. Call `notify()` instead             | The one transient-feedback surface, and the one component deliberately absent from the barrel: a second mount is two live regions for one notice. See the rule below          |
+
+**Transient feedback goes through `notify()`, and only if it is out-of-band.** `import { notify, notifyError, notifySuccess, notifyWarning } from '$lib/stores/notices'` and call it from anywhere — a store, a component, an event handler. It renders in a band that slides down from under the section header, overlaying content without reflowing it. `AppShell` mounts the host, so no page renders anything.
+
+The severities are `info` / `success` / `warning` / `error`. All but `error` auto-dismiss; an error stays until dismissed, as does any notice carrying an `action` (`{ label, run }`) — expiring a decision out from under a reaching finger removes the only way to take it. Concurrent notices queue, because the drawer is one slot; a pinned one hands the slot over after 30s once something is waiting behind it, so an unanswered error can't silence the channel for the life of the tab.
+
+Repeats of the same message coalesce into a count rather than stacking. Pass `key` to coalesce notices whose wording differs but which are the same event — a progress line, then its outcome. On that path a repeat overrides only what it states: omit `severity` or `action` and the existing one is kept, so a progress update can't silently downgrade an error or delete the Retry button the first call offered. Keys are one global namespace, so prefix them by feature (`chat:room-delete`, `feeds:star`) rather than using a bare `sync`.
+
+Notices clear on navigation — a notice comments on the surface that raised it. The corollary: raise one _after_ a `goto`, not before.
+
+**Out-of-band means it has no natural home on the page.** A background sync failed, a link was copied, an optimistic update rolled back silently. In-band state stays where it is: a failed send belongs on its own message bubble, a validation error under its field, and a page that failed to load in that page's banner where it can stay put and be re-read. Routing those through a notice double-reports the failure and then takes the report away after four seconds. Where a surface has no banner for such a failure, a notice beats silence — but reaching for one there is a sign the surface is missing a banner, not a licence to skip it.
 
 ### Settings pages
 

@@ -4,6 +4,7 @@
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
   import { fileKind, playerUrl, providerLabel } from '$lib/feeds/embed';
+  import { notifyError } from '$lib/stores/notices';
 
   let {
     entries = [],
@@ -120,6 +121,7 @@
       onStarToggle?.(target.id, nextStarred);
     } catch {
       target.starred = !nextStarred;
+      notifyError("Couldn't update star.");
     }
   }
 

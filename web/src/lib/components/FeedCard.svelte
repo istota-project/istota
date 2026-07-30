@@ -5,6 +5,7 @@
   import { fileKind, playerUrl, providerLabel } from '$lib/feeds/embed';
 
   import { markReadDelay } from '$lib/stores/feeds';
+  import { notifyError } from '$lib/stores/notices';
 
   let {
     entry,
@@ -48,8 +49,10 @@
       await updateEntryStarred(entry.id, next);
       onStarToggle?.(entry.id, next);
     } catch {
-      // Roll back if the server rejected.
+      // Roll back if the server rejected. The rollback is silent on its own —
+      // the star simply springs back — so say why.
       entry.starred = !next;
+      notifyError("Couldn't update star.");
     }
   }
 

@@ -9,6 +9,7 @@
  * A single module-level instance is shared across the /chat surfaces.
  */
 import { get, writable, type Writable } from 'svelte/store';
+import { notifyError, notifyWarning } from './notices';
 import {
   cancelChatTask,
   chatStreamUrl,
@@ -173,7 +174,6 @@ export interface ChatSession {
   status: Writable<ChatStatus>;
   activeTaskId: Writable<number | null>;
   loaded: Writable<boolean>;
-  error: Writable<string>;
   // Cross-room aggregate views: 'room' renders the active room's live
   // transcript; the other three render a read-only stream across all member
   // rooms (no composer, no live streaming — reload on entry).
@@ -224,7 +224,6 @@ function createSession(): ChatSession {
   // by `sendTurn` the moment it has one. See `cancel`.
   let cancelRequested = false;
   const loaded = writable(false);
-  const error = writable('');
   // Which pane the transcript renders: the active room, or a cross-room
   // aggregate view (All / Unread / Starred). Aggregate views are read-only
   // reading surfaces — no composer, no SSE; re-entering refreshes. The
@@ -1144,7 +1143,11 @@ function createSession(): ChatSession {
       oldestCursor = hist.oldest_cursor ?? null;
       hasMore.set(!!hist.has_more);
     } catch {
-      error.set('Failed to load messages');
+      // A load failure would belong in the page's own banner, but chat has
+      // none — the pane just renders empty, which is indistinguishable from a
+      // room with nothing in it. A notice beats silence; giving chat a real
+      // load-failure banner is the better fix and is ISSUE-200's territory.
+      notifyError('Failed to load messages');
     }
   }
 
@@ -1179,7 +1182,7 @@ function createSession(): ChatSession {
       updateMsg(cid, (mm) => {
         mm.starred = !next;
       });
-      error.set("Couldn't update star.");
+      notifyError("Couldn't update star.");
     }
   }
 
@@ -1189,7 +1192,7 @@ function createSession(): ChatSession {
     try {
       await markAllRoomsRead();
     } catch {
-      error.set("Couldn't mark all rooms read.");
+      notifyError("Couldn't mark all rooms read.");
       return;
     }
     rooms.update((r) => r.map((x) => ({ ...x, unread_count: 0 })));
@@ -1350,8 +1353,9 @@ function createSession(): ChatSession {
         };
         document.addEventListener('visibilitychange', onVisibility);
       }
-    } catch (e) {
-      error.set('Failed to load chat');
+    } catch {
+      // Same exemption as loadViewPage above: no banner exists to put this in.
+      notifyError('Failed to load chat');
     }
   }
 
@@ -1394,7 +1398,7 @@ function createSession(): ChatSession {
       const updated = await promoteChatRoom(id);
       rooms.update((r) => r.map((x) => (x.id === id ? { ...x, ...updated } : x)));
     } catch {
-      error.set("Couldn't open this room in Talk.");
+      notifyError("Couldn't open this room in Talk.");
     }
   }
 
@@ -1416,9 +1420,9 @@ function createSession(): ChatSession {
       await deleteChatRoom(id);
     } catch (e) {
       if (e instanceof ChatRoomBusyError) {
-        error.set('This room has a task in progress — wait for it to finish or cancel it.');
+        notifyWarning('This room has a task in progress — wait for it to finish or cancel it.');
       } else {
-        error.set("Couldn't delete room.");
+        notifyError("Couldn't delete room.");
       }
       return;
     }
@@ -1472,13 +1476,13 @@ function createSession(): ChatSession {
     try {
       const room = get(rooms).find((r) => r.token === roomToken);
       if (!room) {
-        error.set("Couldn't open that conversation.");
+        notifyError("Couldn't open that conversation.");
         return false;
       }
       if (get(activeRoomId) !== room.id || get(view) !== 'room') {
         const ok = await selectRoomByToken(roomToken);
         if (!ok) {
-          error.set("Couldn't open that conversation.");
+          notifyError("Couldn't open that conversation.");
           return false;
         }
       }
@@ -1490,13 +1494,13 @@ function createSession(): ChatSession {
         cid = findCidByTask(taskId);
       }
       if (cid == null) {
-        error.set("Couldn't locate that message.");
+        notifyError("Couldn't locate that message.");
         return false;
       }
       scrollToCid(cid);
       return true;
     } catch {
-      error.set("Couldn't jump to that message.");
+      notifyError("Couldn't jump to that message.");
       return false;
     }
   }
@@ -1712,7 +1716,6 @@ function createSession(): ChatSession {
     status,
     activeTaskId,
     loaded,
-    error,
     view,
     selectView,
     toggleStar,

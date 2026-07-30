@@ -86,6 +86,13 @@ async function freshSession() {
   return mod.getChatSession();
 }
 
+// `vi.resetModules()` gives the chat module a fresh copy of every module it
+// imports, notices included — so a statically imported `currentNotice` here
+// would be a different singleton from the one chat writes to.
+async function freshNotices() {
+  return await import('./notices');
+}
+
 describe('chat store — cross-room views + starring', () => {
   beforeEach(() => {
     persisted.map.clear();
@@ -229,9 +236,46 @@ describe('chat store — cross-room views + starring', () => {
     await s.selectView('all');
     const cid = get(s.messages)[0].cid;
     api.setChatMessageStarred.mockRejectedValue(new Error('boom'));
+    const notices = await freshNotices();
+    notices.clearNotices();
     await s.toggleStar(cid);
     expect(get(s.messages)[0].starred).toBe(false);
-    expect(get(s.error)).toBeTruthy();
+    // The revert is silent on its own — the star just springs back — so the
+    // failure has to reach the notice drawer.
+    expect(get(notices.currentNotice)?.message).toBe("Couldn't update star.");
+    expect(get(notices.currentNotice)?.severity).toBe('error');
+  });
+
+  // The one place in application code where the severity choice carries
+  // meaning: a room that is busy is an expected refusal to be read and
+  // forgotten, not a failure to be acknowledged, so it auto-dismisses.
+  it('reports a busy room as a warning rather than an error', async () => {
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    const s = await freshSession();
+    const notices = await freshNotices();
+    await s.init();
+    notices.clearNotices();
+
+    const { ChatRoomBusyError } = await import('$lib/api');
+    api.deleteChatRoom.mockRejectedValue(new ChatRoomBusyError());
+    await s.deleteRoom(1);
+
+    expect(get(notices.currentNotice)?.severity).toBe('warning');
+    expect(get(notices.currentNotice)?.message).toContain('task in progress');
+  });
+
+  it('reports any other delete failure as an error', async () => {
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    const s = await freshSession();
+    const notices = await freshNotices();
+    await s.init();
+    notices.clearNotices();
+
+    api.deleteChatRoom.mockRejectedValue(new Error('boom'));
+    await s.deleteRoom(1);
+
+    expect(get(notices.currentNotice)?.severity).toBe('error');
+    expect(get(notices.currentNotice)?.message).toBe("Couldn't delete room.");
   });
 
   it('toggleStar is a no-op for a message without msgId', async () => {

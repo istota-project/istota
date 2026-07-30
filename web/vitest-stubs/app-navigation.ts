@@ -12,3 +12,7 @@ export function goto(_url: string): Promise<void> {
 export function invalidateAll(): Promise<void> {
   return Promise.resolve();
 }
+
+export function afterNavigate(_callback: () => void): void {
+  // Nothing under test navigates; the callback simply never fires.
+}
