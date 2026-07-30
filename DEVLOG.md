@@ -8,17 +8,17 @@ The copy half of ISSUE-210 (per-message copy and delete in web chat). Copy shipp
 
 **Copy hangs off the block, not the turn.** The first design put one copy control in the message's hover bar beside the star. That is wrong for the shape of the data: an assistant turn is an ordered list of prose groups separated by activity chips, so a turn-level copy has to decide which parts to include, and the answer nobody wants is "the tool traces". Per block, the question does not arise — a prose group is `{kind: 'prose', id, text}` and `text` is the markdown source, so the copy is exact by construction and the chips are excluded because they are a different `kind`. It also matches how the text is used: you lift one paragraph or one snippet out of an answer.
 
-**A per-code-block button was built and then removed.** It was the standard affordance — injected into `{@html}` output, wrapped per `<pre>` so it survived horizontal scrolling of a wide line, idempotent across re-renders. It went because it duplicated what already worked: the block copy is the markdown *source*, which carries the fences, so copying a block containing a snippet already yields the code ready to paste. About 60 lines of CSS, a 100-line action and its 12 tests came out. The reasoning is now a test rather than a comment — copying a block with a fence asserts both that the clipboard gets the fenced source and that the same block rendered as a highlighted `<pre><code>`.
+**A per-code-block button was built and then removed.** It was the standard affordance — injected into `{@html}` output, wrapped per `<pre>` so it survived horizontal scrolling of a wide line, idempotent across re-renders. It went because it duplicated what already worked: the block copy is the markdown _source_, which carries the fences, so copying a block containing a snippet already yields the code ready to paste. About 60 lines of CSS, a 100-line action and its 12 tests came out. The reasoning is now a test rather than a comment — copying a block with a fence asserts both that the clipboard gets the fenced source and that the same block rendered as a highlighted `<pre><code>`.
 
 **The three workarounds were one mistake.** Placing the button at `bottom: -1.25rem`, outside its block's box, cost a fix per round of use:
 
 - `padding-top: 0.6rem` on the button, to grow its box back up across the two dead pixels between it and `.body`. Crossing them un-hovered the parent, so the button vanished on the way to being clicked.
-- A `::after` hover bridge on the block, because the block is full-width: a cursor moving *diagonally* toward the button leaves through the bottom edge somewhere left of its ~20px box and lands on nothing. Going sideways first and then down worked, which was the tell.
+- A `::after` hover bridge on the block, because the block is full-width: a cursor moving _diagonally_ toward the button leaves through the bottom edge somewhere left of its ~20px box and lands on nothing. Going sideways first and then down worked, which was the tell.
 - `z-index: 1` on the button, because `::after` is generated after the element's children in the box tree — so the bridge painted over the button and, once armed, took the click the button had been revealed for.
 
 Each fixed a defect the previous one introduced, and none of them was checkable: jsdom has no layout and no hit-testing, so every one was found by hand. The fix was to stop hanging the button outside the box. `.body` now reserves `--chat-copy-reserve` below its text and the button sits at `bottom: 0`, inside its own hover target. All three workarounds deleted. The general form: when a control lives outside the element that reveals it, every approach path is a bug you will find one at a time.
 
-**`:last-child` was matching the button, not the content.** Reserving space exposed a doubling: `.markdown p:last-child` resets a trailing paragraph's margin, but `ul`, `ol`, `blockquote` and `pre` all carry `0 0 1rem` with no reset, so a reply ending in a list got 1rem on top of the reserve while one ending in prose did not. The general rule `.markdown > *:last-child` fixes it — except the copy button was the last child, so the rule matched *it* and would have silently done nothing. The button is now rendered before the content; it is absolutely positioned, so document order does not place it. There is a test pinning that ordering, because moving it back to the end looks like tidying.
+**`:last-child` was matching the button, not the content.** Reserving space exposed a doubling: `.markdown p:last-child` resets a trailing paragraph's margin, but `ul`, `ol`, `blockquote` and `pre` all carry `0 0 1rem` with no reset, so a reply ending in a list got 1rem on top of the reserve while one ending in prose did not. The general rule `.markdown > *:last-child` fixes it — except the copy button was the last child, so the rule matched _it_ and would have silently done nothing. The button is now rendered before the content; it is absolutely positioned, so document order does not place it. There is a test pinning that ordering, because moving it back to the end looks like tidying.
 
 **Two invariants a reader would otherwise undo.** The button must stay a DOM child of the block it copies — the reveal is `.body:hover .copy-block`, and `:hover` following the DOM ancestor chain rather than geometry is the only reason it survives the cursor being on a control positioned outside its parent. And `.user-body` carries `white-space: pre-wrap`, so a button placed inside it renders the markup's own newlines and indentation as blank space around every user message; the text lives in its own `.user-text` span and the button is a sibling. Both have tests, because neither is visible in the markup.
 
@@ -27,12 +27,14 @@ Each fixed a defect the previous one introduced, and none of them was checkable:
 **No check-mark flip on the button**, which is the standard flourish. A timed icon swap on a hover-revealed control is ISSUE-201's bug class exactly — two visual properties transitioning independently on WebKit — and this component's own comments record the star having been stranded lit by that mechanism. The notice covers every device, including touch, where the button is under the finger.
 
 **Key changes:**
+
 - `clipboard.ts` — `copyText`, the only sanctioned clipboard write; handles the absent-API and refused-write cases that otherwise pass for success.
 - `Message.svelte` — a `copyButton` snippet on each prose group, the user body and command output; the reserve, and the per-block hover scope so exactly one icon lights at a time.
 - `app.css` — `--chat-copy-reserve`, and `.markdown > *:last-child` widening the trailing-margin reset beyond `p`.
 - `.chip-slot.gap-above` drops to `0.1rem`; the block above now supplies that separation via its reserve. Kept non-zero rather than deleted so the two stay visibly coupled.
 
 **Files added/modified:**
+
 - `web/src/lib/clipboard.ts` + `clipboard.test.ts` - the copy helper
 - `web/src/lib/components/chat/Message.svelte` - per-block button, reserve, hover scope
 - `web/src/lib/components/chat/Message.copy.svelte.test.ts` - 12 tests
@@ -40,30 +42,77 @@ Each fixed a defect the previous one introduced, and none of them was checkable:
 - `web/vite-mock-api.ts` - a fenced block in the mock reply
 - `web/AGENTS.md` - the `copyText` rule
 
+## 2026-07-30: A design language the tooling can actually see, and what it found once it could
+
+`web/AGENTS.md` documented a real design language — a primitive inventory, a semantic colour roster, page skeletons, a `lint:design` check with an empty baseline reporting the tree clean. An audit of all 102 `.svelte` files found the documentation accurate about intent and wrong about reality, and the fifteen-stage cleanup that followed is mostly a story about why the check could not see it.
+
+**The lint's colour rule matched hex only.** Eighty-seven literals written as `rgba()`/`hsla()` were invisible to it, including one danger red at 24 uses across nine alpha values — all frozen to their dark-theme value, so every one rendered a dark tint on white. The rule now covers every notation, with a `strip` hook so a sanctioned `rgb(var(--x) / .5)` sharing a line with a literal cannot launder it.
+
+**The scanner had a worse hole than the audit found.** `accept="image/*,application/pdf"` opens a block comment that never closes, so every line after it was blanked and silently exempt from _every_ rule. Four upload pages were invisible. That is why the audit counted seven headings rendering at body-text size where a naive run of the new rule finds six. Quote state is now tracked per line — per line, because a stuck _string_ state mis-reads one line while a stuck _comment_ state disables a file, and an unpaired apostrophe in prose is common.
+
+**A `var()` naming a nothing is not a style choice, it is a silent bug.** `font-size: var(--text-lg)` on an undefined property is invalid at computed-value time, which does not fall back to the UA heading size — it _inherits_. Seven `<h1>`s shipped at body-text size. The new rule splits on whether a fallback is written, because six of the twelve `--text-lg` references had one and rendered fine while six did not; two rule ids rather than a severity axis, so each baselines on its own.
+
+**The rules got tests, which is the actual fix.** A lint whose regex quietly stops matching reports a clean tree — that is the failure mode, and nothing verified the regexes. 76 tests now do.
+
+**Health was a design-system island.** Zero of eighteen files imported `Button`; it carried its own `.btn` across twelve files and disagreed with the shared one about what the variants mean — `primary` outlined in `--accent-blue` where `Button` fills with `--accent`, `danger` red on three pages and grey-until-hover on two. Both could not be right, so health moved and `Button` did not grow a health-shaped variant. `Button` gained `href` for the twelve sites that navigate: an onclick + `goto()` drops middle-click, open-in-new-tab and the status-bar preview, and `KebabItem` already took the option for that reason.
+
+**Two things broke in a way worth naming.** Svelte prunes a selector whose subject it cannot see, so every page rule targeting an element that has moved inside a component stops applying — silently. The history page's `.actions > *` and the bloodwork toolbar's mobile button shrink both died that way and needed `:global()`. And applying a shared class by rewriting every `<h2>` in a file over-applies wherever the rule was container-scoped: one heading had no rule at all and would have gained styling it never had.
+
+**Three spec items were deliberately not done.** The composer's attach menu keeps its hand-rolled implementation — it already dismisses on Escape _and_ outside click (the audit missed both), and its `onmousedown` focus keeper is iOS engineering that bits-ui's focus-moving `DropdownMenu` would undo, which needs a device to verify. The feed reader's control row is one-third anchor, and a link is not a button. Health's `.msg` went to the existing global `.banner` rather than `NoticeBanner`: the latter is a bordered card with a bold title, the thirteen sites are small tinted boxes holding a bare string, and swapping them would have been a redesign wearing a consolidation's clothes.
+
+**`.banner.info` was green.** Every "this module is disabled" note across location, briefings and feeds rendered as a confirmation. It is blue now, and `.success` exists for the cases that genuinely report a completed action.
+
+**Spacing was 33 distinct rem values across 1,218 declarations, roughly half off any ramp.** Nine of them collapse onto a six-step 4px scale — 948 declarations, 93 files, sub-2px shifts everywhere. Two bands stay off it on purpose: below `0.25rem` are hairline nudges and icon gaps where rounding to 4px is a visible change, and the tail above `1rem` is sparse one-offs. Both are reported by the new rule and baselined, which is the point — counted rather than quietly accepted.
+
+**Four controls, four heights.** `Button`, `Chip` and the `Select` trigger each computed their own box from a font size, a padding and (for `Select`) a border, landing on 1.4 / 1.2 / 1.14 / 1.14rem+2px. A `Select` beside a `Button` sat ~2.6px short — and because everything but that border is in `rem`, the gap changed with the text-scale setting. `--control-height-{sm,md}` as a `min-height`, and `Select` gained a `size` defaulting to `sm` so no existing toolbar moves.
+
+**Key changes:**
+
+- Six lint rules, up from three, with 76 tests on the rule engine; the pure half split into `design-lint-rules.mjs` so it is testable at all.
+- Five new primitives: `Input`, `TextArea`, `Field` (extracted from `SettingsField`, which now delegates), `Badge`, `IconButton`.
+- Tokens that did not exist: `--text-lg/xl`, `--font-mono`, `--radius-sm/md`, `--shadow-md/lg`, `--scrim-bg`, `--status-partial-*`, the `--z-*` ladder, `--focus-ring-*`, `--space-*`, `--control-height-*`.
+- One global `:focus-visible` ring replacing four disagreeing implementations, three of which were invisible and one of which (`Button`) did not exist.
+- Health: no `.btn`, `.msg` or `.badge` of its own; its scoped CSS drops from 4,123 to ~2,900 lines.
+- `.empty` (14 copies), `.spinner` + `@keyframes spin` (3), `.banner`, the sidebar list row and a `micro-label` promoted to shared homes.
+- `tokens.test.ts` asserts the z ladder ordering, theme parity for every colour token, and the control-height steps.
+
+**Files added/modified:**
+
+- `web/scripts/design-lint-rules.mjs` - the rule table + scanner, split out to be testable
+- `web/scripts/design-lint.test.ts` - 76 tests pinning every rule
+- `web/src/lib/components/ui/{Input,TextArea,Field,Badge,IconButton}.svelte` - the new primitives
+- `web/src/lib/components/health/FileDropZone.svelte` - the 3-way duplicated import skeleton
+- `web/src/lib/components/location/StopsPanel.svelte` - a 45-line block the two location pages shared
+- `web/src/lib/health/status.ts` - status labels + badge variants, previously CSS and a duplicated map
+- `web/src/lib/styles/tokens.test.ts` - the token invariants
+- `web/src/app.css` - the token rosters, `.banner`, `.empty`, `.spinner`, `.micro-label`, the focus ring
+- `web/AGENTS.md`, `AGENTS.md` - corrected: `--accent` is the primary fill, not `--accent-blue`
+
 ## 2026-07-30: Provisioning the iOS tracker by QR, and four ways a settings card lied about state it did not own
 
 Stage 4 of the native-iOS spec: mint a location ingest token on `/location/settings`, render it as a QR, scan it from the app on the phone, and drive the background tracker from a card that renders only inside the shell. The server half of provisioning (the generate endpoint, the receiver reload sentinel) landed earlier the same day as Stage 3; this is the surface on top of it.
 
-**The QR payload is JSON, deliberately not the webhook URL.** Encoding `https://host/webhooks/location?token=...` is the obvious move and the wrong one: every generic scanner, including the iOS Camera app's built-in detection, offers to *open* a URL — putting a live secret in Safari's address bar and history in exchange for a 405. A JSON envelope renders as text, which nothing offers to act on. It carries a version because a scanned code is the one input in this system that can be arbitrarily old: a screenshot, a printout, a photo of a monitor.
+**The QR payload is JSON, deliberately not the webhook URL.** Encoding `https://host/webhooks/location?token=...` is the obvious move and the wrong one: every generic scanner, including the iOS Camera app's built-in detection, offers to _open_ a URL — putting a live secret in Safari's address bar and history in exchange for a 405. A JSON envelope renders as text, which nothing offers to act on. It carries a version because a scanned code is the one input in this system that can be arbitrarily old: a screenshot, a printout, a photo of a monitor.
 
-**The scanner is hand-written against AVFoundation.** The packaged Capacitor plugin is a two-command install but drags a third-party barcode library and its transitive dependencies into the binary, plus a web fallback that never runs. The repo's principle is not "hand-roll everything" — the three existing ObjC plugins exist because the packaged ones *could not do the job* — but the shell lags a TestFlight cycle behind the web app, so fewer moving parts in the binary is worth more here than elsewhere.
+**The scanner is hand-written against AVFoundation.** The packaged Capacitor plugin is a two-command install but drags a third-party barcode library and its transitive dependencies into the binary, plus a web fallback that never runs. The repo's principle is not "hand-roll everything" — the three existing ObjC plugins exist because the packaged ones _could not do the job_ — but the shell lags a TestFlight cycle behind the web app, so fewer moving parts in the binary is worth more here than elsewhere.
 
 **A two-agent review then found fourteen things, and the shape of them is the lesson.** Four of the six most serious were in one component, and all four were the same mistake wearing different clothes: **the card assumed it owned state the device owns**.
 
-- The field caption "Tracking" *stopped background location tracking*. `SettingsField` wraps its label text and its slot in one `<label>`, and a `<button>` is a labelable element, so it became the label's implicit control. `HintPopover` already dodges this — its trigger is a `<span role="button">` and its comment says why — but that only protects the "?", not whatever a caller passes into the slot. Reproduced with a probe before believing it.
-- The permission prompt *replaced* Start/Stop rather than sitting beside it, so a user whose authorization dropped to While Using — precisely the case the card exists to warn about — had no way to stop the tracker.
+- The field caption "Tracking" _stopped background location tracking_. `SettingsField` wraps its label text and its slot in one `<label>`, and a `<button>` is a labelable element, so it became the label's implicit control. `HintPopover` already dodges this — its trigger is a `<span role="button">` and its comment says why — but that only protects the "?", not whatever a caller passes into the slot. Reproduced with a probe before believing it.
+- The permission prompt _replaced_ Start/Stop rather than sitting beside it, so a user whose authorization dropped to While Using — precisely the case the card exists to warn about — had no way to stop the tracker.
 - Changing the profile started a tracker that had been deliberately stopped, because `start` is the plugin's only way to set a profile and it also arms. Applying the choice on selection was the same call as switching on.
 - A refused action left the card showing what had been asked for rather than what the device has.
 
-**A relative webhook URL is a QR the phone can only reject.** With `[site] hostname` unset the generate endpoint returned a path with no scheme, which the payload decoder refuses for not being https — so the device reported "not an Istota provisioning code" and blamed the code rather than the config. Where it bites is the interesting part: under Nextcloud auth a blank hostname already 403s every request at the origin check, so the endpoint is unreachable. It is *only* reachable in no-auth mode, which is the standalone local install, which is exactly the shape that leaves hostname blank. The guard runs before minting, since rotating a token and then refusing would cut off working devices for nothing.
+**A relative webhook URL is a QR the phone can only reject.** With `[site] hostname` unset the generate endpoint returned a path with no scheme, which the payload decoder refuses for not being https — so the device reported "not an Istota provisioning code" and blamed the code rather than the config. Where it bites is the interesting part: under Nextcloud auth a blank hostname already 403s every request at the origin check, so the endpoint is unreachable. It is _only_ reachable in no-auth mode, which is the standalone local install, which is exactly the shape that leaves hostname blank. The guard runs before minting, since rotating a token and then refusing would cut off working devices for nothing.
 
 **Two tests were named "off-shell" and tested something else.** They removed the plugin while leaving the shell's User Agent in place, so they exercised plugin-absence — and that is not the same test, because a page can carry a `window.Capacitor` shim without being in the shell at all, which is the premise of the first test in the same file. They passed while six of eight facade exports were gated on plugin presence only, against both the spec's rule and the module's own docstring.
 
-**Where a test could not be honest, it says so.** The bits-ui `Select` cannot be opened under jsdom, so the profile *switch* is asserted through what the DOM does expose — the deferred-choice warning, and Start carrying a profile — rather than by driving the widget. A test that appeared to cover it but passed because the plugin was never called at all was removed rather than kept.
+**Where a test could not be honest, it says so.** The bits-ui `Select` cannot be opened under jsdom, so the profile _switch_ is asserted through what the DOM does expose — the deferred-choice warning, and Start carrying a profile — rather than by driving the widget. A test that appeared to cover it but passed because the plugin was never called at all was removed rather than kept.
 
-**A process note worth more than the code.** Two commits initially swept concurrent uncommitted work into them, because two files had been edited by both sides and a whole-file `git add` takes the other side's hunks with it. Repaired by soft-resetting and staging reconstructed blobs (`git hash-object -w` + `git update-index --cacheinfo`) so the index held only the intended lines while the working tree kept everything. The general form: in a shared tree, "stage specific files" is not sufficient — a shared *file* needs its hunks separated too.
+**A process note worth more than the code.** Two commits initially swept concurrent uncommitted work into them, because two files had been edited by both sides and a whole-file `git add` takes the other side's hunks with it. Repaired by soft-resetting and staging reconstructed blobs (`git hash-object -w` + `git update-index --cacheinfo`) so the index held only the intended lines while the working tree kept everything. The general form: in a shared tree, "stage specific files" is not sufficient — a shared _file_ needs its hunks separated too.
 
 **Key changes:**
+
 - `provisioning.ts` — the QR payload contract, encode and a defensive decode (version, field types, https scheme, three length bounds) shared by the page that writes codes and the phone that reads them.
 - `QrCode.svelte` — `uqr`'s module matrix rendered as inline `<rect>`s rather than its `renderSVG`, which would mean `{@html}`; the quiet zone lives in the `viewBox` because as CSS padding it would be the page's colour rather than the code's background.
 - `nativeLocation.ts` — the tracker facade, every export behind one accessor so the shell-version gate cannot be present on some calls and absent on others.
@@ -73,6 +122,7 @@ Stage 4 of the native-iOS spec: mint a location ingest token on `/location/setti
 - `IstotaQrScanner` in the shell, at 0.7.0.
 
 **Files added/modified:**
+
 - `web/src/lib/location/provisioning.ts` - payload contract + decoder
 - `web/src/lib/components/location/QrCode.svelte` - matrix to inline SVG
 - `web/src/lib/components/location/DeviceTrackerCard.svelte` - the device card
@@ -89,13 +139,13 @@ Stage 4 of the native-iOS spec: mint a location ingest token on `/location/setti
 
 ISSUE-212 read as a routing gap — "a transient 529 should trigger a fallback attempt". The routing was fine. `parse_api_error` only matched `API Error: NNN {json}`, and the CLI does not always attach a body, so `API Error: 529 Overloaded` parsed as **nothing**: not transient, so not retried; classified as a generic `error`, which isn't in the fallback trigger set. Every layer downstream was reasoning correctly about a provider outage it had no idea was one.
 
-**Why the raw text reached the user is a second bug, not the same one.** A failed task's error is friendly-formatted before delivery, so a failure could never have surfaced verbatim as "the answer". `claude -p` reports some provider errors as a *successful* result frame with the error as the whole answer — exactly what it does for subscription limits, which `is_usage_limit_banner` already caught on that branch. The API-error case had no such guard, so it was delivered as the reply. Both halves needed fixing; only the first is what the issue described.
+**Why the raw text reached the user is a second bug, not the same one.** A failed task's error is friendly-formatted before delivery, so a failure could never have surfaced verbatim as "the answer". `claude -p` reports some provider errors as a _successful_ result frame with the error as the whole answer — exactly what it does for subscription limits, which `is_usage_limit_banner` already caught on that branch. The API-error case had no such guard, so it was delivered as the reply. Both halves needed fixing; only the first is what the issue described.
 
 **The enumerated status set was the same bug in waiting.** `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` looks exhaustive until a Cloudflare-fronted provider emits 520–526 — none listed, each dead-ending precisely as the 529 did. The live rule is now "every 5xx, plus 408/425/429"; the constant survives as documentation.
 
-**The fix's own near-miss is the part worth remembering.** Widening `parse_api_error` silently weaponised three pre-existing consumers written against the narrow shape: the scheduler's masquerading-success guard, its twin on the inline path, and `_is_policy_refusal`. All three *discard a completed answer*. So an ordinary reply mentioning `API Error: 529` — a log summary, an ops question, a briefing about yesterday's outage — would have been failed, retried three times producing the same answer, failed permanently, and (via the policy path) told the user their content had been blocked. Both reviewers found it independently; nothing in the suite covered that guard at all. The lesson generalises past this issue: **widening a parser is a change to every consumer's decision, and the consumers that act destructively need the strict predicate, not the permissive one.**
+**The fix's own near-miss is the part worth remembering.** Widening `parse_api_error` silently weaponised three pre-existing consumers written against the narrow shape: the scheduler's masquerading-success guard, its twin on the inline path, and `_is_policy_refusal`. All three _discard a completed answer_. So an ordinary reply mentioning `API Error: 529` — a log summary, an ops question, a briefing about yesterday's outage — would have been failed, retried three times producing the same answer, failed permanently, and (via the policy path) told the user their content had been blocked. Both reviewers found it independently; nothing in the suite covered that guard at all. The lesson generalises past this issue: **widening a parser is a change to every consumer's decision, and the consumers that act destructively need the strict predicate, not the permissive one.**
 
-**Making the strict predicate actually strict took a third gate.** Anchoring at the start and capping the length still admits `API Error: 529 means the provider is overloaded; retry shortly.` — a plausible answer to "what does a 529 mean?". The discriminator that works is *case*: every real banner's tail is a Title-cased reason phrase or a JSON body (`529 Overloaded`, `500 Internal Server Error`, `Connection error.`), while prose continues in lowercase. HTTP reason phrases are Title Case by convention and provider messages follow; a sentence continuing after a number is not.
+**Making the strict predicate actually strict took a third gate.** Anchoring at the start and capping the length still admits `API Error: 529 means the provider is overloaded; retry shortly.` — a plausible answer to "what does a 529 mean?". The discriminator that works is _case_: every real banner's tail is a Title-cased reason phrase or a JSON body (`529 Overloaded`, `500 Internal Server Error`, `Connection error.`), while prose continues in lowercase. HTTP reason phrases are Title Case by convention and provider messages follow; a sentence continuing after a number is not.
 
 **A success-frame reclassification must not be retried.** The CLI ran to completion, so it may have executed tools — re-running the same prompt repeats them (a re-sent email, a re-applied edit), three times per attempt on top of the task-level ladder. `BrainResult.work_committed` marks that case and vetoes the in-brain retry, making it reroute-only.
 
@@ -104,6 +154,7 @@ ISSUE-212 read as a routing gap — "a transient 529 should trigger a fallback a
 **Not done, deliberately:** the briefing `pin` posture is declared in `brain/_postures.py` but unimplemented (ISSUE-180's scope), so default-on transient fallback lets a briefing ride the fallback more often. Production behaviour is unchanged — the Ansible default was already `true` — but this is the one place the change makes an existing gap easier to hit.
 
 **Key changes:**
+
 - `parse_api_error` accepts the bodyless `API Error: NNN <text>` form; `_status_is_transient` replaces the enumerated set as the live rule.
 - New classifiers: `is_permanent_api_error`, `api_error_stop_reason` (the single one every path calls), `is_api_error_banner`, `parse_retry_after`.
 - Success-frame guards on all four `claude_code` branches and on the tmux brain, which had the identical hole; the tmux pane-error branch now returns `transient_api_error` rather than a bare `error` no trigger matched.
@@ -111,9 +162,10 @@ ISSUE-212 read as a routing gap — "a transient 529 should trigger a fallback a
 - `BrainResult.work_committed` makes a success-frame reclassification reroute-only; the backoff is slept in slices so `!stop` lands during a provider-requested wait.
 - Native side: `classify_error` recovers the `HTTP NNN:` status the provider layer stamps into the message, closing the NB-13 call-site gap; Retry-After honoured and capped on both brains.
 - Permanent provider errors skip the task-level 1/4/16-minute ladder as well as the in-brain retry.
-- `fallback_on_transient` defaults on — Ansible shipped `true` while the code default *and* the TOML loader both stayed `false`, so every non-Ansible deployment disagreed with the documented default.
+- `fallback_on_transient` defaults on — Ansible shipped `true` while the code default _and_ the TOML loader both stayed `false`, so every non-Ansible deployment disagreed with the documented default.
 
 **Files added/modified:**
+
 - `src/istota/brain/claude_code.py` - classifiers, banner detector, retry-after, sliced interruptible backoff
 - `src/istota/brain/tmux_claude.py` - success-frame parity + transient stop_reason on pane errors
 - `src/istota/brain/native.py` - status-authoritative classification, network errors transient, Retry-After
@@ -133,7 +185,7 @@ The guard was the easy half, and smaller than the issue expected. The write-up p
 
 **That it stops being a link is worth its own note.** `/istota/logout` is a GET that clears the session, so as an anchor it was reachable by anything that follows links speculatively — a prefetcher, a link scanner, a crawler with a session cookie. Not the reported bug, and not why the change was made, but the same edit closes it.
 
-**The sizing half is where the interesting mistake lives, because the obvious version of it recreates the bug.** Giving each of the three nav icons a 44px hit area, one control at a time, is the natural reading of "bump both to the ~44px minimum". It is wrong: the icons are 14–18px glyphs at a `0.75rem` gap, so 44px targets *overlap*, and a tap in the seam lands on whichever won the stacking order rather than on what the user aimed at — which is precisely the accidental-logout mechanism, now with a larger seam. Targets in a row have to be sized as a row. So the gap goes to `1.25rem` first (centres ≥44px apart at the default text scale), and only then does each control get its area — as an out-of-flow `::before` overlay, reusing `SidebarToggle`'s device so reaching the minimum costs the nav no height. Scoped to ≤640px; pointer precision on a desktop doesn't need it and oversized invisible targets there would only swallow clicks.
+**The sizing half is where the interesting mistake lives, because the obvious version of it recreates the bug.** Giving each of the three nav icons a 44px hit area, one control at a time, is the natural reading of "bump both to the ~44px minimum". It is wrong: the icons are 14–18px glyphs at a `0.75rem` gap, so 44px targets _overlap_, and a tap in the seam lands on whichever won the stacking order rather than on what the user aimed at — which is precisely the accidental-logout mechanism, now with a larger seam. Targets in a row have to be sized as a row. So the gap goes to `1.25rem` first (centres ≥44px apart at the default text scale), and only then does each control get its area — as an out-of-flow `::before` overlay, reusing `SidebarToggle`'s device so reaching the minimum costs the nav no height. Scoped to ≤640px; pointer precision on a desktop doesn't need it and oversized invisible targets there would only swallow clicks.
 
 **Consolidating the three controls onto a shared `.nav-icon-btn` rule was not tidying.** Hoisting the repeated reset put `background: none` in a rule with the same specificity as each component's scoped `:hover` — `.app-nav .nav-right .nav-icon-btn` and `.theme-btn.svelte-hash:hover` are both (0,3,0), a tie broken only by stylesheet order, i.e. a hover that works until something reorders CSS. The hover is byte-identical across all three anyway, so it moved up with the reset and the tie is gone.
 
@@ -142,12 +194,14 @@ The one seam added is a `navigate` prop on `LogoutButton`, defaulting to the rea
 **Not verified:** the ~44px geometry is arithmetic against rendered box sizes, not a measured screenshot — the browser tooling wasn't reachable this session. Worth a look on a real phone.
 
 **Key changes:**
+
 - Logout is a confirmed action, not a bare link — `LogoutButton.svelte` wrapping the existing shared `ConfirmDialog`.
 - The three nav icon controls share one `.nav-icon-btn` rule carrying layout, reset and hover; only resting colour stays per control.
 - Below 640px each gets a ~44px out-of-flow hit area, and the row's gap widens so those areas stay disjoint.
 - `web/AGENTS.md` gained the size-a-row-of-targets-together rule, since the overlap trap is not obvious from the 44px guideline alone.
 
 **Files added/modified:**
+
 - `web/src/lib/components/LogoutButton.svelte` - new; button + confirm dialog, injectable `navigate`
 - `web/src/lib/components/LogoutButton.svelte.test.ts` - new; 5 tests, all failing without the gate
 - `web/src/routes/+layout.svelte` - logout markup replaced by the component; scoped styles reduced to resting colour
@@ -158,9 +212,9 @@ The one seam added is a `navigate` prop on `LogoutButton`, defaulting to the rea
 
 Reported as "503 despite correct info" on the Monarch email/password connect flow. The deployment server's web-unit journal named it on the first look: `monarch_login_client_outdated current=2025.10.0`, with Monarch answering 403 `"Please update to the latest version of the app to continue login."` We send a `monarch-client-version` header; ours had gone stale.
 
-**The interesting part is why it rotted invisibly.** Monarch checks the version *after* validating credentials. Probing `/auth/login/` with a bogus email returns 404 "Invalid email and password combination" and never reaches the gate — confirmed from the deployment host with both the old and new header values, which behave identically against a bad account. So no credential-free probe can detect staleness, no unit test can, and the only symptom is a *correct* login 503-ing, which reads like a Monarch outage rather than our bug. That is a defect class worth naming: a value that is only exercised on the success path, behind a gate you can't reach without real credentials.
+**The interesting part is why it rotted invisibly.** Monarch checks the version _after_ validating credentials. Probing `/auth/login/` with a bogus email returns 404 "Invalid email and password combination" and never reaches the gate — confirmed from the deployment host with both the old and new header values, which behave identically against a bad account. So no credential-free probe can detect staleness, no unit test can, and the only symptom is a _correct_ login 503-ing, which reads like a Monarch outage rather than our bug. That is a defect class worth naming: a value that is only exercised on the success path, behind a gate you can't reach without real credentials.
 
-**The value is not stable enough to hardcode, which changed the design mid-session.** The plan was to bump the constant and self-heal on rejection. Then `app.monarch.com/version.json` — a 23-byte `{"version": …}` manifest carrying exactly the `clientVersion` the app bundle sends — returned `v1.0.3697` early in the session and `v1.0.3696` a couple of hours later, consistently, from two hosts. It moves within hours and not always forwards. So discovery moved *ahead* of the login rather than being a recovery path: resolve from the manifest first (cached per process), attempt, and only on rejection re-read and retry once. Pre-fetching is what avoids spending a failed credential submission on every cold process against an endpoint the module itself documents as rate-limited behind a sticky CAPTCHA gate. The constant survives purely as a cold-start fallback for an unreachable manifest. Exactly one retry, never a loop.
+**The value is not stable enough to hardcode, which changed the design mid-session.** The plan was to bump the constant and self-heal on rejection. Then `app.monarch.com/version.json` — a 23-byte `{"version": …}` manifest carrying exactly the `clientVersion` the app bundle sends — returned `v1.0.3697` early in the session and `v1.0.3696` a couple of hours later, consistently, from two hosts. It moves within hours and not always forwards. So discovery moved _ahead_ of the login rather than being a recovery path: resolve from the manifest first (cached per process), attempt, and only on rejection re-read and retry once. Pre-fetching is what avoids spending a failed credential submission on every cold process against an endpoint the module itself documents as rate-limited behind a sticky CAPTCHA gate. The constant survives purely as a cold-start fallback for an unreachable manifest. Exactly one retry, never a loop.
 
 DEVLOG 2026-05-15 recorded the original value as live-verified — Monarch validated the field loosely then ("anything reasonable-looking is accepted"). That's worth keeping straight: `2025.10.0` was accepted when chosen and later refused, not wrong from the start. It sets the expectation that this will drift again.
 
@@ -170,9 +224,10 @@ DEVLOG 2026-05-15 recorded the original value as live-verified — Monarch valid
 
 Scully also caught that a full revert of the GraphQL header change survived the suite, so the request-shape test now pins that pair too. Nine mutations were checked against the new assertions; all nine fail.
 
-**Deliberately not done.** Persisting the discovered version across restarts — each process pays one 23-byte GET, which is cheaper than coordinating shared state. And Mulder's point that a Chrome UA over an aiohttp TLS fingerprint is a UA/JA3 mismatch that could *raise* Cloudflare's bot score on the API path: the browser UA was an explicit instruction and it verifies working from the deployment host, but it's the first thing to revisit if Monarch sync starts getting challenged.
+**Deliberately not done.** Persisting the discovered version across restarts — each process pays one 23-byte GET, which is cheaper than coordinating shared state. And Mulder's point that a Chrome UA over an aiohttp TLS fingerprint is a UA/JA3 mismatch that could _raise_ Cloudflare's bot score on the API path: the browser UA was an explicit instruction and it verifies working from the deployment host, but it's the first thing to revisit if Monarch sync starts getting challenged.
 
 **Files added/modified:**
+
 - `src/istota/money/_vendor/monarch_client.py` - manifest-backed version resolution (`fetch_live_client_version`, `_resolve_client_version`), pre-fetch + single retry, per-transport client names, browser UA, header-size ceiling on all three sessions, `_safe_json` non-object guard
 - `src/istota/web_app.py` - route docstring now names all three conditions behind its 503
 - `scripts/probe_monarch_login.py` - reports the live version, and handles the outdated/CAPTCHA cases instead of tracebacking on the one failure mode it exists to diagnose
@@ -183,21 +238,22 @@ Scully also caught that a full revert of the GraphQL header change survived the 
 
 Two halves: verifying yesterday's ISSUE-213 fix against something other than its own tests, and adding the markdown capability the transport never had.
 
-**The review's method mattered more than its findings.** The fix rests on one claim the unit tests structurally cannot check — that the *receiver* decodes RFC 2047 encoded-words. A test that encodes with Python and decodes with Python proves the encoder is self-consistent, not that ntfy understands it. So the verification went outside: ntfy's docs name RFC 2047 support for title/tags/actions, and its `maybeDecodeHeader` applies the decode to **every** header read through `readParam` — which incidentally covers the skill CLI's `Click` header, the one the docs don't mention. The multi-word split has the same shape of risk, since it relies on the decoder dropping whitespace *between* adjacent encoded-words; confirmed in Go's `mime/encodedword.go` (`betweenWords` / `hasNonWhitespace`), so the space-joined chunks round-trip and the tests' Python model agrees with the real decoder on the one point where they could have diverged. The chunk arithmetic checks out exactly: 12 chars of prefix+suffix plus 60 base64 chars is 72, and 46 raw bytes would overflow to 76 — 45 is the largest safe value, not a round number someone picked.
+**The review's method mattered more than its findings.** The fix rests on one claim the unit tests structurally cannot check — that the _receiver_ decodes RFC 2047 encoded-words. A test that encodes with Python and decodes with Python proves the encoder is self-consistent, not that ntfy understands it. So the verification went outside: ntfy's docs name RFC 2047 support for title/tags/actions, and its `maybeDecodeHeader` applies the decode to **every** header read through `readParam` — which incidentally covers the skill CLI's `Click` header, the one the docs don't mention. The multi-word split has the same shape of risk, since it relies on the decoder dropping whitespace _between_ adjacent encoded-words; confirmed in Go's `mime/encodedword.go` (`betweenWords` / `hasNonWhitespace`), so the space-joined chunks round-trip and the tests' Python model agrees with the real decoder on the one point where they could have diverged. The chunk arithmetic checks out exactly: 12 chars of prefix+suffix plus 60 base64 chars is 72, and 46 raw bytes would overflow to 76 — 45 is the largest safe value, not a round number someone picked.
 
 Two claims in the fix's own write-up were worth confirming rather than accepting: the diagnosis correction (httpx encodes headers as ASCII, not latin-1 — so `Äpfel` failed too) and the widened blast radius (`format_briefing_title` hardcodes an em-dash, so every briefing pushed to a phone had been failing). Both hold.
 
 Findings were all minor and none were fixed, deliberately — the review wasn't asked to change code. Recorded in the issue entry instead: `_MAX_CHUNK_BYTES` is hand-derived from a constant that production code never reads; control characters other than CR/LF still pass through untouched (pre-existing — the old inline scrub replaced exactly the same two characters); the ASCII-retry backstop exists on the transport but not the skill CLI.
 
-**Then markdown, which is mostly a judgement call about a platform caveat.** ntfy renders markdown in its web app only — a phone notification popup shows the source, so `**3 builds failed**` arrives with the asterisks visible. Most pushes are read on a phone, which makes an always-on flag actively worse than plain text, and makes the interesting part of this feature the guidance rather than the header. The skill body therefore tells the model to default to plain text, reach for the flag only when the message is structured enough that the shape carries meaning *and* the markers stay readable in the popup, and never to use it just to bold a word.
+**Then markdown, which is mostly a judgement call about a platform caveat.** ntfy renders markdown in its web app only — a phone notification popup shows the source, so `**3 builds failed**` arrives with the asterisks visible. Most pushes are read on a phone, which makes an always-on flag actively worse than plain text, and makes the interesting part of this feature the guidance rather than the header. The skill body therefore tells the model to default to plain text, reach for the flag only when the message is structured enough that the shape carries meaning _and_ the markers stay readable in the popup, and never to use it just to bold a word.
 
 Opt-in also protects existing behaviour for a second reason: a plain body like `3 * 4 = 12 #win` would be mangled by a renderer. Two tests pin that — no header and a verbatim body when the flag is absent — which is what makes them regression guards rather than feature tests.
 
-One non-obvious implementation detail. The `Markdown` header is set *outside* the `encode_header_value` path the other free-text headers go through. It is a fixed ASCII literal, so the lossy ASCII-only retry has nothing to flatten, and routing it through there would let a fallback silently downgrade the render mode and deliver raw markup as prose. There's a test for that specific path.
+One non-obvious implementation detail. The `Markdown` header is set _outside_ the `encode_header_value` path the other free-text headers go through. It is a fixed ASCII literal, so the lossy ASCII-only retry has nothing to flatten, and routing it through there would let a fallback silently downgrade the render mode and deliver raw markup as prose. There's a test for that specific path.
 
 Scope call: `DeliveryOptions.markdown` is reachable by internal producers that construct the object directly (the briefing push does), but no `markdown=` kwarg was threaded through `notifications.send_notification` — that function spans every surface and the request was for the skill path.
 
 **Files added/modified:**
+
 - `src/istota/transport/_types.py` - `DeliveryOptions.markdown` field + the opt-in rationale
 - `src/istota/transport/ntfy/__init__.py` - emits `Markdown: yes`, outside the encode/flatten path
 - `src/istota/skills/ntfy/__init__.py` - `--markdown` flag on `send`
@@ -209,23 +265,24 @@ Scope call: `DeliveryOptions.markdown` is reachable by internal producers that c
 
 The nextcloud skill shipped with ~350 mocked tests and no run against an actual Nextcloud. Standing one up found five real defects, two of which meant a verb had never worked at all.
 
-**The mocks encoded the bugs.** `files search` 404'd every single call: the `d:basicsearch` scope href carried `/remote.php/dav/files/<user>`, but Sabre resolves that href *relative to* the SEARCH request URL, so it went hunting for a collection literally named `remote.php`. The unit test asserted the broken href by name (`test_scope_is_the_full_dav_href`) — the test and the code agreed with each other and both were wrong. Same shape for activity: `--type files` built `/activity/filter/files`, which is not a route; the named-stream form is `/activity/files` and the reserved `filter` segment is for object lookups. Neither could survive contact with a server, and neither had.
+**The mocks encoded the bugs.** `files search` 404'd every single call: the `d:basicsearch` scope href carried `/remote.php/dav/files/<user>`, but Sabre resolves that href _relative to_ the SEARCH request URL, so it went hunting for a collection literally named `remote.php`. The unit test asserted the broken href by name (`test_scope_is_the_full_dav_href`) — the test and the code agreed with each other and both were wrong. Same shape for activity: `--type files` built `/activity/filter/files`, which is not a route; the named-stream form is `/activity/files` and the reserved `filter` segment is for object lookups. Neither could survive contact with a server, and neither had.
 
-**Two Talk defects with different characters.** `talk send` always reported `message_id: null`, so `--reply-to` couldn't be chained off a send — `send_message` is the one `TalkClient` method that returns the raw body instead of `ocs.data`, and reading `id` off the envelope silently yields None. Fixed at the CLI rather than changing the client, since the transport mirror and web_app both depend on the raw shape. The worse one was `talk search --token`, which returned **the inverse of what it promised**: it passed the token as the unified-search `from` parameter, which means "the page I am currently on", so the provider *excludes* that conversation. Verified with two rooms holding the same term — `from=/call/A` returned only room B. An agent asked to find something in a room would have gotten hits from other rooms and reported them as if local. Now filtered client-side on `attributes.conversation`, over-fetching so `--limit` applies after the filter.
+**Two Talk defects with different characters.** `talk send` always reported `message_id: null`, so `--reply-to` couldn't be chained off a send — `send_message` is the one `TalkClient` method that returns the raw body instead of `ocs.data`, and reading `id` off the envelope silently yields None. Fixed at the CLI rather than changing the client, since the transport mirror and web_app both depend on the raw shape. The worse one was `talk search --token`, which returned **the inverse of what it promised**: it passed the token as the unified-search `from` parameter, which means "the page I am currently on", so the provider _excludes_ that conversation. Verified with two rooms holding the same term — `from=/call/A` returned only room B. An agent asked to find something in a room would have gotten hits from other rooms and reported them as if local. Now filtered client-side on `attributes.conversation`, over-fetching so `--limit` applies after the filter.
 
-**The fifth one was luck.** The run crossed UTC midnight and every `share link --days 1` started failing with "Expiration date is in the past". `expiry_date` computed from `date.today()` — the *client's local* date — while Nextcloud evaluates against its own clock. At 17:04 PDT the server was already on tomorrow, so `--days 1` produced a date the server called past. For a Pacific user against a UTC server that is a dead seven-hour window every day. An hour earlier and this ships. Base is UTC now; a server running *ahead* of UTC is a documented residual that would need the date from the server itself.
+**The fifth one was luck.** The run crossed UTC midnight and every `share link --days 1` started failing with "Expiration date is in the past". `expiry_date` computed from `date.today()` — the _client's local_ date — while Nextcloud evaluates against its own clock. At 17:04 PDT the server was already on tomorrow, so `--days 1` produced a date the server called past. For a Pacific user against a UTC server that is a dead seven-hour window every day. An hour earlier and this ships. Base is UTC now; a server running _ahead_ of UTC is a documented residual that would need the date from the server itself.
 
 **Two things about testing that are worth carrying forward.** First: the live suite drives `main(argv)`, not the module functions, so argparse, path scoping, the error envelope and the exit code are all in the path — the surface the model actually reaches. Second: "all verbs exercised" is not "all verbs verified". A coverage guard proved 44/44 verbs were touched, but an AST pass looking for tests whose every assertion was `isinstance` or bare truthiness found five that proved nothing — `share list --path` asserted a list came back, which an implementation ignoring the filter entirely would satisfy. And two verbs (`notify get`/`dismiss`) had never executed at all: their test skipped whenever the notification queue was empty, which it always was, hiding that it also read the wrong key. It seeds its own notification now. The guard lives in the default suite rather than the live file, because the live file is skipped without credentials and a guard that skips guards nothing.
 
-**Then the second half: web chat had no way to hand over a file.** Raised as a hypothetical — user asks for something that produces a file, then wants to open it. Checking rather than assuming: attachments are inbound-only, there is no assistant-side attachment rendering, and there was no authenticated download route. So the only available answer was minting a *public* Nextcloud link to show someone a file they already own — turning an authenticated-only file into a bearer URL, for the one person who didn't need one. `GET /api/chat/files?path=` serves it inside the session instead, and link shares go back to being for giving a file to somebody else.
+**Then the second half: web chat had no way to hand over a file.** Raised as a hypothetical — user asks for something that produces a file, then wants to open it. Checking rather than assuming: attachments are inbound-only, there is no assistant-side attachment rendering, and there was no authenticated download route. So the only available answer was minting a _public_ Nextcloud link to show someone a file they already own — turning an authenticated-only file into a bearer URL, for the one person who didn't need one. `GET /api/chat/files?path=` serves it inside the session instead, and link shares go back to being for giving a file to somebody else.
 
-Confinement is two independent checks because they catch different escapes: the lexical one reuses `resolve_scoped_path`, so the browser and the model are held to one rule, and a `realpath` pass afterwards catches a symlink *inside* the workspace pointing out — which no string normalization can see. No admin bypass, deliberately: `resolve_scoped_path` normally lets an admin address anything, but this is the most directly reachable read path on the web app and widening it would also make it the widest. Always `Content-Disposition: attachment` plus `nosniff`, because the workspace holds user-authored HTML and SVG and rendering those inline would execute them on the app's own origin against the cookie that just authorized the read.
+Confinement is two independent checks because they catch different escapes: the lexical one reuses `resolve_scoped_path`, so the browser and the model are held to one rule, and a `realpath` pass afterwards catches a symlink _inside_ the workspace pointing out — which no string normalization can see. No admin bypass, deliberately: `resolve_scoped_path` normally lets an admin address anything, but this is the most directly reachable read path on the web app and widening it would also make it the widest. Always `Content-Disposition: attachment` plus `nosniff`, because the workspace holds user-authored HTML and SVG and rendering those inline would execute them on the app's own origin against the cookie that just authorized the read.
 
-**The guidance mattered as much as the endpoint.** The skill said "*Asked* for a download link? Use `share link`" — a trigger that fires when the user asks for a link, not when a task produced a file. And `nextcloud` is a menu skill whose triggers are all sharing vocabulary, so "pull my Q3 numbers into a CSV" would never reach for it; the model would quote a filesystem path the browser user cannot open. The rule belongs in `web.md`, which is always loaded for web tasks and is where a surface-specific fact should live. Writing it exposed that `{user_id}` was never substituted in guidelines (only skills did it, despite AGENTS.md documenting it for both), so the example link would have rendered a literal placeholder.
+**The guidance mattered as much as the endpoint.** The skill said "_Asked_ for a download link? Use `share link`" — a trigger that fires when the user asks for a link, not when a task produced a file. And `nextcloud` is a menu skill whose triggers are all sharing vocabulary, so "pull my Q3 numbers into a CSV" would never reach for it; the model would quote a filesystem path the browser user cannot open. The rule belongs in `web.md`, which is always loaded for web tasks and is where a surface-specific fact should live. Writing it exposed that `{user_id}` was never substituted in guidelines (only skills did it, despite AGENTS.md documenting it for both), so the example link would have rendered a literal placeholder.
 
-The confirmation rule was also genuinely ambiguous here — "confirm unless the share is with the task's own user" doesn't say what a *public link* to your own file is. It now splits three ways: the user asking for a link is itself the authorization; deciding a link would be nice for the requesting user means don't make one; anyone else means confirm every time, naming who and for how long.
+The confirmation rule was also genuinely ambiguous here — "confirm unless the share is with the task's own user" doesn't say what a _public link_ to your own file is. It now splits three ways: the user asking for a link is itself the authorization; deciding a link would be nice for the requesting user means don't make one; anyone else means confirm every time, naming who and for how long.
 
 **Files added/modified:**
+
 - `tests/test_nextcloud_skill_live.py` - New. 54 live tests, all 44 CLI verbs, tiered by blast radius behind `NC_TEST_*` env gates
 - `src/istota/nextcloud/dav.py` - SEARCH scope href relative to the DAV root (`_dav_scope_prefix`)
 - `src/istota/nextcloud/notifications.py` - Named activity stream is a path segment; object lookup uses the reserved `filter` segment
@@ -242,7 +299,7 @@ The confirmation rule was also genuinely ambiguous here — "confirm unless the 
 
 ## 2026-07-26: Remove the static web root (ISSUE-194) — the confirmation model gates channels, and a public directory isn't one
 
-The instance web root was an agent-writable directory served unauthenticated by nginx. `cp <anything> $WEBSITE_PATH/` published it. The confirmation framework never saw this because it enumerates outbound *channels* — external email, Nextcloud shares, ntfy, browser form posts — and a local filesystem write is explicitly on the safe side of that line. The classification is channel-aware when the property that matters is whether the destination is publicly reachable.
+The instance web root was an agent-writable directory served unauthenticated by nginx. `cp <anything> $WEBSITE_PATH/` published it. The confirmation framework never saw this because it enumerates outbound _channels_ — external email, Nextcloud shares, ntfy, browser form posts — and a local filesystem write is explicitly on the safe side of that line. The classification is channel-aware when the property that matters is whether the destination is publicly reachable.
 
 **Why removal rather than path-aware classification.** The obvious fix is to teach the write path "if the destination resolves somewhere public, treat it as outbound." That leaves the decision inside the model's reasoning, and the threat here is precisely instructions arriving in ingested content — a fetched page, an email body, an OCR'd screenshot — that argue their way past a judgement call. The unguessable-random-filename mitigation is worth nothing for the same reason: obscurity defends against an outsider guessing a URL, not an insider choosing one. Deleting the primitive can't be argued with. The worst single line the route allowed was `cp data/istota.db html/x.db` — a multi-user dump where only the `secrets` table is encrypted, so the blast radius was every user's notes index, KV, facts and conversation history, not just the operator's.
 
@@ -255,6 +312,7 @@ A stale `[site] enabled`/`base_path` logs a warning at config load rather than f
 Left alone deliberately: the existing files under `{{ istota_home }}/html`. Nothing serves or writes them after this, and auto-deleting operator content during a playbook run is the wrong default. Full suite green (8564 passed, 7 skipped); ruff unchanged against its 479-error baseline.
 
 **Files touched.**
+
 - `src/istota/config.py` — `SiteConfig` reduced to `hostname`; `[site]` parse warns on the retired keys
 - `src/istota/executor.py` — removed the bwrap bind, `native_fs_roots` write root, `WEBSITE_*` env, and Web Root prompt section
 - `deploy/ansible/{defaults,tasks}/main.yml`, `templates/{istota.conf,config.toml}.j2`, `README.md`, `deploy/settings_to_vars.py`, `deploy/wizard.sh` — vars, tasks and vhost; deleted `templates/index.html.j2`
@@ -267,9 +325,9 @@ The chat input was three separate boxes in a row — a bordered attach button, a
 
 **Item 5 died on contact with the device.** The ask included removing the iOS keyboard accessory bar (the `< > ✓` strip). The only lever web content has is rendering the field as `contenteditable` instead of `<textarea>`, and I did not know whether current iOS still shows the bar for those — so rather than guess or commit to porting the autocomplete engine off `value`/`selectionStart`, the first thing built was a throwaway static page with five variants (textarea, contenteditable, plaintext-only contenteditable, input, textarea-in-a-form) reporting `visualViewport.height` live, since the bar is ~44pt and would show as a measurable difference. All five triggered it. Item dropped, test page deleted. Worth remembering the shape: a five-minute static page settled a question that would otherwise have cost a speculative refactor.
 
-**The buttons looked like they scaled and didn't.** Switching `.icon-btn` to `2.35em` and sizing the glyph via CSS (rather than lucide's `size` prop, which bakes px into the width/height attributes) *appeared* to work on screen. Measuring it in the browser said 31px at small, medium and large alike. A `<button>` does not inherit font by default, so every `em` was resolving against the UA stylesheet's ~13.3px. One `font: inherit` later: 32/35/38px against text of 13.6/14.96/16.32px. This is the second time this session that eyeballing a screenshot agreed with a change that was doing nothing.
+**The buttons looked like they scaled and didn't.** Switching `.icon-btn` to `2.35em` and sizing the glyph via CSS (rather than lucide's `size` prop, which bakes px into the width/height attributes) _appeared_ to work on screen. Measuring it in the browser said 31px at small, medium and large alike. A `<button>` does not inherit font by default, so every `em` was resolving against the UA stylesheet's ~13.3px. One `font: inherit` later: 32/35/38px against text of 13.6/14.96/16.32px. This is the second time this session that eyeballing a screenshot agreed with a change that was doing nothing.
 
-**The wrap oscillation, in two layers.** With the controls dropping below the field on wrap, the field gets *wider* when it wraps — it no longer shares its row. So text that needs two lines at the narrow width fits one line at the wide width, un-wraps, narrows, wraps again: the field alternated one/two rows on consecutive keystrokes. The fix is to make the decision's input independent of its output — always measure at the single-row width, derived from the row minus the `+` button, the tools group and the gaps. The first attempt at that still flipped, because it pinned the temporary width on the *textarea*, which is a flex item with `flex: 1` (basis `0%`) and therefore ignores `width` for sizing; the measurement was still happening at the live width. Pinning the wrapper's inline `flex-basis` (which also beats the `.multiline` rule) is what actually constrains it. Height sizing became a separate pass after `await tick()`, so the field is measured against the width it ends up with rather than the one it's leaving.
+**The wrap oscillation, in two layers.** With the controls dropping below the field on wrap, the field gets _wider_ when it wraps — it no longer shares its row. So text that needs two lines at the narrow width fits one line at the wide width, un-wraps, narrows, wraps again: the field alternated one/two rows on consecutive keystrokes. The fix is to make the decision's input independent of its output — always measure at the single-row width, derived from the row minus the `+` button, the tools group and the gaps. The first attempt at that still flipped, because it pinned the temporary width on the _textarea_, which is a flex item with `flex: 1` (basis `0%`) and therefore ignores `width` for sizing; the measurement was still happening at the live width. Pinning the wrapper's inline `flex-basis` (which also beats the `.multiline` rule) is what actually constrains it. Height sizing became a separate pass after `await tick()`, so the field is measured against the width it ends up with rather than the one it's leaving.
 
 Verifying this needed the browser, because jsdom has no layout: a probe drove 70 keystrokes across the boundary and counted class transitions — one flip growing, one shrinking, where the bug produced dozens. (A detour: the first probes reported 1000ms per keystroke, which was Chrome clamping timers in a backgrounded tab, not a perf regression. Microtask waits instead of `setTimeout`.) The unit test models the same boundary by returning a different `scrollHeight` when the wrapper is pinned, so it fails if the pinning is removed — it proves the logic is stateless, not that the geometry is right.
 
@@ -278,6 +336,7 @@ Verifying this needed the browser, because jsdom has no layout: a probe drove 70
 **Two things surfaced by the user mid-session.** The jump-to-latest FAB was right-aligned to line up with the old square send button; against a round send circle it read as two mismatched arrows in one corner, so it moved to centre — which then exposed that its `opacity: 0.9` had been invisible while it floated over the right margin and let message text read straight through it once centred. And the attachment chip showed "upload" for recordings: that turned out to be the **mock API** returning a hardcoded name, not real behaviour — but chasing it found that the server discards the filename entirely and stores a bare UUID, so uploads now lead with a sanitized stem and the inbox is browsable.
 
 **Key changes:**
+
 - `Composer.svelte` restructured into one pill: `+` / field / mic + filled `↑` send circle, wrapping to controls-below. Wrapper lost its top divider and fill (the pill is self-contained), taking a now-redundant light-theme override with it.
 - Wrap detection measured at a fixed reference width; height sizing split into a post-`tick` pass; `<svelte:window onresize>` re-evaluates.
 - `useRecorder.svelte.ts` — new; `getUserMedia` + `MediaRecorder`, per-browser container, discard/finish controls, releases the mic on stop/cancel/unmount.
@@ -286,6 +345,7 @@ Verifying this needed the browser, because jsdom has no layout: a probe drove 70
 - Tests: 17 new frontend (composer layout/send/voice + recorder unit), 4 new Python (attachment naming, collision, traversal, empty stem).
 
 **Files added/modified:**
+
 - `web/src/lib/components/chat/Composer.svelte` — restructured
 - `web/src/lib/components/chat/useRecorder.svelte.ts` — new
 - `web/src/lib/components/chat/{Composer,useRecorder}.svelte.test.ts` — new
@@ -301,24 +361,26 @@ The drawer toggle on small screens was a tab pinned to the middle of the viewpor
 
 **Where the standard answer is.** The leading slot of the top bar — Material's navigation-icon slot, UIKit's nav-bar leading item — is where a drawer toggle goes, and it needs no chrome at all because it is anchored to something. The glyph is lucide's `PanelLeft` / `PanelLeftClose` rather than a hamburger: the app already uses a kebab for row overflow menus, and "toggle the side panel" is the more precise reading anyway. A tappable title was added alongside it as a forgiving second target, styled plain — a chevron there would promise a dropdown when what opens is a drawer.
 
-**Not making the bar taller is the whole trick.** A 44px button in a bar whose tallest child is a 1.5rem title line box grows the bar by 18px on every page that has one. So the button's *layout* box is `1.5rem` — exactly the title's line box, so it can never be the tallest child — and the touch target is bought back with an out-of-flow `::before` overlay (2.5 × 2.75rem, centred), which costs no layout height. Measured at 500px wide, chat's header with the in-flow button comes out at 45px, identical to a header with no in-flow toggle at all. The overlay bleeds a little over the title, which is harmless precisely because the title fires the same toggle.
+**Not making the bar taller is the whole trick.** A 44px button in a bar whose tallest child is a 1.5rem title line box grows the bar by 18px on every page that has one. So the button's _layout_ box is `1.5rem` — exactly the title's line box, so it can never be the tallest child — and the touch target is bought back with an out-of-flow `::before` overlay (2.5 × 2.75rem, centred), which costs no layout height. Measured at 500px wide, chat's header with the in-flow button comes out at 45px, identical to a header with no in-flow toggle at all. The overlay bleeds a little over the title, which is harmless precisely because the title fires the same toggle.
 
-The negative inline margins are the other half: the box is padding around a small glyph, so `margin-inline-start: -0.35rem` puts the *glyph* on the bar's padding edge rather than the box around it (it lands at ~13.4px against the header's 13.2px padding, so it aligns with where the title starts on pages without the button), and `-0.15rem` on the trailing side eats most of the bar's gap so the icon reads as attached to the title rather than floating beside it.
+The negative inline margins are the other half: the box is padding around a small glyph, so `margin-inline-start: -0.35rem` puts the _glyph_ on the bar's padding edge rather than the box around it (it lands at ~13.4px against the header's 13.2px padding, so it aligns with where the title starts on pages without the button), and `-0.15rem` on the trailing side eats most of the bar's gap so the icon reads as attached to the title rather than floating beside it.
 
 **Money/transactions is the one placement that isn't a `leading` slot.** Its accounts drawer belongs to that sub-route, but the app bar is owned by `money/+layout.svelte` above it, so reaching the leading slot would mean prop-drilling or context for one button. It went to the leading edge of its own `.money-section-tools` toolbar. The section header proper was the first instinct and is wrong: on mobile that row wraps with the tools taking full width on line two, so with no active account filter, line one would have held nothing but the toggle — adding back exactly the height the `1.5rem` box exists to avoid.
 
 **A detour that outlived its reason.** Before the pattern changed, the ask was for the edge tab to cover the chat avatar gutter exactly and stop at the text column. That produced `--chat-row-inline` / `--chat-gutter` / `--chat-avatar` in `app.css`, with the gutter and avatar shrinking below 768px, so `Message.svelte` and the tab could be measured against one number instead of drifting apart. The tab is gone and with it the `width` prop it fed, but the tokens stayed: the mobile shrink reclaims width for message text on its own merits. Only the comments changed, since they were explaining an alignment trick that no longer exists.
 
-**Also folded in:** the toggle is a real toggle now. The edge tab hid itself when the drawer was open (the drawer covered where it stood) and relied on the click-outside backdrop; the header sits *above* the drawer in the shell, so the same button closes it — hence `aria-expanded` and the closing glyph.
+**Also folded in:** the toggle is a real toggle now. The edge tab hid itself when the drawer was open (the drawer covered where it stood) and relied on the click-outside backdrop; the header sits _above_ the drawer in the shell, so the same button closes it — hence `aria-expanded` and the closing glyph.
 
 **Key changes:**
+
 - `SidebarToggle` is a header-leading icon button, mobile-only; the fixed edge-tab variant is deleted along with its `width` prop.
-- `ShellHeader` gains a `leading` snippet and optional `onTitleClick` / `titleActionLabel`; the title renders as a `<button>` *inside* the `h1`, so heading semantics survive and the button gets its own accessible name.
+- `ShellHeader` gains a `leading` snippet and optional `onTitleClick` / `titleActionLabel`; the title renders as a `<button>` _inside_ the `h1`, so heading semantics survive and the button gets its own accessible name.
 - Layout box matches the title's line box; touch target is an out-of-flow pseudo-element. The bar's height is unchanged on every page.
 - Wired on chat, feeds, briefings, location and money/transactions. On the three section pages the toggle only renders off the settings sub-route, so `onTitleClick` is gated identically — otherwise the title would toggle a drawer that isn't mounted.
 - Chat row metrics are tokens in `app.css`; avatar gutter narrows below 768px.
 
 **Files added/modified:**
+
 - `web/src/lib/components/ui/SidebarToggle.svelte` — rewritten
 - `web/src/lib/components/ui/ShellHeader.svelte` — `leading` slot, tappable title
 - `web/src/app.css` — chat row metric tokens + mobile shrink
@@ -332,7 +394,7 @@ Three web-UI changes from one session. The first two are additive; the third cha
 
 **Text scale, and why the root font-size rather than the tokens.** New `lib/stores/fontSize.ts` — `small | medium | large`, localStorage-persisted, reflected onto `<html>` as `data-font-size`. It is a straight copy of the theme store's shape, including a branch in the single pre-paint script in `app.html`, because the size has to be right before first paint or the page reflows on load. That is also the reason it is client-local rather than a `user_profiles` field: profile data arrives after first paint, so server-persisting it would reintroduce the flash it exists to avoid.
 
-The scaling is a percentage on `:root` (`medium` 110%, `large` 120%), not an override of the `--text-*` tokens. Both were viable — the tokens carry 502 of the ~560 `font-size` declarations — but nearly all *spacing* is `rem` too, so scaling the root moves type and the space around it together and the layout keeps its proportions. Scaling only the tokens would grow text inside fixed padding, which is the more likely way to crowd a container. Percentages rather than px so a user who has raised their browser's base font keeps that gain at every level. `small` deliberately has no rule at all: it is the browser's own size, byte-identical to the previous rendering. The residue that does not scale is the four `px` SVG chart labels on the health pages and the borders, both deliberate.
+The scaling is a percentage on `:root` (`medium` 110%, `large` 120%), not an override of the `--text-*` tokens. Both were viable — the tokens carry 502 of the ~560 `font-size` declarations — but nearly all _spacing_ is `rem` too, so scaling the root moves type and the space around it together and the layout keeps its proportions. Scaling only the tokens would grow text inside fixed padding, which is the more likely way to crowd a container. Percentages rather than px so a user who has raised their browser's base font keeps that gain at every level. `small` deliberately has no rule at all: it is the browser's own size, byte-identical to the previous rendering. The residue that does not scale is the four `px` SVG chart labels on the health pages and the borders, both deliberate.
 
 Medium became the default partway through, which is a smaller change than it sounds except for one trap: the normalizer had to invert. It had the usual shape — match the non-default values, fall through to the default — so keeping that while changing the fallback would have made `small` unselectable, since an explicit `setFontSize('small')` is indistinguishable from garbage. It now matches `small`/`large` and falls through to `medium`, and the `app.html` branch mirrors it; if those two ever disagree you get one frame at the wrong size. Both are pinned by tests.
 
@@ -351,6 +413,7 @@ Two side effects worth knowing. The `filteredEntries` derived is gone, so the re
 An earlier iteration put an "N images hidden" strip where the media had been, on the same reasoning as that repeat note. It read as clutter across a whole grid and was dropped. A picture post with no title or caption is now just its meta strip when images are off — close to blank, but not blank.
 
 **Key changes:**
+
 - `fontSize` store + `data-font-size` on `<html>`, applied pre-paint alongside the theme.
 - Root font-size scaling at 110% / 120%; `small` unscaled and unchanged. Default is `medium`.
 - Appearance settings card (theme + text size), between Identity and Preferences.
@@ -359,6 +422,7 @@ An earlier iteration put an "N images hidden" strip where the media had been, on
 - Those chips are desktop-only — CSS-scoped rules, chips hidden below 768px.
 
 **Files added/modified:**
+
 - `web/src/lib/stores/fontSize.ts` — new store (+ `fontSize.test.ts`, 16 tests)
 - `web/src/app.html` — pre-paint script now applies theme and text scale
 - `web/src/app.css` — root text-scale rules
@@ -378,9 +442,9 @@ Two-agent review of the ISSUE-192 commit, then its high and medium findings. Not
 
 **A CLI footer in the synthesis prompt.** `/render` appends `[Markdown truncated at N characters — raise --max-chars or switch to --mode article]` into the markdown, which the briefing source spliced verbatim into the prompt. Correct wording for the skill, meaningless in a briefing, and at 20000 chars it fires on essentially every real front page. The response already carries a `truncated` flag, so the footer is stripped and the fact goes into provenance instead — the source header, where it reads as metadata rather than as an instruction the model might surface in the delivered briefing. Fixed on the istota side deliberately, not upstream: the footer is right where it was written.
 
-**The index guess needed a veto, not a rewrite.** `_looks_like_index` was sound reasoning from a real measurement (no aggregate content signal separates hubs from articles) but it was named and worded as a classification when it's a guess from URL shape. It reads a short, undated, shallow slug as a section front — right for `/world`, wrong for `/wiki/Poland`, `/p/some-title`, `/blog/why-i-left`, whole families of real articles rendered full with a note asserting they were index pages. Renamed `_url_looks_like_index` and gave it `_has_dominant_article` as an override: one `<article>` node holding 40%+ of the page's text means article mode proceeds whatever the URL looks like. The subtlety is what it *excludes* — `main` and `[role=main]`, which the neighbouring `_largest_main_node` accepts. A hub wraps its entire grid in one, so honouring them would hand the veto to every index page and reinstate exactly the silent-grid-discard the guard exists for. A hub's `<article>`s are cards: many, each a small fraction.
+**The index guess needed a veto, not a rewrite.** `_looks_like_index` was sound reasoning from a real measurement (no aggregate content signal separates hubs from articles) but it was named and worded as a classification when it's a guess from URL shape. It reads a short, undated, shallow slug as a section front — right for `/world`, wrong for `/wiki/Poland`, `/p/some-title`, `/blog/why-i-left`, whole families of real articles rendered full with a note asserting they were index pages. Renamed `_url_looks_like_index` and gave it `_has_dominant_article` as an override: one `<article>` node holding 40%+ of the page's text means article mode proceeds whatever the URL looks like. The subtlety is what it _excludes_ — `main` and `[role=main]`, which the neighbouring `_largest_main_node` accepts. A hub wraps its entire grid in one, so honouring them would hand the veto to every index page and reinstate exactly the silent-grid-discard the guard exists for. A hub's `<article>`s are cards: many, each a small fraction.
 
-**Timeout inversion, and why serializing was the fix.** The briefing's 60s client timeout sat *below* the container's own 90s watchdog deadline, so the client always gave up first and left the container working on a request nobody was waiting for. Raising it to 120s alone would have made things worse: the container is single-threaded, so concurrent browse sources queue in the kernel backlog with their client clocks already running — source 5 could burn its whole budget waiting to be served and then report a live front page as unreachable, which is the reported symptom, reintroduced by the fix. So they now serialize on a process-global lock. Costs no wall-clock (the browser was never going to work in parallel) and each request gets its full budget from when it's actually issued. A 90s queue-wait bound stops N sources from serializing into N × 120s of generation; a source that never gets a turn fails soft.
+**Timeout inversion, and why serializing was the fix.** The briefing's 60s client timeout sat _below_ the container's own 90s watchdog deadline, so the client always gave up first and left the container working on a request nobody was waiting for. Raising it to 120s alone would have made things worse: the container is single-threaded, so concurrent browse sources queue in the kernel backlog with their client clocks already running — source 5 could burn its whole budget waiting to be served and then report a live front page as unreachable, which is the reported symptom, reintroduced by the fix. So they now serialize on a process-global lock. Costs no wall-clock (the browser was never going to work in parallel) and each request gets its full budget from when it's actually issued. A 90s queue-wait bound stops N sources from serializing into N × 120s of generation; a source that never gets a turn fails soft.
 
 **Untrusted, and being honest about what protects it.** The module docstring claimed the content was untrusted and that a companion skill carried the handling rules. Neither held: the source returned the default `untrusted=False`, and the skill selected for a briefing generation task is `briefing`, which declares no `untrusted_input` companion. Set the flag, so assembly wraps it in the do-not-follow-instructions delimiter, and rewrote the docstring to say that the delimiter is the whole protection. Markdown raised the stakes over the flattened text it replaced — the page's own absolute URLs now arrive intact, and there are many more of them.
 
@@ -391,6 +455,7 @@ Two-agent review of the ISSUE-192 commit, then its high and medium findings. Not
 **Left open** (the review's lows, none load-bearing): `_truncate` overshoots its cap by the length of its own note, so `chars <= max_chars` doesn't hold; `javascript:`/`data:` hrefs survive into the markdown while the skill tells the model every URL is absolute and usable; a `captcha` status from the browser collapses into a generic "no content" provenance note, losing the one signal that tells an operator to solve it over VNC; and the `int()` coercion of caller budgets sits outside the endpoint handlers' `try`, so a non-numeric value escapes the JSON error envelope.
 
 **Key changes:**
+
 - `browse render` 404s are disambiguated by body shape; an expired session reports as itself.
 - New `[briefings] max_browse_chars` (default 20000), the markdown counterpart of `max_source_chars`.
 - Render truncation footer stripped from briefing prompts; truncation reported via provenance.
@@ -401,6 +466,7 @@ Two-agent review of the ISSUE-192 commit, then its high and medium findings. Not
 - Browse sources marked `untrusted`, so assembly wraps them.
 
 **Files added/modified:**
+
 - `src/istota/skills/browse/__init__.py` — 404 disambiguation
 - `src/istota/skills/browse/skill.md` — article-mode override is now conditional
 - `src/istota/briefings/sources/browse.py` — budget knob, footer strip, lock, `untrusted`
@@ -430,6 +496,7 @@ The shell went into `routes/money/+layout.svelte` next to the existing `.money-s
 **Unverified visually.** The browser extension wasn't connected this session, so every figure here is computed from the CSS, not measured. `prettier`, `svelte-check` (0 errors, 0 warnings, so no orphaned selectors) and a production build all pass, but the left-edge shift in particular wants eyes on it.
 
 **Key changes:**
+
 - Shared record-table shell in `routes/money/+layout.svelte`: `.money-toolbar`, `.money-notice-bar`, `.money-result-count`, `.money-table` (+ scrollbar), `.money-table-header`, `.money-table-row` (+ hover/expanded/focus, pointer keyed on `role="button"`), `.money-sortable` / `.money-sort-arrow`, `.money-status` (+ the three variants, the header-cell reset, and the mobile hide), `.money-amount`, `.money-kebab-spacer`, `.money-table-empty`.
 - All four money list pages converted; each keeps only its own column rules.
 - Status chips are uppercase, bold, `--text-2xs`; new scale token in `app.css`.
@@ -438,6 +505,7 @@ The shell went into `routes/money/+layout.svelte` next to the existing `.money-s
 - Clients: wrapper padding removed, inline edge moved onto the notice bar and card grid.
 
 **Files added/modified:**
+
 - `web/src/app.css` — `--text-2xs`
 - `web/src/routes/money/+layout.svelte` — the shell
 - `web/src/routes/money/business/invoices/+page.svelte` — columns only
@@ -450,21 +518,22 @@ The shell went into `routes/money/+layout.svelte` next to the existing `.money-s
 
 Investigating ISSUE-191: a long-running scheduled task died 25 minutes in with `Stream parsing failed (rc=-15, 1480 lines)` and, being on its final attempt, failed permanently. The issue's write-up had it as probable memory pressure — the death landed inside a full-page screenshot on a box with no swap — and flagged "who sent the SIGTERM" as the honest unknown.
 
-**It was our own deploy.** The commit pushed one minute before the death (`ff006ceb`, 17:05:01 UTC) is the whole story: the auto-update cron polls every two minutes, so it fired at 17:06:00, spent ~5s on fetch/sync/migrations, and restarted the scheduler at ≈17:06:05. The task died at 17:06:05. The unit template set no `KillMode`, and systemd's default is `control-group` — SIGTERM to every process in the cgroup, the task's sandboxed model subprocess included. That is exactly `rc=-15`, and it explains the detail that had argued *against* systemd: a cgroup SIGTERM only reaches whatever is in flight at that instant, so every other task in the window finished normally. The screenshot is coincidence — it's simply where a 25-minute job happens to be at minute 25.
+**It was our own deploy.** The commit pushed one minute before the death (`ff006ceb`, 17:05:01 UTC) is the whole story: the auto-update cron polls every two minutes, so it fired at 17:06:00, spent ~5s on fetch/sync/migrations, and restarted the scheduler at ≈17:06:05. The task died at 17:06:05. The unit template set no `KillMode`, and systemd's default is `control-group` — SIGTERM to every process in the cgroup, the task's sandboxed model subprocess included. That is exactly `rc=-15`, and it explains the detail that had argued _against_ systemd: a cgroup SIGTERM only reaches whatever is in flight at that instant, so every other task in the window finished normally. The screenshot is coincidence — it's simply where a 25-minute job happens to be at minute 25.
 
 **The reason it failed permanently instead of retrying is the more interesting half.** The daemon's SIGTERM handler is graceful: it sets a flag and returns. So the parent survived the signal that killed its child, the worker observed `rc=-15`, and the failure path recorded an ordinary task failure. Had the daemon been SIGKILLed instead, `recover_orphaned_tasks_on_startup` would have released the row back to `pending` and it would have re-run. The graceful path produced the worse outcome, purely because nothing in the failure path knew a shutdown was underway.
 
 **Not charging the attempt is the load-bearing decision.** The obvious implementation mirrors `recover_orphaned_tasks` exactly, incrementing `attempt_count` — consistent, and it keeps a hard bound. But that leaves the originating case unfixed: the task that prompted this was on its terminal attempt, so a bounded release still fails it. An attempt aborted by infrastructure isn't an attempt the task spent, so the release charges nothing and sets no backoff. The bound moves to `fail_ancient_pending_tasks`, which reaps a released row that never gets claimed like any other stale pending task. The runaway worry — a restart loop re-releasing forever — doesn't apply, because a crashing daemon never sets the shutdown flag and takes the orphan-recovery path (which does increment).
 
-**Two fixes at different layers, deliberately.** `KillMode=mixed` on the scheduler unit is the root cause and converts this whole class of event into the already-handled orphan-recovery path. But unit files aren't in the synced tree, so the auto-update cron *cannot* deploy them — that half waits on an Ansible run. The code half ships within two minutes of a push and works regardless. Hence both: the in-process branch isn't redundant belt-and-braces, it's the part that actually lands first.
+**Two fixes at different layers, deliberately.** `KillMode=mixed` on the scheduler unit is the root cause and converts this whole class of event into the already-handled orphan-recovery path. But unit files aren't in the synced tree, so the auto-update cron _cannot_ deploy them — that half waits on an Ansible run. The code half ships within two minutes of a push and works regardless. Hence both: the in-process branch isn't redundant belt-and-braces, it's the part that actually lands first.
 
 **The classification had to go in the result text, not `stop_reason`.** `execute_task` returns a 4-tuple and drops `stop_reason` at its boundary, so the scheduler already classifies failures by string-matching the message — that's how OOM and cancellation work today. Threading `stop_reason` out would touch every call site and test for one branch. So the brain emits a marker message and exports `is_signal_termination()` as the shared predicate, keeping the string in one place instead of duplicating it at the match site.
 
-**Adjacent latent bug found on the way.** `worker_pid` was written on claim and cleared *only* by orphan recovery — `set_task_pending_retry` and `update_task_status` both left it. Both cancel paths signal whatever the row holds, and `!stop` targets the newest `running|locked|pending_confirmation` row, which after a retry carries the *previous* attempt's dead PID. Once the OS recycles that number, a cancel SIGTERMs an unrelated process. A second, independent source of stray `-15`s, closed by clearing the column on every transition out of `running`.
+**Adjacent latent bug found on the way.** `worker_pid` was written on claim and cleared _only_ by orphan recovery — `set_task_pending_retry` and `update_task_status` both left it. Both cancel paths signal whatever the row holds, and `!stop` targets the newest `running|locked|pending_confirmation` row, which after a retry carries the _previous_ attempt's dead PID. Once the OS recycles that number, a cancel SIGTERMs an unrelated process. A second, independent source of stray `-15`s, closed by clearing the column on every transition out of `running`.
 
 Signal classification also now keeps the execution trace, which a signal death used to drop — the tools that ran before the kill are the only diagnostic left (the ISSUE-183 reasoning, applied to a path it had missed).
 
 **Key changes:**
+
 - `_signal_result()` classifies any negative returncode in both exec paths: SIGKILL keeps its OOM wording and `stop_reason`, every other signal gets a named `stop_reason="terminated"` plus a WARNING and the trace. Ordered after the cancellation check so `!stop` still reads as a cancellation.
 - Shutdown-aware failure path: a signal death while shutting down requeues via `release_task_for_restart` — no attempt charged, no backoff, deferred ops purged, no user-facing error, no scheduled-job failure increment.
 - Watching web clients get a "Scheduler restarting…" notice instead of a terminal frame, mirroring how the retry path already handles a non-terminal failure.
@@ -472,6 +541,7 @@ Signal classification also now keeps the execution trace, which a signal death u
 - `KillMode=mixed` on the scheduler unit template (needs an Ansible run to take effect).
 
 **Files added/modified:**
+
 - `src/istota/brain/claude_code.py` — `_signal_result()`, `is_signal_termination()`, wired into both exec paths
 - `src/istota/scheduler.py` — `_is_shutdown_collateral()`, the requeue branch, terminal-event suppression
 - `src/istota/db.py` — `release_task_for_restart()`, `worker_pid` cleared on retry and terminal transitions
@@ -483,25 +553,26 @@ Signal classification also now keeps the execution trace, which a signal death u
 
 Two-agent review of the clients/entities/services commit. The headline: **all three delete guards were reachable in a state where they reported zero references and allowed the delete**, each for a different reason, and the three reasons share one root cause — the guard re-derived what invoicing resolves instead of asking the resolver.
 
-The entity guard read `stored_default or cfg.default_entity` as "the entity blank-entity clients fall back to." What `resolve_entity` actually falls back to is `config.company`, and `load_invoicing` computes that as `companies.get(default_entity)` *or, when that misses,* the first company. A stored default naming no company isn't exotic — migrating a legacy TOML that has clients but no `[companies]` block hydrates `default_entity = "default"` and persists it. So on an ordinary migrated config the guard reported `default_for_clients: 0` for the one entity every client really billed under, deleted it, and the next invoice carried a blank legal entity. Fix is one line (`cfg.company.key`), but it only became findable by reading the resolver rather than the config dataclass.
+The entity guard read `stored_default or cfg.default_entity` as "the entity blank-entity clients fall back to." What `resolve_entity` actually falls back to is `config.company`, and `load_invoicing` computes that as `companies.get(default_entity)` _or, when that misses,_ the first company. A stored default naming no company isn't exotic — migrating a legacy TOML that has clients but no `[companies]` block hydrates `default_entity = "default"` and persists it. So on an ordinary migrated config the guard reported `default_for_clients: 0` for the one entity every client really billed under, deleted it, and the next invoice carried a blank legal entity. Fix is one line (`cfg.company.key`), but it only became findable by reading the resolver rather than the config dataclass.
 
 Second: the entity scan never looked at work entries, even though `resolve_entity` checks `entry.entity` **first**, ahead of the client's. An entry pinned to an entity re-billed under a different one the moment that entity went away, with the guard reporting nothing.
 
-Third, and the subtlest: a quarantined year file. `_load_year` *skips* an unreadable row rather than raising — that was last session's deliberate choice, so the row can't be destroyed by the next write — which means it is also invisible to a reference count. The fail-closed `try/except` around the scan never fires, because nothing throws. So deleting the service that an unreadable row names was permitted, and once a human repaired the row, `build_line_items` would skip it for an unknown service and the work would go unbilled. The quarantine mechanism protected the row from a *write* and left it exposed to a *config delete*. Now `work.quarantined_years()` exposes the signal and the two strict deletes refuse; the client delete reports it and proceeds, because that delete destroys nothing.
+Third, and the subtlest: a quarantined year file. `_load_year` _skips_ an unreadable row rather than raising — that was last session's deliberate choice, so the row can't be destroyed by the next write — which means it is also invisible to a reference count. The fail-closed `try/except` around the scan never fires, because nothing throws. So deleting the service that an unreadable row names was permitted, and once a human repaired the row, `build_line_items` would skip it for an unknown service and the work would go unbilled. The quarantine mechanism protected the row from a _write_ and left it exposed to a _config delete_. Now `work.quarantined_years()` exposes the signal and the two strict deletes refuse; the client delete reports it and proceeds, because that delete destroys nothing.
 
 **The client-key case bug is the clearest example of "a browser form changes the threat model."** Work entries are stored with `client.lower()`; config keys were unconstrained. A client keyed `Acme` therefore matched none of its own entries, `build_line_items` skipped every one, and invoice generation returned an empty list — no error, no warning, the work simply never billed. Reachable before only by an operator hand-typing `--key Acme`; the new form makes it a normal path. Keys are now lowercase-only for clients (entities and services store verbatim on the entry, so they stay unconstrained), enforced on create so legacy rows remain editable, and lowercased as-you-type so the key you see is the key you get.
 
-**The validation-scope rule needed a third position, not one of the two obvious ones.** Validating the merged record makes a legacy non-conforming row permanently unsaveable. Validating every *passed* field — what shipped — is nearly as bad in practice, because a form seeds each input from the stored value and sends the lot back: renaming a service typed `hourly` 400s on a field the user never touched, and the dropdown has no matching option to explain why. The rule is now "validate only fields whose value differs from what's stored," computed inside the write transaction against the stored row. Changing such a field still has to produce a valid value, so it grandfathers only what's already on disk. The forms cooperate by surfacing an out-of-set `type`/`schedule` as its own `(unrecognised)` option with a warning, rather than silently rendering "Hourly" for a record that isn't.
+**The validation-scope rule needed a third position, not one of the two obvious ones.** Validating the merged record makes a legacy non-conforming row permanently unsaveable. Validating every _passed_ field — what shipped — is nearly as bad in practice, because a form seeds each input from the stored value and sends the lot back: renaming a service typed `hourly` 400s on a field the user never touched, and the dropdown has no matching option to explain why. The rule is now "validate only fields whose value differs from what's stored," computed inside the write transaction against the stored row. Changing such a field still has to produce a valid value, so it grandfathers only what's already on disk. The forms cooperate by surfacing an out-of-set `type`/`schedule` as its own `(unrecognised)` option with a warning, rather than silently rendering "Hourly" for a record that isn't.
 
 **Where I went further than the finding asked.** The review flagged that `skill.md` told the agent a referenced service can't be deleted while the CLI it names two lines earlier deletes it unguarded, and suggested narrowing the sentence. Narrowing documents the hole. The guards moved to a new `money/config_refs.py` and the CLI `remove` paths call them, so the claim is true on both surfaces — which matters precisely because the agent's reach is the CLI, not the browser. They live outside `config_store` because the references being counted aren't in the config DB at all: work entries are TOML in the user's workspace, so the scan needs a `data_dir` the store never sees.
 
-**`save_invoicing` sanitizes rather than raises.** It's the bulk path used by the legacy-TOML migration and `config import`, and it bypassed the per-field validation entirely — so the exact values the granular ops exist to keep out could still land. Raising would strand a user mid-migration on data that's been in their TOML for a year. Each coercion lands on the behaviour that value *already had* (`entry_line_item` has no branch for `hourly` so it billed as hours; `check_scheduled_invoices` only ever acted on `monthly`), so the WARNING is the whole delta: it turns a silent mis-billing into something an operator can see.
+**`save_invoicing` sanitizes rather than raises.** It's the bulk path used by the legacy-TOML migration and `config import`, and it bypassed the per-field validation entirely — so the exact values the granular ops exist to keep out could still land. Raising would strand a user mid-migration on data that's been in their TOML for a year. Each coercion lands on the behaviour that value _already had_ (`entry_line_item` has no branch for `hourly` so it billed as hours; `check_scheduled_invoices` only ever acted on `monthly`), so the WARNING is the whole delta: it turns a silent mis-billing into something an operator can see.
 
 **Also fixed, pre-existing and newly browser-reachable.** The invoice HTML interpolated every user string unescaped — an ampersand in a company name was enough to disturb the PDF. And `accounting_path / entity.logo` follows pathlib semantics, so an absolute logo replaced the left-hand side and got base64-embedded into the invoice; refused at write and ignored at render. Separately, the account regex was ASCII-only and rejected `Assets:Forderungen:Müller`, which beancount itself accepts — an English-only check locking a non-English ledger out of an account it had been posting to all along.
 
 The mock API now mirrors the value invariants. Without that the whole 400-validation class is invisible in dev, which is how a form mishandling a rejection would develop the bug locally and only show it in production.
 
 **Key changes:**
+
 - `config_refs.py` — shared reference guards (service / entity / client), used by both the web routes and `istota money company|service remove`.
 - Entity guard reads the resolver's own fallback, counts work-entry pins, and refuses on a quarantined year.
 - Client keys lowercase-only; `terms` as a numeric string obeys the same `>= 0` rule as an int; account/commodity shapes are Unicode-aware.
@@ -513,6 +584,7 @@ The mock API now mirrors the value invariants. Without that the whole 400-valida
 - Key regex and the client-lowercase rule exported once from the web API module instead of restated per form.
 
 **Files added/modified:**
+
 - `src/istota/money/config_refs.py` — new; the three reference scans and their refusal reasons
 - `src/istota/money/config_store.py` — unchanged-field validation scope, lowercase client keys, Unicode accounts, numeric-string terms, logo confinement, `create_only`, `save_invoicing` sanitation, scalar checks
 - `src/istota/money/routes.py` — guards via `config_refs`, strict body parsing, `?create=false`, hardened scalar PUT
@@ -532,9 +604,9 @@ Two-agent review of the work-tracking commit. The headline finding is the one wo
 
 Fix is `assign_invoice_number_by_uids`, plus a `backfill_work_ids` at the top of generation (a hand-added entry can have no uid, and silently skipping it would be worse than the race it replaces) and an ERROR log when the stamped count doesn't match the billable count — nothing downstream can detect a double-billing. The index-addressed `assign_invoice_number` stays for resolve-and-stamp-immediately callers and for test setup.
 
-**The serializer is the other soft spot, and it got two guards rather than one.** `_escape` handled `\`, `"` and `\n` and nothing else. The new routes are the first caller feeding it arbitrary user strings, so a description containing a CR wrote a raw control character into a TOML basic string: the write succeeds, then every subsequent read of that year raises `TOMLDecodeError` — the work list, invoicing, everything — with no product path back. Now it escapes the full control set, *and* `_save_year` parses its own output before `os.replace`. The second guard is the durable one: it makes "a serializer bug cannot persist an unreadable file" true by construction rather than by having thought of every character. Same class, second instance: `extra` keys were re-emitted bare, so a hand-written `"my key" = 1` came back unquoted and broke the next read.
+**The serializer is the other soft spot, and it got two guards rather than one.** `_escape` handled `\`, `"` and `\n` and nothing else. The new routes are the first caller feeding it arbitrary user strings, so a description containing a CR wrote a raw control character into a TOML basic string: the write succeeds, then every subsequent read of that year raises `TOMLDecodeError` — the work list, invoicing, everything — with no product path back. Now it escapes the full control set, _and_ `_save_year` parses its own output before `os.replace`. The second guard is the durable one: it makes "a serializer bug cannot persist an unreadable file" true by construction rather than by having thought of every character. Same class, second instance: `extra` keys were re-emitted bare, so a hand-written `"my key" = 1` came back unquoted and broke the next read.
 
-**Where the fix needed more care than the finding suggested.** The review asked for type validation in `_load_year` (a quoted date loads as `str` and surfaces three layers later as `AttributeError` from `.isoformat()`, killing every reader). Coercing is easy; *skipping* an unusable row is the trap — a write rewrites the whole year from the loaded list, so a skipped row would be silently deleted, which is worse than the outage it fixes. Hence `_QUARANTINED_YEARS`: a year with a skipped row stays readable, and `_save_year` refuses a write that would change its visible content while silently skipping one that wouldn't (`_save_entries` rewrites every year it knows about, not just the target — an unrelated write to next year must not trip on this one). An unusable *optional* number drops the field and keeps the entry: a visible $0 row is something a human notices, a vanished billable entry is not.
+**Where the fix needed more care than the finding suggested.** The review asked for type validation in `_load_year` (a quoted date loads as `str` and surfaces three layers later as `AttributeError` from `.isoformat()`, killing every reader). Coercing is easy; _skipping_ an unusable row is the trap — a write rewrites the whole year from the loaded list, so a skipped row would be silently deleted, which is worse than the outage it fixes. Hence `_QUARANTINED_YEARS`: a year with a skipped row stays readable, and `_save_year` refuses a write that would change its visible content while silently skipping one that wouldn't (`_save_entries` rewrites every year it knows about, not just the target — an unrelated write to next year must not trip on this one). An unusable _optional_ number drops the field and keeps the entry: a visible $0 row is something a human notices, a vanished billable entry is not.
 
 **Frontend: the payload rule moved out of the component.** The edit form nulled whichever of `qty`/`amount` the resolved service didn't want, which zeroed an hours entry priced by the `amount` fallback — and, when the client/service fetch failed (it's caught and swallowed), every entry read as the default hours type, so editing an `other` entry wiped its amount. The rule is now `buildWorkEntryPayload`: send what the form rendered, omit what it didn't, clear only when the user actually changed the service. It lives in its own module because the interesting branch (service changed) can't be driven through the bits-ui `Select` in jsdom — the dropdown renders through a portal and doesn't open on a synthetic click. Extracting it bought real coverage; testing it through the component would have meant no coverage at all.
 
@@ -545,6 +617,7 @@ Also worth noting for future frontend work: the local-vs-UTC date test picks its
 Everything landed test-first; the invoice-misstamping and `\r`-corruption tests both reproduced the real failure before the fix went in.
 
 **Key changes:**
+
 - `assign_invoice_number_by_uids`; invoice generation stamps by uid and reports an incomplete stamp loudly.
 - `_escape` covers the full TOML control set; `_save_year` validates its own output before replacing the file; `extra` keys are quoted when they can't be written bare.
 - `_load_year` coerces quoted dates/numbers and narrows a TOML datetime; unreadable rows are skipped and their year quarantined against destructive writes.
@@ -556,6 +629,7 @@ Everything landed test-first; the invoice-misstamping and `\r`-corruption tests 
 - Mock API enforces the etag, so the conflict path has a dev-mode route.
 
 **Files added/modified:**
+
 - `src/istota/money/work.py` — uid-addressed stamping, escaping + write validation, loader coercion + quarantine, lock-free backfill check
 - `src/istota/money/core/invoicing.py` — stamp by uid, backfill first, log an incomplete stamp
 - `src/istota/money/routes.py` — field-type/control-char/non-finite validation, PATCH response from the locked read
@@ -583,19 +657,19 @@ Two design points worth recording:
 - **The display index stays.** It's the CLI's `#N` UX and there was no reason to break it. It just stops being identity — it's now explicitly a presentation detail, and the module docstring says which callers may use which.
 - **No sentinel on the backfill**, unlike the ledger's. A hand-added entry with no `uid` can appear at any time (the year files are deliberately hand-editable), so re-running on every init is exactly how that self-heals. It only writes when something is actually missing an id, so a fully-backfilled store costs one read.
 
-`update_work_entry` / `remove_work_entry` return a bare bool, which can't distinguish "no such entry" from "found it, it's invoiced, refused" — a distinction the route needs to pick 404 vs 409. The uid-addressed variants return a typed `WorkMutationResult` instead. They resolve *inside* `_work_lock`, so the resolve-and-mutate is atomic against other writers; resolving outside would have reintroduced the race in a narrower window.
+`update_work_entry` / `remove_work_entry` return a bare bool, which can't distinguish "no such entry" from "found it, it's invoiced, refused" — a distinction the route needs to pick 404 vs 409. The uid-addressed variants return a typed `WorkMutationResult` instead. They resolve _inside_ `_work_lock`, so the resolve-and-mutate is atomic against other writers; resolving outside would have reintroduced the race in a narrower window.
 
-**Etags for stale content.** A uid fixes "wrong row" but not "wrong version": open the edit form, the agent changes the same entry, you save and silently revert its change. `entry_etag` is a truncated sha256 of the serialized form — derived, never stored, so it costs nothing in the file format. Per-entry rather than per-file, so two edits to different entries in the same year never conflict. Notably it excludes the display index, so an entry that merely *moved* keeps its etag; there's a test pinning that, because hashing the wrong thing would produce spurious conflicts on every insert.
+**Etags for stale content.** A uid fixes "wrong row" but not "wrong version": open the edit form, the agent changes the same entry, you save and silently revert its change. `entry_etag` is a truncated sha256 of the serialized form — derived, never stored, so it costs nothing in the file format. Per-entry rather than per-file, so two edits to different entries in the same year never conflict. Notably it excludes the display index, so an entry that merely _moved_ keeps its etag; there's a test pinning that, because hashing the wrong thing would produce spurious conflicts on every insert.
 
-**Rate resolution has one home now.** The list shows what an entry *will* bill for before it's invoiced, and that number has to be the one the invoice actually carries. Extracted `entry_line_item` out of `build_line_items` so both go through it rather than the route reimplementing the `other`/`flat`/`days`/default branch. Same reasoning drives the form's live preview line (`3 × $150.00 = $450.00`) — it mirrors the same rules, so you see the number before writing the entry rather than at invoice time.
+**Rate resolution has one home now.** The list shows what an entry _will_ bill for before it's invoiced, and that number has to be the one the invoice actually carries. Extracted `entry_line_item` out of `build_line_items` so both go through it rather than the route reimplementing the `other`/`flat`/`days`/default branch. Same reasoning drives the form's live preview line (`3 × $150.00 = $450.00`) — it mirrors the same rules, so you see the number before writing the entry rather than at invoice time.
 
-**Validation the store doesn't do.** `build_line_items` does `if not svc: continue` — an entry whose service isn't configured is silently dropped from the invoice. The work is recorded and never billed. That's the worst failure mode in this area, so `POST` hard-rejects an unknown service (400) and the list flags any pre-existing one. Unknown *client* is only a warning: invoice generation is per-client, so it just never gets invoiced, and hard-rejecting would hide existing data. This does make the API stricter than the CLI and the store, which accept anything — a deliberate asymmetry, since the API is the surface where a typo is invisible.
+**Validation the store doesn't do.** `build_line_items` does `if not svc: continue` — an entry whose service isn't configured is silently dropped from the invoice. The work is recorded and never billed. That's the worst failure mode in this area, so `POST` hard-rejects an unknown service (400) and the list flags any pre-existing one. Unknown _client_ is only a warning: invoice generation is per-client, so it just never gets invoiced, and hard-rejecting would hide existing data. This does make the API stricter than the CLI and the store, which accept anything — a deliberate asymmetry, since the API is the surface where a typo is invisible.
 
 **Round-trip preservation.** `_load_year` built a `WorkEntry` from a fixed key list and `_save_year` rewrote the whole file from the serializer, so any write destroyed unrecognised keys. Unknown keys now round-trip via `WorkEntry.extra`. Comments still don't survive — that needs a comment-aware TOML library, and the module reads with `tomli` and writes by hand-rolled string building; documenting the limitation is the proportionate fix. Nested tables are dropped rather than crashing the write, so one bad hand edit can't poison every subsequent save.
 
 **Two bugs found along the way, both real:**
 
-- Pressing Enter to confirm a dropdown option in the entry form *also* fired the form's window-level Enter-to-save, writing a half-filled entry. Caught by actually driving the UI in a browser, not by any test. The handler now only commits from a text/date input. `TransactionForm.svelte` has the same unguarded handler and the same latent bug; left alone as out of scope.
+- Pressing Enter to confirm a dropdown option in the entry form _also_ fired the form's window-level Enter-to-save, writing a half-filled entry. Caught by actually driving the UI in a browser, not by any test. The handler now only commits from a text/date input. `TransactionForm.svelte` has the same unguarded handler and the same latent bug; left alone as out of scope.
 - The money mock API was mounted at `/istota/money/api` while the client calls `/istota/api/money`, so **every** money page failed under `VITE_MOCK_API=1` — the layout just showed "Failed to load money data". Pre-existing and unrelated to this work, but it had to be fixed to verify Stage 4 at all. Also added the missing `/clients` mock handler, and taught the mock harness to honour the `__status` key it was already half-using, so error paths (400/404/409) are exercisable rather than all coming back 200.
 
 `apiFetch` in the money client now throws an `ApiError` carrying status and the parsed error envelope instead of a bare `Error`. Backwards-compatible for callers that only render `.message`; needed so the page can tell a 409 conflict from an ordinary failure and offer a reload instead of a generic error.
@@ -605,6 +679,7 @@ Deviations from the spec: "View invoice" navigates to the Invoices tab but doesn
 Frontend component tests needed `$app/*` stubs in the vitest config: the `ui` barrel pulls in `HeaderNav`, which imports `$app/navigation`, which only resolves inside a Kit build. Worth having for any future component test that touches the barrel.
 
 **Key changes:**
+
 - `WorkEntry.uid` + `backfill_work_ids` + `work backfill-ids`, wired into `ensure_initialised`; `uid` in `work list` output.
 - `update_work_entry_by_uid` / `remove_work_entry_by_uid` with a typed result, resolving inside the write lock.
 - `entry_etag` optimistic concurrency; `409` with the current server-side row on mismatch.
@@ -614,6 +689,7 @@ Frontend component tests needed `$app/*` stubs in the vitest config: the `ui` ba
 - Fixed the money mock API prefix, added the `/clients` fixture, made the mock harness honour non-200 statuses.
 
 **Files added/modified:**
+
 - `src/istota/money/work.py` — uid, etag, uid-addressed mutations, backfill, `extra` round-trip
 - `src/istota/money/core/models.py` — `WorkEntry.uid` / `.extra`
 - `src/istota/money/core/invoicing.py` — `entry_line_item` extracted from `build_line_items`
@@ -627,26 +703,27 @@ Frontend component tests needed `$app/*` stubs in the vitest config: the `ui` ba
 
 ## 2026-07-25: Finished the color-token sweep (`--accent-blue`, `--money-*`)
 
-Follow-up to the chip entry below, which left plain message text hardcoded. Auditing the whole frontend rather than just the rules I'd promised turned up 228 color-bearing CSS rules, 80 of them light-theme overrides — and three *distinct* semantic roles tangled together, not the one I'd assumed.
+Follow-up to the chip entry below, which left plain message text hardcoded. Auditing the whole frontend rather than just the rules I'd promised turned up 228 color-bearing CSS rules, 80 of them light-theme overrides — and three _distinct_ semantic roles tangled together, not the one I'd assumed.
 
 The severity axis was the expected part: `.msg.error` / `.center-msg.error` / `.field-error` / `.btn.danger` / `.sev-severe` and friends, spread across six different reds (`#c66`, `#e88`, `#f0a`, `#e0a0a0`, `#f08c8c`, `#d46ab5`). Worth noting `#f0a` — a hot magenta, plainly a placeholder someone never revisited — was the error color on eight health pages.
 
-The two roles that *aren't* severity are the interesting find:
+The two roles that _aren't_ severity are the interesting find:
 
 - **`--accent-blue`** (dark `#7aa3d8`, light `#2563b0`). Primary buttons, active tabs, focus rings, cross-reference links: 36 occurrences split across two near-identical blues (`#7aa3d8` in health, `#6c8ebf` in settings/notices) that both resolved to `#2563b0` in light. This is "you can act on this", not a severity, so folding it into `--status-info-fg` would have been the wrong abstraction even though the light values coincide. Kept separate, and the comment in `app.css` says why — otherwise the next reader merges them.
 - **`--money-{income,expense}`** (dark `#4adbc0`/`#d46ab5`, light `#0d8f7e`/`#a3157e`). An expense is not an error and income is not a success; a signed amount is a direction, not a judgment. Already perfectly consistent across nine money pages, just unnamed. Tokenizing removed ten overrides.
 
-That last one also caught a genuine misuse: `#d46ab5` is the expense magenta, but `TransactionForm .form-error` and the kebab menu's danger item were both using it *as a danger color*. Those now resolve to the danger red; the money surfaces keep the magenta. Same hex, two meanings, which is exactly what a token layer is for.
+That last one also caught a genuine misuse: `#d46ab5` is the expense magenta, but `TransactionForm .form-error` and the kebab menu's danger item were both using it _as a danger color_. Those now resolve to the danger red; the money surfaces keep the magenta. Same hex, two meanings, which is exactly what a token layer is for.
 
 **Method — a rule-level transformer, not find-and-replace.** Because the same hex means different things depending on where it sits, blind substitution would have been wrong in both directions. The migration script (`mig2.py`, scratch) parses CSS rules, assigns each to a semantic group by selector, and rewrites only the hexes that group owns — so `#d46ab5` became `--status-danger-fg` in `.form-error` and `--money-expense` in `.txn-amount.expense` in the same pass. Selector matching resolves longest-hint-wins so `.alert-low .alert-pill` (info) beats the bare `.alert-pill` (danger). Light-override deletion is guarded: a rule is dropped only if every declaration in it is a `*color` property, so an override that also sets layout or a background survives (`.error-panel` did).
 
-**Verification worth repeating.** Diffed every deleted light override against the token's light value: 82/82 declarations matched exactly, so light theme is byte-identical where overrides disappeared — the deletions are provably inert, not a redesign. Dark theme *does* shift where six reds collapsed to one, which is the point. Also swept for orphaned "Light theme overrides" comment headers left with nothing beneath them (found one, from the previous commit).
+**Verification worth repeating.** Diffed every deleted light override against the token's light value: 82/82 declarations matched exactly, so light theme is byte-identical where overrides disappeared — the deletions are provably inert, not a redesign. Dark theme _does_ shift where six reds collapsed to one, which is the point. Also swept for orphaned "Light theme overrides" comment headers left with nothing beneath them (found one, from the previous commit).
 
 One addition beyond the token work: the "starred" gold (`#f5b300`, three call sites) had no light rule and is a near-duplicate of `--accent-amber` (`#f5a623`), so it now uses that token and picks up the darker light-theme amber. Low-contrast gold on white was a real, if minor, gap.
 
 Net −313 lines across 42 files. Remaining hardcodes are all deliberate: map paint specs, chart datasets, categorical badges, fixed-surface chrome. The one real leftover is the raw neutral greys (`#555`/`#666`/`#888`/`#aaa`) on hover borders and muted links — several have no light rule, so a few render as harsh dark borders on white. That's the `--border-*`/`--text-*` scale's job and a separate sweep; noted in AGENTS.md rather than started here, because it touches hover states app-wide and carries actual regression risk, unlike this pass.
 
 **Key changes:**
+
 - Added `--accent-blue` and `--money-{income,expense}` to both theme blocks; extended the status tokens to message text, danger buttons/links, severity scales, and focus rings.
 - Fixed `#d46ab5` (the money-expense magenta) being used as a danger color in two components.
 - Replaced the `#f0a` magenta error text on eight health pages.
@@ -654,6 +731,7 @@ Net −313 lines across 42 files. Remaining hardcodes are all deliberate: map pa
 - Deleted 82 light-override declarations, each verified to resolve identically via its token.
 
 **Files added/modified:**
+
 - `web/src/app.css` — `--accent-blue`, `--money-income`, `--money-expense`
 - 41 further files across `lib/components/{chat,settings,ui,money,location}`, `lib/styles/settings.css`, and the `health` / `money` / `feeds` / `location` / `briefings` routes — severity, accent and money colors onto tokens; paired light overrides removed
 - `AGENTS.md` — Web UI "Semantic colors" section rewritten for the full token set, with the exclusions and the open neutral-grey sweep
@@ -670,7 +748,7 @@ Migrating the existing chips onto the tokens let the paired light overrides be d
 
 Three judgement calls worth recording:
 
-- **Categorical palettes deliberately do not collapse into the severities.** The eight encounter-type badges (visit / procedure / imaging / dental / …), the admin `SOURCE_COLOR` chart constants, and the purple `series_incomplete` immunization status are hues that *encode distinct categories*, not a severity ranking. Folding them into four status colors would destroy information to satisfy a consistency rule. They keep their existing hardcoded values and light overrides. The tokens are a severity scale, and the comment in `app.css` says so, because the obvious next move for a future reader is to "finish the job" by absorbing them.
+- **Categorical palettes deliberately do not collapse into the severities.** The eight encounter-type badges (visit / procedure / imaging / dental / …), the admin `SOURCE_COLOR` chart constants, and the purple `series_incomplete` immunization status are hues that _encode distinct categories_, not a severity ranking. Folding them into four status colors would destroy information to satisfy a consistency rule. They keep their existing hardcoded values and light overrides. The tokens are a severity scale, and the comment in `app.css` says so, because the obvious next move for a future reader is to "finish the job" by absorbing them.
 - **`.flag-C` stays a solid saturated red** rather than becoming a tinted danger chip like `.flag-H`. Critical is a step above High in the bloodwork flag ladder, and the solid fill is what carries that. It only ever needed the light value it was missing (`#b3261e` instead of the near-black `#6b0000` block).
 - **The effort chip mapped to `info`, not a severity.** It labels a reasoning-effort level, which is informational; it only looked severity-ish because it happened to be blue.
 
@@ -681,6 +759,7 @@ Scope held to chips/badges/pills/flags, since that was the ask. Plain message te
 Verification: `svelte-check` 0 errors / 0 warnings across 4708 files, production build succeeds, prettier clean. Re-ran the audit script that found the originals (filled chip with a hardcoded background and no light-theme counterpart) — 0 remaining, down from 3.
 
 **Key changes:**
+
 - Added `--status-{danger,warn,success,info}-{fg,bg}` to both theme blocks in `app.css` — the first semantic color tokens in the app.
 - Fixed `.flag-C` (critical bloodwork value) rendering a near-black block on light theme in all three bloodwork pages.
 - Fixed the admin effort chip rendering the dark-theme blue on light theme.
@@ -689,8 +768,9 @@ Verification: `svelte-check` 0 errors / 0 warnings across 4708 files, production
 - Left categorical palettes (encounter types, source colors, `series_incomplete`) on their own hues by design.
 
 **Files added/modified:**
+
 - `web/src/app.css` — the `--status-*` token set, dark + light
-- `web/src/lib/styles/settings.css` — status pills, dirty badge, banners, flash, field errors onto tokens (had *no* light overrides before)
+- `web/src/lib/styles/settings.css` — status pills, dirty badge, banners, flash, field errors onto tokens (had _no_ light overrides before)
 - `web/src/routes/admin/+page.svelte` — effort chip, failed pills, KPI/error text, status dots; whole light-override block removed
 - `web/src/routes/health/bloodwork/{,marker/,panel/}+page.svelte` — flag H/L/C, draft badge
 - `web/src/routes/health/{history/encounter,history/import,immunizations,immunizations/import,immunizations/vaccine}/+page.svelte` — status + confidence badges
@@ -704,7 +784,7 @@ Finished what the Tier 1 entry below deferred: the per-user and per-channel slee
 
 The re-fire guard Tier 1 said this needed turned out to already exist. `_spawn_background_check`'s in-flight registry is exactly it: a spawn is skipped while the prior run under that name is alive, so a pass outliving `briefing_check_interval` can't re-fire against users it hasn't stamped `last_run` for yet. Worth recording, because the deferral reasoning made it sound like new machinery was required.
 
-What Tier 1 *didn't* anticipate is a consequence of the interval being a poll cadence rather than a run duration. The DB checks are on a 24h interval, so their skip log effectively never fires; the sleep cycles are polled every 60s but gated by their own cron, so a legitimate multi-minute nightly pass would have logged a WARNING every minute for its whole duration. Added `overlap_expected=True`, which demotes that one log line to DEBUG — an expected multi-tick pass isn't an overrun. The alternative (poll less often) would have delayed the cron's own resolution, and suppressing the log unconditionally would have hidden a genuinely wedged sweep.
+What Tier 1 _didn't_ anticipate is a consequence of the interval being a poll cadence rather than a run duration. The DB checks are on a 24h interval, so their skip log effectively never fires; the sleep cycles are polled every 60s but gated by their own cron, so a legitimate multi-minute nightly pass would have logged a WARNING every minute for its whole duration. Added `overlap_expected=True`, which demotes that one log line to DEBUG — an expected multi-tick pass isn't an overrun. The alternative (poll less often) would have delayed the cron's own resolution, and suppressing the log unconditionally would have hidden a genuinely wedged sweep.
 
 Two calls worth the ink:
 
@@ -717,11 +797,12 @@ Deliberate behaviour change: SIGTERM used to wait out an in-progress pass, becau
 
 Residual, documented in the rules file rather than left implicit: each half still holds a write transaction for its duration, and dispatch now keeps spawning workers during it, so writer contention in that window is marginally higher than before. Pre-existing in kind — already-spawned workers always raced the pass, which is the same observation that unblocked Tier 1.
 
-Testing followed Tier 1's approach and got to drop its awkward part. The differential suspend-count check existed only because the sleep-cycle sites still legitimately suspended; with none left, `test_no_check_suspends_the_watchdog` asserts `suspends == []` outright with every off-thread check due. The wedged-pass integration test asserts both properties at once: dispatch keeps ticking to shutdown, *and* the runner was entered exactly once despite the loop polling the cron several times while it hung. All four new behavioural tests verified non-vacuous by temporarily reverting the call site to `with watchdog.suspended(): _run_sleep_cycles(config)` and by ignoring `overlap_expected` — each failed as expected, then passed on restore.
+Testing followed Tier 1's approach and got to drop its awkward part. The differential suspend-count check existed only because the sleep-cycle sites still legitimately suspended; with none left, `test_no_check_suspends_the_watchdog` asserts `suspends == []` outright with every off-thread check due. The wedged-pass integration test asserts both properties at once: dispatch keeps ticking to shutdown, _and_ the runner was entered exactly once despite the loop polling the cron several times while it hung. All four new behavioural tests verified non-vacuous by temporarily reverting the call site to `with watchdog.suspended(): _run_sleep_cycles(config)` and by ignoring `overlap_expected` — each failed as expected, then passed on restore.
 
 Full suite green across three consecutive runs (8202 passed, 7 skipped); ruff on the touched files matches the pre-change baseline (17 pre-existing, none new).
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` — `_run_sleep_cycles`, `overlap_expected` on `_spawn_background_check`, both loop call sites replaced by one spawn, one clock removed, `run_scheduler` de-duped, `LoopWatchdog` docstring
 - `tests/test_background_checks.py` — Tier 2 cases (9 → 15 tests); Tier 1's differential suspend test replaced with an absolute one
 - `.claude/rules/scheduler.md` — off-thread section rewritten for all three checks, loop-step / poller-table / watchdog rows
@@ -730,18 +811,19 @@ Full suite green across three consecutive runs (8202 passed, 7 skipped); ruff on
 
 ## 2026-07-25: DB health sweep and backup off the dispatch thread (ISSUE-144 Tier 1)
 
-The scheduler's main loop had four `watchdog.suspended()` windows, not the two the issue described when it was filed — the DB-backup snapshot was added later, with ISSUE-159. Each one is a stretch where `pool.dispatch()` can't run *and* the stall watchdog is deliberately blind, so a genuine hang starting inside one is invisible until it outlives the suspension. Moved the two DB checks off the loop thread; left the two sleep-cycle checks alone.
+The scheduler's main loop had four `watchdog.suspended()` windows, not the two the issue described when it was filed — the DB-backup snapshot was added later, with ISSUE-159. Each one is a stretch where `pool.dispatch()` can't run _and_ the stall watchdog is deliberately blind, so a genuine hang starting inside one is invisible until it outlives the suspension. Moved the two DB checks off the loop thread; left the two sleep-cycle checks alone.
 
-The split is by cost, not importance. `check_db_health` and `backup_databases` are both `f(config)`, open their own connections, and take nothing from the loop — mechanical to move. The sleep cycles take a loop-owned connection and stamp `last_run` only *after* processing, so an off-thread run outlasting `briefing_check_interval` would re-fire and overlap; that needs a re-fire guard and can wait (Tier 2, recorded as a residual rather than a new issue).
+The split is by cost, not importance. `check_db_health` and `backup_databases` are both `f(config)`, open their own connections, and take nothing from the loop — mechanical to move. The sleep cycles take a loop-owned connection and stamp `last_run` only _after_ processing, so an off-thread run outlasting `briefing_check_interval` would re-fire and overlap; that needs a re-fire guard and can wait (Tier 2, recorded as a residual rather than a new issue).
 
-The concurrency objection that got this deferred in the first place turned out to be unfounded, which is the main thing worth remembering here. Blocking the dispatch thread never stopped already-spawned `UserWorker` threads — they keep calling `process_one_task` independently — so the sleep cycle has always raced task execution against the DB. Moving work off the loop thread adds no new race class; it only stops *new* worker spawning from being starved. With WAL on the framework DB and `main_loop_read_timeout_ms` making a contended dispatch scan skip its tick and retry in ~0.5s, the downside is bounded.
+The concurrency objection that got this deferred in the first place turned out to be unfounded, which is the main thing worth remembering here. Blocking the dispatch thread never stopped already-spawned `UserWorker` threads — they keep calling `process_one_task` independently — so the sleep cycle has always raced task execution against the DB. Moving work off the loop thread adds no new race class; it only stops _new_ worker spawning from being starved. With WAL on the framework DB and `main_loop_read_timeout_ms` making a contended dispatch scan skip its tick and retry in ~0.5s, the downside is bounded.
 
 Of the four, the backup is the one that most wanted this: it writes to the rclone FUSE mount, where a degraded mount makes the write time unbounded — precisely the case where you want the watchdog awake rather than muzzled.
 
 Design points:
+
 - **`_spawn_background_check(name, fn, inflight)`** runs `fn` on a `bgcheck-<name>` daemon thread unless the previous run under that name is still alive, in which case it logs and skips the tick. That guard is what makes it safe to advance the interval clocks at **spawn** time rather than completion: fixed cadence, no stacking one thread per tick behind a wedged sweep. Exceptions are contained; a crashed run frees the slot.
 - **`inflight` is passed in, not module-global.** `run_daemon` owns the dict, so tests and a re-entered daemon each start clean — no process-wide state to reset between runs.
-- **The staleness alert is untouched.** It reads the *persisted* backup clock, which still only advances on a durable OK run, so making the in-memory clock advance at spawn can't suppress it.
+- **The staleness alert is untouched.** It reads the _persisted_ backup clock, which still only advances on a durable OK run, so making the in-memory clock advance at spawn can't suppress it.
 - **Daemon threads deliberately.** An in-flight snapshot dies with the process at shutdown rather than delaying it; backups write dated dirs and the restore path sanity-checks them, so a torn snapshot can't clobber the last good one.
 
 Testing was the interesting part. The "no longer suspends" property is easy to assert vacuously, since the two sleep-cycle sites still legitimately suspend — so the test is differential: drive the daemon loop once with the DB checks due and once with them not due (an interval past epoch-seconds never comes due), and require the suspend counts to match. Verified non-vacuous by temporarily reintroducing a `suspended()` wrapper and confirming it fails 3 ≠ 2. The other integration test wedges the health sweep on an event and asserts dispatch keeps ticking to shutdown.
@@ -751,6 +833,7 @@ The new test file also shook out a **pre-existing** order-dependency by changing
 Full suite green across three consecutive runs (8196 passed, 7 skipped); ruff on `scheduler.py` matches the pre-change baseline exactly.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` — `_spawn_background_check`, `_run_db_backup`, the `background_checks` registry, both call sites rewired, `LoopWatchdog` docstring
 - `tests/test_background_checks.py` — new (9 tests)
 - `tests/test_local_install_stage3.py` — env-leak isolation fixture
@@ -760,15 +843,16 @@ Full suite green across three consecutive runs (8196 passed, 7 skipped); ruff on
 
 Tumblr feeds painted the same photo over and over — a reblog wave sends one picture through every blog you follow. Sampling showed ~4.6% of stored image instances were exact-URL duplicates. Two distinct mechanisms, fixed in two layers.
 
-**Layer 1 — ingest.** The provider walks a post's own `content` *plus* every `trail` entry's blocks, so a reblog-with-commentary listed its photo twice inside one entry. Rather than a tumblr-specific normalizer, folded tumblr into the existing image-identity helper the RSS path already uses (the issue's own "these should converge" note): `image_identity` now strips the CDN shard (`NN.media.tumblr.com` → `media.tumblr.com`) and the `/sWxH/` size segment, keying on the remaining `<media-key>/…/<content-hash>` path, and `_url_width` reads that size segment so `dedupe_image_variants` keeps the largest rendition. The provider then just calls `dedupe_image_variants`. Declined the media-key-alone stretch (measured +27 of 17,986 — could merge genuinely different crops).
+**Layer 1 — ingest.** The provider walks a post's own `content` _plus_ every `trail` entry's blocks, so a reblog-with-commentary listed its photo twice inside one entry. Rather than a tumblr-specific normalizer, folded tumblr into the existing image-identity helper the RSS path already uses (the issue's own "these should converge" note): `image_identity` now strips the CDN shard (`NN.media.tumblr.com` → `media.tumblr.com`) and the `/sWxH/` size segment, keying on the remaining `<media-key>/…/<content-hash>` path, and `_url_width` reads that size segment so `dedupe_image_variants` keeps the largest rendition. The provider then just calls `dedupe_image_variants`. Declined the media-key-alone stretch (measured +27 of 17,986 — could merge genuinely different crops).
 
-**Layer 2 — cross-entry, bounded.** A reblog is a legitimately distinct entry, so entries are never dropped and rows are never mutated; only the repeated *tile* is suppressed. Computed server-side at read time rather than as client session state, so it survives paging and reloads.
+**Layer 2 — cross-entry, bounded.** A reblog is a legitimately distinct entry, so entries are never dropped and rows are never mutated; only the repeated _tile_ is suppressed. Computed server-side at read time rather than as client session state, so it survives paging and reloads.
 
-The rule is a function of two entries alone — *an image on E is hidden when another entry carries the same image and is newer than E by no more than the window* — which is what makes it page-stable and idempotent: no seen-ledger, no "already served" state, the newest carrier always keeps the tile, ties break by id. Explicitly bounded per the issue: an all-time index would silently hide an image resurfacing months later and grow without limit.
+The rule is a function of two entries alone — _an image on E is hidden when another entry carries the same image and is newer than E by no more than the window_ — which is what makes it page-stable and idempotent: no seen-ledger, no "already served" state, the newest carrier always keeps the tile, ties break by id. Explicitly bounded per the issue: an all-time index would silently hide an image resurfacing months later and grow without limit.
 
 Design points worth remembering:
+
 - **`seen_ts` is epoch seconds, not the ISO string.** Entry timestamps are normally ISO UTC from the poller, but the RSS path falls back to whatever the feed shipped (RFC 822 shows up), so string range comparison would be wrong. `parse_seen_ts` handles ISO/`Z`/naive/RFC822 and returns None otherwise; an undated entry is simply skipped (it can't be windowed either way).
-- **Owner lookup is scoped to the slice being rendered** — feed, category, *and* starred. Browsing one blog must not blank a tile because a different blog reblogged it later, and a starred post must keep the picture you starred it for.
+- **Owner lookup is scoped to the slice being rendered** — feed, category, _and_ starred. Browsing one blog must not blank a tile because a different blog reblogged it later, and a starred post must keep the picture you starred it for.
 - **Read state is deliberately not a scope.** The reader marks entries read as you scroll; scoping on status would make suppressed images pop back into view mid-scroll. There's a regression test for this and for the starred case.
 - The payload reports `duplicate_image_count` instead of silently shrinking `images` — the card renders "N repeats hidden", and the count keeps an all-suppressed post on the image side of the image/text toggle instead of letting it drift into the text view.
 - Known cosmetic edge: suppression orders by published/fetched time, so under a `created_at` sort the carrier that keeps the tile can render after the one that lost it. The note wording ("a more recent post") stays true; not worth ordering-aware suppression.
@@ -776,6 +860,7 @@ Design points worth remembering:
 Benchmarked ~8ms per 500-entry page against a 10k-row index, and verified end-to-end at that scale that cross-shard/cross-size repeats are actually caught (24 of an expected 24). TDD throughout: normalizer and provider tests written and confirmed failing first, then the DB/route layers. Full suite green (8187 passed).
 
 **Files added/modified:**
+
 - `src/istota/feeds/image_dedupe.py` — new: `parse_seen_ts`, `entry_seen_ts`, `PageEntry`, `plan_suppression`, `DEFAULT_WINDOW_DAYS`
 - `src/istota/feeds/sanitize.py` — tumblr-aware `image_identity` + size-segment width
 - `src/istota/feeds/providers/tumblr.py` — dedupe collected images
@@ -789,6 +874,7 @@ Benchmarked ~8ms per 500-entry page against a 10k-row index, and verified end-to
 The briefings reader could list and read generated briefings but never remove one — the only prune path was the age-based `archive_retention_days` sweep. Added a per-result delete affordance, end-to-end (it was missing at every layer: DB, route, api client, UI).
 
 **Key changes:**
+
 - New `bdb.delete_archived(conn, id) -> bool` — single-row delete, returns False on a missing id (mirrors `get_archived`/`delete_block`).
 - New route `DELETE /istota/api/briefings/archive/{id}` — per-user briefings DB, CSRF-gated via `verify_origin`, 404 when absent; mirrors the existing `delete_block` route.
 - `deleteBriefingArchiveItem(id)` api client fn.
@@ -797,6 +883,7 @@ The briefings reader could list and read generated briefings but never remove on
 - TDD: wrote the DB + route tests first (confirmed failing on `AttributeError` / `405`), then implemented. Kept a plain confirm (not the type-the-name challenge the chat-room hard delete uses) — deleting one archived result is low-stakes versus nuking a room's whole history.
 
 **Files added/modified:**
+
 - `src/istota/briefings/db.py` — `delete_archived`
 - `src/istota/briefings/routes.py` — `DELETE /archive/{archive_id}`
 - `web/src/lib/api.ts` — `deleteBriefingArchiveItem`
@@ -807,10 +894,11 @@ The briefings reader could list and read generated briefings but never remove on
 ## 2026-07-25: Alias-registry review fixes (native resolution + reserved `default`)
 
 Post-review hardening of the same-day alias-registry commit (Mulder/Scully pass). Five fixes, all at the resolution/validation boundary:
+
 - **Native role + effort leak (high).** `NativeBrain.resolve_alias` guarded the built-in-role branch on `self._config.model`, so a role tier + `:effort` with an unset model (`general:high`) fell through to the generic `:effort` passthrough and leaked the literal `"general"` onto the wire (NB-3 violation — the no-effort case was covered, the effort case wasn't). Moved the role check before the passthrough; an empty model collapses to `None` (brain default). Regression tests added for `general:high` and `smart:low`.
 - **Native flat-alias baked effort (medium).** A legacy-flat override carrying a baked `:effort` (`smart = "opus:high"`) reached the native wire unsplit, so the same flat value resolved differently on the two brains. Native's override branch now `split_effort`s the target like `claude_code` does (precedence: request suffix > explicit `RoleTarget.effort` > baked).
 - **Ansible `portable` TOML (medium).** `portable = {{ nsval | lower }}` rendered the bare word `yes`/`no` for a non-bool truthy operator value — invalid TOML that failed the whole `validate_config` parse. Now `{{ 'true' if nsval else 'false' }}`.
-- **Reserved `default` alias (medium).** `!room model default` relied on `resolve_alias("default")` returning a null model, which an operator override of `default` would break; `cmd_room` now short-circuits the literal `"default"` to always clear (brain-agnostic, covers native too). And `ClaudeCodeBrain.validate_alias_override` now warns when an override *target* resolves to a null-model alias (`smart = "default"`) instead of silently sending `"default"` verbatim.
+- **Reserved `default` alias (medium).** `!room model default` relied on `resolve_alias("default")` returning a null model, which an operator override of `default` would break; `cmd_room` now short-circuits the literal `"default"` to always clear (brain-agnostic, covers native too). And `ClaudeCodeBrain.validate_alias_override` now warns when an override _target_ resolves to a null-model alias (`smart = "default"`) instead of silently sending `"default"` verbatim.
 
 Deferred (low, dev-only): the `web/vite-mock-api.ts` mock still surfaces removed `opus-high` / `claude-sonnet-4-6`, and `_roles.get_portable_alias_names`'s docstring describes a consumer relationship the executor doesn't use.
 
@@ -819,6 +907,7 @@ Deferred (low, dev-only): the `web/vite-mock-api.ts` mock still surfaces removed
 Builds directly on the per-namespace role tiers below. Two disjoint sources of alias truth were unified into one operator-visible, config-driven registry, and effort was pulled out of alias names into a compositional `:effort` modifier. Motivation: the provider-alias table (`MODEL_ALIASES`) was a hand-maintained model×effort cross-product (`opus`/`opus-high`/`opus-xhigh`/`opus-max` + stale pins `opus-46`/`opus-47`), invisible to operators and re-edited every model release; and effort baked into alias names (`opus-high`) contradicted effort being an orthogonal axis everywhere else, causing the documented `model = "opus-46-high"` config footgun (model set, effort silently empty).
 
 **Design:** three cooperating changes, all at the resolution boundary; storage/delivery untouched.
+
 - **`:effort` modifier** (`brain/_aliases.py`) — `split_effort(raw) -> (base, effort|None)` peels a trailing `:<effort>` via `rpartition(":")` when the suffix ∈ `EFFORT_LEVELS` and the base is non-empty (an OpenRouter `provider/model` slug's `/` is untouched; `:high` / `opus:` / `opus:turbo` don't split). Every brain's `resolve_alias`/`resolve_model_name` calls it first. Effort precedence: `:effort` suffix > the alias entry's own default effort > caller's separate effort field > model default.
 - **Unified `DEFAULT_ALIASES`** (`claude_code.py`) — replaced the split `MODEL_ALIASES` + `DEFAULT_ROLE_TARGETS` with one `name -> (model_id, default_effort)` table holding tiers + shortcuts together, base names only. Deleted `OPUS_46`/`OPUS_47` (a prior-version pin is `claude-opus-4-7:high` via the `claude-*` canonical passthrough `resolve_alias` now does). `TmuxClaudeBrain` inherits by delegation; `NativeBrain` keeps its dynamic tier→`native.model` resolution + `split_effort`.
 - **Config rename + portability** — `[models.roles]` → `[models.aliases]` (hard cut, no shim; a stale `[models.roles]` logs a one-time migration WARNING and is not read). `brain/_roles.py` symbols hard-renamed to alias vocabulary (`set_alias_overrides` / `get_alias_override_target` / `get_alias_overrides`, no back-compat names); `RoleTarget` and `CANONICAL_ROLES` kept (the "role" word now scopes only the portable-tier subset). New reserved `portable = true` per-alias key (stripped into `_portable_names`, read via `get_portable_alias_names`) so a custom cross-brain tier stays portable. `is_portable_alias(name, portable_names)` reworked to key on an explicit portable set (`CANONICAL_ROLES` ∪ declared-portable) instead of "any name in the table" — else shortcuts sharing the table would read as portable; the executor computes it via `config_alias_portable_names(config)`.
@@ -831,24 +920,27 @@ Builds directly on the per-namespace role tiers below. Two disjoint sources of a
 
 Complement to the model-catalog work below: the catalog answers "given a model id, what are its window/price/caps"; this answers the orthogonal "which concrete model does a role tier (`fast`/`general`/`smart`) mean, per brain". The operator override surface — `[models.roles]` → `ModelsConfig.roles: dict[str, str]` — was flat (one role → one raw string), resolved through whichever brain was active. That's single-namespace by construction and fired a real bug in a shipped feature: an operator writing `smart = "opus-46-high"` (an Anthropic alias) had it resolve correctly under the CLI brains but sent verbatim to OpenRouter under the native brain — and the `claude_code → native` availability fallback re-resolves portable role tiers in the fallback namespace, so a customized `smart` failing over sent an invalid id to OpenRouter. Two secondary defects from the same code: role overrides silently dropped their effort (`smart = "opus-high"` → Opus at no effort), and there was no way to say "smart = my expensive model, on both brain families".
 
-Fix: a role override is stored **per model namespace** — `role → namespace → RoleTarget(model, effort)`, where the namespace key is a brain's `model_namespace` (`"anthropic"` for the CLI brains, `"openai_compat"` for native) or the reserved `"*"` for a legacy flat value. Each brain resolves a role in its *own* namespace, so a value written for one can never leak onto another's wire. One `smart` definition carries both an `anthropic` and an `openai_compat` value.
+Fix: a role override is stored **per model namespace** — `role → namespace → RoleTarget(model, effort)`, where the namespace key is a brain's `model_namespace` (`"anthropic"` for the CLI brains, `"openai_compat"` for native) or the reserved `"*"` for a legacy flat value. Each brain resolves a role in its _own_ namespace, so a value written for one can never leak onto another's wire. One `smart` definition carries both an `anthropic` and an `openai_compat` value.
 
 **Key changes:**
+
 - **Per-namespace override state** (`brain/_roles.py`). New frozen `RoleTarget(model, effort=None)`; `_role_overrides` is now `dict[str, dict[str, RoleTarget]]`. `set_role_overrides` normalizes three input shapes (bare string → `{"*": …}`; `{ns: "str"}`; `{ns: {model, effort}}`), dropping malformed entries with a warning. New `get_role_override_target(role, namespace)` (precedence: per-namespace > `"*"` > None). Removed the single-namespace `get_role_override`.
 - **`model_namespace` on the Brain protocol** (`_types.py`) + each impl: `claude_code` / `tmux_claude` = `"anthropic"` (tmux delegates to the composed CLI brain), `native` = `"openai_compat"`.
 - **Effort-drop fix.** `claude_code` gained `_resolve_target_with_effort`; `resolve_alias` now reads its namespace and preserves the alias's effort (`opus-high` → `high`), with an explicit `RoleTarget.effort` winning. Verified role effort reaches the wire via `!model <role>` / `!room model` (commands.py already captures `resolve_alias`'s effort into `task.effort`) and the fallback path.
 - **Native reads only its namespace** — `resolve_alias`/`list_aliases` use `get_role_override_target(alias, "openai_compat")`, returning the slug + effort verbatim, never the anthropic value. This is the core bug fix.
-- **Config + validation.** `ModelsConfig.roles: dict[str, str | dict]` now holds the *raw* parsed structure (normalization lives only in `set_role_overrides`); the parser preserves nested tables. The config-load validation loop is namespace-aware (flat `"*"` → active brain; `anthropic` → claude_code; `openai_compat` → skipped, native has no alias table); warnings only, never fails load.
-- **Fallback** (`executor._resolve_fallback_model_effort`) re-resolves a portable role via the fallback brain's `resolve_alias` (model *and* effort), so a customized `smart` failing over `claude_code → native` lands on a valid OpenRouter slug + effort.
-- **Ansible (batteries-included).** `istota_models_roles` now ships *populated* with block-style per-namespace defaults carrying explicit per-tier `{model, effort}` (anthropic mirrors the code floors Haiku/Sonnet/Opus; openai_compat → `{{ istota_brain_native_model }}`; smart pins effort high, fast/general model-default) — replacing the old `istota_brain_native_model_{fast,general,smart}` overlay + conditional Jinja and the deleted roles FOOTGUN essay. `config.toml.j2` renders flat `role = "value"` + nested `[models.roles.<role>]` tables; `validate_config.py` gained a namespace-aware shape check.
+- **Config + validation.** `ModelsConfig.roles: dict[str, str | dict]` now holds the _raw_ parsed structure (normalization lives only in `set_role_overrides`); the parser preserves nested tables. The config-load validation loop is namespace-aware (flat `"*"` → active brain; `anthropic` → claude_code; `openai_compat` → skipped, native has no alias table); warnings only, never fails load.
+- **Fallback** (`executor._resolve_fallback_model_effort`) re-resolves a portable role via the fallback brain's `resolve_alias` (model _and_ effort), so a customized `smart` failing over `claude_code → native` lands on a valid OpenRouter slug + effort.
+- **Ansible (batteries-included).** `istota_models_roles` now ships _populated_ with block-style per-namespace defaults carrying explicit per-tier `{model, effort}` (anthropic mirrors the code floors Haiku/Sonnet/Opus; openai_compat → `{{ istota_brain_native_model }}`; smart pins effort high, fast/general model-default) — replacing the old `istota_brain_native_model_{fast,general,smart}` overlay + conditional Jinja and the deleted roles FOOTGUN essay. `config.toml.j2` renders flat `role = "value"` + nested `[models.roles.<role>]` tables; `validate_config.py` gained a namespace-aware shape check.
 
 **Design decisions:**
-- **Namespace *label*, not brain *kind*** — the two CLI brains share `anthropic`, so keying on kind would force duplicate values.
+
+- **Namespace _label_, not brain _kind_** — the two CLI brains share `anthropic`, so keying on kind would force duplicate values.
 - **Legacy flat kept as a `"*"` namespace-agnostic value, not auto-expanded** — at config-load we don't know which brain a task will use (`source_type_overrides` route per source type), and expanding an Anthropic alias into an `openai_compat` slug is exactly the translation we refuse. A flat value under native stays the documented pre-per-namespace behavior (no regression).
 - **Code-level `DEFAULT_ROLE_TARGETS` floors retained** — a no-`[models.roles]` deployment is byte-unchanged.
 - **Effort as a first-class shipped default** (operator request) — the default block uses `{model, effort}` on every tier so effort is a visible per-tier knob; empty effort renders as a bare model.
 
 **Files added/modified:**
+
 - `src/istota/brain/_roles.py` — `RoleTarget`, nested `_role_overrides`, normalizing `set_role_overrides`, `get_role_override_target`; removed `get_role_override`
 - `src/istota/brain/_types.py` — `model_namespace` on the Brain Protocol
 - `src/istota/brain/claude_code.py` — `model_namespace`, `_resolve_target_with_effort`, per-namespace `resolve_alias`/`list_aliases`
@@ -868,13 +960,15 @@ Fix: a role override is stored **per model namespace** — `role → namespace �
 The native brain resolved per-model metadata (context window, capabilities, prices) through a hand-maintained bundled catalog (`src/istota/llm/model_catalog.json`). It only knew Anthropic + a few OpenAI ids, some of its data was wrong (context windows especially), and it needed constant updates we didn't want to own. Established during analysis: the catalog is consumed **only** by the native brain, its cost helper, and the config override plumbing — the shipping-default `claude_code`/`tmux_claude` brains never read it (they hand short ids to the `claude` CLI). Native effectively always speaks to OpenRouter, whose `/models` endpoint returns rich per-model metadata for free. Direction: drop the bundled catalog (config-first), add live OpenRouter enrichment.
 
 **Key changes:**
+
 - **Config-first resolution.** `get_model_info` is now a pure, synchronous three-layer chain: operator `[brain.native.model_overrides]` (partial, merged on top) > live-fetched OpenRouter catalog (`_FETCHED`) > conservative `_DEFAULT` (`context_window=200_000`, zero price). Deleted `model_catalog.json` + its loader (`_CATALOG_PATH`/`_load_catalog`/`_CATALOG`). Added `_FETCHED` + `set_fetched_catalog`; the returned `id` is always the queried id (so a default miss never leaks the `"unknown"` sentinel).
-- **OpenRouter parse/fetch/cache** (new `openrouter_catalog.py`). `parse_openrouter_models` (pure): per-token USD → per-mtok, `input_modalities`→vision, `supported_parameters` `reasoning`→thinking, `tools`→tools (default-true when absent); skips entries missing a positive `context_length` and drops non-numeric prices to 0.0, never raising. `fetch_openrouter_catalog` GETs `{base_url}/models` (public; Bearer if a key is given). Disk cache stores the *parsed* `ModelInfo` fields (not the raw payload → immune to upstream schema drift), TTL-gated with a stale-fallback read.
+- **OpenRouter parse/fetch/cache** (new `openrouter_catalog.py`). `parse_openrouter_models` (pure): per-token USD → per-mtok, `input_modalities`→vision, `supported_parameters` `reasoning`→thinking, `tools`→tools (default-true when absent); skips entries missing a positive `context_length` and drops non-numeric prices to 0.0, never raising. `fetch_openrouter_catalog` GETs `{base_url}/models` (public; Bearer if a key is given). Disk cache stores the _parsed_ `ModelInfo` fields (not the raw payload → immune to upstream schema drift), TTL-gated with a stale-fallback read.
 - **NativeBrain wiring.** `_ensure_fetched_catalog` runs once at the top of the async run when `base_url` contains `openrouter.ai` and `model_catalog_fetch` is on: fresh disk cache → live fetch (+write) → stale cache → leave the 200k default. Never fatal (wrapped in try/except). A process-global `threading.Lock` + `_CATALOG_FETCHED_AT` guard mean at most one fetch per process per TTL (no worker-thread stampede) — held across the fetch (simple; the first-use window is tiny). Cache dir = `db_path.parent` resolved from `ISTOTA_DB_PATH` in the per-task env; absent → in-memory + live-fetch only, no disk cache.
 - Config: `[brain.native] model_catalog_fetch` (default true) + `model_catalog_cache_ttl_hours` (default 24).
 - A non-OpenRouter native endpoint (local vLLM/Ollama, direct Anthropic we don't run) is never fetched — it declares its window via `context_window` / a `model_overrides` entry, else gets the 200k default. Documented as the contract in the example + Ansible config.
 
 **Design decisions:**
+
 - **Drop the bundled JSON entirely** rather than keep a minimal Anthropic-pins file — with direct-Anthropic native not deployed, those entries had no consumer. Any future non-OpenRouter native deployment declares its window in config.
 - **Default window 200k, not a small local-safe value** — zero regression for existing paths; overflow from an over-large window is recoverable (≤2 compact-and-retry), premature compaction from an under-large one is merely wasteful. The asymmetry doesn't justify degrading the common case with a guess for a deployment we don't run.
 - **Key the fetch strictly on `openrouter.ai`** — only OpenRouter returns the rich shape; direct Anthropic/OpenAI `/v1/models` return ids only.
@@ -882,6 +976,7 @@ The native brain resolved per-model metadata (context window, capabilities, pric
 - Removing the bundled catalog made `get_model_info` return the conservative default for previously-"known" ids, so four native capability-gate tests were updated to declare thinking/vision the honest new way — via a `model_overrides` entry.
 
 **Files added/modified:**
+
 - `src/istota/llm/catalog.py` — rewrote for the override>fetched>default chain; deleted the bundled-file loader; added `_FETCHED` + `set_fetched_catalog`
 - `src/istota/llm/model_catalog.json` — **deleted**
 - `src/istota/llm/openrouter_catalog.py` — **new**: parse + fetch + disk-cache helpers
@@ -893,20 +988,23 @@ The native brain resolved per-model metadata (context window, capabilities, pric
 
 ## 2026-07-24: Native-brain turn-budget awareness nudge (ISSUE-187 defect 3)
 
-The native brain's `max_turns` cap is a hard safety net the model can't see, so a long explorative task routinely gets capped mid-plan and delivers its last narration verbatim as if it were the answer (the incident: a Lisbon-apartment search capped at turn 80 on "let me move to Otodom and OLX next"). Defects 1–2 (the `stop_reason` masking + the truncation marker gated on an empty result) already shipped in `6e4cd4e`, making the cap *visible when hit*. This closes defect 3 — making the model *pace itself* so it's hit less often, and so a capped run produces a deliberate partial deliverable. Native-only; the CLI brains take their budget from `claude` and are unchanged.
+The native brain's `max_turns` cap is a hard safety net the model can't see, so a long explorative task routinely gets capped mid-plan and delivers its last narration verbatim as if it were the answer (the incident: a Lisbon-apartment search capped at turn 80 on "let me move to Otodom and OLX next"). Defects 1–2 (the `stop_reason` masking + the truncation marker gated on an empty result) already shipped in `6e4cd4e`, making the cap _visible when hit_. This closes defect 3 — making the model _pace itself_ so it's hit less often, and so a capped run produces a deliberate partial deliverable. Native-only; the CLI brains take their budget from `claude` and are unchanged.
 
 **Key changes:**
-- **(B) Threshold reminder — the primary mechanism.** As a tool-bearing, capped run nears `max_turns`, the loop injects an environment notice. `_pick_turn_budget_nudge` counts assistant turns from the loop's `new_messages` accumulator (monotonic across compaction — matches `_max_turns_stop`, so a threshold never re-fires after a context shrink), fires the ~50% "keep it in mind" reminder once, then once each as absolute steps-remaining crosses each level in `[15, 5]` (escalating); each threshold fires at most once via a `fired` set, and a tiny cap collapses to the most urgent crossed threshold (overtaken ones marked fired so they can't fire stale later). `_turn_budget_nudge_message` frames it as a *shrinking* resource ("~N steps remaining"), anchoring-resistant.
+
+- **(B) Threshold reminder — the primary mechanism.** As a tool-bearing, capped run nears `max_turns`, the loop injects an environment notice. `_pick_turn_budget_nudge` counts assistant turns from the loop's `new_messages` accumulator (monotonic across compaction — matches `_max_turns_stop`, so a threshold never re-fires after a context shrink), fires the ~50% "keep it in mind" reminder once, then once each as absolute steps-remaining crosses each level in `[15, 5]` (escalating); each threshold fires at most once via a `fired` set, and a tiny cap collapses to the most urgent crossed threshold (overtaken ones marked fired so they can't fire stale later). `_turn_budget_nudge_message` frames it as a _shrinking_ resource ("~N steps remaining"), anchoring-resistant.
 - **(A) Upfront pacing line — optional flavoring, non-numeric.** `_extract_system_prompt` (now an instance method) appends one non-numeric line to the coding system prompt when the nudge is on + tools present + a cap set. Stating the numeric cap up front would anchor it as a target and compound sprawl on the exact tasks that hit the cap, so it carries no number. Compaction-safe (system prompt lives outside `ctx.messages`).
 - **Injection mechanism.** The nudge rides the existing `prepare_next_turn` closure (threshold logic in the `_next_budget_nudge` helper, kept separate from the compaction path). The notice is injected via `PrepareNextTurnResult(messages=…)` into `ctx.messages` only — not `new_messages` — so it's invisible to the trace and the turn count, purely model-facing, exactly like the compaction-summary injection.
 - **Wire role.** The notice is wire-role user (the LLM layer has no mid-conversation system role; Anthropic rejects one), with an explicit "Automatic system notice — not from the user" frame so the model treats it as environment metadata, not a new instruction (the mirror of `_STEER_FRAME`).
 - Config: `[brain.native] turn_budget_nudge` (default on) + `turn_budget_nudge_early_percent = 50` + `turn_budget_nudge_remaining = [15, 5]`. Defensive list parse (string→int coercion, junk dropped). Text-only runs (empty `allowed_tools`, e.g. sleep cycle) are gated out.
 
 **Design decisions:**
-- Anchoring drove the whole shape. Stating "you have N steps" up front tends to turn N into a target, compounding sprawl on exactly the population that hits the cap; the disciplined case rarely hits it because it self-limits. So (B) is primary (surfaces the budget only when actionable — short/common tasks see nothing), the ~50% first fire is early enough to be actionable (≤15/≤5 alone fired too late), and every framing leads with absolute *remaining* rather than percent-used.
+
+- Anchoring drove the whole shape. Stating "you have N steps" up front tends to turn N into a target, compounding sprawl on exactly the population that hits the cap; the disciplined case rarely hits it because it self-limits. So (B) is primary (surfaces the budget only when actionable — short/common tasks see nothing), the ~50% first fire is early enough to be actionable (≤15/≤5 alone fired too late), and every framing leads with absolute _remaining_ rather than percent-used.
 - Injecting into `ctx.messages` (not `new_messages`) keeps turn accounting and the persisted trace untouched — the cap still fires at the same turn with the real `stop_reason`, verified by a test.
 
 **Files added/modified:**
+
 - `src/istota/brain/native.py` — `_pick_turn_budget_nudge` / `_turn_budget_nudge_message` / `_TURN_BUDGET_FRAME` / `_TURN_BUDGET_UPFRONT`; nudge wired into `prepare_next_turn` via `_next_budget_nudge`; `_extract_system_prompt` static→instance + upfront line.
 - `src/istota/config.py` — three `NativeBrainConfig` fields + defensive parsing.
 - `tests/native/test_turn_budget_nudge.py` — 15 tests (threshold picker, message framing, integration reaches-the-wire / disabled / text-only / cap-honored, upfront-line present/absent).
@@ -915,20 +1013,23 @@ The native brain's `max_turns` cap is a hard safety net the model can't see, so 
 
 ## 2026-07-24: Degraded-brain visibility on the admin dashboard + reusable NoticeBanner (ISSUE-188)
 
-The admin dashboard aggregated *configured* posture, not *live* posture: when the primary brain was down (usage-limit / not-found) and the fallback was serving traffic, the page still looked healthy — it read `_config.brain` (the static config), so `models.brain_kind` showed the configured primary, the scheduler-health block was green, and nothing said "you're running on the fallback right now." The operator had to infer it from per-task model-note footers or a collapsed briefing. The live signal already existed (`brain/_fallback.get_availability_breaker()` / `primary_brain_unavailable`) — it just wasn't wired to the stats payload. Display-only fix; no change to brain selection or routing.
+The admin dashboard aggregated _configured_ posture, not _live_ posture: when the primary brain was down (usage-limit / not-found) and the fallback was serving traffic, the page still looked healthy — it read `_config.brain` (the static config), so `models.brain_kind` showed the configured primary, the scheduler-health block was green, and nothing said "you're running on the fallback right now." The operator had to infer it from per-task model-note footers or a collapsed briefing. The live signal already existed (`brain/_fallback.get_availability_breaker()` / `primary_brain_unavailable`) — it just wasn't wired to the stats payload. Display-only fix; no change to brain selection or routing.
 
 **Key changes:**
+
 - `web_app._admin_brain_status_section()` consults `primary_brain_unavailable(_config.brain)` and reports `{degraded, primary, active, reason}` — `active` = `effective_fallback_kind(...)` when degraded, else the primary. Wired into `_gather_admin_stats` as `payload["brain_status"]`. Best-effort like the sibling sections. The breaker is process-global in-memory, so a stats call in the daemon's own web process sees real state (single-daemon deployment; not a cross-process problem).
 - Surfaced in the **existing** system-banner Status cell (per operator preference — no new standalone banner). Precedence: scheduler-stale → red "Stale" (bigger problem) > brain-degraded → amber "Degraded" (new `.dot-warn`) > green "Healthy". The subtext swaps to "on fallback (X) · Y down" (or "Y down · no fallback") when degraded, else keeps "last activity …".
 - New reusable UI primitive `NoticeBanner.svelte` — full-width, one-line, expandable notice with `info`/`warn`/`danger` variants (theme-aware `--accent-amber` for warn), a variant-colored left border, and a bindable `collapsed` (default true). The standalone-mode notice on the admin page was re-expressed through it (moved from its own card into this component at the top of the page), so any page can drop `<NoticeBanner>` at its top.
 - `AdminStats.brain_status` type added.
 
 **Design decisions:**
+
 - The breaker is the right source of truth, not per-task model notes — notes are per-task and absent on success; the breaker is the process-wide "are we on the fallback right now" signal.
 - With `fallback_cooldown_seconds = 0` (stickiness off) `primary_brain_unavailable` always returns available, so there's no persistent degraded posture to display — acceptable, since in that config each task independently probes the primary first.
 - Iterated on placement with the operator: a top-of-page banner → the Status cell (reuse existing UI, no new banner) → then extracted the standalone-notice pattern into a reusable `NoticeBanner` component when a general-purpose expandable notice was wanted.
 
 **Files added/modified:**
+
 - `src/istota/web_app.py` — `_admin_brain_status_section()` + wire into `_gather_admin_stats`.
 - `web/src/routes/admin/+page.svelte` — Status-cell degraded logic + `.dot-warn`; standalone notice via `<NoticeBanner>` at the page top.
 - `web/src/lib/components/ui/NoticeBanner.svelte` (new) + `index.ts` export.
@@ -942,13 +1043,15 @@ When an interactive task (Talk / web chat) fails or is cancelled, the only recov
 Added two layered commands sharing one room-scoped resolver, all in `commands.py`. No DB migration, no executor change, no frontend change (autocomplete reads the command registry).
 
 **Key changes:**
+
 - `_resolve_retry_target` — mirrors `!more`/`!steer`: explicit `#<id>`, else the most recent `failed`/`cancelled` task in the resolved canonical room whose `source_type` is interactive (`talk`/`email`/`repl`/`web`). Own-task-only unless admin. Rejects `running`/`locked`/`pending` (use `!stop` first), `pending_confirmation` (reply normally), and `completed` (nothing to retry).
 - `!retry` — re-runs from scratch. `!resume` — prepends the failed attempt's rendered `execution_trace` (verbatim Bash `raw` per ISSUE-174, else the tool description, plus intermediate text) to the original prompt with a "continue from where you left off" frame.
-- Both create a *new* task (`_create_retry_task` → `db.create_task` with `parent_task_id` + copied delivery fields `output_target`/`talk_delivery_token`/`model`/`effort`/`skill`/`skill_args`). New-row-not-requeue keeps the failed attempt intact in history and out of the automatic backoff/`attempt_count` pressure — matching how a retyped prompt behaves.
-- The retry's user turn is written to the room transcript (`_record_retry_user_turn`) with the *clean* original prompt (never the trace injection), paired to the new task id so `_store_room_turn`'s eventual assistant row completes the turn.
+- Both create a _new_ task (`_create_retry_task` → `db.create_task` with `parent_task_id` + copied delivery fields `output_target`/`talk_delivery_token`/`model`/`effort`/`skill`/`skill_args`). New-row-not-requeue keeps the failed attempt intact in history and out of the automatic backoff/`attempt_count` pressure — matching how a retyped prompt behaves.
+- The retry's user turn is written to the room transcript (`_record_retry_user_turn`) with the _clean_ original prompt (never the trace injection), paired to the new task id so `_store_room_turn`'s eventual assistant row completes the turn.
 - `!resume` degrades to `!retry` semantics with a note when the trace is absent/empty/corrupt (pre-ISSUE-183 tasks).
 
 **Design decisions:**
+
 - Chose new-task-with-`parent_task_id` over `set_task_pending_retry` re-queue: a re-queued row inherits the attempt counter, the backoff schedule, and muddies the `is_rerun` ack semantics; a new task is unambiguous.
 - Chose prepend-to-prompt over a dedicated executor context section — smaller change, flows through every brain and context path unchanged, keeps the injection in the command layer.
 - The automatic retry path (`set_task_pending_retry`) is untouched — no auto-injection of partial context, which could compound a confused transient-failure state.
@@ -956,6 +1059,7 @@ Added two layered commands sharing one room-scoped resolver, all in `commands.py
 - Skipped copying `attachments` — original task's local temp paths may be cleaned up by retry time, so re-attaching stale paths is riskier than dropping them for v1.
 
 **Files added/modified:**
+
 - `src/istota/commands.py` — new `!retry`/`!resume` handlers, `_resolve_retry_target`, `_create_retry_task`, `_record_retry_user_turn`, `_render_prior_progress`, `_build_resume_prompt`.
 - `tests/test_commands_retry.py` - 28 tests: target resolution (last-in-room, explicit id, not-yours, wrong status, non-interactive source), field copy, transcript row, resume injection shape + step count + clean-prompt transcript, empty/corrupt-trace degradation.
 
@@ -966,19 +1070,21 @@ A cancelled or failed task that had already streamed tool calls and intermediate
 ### Root cause
 
 `db.update_task_status` had three terminal branches:
+
 - `completed` — wrote `result`, `actions_taken`, `execution_trace`, `completed_at`.
 - `failed` — wrote only `status`, `error`, `completed_at`. **Dropped `actions_taken` and `execution_trace`** even when the caller passed them.
 - `cancelled` — fell through to the `else` branch: a **status-only update** (`status`, `updated_at`). It didn't even persist the `error` text, let alone the trace.
 
 So the native brain builds a full execution trace even when a task is cancelled or errors out (the loop measures tools as they run), but the final `update_task_status` call on the failure/cancel path threw that trace away. The web chat's reload path (`_assistant_message_dict` → `_trace_segments`) reads `execution_trace` / `actions_taken` off the `tasks` row; with both NULL it produced an empty segment list, and the assistant message rendered as an empty bubble (the error text wasn't being stored as `result` either, so there was no fallback text segment).
 
-A second, related defect in the reload path: even when the trace *was* present, `_trace_segments` treated the terminal text (the `result` argument) the same way for every status — **overwriting** the last text segment if the trace ended on one, else appending. That's the right call for a *completed* task (the streamed result replaces the draft answer the model was building), but for an *interrupted* task the trace's trailing text is **intermediate** model output (the partial analysis it was writing when cancelled/errored), not a draft of the final answer. Overwriting it discarded the model's last real output and left only the bare error notice.
+A second, related defect in the reload path: even when the trace _was_ present, `_trace_segments` treated the terminal text (the `result` argument) the same way for every status — **overwriting** the last text segment if the trace ended on one, else appending. That's the right call for a _completed_ task (the streamed result replaces the draft answer the model was building), but for an _interrupted_ task the trace's trailing text is **intermediate** model output (the partial analysis it was writing when cancelled/errored), not a draft of the final answer. Overwriting it discarded the model's last real output and left only the bare error notice.
 
 ### Fix
 
 **DB layer (`db.update_task_status`).** Merged the `failed` and `cancelled` branches into one `status in ("failed", "cancelled")` branch that persists `error`, `actions_taken`, `execution_trace`, **and** `completed_at`. The `completed_at` stamp matters beyond the trace: `cleanup_old_tasks` reaps terminal rows by `completed_at`, so a NULL `completed_at` stranded cancelled tasks forever (they never aged out of retention); it also drives the web chat's duration badge, which now renders for cancelled tasks instead of blanking.
 
 **Callers threaded through.** Every `update_task_status(..., "failed"/"cancelled", ...)` site in the scheduler/executor/CLI now passes the `actions_taken` and `execution_trace` it already had in scope:
+
 - `scheduler.process_one_task` — cancelled-by-`!stop`, policy-refusal (non-retried), permanent-failure (exhausted retries), and the email-delivery-failure path.
 - `executor.execute_task_interactive` — the local interactive path's failure leg.
 - `cli.cmd_task` — the `istota task` CLI's failure leg.
@@ -992,6 +1098,7 @@ A second, related defect in the reload path: even when the trace *was* present, 
 ### Tests
 
 Regression coverage across all three layers:
+
 - `tests/test_db.py::TestUpdateTaskStatusPersistsTrace` — `failed` and `cancelled` each persist `error`/`actions_taken`/`execution_trace`/`completed_at`; the no-trace call stores NULLs without raising; cancelled sets `completed_at` (retention reapability).
 - `tests/test_scheduler.py::TestProcessOneTask` — cancelled and permanently-failed tasks persist the trace through the real `process_one_task` path (mocked `execute_task` returns the trace tuple).
 - `tests/test_web_chat.py::TestTraceSegments` — cancelled/failed append the notice without overwriting the trace; cancelled-with-no-trace shows the notice; empty error leaves the trace intact; null text values render as empty (not `None`).
@@ -1004,6 +1111,7 @@ Full suite green (646 in the touched files + 266 executor).
 Bumped the default brain-fallback cooldown (`istota_brain_fallback_cooldown_seconds`) from 900s to 3600s in the Ansible defaults — an unavailable primary backend is now re-probed hourly rather than every 15 minutes, which is less aggressive against a quota window that resets monthly. Operator-tunable; existing configs are unchanged.
 
 **Files modified:**
+
 - `src/istota/db.py` — `update_task_status` failed/cancelled branch persists trace + completed_at
 - `src/istota/scheduler.py` — four `update_task_status` call sites pass trace/actions
 - `src/istota/executor.py` — `execute_task_interactive` failure leg passes trace/actions
@@ -1044,6 +1152,7 @@ The loop's `stop_reason="error"` → `agent_end` path was already covered by `te
 Regression tests in `tests/native/test_openai_compat.py` (array→`items`, object→nested `properties`, `finish_reason: "error"` → `stop_reason: "error"` + descriptive message, partial-text-then-error). Full native + brain suite green (469 passed).
 
 **Files modified:**
+
 - `src/istota/llm/types.py` — `ToolParameter.items` field
 - `src/istota/llm/openai_compat.py` — recursive `_param_to_schema`; `"error"` in `_FINISH_REASON_MAP`; descriptive `error_message` on error finish
 - `src/istota/session/tools/files.py` — Edit `edits.items` object schema
@@ -1056,6 +1165,7 @@ The 2026-07-22 09:29 PT sleep-cycle run failed across every channel with an iden
 **Architectural finding (confirmed).** The sleep cycle (`memory/sleep_cycle.py:_run_sleep_cycle_brain`) and shared-block synthesis (`briefings/shared_blocks.py:_run_section_brain`) call the primary brain **directly** (`make_brain(config.brain).execute(req)`), not through the executor's fallback-wrapped path — so "pause on fallback" reduces to "detect primary-brain unavailability and skip," and the fallback-budget concern is moot for these paths (they never reach the fallback brain at all). The user-facing behavior is identical either way: don't run them against a degraded brain.
 
 **Reusable mechanism.** The `PrimaryAvailabilityBreaker` (`brain/_fallback.py`) already existed — keyed by primary kind, opened by `usage_limit`/`not_found`, with `should_skip`/`record_success`. Added two Config-free helpers so the direct callers share its signal:
+
 - `primary_brain_unavailable(brain_config) -> (available, reason)` — consult before each call/batch; `(False, "unavailable")` when the breaker is open.
 - `report_brain_result(brain_result, brain_config) -> reason | None` — feed a direct caller's `BrainResult` back in; opens the breaker (returns the stop_reason only on the closed→open transition → one operator alert) and closes it on success. Mirrors the executor's task path, so the breaker is now a **single shared signal across all brain callers** — whichever path first hits the limit opens it and alerts; the others see it open and skip silently (no per-channel/per-block alert spam).
 
@@ -1074,6 +1184,7 @@ The 2026-07-22 09:29 PT sleep-cycle run failed across every channel with an iden
 Regression tests in `tests/test_brain_degraded_policy.py` (28 tests): breaker consult/report unit semantics, sleep-cycle pass short-circuit + per-iteration break + one-alert, shared-block synthesis skip (structured still generates), scheduler gather-skip, posture registry shape. Full suite green (7931 passed). `AGENTS.md` "Sleep Cycle" + `.claude/rules/brain.md` (new "Direct-caller availability" + "Fallback-compatibility posture registry" sections) document the policy.
 
 **Files added/modified:**
+
 - `src/istota/brain/_fallback.py` — `primary_brain_unavailable` + `report_brain_result` direct-caller helpers
 - `src/istota/brain/_postures.py` — new fallback-compatibility posture registry (Problem 3)
 - `src/istota/brain/__init__.py` — re-export the new helpers + posture registry
@@ -1086,25 +1197,27 @@ Regression tests in `tests/test_brain_degraded_policy.py` (28 tests): breaker co
 
 ## 2026-07-21: Web UI — standardized confirmation modals (ConfirmDialog primitive)
 
-The web UI had three competing confirmation patterns: native `window.confirm()` (unstyled, theme-ignoring browser dialogs), hand-rolled `.modal-backdrop` divs (each re-implementing backdrop/modal/button CSS with no focus-trap or Esc handling), and the shared bits-ui `Modal` — whose confirms used a redundant *title-is-the-question* form (`"Delete block?"` + body `Remove **X**?`). Standardized everything on one primitive with cleaner two-part copy.
+The web UI had three competing confirmation patterns: native `window.confirm()` (unstyled, theme-ignoring browser dialogs), hand-rolled `.modal-backdrop` divs (each re-implementing backdrop/modal/button CSS with no focus-trap or Esc handling), and the shared bits-ui `Modal` — whose confirms used a redundant _title-is-the-question_ form (`"Delete block?"` + body `Remove **X**?`). Standardized everything on one primitive with cleaner two-part copy.
 
 **New `ConfirmDialog` primitive** (`web/src/lib/components/ui/ConfirmDialog.svelte`, exported from the `ui` barrel), wrapping the existing `Modal` (bits-ui `Dialog`). Copy convention is now an imperative title (`"Delete block"`, no `?`) plus a full "Are you sure you want to remove the block "Calendar"?" body with the name interpolated into the sentence. Props: `open` (bindable), `title`, `message` string or a `body` snippet for rich markup, `confirmLabel`/`cancelLabel`, `confirmVariant` (`danger` default / `primary` for non-destructive), `onConfirm`/`onCancel`, and an optional `challenge` string that requires typing an exact value (e.g. a room name) before the confirm enables — the high-friction path for hard deletes. Resets its typed-challenge field on each open.
 
 **New `danger` Button variant** — a red-outline/text confirm button (`#c66` dark / `#c0271d` light, matching the existing hand-rolled `.btn.danger` convention it replaces) so destructive confirms no longer look identical to Save.
 
 **Migrated every confirmation site:**
+
 - 6 native `confirm()` → `ConfirmDialog` (immunizations list + detail delete, place delete, dismissed-area restore, chat mark-all-read, feeds mark-all-read). Native `confirm` is synchronous, so each became a state var + async handler split.
 - 3 hand-rolled `.modal-backdrop` confirms → `ConfirmDialog` (bloodwork panel, diagnosis, encounter deletes), deleting their duplicated `.modal-backdrop`/`.modal`/`.modal-actions` CSS. Page-level `.btn` trigger styles left intact where still used.
 - Restyled the flagged shared-`Modal` confirms in `briefings/settings` (block/source/briefing + shared-block delete) and `feeds/settings` (feed/category delete) to the new component + copy. `Modal` became unused in `briefings/settings` and was dropped from its import.
 - Folded `RoomSettings`' bespoke type-the-name hard delete into `ConfirmDialog`'s `challenge` prop, removing its inline `danger-zone` markup, the `showDanger`/`confirmText`/`canDelete`/`handleDelete` machinery, and the `.danger-zone`/`.danger-btn`/etc. CSS. The imported-room one-click **Hide** path is unchanged.
 
-**Deliberate exclusion:** `health/stats`'s "Log measurement" hand-rolled backdrop is a *form*, not a confirmation, and its `.modal`-scoped form CSS makes it a larger form-modal refactor — left as-is (a future follow-up if form modals get standardized on the shared `Modal` too).
+**Deliberate exclusion:** `health/stats`'s "Log measurement" hand-rolled backdrop is a _form_, not a confirmation, and its `.modal`-scoped form CSS makes it a larger form-modal refactor — left as-is (a future follow-up if form modals get standardized on the shared `Modal` too).
 
 Non-destructive bulk actions (mark-all-read, restore) use `confirmVariant="primary"` rather than the red danger button. Nested confirms (place delete inside the PlaceForm modal; room delete over RoomSettings) work via bits-ui's portal stacking.
 
 `npm run check` clean (0 errors), prettier formatted (also normalized some unrelated line-wrapping in `api.ts`), production build passes.
 
 **Files added/modified:**
+
 - `web/src/lib/components/ui/ConfirmDialog.svelte` — new shared confirmation primitive
 - `web/src/lib/components/ui/Button.svelte` — added `danger` (red outline/text) variant
 - `web/src/lib/components/ui/index.ts` — export `ConfirmDialog`
@@ -1138,6 +1251,7 @@ Follow-ups: aligned the code fallback `DEFAULT_SHARED_BLOCKS` (`config.py`) + th
 Full suite green (7886 passed, 7 skipped).
 
 **Files modified:**
+
 - `src/istota/briefings/shared_blocks.py` — gather reassembled by source index; synthesis prompt emits no header line
 - `src/istota/config.py` — `DEFAULT_SHARED_BLOCKS` crons aligned twice-daily; title → `🌍 Headlines`
 - `config/config.example.toml` — shared-block example cron + title aligned
@@ -1165,6 +1279,7 @@ Verbatim structured generation: `render_mode="structured"` now truly **skips the
 Web UI cleanup (from live review): extracted the per-kind source editors into a shared `SourceConfigFields.svelte` used by both the per-user block editor and the new admin shared-block editor (the admin editor's raw JSON textareas are gone — real dropdowns now). Fixed field alignment (top-aligned 2-col grid instead of `flex-end` inline-fields), made source Type+config inline, matched the shared-block table's cron/render chips to the sibling cards, compact last-run date, and fixed mobile overflow (the global `.grid` is `table-layout:fixed` and the three wide text actions overflowed the 3rem actions column — gave this table a `min-width` so `.table-scroll` scrolls instead of overlapping).
 
 **Key changes:**
+
 - Verbatim structured generation: `run_shared_block` branches on `render_mode`; `structured` → `_assemble_verbatim` (no brain), returns `{"text", "trusted"}`. `BriefingSharedBlock.trusted` added; default `markets-summary` → structured/verbatim/trusted.
 - Definitions persistence: `shared_block_configs` table + `db.py` CRUD (`SharedBlockConfigRow`), `shared_blocks_store.import_from_config` (seed-once), `config._apply_shared_blocks` overlay (DB-wins), `istota briefings shared` CLI, scheduler startup seed.
 - Admin web: `require_admin` (= `is_shared_kv_writer`, fail-closed) + `GET/PUT/DELETE /shared-blocks` + `POST /shared-blocks/{name}/run` + `GET /shared-block-options`; `ALLOWED_SHARED_SOURCE_KINDS` canonicalized in `briefings.models`. Admin-only "Shared blocks" card + per-user "Shared block" source.
@@ -1175,6 +1290,7 @@ Web UI cleanup (from live review): extracted the per-kind source editors into a 
 - ~50 new backend tests; svelte-check + vitest clean.
 
 **Files added/modified:**
+
 - `src/istota/briefings/shared_blocks.py` - `_assemble_verbatim`, `render_mode` branch, `trusted` in value
 - `src/istota/briefings/sources/kv.py` - stored-value trust, custom-key-not-unknown
 - `src/istota/briefings/routes.py` - admin shared-block CRUD/run/options routes + `require_admin`
@@ -1192,19 +1308,21 @@ Web UI cleanup (from live review): extracted the per-kind source editors into a 
 
 ## 2026-07-20: Robust briefing file-path picker (server-side search + advisory verify)
 
-Follow-up to the verified-path-picker commit. The `todos`/`reminders`/`notes` source path field had two rough edges: the autocomplete only ever saw a small, fixed slice of the workspace (a single bounded walk loaded once on page open, then filtered client-side — so a deep or late-in-walk file could never appear no matter what you typed), and the *first* save of a newly-typed path would sometimes fail before a retry succeeded.
+Follow-up to the verified-path-picker commit. The `todos`/`reminders`/`notes` source path field had two rough edges: the autocomplete only ever saw a small, fixed slice of the workspace (a single bounded walk loaded once on page open, then filtered client-side — so a deep or late-in-walk file could never appear no matter what you typed), and the _first_ save of a newly-typed path would sometimes fail before a retry succeeded.
 
 The save flake was a race: clicking "Save source" blurs the input, and the input's blur handler (`onCommit`) fired `verifyPath()` at the same time `saveSource()` awaited its own `verifyPath()` — two concurrent existence checks mutating shared state, with the save hard-gated on the result. Either landing a transient false (or just resolving in the wrong order) silently aborted the save; the second click then went through.
 
-Fixed both structurally. **(A)** `path-suggest` is now a real server-side search: it takes a `q` param and walks the workspace filtering by substring (basename hits ranked ahead of directory-only hits), bounded by depth, a total-scan cap, and a returned cap — so a deep file surfaces as you type instead of being clipped by the pool bound. The editor debounce-fetches suggestions on input (last-write-wins guarded). **(B)** Verification is now advisory, never a save blocker — which matches the resolver's own fail-soft semantics (a missing file just contributes a provenance note, never an error). `saveSource` always proceeds; the check runs as a debounced inline hint (*Checking…* / *✓ Resolves to …* / *No file there yet — skipped until it exists*), and the blur/click double-verify race is gone.
+Fixed both structurally. **(A)** `path-suggest` is now a real server-side search: it takes a `q` param and walks the workspace filtering by substring (basename hits ranked ahead of directory-only hits), bounded by depth, a total-scan cap, and a returned cap — so a deep file surfaces as you type instead of being clipped by the pool bound. The editor debounce-fetches suggestions on input (last-write-wins guarded). **(B)** Verification is now advisory, never a save blocker — which matches the resolver's own fail-soft semantics (a missing file just contributes a provenance note, never an error). `saveSource` always proceeds; the check runs as a debounced inline hint (_Checking…_ / _✓ Resolves to …_ / _No file there yet — skipped until it exists_), and the blur/click double-verify race is gone.
 
 **Key changes:**
+
 - `_walk_text_files(root, query)` filters by substring with basename-first ranking; depth 4→6, added an 8000-file scan cap, returned cap 200→50.
 - `GET /briefings/path-suggest` accepts `q`; `getBriefingPathSuggestions(q)` client helper.
 - Frontend: debounced `refreshPathHints` (suggest + verify, sequence-guarded); `onPathInput` replaces the inline onChange; `saveSource` no longer gates on verification; advisory `pathStatus` hint replaces the blocking `pathError`.
 - Mock API `/path-suggest` honors `q`; 4 new backend tests (query filter, directory-component match, no-match, deep-file-by-query).
 
 **Files added/modified:**
+
 - `src/istota/briefings/routes.py` - query-filtered walk + `q` param
 - `web/src/lib/api.ts` - `getBriefingPathSuggestions(q)`
 - `web/src/routes/briefings/settings/+page.svelte` - debounced hints, advisory verify, no save gate
@@ -1217,12 +1335,14 @@ Fixed both structurally. **(A)** `path-suggest` is now a real server-side search
 The money module's FastAPI router was mounted at `/istota/money/api`, the lone exception to the `/istota/api/<module>` pattern every other web module follows (`briefings`, `health`, `garmin`). The cause is historical: money is a self-contained/vendored package whose `routes.py` ships with no prefix ("the host application mounts `router` at its chosen prefix"), and istota had mounted it module-first. Nothing structural required it — nginx has a catch-all `location /istota/`, and every money route is relative — so this was a pure mount-point realignment to `/istota/api/money`.
 
 **Key changes:**
+
 - Backend router prefix `/istota/money/api` → `/istota/api/money`.
-- Frontend money API client's two URL-building strings (`apiFetch` base and the invoice-PDF URL) updated to match. The many `$lib/money/api` *imports* are TypeScript source-file paths, not routes, and were left untouched.
+- Frontend money API client's two URL-building strings (`apiFetch` base and the invoice-PDF URL) updated to match. The many `$lib/money/api` _imports_ are TypeScript source-file paths, not routes, and were left untouched.
 - Test request paths and the nginx doc comment updated.
 - Deployed builds need a web rebuild (`scripts/build-web-static.sh`) for the frontend change to take effect.
 
 **Files added/modified:**
+
 - `src/istota/web_app.py` - router mount prefix
 - `web/src/lib/money/api.ts` - `apiFetch` base URL + invoice-PDF URL
 - `tests/test_web_app_money.py` - request paths
@@ -1249,6 +1369,7 @@ Briefings had been running on two parallel content models since the first-class 
 **Deliberate retention.** `components` stays as a field on `BriefingConfig`/`UserBriefing` — a migration-read carrier only, populated from the DB row so `blocks_from_components` (the sole surviving consumer, one-time per-briefing sentinel in `briefings/_migrate.py`) still converts an un-migrated deployment. A later cleanup can drop it once all deployments are known-migrated.
 
 **Files added/modified:**
+
 - `schema.sql` - `briefing_configs.output` + `user_profiles.default_briefings` columns
 - `src/istota/db.py` - `_backfill_briefing_output` + add-column migrations
 - `src/istota/user_briefings.py` - read/write `output` column, drop `__output__` packing
@@ -1269,13 +1390,13 @@ The "resources" config surface had been hollowed out by two prior refactors: the
 
 **The reduction.** Resources collapse from a user-facing config surface with seven declarable types down to one: `folder` (an out-of-workspace sandbox mount), plus `shared_file` as internal organizer state. The path-shaped types retire because they have no live consumer: `calendar` is CalDAV-discovered, `email_folder` has no consumer at all, and `todo_file`/`reminders_file`/`notes_folder` no longer feed anything on the resource axis — the briefing data path now reads an **explicit path** (a briefing-source `path` property on the new module path, or an explicit `todo_file`/`reminders_file` row as a deprecated override on the legacy path), and the `notes/` folder is a prompt-guidance convention for the model, not a resolver default. There is no convention-default filename baked into the fetchers. The `istota resource` CLI verb shrinks to folder-only; the `/settings/resources` web endpoints + UI card are removed; the per-task prompt no longer enumerates resource paths.
 
-**Step 1 — briefing fetchers read explicit paths only.** The *legacy* `build_briefing_prompt` path (`skills/briefing/__init__.py`) read `todo_file`/`reminders_file` resources; the module path (`briefings/sources/builtins.py`) had a convention-default fallback (`{bot_dir}/TODO.md`, `reminders.md`, `NOTES.md`). Both are simplified to read only an explicit path: the module resolvers now take the source's own `config.path` (a not-configured result when unset — no default filename), and the legacy `_fetch_todo_items`/`_fetch_random_reminder` read only an explicit `todo_file`/`reminders_file` resource path (a deprecated back-compat override; absent → returns None). This severs the resource consumers without silently pointing at a convention file a user never populated. The reminder shuffle-queue state is unaffected (keys on content hash, not path). Also removed the dead `email` briefing component (it appended one literal line but the briefing skill's `exclude_skills: [email]` frontmatter meant the model had no email tool and no pre-fetched data — it could never work).
+**Step 1 — briefing fetchers read explicit paths only.** The _legacy_ `build_briefing_prompt` path (`skills/briefing/__init__.py`) read `todo_file`/`reminders_file` resources; the module path (`briefings/sources/builtins.py`) had a convention-default fallback (`{bot_dir}/TODO.md`, `reminders.md`, `NOTES.md`). Both are simplified to read only an explicit path: the module resolvers now take the source's own `config.path` (a not-configured result when unset — no default filename), and the legacy `_fetch_todo_items`/`_fetch_random_reminder` read only an explicit `todo_file`/`reminders_file` resource path (a deprecated back-compat override; absent → returns None). This severs the resource consumers without silently pointing at a convention file a user never populated. The reminder shuffle-queue state is unaffected (keys on content hash, not path). Also removed the dead `email` briefing component (it appended one literal line but the briefing skill's `exclude_skills: [email]` frontmatter meant the model had no email tool and no pre-fetched data — it could never work).
 
 **Step 2 — `_env.py` resource machinery deleted.** The declarative env-var resolver had four resource-backed sources — `source="resource"`, `"resource_json"`, `"user_resource_config"`, and the `gate_user_has_resource` pre-filter — that **zero** bundled skills used (the standing `test_no_bundled_skill_declares_resource_types` invariant already guarded this). Deleted all four branches, the `_spec_resource_types` helper, and the corresponding `EnvSpec` fields (`resource_type`, `resource_types`, `field`, `gate_user_has_resource`). A new guard test asserts the retired sources resolve to `None` (they fall through to the unknown-source warning) so a future manifest declaring one fails closed rather than silently no-op'ing. The `SkillMeta.exclude_resources` field + its frontmatter/legacy-parse plumbing were also dead (no skill declared it; no test asserted prompt-section text) and removed.
 
-**Step 3 — `ResourceConfig.base_url`/`api_key` removed.** These flat fields were the *only* non-obsolete-type readers' path for service credentials, but the secrets-store migration had already moved karakeep/monarch/overland creds to the encrypted `secrets` table. The sole remaining reader was `secrets_store._read_resource_attr` via `getattr(resource, attr)` for the karakeep migration — rerouted through `extra:` (`extra:base_url`, `extra:api_key`) so the one-time import still works for a deploy whose TOML still carries a retired `[[resources]] type = karakeep` block. `_parse_user_data`'s known-keys set dropped `base_url`/`api_key` (so they land in `extra` like any unknown key), and `_apply_user_resources` no longer pops them out of extras when materializing DB rows.
+**Step 3 — `ResourceConfig.base_url`/`api_key` removed.** These flat fields were the _only_ non-obsolete-type readers' path for service credentials, but the secrets-store migration had already moved karakeep/monarch/overland creds to the encrypted `secrets` table. The sole remaining reader was `secrets_store._read_resource_attr` via `getattr(resource, attr)` for the karakeep migration — rerouted through `extra:` (`extra:base_url`, `extra:api_key`) so the one-time import still works for a deploy whose TOML still carries a retired `[[resources]] type = karakeep` block. `_parse_user_data`'s known-keys set dropped `base_url`/`api_key` (so they land in `extra` like any unknown key), and `_apply_user_resources` no longer pops them out of extras when materializing DB rows.
 
-**Step 4 — executor prompt sections replaced (Stage 3a).** `build_prompt` emitted enumerated "Nextcloud Folders / TODO Files / Notes Folders / Reminders Files / Calendars" sections listing resource paths to the model on *every* task — the only thing resources did for a user whose paths were all inside their own workspace (the bind-mount loop skips those as already covered by the wholesale `Users/{user_id}` bind). Replaced the whole block with a single static **workspace-layout line** ("Your workspace is at `Users/<user_id>/`, containing `shared/`, `inbox/`, `memories/`, and your bot dir…"). The calendar section stays discovery-driven; the web root stays config-driven; the `folder` bind-mount code path (sandbox + native_fs_roots) is untouched — it's the sandbox seam.
+**Step 4 — executor prompt sections replaced (Stage 3a).** `build_prompt` emitted enumerated "Nextcloud Folders / TODO Files / Notes Folders / Reminders Files / Calendars" sections listing resource paths to the model on _every_ task — the only thing resources did for a user whose paths were all inside their own workspace (the bind-mount loop skips those as already covered by the wholesale `Users/{user_id}` bind). Replaced the whole block with a single static **workspace-layout line** ("Your workspace is at `Users/<user_id>/`, containing `shared/`, `inbox/`, `memories/`, and your bot dir…"). The calendar section stays discovery-driven; the web root stays config-driven; the `folder` bind-mount code path (sandbox + native_fs_roots) is untouched — it's the sandbox seam.
 
 **Step 5 — user-facing surface reduced (Stage 3b).** `istota resource` is now folder-only (`--type` choices restricted to `folder`; the module-shaped pseudo-path default is gone — a folder mount without a path is meaningless). The `/settings/resources` GET/POST/DELETE endpoints + `_RESOURCE_TYPE_SCHEMA` are removed from `web_app.py` (180 lines); the web `api.ts` resource helpers + types and the Svelte settings page's Resources card / add-resource form / confirm-delete modal are removed (319 lines). A `TestResourcesSettingsRemoved` guard asserts all three verbs 404 so a stale client gets a clean error. Ansible's `resource ensure` task filters to `folder` so a stale `todo_file`/`calendar` inventory entry no longer trips the CLI's type allowlist.
 
@@ -1284,6 +1405,7 @@ The "resources" config surface had been hollowed out by two prior refactors: the
 Built TDD stage by stage; full Python suite green (7750 passed, 7 skipped) and `svelte-check` clean (0 errors). The `folder` bind-mount test (`test_sandbox.py`) confirms out-of-workspace paths still mount and in-workspace paths are a no-op.
 
 **Key changes:**
+
 - Resources reduced to `folder` + `shared_file`; `calendar`/`email_folder`/`notes_folder`/`todo_file`/`reminders_file` retired (calendar → CalDAV, todo/reminders/notes → explicit briefing-source path; no convention-default filename).
 - `_env.py` resource-source machinery deleted (`resource`/`resource_json`/`user_resource_config` + `gate_user_has_resource`); `EnvSpec` loses `resource_type`/`resource_types`/`field`/`gate_user_has_resource`; `SkillMeta.exclude_resources` gone.
 - `ResourceConfig.base_url`/`api_key` removed — credentials live in `extra`/secrets.
@@ -1292,6 +1414,7 @@ Built TDD stage by stage; full Python suite green (7750 passed, 7 skipped) and `
 - Idempotent inert-row cleanup: unconditional drop for calendar/email_folder/notes_folder; todo_file/reminders_file left in place (deprecated explicit-path overrides, never auto-cleaned).
 
 **Files added/modified:**
+
 - `src/istota/skills/_env.py` — deleted resource-source branches + `gate_user_has_resource` + `_spec_resource_types` + `json` import.
 - `src/istota/skills/_types.py` — `EnvSpec` loses `resource_type`/`resource_types`/`field`/`gate_user_has_resource`; `SkillMeta` loses `exclude_resources`.
 - `src/istota/skills/_loader.py` — `_parse_env_specs` + frontmatter/`_index.toml` parse drop the deleted fields.
@@ -1319,7 +1442,7 @@ Built TDD stage by stage; full Python suite green (7750 passed, 7 skipped) and `
 
 The `NativeBrain` (istota's in-process agent loop against any OpenAI-compatible model) empirically underperformed the pi coding harness on coding tasks, even though the loop was modelled on pi's `runLoop`. A side-by-side investigation traced the gap to four thin spots pi had invested in. This spec (`Specs/Done/native-brain-coding-enhancements.md`) closes all four, native-path only — the `claude_code`/`tmux_claude` brains take their prompt + tools from the `claude` CLI and are byte-unchanged.
 
-**Stage 1 — fuzzy, multi-edit Edit tool.** The old `Edit` was exact `str.replace` only: any trailing-whitespace/smart-quote/dash drift between the model's remembered `old_string` and the file bytes hard-failed, driving the classic fail→re-read→retry loop that burns turns (worst on weaker models). Ported pi's `edit-diff.ts` matching engine to a new pure-logic module `session/tools/edit_engine.py`: exact-match-first, then a bounded fuzzy fallback (Unicode NFKC, trailing-whitespace strip, smart-quotes/dashes/exotic-spaces → ASCII) that deliberately does *not* tolerate indentation/internal-whitespace reflow (so it can't silently hit the wrong region). `make_edit_tool` gained an optional `edits[]` array for several disjoint edits in one call (uniqueness + overlap enforced, applied in reverse offset order), while keeping the legacy `old_string`/`new_string`/`replace_all` shape. Two subtleties bit during implementation: (1) the tool must read/write **raw bytes**, not `read_text`, because Python's universal-newline translation strips CRLF before `detect_line_ending` can preserve it; (2) when any edit is fuzzy the batch matches in normalized space but writes via `apply_replacements_preserving_unchanged_lines` so untouched lines keep their exact bytes (a fuzzy edit never reflows quotes on neighbouring lines). A `prepare_arguments` shim coerces `edits`-as-JSON-string and legacy→one-element-`edits`; the synthesis is also duplicated inside `_edit` so the tool is correct whether or not the shim ran.
+**Stage 1 — fuzzy, multi-edit Edit tool.** The old `Edit` was exact `str.replace` only: any trailing-whitespace/smart-quote/dash drift between the model's remembered `old_string` and the file bytes hard-failed, driving the classic fail→re-read→retry loop that burns turns (worst on weaker models). Ported pi's `edit-diff.ts` matching engine to a new pure-logic module `session/tools/edit_engine.py`: exact-match-first, then a bounded fuzzy fallback (Unicode NFKC, trailing-whitespace strip, smart-quotes/dashes/exotic-spaces → ASCII) that deliberately does _not_ tolerate indentation/internal-whitespace reflow (so it can't silently hit the wrong region). `make_edit_tool` gained an optional `edits[]` array for several disjoint edits in one call (uniqueness + overlap enforced, applied in reverse offset order), while keeping the legacy `old_string`/`new_string`/`replace_all` shape. Two subtleties bit during implementation: (1) the tool must read/write **raw bytes**, not `read_text`, because Python's universal-newline translation strips CRLF before `detect_line_ending` can preserve it; (2) when any edit is fuzzy the batch matches in normalized space but writes via `apply_replacements_preserving_unchanged_lines` so untouched lines keep their exact bytes (a fuzzy edit never reflows quotes on neighbouring lines). A `prepare_arguments` shim coerces `edits`-as-JSON-string and legacy→one-element-`edits`; the synthesis is also duplicated inside `_edit` so the tool is correct whether or not the shim ran.
 
 **Stage 2 — coding system prompt.** The native brain ran with an empty system prompt by default; quality rested entirely on the base model. Added a module-level `CODING_SYSTEM_PROMPT` (generic coding hygiene — read-before-edit, prefer Edit over Write, batch multi-site edits into one `edits[]` call, keep `old_string` minimal-but-unique, verify with tests) prepended in `_extract_system_prompt` **only when `req.allowed_tools` is non-empty**, so text-only invocations (the sleep cycle) keep an empty prompt. An operator `custom_system_prompt_path` appends after the base.
 
@@ -1334,6 +1457,7 @@ The `NativeBrain` (istota's in-process agent loop against any OpenAI-compatible 
 Built TDD stage by stage; full suite green (7764 passed, 7 skipped). Three existing `test_tools_files.py` assertions changed with the new engine messages (`"not found"`→`"could not find"`, `"replace_all"`→`"unique"`, grep `"more)"` wording). Explicitly out of scope (istota already at parity via its compaction summary): a TodoWrite/plan tool, sub-agents, session-tree/branch summarization. Spec moved to Done.
 
 **Files added/modified:**
+
 - `src/istota/session/tools/edit_engine.py` (new) — pure fuzzy/multi-edit matching engine ported from pi's `edit-diff.ts`.
 - `src/istota/session/tools/files.py` — rewired `make_edit_tool` (fuzzy + `edits[]` + raw-byte CRLF/BOM fidelity + `prepare_arguments` shim); Read `offset=` continuation wording; Grep `-C`/`context`/`literal` params + `_render_content_with_context` + head-limit wording.
 - `src/istota/session/tools/bash.py` — `_SpillWriter` for over-cap output spill.
@@ -1346,7 +1470,7 @@ Built TDD stage by stage; full suite green (7764 passed, 7 skipped). Three exist
 
 ## 2026-07-20: Config-authored rich briefing blocks
 
-Operators could already define per-user briefings in config (name/cron/output/components), and those land as editable blocks/sources via the existing one-time components→blocks migration. But the authoring surface was stuck in the *legacy components shape*: the fixed component set, fixed order, no custom titles, no synthesis directives, no `rss`/`browse` sources, no per-block options, no mixed-source blocks. The module's rich model could only be reached via the web editor after the fact. This spec (`Specs/Done/config-authored-rich-briefing-blocks.md`) widens the authoring surface so an operator can express the full block/source model in `[[users.X.briefings.blocks]]` + `[[...blocks.sources]]` TOML, materialised once into the user's `briefings.db` as an editable baseline. No new tables, no new sync path, no generation change — a widening of authoring plus threading one config-only field through two reconstruction points.
+Operators could already define per-user briefings in config (name/cron/output/components), and those land as editable blocks/sources via the existing one-time components→blocks migration. But the authoring surface was stuck in the _legacy components shape_: the fixed component set, fixed order, no custom titles, no synthesis directives, no `rss`/`browse` sources, no per-block options, no mixed-source blocks. The module's rich model could only be reached via the web editor after the fact. This spec (`Specs/Done/config-authored-rich-briefing-blocks.md`) widens the authoring surface so an operator can express the full block/source model in `[[users.X.briefings.blocks]]` + `[[...blocks.sources]]` TOML, materialised once into the user's `briefings.db` as an editable baseline. No new tables, no new sync path, no generation change — a widening of authoring plus threading one config-only field through two reconstruction points.
 
 `blocks` is an **in-memory-only** `Config` field: it is parsed as a raw dict passthrough in `_parse_user_data`, threaded through `_apply_user_briefings` (re-attached to the DB-shadowed entry by name — every imported TOML briefing gets a `briefing_configs` row after first startup, so without the re-attach the seeder would never see the blocks) and `get_briefings_for_user` (carried through the `_expand_boolean_components` rebuild), and read once by the module-DB seeder. It is **never** persisted to `briefing_configs` — content is module-DB territory, so the framework row stays byte-unchanged (`compare=False`/`repr=False` keep it out of `ensure_briefing` no-op equality). The seeder (`_migrate._migrate_components`) prefers a briefing's config `blocks` (via the new pure, total, fail-soft `normalize_block_specs`) over the legacy `components` translation, reusing the same per-briefing seed-once sentinel — so blocks win over components, seed exactly once, and operator re-runs never re-clobber a user's edits.
 
@@ -1355,12 +1479,14 @@ The one wrinkle the spec under-specified: the Ansible deploy path provisions bri
 Built TDD across three stages (config threading, seeder, docs+Ansible). Full suite green apart from two failures confirmed to pre-exist the change (a stale Talk `max_message_length` assertion and an xdist ordering flake). Spec moved to Done.
 
 **Key changes:**
+
 - `BriefingConfig.blocks` — in-memory-only rich block/source authoring field, never persisted to the framework DB.
 - `normalize_block_specs` — pure, total coercion to the seeder's spec shape; titleless blocks, unknown source kinds/render modes, and zero-source blocks are skipped with a warning, never raised. `render_mode` inferred by first source kind when omitted.
 - `_migrate_components` prefers config `blocks` over the legacy `components` translation; same per-briefing seed-once sentinel, blocks win.
 - New `istota_briefing_blocks_toml` Ansible filter renders a content-only briefing stub so the server deploy path can carry config-authored blocks.
 
 **Files added/modified:**
+
 - `src/istota/config.py` — `BriefingConfig.blocks`; parse in `_parse_user_data`; capture + re-attach in `_apply_user_briefings`.
 - `src/istota/skills/briefing/__init__.py` — carry `blocks` through the `get_briefings_for_user` reconstruction.
 - `src/istota/briefings/_migrate.py` — `normalize_block_specs` + the `blocks`-preferred seeding branch; docstrings.
@@ -1373,18 +1499,20 @@ Built TDD across three stages (config threading, seeder, docs+Ansible). Full sui
 
 ## 2026-07-20: Web chat no longer truncates long answers (ISSUE-178); Talk splits at the real limit
 
-Long assistant replies were cut off in web chat — a several-thousand-word answer ended mid-content. Two investigation agents traced the whole delivery chain and converged: the truncation was entirely in the live streaming/event-delivery layer. The canonical stores are all clean (`messages.body`, `web_chat_messages.text`, `tasks.result` are unbounded `TEXT`; `store_turn_message` writes the full body; the history-read and SSE-serialization paths never clip a body; the frontend renders the trailing text segment in full). But web chat renders its live answer from the `result` **task event** (text_delta rows are pruned once it lands), and that event was capped at `result[:8000]` at all three emit sites (daemon + inline `result`, plus the confirmation `prompt`), and again by a generic `PAYLOAD_MAX_BYTES = 8192` backstop in `EventWriter.emit` that slashed `text` to 2000 chars — measured on the JSON-*encoded* size, so it fired well before 8000 literal chars on markdown. The synthetic-terminal backstop frame in `web_app` re-clipped at 8000 too. So a long reply arrived truncated live while the durable copy stayed complete (a reload would show it whole).
+Long assistant replies were cut off in web chat — a several-thousand-word answer ended mid-content. Two investigation agents traced the whole delivery chain and converged: the truncation was entirely in the live streaming/event-delivery layer. The canonical stores are all clean (`messages.body`, `web_chat_messages.text`, `tasks.result` are unbounded `TEXT`; `store_turn_message` writes the full body; the history-read and SSE-serialization paths never clip a body; the frontend renders the trailing text segment in full). But web chat renders its live answer from the `result` **task event** (text_delta rows are pruned once it lands), and that event was capped at `result[:8000]` at all three emit sites (daemon + inline `result`, plus the confirmation `prompt`), and again by a generic `PAYLOAD_MAX_BYTES = 8192` backstop in `EventWriter.emit` that slashed `text` to 2000 chars — measured on the JSON-_encoded_ size, so it fired well before 8000 literal chars on markdown. The synthetic-terminal backstop frame in `web_app` re-clipped at 8000 too. So a long reply arrived truncated live while the durable copy stayed complete (a reload would show it whole).
 
 Fix: exempt the deliverable event kinds (`result`, `confirmation`) from the size cap via `_UNCAPPED_EVENT_KINDS` — the cap still guards tool/progress payloads from bloating the log — and drop the `[:8000]` slices at the three emit sites and the synthetic backstop. No schema or frontend change needed. Following TDD, the new tests were written failing first, then made green.
 
-While confirming the fix, a question about the Talk surface surfaced a separate inefficiency: `TalkTransport.deliver` was splitting at `split_message`'s stale default of 4000 chars, fragmenting long answers into many small Talk messages even though Talk's real per-message limit is 32000. Talk never *truncated* — it splits into complete parts with `(N/N)` indicators, and the `truncate_message` helper is dead code — but the split size was far too conservative. `deliver` now splits at `capabilities.max_message_length`, set to a round **30000** (headroom under 32000 for the page indicator), so a normal long answer posts as one message.
+While confirming the fix, a question about the Talk surface surfaced a separate inefficiency: `TalkTransport.deliver` was splitting at `split_message`'s stale default of 4000 chars, fragmenting long answers into many small Talk messages even though Talk's real per-message limit is 32000. Talk never _truncated_ — it splits into complete parts with `(N/N)` indicators, and the `truncate_message` helper is dead code — but the split size was far too conservative. `deliver` now splits at `capabilities.max_message_length`, set to a round **30000** (headroom under 32000 for the page indicator), so a normal long answer posts as one message.
 
 **Key changes:**
+
 - `result`/`confirmation` task events are no longer size-capped; the generic cap still applies to tool/progress events.
 - Dropped the `[:8000]` truncation at all three `result`/`confirmation` emit sites and the synthetic-terminal backstop frame.
 - Talk delivery splits at 30000 (was an accidental 4000), so long answers post as one message instead of many fragments.
 
 **Files added/modified:**
+
 - `src/istota/events.py` — `_UNCAPPED_EVENT_KINDS`; skip the payload cap for those kinds.
 - `src/istota/scheduler.py` — full text at the daemon + inline `result` emits and the `confirmation` emit.
 - `src/istota/web_app.py` — full body on the synthetic-terminal `result` frame.
@@ -1393,7 +1521,7 @@ While confirming the fix, a question about the Talk surface surfaced a separate 
 
 ## 2026-07-20: Session/usage limit now reroutes to the fallback brain (ISSUE-177)
 
-A subscription session-limit hit on the `claude_code` primary (the prod brain) was being delivered to the user as the task's *answer* — the raw `You've hit your session limit · resets …` string — instead of transparently rerouting to the configured fallback brain. The whole availability-failover machinery (detector, trigger set, breaker, executor reroute) was correct; the one missing link was classification. `claude -p` reports a limit hit as a **successful** completion (rc 0 on the simple path, a stream-json `result` frame with `subtype:"success"` on the streaming path), carrying the limit text as the result. `ClaudeCodeBrain` only ran `is_usage_limit_error` on its *failure* branches, so a limit defaulted to `stop_reason="completed"`, never matched the fallback trigger set `{usage_limit, not_found, fallback}`, and got delivered as the reply. Every subsequent task then hit the same wall until the quota window reset.
+A subscription session-limit hit on the `claude_code` primary (the prod brain) was being delivered to the user as the task's _answer_ — the raw `You've hit your session limit · resets …` string — instead of transparently rerouting to the configured fallback brain. The whole availability-failover machinery (detector, trigger set, breaker, executor reroute) was correct; the one missing link was classification. `claude -p` reports a limit hit as a **successful** completion (rc 0 on the simple path, a stream-json `result` frame with `subtype:"success"` on the streaming path), carrying the limit text as the result. `ClaudeCodeBrain` only ran `is_usage_limit_error` on its _failure_ branches, so a limit defaulted to `stop_reason="completed"`, never matched the fallback trigger set `{usage_limit, not_found, fallback}`, and got delivered as the reply. Every subsequent task then hit the same wall until the quota window reset.
 
 Investigated ISSUE-177 first (verified every code-line claim in the writeup against the tree), then shipped "tier 1" after the user confirmed scope. The fix runs the detector on every success return (simple rc-0 stdout + rc-0 result-file; streaming `subtype:"success"` + rc-0 result-file), reclassifying a match to `stop_reason="usage_limit"`; the streaming non-zero-rc result-file branch swapped its hardcoded `"error"` for `_failure_stop_reason`. No executor change needed — a reclassified `usage_limit` flows through the retry-loop short-circuit straight to the reroute check.
 
@@ -1402,11 +1530,13 @@ The investigation also surfaced a completeness gap the original writeup missed: 
 Regression tests exercise the exec paths, not the detector in isolation (the detector already matched the text — the bug was that the success branch never called it): rc-0-with-limit-stdout on the simple path, a `subtype:"success"` frame carrying the limit on the streaming path (via a `FakeProc` Popen stand-in), plus the tmux pane cases for all three scopes. 236 brain/tmux/fallback tests green.
 
 **Key changes:**
+
 - `is_usage_limit_error` now runs on every `claude_code` success return, reclassifying a session/weekly/Opus limit as `stop_reason="usage_limit"` so it reroutes instead of being answered.
 - Broadened the detector with a `hit your <scope> limit` regex covering all three documented phrasings.
 - tmux: pane-detector fallback + marker alignment + dead-marker removal.
 
 **Files added/modified:**
+
 - `src/istota/brain/claude_code.py` — `_HIT_LIMIT_RE`; usage-limit guard on the simple + streaming success returns; `_failure_stop_reason` on the streaming result-file error branch.
 - `src/istota/brain/tmux_claude.py` — `is_usage_limit_error(pane)` fallback in `_wait_for_completion`; markers realigned.
 - `src/istota/config.py` — `TmuxBrainConfig` marker defaults synced.
@@ -1419,11 +1549,13 @@ The two lower-severity findings from the briefings module review (deferred out o
 The new regression test exercises the datetime cutoff path specifically — the existing email test mock uses string dates, so it never hit the new filter, and the filter is deliberately defensive about a non-datetime `.date` (keep, don't drop) so both the mock and real imap_tools envelopes behave correctly.
 
 **Key changes:**
+
 - Concurrent, fail-soft source gather in the briefings generation pipeline; per-thread framework connections; deterministic per-block reassembly.
 - Client-side hour-level trim on the email source so the day-granular IMAP window matches the stated lookback; provenance note now accurate.
 - Regression test for the datetime cutoff.
 
 **Files added/modified:**
+
 - `src/istota/briefings/generate.py` — thread-pool gather replacing the serial loop; `_gather_one` opens a per-thread `db.get_db` connection.
 - `src/istota/briefings/sources/email.py` — `_cutoff_dt` / `_env_before_cutoff` hour-level filter.
 - `tests/test_briefings_sources.py` — datetime-window regression test.
@@ -1440,26 +1572,29 @@ The defect: the components→blocks migration was guarded by a single DB-wide se
 Two lower-severity review items were left as-is, out of scope for the fix: sources gather serially (the `browse` resolver carries a 60s timeout each, but this runs in the background worker and is bounded by the task timeout, not a dispatch-thread concern), and the `email` source's `lookback_hours` is day-granular so its provenance note ("past Nh") is mildly imprecise while never under-inclusive.
 
 **Key changes:**
+
 - Replaced the DB-wide migration sentinel with a per-briefing one so a briefing configured after the module DB's first touch still migrates; existing installs heal on next init.
 - Added regression tests for the empty-first-touch and second-briefing-added-later cases.
 - The briefings first-class module (`src/istota/briefings/`) lands with this push via the six staged commits.
 
 **Files added/modified:**
+
 - `src/istota/briefings/_migrate.py` — `_migrate_components` now tracks a per-briefing sentinel; new `_briefing_sentinel` helper.
 - `tests/test_briefings_migrate.py` — two regression tests.
 - `AGENTS.md`, `CHANGELOG.md`, `README.md` — document the new block/source briefings module.
 
 ## 2026-07-20: Canonical room transcript for all source types (ISSUE-176)
 
-A Talk room the bot participates in shows up in web chat, and the promise a user forms is "what the room shows in Talk, it shows in web." The canonical `messages` store was supposed to make that true but only stored *conversational* (`talk`/`web`) turns plus a couple of hand-patched exceptions. Every other bot post to a room fell through. ISSUE-176 was the live symptom: a `newsletter-gate` cron spawns an extraction subtask that posts a finalized block into a Talk room; it appeared in Talk and never in web. The subtask (`source_type="subtask"`, default `output_target="talk"`) missed all three gates at once — not in `_CONVERSATIONAL_SOURCE_TYPES`, the ISSUE-133 scheduled-mirror hard-guarded `!= "scheduled"`, and the render filter only admitted web/talk/scheduled.
+A Talk room the bot participates in shows up in web chat, and the promise a user forms is "what the room shows in Talk, it shows in web." The canonical `messages` store was supposed to make that true but only stored _conversational_ (`talk`/`web`) turns plus a couple of hand-patched exceptions. Every other bot post to a room fell through. ISSUE-176 was the live symptom: a `newsletter-gate` cron spawns an extraction subtask that posts a finalized block into a Talk room; it appeared in Talk and never in web. The subtask (`source_type="subtask"`, default `output_target="talk"`) missed all three gates at once — not in `_CONVERSATIONAL_SOURCE_TYPES`, the ISSUE-133 scheduled-mirror hard-guarded `!= "scheduled"`, and the render filter only admitted web/talk/scheduled.
 
 The root cause was conflating three axes onto `source_type`: **storage** (should be universal — any bot output into a web-visible room belongs in its transcript), **delivery/mirror** (legitimately asymmetric, untouched), and **LLM context** (legitimately conversational-only). The fix splits storage from rendering: one general producer stores any room-delivered result as an assistant spine row gated on room existence (not source type), and the render filter admits any assistant row while keeping user rows web/talk-only. Adding a new room-posting source type now needs no producer helper and no filter change — the whack-a-mole is gone.
 
-A subtlety that reshaped the plan: the store is not a blank slate. The old `unified_rooms_v1` backfill folded *every* completed task for every registered room into `messages` with no source-type filter, so the filter flip is retroactive — briefing rows would surface as raw JSON and synthetic user rows would re-pair into context. So the change ships with a **required** normalization migration (drop non-conversational user rows, normalize briefing JSON bodies), not an optional backfill.
+A subtlety that reshaped the plan: the store is not a blank slate. The old `unified_rooms_v1` backfill folded _every_ completed task for every registered room into `messages` with no source-type filter, so the filter flip is retroactive — briefing rows would surface as raw JSON and synthetic user rows would re-pair into context. So the change ships with a **required** normalization migration (drop non-conversational user rows, normalize briefing JSON bodies), not an optional backfill.
 
-Implemented via TDD (spec forks all confirmed as recommended: spine-bubble, room-bound gate, leave-unparseable-as-is, accept cross-room/unread expansion). Then ran Mulder + Scully in parallel to verify. Both independently caught one real defect the spec's own safety claim missed: the `_exclude_types` addition only gated `get_conversation_history`, but `_build_db_context` (email / Talk-API-fallback) *also* calls `db.get_previous_tasks`, which reads the `tasks` table regardless of source type to deliberately re-surface recent scheduled/briefing output — and that re-injected a subtask's internal synthetic prompt into context as a "user" turn. Reproduced, then fixed with an `exclude_source_types` param passed `["subtask","heartbeat"]` (scheduled/briefing re-surfacing preserved). Mulder also found a migration import-before-DELETE seam (a mid-migration import failure would half-apply); reordered so the import precedes any mutation. Two lower-severity items flagged and accepted as-is: the migration retroactively reveals backfilled rows for tasks that carried a room token but delivered only to email/ntfy (bounded to historic rows — accepted), and operator `cli`/`--source-type` posts become standalone bubbles (content did post to Talk).
+Implemented via TDD (spec forks all confirmed as recommended: spine-bubble, room-bound gate, leave-unparseable-as-is, accept cross-room/unread expansion). Then ran Mulder + Scully in parallel to verify. Both independently caught one real defect the spec's own safety claim missed: the `_exclude_types` addition only gated `get_conversation_history`, but `_build_db_context` (email / Talk-API-fallback) _also_ calls `db.get_previous_tasks`, which reads the `tasks` table regardless of source type to deliberately re-surface recent scheduled/briefing output — and that re-injected a subtask's internal synthetic prompt into context as a "user" turn. Reproduced, then fixed with an `exclude_source_types` param passed `["subtask","heartbeat"]` (scheduled/briefing re-surfacing preserved). Mulder also found a migration import-before-DELETE seam (a mid-migration import failure would half-apply); reordered so the import precedes any mutation. Two lower-severity items flagged and accepted as-is: the migration retroactively reveals backfilled rows for tasks that carried a room token but delivered only to email/ntfy (bounded to historic rows — accepted), and operator `cli`/`--source-type` posts become standalone bubbles (content did post to Talk).
 
 **Key changes:**
+
 - Replaced `_store_scheduled_room_turn` (ISSUE-133) and `_store_web_room_turn` (ISSUE-164) with one `_store_room_turn(conn, task, body)` — room-existence gate, `origin_surface=source_type`, idempotent. One producer, not one-per-type.
 - Generalized `TRANSCRIPT_SURFACE_FILTER` to assistant-any / user-conversational. `_CONVERSATIONAL_SOURCE_TYPES`, the caught-up dual-read, and re-pairing unchanged.
 - Added `nonconversational_transcript_cleanup_v1` migration: drops synthetic non-conversational user rows (restoring the "user rows conversational-only" invariant) and normalizes backfilled briefing bodies from raw JSON to the delivered body.
@@ -1467,6 +1602,7 @@ Implemented via TDD (spec forks all confirmed as recommended: spine-bubble, room
 - 24 tests in the new suite; existing scheduled-mirror / web-reply tests re-pointed at the general helper.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` — `_store_room_turn` replacing the two helpers; three delivery call sites routed through it.
 - `src/istota/db.py` — generalized `TRANSCRIPT_SURFACE_FILTER`; `_migrate_nonconversational_transcript_cleanup` (registered in the runner, import-before-mutation); `get_previous_tasks` gains `exclude_source_types`.
 - `src/istota/executor.py` — `subtask`/`heartbeat` added to `_build_db_context`'s history exclude and to the `get_previous_tasks` re-surfacing exclude.
@@ -1481,12 +1617,14 @@ A standalone install with a Pacific user was rendering every task's clock in UTC
 Fixed at three layers: the wizard now derives a real IANA name (`TZ` env → `/etc/localtime` symlink target → a `ZoneInfo`-backed local tzinfo, validating every candidate) and validates the collected answer so a typed or `--timezone` abbreviation is rejected and swapped for the valid default; the executor logs one deduped WARNING per `(user, name)` when a stored timezone isn't loadable, so the class of problem is self-diagnosing instead of a mystery UTC clock. Also compounding but pre-existing: the `user_profiles` DB row wins over `config.toml` (ISSUE-099 design), so editing the TOML alone wouldn't have helped — the stale row had to be corrected too.
 
 **Key changes:**
+
 - `setup_wizard._default_timezone()` resolves a valid IANA name from `TZ` / `/etc/localtime` / local tzinfo instead of stringifying a fixed-offset tzinfo into an abbreviation.
 - New `setup_wizard._is_valid_timezone()` helper; `collect_answers` rejects an invalid prompt/flag value (message + fall back to the valid default).
 - `executor._resolve_user_tz` logs a deduped WARNING (module-level `_INVALID_TZ_WARNED` set) naming the bad value and the correct format, once per process per pair.
 - Tests: 6 for the wizard (validity helper, default-derivation, flag rejection/acceptance) + 1 for the executor warning dedup.
 
 **Files added/modified:**
+
 - `src/istota/setup_wizard.py` — `_is_valid_timezone()`, rewritten `_default_timezone()`, answer validation in `collect_answers`.
 - `src/istota/executor.py` — deduped invalid-timezone WARNING in `_resolve_user_tz`.
 - `tests/test_local_install_stage3.py` — `TestTimezone` (6 tests).
@@ -1494,19 +1632,21 @@ Fixed at three layers: the wizard now derives a real IANA name (`TZ` env → `/e
 
 ## 2026-07-19: Learned-playbook lifecycle — verified commands, pin corrections, use-based retention (ISSUE-174)
 
-The nightly playbook loop (generate → index → recall) worked end to end, but the maintenance side was thin. Audit found four gaps: the generator hallucinated commands (a script-invocation playbook instructed a `python -m some.module.path` that didn't exist, invented instead of recording the real `python scripts/foo.py`); a bad playbook had no correction path; retention keyed on last-*write* not last-*use*; and single-script tasks got re-narrated into lossy prose. We took fixes 1, 3, and part of 1's root cause now; slug-only semantic dedup (concern 2) is deferred.
+The nightly playbook loop (generate → index → recall) worked end to end, but the maintenance side was thin. Audit found four gaps: the generator hallucinated commands (a script-invocation playbook instructed a `python -m some.module.path` that didn't exist, invented instead of recording the real `python scripts/foo.py`); a bad playbook had no correction path; retention keyed on last-_write_ not last-_use_; and single-script tasks got re-narrated into lossy prose. We took fixes 1, 3, and part of 1's root cause now; slug-only semantic dedup (concern 2) is deferred.
 
-Two review passes (Mulder + Scully, run in parallel then re-run after rework) surfaced the load-bearing fact the first cut missed: **recall serves `memory_chunks`, not the file**, and that chunk store is only written by the generation path. So the initial pin (skip re-index) and prune (unlink file only) both missed the surface the model actually reads — a pinned correction never reached recall, and a pruned playbook kept being recalled from orphaned chunks. They also proved the "copy the command verbatim from the Tools line" prompt rule rested on a false premise: the trace's tool label is `_describe_tool_use` output — a Bash *description* paraphrase, a 77-char truncation, or a bare basename — not the literal command, which wasn't persisted anywhere the sleep cycle could reach.
+Two review passes (Mulder + Scully, run in parallel then re-run after rework) surfaced the load-bearing fact the first cut missed: **recall serves `memory_chunks`, not the file**, and that chunk store is only written by the generation path. So the initial pin (skip re-index) and prune (unlink file only) both missed the surface the model actually reads — a pinned correction never reached recall, and a pruned playbook kept being recalled from orphaned chunks. They also proved the "copy the command verbatim from the Tools line" prompt rule rested on a false premise: the trace's tool label is `_describe_tool_use` output — a Bash _description_ paraphrase, a 77-char truncation, or a bare basename — not the literal command, which wasn't persisted anywhere the sleep cycle could reach.
 
 Reworked against those findings. The real fix for command capture is at the trace layer: a new `_tool_invocation()` pulls the verbatim Bash command, threaded as an additive `raw` field on the tool trace entry by all three brains (claude_code via a new `ToolUseEvent.invocation`, native, tmux), and `tool_summary` prefers `raw` (200-char budget) so the extraction prompt sees the real invocation. Pin now keeps the file but re-indexes its (frontmatter-stripped) content so the correction reaches recall. Retention prunes on last-use mtime (stamped by `_recall_playbooks` on hit), deletes the pruned file's chunks, skips pinned files, and grandfathers existing files on the first post-upgrade run (a `.retention_initialized` sentinel refreshes mtimes so nothing dies on stale write-mtime before recall history exists). Default `retention_days` flipped 0→90. All three fixes re-verified CONFIRMED end-to-end through `memory_chunks`.
 
 **Key changes:**
+
 - Verbatim-command capture: `_tool_invocation()` + `raw` trace field across all three brains; `tool_summary` prefers it. The extraction prompt now instructs "quote the verified command from the Tools line" and "thin router, don't re-narrate a script."
 - Pin correction path: `pinned: true` frontmatter survives re-derivation and is re-indexed (not skipped), so the human fix reaches recall. Hardened frontmatter parsing (BOM, quoted value, inline comment, no-closing-fence false positive).
 - Use-based retention: recall stamps file mtime; `cleanup_old_playbooks` prunes on it, deletes orphaned chunks, never prunes pinned files, and grandfathers on first run. Default 90 days.
 - Trace `raw` field is additive — no `execution_trace` consumer (web ActivityTrace, history reconstruction, result composition) reads it, verified across the suite.
 
 **Files added/modified:**
+
 - `src/istota/agent/events.py` — `_tool_invocation()` (verbatim Bash command extractor)
 - `src/istota/brain/_events.py` — `ToolUseEvent.invocation` field + parser wiring
 - `src/istota/brain/{claude_code,native,tmux_claude}.py` — thread `raw` into the execution trace
@@ -1522,17 +1662,19 @@ The native brain over an OpenAI-compatible endpoint (OpenRouter) was logging `co
 
 Added provider-reported cost as the preferred source, with catalog pricing as graceful fallback. `Usage` gains a `cost_usd: float | None` field (three-state: `None` = provider reported nothing → compute from catalog; a number = use it verbatim; `0.0` = a genuine free turn, respected). The OpenAI-compat provider adds `"usage": {"include": true}` to the request body **only** for OpenRouter base URLs (other endpoints can 400 on the unknown field), and parses the top-level `usage.cost` unconditionally in `_assemble_message`. `TaskUsage.add` prefers `usage.cost_usd` when present, else falls back to `price_usage()`. Non-OpenRouter endpoints are byte-identical in request and keep computing from the catalog exactly as before.
 
-Mulder/Scully reviewed the implementation. Both cleared the core design (wire format verified against OpenRouter docs — top-level `cost`, USD, markup included; no double-counting since provider cost *replaces* the catalog computation; no positional `Usage(...)` construction that the new trailing field would break). Four real robustness findings fixed: (1) `json.loads` accepts bare `NaN`/`Infinity`, which passed the old `isinstance` check, propagated through every `+=` to poison the whole task's running total, and serialized as invalid JSON to `task_logs` — now dropped via `math.isfinite()` (also rejects negatives); (2) a `cost_details.total` fallback targeted a field OpenRouter never sends (its `cost_details` has `upstream_inference_cost`) — dead code, removed; (3) `bool` slipped through as a cost (`int` subclass) — rejected; (4) the loop gated cost accumulation on `total_tokens > 0`, so a costed turn reporting no tokens (some OpenRouter free/BYOK responses) dropped its charge — gate now also accepts a reported cost. All consolidated into one validated `_parse_reported_cost()` extractor.
+Mulder/Scully reviewed the implementation. Both cleared the core design (wire format verified against OpenRouter docs — top-level `cost`, USD, markup included; no double-counting since provider cost _replaces_ the catalog computation; no positional `Usage(...)` construction that the new trailing field would break). Four real robustness findings fixed: (1) `json.loads` accepts bare `NaN`/`Infinity`, which passed the old `isinstance` check, propagated through every `+=` to poison the whole task's running total, and serialized as invalid JSON to `task_logs` — now dropped via `math.isfinite()` (also rejects negatives); (2) a `cost_details.total` fallback targeted a field OpenRouter never sends (its `cost_details` has `upstream_inference_cost`) — dead code, removed; (3) `bool` slipped through as a cost (`int` subclass) — rejected; (4) the loop gated cost accumulation on `total_tokens > 0`, so a costed turn reporting no tokens (some OpenRouter free/BYOK responses) dropped its charge — gate now also accepts a reported cost. All consolidated into one validated `_parse_reported_cost()` extractor.
 
 Deferred: surfacing aggregate cost in the admin dashboard. That needs structured cost on the task row (currently it's an unstructured `task_logs` JSON blob with no model on it), so a real per-model spend aggregate is a separate schema-touching change — noted for later.
 
 **Key changes:**
+
 - `Usage.cost_usd: float | None` — provider-reported cost, three-state semantics.
 - `_supports_cost_accounting(base_url)` gates the `usage.include` request param to OpenRouter; `_parse_reported_cost(usage_raw)` validates the response cost (finite, non-negative, not bool/string).
 - `TaskUsage.add` prefers reported cost over catalog pricing.
 - Native loop accumulates usage on `total_tokens > 0 or cost_usd is not None`.
 
 **Files modified:**
+
 - `src/istota/llm/types.py` - `cost_usd` field on `Usage`
 - `src/istota/llm/openai_compat.py` - request param + validated cost parse
 - `src/istota/session/usage.py` - reported-cost-preferred accumulation
@@ -1543,19 +1685,21 @@ Verified: full native suite green (386 passed).
 
 ## 2026-07-19: Ansible role brain-fallback templating fix + deploy-time validation
 
-A configured `fallback = "native"` under `[brain]` was a paper fallback in the server deploy. The role only emitted the `[brain.native]` block when native was the *primary* brain — never when it was only the fallback. So a `claude_code` primary with a native fallback rendered no `[brain.native]` section at all; the model field fell to its blank code default, and the first failover would send an empty model id to the endpoint (a 400). Same latent omission for `[brain.tmux]`. This surfaced from a production report that the failover wouldn't actually run despite `fallback` being set.
+A configured `fallback = "native"` under `[brain]` was a paper fallback in the server deploy. The role only emitted the `[brain.native]` block when native was the _primary_ brain — never when it was only the fallback. So a `claude_code` primary with a native fallback rendered no `[brain.native]` section at all; the model field fell to its blank code default, and the first failover would send an empty model id to the endpoint (a 400). Same latent omission for `[brain.tmux]`. This surfaced from a production report that the failover wouldn't actually run despite `fallback` being set.
 
 Fixed the two Jinja guards to also fire on `istota_brain_fallback == '<kind>'`, so the fallback backend's settings block renders even when it isn't the primary. Added a `validate_config.py` check that fails the play when the native backend is active (primary / fallback / a source-type override target) with no model pinned — turning a silent misconfig into a deploy-time error instead of a first-failover surprise. Also extended the `[models.roles]` auto-derivation to the fallback case, and made a typo'd `[brain] fallback` kind fail the play (previously only a runtime WARNING while the play stayed green).
 
 Mulder/Scully review confirmed the diagnosis by rendering the template pre/post-fix and tracing the empty-model value to the wire request. They also ruled out a suspected network-allowlist problem — the native brain's LLM call runs in-process in the daemon, not through the bwrap CONNECT proxy, so a non-Anthropic fallback base_url isn't gated by the sandbox allowlist — and noted the API key can't be validated from `config.toml` because it lives in the EnvironmentFile, not the rendered config. Blank role defaults for model/key are correct (operator supplies them in host/group vars); the template guard was the only real bug for a deployment that already sets those.
 
 **Key changes:**
+
 - `config.toml.j2`: `[brain.native]` and `[brain.tmux]` guards now also emit when the block's kind matches the configured `fallback`.
 - `config.toml.j2`: `[models.roles]` native-model derivation extended to `fallback == 'native'`.
 - `validate_config.py`: fail the play when native is primary/fallback/override-target and `[brain.native].model` is empty; fail on an unknown `[brain] fallback` kind.
 - `defaults/main.yml`: comment updates noting the fallback emission case and the empty-model landmine.
 
 **Files modified:**
+
 - `deploy/ansible/templates/config.toml.j2` - fallback-aware block guards + models.roles derivation
 - `deploy/ansible/files/validate_config.py` - native-model-required + fallback-kind validation
 - `deploy/ansible/defaults/main.yml` - doc comments
@@ -1568,15 +1712,17 @@ Verified: template parses, `validate_config.py` compiles, the guard was exercise
 
 Added an update **channel** to the provenance: `install.json` gains a `channel` field (`stable` | `main`), and `install.sh` writes `stable` for fresh installs. `istota update --channel stable|main` overrides and **persists** the choice back to the record, so it's a set-once decision. Stable resolves the newest `v*` tag (`git fetch --tags` → `tag --list --sort=-version:refname` → `reset --hard <tag>`); main keeps the existing `FETCH_HEAD` branch-tracking.
 
-The one non-obvious call: a record **without** a `channel` key falls back to `main`, not `stable`. Inferring stable for a legacy main-tip install would silently `git reset --hard` it *backwards* onto an older release tag — a real code downgrade nobody asked for. So fresh installs get stable via install.sh; existing users opt in with one `--channel stable`. A checkout on a non-`main` feature branch installs as `main` (track that branch) so releases don't yank a developer off their work.
+The one non-obvious call: a record **without** a `channel` key falls back to `main`, not `stable`. Inferring stable for a legacy main-tip install would silently `git reset --hard` it _backwards_ onto an older release tag — a real code downgrade nobody asked for. So fresh installs get stable via install.sh; existing users opt in with one `--channel stable`. A checkout on a non-`main` feature branch installs as `main` (track that branch) so releases don't yank a developer off their work.
 
 **Key changes:**
+
 - `updater.py`: `_resolve_channel` (override > record > legacy `main` fallback), `_resolve_target` (stable/main split), `_latest_release_tag` (version-sorted `v*`), `_persist_channel`. `run_update` gains `channel=None`.
 - `cli.py`: `--channel {stable,main}` flag on the `update` subparser, threaded to `run_update`.
 - `install.sh` `write_install_record` writes `channel` (default `stable`; `main` for a non-`main` feature-branch checkout; env override `ISTOTA_UPDATE_CHANNEL`).
 - 8 new channel tests; existing 22 unchanged and green (legacy no-channel records still exercise the `main` path).
 
 **Files modified:**
+
 - `src/istota/updater.py` - channel resolution + stable/main target resolver + persistence
 - `src/istota/cli.py` - `--channel` flag
 - `install.sh` - `channel` field in the install record
@@ -1590,17 +1736,20 @@ A first-class update path for the local single-user install shape (`uv tool inst
 The design hinges on install provenance: a `uv tool`-installed package retains no pointer back to the checkout it was built from, so `install.sh` now records `{method, source, extras, ref}` into `~/.config/istota/install.json`. `istota update` reads it, then (checkout method) does dirty-gate → `git fetch origin <ref>` → compare HEAD vs `FETCH_HEAD` → if changed, `git reset --hard`, rebuild web assets, `uv tool install --force --reinstall "<source>[<extras>]"`, run migrations, print a restart nudge. Every external effect is injected, so the orchestration unit-tests without a real git/uv/npm.
 
 **Key changes:**
+
 - New `updater.py` module + `cmd_update` CLI subcommand + `update` subparser. Guarded on `Config.is_standalone`.
 - `install.sh` `run_standalone` writes the provenance file (new `write_install_record` helper) after a successful install.
 - `FETCH_HEAD`, not `origin/<ref>`, is the compare/reset target — a shallow single-branch clone (what install.sh creates) doesn't reliably update the remote-tracking ref, but an explicit fetch always writes FETCH_HEAD.
 
 **Mulder/Scully review — three real bugs the stubbed tests hid, all fixed:**
+
 - **Throwaway `/tmp` clone (critical):** standalone cloned to `/tmp/istota-install` and recorded that as the update source; `/tmp` is wiped on reboot, so the first update after a reboot would break. The standalone clone now lands in a durable `${XDG_DATA_HOME:-$HOME/.local/share}/istota/src`.
-- **Stale-code migrations (high):** the in-process `db.init_db` was imported before the reinstall swapped the package on disk, so a migration shipped *in the update* would silently not apply (confirmed no daemon/serve/web startup path runs framework migrations either). Migrations now shell out to the freshly-installed `istota init`, mirroring the server script.
+- **Stale-code migrations (high):** the in-process `db.init_db` was imported before the reinstall swapped the package on disk, so a migration shipped _in the update_ would silently not apply (confirmed no daemon/serve/web startup path runs framework migrations either). Migrations now shell out to the freshly-installed `istota init`, mirroring the server script.
 - **Failed-reinstall wedge (high):** after `git reset`, a failed `uv install` left the checkout advanced, so the next run reported "already up to date" while pinned to the old wheel. On install/migrate failure the checkout is now rolled back to the pre-update commit so a retry re-detects it.
 - Plus MEDIUM/LOW: the provenance file path now matches where `setup`/`load_config`/the updater look (`$HOME/.config`, not XDG); the recorded `ref` is the checkout's actual branch, not the clone-time default; the dirty-gate uses `--untracked-files=no` so untracked scratch files don't force `--force`.
 
 **Files added/modified:**
+
 - `src/istota/updater.py` — new; `run_update`, provenance load, fresh-migration + web-build + daemon-probe helpers
 - `src/istota/cli.py` — `cmd_update` + `update` subparser + dispatch entry
 - `install.sh` — `write_install_record`; durable standalone clone dir
@@ -1611,15 +1760,18 @@ The design hinges on install provenance: a `uv tool`-installed package retains n
 A new "Models" card in the web admin dashboard, rendered directly below the system-banner. It surfaces the active model backend so an operator can confirm what a deployment is actually configured to run without reading the TOML — useful when role aliases or a fallback backend are in play.
 
 **Key changes:**
-- Backend `_admin_models_section()` builds the active brain via `make_brain(config.brain)` and reports: the brain kind, the effective default model (top-level `config.model` resolved to a canonical id, with a "CLI default" / "endpoint default" sentinel when unset) and effort, and how the portable roles `fast`/`general`/`smart` resolve *right now* (so operator `[models.roles]` overrides show through). `endpoint` + `provider` are populated only for the native brain (which talks to a configurable OpenAI-compatible endpoint); `source_type_overrides` only when configured. Best-effort like the sibling sections — a failure returns an `error` string instead of aborting the whole stats payload.
+
+- Backend `_admin_models_section()` builds the active brain via `make_brain(config.brain)` and reports: the brain kind, the effective default model (top-level `config.model` resolved to a canonical id, with a "CLI default" / "endpoint default" sentinel when unset) and effort, and how the portable roles `fast`/`general`/`smart` resolve _right now_ (so operator `[models.roles]` overrides show through). `endpoint` + `provider` are populated only for the native brain (which talks to a configurable OpenAI-compatible endpoint); `source_type_overrides` only when configured. Best-effort like the sibling sections — a failure returns an `error` string instead of aborting the whole stats payload.
 - Frontend card reuses the existing `.card` / `.section-header` / `.kv` primitives so it matches the other panes. "Brain: Native" as an explicit labeled row, the endpoint on its own row (native only, provider inline), then a unified label-left / value-right list with **Default** at the top (model + an inline effort chip) followed by the three role resolutions. Values are left-aligned in a tight column. The effort chip is a small uppercase blue pill (`#6c8ebf`, the page's existing `talk`-source blue).
 - Role resolution goes through each brain's own `resolve_alias` / `resolve_model_name`, so the pane reflects the real namespace: on the native brain all three roles collapse to the single configured endpoint model, while claude_code shows the three distinct Anthropic tiers.
 
 **Subtleties:**
+
 - `make_brain` is safe to call here — construction only stores config (no API key needed, no I/O), and the resolve methods just read config.
 - The mock API (`vite-mock-api.ts`) gained a `models` block so the pane renders under `VITE_MOCK_API=1 npm run dev` for local preview; it's a dev-only fixture, consistent with the other mocked admin sections.
 
 **Files added/modified:**
+
 - `src/istota/web_app.py` — `_admin_models_section()` + wired into `_gather_admin_stats` as `payload["models"]`
 - `web/src/lib/api.ts` — optional `models` field on `AdminStats`
 - `web/src/routes/admin/+page.svelte` — Models card + `brainLabel()` helper + scoped styles
@@ -1627,6 +1779,7 @@ A new "Models" card in the web admin dashboard, rendered directly below the syst
 - `tests/test_local_install_stage1.py` — `TestAdminModelsSection` (claude_code default, native with endpoint + role collapse + overrides, native empty-model fallback)
 
 **Follow-up — hide Nextcloud mount status on standalone installs:** the Storage card's "Nextcloud mount" row and the system-banner's "mount ✓/✗" indicator were showing on local (no-Nextcloud) installs, where a mount is a meaningless concept. `_admin_storage_section` now emits `nextcloud_configured = bool(_config.storage_is_nextcloud)` (the same `bool(nextcloud.url)` predicate as the storage-vocabulary work), and both frontend spots gate on it. On a Nextcloud-backed server the flag is true, so nothing changes there. Added `TestAdminStorageSection`; the mock fixture declares `nextcloud_configured: false` to match its standalone posture.
+
 - `src/istota/web_app.py` — `nextcloud_configured` in the storage payload
 - `web/src/lib/api.ts` — field on `AdminStats.storage`
 - `web/src/routes/admin/+page.svelte` — gate the mount row + banner indicator
@@ -1639,17 +1792,20 @@ Standalone Istota still talked about the user's files as a Nextcloud mount even 
 The storage I/O was already backend-agnostic — the earlier local-install work deliberately declined a `Storage` abstraction because the `use_mount` branch is plain POSIX and standalone just points the mount path at a local dir. So this pass is purely vocabulary: a config-derived notion of what backs storage, plus prompt/skill prose that adapts.
 
 **Key design decisions:**
+
 - The predicate is `bool(nextcloud.url)`, deliberately **not** `is_standalone` (which folds in web auth, an axis orthogonal to file storage). A URL means the files are Nextcloud whether reached via mount or rclone; no URL means a plain local folder.
 - The executor's file-access section is the single home of storage framing. Skill bodies duplicated it (that's why `files/skill.md` hardcoded a specific Nextcloud mount path, wrong on many servers too), so they were made storage-neutral and reference paths through a new `{workspace}` placeholder — no templating engine, matching the "no decoder-ring DSLs" convention.
-- Local mode gets an extra prompt bullet: the workspace is the *managed* area, not the limit of what an unsandboxed local bot can read — the direct fix for the transcript's "I can only see the Nextcloud mount" false claim.
+- Local mode gets an extra prompt bullet: the workspace is the _managed_ area, not the limit of what an unsandboxed local bot can read — the direct fix for the transcript's "I can only see the Nextcloud mount" false claim.
 
 **Subtleties hit during implementation:**
-- `money`/`feeds`/`health` skill docs already used `{workspace}` as an unsubstituted conceptual token meaning the *bot-dir-rooted* module subtree, while `files`/`todos`/`transcribe`/inbox live under the *base* user root. One placeholder can't mean both. Resolved `{workspace}` to the base user root (`/Users/{user}`) and rewrote the three module docs to `{workspace}/{BOT_DIR}/…` — verified against `get_user_bot_path` so the substituted paths stay correct.
+
+- `money`/`feeds`/`health` skill docs already used `{workspace}` as an unsubstituted conceptual token meaning the _bot-dir-rooted_ module subtree, while `files`/`todos`/`transcribe`/inbox live under the _base_ user root. One placeholder can't mean both. Resolved `{workspace}` to the base user root (`/Users/{user}`) and rewrote the three module docs to `{workspace}/{BOT_DIR}/…` — verified against `get_user_bot_path` so the substituted paths stay correct.
 - `TestAdminPromptIsolation` set a mount path but no URL, so it fell into the new "local" branch. Admin/non-admin mount scoping is inherently a Nextcloud multi-user feature, so the test config was given a Nextcloud URL rather than loosening the assertion.
 
 New config: `Config.storage_is_nextcloud` / `storage_backend` / `storage_label` + a `workspace_root(user_id)` choke-point helper (de-dups the `mount / "Users" / uid` idiom; used by the new local-mode branch and the `{workspace}` resolution). `{workspace}` + `{storage}` substitution wired into the executor's `{scripts_dir}` site, `load_skills`, and `skills show` (new `_workspace_dir` helper). Server/Nextcloud prompts are byte-unchanged; full suite green (7365 passed, 7 skipped).
 
 **Files added/modified:**
+
 - `src/istota/config.py` — `storage_is_nextcloud` / `storage_backend` / `storage_label` properties + `workspace_root(user_id)` helper
 - `src/istota/executor.py` — three-mode file-access block (nextcloud-mount / nextcloud-rclone / local + wider-FS bullet), backend-conditional folders header + attachments prose, `{workspace}` / `{storage}` substitution
 - `src/istota/skills/skills/__init__.py` — `_workspace_dir` helper + `{workspace}` / `{storage}` substitution in `skills show`
@@ -1666,9 +1822,9 @@ The design is deliberately executor-level, not a composing `FallbackBrain` wrapp
 
 **Three cooperating pieces:**
 
-1. **Usage-limit detection.** A subscription/quota limit was landing as generic `error` (or `transient_api_error` on a 429) with nothing distinguishing it. New shared `is_usage_limit_error(text)` (keyword set + an "exceeded…limit" regex) classifies it as a new `stop_reason="usage_limit"` on all three brains. It's checked *before* the transient predicate at every call site, because a quota 429 also matches `is_transient_api_error` — so without the ordering it'd be retried against the exhausted primary. ClaudeCodeBrain wires it into both exec paths + the retry short-circuit; NativeBrain's `_classify_native_error` splits a quota/billing body (usage_limit) from a plain overload 429 (transient); TmuxClaudeBrain detects it in the transcript/Stop-payload body and via a new `usage_limit_markers` pane list (checked before `error_markers`, since "session limit reached" is in both), guarded so a usage_limit never feeds tmux's launch `_CircuitBreaker` or its own headless fallback.
+1. **Usage-limit detection.** A subscription/quota limit was landing as generic `error` (or `transient_api_error` on a 429) with nothing distinguishing it. New shared `is_usage_limit_error(text)` (keyword set + an "exceeded…limit" regex) classifies it as a new `stop_reason="usage_limit"` on all three brains. It's checked _before_ the transient predicate at every call site, because a quota 429 also matches `is_transient_api_error` — so without the ordering it'd be retried against the exhausted primary. ClaudeCodeBrain wires it into both exec paths + the retry short-circuit; NativeBrain's `_classify_native_error` splits a quota/billing body (usage_limit) from a plain overload 429 (transient); TmuxClaudeBrain detects it in the transcript/Stop-payload body and via a new `usage_limit_markers` pane list (checked before `error_markers`, since "session limit reached" is in both), guarded so a usage_limit never feeds tmux's launch `_CircuitBreaker` or its own headless fallback.
 
-2. **Portable alias layer.** The problem: `req.model` reaching the fallback is a *primary-namespace* canonical ID (`claude-opus-4-8`), meaningless to a different-provider fallback. Rather than a provider-translation table (unbounded, always stale), lean on the role tiers, which are already provider-agnostic intents. New `brain/_aliases.py`: `CANONICAL_ROLES` (single source of truth — both brains' role tables now import it) + `is_portable_alias`. A contract test asserts every registered brain resolves every canonical role. On fallback: a portable role re-resolves the *intent* in the fallback namespace; a non-portable pin drops to the fallback's own default (logged + a visible italic note appended to the successful reply so the user isn't silently downgraded).
+2. **Portable alias layer.** The problem: `req.model` reaching the fallback is a _primary-namespace_ canonical ID (`claude-opus-4-8`), meaningless to a different-provider fallback. Rather than a provider-translation table (unbounded, always stale), lean on the role tiers, which are already provider-agnostic intents. New `brain/_aliases.py`: `CANONICAL_ROLES` (single source of truth — both brains' role tables now import it) + `is_portable_alias`. A contract test asserts every registered brain resolves every canonical role. On fallback: a portable role re-resolves the _intent_ in the fallback namespace; a non-portable pin drops to the fallback's own default (logged + a visible italic note appended to the successful reply so the user isn't silently downgraded).
 
 3. **Availability breaker + routing.** New `brain/_fallback.py`: `PrimaryAvailabilityBreaker` (process-global, thread-safe, keyed by primary kind — distinct from `tmux_claude._BREAKER`, which governs launch fast-fail; the two compose) + `effective_fallback_kind` (encodes the tmux→claude_code default). Trigger set `{usage_limit, not_found, fallback}` (+ `transient_api_error` iff `fallback_on_transient`) reroutes the attempt; cooldown set `{usage_limit, not_found}` opens the breaker so subsequent tasks skip the primary for `fallback_cooldown_seconds`. `fallback` is excluded from the cooldown set on purpose — tmux keeps being probed per-task, its own breaker decides when to stop. `oom`/`timeout`/`cancelled`/`error` never fall back (task-level outcomes, not "brain unavailable").
 
@@ -1679,6 +1835,7 @@ The executor block that used to be `if _brain_config.kind == "tmux_claude" and s
 **Test note:** the generalized path routes tmux `not_found` through the availability breaker (it's persistent), which opens the breaker + fires one alert — so the existing `TestTmuxFallback` regression tests needed a `reset_availability_breaker()` + a stubbed `send_notification` to stay isolated (the process-global breaker would otherwise leak an open primary across tests). No behavioural change to their assertions.
 
 **Files added/modified:**
+
 - `src/istota/brain/_aliases.py` - new: `CANONICAL_ROLES`, `is_portable_alias`.
 - `src/istota/brain/_fallback.py` - new: `PrimaryAvailabilityBreaker`, `effective_fallback_kind`, trigger/cooldown sets.
 - `src/istota/brain/claude_code.py` - `is_usage_limit_error` + `_failure_stop_reason`; wired into both exec paths; role table imports `CANONICAL_ROLES`.
@@ -1707,6 +1864,7 @@ Two standalone-install breakages, both found on a real mac run.
 Verified: `istota[local]` (no money) → `beancount` not importable, `serve` logs no money lines, `/api/me` → `money: False`; `istota[local,money]` → `beancount==3.2.3` installs; the install prompt selects `local,money` on yes and `local` on no (pty test). `build_clean_env` now carries USER/LOGNAME. Unit tests for both the identity vars and the availability gate.
 
 **Files added/modified:**
+
 - `src/istota/executor.py` - `build_clean_env` passes `USER`/`LOGNAME`.
 - `src/istota/modules.py` - `MODULE_DEPENDENCIES` + `module_available()` (dep-availability probe).
 - `src/istota/config.py` - `is_module_enabled` returns False for a dep-unavailable module.
@@ -1723,6 +1881,7 @@ Also found (while verifying) that `uv tool install --force` reused a **cached wh
 Verified with a fresh isolated install: bare `/` → 307 → `/istota/`; the static mount serves the SPA at `/istota/` (`html=True`) when `web_static` is built; `serve` message updated. Added a `TestRootRedirect` unit test (307 → `/istota/`); the 201-test web suite stays green.
 
 **Files added/modified:**
+
 - `src/istota/web_app.py` - `_root_redirect` (`@app.get("/")` → 307 `/istota/`).
 - `src/istota/serve.py` - Printed/logged URL shows the bare port (redirects to `/istota`).
 - `install.sh` - `run_standalone` uses `uv tool install --force --reinstall` so a same-version reinstall rebuilds.
@@ -1735,6 +1894,7 @@ Verified with a fresh isolated install: bare `/` → 307 → `/istota/`; the sta
 Fix is two parts: force-include `schema.sql` into the wheel as `istota/schema.sql` (same mechanism as `web_static`), and add `_resolve_schema_path()` which prefers the packaged copy (`Path(__file__).parent / "schema.sql"`) and falls back to the source-tree copy (`…/parent.parent / "schema.sql"`), so both a checkout and an installed wheel work. Verified by building the wheel (schema.sql present at `istota/schema.sql`), installing `istota[local]` into an isolated uv tool dir, running `istota setup --yes` to completion (config + env written, `istota.db` created with schema), and starting `istota serve` — web UI returns HTTP 200. Other repo-root data (`config/` emissaries/persona/guidelines) is loaded with graceful `.exists()` fallbacks, so its absence in an installed wheel degrades rather than crashes; the `money` module logs a benign "No module named 'beancount'" when its heavy extra isn't installed.
 
 **Files added/modified:**
+
 - `src/istota/db.py` - `_resolve_schema_path()`; `init_db` uses it instead of the hardcoded `parent.parent.parent` path.
 - `pyproject.toml` - `[tool.hatch.build.targets.wheel.force-include]` ships `schema.sql` → `istota/schema.sql`.
 
@@ -1746,11 +1906,12 @@ The top-level `install.sh` dispatcher only knew two paths — bare metal (defaul
 
 **Incidental hardening.** `reattach_tty_if_needed` did a bare `exec < /dev/tty` whenever the node existed, which aborts under `set -e` when `/dev/tty` exists but has no controlling terminal (cron / CI / detached pipe). It now probes openability in a subshell first and only reattaches when it'll succeed — so a genuinely non-interactive run falls back to the default instead of dying. Also added the `section()` helper (previously only in `deploy/install.sh`) since `run_standalone` uses it.
 
-**Follow-up fix (curl-pipe hang).** The first cut called `reattach_tty_if_needed` (which `exec < /dev/tty`s) *inside* `prompt_install_mode`. Under `curl … | bash` the shell is still reading the rest of the script (the dispatch `case`, which comes after the prompt) from the pipe on stdin; swapping stdin to the terminal before that block is read makes bash try to read the remaining script from the keyboard — so after picking a mode the installer hung, with or without sudo. Reproduced deterministically with a pty harness (script fed via a pipe, choice sent to the pty): the committed version never dispatched and stayed alive; the fix dispatches and exits. Fix: the prompt no longer touches the shell's stdin — it reads the choice with a redirect on the `read` command alone (`read … < /dev/tty`, or `/dev/stdin` when already interactive), so the pipe stays the script source and the `case` is read normally. `run_standalone` still reattaches (it needs a real terminal for `istota setup`, and by the time it runs the whole script is read) and now ends with an explicit `exit 0` so bash doesn't try to read another command from the swapped-in terminal after setup finishes. The original `exec`-immediately paths (`run_bare` / `run_docker`) were never affected.
+**Follow-up fix (curl-pipe hang).** The first cut called `reattach_tty_if_needed` (which `exec < /dev/tty`s) _inside_ `prompt_install_mode`. Under `curl … | bash` the shell is still reading the rest of the script (the dispatch `case`, which comes after the prompt) from the pipe on stdin; swapping stdin to the terminal before that block is read makes bash try to read the remaining script from the keyboard — so after picking a mode the installer hung, with or without sudo. Reproduced deterministically with a pty harness (script fed via a pipe, choice sent to the pty): the committed version never dispatched and stayed alive; the fix dispatches and exits. Fix: the prompt no longer touches the shell's stdin — it reads the choice with a redirect on the `read` command alone (`read … < /dev/tty`, or `/dev/stdin` when already interactive), so the pipe stays the script source and the `case` is read normally. `run_standalone` still reattaches (it needs a real terminal for `istota setup`, and by the time it runs the whole script is read) and now ends with an explicit `exit 0` so bash doesn't try to read another command from the swapped-in terminal after setup finishes. The original `exec`-immediately paths (`run_bare` / `run_docker`) were never affected.
 
 Verified: `bash -n` + shellcheck clean; drove the menu through a pty (2→standalone, 1→bare, empty→bare); flag dispatch correct; no-terminal path falls back to bare with no error; standalone root-refusal fires.
 
 **Files added/modified:**
+
 - `install.sh` - Added `--standalone` flag + `MODE_EXPLICIT` tracking, `prompt_install_mode`, `run_standalone`, `ensure_uv`, `maybe_build_web_static`, `section()`; hardened `reattach_tty_if_needed`; updated header/`--help`.
 - `README.md` - Install section notes the Server/Standalone prompt and the `--standalone` route.
 
@@ -1760,11 +1921,12 @@ Gave the NativeBrain harness a way to fetch an arbitrary public web page. The na
 
 **Design.** Resolve the host → validate every candidate IP against a private/loopback/link-local/CGNAT/benchmarking/reserved/multicast blocklist (IPv4 + IPv6, IPv4-mapped-IPv6 unwrapped) → **pin the connection to the validated IP** (URL host rewritten to the IP, `Host` header + TLS `sni_hostname` kept on the hostname, so cert verification still binds to the hostname and there's no getaddrinfo→connect DNS-rebinding TOCTOU) → manual per-hop redirect handling that re-validates each hop and refuses an https→http downgrade → streamed body with a size cap that stops without buffering the whole response, a total wall-clock deadline, and abort support. Content typing: HTML→text via a stdlib `html.parser` extractor (no new dependency), text/JSON/XML returned as-is, binary content returns a short note. Output is wrapped in an `[UNTRUSTED WEB CONTENT …]` delimiter with a `Fetched: …` provenance header. The client is credential-free (`trust_env=False`, cookies cleared per hop, fixed User-Agent).
 
-**Wiring.** The tool is native-only (added to `build_default_tools`, which only NativeBrain calls) and appears only when `env.web_fetch` is set and enabled; it passes the `allowed_tools` filter because `build_allowed_tools` already lists `WebFetch`. `NativeBrain._build_tools` maps `[brain.native.web_fetch]` (`WebFetchConfig`) → `WebFetchPolicy` onto `ToolEnv`. Because a core tool doesn't drive companion-skill selection the way ingest *skills* do, the executor folds `untrusted_input` into the eager skill set when a task routes to the native brain with WebFetch enabled, so its inbound-handling guidance reaches the prompt. `require_url_provenance` (default off) locks fetches to URLs seen in the task, threaded as a prompt-derived corpus onto `ToolEnv`.
+**Wiring.** The tool is native-only (added to `build_default_tools`, which only NativeBrain calls) and appears only when `env.web_fetch` is set and enabled; it passes the `allowed_tools` filter because `build_allowed_tools` already lists `WebFetch`. `NativeBrain._build_tools` maps `[brain.native.web_fetch]` (`WebFetchConfig`) → `WebFetchPolicy` onto `ToolEnv`. Because a core tool doesn't drive companion-skill selection the way ingest _skills_ do, the executor folds `untrusted_input` into the eager skill set when a task routes to the native brain with WebFetch enabled, so its inbound-handling guidance reaches the prompt. `require_url_provenance` (default off) locks fetches to URLs seen in the task, threaded as a prompt-derived corpus onto `ToolEnv`.
 
 **Security review + fixes.** A post-implementation review verified the pinning / redirect / cert-verification wiring against httpx/httpcore source and turned up three issues, all fixed: `fec0::/10` (deprecated IPv6 site-local) was reachable because Python's `ipaddress` doesn't flag it — added to the blocklist, with explicit NAT64/6to4/IPv4-compatible entries so coverage doesn't depend on `is_reserved` version drift; a non-string `url` arg (an LLM sometimes emits a number/array) raised into the loop — now returns a clean error; and provenance was made fail-closed via an explicit per-hop `enforce_provenance` flag instead of overloading `corpus is None`. 72 new tests (no real network — httpx `MockTransport` + stubbed resolver), full suite green.
 
 **Files added/modified:**
+
 - `src/istota/session/tools/web_fetch.py` - New. The tool: `_ip_is_public`, `_validate_url`, `_extract_text`/`_html_to_text`, pinned-IP fetch, `make_web_fetch_tool`.
 - `src/istota/session/tools/env.py` - `WebFetchPolicy` dataclass + `ToolEnv.web_fetch` / `web_fetch_url_corpus`.
 - `src/istota/session/tools/__init__.py` - `build_default_tools` appends `WebFetch` when policy set + enabled.
@@ -1800,6 +1962,7 @@ Ran a thorough audit of the native brain harness (the in-process agent loop behi
 **Deferred (latent / test-only):** NB-22 (steering contract, no consumer), NB-23 (usage accounting — cache double-billing latent while prices are 0), NB-24 (replay.py test-only, risk already reduced by NB-2).
 
 **Files added/modified:**
+
 - `src/istota/session/tools/env.py` — `ToolEnv` read/write roots + symlink-resolved allowlist (`resolve`/`contains`), `ToolPathError`, `max_read_bytes`.
 - `src/istota/session/tools/files.py` — confinement plumbing, `is_error` on failures, bounded reads, Grep path-globs, safe Glob sort.
 - `src/istota/session/tools/bash.py` — chunked reads, `start_new_session` + process-group kill, `try/finally` reap, true byte count.
@@ -1833,9 +1996,10 @@ Fixed a long-standing bug where `!search` in a room returned almost nothing, and
 
 **Jump-to-response + deep link (Stage 5).** A conversation card's "Jump to reply" calls a new store `jumpToTask(roomToken, taskId)`: it selects the room if needed, pages older history (5-page bound) to locate the turn, then signals `scrollTarget`; the route scrolls the `data-cid`-anchored row into view with a 2s highlight pulse (reduced-motion aware). `/chat?room=<token>&task=<id>` deep-links straight to a turn. Unknown-room / not-found / cross-room-foreign cases degrade to a transient error, never broken state.
 
-**Review pass (Mulder + Scully).** Two review agents went over the diff. Scully verified spec conformance and the recall non-regression at the exact call sites. Mulder found one real MEDIUM bug: the OR-forgiveness gate keyed on `search()`'s *global* BM25 emptiness, but room-scoping happens later in `cmd_search` — so a strict AND match in *another* room (reachable via the user namespace, then scope-filtered out) suppressed the OR retry and the in-room loose match never surfaced, silently defeating forgiveness in its target case. Fixed by moving the forgiveness decision to key on the *scoped* result: `cmd_search` runs a strict pass, assembles + scope-filters, and only if that is empty re-runs with explicit OR mode. Reproduced with a failing test first. Mulder cleared the high-damage areas (no privacy leak across shared rooms, dedup sound, retention fallback correct, `data` never leaks to the Talk push surface).
+**Review pass (Mulder + Scully).** Two review agents went over the diff. Scully verified spec conformance and the recall non-regression at the exact call sites. Mulder found one real MEDIUM bug: the OR-forgiveness gate keyed on `search()`'s _global_ BM25 emptiness, but room-scoping happens later in `cmd_search` — so a strict AND match in _another_ room (reachable via the user namespace, then scope-filtered out) suppressed the OR retry and the in-room loose match never surfaced, silently defeating forgiveness in its target case. Fixed by moving the forgiveness decision to key on the _scoped_ result: `cmd_search` runs a strict pass, assembles + scope-filters, and only if that is empty re-runs with explicit OR mode. Reproduced with a failing test first. Mulder cleared the high-damage areas (no privacy leak across shared rooms, dedup sound, retention fallback correct, `data` never leaks to the Talk push surface).
 
 **Files added/modified:**
+
 - `src/istota/commands.py` — `_search_memory` (channel namespace, `is_memory` scope axis, retention fallback, dedup), `cmd_search` (scoped strict→OR two-pass, `_assemble` helper, `_build_search_data`), `CommandResult.data`, `CommandContext.result_data`, `dispatch` threading.
 - `src/istota/memory/search.py` — `_escape_fts5_query(prefix=, match_mode=)`, `_search_bm25`/`search` gained `match_mode`/`prefix`/`allow_or_fallback`.
 - `src/istota/db.py` — `get_message_room_for_task`.
@@ -1854,15 +2018,17 @@ Follow-on UI work on the per-room model default (below). Added a badge beside th
 **Header badge.** A compact pill next to the room title shows the room's default — the canonical model name plus effort (e.g. `claude-opus-4-8 · high`) — and only appears when the room has a default set. It's a button: clicking it opens the room-settings modal, so it doubles as a quick way to change the model. Lives in `ShellHeader`'s `nav` snippet (rendered right after the title).
 
 **Canonical names beside aliases.** The recurring confusion is that role aliases (`smart`, `fast`, `general`) don't tell you what model they resolve to. So wherever the UI shows an alias, it now shows the canonical model it points to:
+
 - The `!model` autocomplete rows show the resolved model (and effort) in parens next to the alias — `smart (claude-opus-4-8)`.
 - The room-settings Model dropdown labels read `opus (claude-opus-4-8)`, `sonnet (claude-sonnet-4-6)`, etc.
 - The header badge shows the canonical name outright rather than an alias.
 
-**One label helper, so surfaces never disagree.** While building this, a first cut had the badge reading `smart` while the settings dropdown read the same model differently — because each built its label independently. Consolidated into a single `getBaseModelChoices()` in the autocomplete providers module: it dedups aliases by canonical target and prefers a *provider* alias (whose name appears in the canonical id, e.g. `opus` in `claude-opus-4-8`) over a *role* alias (`smart`). The badge and the dropdown both consume it, so they can't drift.
+**One label helper, so surfaces never disagree.** While building this, a first cut had the badge reading `smart` while the settings dropdown read the same model differently — because each built its label independently. Consolidated into a single `getBaseModelChoices()` in the autocomplete providers module: it dedups aliases by canonical target and prefers a _provider_ alias (whose name appears in the canonical id, e.g. `opus` in `claude-opus-4-8`) over a _role_ alias (`smart`). The badge and the dropdown both consume it, so they can't drift.
 
 **Verified in a real browser** (mock dev server, `VITE_MOCK_API=1`): the badge renders and is clickable, the `!model` popover shows `smart (claude-opus-4-8)`, and the settings dropdown shows the parenthesized canonical for each model. `svelte-check` clean; web vitest green (updated the one provider test asserting the old bare-target description).
 
 **Files added/modified:**
+
 - `web/src/routes/chat/+page.svelte` — header badge (derived label + `nav` snippet + styling).
 - `web/src/lib/components/ui/ShellHeader.svelte` — already had a `nav` snippet slot; used as-is.
 - `web/src/lib/components/chat/RoomSettings.svelte` — Model dropdown labels carry the canonical in parens.
@@ -1889,6 +2055,7 @@ Left as deliberate: the default is room-global (in a shared room, one participan
 **Verification.** TDD throughout: 22 backend tests in `tests/test_room_model_default.py` (DB roundtrip, cross-surface resolution, precedence incl. the `!model default` escape, the `!room` command incl. effort orthogonality) + 5 web PATCH tests in `tests/test_web_chat.py`. Full backend suite green (6980 passed, 7 skipped); `svelte-check` clean; 120 web vitest green; end-to-end smoke checks of both the `!room` command semantics and the `!model default` escape.
 
 **Files added/modified:**
+
 - `schema.sql`, `src/istota/db.py` — `rooms.model` / `rooms.effort` columns (+ migration); `Room` dataclass + `_row_to_room`; `set_room_model_effort` / `set_room_effort` / `set_room_model`.
 - `src/istota/transport/ingest.py` — room-default fill in `record_inbound` + `apply_room_default` gate.
 - `src/istota/transport/_types.py`, `src/istota/transport/talk/inbound.py` — `IncomingMessage.model_prefix_used` + Talk wiring.
@@ -1910,6 +2077,7 @@ Typing `!` in the web chat composer now opens an autocomplete dropdown of availa
 **Verification.** 4 backend endpoint tests + 224 existing web tests green; 37 new frontend tests (engine 11, popover 5, providers 13, composer 8, mounting the real component with only the network fetch mocked) in a 120-test suite; `svelte-check` clean; production build succeeds; and a live mock-API dev-server pass (type `!`, filter to `!models`/`!more`/`!memory`, arrow-navigate, accept).
 
 **Files added/modified:**
+
 - `src/istota/web_app.py` — new `GET /chat/commands` endpoint; hoisted `make_brain` to a module-level import so the alias table is reachable (and mockable).
 - `web/src/lib/components/chat/autocomplete/` — new package: `types.ts`, `useAutocomplete.svelte.ts` (engine), `AutocompletePopover.svelte`, `providers.ts` (`commandProvider` + `modelAliasProvider` + per-session catalogue cache), plus their tests.
 - `web/src/lib/components/chat/Composer.svelte` — instantiate the engine, wrap the textarea, wire input/keyup/click/keydown/blur, ARIA, accept write-back with caret restore.
@@ -1922,7 +2090,7 @@ Typing `!` in the web chat composer now opens an autocomplete dropdown of availa
 
 Per-user `/~user/` static sites left core. They were generic static-file publishing, not a Personal OS concern, and they coupled istota to a Nextcloud-mount path plus a server's nginx autoindex config — exactly the ambient coupling the Nextcloud-decoupling program is trying to shed. The per-user surface is gone; the bot's own instance-wide web root stays (a future standalone static-site skill can build on it).
 
-**The split that made this surgical.** The `[site]` config carried two unrelated things: `site.hostname` (the deployment's public DNS name) and the per-user static-hosting machinery. `hostname` turned out to be load-bearing for the web app — it drives the OAuth2 redirect URI, the origin/CSRF check, and the location webhook URL, all independent of whether static hosting is on. So `SiteConfig` (`enabled`/`hostname`/`base_path`) stays as an instance-level concept: the bot's own web root at `base_path`, bound read-write into the sandbox so the agent can still edit it, plus the public hostname. Everything *per-user* was removed.
+**The split that made this surgical.** The `[site]` config carried two unrelated things: `site.hostname` (the deployment's public DNS name) and the per-user static-hosting machinery. `hostname` turned out to be load-bearing for the web app — it drives the OAuth2 redirect URI, the origin/CSRF check, and the location webhook URL, all independent of whether static hosting is on. So `SiteConfig` (`enabled`/`hostname`/`base_path`) stays as an instance-level concept: the bot's own web root at `base_path`, bound read-write into the sandbox so the agent can still edit it, plus the public hostname. Everything _per-user_ was removed.
 
 **Removed (per-user `/~user/`).** The `website` skill (to return later as a cleaner standalone skill parameterized by a target directory); per-user `site_enabled` everywhere — `UserConfig`, the `user_profiles` DB column across `schema.sql` and every read/write/merge/import path, the `--site-enabled`/`--no-site` CLI flags, the `web_app` profile field, and the web frontend (`api.ts`, the Settings checkbox, the mock API); the per-user nginx `/~user/` location loop, the per-user html-dir Ansible tasks, the `_istota_site_users` fact, the `www-data`-to-mount group task, and `user-index.html.j2`.
 
@@ -1933,6 +2101,7 @@ Per-user `/~user/` static sites left core. They were generic static-file publish
 Rewrote the two executor test classes for the instance-level behavior and dropped the per-user `site_enabled` tests. Full suite green (6948 passed, 7 skipped); Svelte `check` clean; the rendered Ansible `[site]` block validated as TOML in both enabled/disabled states. Committed `99ed668` + a follow-up mock-shape sync `400e9f1`.
 
 **Files added/modified:**
+
 - `src/istota/config.py` — trimmed `SiteConfig` docstring to instance-level intent; removed `UserConfig.site_enabled` + its TOML parse (kept `Config.site` + `[site]` parsing)
 - `src/istota/executor.py` — instance-level `base_path` bwrap bind, `WEBSITE_PATH`/`WEBSITE_URL` env, and "Web Root" prompt section; removed the per-user variants
 - `src/istota/user_profiles.py` — removed `site_enabled` from the dataclass, `_PROFILE_COLUMNS`, and all row/insert/update/merge/import paths
@@ -1950,23 +2119,25 @@ The email skill could only `send` and `output` — it could never read a mailbox
 
 **The read half (Stage 1).** New verbs: `list` (with `--since`/`--from`/`--unread`, plus a snippet and `has_attachments` neither of which existed on the envelope before), `read` (headers + plain **and** html + an attachment manifest — the old `read_email` collapsed body to `text or html`), `search` (a real IMAP SEARCH string passed to the server verbatim, replacing the old 3-branch bespoke grammar that silently degraded any non-`from:`/`subject:` query to a subject substring match), `thread` (a genuine References/In-Reply-To walk, distinct from `compute_thread_id`'s subject+participants grouping key which merges unrelated same-subject threads), `attachments --dest`, `from-senders` (server-side SEARCH — the old helper fetched the newest 100 and filtered in Python, silently truncating a busy box), and `newsletters --sources`.
 
-**The scoping invariant (Stage 1, non-negotiable).** The base box is a shared pool: unowned mail already lands there and sits (the pre-existing "discard" path is `mark_processed` + `continue`, no delete). The moment `list`/`search` ship, an unscoped read hands every user the whole INBOX — including another user's plus-addressed mail. So every read verb takes `--scope {mine,shared,all}` (default `all`), and ownership resolution — which already lived inline in `poll_emails` (plus-address → sender-match → thread-match) — got extracted into a new `email_ownership.py` module that both the inbound poll and the skill's scope filter import, so they agree byte-for-byte on who owns a message. `mine` = your mail; `shared` = unowned (the shared pool); `all` = both. **Another user's mail is never returned in any scope** — there is no `everything`, no admin override. `shared`/`all` fail *closed* when the framework DB (the thread arm) is unavailable, rather than risk classifying a thread-owned emissary reply as unowned. The new module can't import `skills.email` (that edge already exists via `email_support`), so it depends only on `config`/`db` and the skill imports it lazily.
+**The scoping invariant (Stage 1, non-negotiable).** The base box is a shared pool: unowned mail already lands there and sits (the pre-existing "discard" path is `mark_processed` + `continue`, no delete). The moment `list`/`search` ship, an unscoped read hands every user the whole INBOX — including another user's plus-addressed mail. So every read verb takes `--scope {mine,shared,all}` (default `all`), and ownership resolution — which already lived inline in `poll_emails` (plus-address → sender-match → thread-match) — got extracted into a new `email_ownership.py` module that both the inbound poll and the skill's scope filter import, so they agree byte-for-byte on who owns a message. `mine` = your mail; `shared` = unowned (the shared pool); `all` = both. **Another user's mail is never returned in any scope** — there is no `everything`, no admin override. `shared`/`all` fail _closed_ when the framework DB (the thread arm) is unavailable, rather than risk classifying a thread-owned emissary reply as unowned. The new module can't import `skills.email` (that edge already exists via `email_support`), so it depends only on `config`/`db` and the skill imports it lazily.
 
-**Richer send + gated destructive ops (Stage 2).** `send` gained `--cc`/`--bcc`/`--attach`(repeatable)/`--reply-to`; Bcc is stripped from headers and delivered via explicit SMTP envelope recipients so it never transmits. `reply`/`reply-all <id>` thread off a *fetched* message (In-Reply-To/References, `Re:` prefix; reply-all copies the original To/Cc minus the bot's own addresses and the sender). `mark`/`delete` are destructive and refuse without `--confirmed` — a mechanical default-safe backstop *under* the existing model-driven `sensitive_actions` confirmation, so an accidental or content-driven call can't destroy mail. All of these are scope-checked, so a user can never act on another user's mail. Also fixed a latent bug: `_get_mailbox` used an invalid `starttls=True` kwarg on `MailBox` (never hit because prod is port 993) — non-993 now uses `MailBoxStartTls`. And an explicit IMAP socket timeout (`email.imap_timeout_seconds`, default 30) so a blackholed host fails fast instead of hanging the poll.
+**Richer send + gated destructive ops (Stage 2).** `send` gained `--cc`/`--bcc`/`--attach`(repeatable)/`--reply-to`; Bcc is stripped from headers and delivered via explicit SMTP envelope recipients so it never transmits. `reply`/`reply-all <id>` thread off a _fetched_ message (In-Reply-To/References, `Re:` prefix; reply-all copies the original To/Cc minus the bot's own addresses and the sender). `mark`/`delete` are destructive and refuse without `--confirmed` — a mechanical default-safe backstop _under_ the existing model-driven `sensitive_actions` confirmation, so an accidental or content-driven call can't destroy mail. All of these are scope-checked, so a user can never act on another user's mail. Also fixed a latent bug: `_get_mailbox` used an invalid `starttls=True` kwarg on `MailBox` (never hit because prod is port 993) — non-993 now uses `MailBoxStartTls`. And an explicit IMAP socket timeout (`email.imap_timeout_seconds`, default 30) so a blackholed host fails fast instead of hanging the poll.
 
-**Quiet senders (Stage 3).** A per-user fnmatch list (`user_profiles.quiet_email_senders`, mirroring `trusted_email_senders`) whose mail is marked processed and left in INBOX with `routing_method="quiet"` — no task, no Claude session. Read back on demand by a briefing/cron via `email from-senders --senders <list> --since <last-run>`: one composition over N messages instead of N session spawns. The `poll_emails` branch runs *after* owner resolution (a quiet sender is still someone's mail, never the discard path) and *before* the untrusted-sender confirmation gate (a filtered message must not raise a gate prompt for a task that will never exist). Unlike trusted senders it never implicitly matches the user's own address and has no dedicated runtime table.
+**Quiet senders (Stage 3).** A per-user fnmatch list (`user_profiles.quiet_email_senders`, mirroring `trusted_email_senders`) whose mail is marked processed and left in INBOX with `routing_method="quiet"` — no task, no Claude session. Read back on demand by a briefing/cron via `email from-senders --senders <list> --since <last-run>`: one composition over N messages instead of N session spawns. The `poll_emails` branch runs _after_ owner resolution (a quiet sender is still someone's mail, never the discard path) and _before_ the untrusted-sender confirmation gate (a filtered message must not raise a gate prompt for a task that will never exist). Unlike trusted senders it never implicitly matches the user's own address and has no dedicated runtime table.
 
-**Mulder/Scully review pass.** Both agents confirmed the security invariant holds for header-visible mail (Mulder independently traced and refuted every leak hypothesis — raw-string SEARCH, References header casing, Bcc, DB-degradation, thread edges; Scully verified the leak-regression tests assert exclusion with users swapped, not vacuously). Fixes applied from their findings: `is_quiet_email_sender` now reads the *live* `user_profiles` row (like `is_module_enabled`) so a settings-card / `user ensure` edit takes effect on the next poll without a daemon restart; `--scope mine` pushes `TO bot+<user>@ OR FROM <addrs>` server-side so a busy shared box can't truncate the caller's own mail out of the fetch window (the spec's promised server-side `mine`); the untrusted notice now names subjects/senders/filenames, not just bodies; `_parse_since` requires the `d` suffix so a bare year errors instead of reading as N-days-ago; one vacuous test was tied to the feature. Deliberately left as pre-existing/out-of-scope (the spec's own "Tracked separately"): `cleanup_old_emails`'s 100-message head-slice, unbounded `processed_emails`, the dead `confirm_sender_match` flag.
+**Mulder/Scully review pass.** Both agents confirmed the security invariant holds for header-visible mail (Mulder independently traced and refuted every leak hypothesis — raw-string SEARCH, References header casing, Bcc, DB-degradation, thread edges; Scully verified the leak-regression tests assert exclusion with users swapped, not vacuously). Fixes applied from their findings: `is_quiet_email_sender` now reads the _live_ `user_profiles` row (like `is_module_enabled`) so a settings-card / `user ensure` edit takes effect on the next poll without a daemon restart; `--scope mine` pushes `TO bot+<user>@ OR FROM <addrs>` server-side so a busy shared box can't truncate the caller's own mail out of the fetch window (the spec's promised server-side `mine`); the untrusted notice now names subjects/senders/filenames, not just bodies; `_parse_since` requires the `d` suffix so a bare year errors instead of reading as N-days-ago; one vacuous test was tied to the feature. Deliberately left as pre-existing/out-of-scope (the spec's own "Tracked separately"): `cleanup_old_emails`'s 100-message head-slice, unbounded `processed_emails`, the dead `confirm_sender_match` flag.
 
 Full suite green (6941 passed, 7 skipped); ~130 new email tests. Spec moved to Done.
 
 **Key changes:**
+
 - New `email_ownership.py` — shared ownership resolver (`extract_user_from_recipient` / `match_thread` / `resolve_email_owner` / `owner_in_scope`); `transport/email/inbound.py` now imports it (kept old private names as aliases for existing tests).
 - Email skill: read verbs + scoping + richer send + gated mark/delete; `EmailEnvelope`/`Email` enriched (snippet, has_attachments, body_text/body_html, in_reply_to, attachment_manifest); `MailBoxStartTls` + IMAP timeout.
 - `quiet_email_senders`: schema + migration, `UserConfig` field + parse, `Config.is_quiet_email_sender` (live profile read), `poll_emails` branch, `istota user ensure --quiet-sender`, Ansible wiring, `/settings` Preferences card.
 - `email.imap_timeout_seconds` config field wired through config / example / Ansible.
 
 **Files added/modified:**
+
 - `src/istota/email_ownership.py` — new shared ownership module.
 - `src/istota/skills/email/__init__.py` — read/send verbs, scoping, gating, mappers.
 - `src/istota/transport/email/inbound.py` — use shared ownership; quiet-sender branch.
@@ -1985,28 +2156,32 @@ The one live-behavior unknown the spec flagged — whether `/highlights` rejects
 The scheduling/export half of the spec is deliberately out of the repo: a standalone stdlib-only export script (one vault note per article, incremental via the `kv` seen-set, managed-region sentinel that preserves hand-written prose) lives on the deployment's user data dir and shells out to `istota-skill` for all Karakeep + kv access, so credentials never leave the skill runtime. The nightly cron that runs it is an owner-wired one-liner in the live installation, not a code change here. Spec moved to Done.
 
 **Key changes:**
+
 - `bookmarks` skill: `list_highlights` / `get_bookmark_highlights` on the client, `format_highlight` projector (null-`text`/`note` tolerant), `cmd_highlights` handler returning `{status, count, highlights}`, parser + `commands` wiring, docstring + `skill.md`.
 - `_paginate`: `includeContent` gated to the bookmarks key.
 - 11 new unit tests (pagination + cursor follow, per-bookmark path, handler shape, `--bookmark`, formatter null-tolerance) + `SAMPLE_HIGHLIGHT` fixtures; full file 82 pass.
 
 **Files added/modified:**
+
 - `src/istota/skills/bookmarks/__init__.py` — highlights client methods, formatter, handler, parser, `_paginate` gate.
 - `src/istota/skills/bookmarks/skill.md` — highlights usage + output notes.
 - `tests/test_skills_bookmarks.py` — highlights fixtures + tests.
 
 ## 2026-07-13: Rollout incident — `db_relocate` skipped every DB; harden against premature-empty destinations
 
-The module-DB relocation shipped the day before was deployed to the production host via Ansible and appeared to wipe all per-user module data (feeds, location, health, money) — every user showed near-empty modules, with feed counts *identical across users* (the tell-tale sign of freshly-seeded empty DBs).
+The module-DB relocation shipped the day before was deployed to the production host via Ansible and appeared to wipe all per-user module data (feeds, location, health, money) — every user showed near-empty modules, with feed counts _identical across users_ (the tell-tale sign of freshly-seeded empty DBs).
 
-Root cause, verified read-only on the host: **no data was lost.** The Ansible play rendered `config.toml` with `module_data_dir` set and restarted the services (new code) *before* the relocation task ran. The new code saw the empty local path, created fresh empty WAL DBs there, and started writing. Then `db_relocate` ran — but its destination-exists guard was "skip if the file exists", so it saw the just-created empty DBs and skipped all twelve (0 `.migrated-*` archives on the mount). The real data sat untouched on the rclone mount the whole time (framework DBs at their original paths, e.g. a 14 MB feeds.db and 8.6 MB location.db for the primary user). Recovery was: stop services, move the empty local DBs aside (preserving them), re-run `db_relocate` against the intact mount source with the destinations cleared, restart. All row counts restored exactly (19,577 feed entries / 65,461 location pings / 114 health stats for the primary user).
+Root cause, verified read-only on the host: **no data was lost.** The Ansible play rendered `config.toml` with `module_data_dir` set and restarted the services (new code) _before_ the relocation task ran. The new code saw the empty local path, created fresh empty WAL DBs there, and started writing. Then `db_relocate` ran — but its destination-exists guard was "skip if the file exists", so it saw the just-created empty DBs and skipped all twelve (0 `.migrated-*` archives on the mount). The real data sat untouched on the rclone mount the whole time (framework DBs at their original paths, e.g. a 14 MB feeds.db and 8.6 MB location.db for the primary user). Recovery was: stop services, move the empty local DBs aside (preserving them), re-run `db_relocate` against the intact mount source with the destinations cleared, restart. All row counts restored exactly (19,577 feed entries / 65,461 location pings / 114 health stats for the primary user).
 
-The fix makes `db_relocate` self-heal this race instead of relying on Ansible ordering. When the destination exists it now compares *data-row counts* (summed across all non-meta tables — schema/version tables are excluded, since a fresh DB has those but no real rows): an **empty** destination (0 data rows) with a **non-empty** source is backed up as `.premature-<ts>` and replaced from the source (`migrated_over_empty`); a destination that **already holds data** is left alone with a loud WARNING (`skip_dest_has_data`), never silently clobbered. So a prematurely-started service can no longer strand the real data, and a genuine re-run still can't overwrite good data. The mount source is never deleted regardless — only renamed to `.migrated-<ts>` on success.
+The fix makes `db_relocate` self-heal this race instead of relying on Ansible ordering. When the destination exists it now compares _data-row counts_ (summed across all non-meta tables — schema/version tables are excluded, since a fresh DB has those but no real rows): an **empty** destination (0 data rows) with a **non-empty** source is backed up as `.premature-<ts>` and replaced from the source (`migrated_over_empty`); a destination that **already holds data** is left alone with a loud WARNING (`skip_dest_has_data`), never silently clobbered. So a prematurely-started service can no longer strand the real data, and a genuine re-run still can't overwrite good data. The mount source is never deleted regardless — only renamed to `.migrated-<ts>` on success.
 
 **Key changes:**
+
 - `db_relocate`: `_data_row_count` (meta-table-excluded); destination-exists branch splits into replace-empty vs. skip-has-data; `_perform_migration` extracted; CLI summary reports skipped-with-data.
 - Regression tests: replace-empty-premature-destination (the exact incident), skip-when-destination-has-data, dry-run-over-empty.
 
 **Files added/modified:**
+
 - `src/istota/db_relocate.py` — self-heal logic + `import sqlite3`.
 - `tests/test_db_relocate.py` — incident regression coverage.
 
@@ -2014,9 +2189,9 @@ The fix makes `db_relocate` self-heal this race instead of relying on Ansible or
 
 The scheduler's main dispatch loop stalled for ~6.5 minutes and tripped the stall watchdog. Investigation traced it to SQLite lock contention making the loop's own DB reads block on the 30s busy timeout — not a throughput ceiling (the workload is a per-minute cron plus a few pollers). Two root causes, both structural, plus durability and defense-in-depth.
 
-**Cause 1 — the framework DB re-issued WAL on every connection open.** `db.get_db` ran `PRAGMA journal_mode=WAL` on *every* `sqlite3.connect`, including pure reads. journal_mode is persistent in the file header, so this only bought a write-lock acquisition per open that races sibling readers — exactly the contention that wedges a hot loop. Three sibling modules (`secrets_store`, `user_profiles`, `user_briefings`) already carried comments explaining this and had been fixed; the main framework pool never was. WAL now moves to `init_db` (once); `get_db` sets `synchronous=NORMAL` and takes an optional `busy_timeout_ms`.
+**Cause 1 — the framework DB re-issued WAL on every connection open.** `db.get_db` ran `PRAGMA journal_mode=WAL` on _every_ `sqlite3.connect`, including pure reads. journal_mode is persistent in the file header, so this only bought a write-lock acquisition per open that races sibling readers — exactly the contention that wedges a hot loop. Three sibling modules (`secrets_store`, `user_profiles`, `user_briefings`) already carried comments explaining this and had been fixed; the main framework pool never was. WAL now moves to `init_db` (once); `get_db` sets `synchronous=NORMAL` and takes an optional `busy_timeout_ms`.
 
-**Cause 2 — the four per-user module DBs were forced onto DELETE journal mode.** feeds/health/location/money DBs lived inside each user's workspace on the FUSE-backed mount, where WAL's mmap'd `-shm` file SIGBUSes the process (ISSUE-157). DELETE mode dodges `-shm` but gives *zero* reader/writer concurrency — so a per-minute reader landing mid-contention serializes the whole loop (ISSUE-156). The fix is to get them off the FUSE mount: they now resolve to `Config.module_db_path(user, module)` on local disk (default `{db_path.parent}/modules/{user}/{module}.db`) and run WAL. Crucially, **only the `.db` moved** — each loader's `data_dir` (health uploads, money ledgers, feeds exports — the user-facing files) stays in the workspace on the mount. The `module_db_path` seam is passed as the existing `db_path=` override into each module's `synthesize_*`, so it's a one-line change per loader. An explicit `module_data_dir` under the mount is refused (a WAL-SIGBUS footgun guard); the derived default is trusted-local and unguarded.
+**Cause 2 — the four per-user module DBs were forced onto DELETE journal mode.** feeds/health/location/money DBs lived inside each user's workspace on the FUSE-backed mount, where WAL's mmap'd `-shm` file SIGBUSes the process (ISSUE-157). DELETE mode dodges `-shm` but gives _zero_ reader/writer concurrency — so a per-minute reader landing mid-contention serializes the whole loop (ISSUE-156). The fix is to get them off the FUSE mount: they now resolve to `Config.module_db_path(user, module)` on local disk (default `{db_path.parent}/modules/{user}/{module}.db`) and run WAL. Crucially, **only the `.db` moved** — each loader's `data_dir` (health uploads, money ledgers, feeds exports — the user-facing files) stays in the workspace on the mount. The `module_db_path` seam is passed as the existing `db_path=` override into each module's `synthesize_*`, so it's a one-line change per loader. An explicit `module_data_dir` under the mount is refused (a WAL-SIGBUS footgun guard); the derived default is trusted-local and unguarded.
 
 **Migration + durability.** `db_relocate` is an idempotent migrator: copy each on-mount DB to its local path, call the module's `init_db` (which flips the copied DELETE-mode file to WAL and re-asserts schema), `quick_check`, then archive the old file as `*.migrated-<ts>` (so a re-run is a no-op and data stays recoverable). Ansible runs it once with services stopped, gated on a `find` for legacy on-mount `.db` files. Because the DBs left the Nextcloud-synced workspaces, `db_backup` restores off-host durability: on a timer it snapshots the framework DB + every module DB to `{mount}/istota-db-backups` via SQLite's online-backup API (a consistent copy of a live WAL DB, no writer stop).
 
@@ -2025,6 +2200,7 @@ The scheduler's main dispatch loop stalled for ~6.5 minutes and tripped the stal
 TDD throughout: WAL-once/no-reissue, the busy_timeout override + skip-on-lock degradation, `module_db_path` layout + under-mount guard + derived default, each module's DELETE→WAL flip (incl. converting a relocated DELETE file), the migrator's copy/flip/archive/idempotency, and the backup's online-snapshot readability. Also caught and fixed a latent test-isolation gap the change exposed: two `web_app` fixtures set a tmp mount but left `db_path` repo-relative, so the derived module path wrote into the repo — found with a tripwire (`data/modules` as a file) that named the offending tests. Full suite green (6673 pass). The Ansible play and the live production relocation (operator-run, services stopped) are the only parts not exercisable off the deploy host.
 
 **Key changes:**
+
 - `get_db`: WAL set once in `init_db`, not per-open; `synchronous=NORMAL`; optional `busy_timeout_ms`.
 - `Config.module_db_path()` + `module_data_dir` (local-disk root, under-mount guard, derived default); loaders pass it as `db_path=`.
 - feeds/health/location/money `init_db` flipped DELETE→WAL; `db_health` enumeration + docstring de-mount-ified.
@@ -2034,6 +2210,7 @@ TDD throughout: WAL-once/no-reissue, the busy_timeout override + skip-on-lock de
 - Unrelated: de-rotted a knowledge-graph test that hardcoded a now-past `valid_until`.
 
 **Files added/modified:**
+
 - `src/istota/db.py` — WAL to `init_db`; `get_db` no-reissue + `synchronous=NORMAL` + `busy_timeout_ms`.
 - `src/istota/config.py` — `module_data_dir` field + parse; `module_db_path()`; `SchedulerConfig` `main_loop_read_timeout_ms` + `db_backup_*`.
 - `src/istota/{feeds,health,location,money}/_loader.py` — pass `db_path=module_db_path(...)`.
@@ -2049,7 +2226,7 @@ TDD throughout: WAL-once/no-reissue, the busy_timeout override + skip-on-lock de
 
 Alice records runs/hikes on a Garmin watch that the phone-based Overland tracker never sees (watch-only activities, or the phone left home/dead). This adds a standalone importer that pulls those GPS tracks into the per-user `location.db`, filling only the gaps where native Overland pings are absent. Along the way Garmin stopped being a health-module feature and became a shared connected service, since both Health (daily summaries) and Location (tracks) now consume one token blob.
 
-The draft spec was reviewed by two subagents before building. Scully verified all twelve concrete API claims against the code (buildable as written). Mulder found six real failure modes; the load-bearing one killed the original design: the dedup was purely temporal ("drop a Garmin point if any native ping exists near its timestamp"), but a phone left at home keeps emitting *stationary* native pings for the whole activity window — so a watch-only run would be fully shadowed (nothing imported) or produce a Home↔route teleporting sawtooth. Confirmed the premise against the code (`activity_type='stationary'` is a real, expected data category). Fix: the shadow filter is now **spatiotemporal** — a Garmin point is dropped only when a native ping is within both a time band (default 300s) AND a distance band (default 150m). The spatial gate means far-away home pings can't shadow a run elsewhere, which also lets the time band be generous without harming watch-only imports.
+The draft spec was reviewed by two subagents before building. Scully verified all twelve concrete API claims against the code (buildable as written). Mulder found six real failure modes; the load-bearing one killed the original design: the dedup was purely temporal ("drop a Garmin point if any native ping exists near its timestamp"), but a phone left at home keeps emitting _stationary_ native pings for the whole activity window — so a watch-only run would be fully shadowed (nothing imported) or produce a Home↔route teleporting sawtooth. Confirmed the premise against the code (`activity_type='stationary'` is a real, expected data category). Fix: the shadow filter is now **spatiotemporal** — a Garmin point is dropped only when a native ping is within both a time band (default 300s) AND a distance band (default 150m). The spatial gate means far-away home pings can't shadow a run elsewhere, which also lets the time band be generous without harming watch-only imports.
 
 Two of Mulder's other findings were resolved by architectural decisions Alice called rather than by patches: (1) provenance became a first-class `source` column on `location_pings` (`overland`/`garmin`) instead of a bolt-on sidecar table — the sidecar could desync and let an imported ping masquerade as native, corrupting the filter; a column is written atomically with the row and makes "native" a plain predicate. (2) A single shared `garmin.acquire_client` owns the token lifecycle: rehydrate (`client.login(tokenstore=…)`) can rotate the refresh token in memory, and a second consumer that discarded the rotation would leave the daily-sync loading a dead blob that then gets wiped ("reconnect forever"). `acquire_client` re-persists the rotated blob under a per-user lock, and both consumers go through it.
 
@@ -2058,6 +2235,7 @@ Other fixes folded in: imported pings are placeless (`place_id` NULL) route brea
 Built in six commits, TDD throughout; the pure logic (spatiotemporal filter incl. the phone-at-home regression, downsample, polyline parse, evict/reinsert convergence) is fully unit-tested. Two items remain that can only be done on the deploy host: confirming the live Garmin polyline point key names against the API (hard-coded to the documented shape with defensive skipping), and wiring the nightly cron — which must be a system cron / systemd timer sourcing the service EnvironmentFile, since the in-tree scheduled-job path strips the secret key needed to decrypt the token blob.
 
 **Key changes:**
+
 - Spatiotemporal native-coverage shadow filter (time band AND distance band) — replaces the temporal-only design that dropped watch-only runs.
 - First-class `source` column on `location_pings` (schema v2, additive guarded migration backfilling existing rows to `overland`); `insert_ping` gains `source`/`received_at`.
 - Shared `garmin.acquire_client` with token-rotation re-persist under a per-user lock; daily-sync refactored onto it; adapter gains GPS-activity methods through the existing `_call_optional` (inherits 429/auth/transient handling).
@@ -2065,6 +2243,7 @@ Built in six commits, TDD throughout; the pure logic (spatiotemporal filter incl
 - Standalone importer with dry-run, per-user flock, evict-then-reinsert idempotency, placeless source-tagged inserts.
 
 **Files added/modified:**
+
 - `scripts/import_garmin_tracks.py` (new) — the importer (pure logic + fetch/DB glue + CLI)
 - `tests/test_import_garmin_tracks.py` (new) — pure-logic + DB-glue tests
 - `src/istota/garmin_routes.py` (new) — module-agnostic Garmin auth router
@@ -2081,6 +2260,7 @@ Built in six commits, TDD throughout; the pure logic (spatiotemporal filter incl
 **Follow-up (same day): one-click UX + chat access.** The importer started life as a cron-only script, which left two gaps: no on-demand trigger from the web UI, and no way for the assistant to run it (the location skill had no track-import subcommand, so web chat / Talk couldn't reach it). Fixing both meant lifting the importer's core out of the standalone script into a proper module, `istota.location.garmin_import` (`import_tracks()` → a structured `ImportResult`); the script is now a thin CLI wrapper and the tests import the module directly. Two consumers were then added on top: a `POST /api/garmin/import-tracks` endpoint (gated on the location module, runs inline in a thread) behind an "Import GPS tracks" button on the Garmin card, and a `location import-garmin-tracks` skill subcommand. The health "Sync now" button was relabelled "Sync health data" now that the card is cross-module. The chat path needed the deferred-op pattern rather than health `garmin-sync`'s enqueue-and-poll: inside the sandbox `location.db` is writable (it's the user's own workspace) but the master key that decrypts the Garmin tokens is stripped, so the skill writes `task_<id>_garmin_import.json` and the scheduler runs the import post-task in the daemon process where the key lives, then notifies the user. That works from chat where `garmin-sync`'s path doesn't — its enqueue hits the read-only framework DB and just tells the user to use the web UI. Validated on the deploy host: the skill's direct-mode dry-run returns the same four watch-only activities as the raw script.
 
 **Follow-up files:**
+
 - `src/istota/location/garmin_import.py` (new) — shared importer core (`import_tracks` / `ImportOptions` / `ImportResult`)
 - `scripts/import_garmin_tracks.py` — reduced to a thin CLI over the module
 - `src/istota/garmin_routes.py` — `POST /import-tracks`
@@ -2095,24 +2275,27 @@ A frontend-only pass to make the web UI hold together on phones and stop mixing 
 
 **Card grids.** The Health stats page overflowed sideways on phones: its grid used `repeat(auto-fill, minmax(380px, 1fr))`, and `auto-fill` can't shrink a track below the fixed `380px`, so on a viewport narrower than that the row is wider than the screen. The other modules had the same latent trap at various widths (feeds 320px, money clients 280px, admin/settings tiles, etc.) — ~20 grids total, `auto-fill`/`auto-fit` chosen at random. Added a global `.card-grid` layout primitive (`lib/styles/cards.css`, imported by `app.css`, mirroring how `settings.css` is wired) whose track is `minmax(min(var(--card-min, 240px), 100%), 1fr)`. The `min(…, 100%)` guard lets a lone card collapse to the viewport width while keeping the multi-column layout wider; `auto-fit` so a single card fills instead of stranding beside empty tracks. Simple card walls adopt it with a `--card-min` knob; the bespoke feeds grid (list-view variant + galleries) kept its own grid but got the same guard inline; genuine form-field/`<dl>` grids got the guard without the class.
 
-The card *visual* couldn't be globalized: `.card` already means conflicting things across the app (bordered health cards, deliberately borderless feed and cash-flow tiles, `--border-subtle` settings cards). A global bare `.card` would have leaked a border onto the borderless ones. So the ~9 identical bordered health cards dedup their surface into `.health-frame :global(.card)` scoped in the health layout, the same pattern `settings.css` uses for `.settings .card`. Non-health modules keep their own (legitimately different) card surfaces.
+The card _visual_ couldn't be globalized: `.card` already means conflicting things across the app (bordered health cards, deliberately borderless feed and cash-flow tiles, `--border-subtle` settings cards). A global bare `.card` would have leaked a border onto the borderless ones. So the ~9 identical bordered health cards dedup their surface into `.health-frame :global(.card)` scoped in the health layout, the same pattern `settings.css` uses for `.settings .card`. Non-health modules keep their own (legitimately different) card surfaces.
 
 **Collapsing header nav.** The Health/Money/Location headers are link-only nav; on a phone they wrapped. Added a `HeaderNav` component that renders `NavLink`s on desktop and a native `<select>` under 768px (native, deliberately — the OS picker is better touch UX than a custom popup on a phone). Each layout now builds a `$derived` `navItems` array (preserving its exact active-detection) and passes it in. Feeds is excluded — its header nav is the sort control + chips, not links.
 
 **Select standardization.** ~28 native `<select>` elements were replaced with the shared bits-ui-backed `Select` component (`value` + `onValueChange`, options arrays, string↔value coercion where the bound value wasn't a string, preserving any `onchange` side effect). The split that mattered: settings-context forms and toolbar filters sit on `surface-base`/`surface-card`, where `Select`/`Select fullWidth` already match; the health entry forms styled their native inputs `surface-raised`, so converting only the selects would have mismatched. Per the decision to unify on the settings pattern, those forms' input backgrounds were migrated `surface-raised → surface-base` (they sit on `surface-card` containers, so darker inputs read as inset, the settings look) and their selects converted on top. Two native holdouts stay: the `HeaderNav` mobile dropdown, and the stats inline unit picker (must stay compact and match the value input beside it). The eight straightforward card-form files were fanned out to three parallel subagents with a tight spec; the two edge files (stats, history) and all review/verification were done inline.
 
 **Three bugs surfaced and fixed along the way** (verified live in the browser via the dev server):
+
 - Stats "log measurement" value field collapsed to near-zero width. A later `.modal select { width: 100% }` rule (specificity 0,1,1) overrode `.unit-select`'s `width: auto` (0,1,0), and with `flex: 0 0 auto` the unit picker refused to shrink and ate the row. Fixed by raising the unit-select's specificity (`.value-row .unit-select`).
 - History filter-bar Type dropdown didn't line up with the Since/Until date inputs. A native `<input type="date">` and the inline-flex Select trigger derive different heights from the same padding, so both were pinned to an explicit `height: 2rem; box-sizing: border-box`, and the chevron right-aligned with `justify-content: space-between`.
 - `Select fullWidth` triggers rendered ~4px shorter than the text inputs beside them in every form. Measured live: inputs are 30px (inherited `line-height: 1.5`, 18px), the trigger was 26px (base `line-height: 1.2`, 14.4px). Fixed once at the component level — `line-height: 1.5` on the `--full` variant — so all forms track native input height.
 
 **Key changes:**
+
 - New `.card-grid` global primitive; ~20 card/tile grids migrated or guarded; no more horizontal overflow on phones.
 - New `HeaderNav` component; Health/Money/Location nav collapses to a dropdown under 768px.
 - ~28 native `<select>` unified onto the `Select` component; health entry-form inputs migrated to the `surface-base` pattern.
 - `Select fullWidth` height now matches native inputs; two alignment/width bugs fixed.
 
 **Files added/modified:**
+
 - `web/src/lib/styles/cards.css` (new) — `.card-grid` layout primitive; `web/src/app.css` imports it
 - `web/src/lib/components/ui/HeaderNav.svelte` (new) + `index.ts` export — desktop links / mobile dropdown
 - `web/src/lib/components/ui/Select.svelte` — `line-height: 1.5` on the `--full` variant
@@ -2127,17 +2310,19 @@ The card *visual* couldn't be globalized: `.card` already means conflicting thin
 
 `istota-skill money add-transaction` returned `status: ok`, its post-write `bean-check` passed, and the transaction was **not in the ledger** — invisible to every query, balance, invoice, and report. Low blast radius only because it isn't the primary write path (`sync-monarch` / `import-csv` are, and both worked); the defect sat unnoticed for months, leaving a fossil trail of orphaned entries under `ledgers/transactions/`.
 
-**Root cause.** `add_transaction` wrote the entry to `{ledger_dir}/transactions/{year}.beancount` — a subdir that no ledger `include`s and that the workspace loader's non-recursive `*.beancount` glob never picks up — then ran `run_bean_check` against the *main* ledger, which never saw the new file and passed vacuously. So the CLI reported success against a file that didn't contain the transaction. The two working write paths both go through `append_to_ledger`, which appends straight to the main ledger.
+**Root cause.** `add_transaction` wrote the entry to `{ledger_dir}/transactions/{year}.beancount` — a subdir that no ledger `include`s and that the workspace loader's non-recursive `*.beancount` glob never picks up — then ran `run_bean_check` against the _main_ ledger, which never saw the new file and passed vacuously. So the CLI reported success against a file that didn't contain the transaction. The two working write paths both go through `append_to_ledger`, which appends straight to the main ledger.
 
 **Fix.** Make `add_transaction` land in the main ledger, the same file the other writers append to and the same file bean-check validates; drop the `transactions/` subdir write entirely. The one wrinkle: `add_transaction` already holds `_ledger_lock` across its post-write bean-check (ISSUE-104), and the flock is **not** reentrant across separate open file descriptions in the same process — calling `append_to_ledger` (which re-takes the lock) from inside would deadlock until the 10s timeout. So the append body was factored into `_append_entries_unlocked(ledger_path, entries)`: `append_to_ledger` wraps it in the lock as before, `add_transaction` calls it directly under its existing lock. The `monarch-id` dedup gap noted in the issue is moot under this fix — not pursuing the per-year-partition alternative, which carried an ownership-ambiguity problem when multiple ledgers share a dir.
 
 Verified end-to-end against a real beancount ledger (not a mocked bean-check): an added entry lands in the main ledger, creates no subdir, loads cleanly, and is visible to the beancount loader that every query/balance/report reads from.
 
 **Key changes:**
+
 - `add_transaction` appends to the main ledger via a new unlocked helper instead of writing a per-year file under `transactions/`.
 - `_append_entries_unlocked` extracted so a lock-holding caller can append without a reentrant-flock deadlock; `append_to_ledger` now wraps it.
 
 **Files added/modified:**
+
 - `src/istota/money/core/transactions.py` — `add_transaction` write path → main ledger; `_append_entries_unlocked` split out of `append_to_ledger`
 - `tests/money/test_transactions.py` — `test_success` asserts main-ledger landing + no subdir; new `test_lands_in_validated_ledger` asserts bean-check sees the entry
 - `tests/money/test_edit.py` — `test_add_transaction_stamps_id` reads the main ledger
@@ -2155,11 +2340,13 @@ The web service was crash-looping on **SIGBUS** whenever a feeds endpoint was hi
 **Backup script (same SIGBUS, second blast radius).** The Ansible-managed backup script ran under `set -euo pipefail`, so when `sqlite3 .backup` SIGBUS'd on a WAL-mode on-mount DB, the whole run aborted — every DB after the failing one was silently skipped, and the `mktemp` temp file was orphaned (a `RETURN` cleanup trap does not fire on a `set -e` abort). Observed as a backup run that saved the framework DB and two users' modules, then died on a third user's first module, leaving that user with no backups for the run plus a stray 0-byte temp file. Reworked so each DB (and each rclone source) is backed up independently: explicit error checks so the per-DB helper always returns cleanly, explicit **scope-safe** temp cleanup on every path (the first cut used a `RETURN` trap, but that trap is not scope-local — it re-fired on the caller's return and tripped `set -u` on the out-of-scope temp var, turning a fully-successful run into exit 1; caught in live testing and replaced with explicit `rm`), a failure counter instead of a fatal abort, a non-zero aggregate exit on any failure, and an optional operator alert hook. Added a `backup` Ansible tag for surgical deploys.
 
 **Key changes:**
+
 - `journal_mode = DELETE` (unconditional) for feeds/health/location/money module DBs; framework DBs keep WAL.
 - `busy_timeout = 30000` + `timeout=30.0` added to the feeds and money connection helpers.
 - Backup script: per-DB and per-source failure isolation, scope-safe temp cleanup, non-zero exit on failure, optional `istota_backup_alert_command` hook, `backup` deploy tag.
 
 **Files added/modified:**
+
 - `src/istota/feeds/db.py`, `src/istota/health/db.py`, `src/istota/location/db.py`, `src/istota/money/db.py` — WAL→DELETE (+ busy_timeout on feeds/money; dropped a now-unused `fresh` var in health)
 - `tests/test_location_module.py` — `test_init_db_sets_delete_mode` (was `_sets_wal_mode`)
 - `deploy/ansible/templates/istota-backup.sh.j2` — per-DB/per-source failure isolation, scope-safe cleanup, aggregate non-zero exit, alert hook
@@ -2171,17 +2358,19 @@ The web service was crash-looping on **SIGBUS** whenever a feeds endpoint was hi
 Removed the `::after` gradient fade on feed grid cards. It was added as a truncation cue (feather the clipped bottom `3rem` of a fixed-height grid card so "there's more" reads clearly), gated to grid view and `.card.openable`. In practice it overlapped the card's `.meta` row — star button, feed name, published date — dimming the footer under a gradient. Since the cards are already clickable-to-open, the cue wasn't worth the readability cost. Deleted the rule outright; cards now clip with a clean edge. No markup change — the fade lived entirely in the page's scoped CSS, not `FeedCard.svelte`.
 
 **Files added/modified:**
+
 - `web/src/routes/feeds/+page.svelte` - dropped the `.feed-grid:not(.list-view) :global(.card.openable)::after` gradient rule
 
 ## 2026-07-03: Health — date-only render off-by-one + cross-source import de-dup
 
 Two independent health fixes in one session.
 
-**Date-only off-by-one.** Vaccinations (and other date-only health values) rendered a day early for any viewer west of UTC. `formatDate` appended `T00:00:00Z` to bare `YYYY-MM-DD` strings, pinning them to UTC midnight, then `toLocaleDateString(undefined, …)` shifted them into the browser's local zone — so a July 3 record showed as "Jul 2" in a UTC-4 zone. The stored value and the write path were both correct; purely a render bug. The fix is one character per site — drop the `Z` so bare dates parse as *local* midnight; real timestamps (with a `T…` component) are untouched. Grepping the pattern turned up 10 sites (9 health pages + the location layout); the money pages already did it right (`T00:00:00`, no `Z`).
+**Date-only off-by-one.** Vaccinations (and other date-only health values) rendered a day early for any viewer west of UTC. `formatDate` appended `T00:00:00Z` to bare `YYYY-MM-DD` strings, pinning them to UTC midnight, then `toLocaleDateString(undefined, …)` shifted them into the browser's local zone — so a July 3 record showed as "Jul 2" in a UTC-4 zone. The stored value and the write path were both correct; purely a render bug. The fix is one character per site — drop the `Z` so bare dates parse as _local_ midnight; real timestamps (with a `T…` component) are untouched. Grepping the pattern turned up 10 sites (9 health pages + the location layout); the money pages already did it right (`T00:00:00`, no `Z`).
 
-**Cross-source import de-dup (ISSUE-154).** Importing conditions from more than one source — or adding them over chat while processing several documents — inserted a duplicate `diagnoses` row per source. There *was* a dedup mechanism, but its `dedup_key` is a per-import random-prefixed positional key: it only collapses a *replay of the identical batch*, never two independent sources naming the same condition. Added a second, content-based reconciliation layer alongside it (the positional key stays, for replay idempotency). `insert_diagnosis` / `insert_immunization` gained a `reconcile` flag that the import routes and the deferred agent-write replay set; manual UI single-adds stay plain inserts. Diagnoses match ICD10-first — authoritative when both rows carry a code, so a differing code is a distinct condition even if the names agree — with a normalized-name fallback when either side lacks a code. Immunizations match on normalized name + `date_given`, so a re-import merges but a genuine booster on another date stays distinct. On a match the existing row is kept and only its null fields are backfilled (a value already set is never overwritten), and duplicates converge to one row keeping the earliest encounter link. No schema change — the multi-encounter-provenance link table was considered and deferred.
+**Cross-source import de-dup (ISSUE-154).** Importing conditions from more than one source — or adding them over chat while processing several documents — inserted a duplicate `diagnoses` row per source. There _was_ a dedup mechanism, but its `dedup_key` is a per-import random-prefixed positional key: it only collapses a _replay of the identical batch_, never two independent sources naming the same condition. Added a second, content-based reconciliation layer alongside it (the positional key stays, for replay idempotency). `insert_diagnosis` / `insert_immunization` gained a `reconcile` flag that the import routes and the deferred agent-write replay set; manual UI single-adds stay plain inserts. Diagnoses match ICD10-first — authoritative when both rows carry a code, so a differing code is a distinct condition even if the names agree — with a normalized-name fallback when either side lacks a code. Immunizations match on normalized name + `date_given`, so a re-import merges but a genuine booster on another date stays distinct. On a match the existing row is kept and only its null fields are backfilled (a value already set is never overwritten), and duplicates converge to one row keeping the earliest encounter link. No schema change — the multi-encounter-provenance link table was considered and deferred.
 
 **Files added/modified:**
+
 - `web/src/routes/health/**` (bloodwork, bloodwork/panel, bloodwork/marker, history, history/diagnoses, history/encounter, immunizations, immunizations/vaccine) + `web/src/routes/location/+layout.svelte` — drop the `Z` from date-only parsing
 - `src/istota/health/db.py` - normalization helpers, `_find_matching_diagnosis` / `_find_matching_immunization`, shared `_backfill_null_columns`; `reconcile` flag on both insert functions
 - `src/istota/health/routes.py` - encounter-bulk + immunization-bulk pass `reconcile=True`
@@ -2192,13 +2381,14 @@ Two independent health fixes in one session.
 
 Follow-up to the image de-duplication work below. That change fixed the duplication at ingest, but the prior entry's assumption that stale rows "self-heal within a poll cycle" was wrong for the body-duplication case. xkcd was the reported symptom: the comic still rendered twice.
 
-**Why the self-heal never happened.** The poller writes entries with `INSERT OR IGNORE INTO feed_entries` keyed on `(feed_id, guid)`. Re-polling an already-stored guid is a no-op — the row is never rewritten regardless of how often the feed churns. So any entry stored *before* the dedup landed keeps its pre-dedup `content_html` (the hero `<img>` still embedded in the body) alongside `image_urls`, and `FeedReader.svelte` paints it twice: once as `.reader-hero`, once inside `{@html entry.content}`. xkcd is the clearest case because the whole entry body is that single comic `<img>`. I confirmed the ingest path is correct by running the live xkcd feed through `_rss_entry_to_item` — new entries come out with `content_html` empty and the comic promoted to `image_urls`. The bug is purely stale stored data.
+**Why the self-heal never happened.** The poller writes entries with `INSERT OR IGNORE INTO feed_entries` keyed on `(feed_id, guid)`. Re-polling an already-stored guid is a no-op — the row is never rewritten regardless of how often the feed churns. So any entry stored _before_ the dedup landed keeps its pre-dedup `content_html` (the hero `<img>` still embedded in the body) alongside `image_urls`, and `FeedReader.svelte` paints it twice: once as `.reader-hero`, once inside `{@html entry.content}`. xkcd is the clearest case because the whole entry body is that single comic `<img>`. I confirmed the ingest path is correct by running the live xkcd feed through `_rss_entry_to_item` — new entries come out with `content_html` empty and the comic promoted to `image_urls`. The bug is purely stale stored data.
 
 **Fix — one-shot backfill migration.** Added `backfill_image_dedup(ctx)` to `_migrate.py`, mirroring `migrate_legacy_toml`'s idempotent/race-safe shape: a `schema_meta` sentinel (`feeds_image_dedup_backfilled_at`) is claimed via a plain `INSERT` (PK conflict → one winner), then the rewrites run in the same transaction. For every stored entry with non-empty `content_html` it re-collapses the row's `image_urls` variants (`dedupe_image_variants`) and strips those images from the body (`remove_images`, matched by `image_identity` so a differently-sized body copy still matches), recomputing `content_text`. Genuine mid-article inline images — anything not promoted to the hero set — are left untouched. Zero-row runs still burn the sentinel so it doesn't re-scan every boot. Wired into `ensure_initialised` after `seed_default_opml`, so it runs once per user on the next feeds touch (web/CLI/skill). Operator reset: `DELETE FROM schema_meta WHERE key='feeds_image_dedup_backfilled_at'`.
 
 Considered but deferred: switching the poller's `INSERT OR IGNORE` to `ON CONFLICT DO UPDATE` scoped to content columns, so re-served items refresh. That would only heal feeds that keep serving the same item (xkcd does, but a rotated-out item wouldn't), and the backfill fixes all stale rows regardless — so the migration is the complete fix and the upsert is optional hardening for another day.
 
 **Files added/modified:**
+
 - `src/istota/feeds/_migrate.py` - added `backfill_image_dedup` + `_BACKFILL_SENTINEL_KEY`; wired into `ensure_initialised`; imports the sanitize dedup helpers
 - `tests/test_feeds_migrate.py` - new `TestBackfillImageDedup` (strip stale hero, collapse variant in body, leave inline images, sentinel idempotency, zero-row no-op, `ensure_initialised` wiring)
 
@@ -2206,17 +2396,18 @@ Considered but deferred: switching the poller's `INSERT OR IGNORE` to `ON CONFLI
 
 A run of feed-reader work, all in the `feeds` module and its web UI, plus a local dev-preview harness so the UI could be iterated on without a deploy.
 
-**RSS image duplication.** Entries were painting the same image two or three times. Two distinct mechanisms, confirmed against live feeds: the Guardian ships one photo as several `<media:content>` variants differing only in resize/signature query params (`?width=140/460/700`), and `_dedupe_preserving_order` couldn't collapse them because the strings differ — the card then rendered a 3-tile gallery of one photo. Separately, WordPress-style feeds embed the lead image in the `<description>` body *and* surface it as a thumbnail, so the card drew it as the hero and again at the top of the excerpt (2×). Constraint from the user: don't strip genuine inline images from the body, only kill the duplication. Fix lives entirely in `sanitize.py` helpers + `_rss_entry_to_item` (RSS/Atom only — Tumblr/Are.na have their own providers and keep their galleries): a new `image_identity()` (path-based key that ignores resize query params for image-extension URLs, keeps the full URL otherwise so `image.php?id=1|2` don't wrongly merge), `dedupe_image_variants()` (collapse variants, keep the widest), and `remove_images()` (drop only the hero-matching `<img>` from the body, plus clean up emptied `<a>`/`<p>`/`<figure>` wrappers). The poller now promotes only the *lead* body image (not every inline image) plus media/enclosure images to `image_urls`, then strips exactly those from `content_html` — so the hero shows once and mid-article images stay in place. Existing rows aren't rewritten (`INSERT OR IGNORE` on guid); these feeds churn so the visible top self-heals within a poll cycle.
+**RSS image duplication.** Entries were painting the same image two or three times. Two distinct mechanisms, confirmed against live feeds: the Guardian ships one photo as several `<media:content>` variants differing only in resize/signature query params (`?width=140/460/700`), and `_dedupe_preserving_order` couldn't collapse them because the strings differ — the card then rendered a 3-tile gallery of one photo. Separately, WordPress-style feeds embed the lead image in the `<description>` body _and_ surface it as a thumbnail, so the card drew it as the hero and again at the top of the excerpt (2×). Constraint from the user: don't strip genuine inline images from the body, only kill the duplication. Fix lives entirely in `sanitize.py` helpers + `_rss_entry_to_item` (RSS/Atom only — Tumblr/Are.na have their own providers and keep their galleries): a new `image_identity()` (path-based key that ignores resize query params for image-extension URLs, keeps the full URL otherwise so `image.php?id=1|2` don't wrongly merge), `dedupe_image_variants()` (collapse variants, keep the widest), and `remove_images()` (drop only the hero-matching `<img>` from the body, plus clean up emptied `<a>`/`<p>`/`<figure>` wrappers). The poller now promotes only the _lead_ body image (not every inline image) plus media/enclosure images to `image_urls`, then strips exactly those from `content_html` — so the hero shows once and mid-article images stay in place. Existing rows aren't rewritten (`INSERT OR IGNORE` on guid); these feeds churn so the visible top self-heals within a poll cycle.
 
 **Local preview harness.** To iterate on the card rendering without deploying, added `scripts/dev/seed_feed_preview.py` — polls a handful of real feeds through the actual (fixed) `poll_feed` and dumps `web/dev-feed-data.json` in the Vite mock's shape. The mock (`vite-mock-api.ts`) now loads that file when present, else falls back to its synthetic generator, so `VITE_MOCK_API=1 npm run dev` renders real post-fix entries with no backend/auth. The JSON is gitignored.
 
 **Expand-to-read overlay.** Grid cards are clipped at 420px; the only way to read a full post was to toggle to list view and scroll to find it. Added `FeedReader.svelte`, a reader overlay modeled on the existing `Lightbox`: click a card body (guarded so image→lightbox, title/star keep their behaviour) opens a centered panel with the full un-clipped content + inline images, star, and a prominent "Open original" (the payoff for summary feeds whose stored content is just an excerpt). Esc/backdrop close; ← / → step between posts. Colors were pulled to the real `app.css` design tokens so grid/list/reader match (biggest fix: body copy was `--text-dim`, should be `--text-secondary`), and the panel centers vertically for short posts (caps at 94vh with internal scroll for long ones).
 
-**Category filtering.** The sidebar only offered all / unread / individual feeds. Rather than the user's floated eye-icon, made the category *name* itself the filter (caret still collapses) with the same active highlight a selected feed gets — consistent with clicking a feed, standard in readers, no new iconography. `CategoryGroup` gained an opt-in selectable header (only when an `onSelect` prop is passed, so the location sidebar that reuses it is untouched). New `selectedCategoryId` store, mutually exclusive with `selectedFeedId`; the page sends `category_id` and the feed/category reload effects were merged so switching straight from a feed to a category reloads once. No backend change needed — `list_entries` already filtered `f.category_id` and the route was already plumbed; only the UI was missing. Mark-all-read gained the `category` scope (backend already supported it).
+**Category filtering.** The sidebar only offered all / unread / individual feeds. Rather than the user's floated eye-icon, made the category _name_ itself the filter (caret still collapses) with the same active highlight a selected feed gets — consistent with clicking a feed, standard in readers, no new iconography. `CategoryGroup` gained an opt-in selectable header (only when an `onSelect` prop is passed, so the location sidebar that reuses it is untouched). New `selectedCategoryId` store, mutually exclusive with `selectedFeedId`; the page sends `category_id` and the feed/category reload effects were merged so switching straight from a feed to a category reloads once. No backend change needed — `list_entries` already filtered `f.category_id` and the route was already plumbed; only the UI was missing. Mark-all-read gained the `category` scope (backend already supported it).
 
 **Reader nav respects the active view.** The overlay already navigated the current scope (entries are server-loaded with the active filter params), but stopped at the loaded page boundary because the modal can't trip the grid's scroll-to-load. `next` now pages in more via the page's `loadMore` (same filter params) when it hits the loaded end, and the arrows are always rendered but disabled/dimmed at the true first/last of the view (with a loading state while paging) instead of disappearing.
 
 **Files added/modified:**
+
 - `src/istota/feeds/sanitize.py` - added `image_identity`, `dedupe_image_variants`, `remove_images` + helpers
 - `src/istota/feeds/poller.py` - `_rss_entry_to_item` now dedups variants + strips the hero from the body; dropped dead `_dedupe_preserving_order`
 - `tests/test_feeds_sanitize.py` - new: helper unit tests
@@ -2235,13 +2426,14 @@ A run of feed-reader work, all in the `feeds` module and its web UI, plus a loca
 
 Two things this session: a docs-copy pass, and an unplanned git recovery.
 
-**Docs pass.** Streamlined the README and repositioned the top-level framing across every prominent surface. The README had grown to ~220 lines with a 69-line Docker walkthrough and a dozen long feature paragraphs that duplicated the docs site; rewrote it in the compact style of a few reference agent READMEs (Hermes, nanoclaw, pi): a bold one-line tagline, a scannable feature *table* instead of prose, and minimal install steps that link out to the docs site rather than reproducing them. Fixed stale content while there — the removed skill-routing model (progressive disclosure / Pass 1 keyword / Haiku semantic-routing pre-pass), "OIDC" (web auth is Nextcloud OAuth2), and an outdated test count.
+**Docs pass.** Streamlined the README and repositioned the top-level framing across every prominent surface. The README had grown to ~220 lines with a 69-line Docker walkthrough and a dozen long feature paragraphs that duplicated the docs site; rewrote it in the compact style of a few reference agent READMEs (Hermes, nanoclaw, pi): a bold one-line tagline, a scannable feature _table_ instead of prose, and minimal install steps that link out to the docs site rather than reproducing them. Fixed stale content while there — the removed skill-routing model (progressive disclosure / Pass 1 keyword / Haiku semantic-routing pre-pass), "OIDC" (web auth is Nextcloud OAuth2), and an outdated test count.
 
 Then a repositioning pass on the identity copy itself. Prominent taglines described Istota as something that "runs as a regular Nextcloud user" or "lives in your Nextcloud instance," and led the model story with "run it on the Claude Code CLI." Both read wrong for where the project is heading: Nextcloud is an integration, not where the assistant lives, and we're slowly decoupling toward Nextcloud-optional. Reframed the lead identity to "a self-hosted personal AI assistant with its own web UI" that "runs on your own server" and "works with any model — Claude through the Claude Code CLI, or any OpenAI-compatible endpoint like OpenRouter." Nextcloud is now framed as a deep integration you connect, "though not a hard requirement." The technical "integrates as a regular Nextcloud user" mechanism survives only in the Why-Nextcloud deep-dives, not the headline. Dropped "operating system" everywhere in favor of "assistant."
 
 **Git recovery.** Mid-session a `git pull --rebase` against the primary remote silently dropped our local work. A weekly docs-sync automation had force-pushed `main` from a pre-retheme base (before the move-to-GitHub / retheme commit), so its merge carried neither the retheme nor the just-made README streamline; the rebase took that stale merge as its base and reset the working tree to it — reverting the mkdocs theme from teal/green back to deep-purple/amber along the way. Nothing was lost (our streamline commit survived on the public GitHub mirror and in the reflog). Recovered by resetting local back to our commit, restoring the stashed `mkdocs.yml` WIP, and force-pushing to drop the stale merge and reconverge both remotes. Verified the teal/green palette is back. Open follow-up: the docs-sync job pushes from a stale base and will keep re-diverging until it's pointed at current `main`.
 
 **Files modified:**
+
 - `README.md` - streamlined to a feature table + minimal install; repositioned intro and "Why Nextcloud?"
 - `docs/index.md` - repositioned intro, "What is it?", and "Why Nextcloud?"; added a "docs authored by Istota" footer note
 - `docs/architecture/overview.md` - lead sentence: "operating system … runs as a regular Nextcloud user" → "assistant … runs on your own server and integrates with Nextcloud"
@@ -2249,13 +2441,14 @@ Then a repositioning pass on the identity copy itself. Prominent taglines descri
 
 ## 2026-06-25: Browser watchdog runs from cron.d, not a systemd timer
 
-Follow-up to the deep-liveness change (ISSUE-149). A browser outage on the deployment host surfaced a gap one layer below the healthcheck: the container correctly read `unhealthy` for ~15 hours (deep probe working — Chrome's process alive but DevTools hanging) and nothing restarted it. The container `HEALTHCHECK` only *marks* status; the piece that reads `.State.Health.Status` and restarts is the watchdog, and the watchdog was **not running on the host at all**. The script and state dir had been deployed, but the systemd timer/service that fire the script were never installed — so the whole debounce → restart → crash-loop → alert chain sat idle behind a correct unhealthy signal. (Manual container restart restored service as a stopgap.)
+Follow-up to the deep-liveness change (ISSUE-149). A browser outage on the deployment host surfaced a gap one layer below the healthcheck: the container correctly read `unhealthy` for ~15 hours (deep probe working — Chrome's process alive but DevTools hanging) and nothing restarted it. The container `HEALTHCHECK` only _marks_ status; the piece that reads `.State.Health.Status` and restarts is the watchdog, and the watchdog was **not running on the host at all**. The script and state dir had been deployed, but the systemd timer/service that fire the script were never installed — so the whole debounce → restart → crash-loop → alert chain sat idle behind a correct unhealthy signal. (Manual container restart restored service as a stopgap.)
 
-Rather than re-debug why the systemd units didn't install, reframed the watchdog as a **cron.d job** to match how the other scheduled jobs already run (auto-update, backup are both `/etc/cron.d/` entries). The watchdog script is fully self-contained — it logs to its own file, its debounce counts *reads* not seconds, and it drives `docker compose` directly — so systemd contributed only the firing cadence and unit management, both of which cron.d provides. The conversion loses nothing functional. One tradeoff: cron's 1-minute floor replaces the timer's 30s interval, so with debounce=2 the worst-case detect-and-restart goes from ~1 min to ~2 min — immaterial for a rare wedge, and not worth a `sleep 30` double-fire hack.
+Rather than re-debug why the systemd units didn't install, reframed the watchdog as a **cron.d job** to match how the other scheduled jobs already run (auto-update, backup are both `/etc/cron.d/` entries). The watchdog script is fully self-contained — it logs to its own file, its debounce counts _reads_ not seconds, and it drives `docker compose` directly — so systemd contributed only the firing cadence and unit management, both of which cron.d provides. The conversion loses nothing functional. One tradeoff: cron's 1-minute floor replaces the timer's 30s interval, so with debounce=2 the worst-case detect-and-restart goes from ~1 min to ~2 min — immaterial for a rare wedge, and not worth a `sleep 30` double-fire hack.
 
 The `check` line runs every minute and the daily proactive restart at 05:00 (which also clears crash-loop state). Dropped the four systemd unit templates and the `interval`/`oncalendar` vars (replaced by `watchdog_cron`/`daily_restart_cron`). No migration cleanup task — this host never got the timers and there are no others. New deploy installs `/etc/cron.d/<ns>-browser-watchdog`; needs a playbook run to take effect (the auto-update cron pulls app code but doesn't run the role).
 
 **Files modified:**
+
 - `deploy/ansible/tasks/main.yml` - replaced the systemd unit deploy/enable/disable tasks with a single cron.d deploy + disabled-state cleanup
 - `deploy/ansible/defaults/main.yml` - `watchdog_interval`/`restart_oncalendar` → `watchdog_cron`/`daily_restart_cron`
 - `deploy/ansible/templates/istota-browser-watchdog.cron.j2` - new (check + daily-restart cron lines)
@@ -2263,13 +2456,14 @@ The `check` line runs every minute and the daily proactive restart at 05:00 (whi
 
 ## 2026-06-24: Browser autoheal sees a wedged-but-alive Chrome (deep liveness tier)
 
-ISSUE-149. ISSUE-143 moved the container `HEALTHCHECK` off the blocking Flask `/health` onto a lightweight liveness server (`:9224/live`) so a long legitimate browse stops reading as "dead" — but `/live` answers from `chrome.is_chrome_running()`, which is just `_chrome_proc.poll() is None`. That sees a *dead* process, not a Chrome whose process is alive but internally frozen (hung CDP, deadlocked browser, wedged renderer tree). In that state browse and VNC hang while every health signal stays green, so the whole heal chain (debounce → restart → crash-loop guard → alert) never fires.
+ISSUE-149. ISSUE-143 moved the container `HEALTHCHECK` off the blocking Flask `/health` onto a lightweight liveness server (`:9224/live`) so a long legitimate browse stops reading as "dead" — but `/live` answers from `chrome.is_chrome_running()`, which is just `_chrome_proc.poll() is None`. That sees a _dead_ process, not a Chrome whose process is alive but internally frozen (hung CDP, deadlocked browser, wedged renderer tree). In that state browse and VNC hang while every health signal stays green, so the whole heal chain (debounce → restart → crash-loop guard → alert) never fires.
 
-Reproduced live before coding: the browser container was `healthy`, `/live` returned `ok`, browse + VNC were frozen, and Chrome's own DevTools endpoint (`127.0.0.1:9222/json/version`) *accepted the TCP connection but never sent an HTTP response* (recv timed out). Restarting the container restored it — `/json/version` answered again — confirming a browser-process-level freeze (in scope), not a single hung renderer (out of scope). That endpoint is the discriminator: it's served by the Chrome process itself, independent of the single-threaded Flask app and of page-level browse work, so it keeps answering fast during a long browse but stops when the browser is genuinely wedged.
+Reproduced live before coding: the browser container was `healthy`, `/live` returned `ok`, browse + VNC were frozen, and Chrome's own DevTools endpoint (`127.0.0.1:9222/json/version`) _accepted the TCP connection but never sent an HTTP response_ (recv timed out). Restarting the container restored it — `/json/version` answered again — confirming a browser-process-level freeze (in scope), not a single hung renderer (out of scope). That endpoint is the discriminator: it's served by the Chrome process itself, independent of the single-threaded Flask app and of page-level browse work, so it keeps answering fast during a long browse but stops when the browser is genuinely wedged.
 
 Fix is the issue's minimal variant: a `deep` liveness tier (`/live?deep=1`) that, when the process is alive, also probes `/json/version` with a short timeout and returns 503 `chrome-wedged` if it doesn't answer. The launch window is exempt via an `is_launching()` flag spanning `launch_chrome()` (process up, DevTools not serving yet — must not read as a wedge). Both HEALTHCHECKs (image `Dockerfile` and the overriding service-level one in `docker-compose.yml`) point at the deep tier; the Ansible production compose declares no service-level healthcheck so it inherits the image one, and the watchdog reads `.State.Health.Status` so it gets the better signal with no change. Skipped the optional in-process `restart_chrome()` self-heal to avoid racing the watchdog. Browser code edited in the stealth-browser source-of-truth repo and synced. Decision table verified with a self-contained replica (the container code can't import in the pytest env — Flask/patchright). Deploy needs an Ansible run to rebuild the browser image; the auto-update cron pulls app code but won't rebuild the image.
 
 **Files modified:**
+
 - `docker/browser/chrome.py` - `devtools_responding(timeout)` + `is_launching()` flag; `_wait_for_chrome_ready` refactored onto the shared probe
 - `docker/browser/browse_api.py` - liveness handler gained a `deep` tier (`_probe` decision table)
 - `docker/browser/Dockerfile` - image HEALTHCHECK → `/live?deep=1`
@@ -2277,11 +2471,12 @@ Fix is the issue's minimal variant: a `deep` liveness tier (`/live?deep=1`) that
 
 ## 2026-06-23: Fix non-admin doubled mount path (silent memory loss)
 
-Follow-up from the Mulder/Scully review of the memory-lock change (FINDING 2). For non-admin users the executor set `NEXTCLOUD_MOUNT_PATH` to a *scoped* value (`real/Users/<uid>`), but every consumer — the `memory` and `memory_search` skill CLIs, and the `schedules`/`reminders` skill docs — builds paths as `$NEXTCLOUD_MOUNT_PATH/Users/<uid>/…`. So a non-admin's USER.md write resolved to `real/Users/<uid>/Users/<uid>/<bot>/config/USER.md` — a phantom doubled path that the auto-loader (which uses the unscoped `config.nextcloud_mount_path`) never reads back. Result: non-admin durable-memory writes silently vanished. Latent in the default deployment because an empty admins file means everyone is admin.
+Follow-up from the Mulder/Scully review of the memory-lock change (FINDING 2). For non-admin users the executor set `NEXTCLOUD_MOUNT_PATH` to a _scoped_ value (`real/Users/<uid>`), but every consumer — the `memory` and `memory_search` skill CLIs, and the `schedules`/`reminders` skill docs — builds paths as `$NEXTCLOUD_MOUNT_PATH/Users/<uid>/…`. So a non-admin's USER.md write resolved to `real/Users/<uid>/Users/<uid>/<bot>/config/USER.md` — a phantom doubled path that the auto-loader (which uses the unscoped `config.nextcloud_mount_path`) never reads back. Result: non-admin durable-memory writes silently vanished. Latent in the default deployment because an empty admins file means everyone is admin.
 
 Root cause was the env scoping itself, not the CLIs: per-user filesystem isolation is already enforced by the bwrap bind (`build_bwrap_cmd` binds only the task user's own `Users/<uid>` dir, for admin and non-admin alike), and the skill CLIs self-scope by `ISTOTA_USER_ID` (executor-set, not model-controllable). The scoped env added no isolation while breaking the path convention. Fix: `NEXTCLOUD_MOUNT_PATH` is now the real root for everyone; `ISTOTA_DB_PATH` stays admin-only; the prompt still shows non-admins their scoped path and the "you can ONLY access …" framing (display only, backed by bwrap). As a corollary this also realigns the per-user memory lock anchor between the curator and a non-admin CLI (the anchor name is keyed on the target's abspath).
 
 **Files modified:**
+
 - `src/istota/executor.py` - non-admin `NEXTCLOUD_MOUNT_PATH` now the real root (DB stays admin-only)
 - `tests/test_executor.py` - `test_non_admin_gets_real_root_mount_path_env` replaces the test that pinned the doubled value
 
@@ -2289,19 +2484,21 @@ Root cause was the env scoping itself, not the CLIs: per-user filesystem isolati
 
 Two related fixes to the op-based USER.md / CHANNEL.md memory subsystem, prompted by a report that the `USER.md.lock` file persisted in the user's config dir and that the assistant struggled to prune stale bullets under the strict append-only feel.
 
-The lock was never actually stuck — `memory_md_lock` is a context-managed flock; the `.lock` *file* just persisted on disk as an inert anchor while the lock itself released on context exit. The real problems were (1) the anchor lived as a sibling of USER.md on the rclone/FUSE Nextcloud mount, where `fcntl.flock` is unreliable (silent no-op or `ENOLCK`/`ENOTSUP`) and the leftover file cluttered the config dir, and (2) the ops vocabulary couldn't touch `### subsection` content at all, had no in-place edit, and no whole-section removal — so the model frequently couldn't land an edit even though a `remove` command existed.
+The lock was never actually stuck — `memory_md_lock` is a context-managed flock; the `.lock` _file_ just persisted on disk as an inert anchor while the lock itself released on context exit. The real problems were (1) the anchor lived as a sibling of USER.md on the rclone/FUSE Nextcloud mount, where `fcntl.flock` is unreliable (silent no-op or `ENOLCK`/`ENOTSUP`) and the leftover file cluttered the config dir, and (2) the ops vocabulary couldn't touch `### subsection` content at all, had no in-place edit, and no whole-section removal — so the model frequently couldn't land an edit even though a `remove` command existed.
 
-Mulder/Scully reviewed the first pass. Scully verified all functional behavior; Mulder caught a silent regression in the initial off-mount design (anchor under `/tmp/istota-md-locks` is invisible inside the bwrap sandbox, which mounts a private tmpfs over `/tmp` — so a sandboxed CLI and the host curator would flock different inodes and both acquire instantly, reintroducing the exact race the lock prevents, only when the skill proxy is off). The fix moved the anchor under the per-user deferred dir (`ISTOTA_DEFERRED_DIR` = `config.temp_dir/<user_id>`), which the executor already bind-mounts into the sandbox at the same path — so curator (host), proxy CLI (host), and sandboxed CLI all resolve the same inode, per-user, with no cross-tenant reach. Trade-off: cross-*user* CHANNEL.md serialization is now best-effort (it was already FUSE-unreliable; channel writes are rare and uncurated, and protecting the audited USER.md in every config is the priority).
+Mulder/Scully reviewed the first pass. Scully verified all functional behavior; Mulder caught a silent regression in the initial off-mount design (anchor under `/tmp/istota-md-locks` is invisible inside the bwrap sandbox, which mounts a private tmpfs over `/tmp` — so a sandboxed CLI and the host curator would flock different inodes and both acquire instantly, reintroducing the exact race the lock prevents, only when the skill proxy is off). The fix moved the anchor under the per-user deferred dir (`ISTOTA_DEFERRED_DIR` = `config.temp_dir/<user_id>`), which the executor already bind-mounts into the sandbox at the same path — so curator (host), proxy CLI (host), and sandboxed CLI all resolve the same inode, per-user, with no cross-tenant reach. Trade-off: cross-_user_ CHANNEL.md serialization is now best-effort (it was already FUSE-unreliable; channel writes are rare and uncurated, and protecting the audited USER.md in every config is the priority).
 
 Also from the review: `replace` now refuses to manufacture a duplicate (scans the whole section, returns `noop_dup`), `remove`/`replace` uniqueness spans the whole section, and the stale "subsections are opaque" instruction was scrubbed from the curation prompt and the `types.py` docstring.
 
 **Key changes:**
+
 - `file_lock.py`: anchor moved off the mount. `lock_path_for(target, *, lock_dir=None)` keys the anchor name on `sha256(abspath(target))[:16]`; `deferred_lock_dir(deferred_dir)` builds the per-user `.md-locks/` anchor dir the daemon writers pass. System-temp default kept as an ad-hoc/test fallback.
 - Curator (`sleep_cycle.py`) and the runtime CLI (`skills/memory`) both pass the per-user deferred anchor dir, so they coordinate on one inode across the sandbox boundary.
 - New ops in `curation/ops.py`: `replace` (in-place rewrite of the unique matching bullet, indentation-preserving, dup-safe) and `remove_heading` (drop a whole `## ` section). `remove` now spans the whole section (top region + subsections); the old `match_in_subsection` reject is gone. `append` gained an optional `subheading` to target a `### subsection` (new `subsection_region_indices` helper in `types.py`).
 - CLI subcommands `replace`, `remove-heading`, and `append --subheading`; curation prompt + skill.md + AGENTS.md updated to advertise the wider vocabulary and drop the "opaque subsections" guidance.
 
 **Files added/modified:**
+
 - `src/istota/memory/curation/file_lock.py` - off-mount anchor, `lock_path_for`, `deferred_lock_dir`
 - `src/istota/memory/curation/ops.py` - `replace`, `remove_heading`, whole-section `remove`, subheading-append, `_find_unique_bullet`/`_insert_bullet_in_region` helpers
 - `src/istota/memory/curation/types.py` - `subsection_region_indices`, corrected docstrings
@@ -2313,23 +2510,25 @@ Also from the review: `replace` now refuses to manufacture a duplicate (scans th
 
 ## 2026-06-17: Stop one hung scheduled task wedging the background queue
 
-A per-minute CRON `command:` job (a `* * * * *` location script) shelled out to `istota-skill` subprocesses and hung. Its task heartbeated for 6.5h while stuck, holding the user's single background worker slot the whole time, so nothing else in the background queue could run. Three compounding gaps turned one hung script into a self-sustaining incident: (1) `check_scheduled_jobs` enqueued a fresh run every fire regardless of whether the prior run was still in flight, so the backlog grew one row/minute behind the wedged slot (130+ pending); (2) `subprocess.run(timeout=…)` only SIGKILLs the *direct* child, then blocks forever in the post-kill `communicate()` when an orphaned grandchild still holds the stdout pipe — so the framework timeout never actually fired, and because the per-task heartbeat thread keeps pinging from a separate thread, the liveness-based stuck-running reaper never reclaimed it either; (3) `fail_ancient_pending_tasks` posted "A task you submitted was cancelled…" to every aged-out task's channel — including the automated backlog — turning the pile-up into a once-a-minute chat flood (and the message wasn't even true for a scheduled job).
+A per-minute CRON `command:` job (a `* * * * *` location script) shelled out to `istota-skill` subprocesses and hung. Its task heartbeated for 6.5h while stuck, holding the user's single background worker slot the whole time, so nothing else in the background queue could run. Three compounding gaps turned one hung script into a self-sustaining incident: (1) `check_scheduled_jobs` enqueued a fresh run every fire regardless of whether the prior run was still in flight, so the backlog grew one row/minute behind the wedged slot (130+ pending); (2) `subprocess.run(timeout=…)` only SIGKILLs the _direct_ child, then blocks forever in the post-kill `communicate()` when an orphaned grandchild still holds the stdout pipe — so the framework timeout never actually fired, and because the per-task heartbeat thread keeps pinging from a separate thread, the liveness-based stuck-running reaper never reclaimed it either; (3) `fail_ancient_pending_tasks` posted "A task you submitted was cancelled…" to every aged-out task's channel — including the automated backlog — turning the pile-up into a once-a-minute chat flood (and the message wasn't even true for a scheduled job).
 
 Fixes, scoped to all three (verified the live state on the deploy host first: task heartbeated 6.5h, 130+ pending scheduled-bg backlog, the per-minute job confirmed as the source):
 
-- **Overlap guard.** `check_scheduled_jobs` now skips enqueuing a run when `db.count_inflight_tasks_for_scheduled_job(job_id) > 0`. `last_run_at` is deliberately *not* advanced on skip, so the job fires the next tick once the in-flight run clears — correct for sparse jobs too (advancing would push the next fire out a full interval). Composes with the existing `cron_max_staleness` guard: after a long-running run finally clears, a far-past `next_run` then trips the staleness suppression so missed fires don't all replay.
+- **Overlap guard.** `check_scheduled_jobs` now skips enqueuing a run when `db.count_inflight_tasks_for_scheduled_job(job_id) > 0`. `last_run_at` is deliberately _not_ advanced on skip, so the job fires the next tick once the in-flight run clears — correct for sparse jobs too (advancing would push the next fire out a full interval). Composes with the existing `cron_max_staleness` guard: after a long-running run finally clears, a far-past `next_run` then trips the staleness suppression so missed fires don't all replay.
 - **Process-group kill.** New `_run_capture` / `_kill_process_group` helpers run the child under `Popen(start_new_session=True)` and `os.killpg(SIGKILL)` the whole group on timeout, then drain pipes with a bounded second `communicate`. Both `_execute_command_task` and `_execute_skill_task` route through it (re-raising `TimeoutExpired` so their existing except branches are unchanged). The framework now hard-kills the tree at `task_timeout_minutes` even when a child backgrounds grandchildren that inherited the pipe.
 - **Notification suppression.** The `fail_ancient_pending_tasks` loop skips the user-facing notice for `_AUTOMATED_SOURCE_TYPES` (`scheduled`/`briefing`/`heartbeat`/`subtask`); user-submitted source types (talk/email/web/cli/…) still notify as before.
 
 Note the script's own internal timeouts / cadence remain the user's cleanup — fix #2 caps the wedge at `task_timeout_minutes`, it doesn't make a 30-min-per-run cron sensible. Full suite green (6519 passed, 7 skipped).
 
 **Key changes:**
+
 - `db.count_inflight_tasks_for_scheduled_job(conn, scheduled_job_id)` — non-terminal task count per job, backs the overlap guard.
 - Overlap guard in `check_scheduled_jobs` (skip without advancing `last_run_at`).
 - `_run_capture` + `_kill_process_group`; both subprocess task runners use them.
 - `_AUTOMATED_SOURCE_TYPES` + the suppressed `fail_ancient_pending_tasks` notification branch.
 
 **Files added/modified:**
+
 - `src/istota/db.py` - `count_inflight_tasks_for_scheduled_job`
 - `src/istota/scheduler.py` - overlap guard; `_run_capture`/`_kill_process_group` + both runners rewired; `_AUTOMATED_SOURCE_TYPES` + notification gate
 - `tests/test_db.py` - `TestCountInflightTasksForScheduledJob`
@@ -2342,17 +2541,19 @@ A transient upstream blip caused a full task-processing outage: chat in every ro
 
 Fix is the issue's preferred design: stop prefetching in the loop. `check_briefings` / `check_briefing_triggers` now create the background briefing task immediately, carrying only the briefing identity (new `tasks.briefing_name` column) plus a lightweight placeholder prompt — no network on the loop thread. The real prompt is built in the executor (`build_deferred_briefing_prompt`, a guard at the top of `execute_task`) when a background worker picks the task up, so a slow upstream only ties up that one worker. The build resolves the live briefing config + timezone each run (preserves the ISSUE-099 live-tz behavior); retries re-fetch fresh data. An unbuildable briefing (config gone, or build raised) fails the task → quiet retry/backoff (briefing failures don't notify) rather than running the model on the bare placeholder.
 
-Also did the two secondary asks. Browser auto-heal: the Flask API is single-threaded (Playwright sync greenlets), so a long in-flight browse blocked `/health` and the Docker healthcheck marked a busy-but-healthy container unhealthy → restarted mid-session. Added a lightweight liveness server on its own thread/port (9224) that answers even while Flask is busy and reports unhealthy only when the Chrome *process* is gone; retargeted the healthcheck (image + full-stack compose). Replaced the grep-based 2-min cron with a systemd watchdog (30s, debounced restart, crash-loop protection that stops flapping and pages once, ntfy/email alerts) plus a separate daily-restart timer. Defense-in-depth: `LoopWatchdog` alerts an operator if the main loop ever stops ticking (`loop_stall_alert_seconds`, default 180), suspended around the known multi-minute in-loop checks (sleep cycles, DB-health sweep) so a healthy nightly run doesn't false-page, with alert delivery off-thread so a wedged delivery can't freeze the watchdog.
+Also did the two secondary asks. Browser auto-heal: the Flask API is single-threaded (Playwright sync greenlets), so a long in-flight browse blocked `/health` and the Docker healthcheck marked a busy-but-healthy container unhealthy → restarted mid-session. Added a lightweight liveness server on its own thread/port (9224) that answers even while Flask is busy and reports unhealthy only when the Chrome _process_ is gone; retargeted the healthcheck (image + full-stack compose). Replaced the grep-based 2-min cron with a systemd watchdog (30s, debounced restart, crash-loop protection that stops flapping and pages once, ntfy/email alerts) plus a separate daily-restart timer. Defense-in-depth: `LoopWatchdog` alerts an operator if the main loop ever stops ticking (`loop_stall_alert_seconds`, default 180), suspended around the known multi-minute in-loop checks (sleep cycles, DB-health sweep) so a healthy nightly run doesn't false-page, with alert delivery off-thread so a wedged delivery can't freeze the watchdog.
 
 Browser code lives in the `stealth-browser` source-of-truth repo (vendored into `docker/browser/`); edited there and synced. Mulder + Scully reviewed: caught a must-fix (the full-stack compose `healthcheck:` overrode the image `HEALTHCHECK`, still probing the blocking `/health`), the watchdog false-page on the sleep cycle, the watchdog-blocking-on-alert hazard, and the briefing-degrade-vs-retry call — all fixed. Full suite green (6510 passed).
 
 **Key changes:**
+
 - Deferred briefing prompt build: new `tasks.briefing_name` column; `check_briefings`/`check_briefing_triggers` create identity-only tasks; `executor.build_deferred_briefing_prompt` builds at worker-pickup time.
 - `LoopWatchdog` + `loop_stall_alert_seconds` (default 180); `suspended()` context manager wraps the sleep-cycle and DB-health checks; off-thread alert delivery.
 - Browser liveness server on port 9224; healthcheck retargeted in the Dockerfile and the full-stack compose.
 - systemd browser watchdog (debounce / crash-loop / alerts) + daily-restart timer replacing the grep cron.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` - deferred briefing task creation; `LoopWatchdog` + `_operator_alert_user`; wired into `run_daemon` with `suspended()` around slow checks
 - `src/istota/executor.py` - `build_deferred_briefing_prompt` + the briefing guard at the top of `execute_task` (fail-on-unbuildable)
 - `src/istota/db.py`, `schema.sql` - `tasks.briefing_name` column (dataclass, migration, create_task, `_TASK_COLUMNS`, `_row_to_task`)
@@ -2376,12 +2577,14 @@ Removed the standalone surface entirely: the Click `cli` group is now injection-
 Deliberate residual: `money/routes.py` keeps a DB-first→TOML fallback for the web surface — inert in-Istota (DB always seeded), left as-is to bound scope.
 
 **Key changes:**
+
 - New `istota money <op> …` operational CLI forwarding to the money Click tree in-process; config commands stay native argparse.
 - Removed the `money` console script, `MONEY_CONFIG`/`MONEY_SECRETS_FILE`, `load_context`/`_parse_user_context`/`DEFAULT_SECRETS_FILE`, the `--config/-c` option, and the TOML config-read fallbacks; Click group is injection-only.
 - `cli.main()` peels operational money commands before `parse_args` to work around argparse REMAINDER's leading-option limitation.
 - Migrated the money CLI test suites off the removed standalone loader to injected Context.
 
 **Files added/modified:**
+
 - `src/istota/cli_money.py` - operational passthrough (`_OPERATIONAL_COMMANDS`, `_add_operational`, `_pop_user`, `_invoke_money_cli`, `dispatch_operational`, `is_operational`)
 - `src/istota/cli.py` - pre-parse peel routing `money <op>` to `cli_money.dispatch_operational`
 - `src/istota/money/cli.py` - removed `load_context`/`_parse_user_context`/`DEFAULT_SECRETS_FILE`; injection-only `cli()` group; DB-only config in `_load_invoicing_config`/`_run_monarch_sync`/`debug_monarch`
@@ -2396,11 +2599,13 @@ Generating outstanding invoices was about to reissue invoice numbers that alread
 Fix derives the starting number from ground truth instead of trusting a separate counter: `max(stored_counter, highest_existing_invoice_number(data_dir) + 1)`, where the helper parses the `INV-` numbers already stamped on work entries. This self-heals the drift and also kills a latent collision where `run-scheduled` reused one in-memory counter across multiple clients in a single run. Persistence now routes to the same backend the config came from via `persist_next_invoice_number` (DB when `has_invoicing_data`, else TOML), with `config_store.set_next_invoice_number` as the targeted DB scalar setter. No manual data fix needed on the deployment — the next real run reconciles the counter.
 
 **Key changes:**
+
 - Start invoice numbering from one past the highest invoice already issued (work log is ground truth).
 - Persist the advanced counter to whichever backend the config came from (DB in-Istota).
 - Added `highest_existing_invoice_number`, `parse_invoice_number`, `persist_next_invoice_number`, `config_store.set_next_invoice_number`.
 
 **Files added/modified:**
+
 - `src/istota/money/core/invoicing.py` - defensive start + `persist_next_invoice_number` + helpers
 - `src/istota/money/config_store.py` - `set_next_invoice_number`
 - `src/istota/money/cli.py` - pass `db_path` through generate/create; route persistence
@@ -2413,6 +2618,7 @@ Fix derives the starting number from ground truth instead of trusting a separate
 Fix: set `conn.row_factory = sqlite3.Row` in `init_db` before `_run_migrations`. `Row` supports both name and positional access, so it's a safe superset for every migration step (full suite stays green — 6439 passed). Pre-existing bug, unrelated to the skip-permissions change in the same session; it surfaced now because the user's Docker volume had completed tasks and hadn't yet run the unified-rooms fold.
 
 **Files added/modified:**
+
 - `src/istota/db.py` - `init_db` sets `row_factory = sqlite3.Row`
 - `tests/test_unified_rooms.py` - regression test re-running `init_db` with a completed task present and the migration marker cleared (the upgrade path)
 - `CHANGELOG.md` - Fixed entry
@@ -2424,14 +2630,16 @@ The headless `claude -p` brain ran with an explicit `--allowedTools Read Write E
 Verified both load-bearing CLI behaviors empirically against the local CLI (2.1.177) before committing: (1) `--dangerously-skip-permissions` in `-p` mode does execute tools with no allowlist (wrote a file); (2) `--disallowedTools` still wins under skip-permissions (a denied `Write` stayed blocked). So deny rules are the right mechanism for the orchestration tools.
 
 **Key changes:**
+
 - **`build_claude_cli_flags`** (shared by both CLI brains): for a tool-bearing task, emit only `--disallowedTools Agent Workflow` instead of the `--allowedTools …` allowlist. Empty `allowed_tools` (text-only: sleep cycle / OCR / explainer) still emits no tool flags at all.
 - **`ClaudeCodeBrain._build_command`**: append `--dangerously-skip-permissions` for tool-bearing tasks (skipped for text-only, so those stay tool-less and can't reach a tool).
-- **Re-deny `Workflow`.** ISSUE-110's follow-up had dropped `Workflow` from the disallow list, but only because the *allowlist* was implicitly excluding it. With the allowlist gone, `Workflow` (multi-agent fan-out, dozens of subagents) becomes reachable, so it's denied explicitly again alongside `Agent`. Behavior-preserving — the model still can't fan out and keeps orchestrating through Istota's own skills/subtasks.
+- **Re-deny `Workflow`.** ISSUE-110's follow-up had dropped `Workflow` from the disallow list, but only because the _allowlist_ was implicitly excluding it. With the allowlist gone, `Workflow` (multi-agent fan-out, dozens of subagents) becomes reachable, so it's denied explicitly again alongside `Agent`. Behavior-preserving — the model still can't fan out and keeps orchestrating through Istota's own skills/subtasks.
 - **Root handling.** `claude` refuses skip-permissions as root unless `IS_SANDBOX=1`. `ClaudeCodeBrain.execute` now sets it for tool-bearing tasks when running as root (the Docker container-as-sandbox case; bwrap off, runs as root), mirroring the tmux brain. On the non-root prod VM service user the flag is allowed without it, so it's left unset. `_is_root` moved into `claude_code.py` (single definition; the tmux brain imports it, keeping the test monkeypatch on `tmux_claude._is_root` working).
 - **`build_allowed_tools` kept, repurposed.** Its return list no longer reaches the CLI for the two CLI brains, but it still drives NativeBrain's in-process tool filter and is the non-empty/empty signal that distinguishes a tool task from a text-only one. Docstring updated to say so.
 - **Healthchecks left alone.** The `--allowedTools Bash` calls in `commands.py` / `heartbeat.py` only run `echo healthcheck-ok`, work fine, and aren't on the brain path.
 
 **Files added/modified:**
+
 - `src/istota/brain/claude_code.py` - drop allowlist, add `_is_root` + skip-permissions + root `IS_SANDBOX`, re-deny `Workflow`
 - `src/istota/brain/tmux_claude.py` - import `_is_root` from `claude_code` instead of defining it
 - `src/istota/executor.py` - `build_allowed_tools` docstring rewrite
@@ -2441,16 +2649,18 @@ Verified both load-bearing CLI behaviors empirically against the local CLI (2.1.
 
 ## 2026-06-13: Surface lurked-in Talk rooms in web chat + durable per-user hide
 
-A Talk room the bot merely *participates in* but has never been addressed in didn't appear in web chat. Diagnosed on the deployment DB: room registration keyed exclusively on `tasks` rows (the `unified_rooms_v1` migration's `_fold_talk_rooms` and the live `record_inbound` path), but a quiet channel the bot lurks in has its message history rebuilt from Nextcloud while its tasks never carry over — so zero task rows, no `rooms` registry row, invisible in the membership-driven web list. The poll only *renamed* known rooms; it never registered new ones.
+A Talk room the bot merely _participates in_ but has never been addressed in didn't appear in web chat. Diagnosed on the deployment DB: room registration keyed exclusively on `tasks` rows (the `unified_rooms_v1` migration's `_fold_talk_rooms` and the live `record_inbound` path), but a quiet channel the bot lurks in has its message history rebuilt from Nextcloud while its tasks never carry over — so zero task rows, no `rooms` registry row, invisible in the membership-driven web list. The poll only _renamed_ known rooms; it never registered new ones.
 
 **Key changes:**
-- **Poll-time registration.** The Talk poll now registers any conversation the bot participates in (`origin='talk'`) on first sight, seeding membership from the human participants mapped to istota users (`actor_id in config.users` + `actorType == "users"`, bot excluded). Resolves the canonical token first so a *promoted* web room (whose canonical token is its web token) isn't duplicated into a phantom `origin='talk'` row. Skips type-4 changelog rooms. First-sight-only (no per-cycle re-seed); membership for active users is kept current by the message loop + `record_inbound`.
+
+- **Poll-time registration.** The Talk poll now registers any conversation the bot participates in (`origin='talk'`) on first sight, seeding membership from the human participants mapped to istota users (`actor_id in config.users` + `actorType == "users"`, bot excluded). Resolves the canonical token first so a _promoted_ web room (whose canonical token is its web token) isn't duplicated into a phantom `origin='talk'` row. Skips type-4 changelog rooms. First-sight-only (no per-cycle re-seed); membership for active users is kept current by the message loop + `record_inbound`.
 - **Durable per-user hide.** New `room_dismissals` tombstone (`(room_token, user_id)`). `list_member_rooms` excludes a tombstoned room even while the user is a member, so a hide survives any later membership re-add. Written by both web hide paths (`_chat_delete_room` + the `PATCH archived` branch).
 - **Re-engagement un-hides.** The tombstone is cleared by the user's own next message — `record_inbound` for an addressed message, and the poll message loop (before the @mention gate) for a non-mention post in a multi-user room, which never reaches `record_inbound`.
 - **UI.** Deleting an imported (Talk-origin) room is now a one-click **Hide** with honest copy and no type-the-name confirm; web-origin rooms keep the confirmed destructive **Delete**. Fixed the branch condition to `origin === 'talk'` so a promoted web room (hard-deleted by the backend) correctly reads as a delete.
 - **Review round (Mulder/Scully).** Caught + fixed: the promoted-web phantom (canonical-token resolution), multi-user re-engagement never firing (message-loop un-hide), the `PATCH archived` path missing the tombstone, write-txn-across-HTTP (now first-sight-only), `actorType` filter, `schema.sql` + `delete_web_chat_room` tombstone cleanup. All re-verified.
 
 **Files added/modified:**
+
 - `src/istota/transport/talk/inbound.py` - poll-time room registration + member seeding (`_istota_members_for_conversation`); message-loop re-engagement un-hide
 - `src/istota/db.py` - `room_dismissals` table + `dismiss_room`/`undismiss_room`/`is_room_dismissed`; `list_member_rooms` tombstone exclusion; `delete_web_chat_room` cleanup
 - `src/istota/transport/ingest.py` - `record_inbound` clears the sender's tombstone
@@ -2462,9 +2672,10 @@ A Talk room the bot merely *participates in* but has never been addressed in did
 
 ## 2026-06-13: Allow WebSearch/WebFetch in the bot toolset, steer page reads to browse
 
-The bot's headless `claude -p` invocation enumerates `--allowedTools` (it does *not* run with bypass permissions — that's the tmux brain only), and the six-tool list excluded web tools, so the bot couldn't search the web. Added `WebSearch` + `WebFetch` to `build_allowed_tools`. WebSearch runs server-side (returns titles/URLs only); page reading is steered to the `browse` skill via an eager line in the prompt's Tools section (there's no tool-search-level steering hook — prompt + allow/deny lists are the only levers).
+The bot's headless `claude -p` invocation enumerates `--allowedTools` (it does _not_ run with bypass permissions — that's the tmux brain only), and the six-tool list excluded web tools, so the bot couldn't search the web. Added `WebSearch` + `WebFetch` to `build_allowed_tools`. WebSearch runs server-side (returns titles/URLs only); page reading is steered to the `browse` skill via an eager line in the prompt's Tools section (there's no tool-search-level steering hook — prompt + allow/deny lists are the only levers).
 
 **Files added/modified:**
+
 - `src/istota/executor.py` - `build_allowed_tools` adds `WebSearch`/`WebFetch`; `build_prompt` Tools section steers page reads to `browse`
 - `tests/test_security.py` - asserts web tools allowed
 
@@ -2485,6 +2696,7 @@ Full suite green (6,353 passed, 7 skipped); no new lint findings.
 Follow-up to the disclosure work below, prompted by a production check: Pass 2 semantic routing was timing out on 100% of tasks. Root cause is structural, not tuning — `classify_skills` spawns a fresh `claude -p -` subprocess per task (`_claude_cli_classify`), so the 3s budget is eaten by CLI cold-start (Node boot, auth, model init), not inference. Raising the timeout to 5–10s just pays that boot tax on every task. Since the same-day disclosure feature makes surfacing a skill nearly free (a cached one-line index entry), the per-task pre-router no longer earns its latency.
 
 **Change.** Flipped the defaults and widened the index:
+
 - `SkillsConfig.semantic_routing` default `True → False`; `progressive_disclosure` default `False → True`.
 - The on-demand index is widened from "selected-but-lazy skills" to the **full eligible catalogue**: `index_names = lazy_selected ∪ eligible_skill_names(exclude = selected ∪ always_eager ∪ ⋃ exclude_skills_of_selected)`. The capable main model self-selects from the menu instead of a weak pre-router guessing. Pass 1 (deterministic, high-precision) is untouched and still renders obvious matches eager so they need no round-trip.
 - Extracted the eligibility gate out of `build_skill_manifest` into a shared `eligible_skill_names` (`_loader.py`) — same filter (already-selected / `always_include` / disabled / admin-gated / experimental-gated / missing-deps) now backs both the catalogue and the Pass-2 manifest.
@@ -2500,7 +2712,7 @@ Follow-up to the disclosure work below, prompted by a production check: Pass 2 s
 
 Implemented the `progressive-skill-selection-and-playbooks` spec end to end (7 stages, strict TDD). Two independent, default-off features inspired by a study of the Hermes Agent skill system, rebuilt to fit Istota's architecture. Full suite green (6,377 passed, 7 skipped); no new lint findings in the touched code.
 
-**Part A — progressive skill disclosure.** Selection (deterministic Pass 1 + Haiku Pass 2) is unchanged; only how a *selected* skill is *rendered* changes. A new per-skill mode — eager (full body in `skills_doc`, as before) or lazy (a one-line "Available skills (load on demand)" index entry) — is resolved by `resolve_disclosure_mode`: frontmatter `disclosure: eager|lazy` wins, else a size threshold (`auto_lazy_threshold_chars`, CLI skills only), else eager. `partition_skills_for_disclosure` splits the selection (eager on any body-read failure — safe, content present); `build_disclosure_index` emits the index; the executor passes it to `build_prompt` as `skills_index`. The model pulls a deferred body via a new `skills` core skill (`istota-skill skills show <name>` / `list`), which re-applies the disabled/admin/experimental guards from the loaded config so a deferred body can't bypass them. Gated by `skills.progressive_disclosure` (off → byte-identical legacy prompt). Marked `developer`/`health`/`money`/`location`/`browse`/`calendar` `disclosure: lazy`; measured ~5,870 tokens saved (~50% of the skills doc) on a developer+calendar task.
+**Part A — progressive skill disclosure.** Selection (deterministic Pass 1 + Haiku Pass 2) is unchanged; only how a _selected_ skill is _rendered_ changes. A new per-skill mode — eager (full body in `skills_doc`, as before) or lazy (a one-line "Available skills (load on demand)" index entry) — is resolved by `resolve_disclosure_mode`: frontmatter `disclosure: eager|lazy` wins, else a size threshold (`auto_lazy_threshold_chars`, CLI skills only), else eager. `partition_skills_for_disclosure` splits the selection (eager on any body-read failure — safe, content present); `build_disclosure_index` emits the index; the executor passes it to `build_prompt` as `skills_index`. The model pulls a deferred body via a new `skills` core skill (`istota-skill skills show <name>` / `list`), which re-applies the disabled/admin/experimental guards from the loaded config so a deferred body can't bypass them. Gated by `skills.progressive_disclosure` (off → byte-identical legacy prompt). Marked `developer`/`health`/`money`/`location`/`browse`/`calendar` `disclosure: lazy`; measured ~5,870 tokens saved (~50% of the skills doc) on a developer+calendar task.
 
 **Decision (mid-build, user-confirmed): dropped the spec's "no-CLI → force eager" carve-out.** It conflicted with deferring the doc-only `developer` skill (`cli: false`), the biggest target. Resolution: `skills.always_eager` is the sole force-eager safety boundary (it already lists every shipped behavioral/safety skill); the size-threshold path still requires `cli: true`, so a no-CLI skill is deferred only via explicit frontmatter. The `skills show` mechanism works regardless of whether the deferred skill has its own CLI, so this is safe.
 
@@ -2511,6 +2723,7 @@ Implemented the `progressive-skill-selection-and-playbooks` spec end to end (7 s
 **Ansible.** Wired default-off toggles (`istota_skills_progressive_disclosure`, `istota_skills_auto_lazy_threshold_chars`, `istota_playbooks_*`) into the role defaults + `config.toml.j2`; with defaults neither the `[skills]` extension nor the `[playbooks]` block renders, so existing deployments produce a byte-identical config. No required operator changes.
 
 **Files added/modified:**
+
 - `src/istota/skills/_types.py` — `SkillMeta.disclosure` field
 - `src/istota/skills/_loader.py` — `resolve_disclosure_mode` / `partition_skills_for_disclosure` / `build_disclosure_index` + frontmatter parse
 - `src/istota/skills/skills/` — new `skills` core CLI skill (`skill.md`, `__init__.py`, `__main__.py`)
@@ -2530,9 +2743,9 @@ Triaged the open issue tracker and closed six. One (ISSUE-130) was already fixed
 
 **Key changes:**
 
-- **ISSUE-132 — Talk rich-object placeholders leaking into the web transcript.** `clean_message_content` (`talk.py`) only resolved two narrow regexes (`{fileN}` / `{mention-…N}`), so bare `{file}` single-file shares and every other rich-object type (`{actor}`, polls, deck cards, locations, guest/call mentions) rendered as literal tokens. Replaced both regexes with one generic resolver that walks `messageParameters` and dispatches on each param's `type`. The *actual* web-transcript leak turned out to be the cache-recovery path, not system messages: the live inbound path already resolves and already skips Talk system messages (`messageType == "system"`), but `db.backfill_room_messages_from_talk_cache` folded the cache's raw `message_text` into the durable `messages` store unresolved (dormant/legacy rooms). It now resolves against the cached `message_parameters` before insert. `call`/`mention-call` now render `@all` (Nextcloud semantics); mentions resolve even with no `bot_username` (the is-bot / cache display path). Two old tests that pinned the previous quirks were updated to the new contract.
+- **ISSUE-132 — Talk rich-object placeholders leaking into the web transcript.** `clean_message_content` (`talk.py`) only resolved two narrow regexes (`{fileN}` / `{mention-…N}`), so bare `{file}` single-file shares and every other rich-object type (`{actor}`, polls, deck cards, locations, guest/call mentions) rendered as literal tokens. Replaced both regexes with one generic resolver that walks `messageParameters` and dispatches on each param's `type`. The _actual_ web-transcript leak turned out to be the cache-recovery path, not system messages: the live inbound path already resolves and already skips Talk system messages (`messageType == "system"`), but `db.backfill_room_messages_from_talk_cache` folded the cache's raw `message_text` into the durable `messages` store unresolved (dormant/legacy rooms). It now resolves against the cached `message_parameters` before insert. `call`/`mention-call` now render `@all` (Nextcloud semantics); mentions resolve even with no `bot_username` (the is-bot / cache display path). Two old tests that pinned the previous quirks were updated to the new contract.
 
-- **ISSUE-135 — deferred subtasks silently failing.** Two silent modes. (1) `_process_deferred_subtasks` dropped any entry without a `prompt` via a bare `continue`, so an entry using the unsupported `command` key vanished with no log — now it warns loudly (naming the keys, calling out `command`) and still creates well-formed siblings; non-dict entries guarded too. (2) `_warn_unconsumed_deferred_files` only scanned the `task_{id}_*` and `{id}_*` name shapes, so a descriptive name with the id as a *trailing* token (the shape that triggered this) was invisible — added a third glob `*_{id}.json` and deduped the scan. Net: a deferred subtask with a wrong key or hallucinated filename is now diagnosable from the logs instead of disappearing.
+- **ISSUE-135 — deferred subtasks silently failing.** Two silent modes. (1) `_process_deferred_subtasks` dropped any entry without a `prompt` via a bare `continue`, so an entry using the unsupported `command` key vanished with no log — now it warns loudly (naming the keys, calling out `command`) and still creates well-formed siblings; non-dict entries guarded too. (2) `_warn_unconsumed_deferred_files` only scanned the `task_{id}_*` and `{id}_*` name shapes, so a descriptive name with the id as a _trailing_ token (the shape that triggered this) was invisible — added a third glob `*_{id}.json` and deduped the scan. Net: a deferred subtask with a wrong key or hallucinated filename is now diagnosable from the logs instead of disappearing.
 
 - **ISSUE-092 — deferred skill CLI can't chain dependent writes.** Inside the sandbox, `add-panel` returns no id (the write is deferred), so a follow-up `add-biomarker` had no `panel_id` to chain to. Landed Option 1 (within-batch ref resolution): `add-panel --ref NAME` stamps a symbolic ref on the deferred op; `add-biomarker @NAME` emits `panel_ref`; `_process_deferred_health_ops` keeps a `{ref → real id}` map as it replays and substitutes. An unresolved `panel_ref` fails loudly (ERROR + the existing failure sidecar), never silently misfiled; a `@ref` in direct mode is rejected with an error envelope. The `ref`/`*_ref` convention is generic enough to extend to any future parent→child deferred chain.
 
@@ -2541,6 +2754,7 @@ Triaged the open issue tracker and closed six. One (ISSUE-130) was already fixed
 - **ISSUE-130 (already fixed) / ISSUE-131 (advanced).** 130 (transcript LIMIT ordered by id not time) was already resolved by the keyset-paging commits with a regression test — tracker flipped to closed. 131's paging half (backend cursor + scroll-up + stick-to-bottom) shipped; DOM virtualization remains, so it stays open with a status note.
 
 **Files added/modified:**
+
 - `src/istota/talk.py` — generic `_resolve_param` + rewritten `clean_message_content`
 - `src/istota/db.py` — `backfill_room_messages_from_talk_cache` resolves placeholders via cached params
 - `src/istota/scheduler_deferred.py` — loud warn on prompt-less subtask entries; broadened unconsumed-file scan; within-batch panel-ref resolution in `_process_deferred_health_ops`
@@ -2551,20 +2765,21 @@ Triaged the open issue tracker and closed six. One (ISSUE-130) was already fixed
 
 ## 2026-06-10: Keep substantial intermediate text in stream output — meaty blocks no longer vanish into the activity chip
 
-With live streaming in the web chat UI, a turn where the model writes a substantial analysis block, *then* acts on it (an Edit), then gives a short confirmation would stream the analysis live and then drop it — the final answer area showed only the terse confirmation, and the detailed block disappeared. The content the user most wanted was the part that got thrown away.
+With live streaming in the web chat UI, a turn where the model writes a substantial analysis block, _then_ acts on it (an Edit), then gives a short confirmation would stream the analysis live and then drop it — the final answer area showed only the terse confirmation, and the detailed block disappeared. The content the user most wanted was the part that got thrown away.
 
-Root cause was a rendering-model error, not a streaming bug. Both render paths (live SSE in `segments.ts`, history-from-`execution_trace` in `web_app._trace_segments` + `historySegments`) encoded the same rule: *only the trailing text segment is the answer; every earlier text block is narration.* `Message.svelte` then routed all non-trailing segments to a **tool-only** `ActivityTrace` chip that renders no prose. So any text the model emitted before its final block — including a 1500-char analysis — was settled the instant the next tool arrived and silently dropped from view. The heuristic conflated "text followed by a tool" with "throwaway lead-in," but an agent routinely writes real content, acts on it, then confirms tersely.
+Root cause was a rendering-model error, not a streaming bug. Both render paths (live SSE in `segments.ts`, history-from-`execution_trace` in `web_app._trace_segments` + `historySegments`) encoded the same rule: _only the trailing text segment is the answer; every earlier text block is narration._ `Message.svelte` then routed all non-trailing segments to a **tool-only** `ActivityTrace` chip that renders no prose. So any text the model emitted before its final block — including a 1500-char analysis — was settled the instant the next tool arrived and silently dropped from view. The heuristic conflated "text followed by a tool" with "throwaway lead-in," but an agent routinely writes real content, acts on it, then confirms tersely.
 
 The fix promotes substantial intermediate text to visible body content, keeping short lead-ins suppressed. Approach (agreed with the user): reuse the 200-char bar, render in true order, stream surfaces only.
 
-- **Frontend body model.** New pure `renderGroups(message)` in `segments.ts` reduces the ordered segment list into interleaved render groups: a `text` segment renders as a prominent `prose` block iff its trimmed length ≥ `SUBSTANTIAL_TEXT_CHARS` (200) *or* it's the trailing answer (always shown, however short); runs of consecutive tools (and any short narration skipped between them) coalesce into one `activity` chip; `thinking` never reaches the body. `Message.svelte` iterates the groups instead of "all tools in one chip + trailing answer only," so a meaty block renders in place between the chips. Pure + settled-agnostic, so the live stream and a reloaded-from-trace turn build identical groups — no backend `result`/composition change needed (the trace already carries every block).
+- **Frontend body model.** New pure `renderGroups(message)` in `segments.ts` reduces the ordered segment list into interleaved render groups: a `text` segment renders as a prominent `prose` block iff its trimmed length ≥ `SUBSTANTIAL_TEXT_CHARS` (200) _or_ it's the trailing answer (always shown, however short); runs of consecutive tools (and any short narration skipped between them) coalesce into one `activity` chip; `thinking` never reaches the body. `Message.svelte` iterates the groups instead of "all tools in one chip + trailing answer only," so a meaty block renders in place between the chips. Pure + settled-agnostic, so the live stream and a reloaded-from-trace turn build identical groups — no backend `result`/composition change needed (the trace already carries every block).
 - **Executor stream gate, now a substance classifier.** Renamed `_discard_deltas` → `_settle_deltas_at_tool_boundary`. A short lead-in that stayed under the gate is still dropped intact (never streamed → can't flash). A substantial block that crossed the gate now **flushes its unflushed tail** instead of discarding it, so the full block reaches the stream. This mattered for token-streaming NativeBrain (up to ~120 chars of tail was lost at each tool boundary; whole-block ClaudeCodeBrain already flushed on unlock). The old `stream_gate: LEAK` log is gone — crossing the gate before a tool is now intended, not a leak.
 
-Symmetry that keeps it low-risk: the executor only streams a text run once it crosses the 200 gate, so the live path only ever *received* substantial intermediate text already; the same bar in `renderGroups` drops sub-threshold lead-ins on the history path, keeping the two layouts consistent.
+Symmetry that keeps it low-risk: the executor only streams a text run once it crosses the 200 gate, so the live path only ever _received_ substantial intermediate text already; the same bar in `renderGroups` drops sub-threshold lead-ins on the history path, keeping the two layouts consistent.
 
 Reproduced against a real production task's `execution_trace` (a multi-step note edit) before and after. Built strict-TDD: failing tests first at each layer (renderGroups reducer, Message DOM, executor tail-preservation), then implementation. Full web suite (59) + Python streaming/events/scheduler/native (721) green; svelte-check clean. The obsolete in-place-mutation regression guard was rewritten — the refactor removed an accidental `$derived(message.segments)` memoization barrier, so in-place updates now also reach the DOM (production still rebuilds refs in `chat.ts`, unchanged).
 
 **Files modified:**
+
 - `web/src/lib/stores/segments.ts` — `renderGroups` + `SUBSTANTIAL_TEXT_CHARS`; `RenderGroup` type
 - `web/src/lib/components/chat/Message.svelte` — render groups in order (prose + activity chips); only the last chip pulses while streaming
 - `src/istota/executor.py` — `_settle_deltas_at_tool_boundary` (flush substantial tail, drop short lead-ins); updated gate comment
@@ -2574,11 +2789,12 @@ Reproduced against a real production task's `execution_trace` (a multi-step note
 **Follow-ups (same day): review, threshold bump, spacing, mock data.**
 
 - **Mulder + Scully review.** A two-agent pass (skeptical bug-hunter + spec-conformance verifier) confirmed the mechanism is sound end-to-end and falsified the new tests (reverting either half breaks them). One MEDIUM was a real regression I'd introduced: `renderGroups` always emitted the trailing text as a prose group, so an empty/whitespace answer rendered a blank padded `.body` div (the old `{#if hasAnswerText}` guard had suppressed that, and `isRenderable`'s empty-settled suppression had gone dead on the body path). Fixed by skipping whitespace-only blocks in `renderGroups`, with a test. A LOW (the frontend `SUBSTANTIAL_TEXT_CHARS` and backend `stream_text_gate_chars` are independent constants that must stay equal) got a strengthened coupling comment.
-- **Threshold bumped 200 → 280** at the user's request, moving *both* coupled constants together plus every mirror (`config.py` default + parse fallback, `SUBSTANTIAL_TEXT_CHARS`, Ansible default, `config.example.toml`, AGENTS.md / scheduler.md, and the two executor tests whose fixtures hardcoded 200-relative block sizes). The frontend `long()` test helper and the Message DOM test scale off the constant, so they adapted automatically.
-- **Activity-chip vertical spacing.** All chip spacing now lives on a neighbour-aware `.chip-slot` wrapper in `Message.svelte` (and `ActivityTrace`'s own margin is zeroed, single source of truth): a chip gets a paragraph-sized gap (`0.85rem`) on whichever side touches a prose block, but stays flush when it's the first group — so a tool-first turn's chip sits directly under the meta like a no-tool text answer. Chips never abut (tool runs coalesce), so a chip's neighbours are always prose or the message edge. Also capped the *expanded* activity box at `max-width: 900px` to align with `.body`.
+- **Threshold bumped 200 → 280** at the user's request, moving _both_ coupled constants together plus every mirror (`config.py` default + parse fallback, `SUBSTANTIAL_TEXT_CHARS`, Ansible default, `config.example.toml`, AGENTS.md / scheduler.md, and the two executor tests whose fixtures hardcoded 200-relative block sizes). The frontend `long()` test helper and the Message DOM test scale off the constant, so they adapted automatically.
+- **Activity-chip vertical spacing.** All chip spacing now lives on a neighbour-aware `.chip-slot` wrapper in `Message.svelte` (and `ActivityTrace`'s own margin is zeroed, single source of truth): a chip gets a paragraph-sized gap (`0.85rem`) on whichever side touches a prose block, but stays flush when it's the first group — so a tool-first turn's chip sits directly under the meta like a no-tool text answer. Chips never abut (tool runs coalesce), so a chip's neighbours are always prose or the message edge. Also capped the _expanded_ activity box at `max-width: 900px` to align with `.body`.
 - **Mock multi-round turns.** Seeded two finished multi-round assistant turns in the dev mock (`vite-mock-api.ts`) that produce chip → substantial intermediate prose → chip → final answer, plus a `multiround` keyword that streams the same shape live, so the new layout is previewable on the `VITE_MOCK_API=1` dev server without a backend. Verified in-browser: both turns render the intended interleaved layout and the expanded chip caps at the body width.
 
 **Additional files modified (follow-ups):**
+
 - `src/istota/config.py`, `deploy/ansible/defaults/main.yml`, `config/config.example.toml` — gate default 200 → 280
 - `web/src/lib/components/chat/ActivityTrace.svelte` — zero own margin; expanded box `max-width: 900px`
 - `web/vite-mock-api.ts` — `mockMultiRoundTaskEvents` + two seeded multi-round turns + `multiround` live trigger
@@ -2596,6 +2812,7 @@ Client mark-read fires on room open (optimistic local zero + persist), on the ac
 Spec: `Specs/Active/web-chat-unread-room-indicators.md` (all 4 stages done).
 
 **Files added/modified:**
+
 - `src/istota/db.py` — `room_max_message_id`, `count_unread_messages`, `initialize_room_read_state`
 - `src/istota/web_app.py` — `_chat_list_rooms` seeds + computes `unread_count` (per-room try/except); `_chat_mark_room_read` + `POST /chat/rooms/{id}/read`
 - `web/src/lib/api.ts` — `ChatRoom.unread_count`, `markRoomRead()`
@@ -2605,7 +2822,7 @@ Spec: `Specs/Active/web-chat-unread-room-indicators.md` (all 4 stages done).
 
 ## 2026-06-10: Per-user room membership — group Talk rooms now surface in web chat for every participant (ISSUE-134)
 
-A group Nextcloud Talk room (bot + two humans) was the only room missing from one user's web chat room list. Root cause: the unified room model keyed a room to a single user. `rooms.token` is a PK and `web_chat_rooms.token` was globally `UNIQUE`, and the web list filtered on `rooms.user_id` — so a shared Talk conversation (one token) could only ever belong to one user. The one-time fold-in migration (`_fold_talk_rooms`) registered each Talk room with `SELECT user_id … GROUP BY conversation_token`, and SQLite's arbitrary pick under a bare grouped column resolved to the *earliest* talk-task sender. The other participant(s) never saw the room, and later inbound from them hit `register_room`'s `INSERT OR IGNORE` (first-writer-wins) and no-op'd.
+A group Nextcloud Talk room (bot + two humans) was the only room missing from one user's web chat room list. Root cause: the unified room model keyed a room to a single user. `rooms.token` is a PK and `web_chat_rooms.token` was globally `UNIQUE`, and the web list filtered on `rooms.user_id` — so a shared Talk conversation (one token) could only ever belong to one user. The one-time fold-in migration (`_fold_talk_rooms`) registered each Talk room with `SELECT user_id … GROUP BY conversation_token`, and SQLite's arbitrary pick under a bare grouped column resolved to the _earliest_ talk-task sender. The other participant(s) never saw the room, and later inbound from them hit `register_room`'s `INSERT OR IGNORE` (first-writer-wins) and no-op'd.
 
 The fix models membership as many-to-many while keeping the transcript shared. A room is still one token / one `messages` transcript / one binding set, but a new `room_members` table records each participant, and the web list resolves through it (`list_member_rooms`) instead of the single-owner `rooms.user_id`. `web_chat_rooms` is now `UNIQUE(user_id, token)` so each member gets their own frontend handle for the same Talk token. The global `rooms.archived` flag is reserved for "the bot left the Nextcloud room" (`archive_orphaned_talk_rooms`), and a fresh inbound un-archives it; per-user delete/hide now drops only that user's membership, never the shared flag. `room_read_state` gained `user_id` in its PK (dead/future code, so cheap to change now).
 
@@ -2614,6 +2831,7 @@ Migrations are guarded/markered and idempotent: `web_chat_rooms` is rebuilt in p
 Validated end-to-end by running the real migration against a consistent snapshot of the production database: the group room ends up with both participants as members, all web handles preserved with ids intact, no duplicates, and a second run is a clean no-op. Applies automatically on the next deploy/restart.
 
 **Files modified:**
+
 - `src/istota/db.py` — `room_members` table + CRUD (`add_room_member`/`remove_room_member`/`is_room_member`/`list_room_members`/`list_member_rooms`); `register_room` adds membership; `ensure_web_chat_handle` user-scoped; `web_chat_rooms` `UNIQUE(user_id, token)`; `room_read_state.user_id`; three migrations (`_migrate_web_chat_rooms_peruser`, `_migrate_room_read_state_peruser`, `_migrate_room_members`); `delete_web_chat_room` drops handles by token
 - `src/istota/transport/ingest.py` — `record_inbound` adds the sender as a member and un-archives a re-joined Talk room
 - `src/istota/web_app.py` — web room list resolves via membership; per-user hide/delete drops membership instead of the global archive flag; stale per-user archived flag cleared on listing
@@ -2623,22 +2841,23 @@ Validated end-to-end by running the real migration against a consistent snapshot
 
 ## 2026-06-10: Rewrite the custom system prompt (config/system-prompt.md)
 
-The opt-in custom system prompt (prod runs with `custom_system_prompt = true`, so it *replaces* Claude Code's default via `--system-prompt-file`) had drifted into a thinned, slightly stale paraphrase of CC's own system-prompt building blocks — plus a chunk of redundancy. Symptom the user noticed: coding output quality felt worse than vanilla Claude Code.
+The opt-in custom system prompt (prod runs with `custom_system_prompt = true`, so it _replaces_ Claude Code's default via `--system-prompt-file`) had drifted into a thinned, slightly stale paraphrase of CC's own system-prompt building blocks — plus a chunk of redundancy. Symptom the user noticed: coding output quality felt worse than vanilla Claude Code.
 
-Diagnosis, after comparing against the upstream block set (Piebald-AI/claude-code-system-prompts, tracking CC 2.1.170): our file was a hand-condensed subset that (a) dropped the communication-style block entirely, (b) flattened the `doing-tasks-*` guidance into weaker negative-only bullets, (c) restated the Edit/Write/Read/Grep tool *parameters* in prose — which has no equivalent in CC's real prompt (CC leans on the tool schemas) and just burns tokens + risks drift, and (d) kept an implicit software-engineering framing without adapting it to Istota's general-assistant reality.
+Diagnosis, after comparing against the upstream block set (Piebald-AI/claude-code-system-prompts, tracking CC 2.1.170): our file was a hand-condensed subset that (a) dropped the communication-style block entirely, (b) flattened the `doing-tasks-*` guidance into weaker negative-only bullets, (c) restated the Edit/Write/Read/Grep tool _parameters_ in prose — which has no equivalent in CC's real prompt (CC leans on the tool schemas) and just burns tokens + risks drift, and (d) kept an implicit software-engineering framing without adapting it to Istota's general-assistant reality.
 
-Key design call: the three prompt layers divide labor. **Emissaries** (user message) own values/safety-of-conscience; **persona** (user message) owns voice/conciseness/emoji-avoidance; the **system prompt** should be the universal *operational substrate* (tool judgment, code craft, blast-radius rules, file conventions). But briefings skip both emissaries and persona, and sleep-cycle is text-only — so the system prompt is the only layer present on *every* task. That argued for keeping it self-contained: a minimal name-free identity line + an outcome-first communication block of its own, rather than offloading everything to persona. (Name-free because this file is passed raw to `--system-prompt-file` — no `{BOT_NAME}` templating runs on it, unlike persona.)
+Key design call: the three prompt layers divide labor. **Emissaries** (user message) own values/safety-of-conscience; **persona** (user message) owns voice/conciseness/emoji-avoidance; the **system prompt** should be the universal _operational substrate_ (tool judgment, code craft, blast-radius rules, file conventions). But briefings skip both emissaries and persona, and sleep-cycle is text-only — so the system prompt is the only layer present on _every_ task. That argued for keeping it self-contained: a minimal name-free identity line + an outcome-first communication block of its own, rather than offloading everything to persona. (Name-free because this file is passed raw to `--system-prompt-file` — no `{BOT_NAME}` templating runs on it, unlike persona.)
 
 New structure: Identity → Communicating (outcome-first, "your text is all the user sees", folds in the existing "don't narrate tool mechanics" line) → Tools (judgment only; param docs dropped, Bash trimmed to `&&`-vs-`;` / no-interactive / no-sleep) → Doing the work (general framing + a scoped "when writing or changing code" block carrying the full-strength current upstream wording for no-additions / no-error-handling / no-compat-hacks / security / comment-why-only, plus `file_path:line_number`) → **Check your work** (new: adversarial self-verification — treat the first answer as a draft, try to break your own conclusion, run the real command and read real output, then report truthfully without claiming unverified success; merges the user's request with CC's truthful-reporting clause) → Executing actions with care (refreshed) → File conventions / `agents:` frontmatter (kept verbatim, Istota-unique).
 
 Net: shorter overall, redundancy gone, coding guidance strengthened rather than dropped, and the self-check nudge added. Ships on next Ansible deploy; no code change.
 
 **Files modified:**
+
 - `config/system-prompt.md` — full rewrite
 
 ## 2026-06-10: Startup orphan recovery for tasks interrupted by a scheduler restart
 
-Reproduced from prod: a web-chat task streaming a response when the scheduler restarted was left `running` with a dead worker — a hung spinner in the UI, with the cancel button doing nothing (`cancel_requested=1` but no worker to honor it). It self-healed only after `worker_stuck_minutes` (10) of heartbeat silence — the time-based reclaim in `run_cleanup_checks` had to *infer* the worker was dead.
+Reproduced from prod: a web-chat task streaming a response when the scheduler restarted was left `running` with a dead worker — a hung spinner in the UI, with the cancel button doing nothing (`cancel_requested=1` but no worker to honor it). It self-healed only after `worker_stuck_minutes` (10) of heartbeat silence — the time-based reclaim in `run_cleanup_checks` had to _infer_ the worker was dead.
 
 But a scheduler restart is deterministic, not a guess: the daemon holds a singleton flock, so the moment a fresh instance boots, every `running`/`locked` row is definitionally an orphan of the dead instance. `recover_orphaned_tasks_on_startup` (called once under the flock, before any worker spawns) reclaims them immediately instead of waiting out the window. Each orphan resolves three ways: `cancel_requested` → straight to `cancelled` (no re-running the whole prompt just to cancel on its first event); retries-exhausted / too-old / inline-only (REPL — the daemon never claims it, so releasing would strand it) → `failed`; otherwise → released to `pending` with `attempt_count` bumped and liveness cleared. For the cancelled/failed cases it emits a terminal event frame (seq resumed above the dead attempt's partial deltas, no subscribers — the SSE client polls the table) so a watching web client gets immediate closure rather than a spinner; released orphans emit nothing, since the re-run streams its own `task_started`.
 
@@ -2647,6 +2866,7 @@ But a scheduler restart is deterministic, not a guess: the daemon holds a single
 Tests: `TestRecoverOrphanedTasks` (db: released/cancelled/failed/inline/too-old/exhausted/locked + pending-confirmation untouched) and `TestRecoverOrphanedTasksOnStartup` (scheduler: terminal-frame emission, seq continuity after partial deltas, released-emits-nothing). Full db + scheduler suites green (498).
 
 **Files modified:**
+
 - `src/istota/db.py` — `recover_orphaned_tasks`
 - `src/istota/scheduler.py` — `recover_orphaned_tasks_on_startup` + `run_daemon` wiring
 - `tests/test_db.py`, `tests/test_scheduler.py`
@@ -2656,6 +2876,7 @@ Tests: `TestRecoverOrphanedTasks` (db: released/cancelled/failed/inline/too-old/
 Closed the gap between Istota's two interactive surfaces. Talk rooms and web-chat rooms used to be two disjoint namespaces with two disjoint histories — a conversation started in Talk couldn't be picked up in web and vice versa. They now share one surface-independent room model, so any conversation can be continued on either surface with full cross-surface context, one history per room, and one `CHANNEL.md`. Implemented in a worktree, stage by stage with TDD, fast-forwarded onto main after each stage.
 
 **Key changes:**
+
 - **Data model.** New `rooms` registry (PK = canonical `conversation_token`, `origin` talk|web), `room_bindings` (per-surface ref), `messages` (canonical transcript: role user|assistant|system + title + task_id + origin_surface + external_ids), `room_read_state`, and a `_migration_state` marker. A one-time markered migration folds `web_chat_rooms` → registry + web bindings, `web_chat_messages` → system messages, and distinct Talk tokens → talk rooms, and backfills `messages` from completed tasks. Note: the partial unique index on `messages` keys on `role` too — the spec's `(room_token, origin_surface, task_id)` would have rejected a turn's assistant row (same task_id as its user row).
 - **History unification.** `get_conversation_history` repointed at `messages` with re-pairing (user+assistant rows keyed on a shared `task_id` fold back into the `(prompt, result)` shape callers expect; `id` stays the task id). A self-healing dual-read serves `messages` only when caught up to the latest completed task, else falls back to the legacy `tasks` query — so context never goes stale mid-rollout. Talk keeps its metadata-rich `_build_talk_api_context` for Talk-origin context.
 - **Inbound.** Extracted `record_inbound` as the single inbound choke point (resolve canonical token → echo-check → store user message → create task), wired into both `ingest_message` (Talk/email) and the web POST path (which previously called `create_task` directly and never stored the web user turn). The Talk poller threads each conversation's display name through for lazy room registration; Talk-side renames flow back to the registry.
@@ -2665,6 +2886,7 @@ Closed the gap between Istota's two interactive surfaces. Talk rooms and web-cha
 - **Live cross-surface progress.** When a Talk turn starts while a web room is open, the web client's idle poll picks it up and streams its progress live (the SSE events endpoint is ownership-gated, not source-gated, so a Talk-source task streams to web with no new substrate).
 
 **Files added/modified:**
+
 - `schema.sql`, `src/istota/db.py` — new tables, registry/binding/message helpers, migration, re-paired history reader, room-list handle.
 - `src/istota/transport/{ingest,routing,_types,web/__init__}.py` — `record_inbound`, `room` fan-out + `Destination.mirror`, `channel_name`, canonical-store delivery.
 - `src/istota/scheduler.py` — assistant-turn persistence, mirror confirmation-suppression + external-id ledger.
@@ -2677,7 +2899,7 @@ Closed the gap between Istota's two interactive surfaces. Talk rooms and web-cha
 
 A Mulder/Scully pass over the 7-stage unified-rooms diff surfaced four issues, fixed here with regression coverage in `test_unified_room_fixes.py`.
 
-- **Dual-read dropped older history (M1).** `_messages_caught_up` keyed the entire token's history source on whether the *single newest* completed task was mirrored into `messages`. Once it was, the reader switched wholesale to `messages` and silently dropped any older turn not yet mirrored — the exact partial-population state a mid-rollout window or partial migration leaves. Replaced the newest-only probe with a completeness check (any completed turn missing its assistant row → stay on the always-complete `tasks` path). Equivalence on a fully-populated store is unchanged.
+- **Dual-read dropped older history (M1).** `_messages_caught_up` keyed the entire token's history source on whether the _single newest_ completed task was mirrored into `messages`. Once it was, the reader switched wholesale to `messages` and silently dropped any older turn not yet mirrored — the exact partial-population state a mid-rollout window or partial migration leaves. Replaced the newest-only probe with a completeness check (any completed turn missing its assistant row → stay on the always-complete `tasks` path). Equivalence on a fully-populated store is unchanged.
 - **Migration marked itself done after a swallowed failure (M2).** Each backfill step was wrapped in `except OperationalError: pass`, then the `unified_rooms_v1` marker was written unconditionally — so a real disk/lock error mid-backfill left a partial `messages` copy that never retried. Steps now distinguish a benign "no such table" (fresh install) from a real failure; the marker is written only if every step succeeded, so a failure retries cleanly next boot. Combined with M1, a partial copy degrades to the `tasks` path instead of losing turns.
 - **Messages unique index looser than its guards (H2).** `idx_messages_ext` keyed on `(room_token, origin_surface, role, task_id)`, but every app-level idempotency guard dedupes on `(room_token, role, task_id)`. Two rows for one turn with differing `origin_surface` could slip past the index. Tightened the index (schema + an in-place drop/recreate migration for existing deploys) so it actually backstops the guards.
 - **Deleted Talk rooms lingered in web (user-reported).** A Talk conversation deleted in Nextcloud (or the bot removed) kept showing in the web room list — its registry row was never reconciled. The Talk poller now archives Talk-origin rooms absent from the bot's live conversation list each cycle (`db.archive_orphaned_talk_rooms`), guarded against a transient empty/failed fetch. Archive, not hard-delete, so a re-add or mirror history isn't destroyed.
@@ -2687,13 +2909,14 @@ A Mulder/Scully pass over the 7-stage unified-rooms diff surfaced four issues, f
 
 Fourth docker test: the first web task (self-test) completed cleanly through tmux (`outcome=done tools=6`), proving the full happy path. But the follow-up task hung, and background channel-sleep-cycle extractions timed out at 120s on a loop. Same root cause for both: **the prompt didn't submit.**
 
-The interactive `claude` TUI ingests a large prompt as a *bracketed paste*, collapsing it to a `[Pasted text #N +NNN lines]` placeholder. `_inject_prompt` did `paste-buffer` then immediately `send-keys Enter` — but the Enter raced the TUI's paste ingestion and got absorbed, leaving the prompt sitting unsent in the input box. No turn started → no Stop hook → the brain polled until the hard timeout. The first task won the race by luck; the follow-up and the sleep-cycle calls (which flow through the same `_inject_prompt`, with no `session_label` → `istota-tmux-<pid>-<n>` names) lost it. Confirmed live: one manual `Enter` to the stuck pane submitted instantly and the turn ran. The `tmux_stall` halfway warning + structured `outcome=timeout` logging caught it precisely — observability working as designed.
+The interactive `claude` TUI ingests a large prompt as a _bracketed paste_, collapsing it to a `[Pasted text #N +NNN lines]` placeholder. `_inject_prompt` did `paste-buffer` then immediately `send-keys Enter` — but the Enter raced the TUI's paste ingestion and got absorbed, leaving the prompt sitting unsent in the input box. No turn started → no Stop hook → the brain polled until the hard timeout. The first task won the race by luck; the follow-up and the sleep-cycle calls (which flow through the same `_inject_prompt`, with no `session_label` → `istota-tmux-<pid>-<n>` names) lost it. Confirmed live: one manual `Enter` to the stuck pane submitted instantly and the turn ran. The `tmux_stall` halfway warning + structured `outcome=timeout` logging caught it precisely — observability working as designed.
 
-Fix: `_inject_prompt` now settles after the paste, sends Enter, then *confirms a turn actually started* — the `UserPromptSubmit` hook fired (it overwrites the pre-turn `SessionStart` payload in `started.json`, so `hook_event_name` flips) or the transcript file appeared — and only resends Enter if it didn't. Never a blind resend, so a slow-confirming successful submit can't get a stray empty Enter. Also: the live tailer no longer spams `parse_transcript: cannot read` every poll before the transcript exists (it checks existence first), and a new `_turn_started` helper backs the confirm.
+Fix: `_inject_prompt` now settles after the paste, sends Enter, then _confirms a turn actually started_ — the `UserPromptSubmit` hook fired (it overwrites the pre-turn `SessionStart` payload in `started.json`, so `hook_event_name` flips) or the transcript file appeared — and only resends Enter if it didn't. Never a blind resend, so a slow-confirming successful submit can't get a stray empty Enter. Also: the live tailer no longer spams `parse_transcript: cannot read` every poll before the transcript exists (it checks existence first), and a new `_turn_started` helper backs the confirm.
 
 This was the last functional blocker — every tmux brain path (interactive tasks + background sleep-cycle/OCR/explainer calls) goes through `_inject_prompt`, so the fix is comprehensive.
 
 **Files modified:**
+
 - `src/istota/brain/tmux_claude.py`, `tests/test_tmux_production.py`
 
 ## 2026-06-09: tmux brain — fix _TranscriptTailer shadowing Thread._stop
@@ -2705,20 +2928,23 @@ Root cause: a classic `threading.Thread`-subclass gotcha. `Thread` has a private
 Fix: rename the attribute to `self._stop_event` (the public `stop()` method name is fine — Thread has no public `stop`). Added a regression test that actually `start()`/`stop()`/`join()`s the tailer — the existing tests only exercised `_drain_once()` directly, never the thread lifecycle, which is how this slipped through.
 
 **Files modified:**
+
 - `src/istota/brain/tmux_claude.py`, `tests/test_tmux_production.py`
 
 ## 2026-06-09: tmux brain — skip first-run onboarding (theme picker repro)
 
-Second docker test, after the IS_SANDBOX fix: claude now *launches* (banner instead of the root refusal), but blocked at a new dialog the markers didn't handle — the first-run **theme picker** (`Choose the text style…`). Root cause is an interaction with the §2 per-session `CLAUDE_CONFIG_DIR` fix: a fresh, empty config dir each task means the interactive TUI sees a brand-new install and re-runs onboarding (theme → trust → bypass) every time. The prod VM never showed it because its global `~/.claude` already had onboarding state; and the container's `~/.claude.json` only ever held headless-`-p` state (which skips onboarding), so it had no `theme`/`hasCompletedOnboarding` keys either.
+Second docker test, after the IS_SANDBOX fix: claude now _launches_ (banner instead of the root refusal), but blocked at a new dialog the markers didn't handle — the first-run **theme picker** (`Choose the text style…`). Root cause is an interaction with the §2 per-session `CLAUDE_CONFIG_DIR` fix: a fresh, empty config dir each task means the interactive TUI sees a brand-new install and re-runs onboarding (theme → trust → bypass) every time. The prod VM never showed it because its global `~/.claude` already had onboarding state; and the container's `~/.claude.json` only ever held headless-`-p` state (which skips onboarding), so it had no `theme`/`hasCompletedOnboarding` keys either.
 
 Fix: pre-seed `<CLAUDE_CONFIG_DIR>/.claude.json` per session with the onboarding-skip keys (verified present in the CLI binary via a strings scan): `theme`, `hasCompletedOnboarding`, `bypassPermissionsModeAccepted`, and per-project `projects.<cwd>.{hasTrustDialogAccepted,hasCompletedProjectOnboarding}`. The TUI then skips the whole first-run gauntlet. As a version-tolerant safety net (if a CLI version renames a key), `_wait_ready` also scripts past the theme picker with a bare Enter (a dark option is pre-selected), via a new configurable `theme_markers` list — same pattern as the existing trust/bypass handling.
 
 **Key changes:**
+
 - `tmux_claude.py`: `_seed_onboarding(config_dir, launch_cwd)` writes the per-session `.claude.json`; `_run_session` calls it after `_write_hooks`. `_wait_ready` gains a theme-picker branch; new `_THEME_MARKERS` constant.
 - `config.py`: `TmuxBrainConfig.theme_markers` + parsing. `validate_config.py`, Ansible defaults/template: `theme_markers` knob.
 - Tests for the seed (keys + execute-path) and the theme-dialog safety net.
 
 **Files modified:**
+
 - `src/istota/brain/tmux_claude.py`, `src/istota/config.py`, `deploy/ansible/{files/validate_config.py,defaults/main.yml,templates/config.toml.j2}`, `tests/test_tmux_production.py`
 
 ## 2026-06-09: tmux brain — IS_SANDBOX for root containers (first docker test)
@@ -2728,11 +2954,13 @@ First live test of `brain.kind = "tmux_claude"` was a local docker deploy. The f
 A strings scan of the installed CLI binary confirmed the escape hatch: `claude` honors `IS_SANDBOX=1` to allow `--dangerously-skip-permissions` as root, signaling that an external layer provides isolation. In a container that's accurate — bwrap is disabled and the container is the sandbox boundary. Also caught: the Dockerfile didn't install `tmux` (added it; without tmux every task would `not_found` → fall back to headless).
 
 **Key changes:**
+
 - `tmux_claude.py`: a new `_is_root()` helper; `_run_session` sets `IS_SANDBOX=1` in the per-session pane env when running as uid 0 (and the operator hasn't already set it). Non-root deploys (the prod VM) leave it unset — the flag is allowed there without it. Targeted to the tmux path only; the headless brain doesn't use `--dangerously-skip-permissions`.
 - `docker/istota/Dockerfile`: install `tmux` (required by the brain).
 - Three tests for the root/non-root/preserve-existing env paths.
 
 **Files modified:**
+
 - `src/istota/brain/tmux_claude.py`, `docker/istota/Dockerfile`, `tests/test_tmux_production.py`
 
 ## 2026-06-09: TmuxClaudeBrain production hardening (stages 2–5 + docs/Ansible)
@@ -2740,6 +2968,7 @@ A strings scan of the installed CLI binary confirmed the escape hatch: `claude` 
 Took `TmuxClaudeBrain` from feasibility prototype to production-ready, per the `claude-tmux-production-readiness` spec. The brain drives the interactive `claude` TUI in a detached tmux session (prompt injection + Stop-hook sentinel + transcript parse) so traffic stays on subscription billing rather than the metered Agent-SDK credit headless `claude -p` draws from after 2026-06-15. The switch is full-instance (`brain.kind = "tmux_claude"` routes every source type through it); `claude_code` is retained only as the automatic fallback. The spec's Stage 1 and 6 (live bwrap/network probes) and Stage 7's live rollout are prod-host-only gates not run here — code was built against the spec's documented primary choices, all config/constant-tweakable so a live finding is a tweak, not a rewrite.
 
 **Key changes:**
+
 - **Per-session hook isolation (the concurrency-clobber fix).** Each session now gets its own `CLAUDE_CONFIG_DIR` (`<workdir>/config/settings.json`) instead of a shared `base_dir/.claude/`. Two concurrent same-user tasks previously both wrote that shared file with their own baked-in sentinel path, cross-firing each other's Stop hook. `_write_stop_hook` → `_write_hooks` now also declares early `UserPromptSubmit`/`SessionStart` hooks (→ `started.json`) so the brain can learn `transcript_path` mid-turn. One-shot legacy `.claude` cleanup; the whole workdir is rmtree'd in `finally`.
 - **Shared CLI-flag helper.** Extracted `build_claude_cli_flags(req, *, unsupported=…)` to `claude_code.py`; both `_build_command` (headless) and the tmux launch call it, so flag handling can't drift. Golden-identical headless argv preserved. An `unsupported` flag set is dropped + warned-once (for any flag the interactive TUI rejects; empty default).
 - **Fail-fast completion.** `_wait_sentinel` → `_wait_for_completion`: a multi-signal poll (sentinel / cancel / error-marker / dead-pane / halfway stall-warning) that returns `(status, pane)` instead of always burning the full 30-min timeout. A transient API error in the pane retries a fresh session (≤3, 5s apart, reusing `is_transient_api_error`) without consuming a task attempt — same contract as `ClaudeCodeBrain`.
@@ -2751,6 +2980,7 @@ Took `TmuxClaudeBrain` from feasibility prototype to production-ready, per the `
 **Tests:** new `tests/test_tmux_production.py` (flag helper golden + unsupported, `_wait_for_completion` matrix, transient retry, circuit breaker, fallback, config parse/override, observability, session-label, transcript tailer); `tests/test_executor_streaming.py::TestTmuxFallback` (executor headless rerun on fallback/not_found, no rerun on normal error); updated `tests/test_tmux_execute.py` for the renamed methods + per-session config-dir + concurrency isolation. Full suite green (6101).
 
 **Files added/modified:**
+
 - `src/istota/brain/tmux_claude.py` - the bulk: per-session hooks, `_wait_for_completion`, transient-retry loop, `_CircuitBreaker`, `_TranscriptTailer`, `_Params`, CLI-version check, structured logging
 - `src/istota/brain/claude_code.py` - `build_claude_cli_flags` helper extraction
 - `src/istota/brain/__init__.py` - `make_brain` passes `brain_config.tmux`
@@ -2765,15 +2995,16 @@ Took `TmuxClaudeBrain` from feasibility prototype to production-ready, per the `
 
 A live round-trip test exposed that the origin-routing feature (above) only worked for one of three inbound paths. The bot emailed the user from a web-chat room; the user replied from their own address; the reply came back over email only and never landed in the room. Production records (via Zorg's own investigation) confirmed the send leg captured `origin_target = web:<token>` correctly — inbound threw it away.
 
-**Root cause.** `transport/email/inbound.py` resolves the inbound user by precedence: plus-address → sender-match → thread-match. The thread-match step did double duty — it resolved the user *and* was the only place that loaded `sent_email_match` (which carries `origin_target`). But it ran only as a user-resolution fallback (`if not user_id:`). A reply from the user's own configured address resolves at sender-match (step 2), so thread-match was skipped, `sent_email_match` stayed `None`, the whole origin-routing block was bypassed, and `output_target` defaulted to email-only. Since you always reply to yourself from a configured address, the primary use case was effectively dead. A reply addressed to the bot's plus-address (`bot+user@…`) had the same failure via step 1. Only an external contact replying from an unrecognised address (pure thread-match) ever exercised the origin path — which is exactly the only case my Stage-3 tests covered (`ext@x.com` sender), so the suite was green while the real case was broken. Same handoff-drop shape as the original outbound gap: payload captured correctly, dropped at a handoff.
+**Root cause.** `transport/email/inbound.py` resolves the inbound user by precedence: plus-address → sender-match → thread-match. The thread-match step did double duty — it resolved the user _and_ was the only place that loaded `sent_email_match` (which carries `origin_target`). But it ran only as a user-resolution fallback (`if not user_id:`). A reply from the user's own configured address resolves at sender-match (step 2), so thread-match was skipped, `sent_email_match` stayed `None`, the whole origin-routing block was bypassed, and `output_target` defaulted to email-only. Since you always reply to yourself from a configured address, the primary use case was effectively dead. A reply addressed to the bot's plus-address (`bot+user@…`) had the same failure via step 1. Only an external contact replying from an unrecognised address (pure thread-match) ever exercised the origin path — which is exactly the only case my Stage-3 tests covered (`ext@x.com` sender), so the suite was green while the real case was broken. Same handoff-drop shape as the original outbound gap: payload captured correctly, dropped at a handoff.
 
 **Fix.** Run `_match_thread` unconditionally to recover the routing payload, regardless of how the user was resolved; keep `routing_method` as the user-resolution method so the confirmation gate is unchanged. Two guards: (1) the prompt template now keys on `is_emissary_reply = routing_method == "thread_match"` so a self-reply keeps the plain "you're continuing your own conversation" template instead of the external-contact emissary one; (2) a recovered thread row is only used when `sent_email_match.user_id == user_id`, so a reply sender-matched to user A can never inherit user B's origin and route into B's surface (identity wins over payload, per the deferred-DB principle).
 
 Five regression tests added for the previously-uncovered paths (self-reply via sender-match, self-reply policy, plus-address reply, external-emissary prompt preserved, cross-user row dropped). Full suite green (6013).
 
-Known follow-up (not a routing bug): whether the web room shows the *full* reply text depends on the model — on an email-source task the email guidelines push it to compose via the email-output tool (structured body → email leg), while the web leg delivers the task's `result_text`. If those diverge the room could show less than the email. Best confirmed by a live round-trip post-deploy.
+Known follow-up (not a routing bug): whether the web room shows the _full_ reply text depends on the model — on an email-source task the email guidelines push it to compose via the email-output tool (structured body → email leg), while the web leg delivers the task's `result_text`. If those diverge the room could show less than the email. Best confirmed by a live round-trip post-deploy.
 
 **Files modified:**
+
 - `src/istota/transport/email/inbound.py` - unconditional thread-match recovery; `is_emissary_reply` prompt gate; cross-user origin guard
 - `tests/test_transport_email_inbound.py` - five regression tests for the self-reply / plus-address / cross-user paths
 
@@ -2782,21 +3013,24 @@ Known follow-up (not a routing bug): whether the web room shows the *full* reply
 Closed the "lossy hop": when the bot sent an email at the request of a web-chat room (or Talk/REPL) and the recipient replied, the inbound reply spawned a fresh `source_type="email"` task that had no memory of where it came from — it delivered only over email, never back into the room. Implemented the `email-reply-origin-routing` spec in four TDD stages, then ran Mulder (bug-hunter) + Scully (verifier) over the result and fixed everything they surfaced.
 
 **The feature (stages 1–4):**
+
 - **Capture origin.** New `sent_emails.origin_target` column stores an `output_target` descriptor (`web:<token>` / `talk:<token>`) identifying the surface+channel the original send came from. Computed by `routing.origin_descriptor(task)` at send time and wired into both `record_sent_email` call sites. NULL for pre-migration rows.
-- **Cross-surface stream delivery.** `_resolve_one` now distinguishes an *own-origin* stream surface (a web/REPL task whose own result streams over `task_events` → stays a no-op) from a *foreign* task routing INTO a stream surface (an email reply into a web room → resolves to a real push). Also added the missing web-push branch to `process_one_task` — `plan_web` was previously only used for the confirmation gate and delta-prune, so a resolved web push would not have been delivered at all.
+- **Cross-surface stream delivery.** `_resolve_one` now distinguishes an _own-origin_ stream surface (a web/REPL task whose own result streams over `task_events` → stays a no-op) from a _foreign_ task routing INTO a stream surface (an email reply into a web room → resolves to a real push). Also added the missing web-push branch to `process_one_task` — `plan_web` was previously only used for the confirmation gate and delta-prune, so a resolved web push would not have been delivered at all.
 - **Inbound origin routing.** Replaced the hardcoded `output_target="talk,email"` block with policy-driven origin+mirror logic: a thread-matched reply routes back to its origin descriptor and, per the user's policy, optionally mirrors to the email thread. Legacy NULL-origin rows keep the exact old `talk,email` behavior + the Talk delivery-token ladder.
 - **Per-user policy.** New `user_profiles.email_reply_routing` (`origin+thread` default | `origin` | `thread`), threaded through `config`/`user_profiles`, `istota user ensure --email-reply-routing`, and Ansible provisioning.
 
 **Design note:** `origin_descriptor` follows the spec's code (uses `_surface_for_source_type`) over its hedged docstring — `talk`-surface source types return `talk`, so under the default policy the outcome is byte-identical to today's `talk,email` for every source type, and the per-user policy applies uniformly. Scully proved the byte-identical claim by tracing token equivalence and proved the tests non-vacuous by mutation.
 
 **Review fixes (Mulder findings — the multi-step bugs unit tests missed):**
-- **Multi-round threads lost the origin.** A reply task (`source_type="email"`) that mirrors its result to the thread recorded a NULL-origin `sent_emails` row, so the *next* reply hit the back-compat branch and misrouted to Talk using the carried-forward web/REPL room token as the Talk channel — a post to a nonexistent room. This broke the **default** flow on round 2+. Fix: `origin_descriptor` now recovers a web/Talk origin from an email continuation's `conversation_token`, and the back-compat ladder refuses `web-`/`repl-`-prefixed tokens as Talk channels.
+
+- **Multi-round threads lost the origin.** A reply task (`source_type="email"`) that mirrors its result to the thread recorded a NULL-origin `sent_emails` row, so the _next_ reply hit the back-compat branch and misrouted to Talk using the carried-forward web/REPL room token as the Talk channel — a post to a nonexistent room. This broke the **default** flow on round 2+. Fix: `origin_descriptor` now recovers a web/Talk origin from an email continuation's `conversation_token`, and the back-compat ladder refuses `web-`/`repl-`-prefixed tokens as Talk channels.
 - **Stuck confirmation on a web-origin reply.** A web-routed email reply that produced a confirmation prompt parked in `pending_confirmation` but couldn't be surfaced or answered anywhere (the web confirm flow only works for `source_type="web"` tasks via their own SSE). Fix (option C): scope the web confirmability arm to own-origin web tasks; a foreign reply now completes and delivers the question to the room.
 - **Orphan row on a deleted room** (`_append_blocking` inserted a never-rendering row instead of dropping with a WARNING) and the **busy-room delete guard bypass** (`count_active_web_tasks` only counted `source_type="web"`, so an in-flight email reply didn't block deletion) — both fixed.
 
 Full suite green (6008). Spec moved to Done.
 
 **Files modified:**
+
 - `src/istota/transport/routing.py` - `origin_descriptor` (+ email-continuation recovery); `_resolve_one` own-origin-vs-foreign stream branch
 - `src/istota/transport/email/inbound.py` - policy-driven origin+mirror routing; back-compat token guard
 - `src/istota/transport/email/outbound.py`, `src/istota/scheduler_deferred.py` - stamp `origin_target` on sent emails
@@ -2809,15 +3043,16 @@ Full suite green (6008). Spec moved to Done.
 
 ## 2026-06-09: Defense-in-depth for the alive-but-slow duplicate-execution residual
 
-Follow-up to the stuck-running reclaim fix. Mulder + Scully both flagged a residual the liveness-reset couldn't close: a genuinely *alive* worker whose heartbeat lapses past `worker_stuck_minutes` (GIL/thread starvation under load, or a stalled FUSE-mounted DB blocking `touch_task_heartbeat`) can be declared dead, its task reclaimed and re-run by a second worker while the first is still executing. The heartbeat-reset can't help — the row legitimately looks dead. Two mitigations, per the user's call to do both.
+Follow-up to the stuck-running reclaim fix. Mulder + Scully both flagged a residual the liveness-reset couldn't close: a genuinely _alive_ worker whose heartbeat lapses past `worker_stuck_minutes` (GIL/thread starvation under load, or a stalled FUSE-mounted DB blocking `touch_task_heartbeat`) can be declared dead, its task reclaimed and re-run by a second worker while the first is still executing. The heartbeat-reset can't help — the row legitimately looks dead. Two mitigations, per the user's call to do both.
 
-**1. Pre-delivery ownership guard (kills the user-visible symptom).** `process_one_task` now re-reads the task row after execution, before any delivery / status mutation / deferred-op drain, and bails if it was superseded. The discriminator is `attempt_count`, NOT `locked_by`: `get_worker_id()` is `{host}-{pid}-{user}` with no slot, so two workers in the same process for the same user share an id and can't be told apart by `locked_by` — which is exactly the original-bug topology (slots 0 and 1). The stuck-running release bumps `attempt_count` on every reclaim, so if the row's count advanced past what this worker claimed, another worker owns it now → discard the result, return `(task_id, False)`, let the superseding worker deliver + emit the terminal frame. This stops the double *delivery* ("two answers"); it doesn't stop the wasted double *execution*, which is inherent to heartbeat-liveness.
+**1. Pre-delivery ownership guard (kills the user-visible symptom).** `process_one_task` now re-reads the task row after execution, before any delivery / status mutation / deferred-op drain, and bails if it was superseded. The discriminator is `attempt_count`, NOT `locked_by`: `get_worker_id()` is `{host}-{pid}-{user}` with no slot, so two workers in the same process for the same user share an id and can't be told apart by `locked_by` — which is exactly the original-bug topology (slots 0 and 1). The stuck-running release bumps `attempt_count` on every reclaim, so if the row's count advanced past what this worker claimed, another worker owns it now → discard the result, return `(task_id, False)`, let the superseding worker deliver + emit the terminal frame. This stops the double _delivery_ ("two answers"); it doesn't stop the wasted double _execution_, which is inherent to heartbeat-liveness.
 
 **2. Raised `worker_stuck_minutes` 5 → 10 (reduces how often the race fires).** Five missed 60s pings was aggressive enough that a transient stall could false-declare a live worker dead. Ten gives more headroom; the trade-off is slower genuine-crash recovery, acceptable since the timeout-fallback (`task_timeout + grace`) still bounds no-heartbeat cases.
 
 Test: `test_superseded_task_does_not_deliver_duplicate` (fake exec bumps attempt_count mid-run → assert the worker bails, doesn't complete or store its result). Full suite green (5967).
 
 **Files modified:**
+
 - `src/istota/scheduler.py` - ownership guard in `process_one_task`
 - `src/istota/config.py`, `config/config.example.toml`, `deploy/ansible/{defaults/main.yml}` - `worker_stuck_minutes` 5 → 10
 - `tests/test_scheduler.py` - supersession test
@@ -2826,13 +3061,14 @@ Test: `test_superseded_task_does_not_deliver_duplicate` (fake exec bumps attempt
 
 A failed/interrupted task could be claimed and executed by two workers at once — one task id, two concurrent runs, two different answers delivered. Reproduced from prod logs: a task left `running` by a scheduler restart (stale `last_heartbeat`) was, on the retry tick, picked up by two foreground workers spawned in the same dispatch pass; both produced a result ~2s apart.
 
-**Root cause.** `claim_task` never reset a task's liveness fields when (re)claiming it. The stuck-running *release* step set `started_at=NULL` but left the dead worker's `last_heartbeat` on the row, and the *claim* step touched neither. So after worker A reclaimed the task and set it `running`, the `_STUCK_RUNNING_PREDICATE`'s first clause (`last_heartbeat IS NOT NULL AND last_heartbeat < now-5min`) was *still* true until A's first heartbeat ping landed — a multi-second window in which worker B's `claim_task` re-ran the same stuck-running recovery, re-released the task, and re-claimed it. Both executed. The ISSUE-112 heartbeat-liveness reclaim is the latent cause; the phase-2 idle-recheck/dispatch work (commit c281804, same day) is what made two workers call `claim_task` near-simultaneously and expose the window.
+**Root cause.** `claim_task` never reset a task's liveness fields when (re)claiming it. The stuck-running _release_ step set `started_at=NULL` but left the dead worker's `last_heartbeat` on the row, and the _claim_ step touched neither. So after worker A reclaimed the task and set it `running`, the `_STUCK_RUNNING_PREDICATE`'s first clause (`last_heartbeat IS NOT NULL AND last_heartbeat < now-5min`) was _still_ true until A's first heartbeat ping landed — a multi-second window in which worker B's `claim_task` re-ran the same stuck-running recovery, re-released the task, and re-claimed it. Both executed. The ISSUE-112 heartbeat-liveness reclaim is the latent cause; the phase-2 idle-recheck/dispatch work (commit c281804, same day) is what made two workers call `claim_task` near-simultaneously and expose the window.
 
-**Fix.** Give every claim a clean liveness slate: the atomic claim now sets `last_heartbeat = NULL, started_at = NULL`, and the stuck-running release also clears `last_heartbeat` (both the inline `claim_task` recovery and the standalone `fail_stuck_locked_running_tasks` maintenance pass). `update_task_status('running')` sets `started_at=now` immediately after the claim, so the predicate's fallback (`last_heartbeat IS NULL AND started_at < now-5min`) reads fresh — no window for a second claimer. claim_task atomicity (UPDATE…RETURNING) already prevents two workers claiming the *same pending row*; the bug was purely the stale heartbeat re-qualifying an already-claimed task as stuck.
+**Fix.** Give every claim a clean liveness slate: the atomic claim now sets `last_heartbeat = NULL, started_at = NULL`, and the stuck-running release also clears `last_heartbeat` (both the inline `claim_task` recovery and the standalone `fail_stuck_locked_running_tasks` maintenance pass). `update_task_status('running')` sets `started_at=now` immediately after the claim, so the predicate's fallback (`last_heartbeat IS NULL AND started_at < now-5min`) reads fresh — no window for a second claimer. claim_task atomicity (UPDATE…RETURNING) already prevents two workers claiming the _same pending row_; the bug was purely the stale heartbeat re-qualifying an already-claimed task as stuck.
 
 Deterministic regression test (`TestReclaimedTaskNotDoubleClaimed`): stage a stale-running task, claim it (A), transition to running, then a second claim (B) must return None / a different id. Verified it fails without the fix and passes with it. Full suite green (5964).
 
 **Files modified:**
+
 - `src/istota/db.py` - `claim_task` claim + both stuck-running release sites clear `last_heartbeat`/`started_at`
 - `tests/test_db.py` - `TestReclaimedTaskNotDoubleClaimed`
 
@@ -2841,12 +3077,14 @@ Deterministic regression test (`TestReclaimedTaskNotDoubleClaimed`): stage a sta
 Cleanup prompted by a burst of `secrets import skipped: ISTOTA_SECRET_KEY not set` and `admins_file_default_missing path=/etc/istota/admins (ISTOTA_ADMINS_FILE not set)` INFO lines on the namespace deploy. Traced to the in-process `feeds`/`money` skill facades calling `load_config()` when run as subprocesses (`python -m istota.skills.*` via `_execute_skill_task`): the subprocess env is `build_clean_env`, which carries neither `ISTOTA_SECRET_KEY` (stripped by design — the master-key boundary) nor `ISTOTA_ADMINS_FILE` (not propagated). So `load_config` → `load_admin_users()` fell back to the hardcoded `/etc/istota/admins` and `_migrate_obsolete_resources` → `import_from_user_configs` found no key, each logging at INFO. Pre-existing for a month (the secrets half landed with the modules refactor, 03a240c); not a regression from the scheduler-stats work — just newly visible because the operator was reading the logs for Stage 5.
 
 **Two changes:**
+
 - `build_clean_env` now propagates `ISTOTA_ADMINS_FILE` when set. It's a path, not a secret, so there's no reason to drop it — this makes subprocess config loads resolve the namespace-correct admins file instead of the hardcoded `/etc/istota` default. The secret key stays out of subprocesses (boundary unchanged).
-- Both log lines dropped INFO → DEBUG. The secrets-import-skip is *expected* in any subprocess (key intentionally absent), and the admins default-missing is moot there (no web dashboard). The env-var-set-but-file-absent case stays WARNING — that's a real misconfig.
+- Both log lines dropped INFO → DEBUG. The secrets-import-skip is _expected_ in any subprocess (key intentionally absent), and the admins default-missing is moot there (no web dashboard). The env-var-set-but-file-absent case stays WARNING — that's a real misconfig.
 
 Full suite green (5963). Added two `build_clean_env` propagation tests.
 
 **Files modified:**
+
 - `src/istota/executor.py` - `build_clean_env` propagates `ISTOTA_ADMINS_FILE`
 - `src/istota/secrets_store.py`, `src/istota/config.py` - two log lines INFO → DEBUG
 - `tests/test_security.py` - admins-file propagation tests
@@ -2860,13 +3098,15 @@ Periodic process-health line emitted by the long-running scheduler daemon, motiv
 **Defensive by design.** Every collector degrades rather than killing the daemon loop: psutil-missing omits `fds`/`rss_mb` with a once-per-process WARN (module-global latch); a DB hiccup yields `tasks_running=?`; a missing pool yields `workers_active=0`; the whole body is wrapped in a final try/except backstop.
 
 **Post-review (Mulder/Scully).** Two agents reviewed the implementation:
-- *psutil collector errors dropped the whole line (HIGH, fixed).* The first cut caught only `ImportError`, but `psutil.num_fds()` / `memory_info()` can raise `AccessDenied`, `NoSuchProcess`, or — the case this line exists to catch — `OSError(EMFILE)` (num_fds does `os.listdir("/proc/self/fd")`, which needs a fd it can't get under exhaustion). Those escaped to the outer except and emitted *no* line, blinding the operator during the exact leak scenario. Fixed by separating the import (ImportError → once-WARN) from the collectors (each field collected independently, omitted on any error, line still emits).
-- *Failure WARN routed to the stats logger* so a consumer filtering by logger name (not just grepping) sees the gap.
+
+- _psutil collector errors dropped the whole line (HIGH, fixed)._ The first cut caught only `ImportError`, but `psutil.num_fds()` / `memory_info()` can raise `AccessDenied`, `NoSuchProcess`, or — the case this line exists to catch — `OSError(EMFILE)` (num_fds does `os.listdir("/proc/self/fd")`, which needs a fd it can't get under exhaustion). Those escaped to the outer except and emitted _no_ line, blinding the operator during the exact leak scenario. Fixed by separating the import (ImportError → once-WARN) from the collectors (each field collected independently, omitted on any error, line still emits).
+- _Failure WARN routed to the stats logger_ so a consumer filtering by logger name (not just grepping) sees the gap.
 - Added regression tests for the EMFILE path, the once-only WARN across multiple emits, and the outer backstop (gaps Scully flagged).
 
 Full suite green; scheduler/config/db/stats suites green post-fix. `tests/test_scheduler_stats.py` = 12 tests.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` - `_emit_scheduler_stats` + `_SCHEDULER_STATS_LOGGER` + once-WARN latch; daemon-loop gate
 - `src/istota/db.py` - `count_running_tasks`
 - `src/istota/config.py` - `scheduler_stats_interval` field + loader
@@ -2878,19 +3118,21 @@ Full suite green; scheduler/config/db/stats suites green post-fix. `tests/test_s
 
 Second of two latency cuts for cold task pickup, motivated by web chat: a freshly-enqueued `source_type="web"` task could sit `pending` for seconds before a worker claimed it and emitted the first SSE event. Phase 1 (the `_dispatch_sleep` sub-tick dispatch scan) already closed the fully-cold case. Phase 2 closes the "quick follow-up" case — the user reads a reply and sends another message while the worker that just handled the previous turn is still parked in its idle linger. `dispatch()` can't help there because the parked worker still holds the per-user slot, so pickup was gated by `poll_interval` (~5s), not the 0.5s dispatch cadence.
 
-**The idle loop.** Replaced `UserWorker.run`'s single coarse-wait + single-recheck idle branch with `_worker_idle_wait`: it re-checks for work every `worker_idle_poll_interval` (new knob, default 0.5s) until `worker_idle_timeout` of *continuous* emptiness elapses, then exits (dispatch re-spawns on the next task). A follow-up landing mid-linger is now claimed within ~one idle poll. The deadline tracks continuous emptiness — a lost claim race does not reset it, so two idle workers can't keep each other alive forever. The helper mirrors `_dispatch_sleep` (slice-sleep + stop/shutdown checks, testable with the same fake clock); stop/shutdown are honoured within one slice.
+**The idle loop.** Replaced `UserWorker.run`'s single coarse-wait + single-recheck idle branch with `_worker_idle_wait`: it re-checks for work every `worker_idle_poll_interval` (new knob, default 0.5s) until `worker_idle_timeout` of _continuous_ emptiness elapses, then exits (dispatch re-spawns on the next task). A follow-up landing mid-linger is now claimed within ~one idle poll. The deadline tracks continuous emptiness — a lost claim race does not reset it, so two idle workers can't keep each other alive forever. The helper mirrors `_dispatch_sleep` (slice-sleep + stop/shutdown checks, testable with the same fake clock); stop/shutdown are honoured within one slice.
 
 **Repaired dead config.** `worker_idle_timeout` (was 30s) was effectively dead — the old single-wait branch lingered only ~one `poll_interval` regardless of the setting. It's now the genuine cumulative-idle linger; default lowered to 10s (operator-tunable middle ground between slot occupancy and absorbing realistic between-turn gaps).
 
-**Stays poll-based.** The obvious wake-on-enqueue `Event`/`Condition` doesn't work: web messages are enqueued by the *web* process, a different OS process from the scheduler daemon, so an in-process signal can't cross the boundary. Polling the shared SQLite DB is the only cross-process mechanism — same constraint as phase 1.
+**Stays poll-based.** The obvious wake-on-enqueue `Event`/`Condition` doesn't work: web messages are enqueued by the _web_ process, a different OS process from the scheduler daemon, so an in-process signal can't cross the boundary. Polling the shared SQLite DB is the only cross-process mechanism — same constraint as phase 1.
 
 **Post-review (Mulder/Scully).** Two fixes folded in before merge:
-- *Legacy-branch stop responsiveness.* The first cut used `time.sleep` in the legacy-parity branch too (for fake-clock testability), silently dropping the instant-wake-on-stop the pre-phase-2 code had via `stop_event.wait`. Restored `stop_event.wait` in the legacy branch only; the fine-cadence default keeps slice-sleep (meets the one-poll bound).
-- *Claimability-aware counts (scope expanded into `dispatch()`).* The cheap `count_pending_tasks_for_user_queue` pre-check was the wrong gate for the foreground queue: `claim_task` applies a per-channel single-active gate, so a follow-up queued behind an active task in the *same room* (the exact web-chat case) read as "1 pending" but was unclaimable — the idle worker would busy-poll `claim_task` (5 stale-lock maintenance UPDATEs) every 0.5s and `dispatch()` would spawn a doomed second worker, for the blocking task's whole lifetime. Factored the gate into a shared `db._CLAIM_CHANNEL_GATE_SQL`, added `db.count_claimable_tasks_for_user_queue` mirroring `claim_task`'s claimability, and used it in *both* the idle pre-check and `dispatch()`'s spawn count. A gated follow-up now counts 0 → no doomed worker, no busy-poll; a different-room task still counts. Raw `count_pending_*` kept for status/observability only. This deliberately overrode the spec's "don't touch `dispatch()`" non-goal — the doomed spawn was the larger half of the same defect.
+
+- _Legacy-branch stop responsiveness._ The first cut used `time.sleep` in the legacy-parity branch too (for fake-clock testability), silently dropping the instant-wake-on-stop the pre-phase-2 code had via `stop_event.wait`. Restored `stop_event.wait` in the legacy branch only; the fine-cadence default keeps slice-sleep (meets the one-poll bound).
+- _Claimability-aware counts (scope expanded into `dispatch()`)._ The cheap `count_pending_tasks_for_user_queue` pre-check was the wrong gate for the foreground queue: `claim_task` applies a per-channel single-active gate, so a follow-up queued behind an active task in the _same room_ (the exact web-chat case) read as "1 pending" but was unclaimable — the idle worker would busy-poll `claim_task` (5 stale-lock maintenance UPDATEs) every 0.5s and `dispatch()` would spawn a doomed second worker, for the blocking task's whole lifetime. Factored the gate into a shared `db._CLAIM_CHANNEL_GATE_SQL`, added `db.count_claimable_tasks_for_user_queue` mirroring `claim_task`'s claimability, and used it in _both_ the idle pre-check and `dispatch()`'s spawn count. A gated follow-up now counts 0 → no doomed worker, no busy-poll; a different-room task still counts. Raw `count_pending_*` kept for status/observability only. This deliberately overrode the spec's "don't touch `dispatch()`" non-goal — the doomed spawn was the larger half of the same defect.
 
 Full suite green (5949 passed). New tests: `TestWorkerIdleWait` (11 idle-loop cases), `TestCountClaimableTasksForUserQueue` (8 db cases), two `dispatch()` doomed-worker cases, config default/load assertions.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` - `_worker_idle_wait` + `_count_pending` helpers; rewired `UserWorker.run` idle branch; `dispatch()` spawn count → claimable
 - `src/istota/db.py` - `_CLAIM_CHANNEL_GATE_SQL` shared constant (factored out of `claim_task`); `count_claimable_tasks_for_user_queue`
 - `src/istota/config.py` - `worker_idle_poll_interval` field + loader; `worker_idle_timeout` default 30 → 10
@@ -2909,6 +3151,7 @@ Two surfaces still hardcoded dark hex values instead of the theme CSS variables,
 The remaining hardcoded dark values elsewhere (health bloodwork flag cells, location map markers/colors) are the deliberately dark-tuned status/chart colors that `app.css` documents as exempt from the variable flip — left as-is.
 
 **Files modified:**
+
 - `web/src/routes/+page.svelte` - dashboard card surfaces/text → theme variables
 - `web/src/lib/components/ui/SidebarToggle.svelte` - mobile tab background → `var(--surface-card)`
 
@@ -2918,13 +3161,14 @@ Web chat shipped with rooms you could create and select but not manage: no renam
 
 **Affordance.** Each room row in the sidebar gained the existing `KebabMenu` (⋮) with a single "Settings…" item opening `RoomSettings.svelte` (built on the shared `Modal`, mirroring the location `PlaceForm` pattern). The modal: rename the room (token stays invariant), a read-only token field with a Copy button (clipboard write, "Copied!" feedback, falls back to a "select manually" notice when `navigator.clipboard` rejects on an insecure context), and a delete flow.
 
-**Delete is a hard cascade.** `db.delete_web_chat_room` removes, in one transaction, the room's tasks' `task_events`, those tasks, its `web_chat_messages`, its `channel_sleep_cycle_state`, and the room row — ownership-checked (`user_id` mismatch / unknown id → `False`, deleting nothing). The API helper (`_chat_delete_room`) guards on `count_active_web_tasks` (a non-terminal task in the room → 409, so a running worker can't write `task_events` against rows we just dropped) and best-effort removes the `Channels/<token>/` directory outside the transaction. The destructive button is gated behind a GitHub-style type-the-room-name confirmation (exact, case-sensitive, against the *saved* name, not any unsaved rename). Channel `memory_chunks` are a documented residual — removing `CHANNEL.md` stops them being re-indexed.
+**Delete is a hard cascade.** `db.delete_web_chat_room` removes, in one transaction, the room's tasks' `task_events`, those tasks, its `web_chat_messages`, its `channel_sleep_cycle_state`, and the room row — ownership-checked (`user_id` mismatch / unknown id → `False`, deleting nothing). The API helper (`_chat_delete_room`) guards on `count_active_web_tasks` (a non-terminal task in the room → 409, so a running worker can't write `task_events` against rows we just dropped) and best-effort removes the `Channels/<token>/` directory outside the transaction. The destructive button is gated behind a GitHub-style type-the-room-name confirmation (exact, case-sensitive, against the _saved_ name, not any unsaved rename). Channel `memory_chunks` are a documented residual — removing `CHANNEL.md` stops them being re-indexed.
 
 **Deep link.** `/chat?room=<token>` selects that room on mount via a new `selectRoomByToken` store action, overriding the persisted-room default for that load. A token not in the per-user room list (foreign / typo / archived) silently falls back — which is also the access-control boundary, since the list is already per-user.
 
 Verified end-to-end against the mock backend (kebab → settings, rename disabled-when-unchanged, type-to-confirm gating wrong vs. exact, delete → empty-state fall-through, deep-link selects the named room over the active one, unknown token falls back). Backend is TDD: `TestWebChatRoomDelete` (DB cascade + ownership + busy count) and `TestChatDeleteApi` (200/409/404/CSRF) in `tests/test_web_chat.py`.
 
 **Files added/modified:**
+
 - `src/istota/db.py` - `delete_web_chat_room` + `count_active_web_tasks`
 - `src/istota/web_app.py` - `_chat_delete_room` + `DELETE /chat/rooms/{id}` route + `CHANNEL.md` cleanup
 - `web/src/lib/api.ts` - `deleteChatRoom` + `ChatRoomBusyError`
@@ -2936,7 +3180,7 @@ Verified end-to-end against the mock backend (kebab → settings, rename disable
 
 ## 2026-06-07: Web chat as a user-routable delivery surface (ISSUE-121)
 
-Web chat shipped as an *interactive* surface only: you could talk to the bot in a room, but it wasn't a destination you could route logs/alerts/notifications to. The settings UI's logs/alerts route pickers offered talk/email/ntfy but not web, and the underlying reason was structural — there was no `WebTransport`, so `registry.routable_names()` (which every UI selector already reads) couldn't surface it.
+Web chat shipped as an _interactive_ surface only: you could talk to the bot in a room, but it wasn't a destination you could route logs/alerts/notifications to. The settings UI's logs/alerts route pickers offered talk/email/ntfy but not web, and the underlying reason was structural — there was no `WebTransport`, so `registry.routable_names()` (which every UI selector already reads) couldn't surface it.
 
 The wrinkle that made this more than a one-liner: web is a **stream** surface. An interactive `source_type="web"` task streams its own result over the `task_events` log (the SSE), exactly like the REPL, and `routing._STREAM_SURFACES` short-circuits `web` to a stream destination so nothing gets pushed for those tasks. A `ReplTransport.deliver` is a genuine no-op for that reason. So "route an alert to web" had nowhere to land — a notification isn't tied to a chat task the user is watching.
 
@@ -2949,6 +3193,7 @@ The wrinkle that made this more than a one-liner: web is a **stream** surface. A
 A scully review confirmed no must-fix issues and that the no-double-delivery invariant holds. Deferred (not defects): per-room channel picking in the routing UI (a bare `web` route lands in the user's default room); the pre-existing `ensure_default_web_chat_room` read-then-create race, narrow and only slightly widened by the new entry points.
 
 **Key changes:**
+
 - New `WebTransport` (`transport/web/__init__.py`) + `default_web_room_token`; registered in `make_registry`, `user_routable=True`.
 - New `web_chat_messages` table (schema + idempotent init migration) with `add_web_chat_message` / `list_web_chat_messages` / `WebChatMessage`.
 - `notifications.py`: `_send_web` + `send_notification` web branch; `effective_log_destinations` bare-`web` resolution; `is_channel_configured` web probe.
@@ -2956,6 +3201,7 @@ A scully review confirmed no must-fix issues and that the no-double-delivery inv
 - Docs (AGENTS.md, transport/scheduler rules) updated; ISSUE-121 closed.
 
 **Files added/modified:**
+
 - `src/istota/transport/web/__init__.py` - new WebTransport + default-room helper
 - `src/istota/transport/registry.py` - register web; `for_task("web")` now resolves it
 - `src/istota/transport/__init__.py` - export WebTransport
@@ -2985,6 +3231,7 @@ A scully review confirmed no must-fix issues and that the no-double-delivery inv
 **Tests.** Migrated `test_commands.py` (93 handler call sites) to `CommandContext` via a `_ctx` helper; rewrote the dispatch tests around `CommandResult` + a fake push/stream registry; rewrote export tests DB-backed and search to assert Talk-API gating on non-Talk surfaces; added `resolve_model_prefix` coverage and web `!model` (override + usage) tests. Full suite green; `svelte-check` and prod build clean.
 
 **Key changes:**
+
 - `CommandContext` + `CommandResult`; all 13 handlers take `ctx`. `CommandHandler` type updated.
 - `dispatch()` delivers via registry push transport or returns inline text for stream surfaces; `run_inline` removed.
 - `resolve_model_prefix()` shared by Talk inbound + web send handler; fixes broken web `!model`.
@@ -2993,6 +3240,7 @@ A scully review confirmed no must-fix issues and that the no-double-delivery inv
 - Command output renders left-aligned (was centered); `.body` capped at 900px; `.meta-footer` absolutely positioned.
 
 **Files added/modified:**
+
 - `src/istota/commands.py` — CommandContext/CommandResult, unified dispatch, resolve_model_prefix, DB-backed export/search, all handler signatures.
 - `src/istota/transport/talk/inbound.py` — call new dispatch + shared model-prefix helper.
 - `src/istota/web_app.py` — `!model` parsing, registry-based command dispatch, model/effort on web task creation.
@@ -3017,9 +3265,10 @@ Follow-up polish on the web chat streaming UI. Four asks plus two bugs found alo
 
 **Bug — chevron alignment.** The `ToolStrip` icon slots were plain spans, so the lucide SVGs sat on the text baseline and looked off. Made the icon slots `inline-flex` + centered. (Icons were already lucide — the library used throughout.)
 
-Separation of concerns settled: the status line carries *generic* progress (shared verbs + intermediate text); the tool box carries *tool* activity. The status line is suppressed while a tool is actively running so the two don't compete. Verified end-to-end in the browser against the mock backend (running → completed → expand), plus `svelte-check` / `npm run build` clean and backend tests green (events/progress 38, executor 261).
+Separation of concerns settled: the status line carries _generic_ progress (shared verbs + intermediate text); the tool box carries _tool_ activity. The status line is suppressed while a tool is actively running so the two don't compete. Verified end-to-end in the browser against the mock backend (running → completed → expand), plus `svelte-check` / `npm run build` clean and backend tests green (events/progress 38, executor 261).
 
 **Key changes:**
+
 - Shared `PROGRESS_MESSAGES` + `random_progress_message()` in `events.py`; executor stamps a verb onto `task_started`; Talk italicizes its own pick.
 - `ToolStrip` single-box tool UI (active tool + details, expand-to-all); `ToolChip` removed.
 - `finalizeTools()` on terminal events fixes the never-ending tool spinner under the Claude Code brain.
@@ -3028,6 +3277,7 @@ Separation of concerns settled: the status line carries *generic* progress (shar
 - Chat added as the first dashboard feature card (gated on the always-on `chat` feature).
 
 **Files added/modified:**
+
 - `web/src/routes/+page.svelte` - Chat dashboard card (first)
 - `web/src/lib/components/chat/ToolStrip.svelte` - new single tool box (replaces ToolChip)
 - `web/src/lib/components/chat/Message.svelte` - use ToolStrip, suppress status line while a tool runs
@@ -3052,12 +3302,14 @@ Real names: the frontend had no bot name, so author labels were hardcoded "You" 
 Verified in-browser against the mock backend (`VITE_MOCK_API=1`): grouping, avatars, tool chips, timestamps, bold/list/inline-code rendering, full-width hover highlight, and real names ("Alice" / "Istota"). `svelte-check` + `npm run build` clean; the `/me` web_app tests pass with a new `bot_name` assertion.
 
 **Key changes:**
+
 - Discord/Slack transcript: avatar + author/time header, same-author grouping, full-width hover highlight, no bubbles.
 - markdown-it replaces the hand-rolled renderer; same signature, same safe-by-construction posture, fuller grammar.
 - `bot_name` added to `/me`; chat headers show real display name + bot name (avatar initial derived).
 - `createdAt` added to the chat message model and threaded through history + live sends.
 
 **Files added/modified:**
+
 - `web/src/lib/components/chat/Message.svelte` - row layout, avatar, author/time header, grouping, name props
 - `web/src/lib/markdown/index.ts` - rewritten on markdown-it (html:false, link allowlist, target/rel)
 - `web/src/routes/chat/+page.svelte` - continuation grouping, `/me` fetch, name props, full-width container
@@ -3079,11 +3331,13 @@ Env parity is best-effort sourcing of the same `/etc/<ns>/secrets.env` the units
 Verified: rendered the template with the defaults → `shellcheck` clean + `bash -n` OK; `ansible-playbook --syntax-check` passes.
 
 **Key changes:**
+
 - New `<namespace>-run` wrapper at `/usr/local/bin` (e.g. `istota-run repl -u alice`).
 - Self-sudo with re-exec guard; sources `secrets.env` best-effort; exports `ISTOTA_ADMINS_FILE`; `cd`s into the repo; `exec`s the venv `istota`.
 - Ansible deploy task gated `not istota_web_only`; no new variables, no sudoers.d.
 
 **Files added/modified:**
+
 - `deploy/ansible/templates/ns-run.sh.j2` - the wrapper template
 - `deploy/ansible/tasks/main.yml` - template task → `/usr/local/bin/{{ istota_namespace }}-run`
 - `deploy/ansible/README.md` - "Running the CLI on the host" section
@@ -3095,7 +3349,7 @@ Residual cleanup after the delivery-abstraction layer: briefings still offered `
 
 The backend already supports multiple/arbitrary output targets end-to-end — `parse_output_target` splits comma lists and `surface:channel` leaves, `user_briefings.ensure_briefing` validates via that parser, the CLI passes the descriptor straight through, and `check_briefings` is grammar-aware. The only chokepoint was the web UI plus its endpoint validation (`_BRIEFING_OUTPUTS = {talk, email, both}`), which rejected anything richer before it reached the storage layer.
 
-The second finding (spotted mid-review): the Preferences "default delivery destination" and "alert route" dropdowns were populated by `_registered_delivery_surfaces() = {"stream"} | registry.names()`, which blindly dumped *every* registered transport — including `istota_file` and `repl`. Both are self-routing/internal surfaces: `istota_file` resolves its target from the originating TASKS.md row (a non-TASKS.md task has no row → dropped), and `repl` is the inline terminal the daemon never delivers to. Neither is a meaningful user-pickable destination, and they were leaking into the UI as footguns.
+The second finding (spotted mid-review): the Preferences "default delivery destination" and "alert route" dropdowns were populated by `_registered_delivery_surfaces() = {"stream"} | registry.names()`, which blindly dumped _every_ registered transport — including `istota_file` and `repl`. Both are self-routing/internal surfaces: `istota_file` resolves its target from the originating TASKS.md row (a non-TASKS.md task has no row → dropped), and `repl` is the inline terminal the daemon never delivers to. Neither is a meaningful user-pickable destination, and they were leaking into the UI as footguns.
 
 Fix: made "can a user route to this" an intrinsic transport property rather than a blind name union. Added `user_routable: bool = True` to `TransportCapabilities`; `IstotaFileTransport` and `ReplTransport` set it `False`. New `TransportRegistry.routable_names()` filters on the flag, and `_registered_delivery_surfaces()` returns only routable, instance-enabled surfaces — talk/email/ntfy. The hand-added `"stream"` was dropped (held back from the UI until web chat ships; flips back via one flag). The briefing dropdown is now server-driven from the same helper, single-select, token field kept; token is required only when `talk` is a leaf.
 
@@ -3104,6 +3358,7 @@ Fix: made "can a user route to this" an intrinsic transport property rather than
 Ansible: no new field needed (`user_routable` is code-only; instance-enable defaults `istota_talk_enabled`/`istota_email_enabled` already exist, ntfy is per-user). Cosmetic touch-ups only — quoted `--output` for comma-list safety, scrubbed `both` from two planning/example comments.
 
 **Key changes:**
+
 - `TransportCapabilities.user_routable` (default `True`); `istota_file` + `repl` set `False`.
 - `TransportRegistry.routable_names()`; `_registered_delivery_surfaces()` filters on it and drops the hand-added `"stream"`.
 - Briefing `outputs` endpoint + dropdown driven by routable surfaces; token required only when `talk` is a leaf.
@@ -3112,6 +3367,7 @@ Ansible: no new field needed (`user_routable` is code-only; instance-enable defa
 - `both` scrubbed from UI/producers/docs; kept as silent alias in `routing.py`; email-reply producer emits `talk,email`.
 
 **Files added/modified:**
+
 - `src/istota/transport/_types.py` - `user_routable` capability + doc; `IncomingMessage.output_target` comment
 - `src/istota/transport/registry.py` - `routable_names()`
 - `src/istota/transport/istota_file/__init__.py`, `repl/__init__.py` - `user_routable=False`
@@ -3135,12 +3391,14 @@ Second, simplified the per-user delivery-routing UI. The web Preferences card ex
 Note for future sessions: this landed mid-air against `main`. The branch was 1 behind `main`, whose newer commit had just reworked the same `+page.svelte` routing block into a dropdown / per-line layout. The settings edit was redone against that newer layout (matrix `{#each}` → single `Select`); the `web_app.py` / `api.ts` edits were unaffected.
 
 **Key changes:**
+
 - Closed ISSUE-113 as substantially-resolved; documented the shim keep + the already-done `TalkClient` sweep in `transport.md`.
 - Web Preferences "Delivery routing (per purpose)" matrix replaced by one "Send alerts to" dropdown bound to `routing["alert"]`; default-destination control kept with a clearer hint.
 - Dropped the dead `purposes` hint from `GET /settings/profile`, the `_routing_purposes` helper, the `purposes?` api.ts field, the unused `DEFAULT_PURPOSES` const, and the `.route-section` / `.route-heading` CSS.
 - Logs and briefings deliberately left for a separate config pass (log destination belongs with log settings, briefing output with briefing settings).
 
 **Files added/modified:**
+
 - `web/src/routes/settings/+page.svelte` - matrix → single alerts override; removed `DEFAULT_PURPOSES` + dead CSS
 - `src/istota/web_app.py` - removed `_routing_purposes` + the `purposes` payload field
 - `web/src/lib/api.ts` - dropped `purposes?` from `UserProfile`
@@ -3150,11 +3408,11 @@ Note for future sessions: this landed mid-air against `main`. The branch was 1 b
 
 Ran both review agents over the just-landed persistent-asyncio-loop refactor. Verdict: architecture sound, the dangerous traps (reentry deadlock, transient `TalkClient(config)` in a daemon path, email accidentally on the persistent loop) were genuinely avoided, all stated guarantees verified, suite green. The agents surfaced a handful of real fragilities; this session fixed the ones worth acting on.
 
-**`stop()` closed the client before cancelling in-flight work.** The original `stop()` ran the cleanup hooks (which `aclose` the shared client) first, then stopped the loop, and only afterward cancelled pending tasks in `_run`'s `finally`. So at shutdown the talk-poller's in-flight long-poll — awaiting `self._client.get(...)` — had its client closed out from under it, surfacing a spurious "client closed" error instead of a clean `CancelledError` (swallowed by `gather(return_exceptions=True)`, so survivable but inverted). Fixed by adding an `_shutdown` coroutine that runs on the loop and does cancel-then-aclose in the correct order: cancel all pending tasks, `gather` them, *then* run the cleanup hooks. `stop()` submits it with half the timeout budget, then stops the loop with the remainder.
+**`stop()` closed the client before cancelling in-flight work.** The original `stop()` ran the cleanup hooks (which `aclose` the shared client) first, then stopped the loop, and only afterward cancelled pending tasks in `_run`'s `finally`. So at shutdown the talk-poller's in-flight long-poll — awaiting `self._client.get(...)` — had its client closed out from under it, surfacing a spurious "client closed" error instead of a clean `CancelledError` (swallowed by `gather(return_exceptions=True)`, so survivable but inverted). Fixed by adding an `_shutdown` coroutine that runs on the loop and does cancel-then-aclose in the correct order: cancel all pending tasks, `gather` them, _then_ run the cleanup hooks. `stop()` submits it with half the timeout budget, then stops the loop with the remainder.
 
 **One-shot paths leaked the runtime.** `run_scheduler` (cron single-pass) and `cmd_run` (`istota run`) both lazily start the process-global runtime via `run_coro` but never stopped it — every one-shot invocation exited with the shared client's `aclose` hook never running, dropping pooled keep-alives without a clean TLS shutdown (strictly worse than the old per-call `async with`). Both now call `reset_async_runtime()` before returning; no-op when Talk is disabled and the runtime was never started.
 
-**Cleanup hooks accumulated across an in-process restart.** `start()` never cleared `_cleanup_hooks`, and `run_daemon` stopped the runtime without clearing the process globals, so a second `run_daemon` in the same process would re-`start()` the same instance with the prior run's `aclose` hook still in the list, and `get_talk_client` would append another. Benign while `aclose` is idempotent, latent otherwise. Fixed two ways: `start()` now resets `_cleanup_hooks`, and `run_daemon` shutdown switched from `runtime.stop()` to `reset_async_runtime()` (stops *and* clears the globals).
+**Cleanup hooks accumulated across an in-process restart.** `start()` never cleared `_cleanup_hooks`, and `run_daemon` stopped the runtime without clearing the process globals, so a second `run_daemon` in the same process would re-`start()` the same instance with the prior run's `aclose` hook still in the list, and `get_talk_client` would append another. Benign while `aclose` is idempotent, latent otherwise. Fixed two ways: `start()` now resets `_cleanup_hooks`, and `run_daemon` shutdown switched from `runtime.stop()` to `reset_async_runtime()` (stops _and_ clears the globals).
 
 **Test isolation — and a real latent flake it exposed.** The runtime/TalkClient singletons are process-global and persisted across tests within an xdist worker; only the two dedicated test files reset them, on teardown only. Added an autouse `conftest.py` fixture that resets both around every test (near-free for the ~5500 tests that never touch the runtime — the reset helpers early-return when the globals are still `None`). This wasn't just hygiene: the full suite under xdist deterministically failed `test_accessor_starts_runtime_for_cleanup_hook` (it asserts the singleton's pool isn't opened eagerly, but inherited an already-opened client leaked by a prior file's test). Passed in isolation, failed in the suite — exactly the contamination the fixture now prevents.
 
@@ -3165,6 +3423,7 @@ Left as-is by design: no caller-side `run_coro` timeout (httpx bounds each reque
 **Tests.** Full suite green twice (5585 passed, 7 skipped).
 
 **Files modified:**
+
 - `src/istota/async_runtime.py` - `_shutdown` coroutine + reordered `stop()` (cancel→aclose→stop); `start()` clears `_cleanup_hooks`
 - `src/istota/scheduler.py` - `run_scheduler` calls `reset_async_runtime()`; `run_daemon` shutdown uses `reset_async_runtime()`; dropped unused `runtime` binding
 - `src/istota/cli.py` - `cmd_run` calls `reset_async_runtime()` on exit
@@ -3199,7 +3458,7 @@ When the transport seam landed, Talk became a proper subpackage (`transport/talk
 
 **De-duplicated inbound.** `poll_emails` used to call `db.create_task(...)` directly; it now routes through the shared `transport/ingest.py:ingest_message` like Talk does. The load-bearing subtlety: the old code passed `attachments = paths if paths else None`, the new path passes `[]` and `ingest_message` does `attachments=msg.attachments or None`, so `[]` collapses to `None` and `db.create_task` treats both as SQL NULL — byte-identical outcome. Every other field (`is_group_chat`, `priority`, `model`/`effort`, reply fields) resolves to the same `create_task` default the old omitted-arg call relied on.
 
-**Shared library, not a leftover.** The non-transport helpers (`get_email_config`, `is_synthetic_email_thread_token`, `normalize_subject`, `compute_thread_id`, `cleanup_old_emails`) moved to a new `email_support.py` — used by both transport halves *and* by non-transport callers (briefing skill, notifications, TASKS.md poller, scheduler delivery-routing / cleanup). The low-level IMAP/SMTP client stays in `skills.email`, email's analog of `talk.TalkClient`. `scheduler.post_result_to_email` is now a thin shim over `deliver_email_result`, parallel to `post_result_to_talk`; it calls the bool-returning body directly rather than `EmailTransport.deliver`, because the `Transport.deliver` protocol returns `int | None` and would discard the success flag the scheduler's two callers check.
+**Shared library, not a leftover.** The non-transport helpers (`get_email_config`, `is_synthetic_email_thread_token`, `normalize_subject`, `compute_thread_id`, `cleanup_old_emails`) moved to a new `email_support.py` — used by both transport halves _and_ by non-transport callers (briefing skill, notifications, TASKS.md poller, scheduler delivery-routing / cleanup). The low-level IMAP/SMTP client stays in `skills.email`, email's analog of `talk.TalkClient`. `scheduler.post_result_to_email` is now a thin shim over `deliver_email_result`, parallel to `post_result_to_talk`; it calls the bool-returning body directly rather than `EmailTransport.deliver`, because the `Transport.deliver` protocol returns `int | None` and would discard the success flag the scheduler's two callers check.
 
 **Mulder/Scully review.** Ran both review agents on the result. Verdict: behavior-preserving and structurally faithful (inbound field mapping, the `[]`→`None` attachment handling, the smart-quote map, and the shim's bool semantics all verified equivalent against `HEAD`; no test cases dropped — 76 inbound tests before and after). One finding acted on: the refactor had made `import istota.transport` eagerly pull in `skills.briefing` via a module-top `strip_markdown` import in `outbound.py` — a transport structurally depending on a sibling feature-skill at import time, a latent cycle trap the old function-local imports avoided. Made `strip_markdown` lazy inside `deliver_email_result`; `import istota.transport` no longer loads `skills.briefing`.
 
@@ -3208,6 +3467,7 @@ When the transport seam landed, Talk became a proper subpackage (`transport/talk
 **Tests.** Full suite stays green (5538 → 5553 with the new file). `test_email_poller.py` renamed to `test_transport_email_inbound.py`; patch targets repointed (cleanup helpers → `email_support`, poll internals → `transport.email.inbound`); outbound-helper imports in `test_scheduler.py` repointed to `transport.email.outbound`.
 
 **Files added/modified:**
+
 - `src/istota/transport/email/__init__.py` - new: `EmailTransport` seam (poll→inbound, deliver→outbound, resolve_target)
 - `src/istota/transport/email/inbound.py` - new: `poll_emails` + routing + confirmation gate, via shared `ingest_message`
 - `src/istota/transport/email/outbound.py` - new: `deliver_email_result` + parse/deferred/record helpers (moved from scheduler), lazy `strip_markdown`
@@ -3229,15 +3489,16 @@ Replaced the string-based `on_progress` progress callback with a single typed, p
 
 **Layer 2 — persistence**: a `task_events` table (`UNIQUE(task_id, seq)` + index), shared scheduler ⇄ web via WAL. The `ON DELETE CASCADE` clause is decorative — istota never sets `PRAGMA foreign_keys`, proven by `cleanup_old_tasks` already hand-deleting `task_logs` — so events are hand-deleted there and, critically, on retry: a task keeps its id across retries, so a fresh writer's `seq=1` would collide with the prior attempt's surviving rows. `db.delete_task_events` runs in the retry-eligible failure branch beside the deferred-file purge.
 
-**Brain boundary**: the four-member `StreamEvent` union was the bottleneck — the native brain already receives `tool_execution_end` (duration, is_error) and `tool_execution_update` but the union couldn't carry them. Widened it with `ToolEndEvent` and `ToolProgressEvent`, and gave `ToolUseEvent` a real `tool_call_id` (an empty string isn't "absent", it's a *colliding* key that collapses every tool chip onto one). The agent loop now brackets each tool dispatch with a monotonic span (`AgentEvent.duration_ms`) in both sequential and parallel paths — genuine new instrumentation, the loop measured nothing before. `NativeBrain.emit()` maps the richer events and holds back the final text-bearing turn's `TextEvent` (it becomes the result — otherwise a single-turn task double-renders its answer as both progress and result). The ISSUE-111 off-loop dispatch invariant (route the executor callback through `run_in_executor` so synchronous subscribers' `asyncio.run` calls don't collide with the brain's loop) generalizes cleanly: it now carries the whole `emit → on_event` chain.
+**Brain boundary**: the four-member `StreamEvent` union was the bottleneck — the native brain already receives `tool_execution_end` (duration, is_error) and `tool_execution_update` but the union couldn't carry them. Widened it with `ToolEndEvent` and `ToolProgressEvent`, and gave `ToolUseEvent` a real `tool_call_id` (an empty string isn't "absent", it's a _colliding_ key that collapses every tool chip onto one). The agent loop now brackets each tool dispatch with a monotonic span (`AgentEvent.duration_ms`) in both sequential and parallel paths — genuine new instrumentation, the loop measured nothing before. `NativeBrain.emit()` maps the richer events and holds back the final text-bearing turn's `TextEvent` (it becomes the result — otherwise a single-turn task double-renders its answer as both progress and result). The ISSUE-111 off-loop dispatch invariant (route the executor callback through `run_in_executor` so synchronous subscribers' `asyncio.run` calls don't collide with the brain's loop) generalizes cleanly: it now carries the whole `emit → on_event` chain.
 
 **Executor + scheduler**: `execute_task` swapped its `on_progress(str)` parameter for an `EventWriter`; `_on_brain_event` maps the widened stream to `TaskEvent`s. The scheduler builds the writer, subscribes Talk/log/push, then emits the terminal `result`/`error`/`cancelled`/`confirmation` + `done` events and `finish()`s — except on a retry-eligible failure, where it emits nothing terminal (the attempt isn't done) and deletes the event rows. Removed `_make_talk_progress_callback`, `_make_log_channel_callback`, the `_composite_callback` attr-copying hack, the legacy sent_texts dedup and text-msg-as-result delivery paths, and the `progress_style` config plus four sibling knobs.
 
-**Consumers** (`consumers/`, new): `TalkEventSubscriber` (edits the ack in place per tool, and into the `✅ Done — N actions (Xs)` completion summary on the terminal event), `LogChannelSubscriber` (accumulating edit; the scheduler's `_finalize_log_channel` still reads its `all_descriptions`/`log_msg_id`), `PushNotificationSubscriber` (ntfy on tasks over a threshold). The SSE / snapshot / admin consumers are *not* in-process subscribers — they poll the table from the web process (the table is the bus, no IPC): `/api/chat/tasks/{id}/stream` (SSE, `Last-Event-ID` resume, closes after `done`), `…/events` (snapshot), and `/api/admin/tasks/{id}/events`, all ownership-gated.
+**Consumers** (`consumers/`, new): `TalkEventSubscriber` (edits the ack in place per tool, and into the `✅ Done — N actions (Xs)` completion summary on the terminal event), `LogChannelSubscriber` (accumulating edit; the scheduler's `_finalize_log_channel` still reads its `all_descriptions`/`log_msg_id`), `PushNotificationSubscriber` (ntfy on tasks over a threshold). The SSE / snapshot / admin consumers are _not_ in-process subscribers — they poll the table from the web process (the table is the bus, no IPC): `/api/chat/tasks/{id}/stream` (SSE, `Last-Event-ID` resume, closes after `done`), `…/events` (snapshot), and `/api/admin/tasks/{id}/events`, all ownership-gated.
 
 A mid-session note: the user reversed the spec's first-draft decision to drop the Done/N-actions ack summary — it's a wanted UX feature — so the Talk subscriber re-derives the count from the tool descriptions it accumulates and edits the summary on the terminal event. The web-chat frontend that will consume the SSE endpoint is a separate pending spec; this lands the backend it needs.
 
 **Key changes:**
+
 - New `events.py` (TaskEvent / EventWriter / EventSubscriber) + `task_events` table + `db.get_task_events` / `db.delete_task_events`.
 - New `consumers/` package: Talk / log channel / push subscribers.
 - Widened `StreamEvent` union (`ToolEndEvent`, `ToolProgressEvent`, real `tool_call_id`); agent-loop per-tool timing; native final-turn text suppression.
@@ -3246,6 +3507,7 @@ A mid-session note: the user reversed the spec's first-draft decision to drop th
 - Config: removed `progress_style` / `progress_min_interval` / `progress_max_messages` / `progress_text_max_chars` / `progress_max_display_items`; added `event_log_enabled`, `push_notification_threshold_seconds`, `push_notification_sources`.
 
 **Files added/modified:**
+
 - `src/istota/events.py`, `src/istota/consumers/{__init__,talk,log_channel,push}.py` - new
 - `src/istota/brain/_events.py`, `src/istota/brain/__init__.py`, `src/istota/brain/native.py` - widened union, native emit mapping + final-turn suppression
 - `src/istota/agent/events.py`, `src/istota/agent/loop.py` - `duration_ms` instrumentation
@@ -3259,15 +3521,16 @@ A mid-session note: the user reversed the spec's first-draft decision to drop th
 
 ## 2026-06-05: Native brain — Talk progress streaming + stuck-task reclaim/heartbeat (ISSUE-111, ISSUE-112)
 
-Two bugs surfaced once the native brain was running live on Talk. Both trace to the same root environment — the native brain runs its agent loop *in-process* in the worker thread — but they're distinct defects.
+Two bugs surfaced once the native brain was running live on Talk. Both trace to the same root environment — the native brain runs its agent loop _in-process_ in the worker thread — but they're distinct defects.
 
-ISSUE-111: Talk stopped showing in-progress updates (the live tool-call trail and partial text) under the native brain; the chat sat blank until the final reply. The original diagnosis assumed the native brain wasn't *emitting* progress, but it was — `tool_execution_start` → `ToolUseEvent` and `turn_end` → `TextEvent` fired in real time. The break was mechanical: `emit()` called `req.on_progress(event)` synchronously from inside the brain's own `asyncio.run` loop, and the scheduler's Talk-edit callback uses `asyncio.run(edit_talk_message(...))`, which raises `RuntimeError` from a running loop. The error was swallowed at debug level, so every in-progress edit silently failed while the final post (made after `execute_task` returns, with no running loop) still worked. ClaudeCodeBrain was never affected — it parses its subprocess stream on a synchronous loop. Fix: dispatch the sync callback via `run_in_executor` onto a worker thread (no running loop there, so its `asyncio.run` works), awaited to keep edits ordered.
+ISSUE-111: Talk stopped showing in-progress updates (the live tool-call trail and partial text) under the native brain; the chat sat blank until the final reply. The original diagnosis assumed the native brain wasn't _emitting_ progress, but it was — `tool_execution_start` → `ToolUseEvent` and `turn_end` → `TextEvent` fired in real time. The break was mechanical: `emit()` called `req.on_progress(event)` synchronously from inside the brain's own `asyncio.run` loop, and the scheduler's Talk-edit callback uses `asyncio.run(edit_talk_message(...))`, which raises `RuntimeError` from a running loop. The error was swallowed at debug level, so every in-progress edit silently failed while the final post (made after `execute_task` returns, with no running loop) still worked. ClaudeCodeBrain was never affected — it parses its subprocess stream on a synchronous loop. Fix: dispatch the sync callback via `run_in_executor` onto a worker thread (no running loop there, so its `asyncio.run` works), awaited to keep edits ordered.
 
-ISSUE-112: a `!stop` returned an immediate "Cancelled by user" but then a *later* "task failed" for the same task, with a backoff cadence. That smell was the giveaway — not a cancel problem, but **duplicate execution**. Both reclaim paths (`claim_task`, `fail_stuck_locked_running_tasks`) declared a `running` task stuck after a hardcoded 15 minutes, below the 30-minute task timeout, so a healthy long task got re-queued and a second worker ran a duplicate; after enough reclaim waves it surfaced "worker may have crashed". It hits the native brain hardest because in-process execution has no killable PID and no subprocess death to detect — a slow-but-alive worker looks identical to a crashed one. First fix made the reclaim window `task_timeout_minutes + grace`. Then, per the follow-up, added a real worker liveness heartbeat so reclaim no longer leans on the timeout as a proxy: a daemon pinger touches a new `last_heartbeat` column every `worker_heartbeat_seconds`, and reclaim treats a task as stuck only when that heartbeat goes silent past `worker_stuck_minutes` (falling back to the started_at window when no heartbeat was ever recorded). A live worker is never reclaimed however long it runs; a crashed one recovers in ~5 min, independent of the timeout.
+ISSUE-112: a `!stop` returned an immediate "Cancelled by user" but then a _later_ "task failed" for the same task, with a backoff cadence. That smell was the giveaway — not a cancel problem, but **duplicate execution**. Both reclaim paths (`claim_task`, `fail_stuck_locked_running_tasks`) declared a `running` task stuck after a hardcoded 15 minutes, below the 30-minute task timeout, so a healthy long task got re-queued and a second worker ran a duplicate; after enough reclaim waves it surfaced "worker may have crashed". It hits the native brain hardest because in-process execution has no killable PID and no subprocess death to detect — a slow-but-alive worker looks identical to a crashed one. First fix made the reclaim window `task_timeout_minutes + grace`. Then, per the follow-up, added a real worker liveness heartbeat so reclaim no longer leans on the timeout as a proxy: a daemon pinger touches a new `last_heartbeat` column every `worker_heartbeat_seconds`, and reclaim treats a task as stuck only when that heartbeat goes silent past `worker_stuck_minutes` (falling back to the started_at window when no heartbeat was ever recorded). A live worker is never reclaimed however long it runs; a crashed one recovers in ~5 min, independent of the timeout.
 
 Also confirmed the native `!stop` cancel path itself is sound — cooperative via the `cancel_requested` poll (~0.5s), correctly reported as `cancelled` with no failure notice. The SIGTERM path in `!stop` is a no-op for native by design (no `worker_pid`, since SIGTERM would hit the shared scheduler process).
 
 **Key changes:**
+
 - `NativeBrain` dispatches `on_progress` off the event loop via `run_in_executor` (ISSUE-111).
 - Stuck-task reclaim window is now timeout-relative (`task_timeout_minutes` + 5 min grace) instead of a flat 15 min (ISSUE-112).
 - Added a worker liveness heartbeat: new `last_heartbeat` column, `db.touch_task_heartbeat`, a `_task_heartbeat` daemon-thread pinger wrapping the whole execution span, and a shared `_STUCK_RUNNING_PREDICATE` keying reclaim on heartbeat silence with a started_at fallback.
@@ -3275,6 +3538,7 @@ Also confirmed the native `!stop` cancel path itself is sound — cooperative vi
 - `last_heartbeat` is SQL-only (not on the `Task` dataclass, like `worker_pid`) — only reclaim reads it.
 
 **Files added/modified:**
+
 - `src/istota/brain/native.py` - off-loop `_emit_progress`
 - `src/istota/db.py` - `last_heartbeat` migration, `touch_task_heartbeat`, `_STUCK_RUNNING_PREDICATE`, heartbeat-aware `claim_task` / `fail_stuck_locked_running_tasks`
 - `src/istota/scheduler.py` - `_stuck_running_minutes`, `_task_heartbeat` ctx mgr, reclaim call sites, execution wrap
@@ -3289,12 +3553,14 @@ The native brain shipped with two inference providers: `openai_compat` and a `cl
 With the native loop now the unambiguous standalone path, repositioned the docs. Istota was previously framed as "an application built on top of Claude Code" with "no agent loops of its own" — false since the native brain landed. It's now described as a standalone agent that runs its own in-process loop against any OpenAI-compatible model, with the Claude Code CLI as the default-but-swappable brain.
 
 **Key changes:**
+
 - Deleted the CLI-inference provider module and its test; `make_provider` now only knows `openai_compat` and raises on anything else.
 - Collapsed `NativeBrain`'s provider-aware model resolution to a single `openai_compat` path; dropped the orphaned `claude_binary` config field and its Ansible plumbing.
 - Rewrote positioning across README, the docs index, architecture overview/brain/executor, the config reference, and AGENTS.md to describe the two-brain reality and the standalone-agent capability. Mechanics docs that accurately describe the still-default `claude_code` subprocess were left untouched.
 - No CHANGELOG migration note for the removal — the provider never shipped in a release. Added an `[Unreleased]` entry for the native brain itself, which had none.
 
 **Files added/modified:**
+
 - `src/istota/llm/__init__.py`, `src/istota/brain/native.py`, `src/istota/config.py`
 - removed `src/istota/llm/claude_code_inference.py`, `tests/native/test_claude_code_inference.py`
 - `tests/native/test_make_provider.py`, `test_native_brain.py`, `test_native_resolution.py`
@@ -3312,6 +3578,7 @@ The implementation is three layers, each its own package:
 - `istota.session` — the app layer: six sandbox-aware tools (Read/Write/Edit/Grep/Glob/Bash; Grep/Glob are pure-Python, no ripgrep dependency), context compaction with file-op carry-forward, windowed loop detection, error classification + backoff retry, usage pricing, and `brain/native.py`'s `NativeBrain` adapter wiring all of it to the `Brain` protocol.
 
 **Key changes:**
+
 - Switchable brain via `[brain] kind = "native"` with a nested `[brain.native]` block (provider, model, base_url, context_window, max_turns, max_tokens, prompt_caching). API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file.
 - Per-source-type routing: `[brain.source_type_overrides]` + `resolve_brain_kind` lets cron/heartbeat move to native while interactive talk/email stays on claude_code — the gradual-rollout knob. Unknown kinds are logged and ignored so a typo can't wedge a task.
 - Retry lives at the provider/turn boundary (`_RetryingProvider`), not around the whole loop, so re-issuing a request never replays already-executed tools; only transient stream errors arriving before any delta commits the turn are retried.
@@ -3327,6 +3594,7 @@ Validated live against a local OpenAI-compatible endpoint (LM Studio, a local qw
 Known follow-ups at merge: the Linux/Docker bwrap isolation integration test (can't run on mac), and the Docker entrypoint still defaults to claude_code (native-brain env not wired into compose).
 
 **Files added/modified (highlights):**
+
 - new packages `src/istota/llm/`, `src/istota/agent/`, `src/istota/session/`; `src/istota/brain/native.py`
 - `src/istota/brain/__init__.py` (`make_brain` kind="native", `resolve_brain_kind`, `KNOWN_BRAIN_KINDS`), `brain/_roles.py`, `brain/_events.py` + `stream_parser.py` shim
 - `src/istota/config.py` (`NativeBrainConfig`, `[brain.native]` + `source_type_overrides` parsing), `executor.py` (routing site, per-user key overlay, usage persistence, native Pass-2 classifier)
@@ -3340,11 +3608,13 @@ Known follow-ups at merge: the Linux/Docker bwrap isolation integration test (ca
 Beancount has no native transaction identifier, so the money web UI's "Edit transaction" action used to identify a row by a fragile `(date, payee, narration, account, position)` tuple that breaks on the first edit. Solved identity with metadata: every transaction now carries an `id:` line, backfilled onto legacy entries by a one-time reversible migration and stamped by every writer (manual add, Monarch sync, CSV import, invoice posting). `edit_transaction` locates by id and surgically rewrites the header + the single edited posting, re-validates with `bean-check`, and rolls back on imbalance. A Mulder/Scully review of that commit then found four follow-up defects, all fixed TDD-first.
 
 **Key changes:**
+
 - `id:`/`edited:` metadata + `backfill_ledger_ids` (idempotent, additive, atomic, bean-check-guarded) auto-run once via the workspace init sentinel.
 - Monarch sync reconciler matches by `monarch-id` and skips its category-correction for `edited:`-marked entries.
 - Review follow-ups (ISSUE-104..107): the ledger lock now also covers the Monarch-sync append and manual add (the race the lock claimed to close was still open); rollback restores go through the atomic temp-file write; an ambiguous `id` is refused instead of editing the first match; an amount edit on a posting carrying a `{cost}`/`@ price` annotation is refused rather than silently dropping the lot.
 
 **Files added/modified:**
+
 - `src/istota/money/core/edit.py`, `core/ids.py`, `core/transactions.py`, `core/importers/__init__.py`, `core/invoicing.py`, `_migrate.py`
 - `src/istota/money/routes.py`, `src/istota/skills/money/__init__.py`, `web/src/routes/money/transactions/+page.svelte`
 - `tests/money/test_edit.py` (+10 review-fix tests), `test_migrate.py`, `test_cli.py`, `test_routes_edit.py`
@@ -3354,11 +3624,13 @@ Beancount has no native transaction identifier, so the money web UI's "Edit tran
 A web-UI timezone change wasn't taking effect without a daemon restart. The first fix (ISSUE-099) only updated the prompt header; briefings, scheduled jobs, heartbeat quiet-hours, Garmin sync, the subprocess env, exports, and the sleep-cycle schedule all still read the stale in-memory `UserConfig` — a worse split than the original consistent staleness. A Mulder/Scully review caught the gap. Centralized the DB-vs-in-memory decision in a new `Config.resolve_user_timezone(user_id, conn=None)` (mirrors `is_module_enabled`, with an optional connection to avoid per-call FD churn on the FUSE mount) and re-pointed every reader at it.
 
 **Key changes:**
+
 - New `Config.resolve_user_timezone`; threaded `conn` through `build_prompt` and the hot scheduler loops.
 - ISSUE-102 design call: the explicit "follow Nextcloud timezone" toggle was tried and reverted in favor of the simpler rule — the Istota UI value wins, Nextcloud is seed-only. Settings gained an IANA-zone dropdown (full-width, mobile-fluid) with a note that the Istota value overrides Nextcloud.
 - 2026-06-01 follow-up: Ansible stopped passing `--tz` on every deploy, which had been doing an unconditional UPDATE and clobbering the web-set value. Timezone is now treated as a user preference, not deployment infra.
 
 **Files added/modified:**
+
 - `src/istota/config.py`, `executor.py`, `scheduler.py`, `heartbeat.py`, `commands.py`, `storage.py`, `memory/sleep_cycle.py`, `web_app.py`
 - `web/` settings page + mock fixture; `deploy/ansible/` provisioning task + inventory; timezone tests across the affected suites
 
@@ -3367,6 +3639,7 @@ A web-UI timezone change wasn't taking effect without a daemon restart. The firs
 Bumped the brain's `OPUS` constant from `claude-opus-4-7` to `claude-opus-4-8`, kept `OPUS_47` as a pinning constant, and added `opus-47` / `opus-47-high` provider aliases. Config comments were made brain-agnostic (model id → brain default, effort support varies by model) ahead of the switchable-brain work.
 
 **Files added/modified:**
+
 - `src/istota/brain/claude_code.py`, config defaults + comments
 
 ## 2026-05-31: Money web UI — row-click detail, kebab menus, work-store hardening
@@ -3374,11 +3647,13 @@ Bumped the brain's `OPUS` constant from `claude-opus-4-7` to `claude-opus-4-8`, 
 Transaction and invoice lists now expand their detail (postings / line items) when the row itself is clicked; the trailing glyph became a real kebab (⋮) actions menu instead of doubling as the expand toggle. The transaction-edit action shipped mock-only here (no edit backend yet — that landed the next day, see the 06-01 entry). Invoice actions (mark paid / mark pending / download PDF) got real routes.
 
 **Key changes:**
+
 - Reusable `KebabMenu` + `TransactionForm` modal; stateful vite mock handlers so the UX is testable under the mock API.
 - Invoice mark-paid/pending toggle only `paid_date` (no ledger payment posted/reversed); `find_invoice_pdf` locates the generated PDF for download.
 - Hardened the work-entry store — the web routes are the first user-triggerable writer to those files: temp-file + `os.replace` saves and an exclusive flock around every read-modify-write, so a web mark-paid can't clobber a concurrent scheduler invoice run.
 
 **Files added/modified:**
+
 - `web/` money routes + components; `src/istota/money/core/work.py`, `core/invoicing.py`, `routes.py`
 
 ## 2026-05-31: Streaming prompt delivery race after claude CLI update — ISSUE-103
@@ -3386,6 +3661,7 @@ Transaction and invoice lists now expand their detail (postings / line items) wh
 Every interactive (streaming) task started failing with "produced no output (rc=0)" after the `claude` CLI auto-updated. The new CLI aborts its stdin read after ~3 s and runs with an empty prompt; the brain was writing the prompt only after a PID-recording DB write that can stall under daemon load, so contended tasks lost the race. Background command/skill tasks don't go through the brain, so the daemon looked healthy. Fix delivers the prompt on a dedicated thread started immediately after spawn, and hardens the sandbox net-bridge (stdin from `/dev/null`, dropped a pre-exec sleep).
 
 **Files added/modified:**
+
 - `src/istota/brain/claude_code.py`, `src/istota/executor.py`, `tests/test_executor_streaming.py`
 
 ## 2026-05-31: health.db added to WAL-aware module backups — ISSUE-094
@@ -3393,6 +3669,7 @@ Every interactive (streaming) task started failing with "produced no output (rc=
 The per-user `health.db` was relying on a non-WAL-safe rclone file copy. Added `health` to the backup template's module list so it gets the same WAL-safe backup loop as feeds/money/location.
 
 **Files added/modified:**
+
 - `deploy/ansible/` backup template
 
 ## 2026-05-30: Insertion-time staleness gate for cron-driven tasks
@@ -3400,6 +3677,7 @@ The per-user `health.db` was relying on a non-WAL-safe rclone file copy. Added `
 When the daemon returns from a long outage, `check_scheduled_jobs` and `check_briefings` no longer fire every missed instance on the first tick. A computed `next_run` more than `cron_max_staleness_minutes` (default 60) behind now is skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. Set the threshold to 0 to restore the prior unconditional catch-up.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py`, `config.py`, config reference + scheduling guide docs
 
 ## 2026-05-27: caldav DAVClient leak in scheduler — ISSUE-101 root cause
@@ -3411,6 +3689,7 @@ The whisper skill had been failing for ~13 days with `{"status":"error","error":
 **Root cause.** `executor.discover_calendars_for_task` constructed a fresh `DAVClient` per task without ever calling `client.close()`. Every task that issued a CalDAV request (most of them — the function is called twice per task in scheduler delivery + once during prompt build) leaked one watchdog thread and one open socket. The "1 thread + 1 socket per task" pattern lined up exactly with the production count. Whisper's pre-check was reporting the truth — there really was no RAM — but the cause was several layers removed.
 
 **Fix.** Wrap every `DAVClient` construction site in `with`/try-finally so the urllib3 pools are closed on exit:
+
 - `executor.discover_calendars_for_task` — the leak hotpath in the long-running daemon.
 - `cli.cmd_calendar_discover`, `cli.cmd_calendar_test` — CLI commands; OS reclaims on exit but keeps the pattern consistent.
 - `skills/briefing/_fetch_calendar_events` — runs in the briefing-generation hot path.
@@ -3426,6 +3705,7 @@ The scheduler still has the leaky code in production — Ansible deploy is the n
 **Diagnosis tooling note.** `py-spy dump --pid <SCHED>` on the live daemon was the breakthrough — Python thread stacks made the leak source immediately obvious where socket counts and memory profiling did not. Worth keeping in the diagnostic toolkit for future "what is the daemon doing" investigations.
 
 **Key changes:**
+
 - `discover_calendars_for_task` wraps `DAVClient` in `with` — stops the urllib3 watchdog leak.
 - Every other `get_caldav_client` call site converted to `with`/try-finally for consistency.
 - `whisper/models.py:get_available_memory_gb` returns `available + cached + buffers` instead of `available` — matches Linux's actual loadable capacity.
@@ -3435,6 +3715,7 @@ The scheduler still has the leaky code in production — Ansible deploy is the n
 - `ISSUE-101` marked closed in `_ISSUES.md` with the real diagnosis on top of the original report.
 
 **Files added/modified:**
+
 - `src/istota/executor.py` — `discover_calendars_for_task` now uses `with get_caldav_client(...) as client:`.
 - `src/istota/cli.py` — `cmd_calendar_discover` and `cmd_calendar_test` reindented inside `with`.
 - `src/istota/skills/briefing/__init__.py` — `_fetch_calendar_events` uses `with`.
@@ -3459,11 +3740,12 @@ Three related bugs surfaced after the encrypted-secrets refactor landed: cron-dr
 
 **`cmd_garmin_sync` implementation: thin router + two helpers.** `cmd_garmin_sync` now checks `secrets_store.secret_key_available()` and dispatches to `_cmd_garmin_sync_direct` (existing body extracted verbatim) or `_cmd_garmin_sync_delegated`. Delegated mode validates `ISTOTA_USER_ID` + `ISTOTA_DB_PATH` (no DB path → fail-loud message naming `/garmin/sync`), `db.create_task(skill="health", skill_args=["garmin-sync","--days-back","N"])`, immediately `UPDATE`s `max_attempts=1` (the standard 1/4/16 min retry backoff would only fire after the CLI poll already timed out — silent data appearing later is worse than the CLI failing loudly), polls every 0.5s up to 60s, surfaces `task.result` JSON on completion. Wraps the enqueue in a `sqlite3.OperationalError` catch — sandboxed LLM callers see EROFS on the bwrap-mounted read-only DB and the catch turns the stack trace into a "use the web UI" message. Polling uses `time.monotonic()` (not wall clock) so a system clock jump doesn't cause an early timeout or an infinite wait.
 
-**Test coverage.** ISSUE-097: 2 tests in `TestExecuteCommandTask` (hook dispatch + per-user value overwrites systemd ambient env). ISSUE-098: 5 tests in new `TestGarminSyncInProcess` (dispatch routing — asserts subprocess is *never* invoked for garmin-sync, default `days_back=2`, auth-error propagation, `UserNotFoundError`, non-garmin health args still take subprocess path). Heartbeat: 9 tests in `TestCheckShellCommand` (hook dispatch, no-user-id fallthrough, hook-exception degradation, four envelope shapes — error / error-without-msg / ok / malformed — plus non-JSON passthrough). CLI delegation: 9 tests in `TestGarminSyncRouting` + `TestGarminSyncDelegated` (routing by key availability, success-path payload + verifying `max_attempts=1` actually got written to the row, failed-task error propagation, cancelled-task, timeout, missing USER_ID, missing DB_PATH with `/garmin/sync` hint, read-only DB sandbox case). Wider regression: 396 across health+scheduler+heartbeat, 58 in the garmin-adjacent suite — all green.
+**Test coverage.** ISSUE-097: 2 tests in `TestExecuteCommandTask` (hook dispatch + per-user value overwrites systemd ambient env). ISSUE-098: 5 tests in new `TestGarminSyncInProcess` (dispatch routing — asserts subprocess is _never_ invoked for garmin-sync, default `days_back=2`, auth-error propagation, `UserNotFoundError`, non-garmin health args still take subprocess path). Heartbeat: 9 tests in `TestCheckShellCommand` (hook dispatch, no-user-id fallthrough, hook-exception degradation, four envelope shapes — error / error-without-msg / ok / malformed — plus non-JSON passthrough). CLI delegation: 9 tests in `TestGarminSyncRouting` + `TestGarminSyncDelegated` (routing by key availability, success-path payload + verifying `max_attempts=1` actually got written to the row, failed-task error propagation, cancelled-task, timeout, missing USER_ID, missing DB_PATH with `/garmin/sync` hint, read-only DB sandbox case). Wider regression: 396 across health+scheduler+heartbeat, 58 in the garmin-adjacent suite — all green.
 
 The Scully verdict on the original 097/098 patches was PASS with PARTIAL on test depth: the dispatch-side tests mock `dispatch_setup_env_hooks` directly so they prove the call site is wired but don't exercise the real location/health hook end-to-end. Filed as a known gap rather than rewritten — running the real hook needs a synthesized workspace per test and the cost is high for a property the wider hook tests already cover from the other side.
 
 **Key changes:**
+
 - New `_run_garmin_sync_inprocess` helper in `scheduler.py` + early-dispatch in `_execute_skill_task` for the cron path.
 - `_execute_command_task` now dispatches `setup_env` hooks (env.update — hook value wins over ambient daemon env).
 - `_check_shell_command` resolves the full `build_skill_env` + `dispatch_setup_env_hooks` chain when `user_id` is set; parses JSON `status=error` envelopes as failures; CalDAV discovery skipped to avoid per-tick PROPFIND.
@@ -3472,6 +3754,7 @@ The Scully verdict on the original 097/098 patches was PASS with PARTIAL on test
 - New project note `Skill proxy execution model and the master-key boundary.md` documents the architectural reasoning + rename follow-up.
 
 **Files modified:**
+
 - `src/istota/scheduler.py` — `_run_garmin_sync_inprocess` helper + dispatch short-circuit in `_execute_skill_task`; `dispatch_setup_env_hooks` in `_execute_command_task`.
 - `src/istota/heartbeat.py` — `_build_heartbeat_skill_env` helper, hook dispatch + JSON envelope failure detection in `_check_shell_command`.
 - `src/istota/skills/health/__init__.py` — `cmd_garmin_sync` now a router; new `_cmd_garmin_sync_direct` / `_cmd_garmin_sync_delegated` helpers.
@@ -3504,9 +3787,10 @@ The hairy moments:
 3. The pre-existing Dockerfile-change-triggers-rebuild task only hashed the Dockerfile itself. With the new lib + scripts + etc tree being COPYed in, an edit to a shim wouldn't trigger an image rebuild. Generalized the stat-then-copy task into a single `find … -exec sha256sum | sha256sum` over the whole `docker/devbox/{Dockerfile,lib,scripts,etc}` tree so any shim edit notifies `restart istota-devbox`.
 4. Systemd-before-compose ordering. Docker refuses to create a container if a bind-mount source doesn't exist, so the proxy must be up — socket file materialized — before the compose first-deploy step runs. Inserted the tmpfiles + unit + per-user `enable+start` block before the "Check whether devbox compose currently has containers running" task in `tasks/main.yml`. Added a synchronous `file:` task for the socket dir so it exists immediately (the tmpfiles handler fires at end-of-play).
 
-**Trust boundary check.** The new attack surface is the daemon's per-user Unix socket, reachable only by processes inside the matching devbox container. The container is the same one we already trust to receive bind-mounted docker socket access (the existing devbox capability) — the proxy doesn't widen that footprint. A compromised container can still cause auth'd writes through the proxy *for the duration of an operation* (e.g. force-push a tampered commit), but it can't exfiltrate the token itself: every request just gets a single response with the credential payload, never the raw token in a queryable form. The proxy doesn't try to prevent abuse of an already-compromised container against an already-authorized operation; the audit log is the after-the-fact signal.
+**Trust boundary check.** The new attack surface is the daemon's per-user Unix socket, reachable only by processes inside the matching devbox container. The container is the same one we already trust to receive bind-mounted docker socket access (the existing devbox capability) — the proxy doesn't widen that footprint. A compromised container can still cause auth'd writes through the proxy _for the duration of an operation_ (e.g. force-push a tampered commit), but it can't exfiltrate the token itself: every request just gets a single response with the credential payload, never the raw token in a queryable form. The proxy doesn't try to prevent abuse of an already-compromised container against an already-authorized operation; the audit log is the after-the-fact signal.
 
 **Key changes:**
+
 - New `Brain`-shaped per-user daemon at `src/istota/devbox_proxy.py`. Asyncio, `DevboxProxyContext` dataclass, four handlers (`ping`, `git_credential`, `gitlab_api`, `github_api`). 16 MiB request cap inherited from the protocol module.
 - Pure-data protocol at `src/istota/devbox_proxy_protocol.py` — action constants, error codes (`ERR_NO_TOKEN`, `ERR_NOT_ALLOWED`, `ERR_UPSTREAM`, `ERR_BAD_REQUEST`, `ERR_UNKNOWN_ACTION`, `ERR_INTERNAL`), `encode_request`/`encode_response`/`encode_error`/`decode_request`/`decode_response`, `ProtocolError`. Importable from anywhere without dragging in asyncio.
 - Allowlist enforcement via `fnmatch.fnmatchcase` on `"<METHOD> <path>"` with query string stripped — matches the existing shell-glob semantics of the host-side wrapper.
@@ -3520,6 +3804,7 @@ The hairy moments:
 - 88 new tests across `tests/test_devbox_proxy_protocol.py` (26), `tests/test_devbox_proxy.py` (44), `tests/test_devbox_proxy_shims.py` (40). Cross-suite total 550+ green.
 
 **Files added:**
+
 - `src/istota/devbox_proxy.py` - per-user asyncio daemon
 - `src/istota/devbox_proxy_protocol.py` - wire protocol module
 - `docker/devbox/lib/istota_devbox_client.py` - shared in-container client
@@ -3534,6 +3819,7 @@ The hairy moments:
 - `tests/test_devbox_proxy_protocol.py`, `tests/test_devbox_proxy.py`, `tests/test_devbox_proxy_shims.py`
 
 **Files modified:**
+
 - `src/istota/config.py` - 4 new `DeveloperConfig` fields + TOML parser wiring
 - `docker/devbox/Dockerfile` - Layer 5 (root COPYs + chmod) + ENV defaults
 - `deploy/ansible/defaults/main.yml` - proxy defaults + `istota_developer_api_timeout_seconds`
@@ -3552,7 +3838,7 @@ The hairy moments:
 
 Monarch sync started failing for a user mid-day. The third-party `monarchmoneycommunity` client (1.3.x, pinned to upstream `@main`) talks to `api.monarch.com/graphql` with `Authorization: Token <...>` and nothing else. That stopped working: the API now enforces Django CSRF on every GraphQL request and returns 403 `"CSRF Failed: Referer checking failed - no Referer."` when those headers aren't present. Upstream had no fix, no open issue mentioning the change, and no obvious activity. Pinning to a moving `@main` branch was already a smell — this was the moment to stop tracking it and own the integration.
 
-The first hour was a probe loop, not a coding loop. Before writing any new code I needed to know what the API actually requires *today*, because the Reddit thread that surfaced the issue was LLM-generated and listed seven required headers that turned out to be a mix of "needed", "tolerated", and "wrong". I wrote two small probes against the live `/graphql` with the user's browser cookies pasted in:
+The first hour was a probe loop, not a coding loop. Before writing any new code I needed to know what the API actually requires _today_, because the Reddit thread that surfaced the issue was LLM-generated and listed seven required headers that turned out to be a mix of "needed", "tolerated", and "wrong". I wrote two small probes against the live `/graphql` with the user's browser cookies pasted in:
 
 - **Probe 1 (auth combinations)** — tried six header sets ranging from "cookies only" to "the full Reddit recipe". Result: cookies + `X-Csrftoken` + `Origin` + `Referer` is the minimum. The `monarch-client` / `monarch-client-version` headers some forks send are tolerated but ignored. (Important caveat below: that's true on `/graphql`, not on `/auth/login/`.)
 - **Probe 2 (cookie subsets)** — confirmed that only `session_id` and `csrftoken` are required for ongoing API calls. The Cloudflare cookies (`__cf_bm`, `cf_clearance`) and the analytics cookies (`ajs_*`) are needed only at login time. This makes the cookie-paste workflow durable: the user pastes two values once and they last weeks-to-months on a trusted-device login.
@@ -3571,9 +3857,9 @@ A sixth one came out of the live login probe later: `MonarchCaptchaRequired`. Mo
 
 **Live verification, then implementation, in that order.** I called the new client against the real API as soon as `whoami()` worked — `get_transactions()` returned real data, end-to-end, before any of the wider plumbing changed. That made the rest of the work confident: schema changes, settings UI, web routes, env loader, all knew the contract was right.
 
-**Programmatic login was the part that didn't survive contact with reality.** The plan was: store cookies as the durable credential, *and* offer an "email + password → derive cookies" flow on the settings page so users wouldn't have to learn DevTools. Implemented `MonarchClient.login_with_credentials(email, password, mfa_totp=...)` that POSTs to `/auth/login/`, captures cookies via `aiohttp.CookieJar(unsafe=True)`, and returns the `(session_id, csrftoken)` pair. Wired it through a new `/api/money/monarch/login` route and a SvelteKit form with `<details>` panels for "Option A: Login with email and password" and "Option B: Paste cookies from your browser".
+**Programmatic login was the part that didn't survive contact with reality.** The plan was: store cookies as the durable credential, _and_ offer an "email + password → derive cookies" flow on the settings page so users wouldn't have to learn DevTools. Implemented `MonarchClient.login_with_credentials(email, password, mfa_totp=...)` that POSTs to `/auth/login/`, captures cookies via `aiohttp.CookieJar(unsafe=True)`, and returns the `(session_id, csrftoken)` pair. Wired it through a new `/api/money/monarch/login` route and a SvelteKit form with `<details>` panels for "Option A: Login with email and password" and "Option B: Paste cookies from your browser".
 
-Live-tested. Got 403 `"Please update to the latest version of the app to continue login."`. Hadn't sent the `monarch-client` / `monarch-client-version` headers because the GraphQL probes had shown they were ignored. Turns out `/auth/login/` *does* validate them. Quick curl loop with several plausible version strings (`2025.5.1`, `2025.10.0`, `2025.11.0`, etc.) showed that Monarch loosely validates the version field — anything reasonable-looking is accepted. Picked `2025.10.0`, made `CLIENT_VERSION` a module-level constant so it's the one place to bump if Monarch ever does start strictly checking.
+Live-tested. Got 403 `"Please update to the latest version of the app to continue login."`. Hadn't sent the `monarch-client` / `monarch-client-version` headers because the GraphQL probes had shown they were ignored. Turns out `/auth/login/` _does_ validate them. Quick curl loop with several plausible version strings (`2025.5.1`, `2025.10.0`, `2025.11.0`, etc.) showed that Monarch loosely validates the version field — anything reasonable-looking is accepted. Picked `2025.10.0`, made `CLIENT_VERSION` a module-level constant so it's the one place to bump if Monarch ever does start strictly checking.
 
 Re-tested with the headers present. Got back `429 {"detail":"CAPTCHA is required to proceed.","error_code":"CAPTCHA_REQUIRED"}`. That's Monarch's own bot-protection gate, separate from Cloudflare. Added the sixth exception type (`MonarchCaptchaRequired`), classified it as 503 in the web route with a message that explicitly routes the user to Option B. The CAPTCHA gate is sticky once tripped — there's no programmatic path through it for that (account, IP) pair. So for this user, the cookie-paste workflow is the only thing that works. For other users on other IPs, Option A may still work; the UI degrades gracefully when it doesn't.
 
@@ -3588,11 +3874,13 @@ Test churn from the hard removal: roughly two dozen tests across nine files that
 **`monarch-client-version` is a known liability.** I picked `2025.10.0` because it worked when I tested it. Monarch could start strictly validating tomorrow. The plan if that happens: open browser DevTools on `app.monarch.com`, copy whatever `monarch-client-version` value the live web app sends, bump the constant. The exception type (`MonarchClientOutdated`) makes the failure mode immediately legible. Not putting it in config because it's not user-tunable — it's "the protocol version we know how to speak", which belongs in source.
 
 **Files added:**
+
 - `src/istota/money/_vendor/__init__.py`, `src/istota/money/_vendor/monarch_client.py` — vendored slim client (~250 lines).
 - `tests/money/test_monarch_client.py` — 22 tests pinning request shape, all six error paths, the `debug-monarch` CLI envelope, and the `monarch_api.py` wrapper.
 - `scripts/probe_monarch_login.py` — operator-facing probe for the live `/auth/login/` flow. Takes `MM_EMAIL` / `MM_PASSWORD` / optional `MM_MFA_TOTP` from env, prints structured output, exits non-zero on failure. Useful next time something breaks.
 
 **Files modified:**
+
 - `pyproject.toml` — dropped `monarchmoneycommunity` git dep, added `aiohttp>=3.10` to the `money` extra.
 - `src/istota/money/core/importers/monarch_api.py` — rewritten against the vendored client, defensive logging on every error path.
 - `src/istota/money/core/models.py` — `MonarchCredentials` reduced to `(session_id, csrftoken)`.
@@ -3616,7 +3904,7 @@ The diagnosis ran out a few false trails first. DNS worked because Docker's embe
 
 Initial hypothesis was that Docker 29 had simply failed to add them, and the temptation was to add them ourselves in the Ansible role. I did, briefly — a MASQUERADE block plus a discovered-bridge ACCEPT — before realizing this was patching the symptom. Why would Docker, which has reliably managed bridge networks for a decade, suddenly stop?
 
-Looking at `/etc/iptables/rules.v4` gave it away: the saved snapshot contained Docker's runtime rules for `docker0` and `br-<browser-id>` but nothing for the new devbox bridge. The role was running `netfilter-persistent save` as a handler after every iptables change, which captured a point-in-time view of *everything currently in the table*, including Docker's own rules. On the next reboot, `netfilter-persistent.service` restored that stale snapshot — and dockerd's rules for any bridge created *after* the last save were silently lost. We were snapshotting Docker's mutable state into a file we then treated as authoritative.
+Looking at `/etc/iptables/rules.v4` gave it away: the saved snapshot contained Docker's runtime rules for `docker0` and `br-<browser-id>` but nothing for the new devbox bridge. The role was running `netfilter-persistent save` as a handler after every iptables change, which captured a point-in-time view of _everything currently in the table_, including Docker's own rules. On the next reboot, `netfilter-persistent.service` restored that stale snapshot — and dockerd's rules for any bridge created _after_ the last save were silently lost. We were snapshotting Docker's mutable state into a file we then treated as authoritative.
 
 `systemctl restart docker` on the host fixed it immediately. That confirmed the theory: dockerd, given a chance to re-walk its known networks at startup, programs the right iptables rules on its own. Our role just needed to stop interfering.
 
@@ -3629,6 +3917,7 @@ Looking at `/etc/iptables/rules.v4` gave it away: the saved snapshot contained D
 **Secondary fix: `/etc/services` in the devbox image.** While diagnosing, `whois` from inside the container failed with "service not found" because Debian's slim base ships without `/etc/services`. Anything that resolves a port name symbolically (whois → 43/tcp, etc.) breaks the same way. Added `netbase` to the apt install layer in `docker/devbox/Dockerfile`.
 
 **Files modified:**
+
 - `deploy/ansible/tasks/main.yml` — reverted the MASQUERADE patch, dropped `iptables-persistent` from the install list, removed all `notify: save iptables (devbox)` references, added tasks to deploy/enable/cleanup the new oneshot unit + script.
 - `deploy/ansible/handlers/main.yml` — removed the `save iptables (devbox)` handler.
 - `deploy/ansible/templates/istota-devbox-iptables.sh.j2` — new. Idempotent re-apply of DOCKER-USER DROP rules.
@@ -3638,7 +3927,7 @@ Looking at `/etc/iptables/rules.v4` gave it away: the saved snapshot contained D
 
 ## 2026-05-12: SQLite self-healing for per-user DBs on the FUSE mount
 
-A single Tumblr post in the reader UI kept rendering with both the `SEEN` overlay *and* a "1 unread" badge that never went to zero. Tracking down the source revealed it wasn't a frontend cache mismatch or a stale row — it was index corruption on the per-user `feeds.db` living on the FUSE-backed Nextcloud mount.
+A single Tumblr post in the reader UI kept rendering with both the `SEEN` overlay _and_ a "1 unread" badge that never went to zero. Tracking down the source revealed it wasn't a frontend cache mismatch or a stale row — it was index corruption on the per-user `feeds.db` living on the FUSE-backed Nextcloud mount.
 
 `PRAGMA quick_check` on the affected DB returned:
 
@@ -3670,6 +3959,7 @@ wrong # of entries in index sqlite_autoindex_feed_entries_1
 **Production fix.** Ran `REINDEX` on the affected user's `feeds.db`; `quick_check` returns `ok` and the badge count clears. Cross-checked the other configured users' feeds/health/location/money DBs — all clean. Only one DB was hit. Once the daily sweep ships, the same incident will self-heal within 24h instead of needing a manual `sqlite3` session.
 
 **Files added/modified:**
+
 - `src/istota/db_health.py` — new helper module (≈110 lines): `CheckReport`, `quick_check`, `reindex`, `check_and_repair`.
 - `src/istota/scheduler.py` — imports `CheckReport`/`check_and_repair`, adds `check_db_health(config)` that enumerates `{mount}/Users/{user}/{bot_dir}/{module}/data/{module}.db` paths, wires `last_db_health_check` + the periodic-tick block into `run_daemon`, adds the STARTUP log line.
 - `src/istota/config.py` — `SchedulerConfig.db_health_check_interval: int = 86400`, parsed in `load_config()` next to the other scheduler ints.
@@ -3702,6 +3992,7 @@ TDD pass per project conventions: 24 new tests in `tests/test_kv_skill.py` cover
 Docs: `skills/kv/skill.md` lists the new commands prominently and points to the membership-tracking use case; `.claude/rules/skills.md` updated subcommand list; `scheduler_deferred.py` docstring reflects the broader op set.
 
 **Files added/modified:**
+
 - `src/istota/skills/kv/__init__.py` — five new `cmd_set_*` functions, shared `_load_set` validator, parser entries, `_defer_op` helper extracted from `_defer_write`.
 - `src/istota/scheduler_deferred.py` — `set-add` / `set-remove` ops in `_process_deferred_kv_ops`, re-reading current value before applying the diff.
 - `src/istota/skills/kv/skill.md` — set-ops section with use-case framing.
@@ -3725,6 +4016,7 @@ Doc updates: `AGENTS.md` "GPS Location" section now describes the per-user file,
 Spec moved from `Specs/Active/` to `Specs/Done/`.
 
 **Files added/modified:**
+
 - `deploy/ansible/tasks/main.yml` — Stage 3 migration block (orphan/duplicate pre-checks, services stop, migrator invoke, `DROP TABLE`, services restart).
 - `src/istota/db.py` — removed location helpers, dataclasses, and the obsolete `ALTER TABLE` migration.
 - `schema.sql` — removed the five location `CREATE TABLE` blocks and indexes; left a pointer comment.
@@ -3748,6 +4040,7 @@ Mulder + Scully review pass caught two genuine must-fix bugs that survived the i
 Documentation surface: rewrote the model-related blocks in `deploy/ansible/defaults/main.yml` and `config/config.example.toml` with explicit "three knobs that interact" headers, explaining the resolution chain (`!model` per-task → `istota_model`+`istota_effort` → brain default) and the alias-effort footgun (`istota_model = "opus-46-high"` resolves model only; `istota_effort` is read independently and must be set separately for global config — only the Talk `!model` path encodes both at once). The `[models.roles]` example calls out which roles internal code uses (`fast` for triage and skill classification, `general` for sleep cycle and USER.md curation, `smart` purely user-facing — so rebinding `smart` is risk-free for internal flows). `.claude/rules/brain.md` and `.claude/rules/config.md` updated for the new layout. AGENTS.md gets the `!model` prefix overview and a one-line note that brains own their model namespace.
 
 **Key changes:**
+
 - New `/spec` skill at `src/istota/skills/spec/skill.md` (doc-only). Uses `notes_folder` resource, companions `files` + `notes`.
 - New `!model <alias> <prompt>` Talk prefix and `!models` listing command. Aliases parsed by the active brain.
 - New `Brain` Protocol methods: `resolve_alias`, `resolve_model_name`, `list_aliases`, `validate_role_override`. ClaudeCodeBrain implements them.
@@ -3762,6 +4055,7 @@ Documentation surface: rewrote the model-related blocks in `deploy/ansible/defau
 - New tests: `tests/test_brain_models.py` (35 cases), additions to `tests/test_commands.py`, `tests/test_talk_poller.py`, `tests/test_cron_loader.py`. 4445 unit tests pass.
 
 **Files added/modified:**
+
 - `src/istota/skills/spec/skill.md` — new spec lifecycle skill
 - `src/istota/brain/_models.py` — deleted (contents redistributed)
 - `src/istota/brain/_roles.py` — new global operator-override module
@@ -3791,7 +4085,7 @@ The 2026-05-08 daily devlog-sync cron produced a multi-page result whose first ~
 
 The trigger: `max_block_len > result_len * 2` (the old `executor.py:197`). Any intermediate text block more than 2× the size of the ResultEvent satisfied "the real answer must be earlier in the trace." With a 5KB preamble against a 900-char summary, the gate read "real answer was in text, ResultEvent is terse" — wrong reading.
 
-Mulder + scully passes on the redesign caught three things v1 of the spec got wrong: (a) the original ISSUE-025 shape is `text(answer) → tool → terse ResultEvent` — answer is *not* trailing because a tool follows it, so v1's "walk back, stop at first tool" Mechanism B regressed the bug it claimed to preserve; (b) the source-type gate at the top of the function would have killed CM-aware recovery for scheduled tasks, regressing ISSUE-026; (c) `heartbeat` isn't an actual `source_type` value (heartbeat tasks are stamped `scheduled` per `scheduler.py:2871`) — including it in the gate set would have been dead code, but `heartbeat_silent` and `scheduled_job_id` are real structural signals worth checking as defense in depth.
+Mulder + scully passes on the redesign caught three things v1 of the spec got wrong: (a) the original ISSUE-025 shape is `text(answer) → tool → terse ResultEvent` — answer is _not_ trailing because a tool follows it, so v1's "walk back, stop at first tool" Mechanism B regressed the bug it claimed to preserve; (b) the source-type gate at the top of the function would have killed CM-aware recovery for scheduled tasks, regressing ISSUE-026; (c) `heartbeat` isn't an actual `source_type` value (heartbeat tasks are stamped `scheduled` per `scheduler.py:2871`) — including it in the gate set would have been dead code, but `heartbeat_silent` and `scheduled_job_id` are real structural signals worth checking as defense in depth.
 
 Final shape: one `_last_substantial_region(trace, delimiters, min_chars)` helper that both mechanisms share — same walking logic, different delimiter sets. CM-aware uses `{cm_boundary}` as delimiter and a 200-char floor; terse-recovery uses `{tool, cm_boundary}` and a 500-char floor. The CM-aware branch always runs when CM events exist (no source-type gate). Terse-recovery is gated on both `_is_automated_task(task)` (source_type ∈ {scheduled, briefing} OR heartbeat_silent OR scheduled_job_id is not None) AND `_is_terse(result_text)` (≤150 chars OR matches a short reference regex). When recovery fires, replace — never prepend, never glue. Every override emits one INFO log line so the thresholds can be calibrated against real production data over the next sprint.
 
@@ -3811,7 +4105,7 @@ The shape: pre-refactor, credentials lived in four parallel places. The executor
 
 **Phase 1 — master key out of subprocess env.** Extended `EnvSpec` with `sensitive`, `fallback_var`, `gate_user_has_resource`, `gate_has_discovered_calendars`. Added `from: "setup_env"` source for hooks that compute their own values, and `from: "secret"` for per-user encrypted-secret resolution. New `Task.skill` / `skill_args` columns and a `_execute_skill_task` dispatcher: cron's auto-seeded `_module.feeds.run_scheduled` / `_module.money.run_scheduled` rows now run as `python -m istota.skills.<name>` subprocesses with `build_skill_env` resolving env on the trusted side — no `ISTOTA_SECRET_KEY` propagation, no proxy. `_purge_obsolete_skill_jobs` cleans up rows whose skill name no longer exists in the index. `_STRIPPED_ENV_PRESERVE` is gone; `build_stripped_env` now strips by `SECRET` substring, period. Module-skill loaders (`feeds/_loader.py`, `money/_loader.py`) became env-first via a new `_read_credential` helper so they can pull values from skill-task env without a `secrets_store` round-trip.
 
-**Phase 2 — migrate hardcoded credentials to declarative env.** Every credential that the executor hardcoded (`NC_*`, `CALDAV_*`, `IMAP_*`, `SMTP_*`, `KARAKEEP_*`, `GITLAB_TOKEN`, `GITHUB_TOKEN`, `MONARCH_SESSION_TOKEN`, `GOOGLE_WORKSPACE_CLI_TOKEN`, `NTFY_*`, `TUMBLR_API_KEY`) moved to its skill's manifest with `sensitive: true` where appropriate. The developer skill became the test case for `from: "setup_env"`: the 230-line shell-script generator that writes git credential helpers and gitlab-/github-api wrappers extracted into `src/istota/skills/developer/__init__.py::setup_env(ctx)`. The hook self-gates on `config.developer.enabled` plus per-token presence, and `dispatch_setup_env_hooks` iterates the *full* index so the hook fires even when the skill wasn't selected (preserves the existing "git access works without saying 'git'" UX). The hardcoded credential block in `executor.py:execute_task` is gone — pinned by a regression test that greps the function body.
+**Phase 2 — migrate hardcoded credentials to declarative env.** Every credential that the executor hardcoded (`NC_*`, `CALDAV_*`, `IMAP_*`, `SMTP_*`, `KARAKEEP_*`, `GITLAB_TOKEN`, `GITHUB_TOKEN`, `MONARCH_SESSION_TOKEN`, `GOOGLE_WORKSPACE_CLI_TOKEN`, `NTFY_*`, `TUMBLR_API_KEY`) moved to its skill's manifest with `sensitive: true` where appropriate. The developer skill became the test case for `from: "setup_env"`: the 230-line shell-script generator that writes git credential helpers and gitlab-/github-api wrappers extracted into `src/istota/skills/developer/__init__.py::setup_env(ctx)`. The hook self-gates on `config.developer.enabled` plus per-token presence, and `dispatch_setup_env_hooks` iterates the _full_ index so the hook fires even when the skill wasn't selected (preserves the existing "git access works without saying 'git'" UX). The hardcoded credential block in `executor.py:execute_task` is gone — pinned by a regression test that greps the function body.
 
 **Phase 3 — manifest-derived authorization.** Deleted `_PROXY_CREDENTIAL_VARS`, `_CREDENTIAL_SKILL_MAP`, `_allowed_credentials_for_skills`, `_authorized_skills_from_credentials`, `_build_skill_credential_map`. Replaced with four pure helpers: `derive_credential_set(skill_index)` (sensitive vars), `derive_authorized_skills(selected, skill_index, ctx)` (selected ∪ skills with present sensitive credentials), `derive_skill_credential_map(authorized, skill_index)` (per-skill cred map for the proxy), `derive_lookup_allowlist(authorized, skill_index)` (vars the proxy will respond to over `credential-fetch`). Critical correctness detail: `derive_authorized_skills` calls `_resolve_env_spec(spec, ctx, fallbacks_disabled=True)` so an instance-wide `EnvironmentFile` fallback can never trigger per-user auto-authorization (risk #6 in the spec). `_PROXY_LOOKUP_BLOCKED` retained as defense-in-depth so even a buggy `setup_env` hook can't expose `ISTOTA_SECRET_KEY` or other infra vars over the proxy's lookup channel. `build_skill_env` warns on real value conflicts when two skills declare the same var with different resolutions (the `NC_URL` co-declaration on `nextcloud` and `files` resolves to the same value, so no warning).
 
@@ -3830,10 +4124,12 @@ Fix: extracted `discover_calendars_for_task(task, config)` from `executor.execut
 **Performance.** Spec budgeted <50ms cold for the four derivation helpers. `TestDerivationPerf` pins it. `functools.lru_cache` on `secrets_store.get_secret` was suggested in the spec but skipped — measured cost is well under budget without it; not worth the cache-invalidation surface.
 
 **Files added:**
+
 - `src/istota/skills/developer/__init__.py` — `setup_env(ctx)` hook (extracted from executor).
 - `tests/test_credential_derivation.py` — 373 new tests for the derivation helpers.
 
 **Files modified:**
+
 - `src/istota/executor.py` — Hardcoded credential block deleted; `derive_*` helpers added; `discover_calendars_for_task` extracted; `_PROXY_LOOKUP_BLOCKED` constant retained as defense-in-depth.
 - `src/istota/scheduler.py` — `_execute_skill_task` (Phase 1.3) + manifest-derived env on both subprocess paths (gap fixes); `_purge_obsolete_skill_jobs`; full skill-index resolution; `discover_calendars_for_task` plumbed through.
 - `src/istota/cron_loader.py` — `_parse_skill_command` / `_resolve_job_dispatch` / `fj_is_disallowed_command`; sync upgrades legacy `istota-skill <name>` command rows to skill-task rows; `migrate_db_jobs_to_file` round-trips.
@@ -3845,8 +4141,6 @@ Fix: extracted `discover_calendars_for_task(task, config)` from `executor.execut
 - `tests/test_executor.py`, `test_scheduler.py`, `test_skill_env.py`, `test_skill_proxy.py`, `test_security.py`, `test_cron_loader.py`, `test_feeds_*.py`, `test_money_*.py`, `test_skill_money.py`, `test_skills_ntfy.py`, `test_google_workspace.py` — refactored against the new helpers; new acceptance tests pinning the spec's invariants.
 - `.claude/rules/scheduler.md` — `_execute_skill_task`, `_execute_command_task`, `discover_calendars_for_task` documented.
 - `CHANGELOG.md` — Phase 4 entry plus the gap-fix entry.
-
-
 
 Phase 1 of the modules refactor (backend gating + secret-store import + obsolete-resource cleanup) had landed but was uncommitted. This pass implements the UI split spec'd in `Notes/Projects/Istota/Modules and connected services refactor spec.md` and lands phases 2 and 3 of that spec.
 
@@ -3865,6 +4159,7 @@ A small but load-bearing detail: `KARAKEEP_BASE_URL` is now an encrypted secret 
 The pre-existing `urllib3` `ModuleNotFoundError` in `tests/test_feeds_cli.py::TestPoll` is unrelated to this change — verified by stashing the diff and reproducing the failure on `main`. 3977 tests pass; the 4 environmental failures don't touch any code I modified.
 
 **Key changes:**
+
 - New `/api/settings/modules` and `/api/settings/module-services/{module}` endpoints; `/settings/services` filtered to connected services only.
 - `disabled_modules` editable in the Preferences card; new multiselect UI; server-side validation against `MODULE_NAMES`.
 - New `ServiceCard.svelte` shared component; `SecretField.svelte` now exported from `web/src/lib/components/settings/index.ts`.
@@ -3874,6 +4169,7 @@ The pre-existing `urllib3` `ModuleNotFoundError` in `tests/test_feeds_cli.py::Te
 - 3 new tests in `tests/test_webhook_receiver.py` covering token-map sourced from secrets + module gate.
 
 **Files added/modified:**
+
 - `src/istota/web_app.py` - Split `_SERVICE_SCHEMA`; new `/settings/modules`, `/settings/module-services/{module}`, `/location/settings-info` endpoints; `_user_has_*` route through `is_module_enabled`; `disabled_modules` in `_PROFILE_EDITABLE_FIELDS`.
 - `src/istota/skills/_env.py`, `_types.py`, `_loader.py` - New `from: "secret"` env-spec source.
 - `src/istota/skills/bookmarks/skill.md` - `KARAKEEP_BASE_URL` and `_API_KEY` resolved from secrets.
@@ -3915,6 +4211,7 @@ Feeds module was hiding configured-but-unreachable state. `_admin_module_feeds` 
 `last_active` was using `MAX(updated_at)`, which bumps on every retry / status transition. A user who logged off hours ago would appear "active 30s ago" if a background retry happened. Switched to `MAX(created_at)` for true user activity.
 
 **Key changes:**
+
 - `/api/admin/stats` endpoint, admin-gated. Aggregates system, per-user task counts, scheduled jobs (with last-error rollup), tasks (total/24h/30d/by_source/avg_duration/error_rate), per-module health (feeds/money/location), storage. All sub-aggregators are best-effort — a single broken section becomes `payload.error` rather than a 500.
 - `_user_is_web_admin()` helper: distinct from `Config.is_admin`, fails closed on empty allowlist. Used by `_require_admin` (FastAPI dependency, returns 403) and `/api/me` (sets `is_admin` and `features.admin`).
 - `_iso_utc(ts)` normalizer applied to every timestamp in the response. Frontend `formatTimestamp` simplified to one `new Date()` call.
@@ -3926,9 +4223,11 @@ Feeds module was hiding configured-but-unreachable state. `_admin_module_feeds` 
 - Mock backend at `web/vite-mock-api.ts` returns the same payload shape as the real backend (canonical ISO 8601 timestamps, `users_resolved`, etc.) so dev and prod render identically.
 
 **Files added:**
+
 - `web/src/routes/admin/+page.svelte` — single-page dashboard.
 
 **Files modified:**
+
 - `src/istota/web_app.py` — `_user_is_web_admin`, `_require_admin`, `_iso_utc`, the admin aggregator section (`_gather_admin_stats` + 8 helper functions), `/api/admin/stats` route, `/api/me` extended with `is_admin` and `features.admin`.
 - `web/src/lib/api.ts` — `User.is_admin`, `User.features.admin`, `AdminStats*` types, `getAdminStats()`.
 - `web/src/routes/+layout.svelte` — conditional Admin link in nav and hamburger menu.
@@ -3938,7 +4237,7 @@ Feeds module was hiding configured-but-unreachable state. `_admin_module_feeds` 
 
 ## 2026-05-05: Emissary self-reply edge case — known, not fixed
 
-Discovered while testing ff76c9a (route emissary replies to originator's room when delivery token is NULL): if the user replies to a bot-sent thread from an address that is *itself* configured against a user (i.e. their own email), the email_poller routing precedence in `email_poller.py:186-210` runs sender_match first, sets `user_id`, and skips thread_match (gated `if not user_id`). Result: `sent_email_match` stays `None`, so the new email task gets no emissary prompt prefix, no `output_target="both"`, and `talk_delivery_token` falls through to `resolve_conversation_token` (alerts/DM) instead of using the originating Talk room.
+Discovered while testing ff76c9a (route emissary replies to originator's room when delivery token is NULL): if the user replies to a bot-sent thread from an address that is _itself_ configured against a user (i.e. their own email), the email_poller routing precedence in `email_poller.py:186-210` runs sender_match first, sets `user_id`, and skips thread_match (gated `if not user_id`). Result: `sent_email_match` stays `None`, so the new email task gets no emissary prompt prefix, no `output_target="both"`, and `talk_delivery_token` falls through to `resolve_conversation_token` (alerts/DM) instead of using the originating Talk room.
 
 ff76c9a is correct for the case it was written for (external contacts replying); it just doesn't anticipate that sender_match short-circuits thread_match for self-replies. Verified on zorg with task 98076: References header on the inbound contained sent_email 125's message_id verbatim, but `processed_emails.routing_method = sender_match` and the thread match was never attempted.
 
@@ -3949,6 +4248,7 @@ Decision: leave it. The behavior — treating a self-reply as "user emails the b
 USER.md was accumulating temporal facts ("ordered a fountain pen on …", "decided to standardize on …", "returned the …") under whatever `## heading` happened to be last in the file, because the runtime memory skill's only write recipe was `echo "- ... (noted $(date +%Y-%m-%d))" >> USER.md`. Two failures stacked: no classification (these belonged in the knowledge graph as `acquired` / `decided` / `disposed_of` triples) and no section routing (append-to-EOF dumps under whatever `## ` heading is last in the file). The fix lands the curation ops engine — used nightly already — as the runtime write path, plus a three-branch classification gate in the skill body, plus a Phase-A lint pass and bypass detector to surface the pre-existing damage without trying to migrate it blindly.
 
 **Key changes:**
+
 - New runtime memory CLI (`python -m istota.skills.memory`, exposed as `istota-skill memory`) with subcommands `append`, `add-heading`, `remove`, `show`, `headings`, plus `--channel TOKEN` flag for CHANNEL.md (refuses cross-channel writes when `ISTOTA_CONVERSATION_TOKEN` is set). Each write takes a per-file flock (`<path>.lock`), parses → applies → atomically renames, and writes a `source="runtime"` JSONL audit entry.
 - `apply_ops` gained a sibling `apply_ops_with_db()` and an `add_fact` op (subject, predicate, object, valid_from). DB-aware ops route through `knowledge_graph.add_fact`; the existing file-only `apply_ops` returns `no_db_connection` for `add_fact` so callers don't accidentally drop facts.
 - Three-branch classification gate replaces the old "Things to remember" guidance: temporal event → `add-fact` with `--from`; stable factual claim (allergies, family, biography, language) → `add-fact` no `--from`; behavioral instruction → `memory append`. Worked CLI examples for both targets, explicit "don't `echo >>`" callout. Skill body grows from ~5.5KB to ~9KB; trade-off accepted because the skill is `always_include`.
@@ -3959,6 +4259,7 @@ USER.md was accumulating temporal facts ("ordered a fountain pen on …", "decid
 - Audit JSONL gains `source` (`nightly` | `runtime` | `cli` | `legacy`) and `entry_kind` (`batch` | `lint_candidate` | `aborted` | `legacy_detected`) fields. Existing entries without these fields round-trip cleanly. Per-run summary log: `memory_curation_run user=… ops_applied=… ops_rejected=… lint_candidates=… legacy_detected=… agents_header_added=…`.
 
 **Files added:**
+
 - `src/istota/memory/curation/file_lock.py` — `memory_md_lock(target_path, timeout_seconds)` context manager (`fcntl.flock` on `<path>.lock`).
 - `src/istota/memory/curation/lint.py` — `find_temporal_bullets()` + `prepend_agents_header_if_missing()`.
 - `src/istota/skills/memory/__init__.py` + `__main__.py` — runtime CLI.
@@ -3969,6 +4270,7 @@ USER.md was accumulating temporal facts ("ordered a fountain pen on …", "decid
 - `tests/test_no_echo_user_md.py` — repo-wide grep guard.
 
 **Files modified:**
+
 - `src/istota/memory/curation/ops.py` — `add_fact` op + `apply_ops_with_db` sibling, validation (`empty_subject`, `invalid_predicate`, `invalid_valid_from`, `object_too_long`, `no_db_connection`).
 - `src/istota/memory/curation/audit.py` — `source` / `entry_kind` / `extra` fields, `last_seen` sidecar, `detect_bypass_write()`.
 - `src/istota/memory/curation/__init__.py` — exports `apply_ops_with_db`.
@@ -4004,6 +4306,7 @@ Fix: added `_ledger_has_posting(ledger_path, synced_txn, expected_account)` in `
 Match is by `(date, payee)`. Multiple transactions same day, same merchant → if any of them still posts to the old account, prefer to emit the change (false positive over false negative). Conservative fallback: missing ledger / missing date / missing merchant returns True so legitimate changes aren't silently swallowed. The account-prefix check uses `startswith(expected + " ")` to avoid `Income:ConsultingExtra` matching `Income:Consulting`.
 
 **Files modified:**
+
 - `src/istota/heartbeat.py` — env injection in `_check_shell_command`, dispatcher signature.
 - `src/istota/feeds/cli.py` — `_poll_due` rollup.
 - `src/istota/money/cli.py` — `_apply_monarch_status` helper, called on all `run-scheduled` return paths.
@@ -4022,6 +4325,7 @@ The grid-view feed cards were clipping their meta strip whenever an entry had mu
 **Gallery sizing.** Replaced per-cell `aspect-ratio: 1` with a fixed `height: 320px` 2×2 grid (`grid-template-rows: repeat(2, 1fr)`) and `object-fit: cover` on the images. Gallery height is now bounded independently of card width, so the meta strip always fits inside `max-height: 420px`.
 
 **Per-count layouts.** `FeedCard.svelte` annotates the gallery with a `gallery-{N}` class (N = `min(images.length, 4)`). CSS branches on the class:
+
 - `gallery-2` → single row of 2 (no empty 2nd row).
 - `gallery-3` → first image spans both rows on the left, others stacked on the right (no empty bottom-right cell).
 - `gallery-4` and 5+ → unchanged 2×2 grid; 5+ keeps the `+N` overlay on the 4th tile.
@@ -4033,6 +4337,7 @@ List-view overrides reset the new fixed height and the `grid-row: span 2` rule.
 **Mock data.** `vite-mock-api.ts` now generates galleries of 2 / 3 / 4 / 6 images (was always 4) so `VITE_MOCK_API=1` exercises every layout branch and the +N overlay.
 
 **Files modified:**
+
 - `web/src/lib/components/FeedCard.svelte` — `gallery-{N}` class, `onImageClick(images, idx)` signature.
 - `web/src/lib/components/Lightbox.svelte` — array+index API, prev/next buttons + counter + arrow keys.
 - `web/src/routes/feeds/+page.svelte` — gallery CSS overhaul (fixed height + per-count layouts + list-view resets), lightbox state changed from a single `src` to `images`/`index`.
@@ -4044,7 +4349,7 @@ List-view overrides reset the new fixed height and the `grid-row: span 2` rule.
 
 First slice of the Miniflux parity work (see `Notes/Projects/Istota/Feeds Miniflux parity spec.md`). Closes the two highest-value daily-workflow gaps left behind by the native cutover: there was no way to bookmark an entry for later, and "catching up" on a backlog meant scrolling everything into view to satisfy mark-on-scroll.
 
-**Schema migration (the first since `init_db` was written).** `SCHEMA_VERSION` bumped to 2 and a real migrations table introduced (`_MIGRATIONS: list[(target_version, fn)]`). `_migrate_v1_to_v2(conn)` adds `starred INTEGER NOT NULL DEFAULT 0` + `starred_at TEXT` to `feed_entries` plus a partial `idx_entries_starred ON (starred) WHERE starred = 1`. `init_db()` now reads the persisted version, runs the migration list before `executescript(SCHEMA_SQL)`, and writes the new version. Migrations had to run *before* the schema script, not after, because `SCHEMA_SQL` itself contains the partial-index DDL — running the script first against a v1 DB raises `OperationalError: no such column: starred`. Caught by a hand-built v1-schema fixture in `tests/test_feeds_db.py::TestInitDb::test_v1_to_v2_migration_idempotent` that re-runs `init_db` twice on the same DB.
+**Schema migration (the first since `init_db` was written).** `SCHEMA_VERSION` bumped to 2 and a real migrations table introduced (`_MIGRATIONS: list[(target_version, fn)]`). `_migrate_v1_to_v2(conn)` adds `starred INTEGER NOT NULL DEFAULT 0` + `starred_at TEXT` to `feed_entries` plus a partial `idx_entries_starred ON (starred) WHERE starred = 1`. `init_db()` now reads the persisted version, runs the migration list before `executescript(SCHEMA_SQL)`, and writes the new version. Migrations had to run _before_ the schema script, not after, because `SCHEMA_SQL` itself contains the partial-index DDL — running the script first against a v1 DB raises `OperationalError: no such column: starred`. Caught by a hand-built v1-schema fixture in `tests/test_feeds_db.py::TestInitDb::test_v1_to_v2_migration_idempotent` that re-runs `init_db` twice on the same DB.
 
 **Backend.** `db.update_entry_starred(conn, ids, starred)` writes the boolean and sets/clears `starred_at` (UTC ISO). `db.mark_as_read(conn, scope, scope_id?, before_id?)` does the bulk update in one statement per scope (`all`, `feed`, `category`); `before_id` caps via `id <= ?` so concurrent infinite-scroll loads don't get clobbered. Both `list_entries` and `count_entries` gained a `starred: bool | None` filter (None = don't filter). Routes: existing `PUT /feeds/entries/{id}` and `/batch` now accept `status` and/or `starred` additively (back-compat — body without either field defaults to `status=read` like before). New `POST /feeds/mark-as-read` with the same scope contract. New `starred` param on `GET /feeds` (-1 = all, 1 = starred, 0 = unstarred). Entry response always carries `starred` and `starred_at`.
 
@@ -4057,6 +4362,7 @@ First slice of the Miniflux parity work (see `Notes/Projects/Istota/Feeds Minifl
 **What I deliberately deferred from the spec.** Per-row right-click context menu (the spec mentions it for "Mark all as read"); the toolbar button + `Shift-A` covers the same ground, and the right-click menu naturally folds into Tranche B's broader keyboard / interaction layer. Will revisit if it's actually missed.
 
 **Files added/modified:**
+
 - `src/istota/feeds/db.py` — `SCHEMA_VERSION = 2`, migration scaffolding, `_migrate_v1_to_v2`, `update_entry_starred`, `mark_as_read`, `starred` filter on list/count, `_row_to_entry` reads new columns defensively.
 - `src/istota/feeds/models.py` — `EntryRecord` gained `starred` / `starred_at`.
 - `src/istota/feeds/routes.py` — entry mapper carries star fields, `GET /feeds?starred=`, additive PUT body for status+starred, new `POST /feeds/mark-as-read`.
@@ -4094,6 +4400,7 @@ Both layers act independently. The scheduler-side check is the catch-all that pr
 **Tests added.** `tests/test_scheduler.py::TestExecuteCommandTask` grew five cases: error envelope marks task failed (`status:error` + message extracted), error envelope without `error` field falls back to a generic message, ok envelope still succeeds, plain-text stdout unaffected, malformed JSON unaffected. `tests/test_feeds_skill.py::TestSkillExitCodes` and `tests/test_skill_money.py::test_main_exits_nonzero_on_error_envelope` verify the facade exit-code contract.
 
 **Files modified:**
+
 - `src/istota/scheduler.py` — JSON error envelope detector in `_execute_command_task`.
 - `src/istota/skills/feeds/__init__.py` — `_output()` exits non-zero on error envelope.
 - `src/istota/skills/money/__init__.py` — same.
@@ -4102,6 +4409,7 @@ Both layers act independently. The scheduler-side check is the catch-all that pr
 - `tests/test_skill_money.py` — exit-code test.
 
 **Latent issues this fix surfaces, not yet addressed:**
+
 - Money's `run-scheduled` returns `status:ok` even when nested `monarch` reports an error. Need to roll the inner status up into the outer envelope, or the scheduler-side detector won't see it. Tracked separately.
 - Feeds' `_poll_due` reports `error_total` but the outer envelope is unconditionally `ok`. Same shape.
 - Heartbeat `shell-command` checks (`src/istota/heartbeat.py:249-258`) don't propagate `ISTOTA_CONFIG_PATH`. The 36a5420 fix only patched the scheduler path. Heartbeats invoking module-skill CLIs would hit the original empty-Config bug. Tracked separately.
@@ -4109,7 +4417,7 @@ Both layers act independently. The scheduler-side check is the catch-all that pr
 
 ## 2026-05-03: `feeds run-scheduled` was a Click context double-binding bug
 
-After the previous "module skills lose the config" fix landed and the daemon restarted, polling was *still* dead. The scheduler kept queuing `_module.feeds.run_scheduled` every 5 minutes (cron worked, command worked), but the user's settings-page refresh button still did nothing visible. Pulling the actual stored task results from `tasks.result` told the truth: the older runs (pre-restart) had `error: "user 'alice' not in istota config"` — that's the one the previous fix targeted. Then task 93298 (the first run after the daemon picked up the config-path fix) failed with a *different* error: `TypeError: cmd_poll() got multiple values for argument 'ctx'`.
+After the previous "module skills lose the config" fix landed and the daemon restarted, polling was _still_ dead. The scheduler kept queuing `_module.feeds.run_scheduled` every 5 minutes (cron worked, command worked), but the user's settings-page refresh button still did nothing visible. Pulling the actual stored task results from `tasks.result` told the truth: the older runs (pre-restart) had `error: "user 'alice' not in istota config"` — that's the one the previous fix targeted. Then task 93298 (the first run after the daemon picked up the config-path fix) failed with a _different_ error: `TypeError: cmd_poll() got multiple values for argument 'ctx'`.
 
 Root cause: `cmd_run_scheduled` in `src/istota/feeds/cli.py` was implemented as
 
@@ -4121,7 +4429,7 @@ def cmd_run_scheduled(ctx: FeedsContext, limit) -> None:
     cmd_poll.callback(ctx=ctx, limit=limit)
 ```
 
-`pass_ctx = click.make_pass_decorator(FeedsContext)` wraps the inner callback so that on every invocation it pulls `FeedsContext` out of `click.get_current_context().obj` and prepends it as the first positional arg. `cmd_poll.callback` is the *wrapped* function (because `pass_ctx` is the innermost decorator below `cli.command`), so calling it with `ctx=ctx` collides with the positional injection — `cmd_poll(injected_obj, ctx=ctx, limit=limit)` → `multiple values for 'ctx'`.
+`pass_ctx = click.make_pass_decorator(FeedsContext)` wraps the inner callback so that on every invocation it pulls `FeedsContext` out of `click.get_current_context().obj` and prepends it as the first positional arg. `cmd_poll.callback` is the _wrapped_ function (because `pass_ctx` is the innermost decorator below `cli.command`), so calling it with `ctx=ctx` collides with the positional injection — `cmd_poll(injected_obj, ctx=ctx, limit=limit)` → `multiple values for 'ctx'`.
 
 Why didn't tests catch it: `tests/test_feeds_cli.py::TestPoll` only exercised `["poll"]`. There was no test for `["run-scheduled"]`. The skill-side parser test (`tests/test_feeds_skill.py::TestParser`) only verified argparse accepted the subcommand name, not that invoking it succeeded. The settings-page "Refresh all" button is a thin wrapper that just sets `next_poll_at = NULL` and trusts the scheduled job to do the actual work, which is why the symptom from the user's perspective was identical to the previous bug.
 
@@ -4130,12 +4438,13 @@ The settings-page refresh-all button is unblocked by the same fix because it nev
 **Fix.** Extracted the polling body into `_poll_due(ctx, limit)` and have both `cmd_poll` and `cmd_run_scheduled` call it directly. The `.callback` indirection is gone.
 
 **Files modified:**
+
 - `src/istota/feeds/cli.py` — refactored `cmd_poll` and `cmd_run_scheduled` to share `_poll_due()`.
 - `tests/test_feeds_cli.py` — `TestPoll.test_run_scheduled_polls_due_feeds` invokes `["run-scheduled"]` end-to-end. Verified to fail with the production error before the fix.
 
 ## 2026-05-03: Module-skill scheduled jobs lost the istota config in their subprocess
 
-User reported "feeds haven't polled in over an hour" and the settings-page refresh-now button doing nothing. The `_module.feeds.run_scheduled` cron job was firing every 5 minutes on schedule — the scheduler queued tasks at 02:00, 02:05, etc., and they all completed with no error from the scheduler's view. But the actual *result* of every recent run was `{"status": "error", "error": "user '<user>' not in istota config"}`. Same for `_module.money.run_scheduled`.
+User reported "feeds haven't polled in over an hour" and the settings-page refresh-now button doing nothing. The `_module.feeds.run_scheduled` cron job was firing every 5 minutes on schedule — the scheduler queued tasks at 02:00, 02:05, etc., and they all completed with no error from the scheduler's view. But the actual _result_ of every recent run was `{"status": "error", "error": "user '<user>' not in istota config"}`. Same for `_module.money.run_scheduled`.
 
 Root cause: `_execute_command_task()` runs the subprocess with `cwd=config.temp_dir` (e.g. the per-user temp directory) and env from `build_stripped_env()` (`os.environ` minus credentials). The daemon was launched with `--config <path>/config.toml`, but that flag isn't visible to children. When the subprocess (`istota-skill feeds run-scheduled` → `python -m istota.skills.feeds run-scheduled`) called `load_config()` with no argument, it walked the existing search list — `Path("config/config.toml")` (relative to cwd, missing), `~/src/config/config.toml` (missing), `~/.config/istota/config.toml` (missing), `/etc/istota/config.toml` (missing) — and returned a default `Config()` with an empty `users` dict. Then `resolve_for_user(<user>, cfg)` raised `UserNotFoundError`, the skill facade printed the JSON error, and the subprocess exited 0 (because the JSON error path doesn't propagate the exit code through to the shell). To the scheduler the task looked successful; from the user's perspective polling was silently dead.
 
@@ -4150,6 +4459,7 @@ The settings-page refresh button has the same root cause — it just sets `next_
 Both money and feeds module jobs benefit. No config or template change required — the daemon already passes `--config` so `Config.config_path` populates automatically on the next start.
 
 **Files modified:**
+
 - `src/istota/config.py` — env-var lookup in `load_config()`, `config_path` field on `Config`, recorded after a successful load.
 - `src/istota/scheduler.py` — `_execute_command_task()` propagates `ISTOTA_CONFIG_PATH`.
 - `tests/test_config.py` — five tests covering env-var lookup, explicit-path precedence, missing-file fall-through, and `config_path` recording.
@@ -4183,12 +4493,14 @@ Implemented across four phases (1–3 staged earlier in this branch but never co
 **Tests.** 114 feeds tests across `test_feeds_db.py`, `test_feeds_workspace.py`, `test_feeds_opml.py`, `test_feeds_poller.py`, `test_feeds_cli.py`, `test_feeds_jobs.py`, `test_feeds_skill.py`, `test_feeds_routes.py`, `test_feeds_config.py`, all green. Pre-existing `test_feeds.py` continues to cover the legacy Miniflux briefing client through a re-export shim.
 
 **Files added:**
+
 - `src/istota/feeds/{__init__,_loader,_miniflux,_native_briefing,_config_io,cli,db,jobs,models,opml,poller,routes,sanitize,workspace}.py`
 - `src/istota/feeds/providers/{__init__,tumblr,arena}.py`
 - `tests/test_feeds_{cli,config,db,jobs,opml,poller,routes,workspace}.py`
 - `web/src/routes/feeds/settings/+page.svelte`
 
 **Files modified:**
+
 - `src/istota/feeds.py` — deleted; replaced by the package, with `_miniflux.py` holding the legacy briefing client.
 - `src/istota/config.py` — added `FeedsConfig(backend="miniflux")`, `[feeds]` TOML section, validation.
 - `src/istota/scheduler.py` — added `_sync_feeds_module_jobs()` next to `_sync_money_module_jobs()`.
@@ -4204,7 +4516,7 @@ Implemented across four phases (1–3 staged earlier in this branch but never co
 
 A continuous walking trip (Home → Trails Cafe) showed a dashed-gap segment across several hundred metres of normal walking on the web map. Every other filter looked correct in isolation, so the bug was in the interaction.
 
-**Mechanism.** Ping 20488 was a stale Wi-Fi/cell bounce-back into Home (place_id=5169, accuracy 11m, no speed/activity) — same shape as ISSUE-061. `dropOutlierPings` didn't catch it: AB distance 117m barely crosses the 100m floor and the path ratio (1.78) sits well under the 3.0 threshold, so the ping survived. `stripIsolatedPlacePings` correctly identified it as an isolated place ping (`Home` between two `null` neighbours) but *removed* it via `.filter()`. That eliminated the only data point between pings 20487 and 20489, opening a 315 s time gap. `isGap` then fired on `timeDeltaS (315) >= DWELL_MIN_DURATION_S (300)` and the edge rendered as a dashed gap, even though the implied speed across the gap was 0.81 m/s (2.9 km/h) — clearly continuous walking, not a dwell.
+**Mechanism.** Ping 20488 was a stale Wi-Fi/cell bounce-back into Home (place_id=5169, accuracy 11m, no speed/activity) — same shape as ISSUE-061. `dropOutlierPings` didn't catch it: AB distance 117m barely crosses the 100m floor and the path ratio (1.78) sits well under the 3.0 threshold, so the ping survived. `stripIsolatedPlacePings` correctly identified it as an isolated place ping (`Home` between two `null` neighbours) but _removed_ it via `.filter()`. That eliminated the only data point between pings 20487 and 20489, opening a 315 s time gap. `isGap` then fired on `timeDeltaS (315) >= DWELL_MIN_DURATION_S (300)` and the edge rendered as a dashed gap, even though the implied speed across the gap was 0.81 m/s (2.9 km/h) — clearly continuous walking, not a dwell.
 
 The irony: `stripIsolatedPlacePings` was added to fix a place-crossing gap (ISSUE-061). By removing the ping rather than relabeling it, it traded one gap type for another.
 
@@ -4217,6 +4529,7 @@ The ping's lat/lon is still ~100m off (it points at a stale Home position), so t
 **No new tests.** The web/ tree has no Vitest setup yet (only the maplibre vendor's own tests live in node_modules); `stripIsolatedPlacePings` is private to LocationMap.svelte. `npm run check` passes against this file (the 16 errors it reports are all in unrelated routes).
 
 **Files modified:**
+
 - `web/src/lib/components/location/LocationMap.svelte` — `stripIsolatedPlacePings` switched from filter to map+clone+null-place; comment block updated.
 - `CHANGELOG.md`, `DEVLOG.md`, `_ISSUES.md` — issue closed.
 
@@ -4234,6 +4547,7 @@ For Lazy Acres, the window slid past the visit's pings over roughly the hour fol
 **Reproducer.** Three sequential `reconcile_visits` calls with `since` advancing past the visit's first ping while `until` stayed past the last ping. Confirmed: 1 visit → 2 → 3, all with identical `exited_at` and pings remaining on their original `visit_id` (the reconciler never updates pings).
 
 **Fix.**
+
 - Read pings from `since - read_lookback_hours` (default 24 h) so a visit whose first ping is before `since` is reconstructed in full and the new segment's `entered_at` matches the prior run's.
 - After segmentation, drop segments whose `last_ts < since` — those belong to an older window and aren't our responsibility this pass.
 - DELETE uses overlap on the closed-visit interval: `exited_at IS NOT NULL AND exited_at >= since AND entered_at < until`. Catches phantoms from prior buggy runs (whose `entered_at` is now before `since`) and matches the new segment-keep filter so the routine is idempotent.
@@ -4245,6 +4559,7 @@ The open visit is still untouched (DELETE excludes `exited_at IS NULL`; the exis
 **Production cleanup.** A targeted SQL pass on the production database removes existing phantom rows during deploy. (The deployed fix would also delete them on the next nightly pass via the new overlap-aware DELETE — running it manually shortens the window where the dashboard shows duplicates.)
 
 **Files modified:**
+
 - `src/istota/db.py` — `reconcile_visits` reads pings from `since - read_lookback_hours`, filters segments by `last_ts >= since`, DELETE switched to overlap-aware. New `read_lookback_hours` parameter (default 24).
 - `tests/test_location.py` — four new tests in `TestReconcileVisits` covering sliding-window idempotency, straddling visits, history visits, and pre-existing phantoms.
 
@@ -4257,11 +4572,13 @@ Picked option 6 from the issue write-up over the speed pre-filter. The webhook's
 **Threshold rationale:** at the typical 10 s ping cadence, 3 tagged pings = ≥20 s inside the geofence. That rules out drive-bys (a 30 mph car traverses a 150 m-diameter geofence in ~12 s, producing 1-2 tagged pings) while still capturing brief legitimate stops. Slow drives at 15 mph through the geofence (~22 s, 2-3 pings) sit at the boundary; if that becomes a problem in practice the next iteration would add a dwell gate (first-to-last tagged-ping span ≥ 30 s), but starting simple per the issue's suggestion.
 
 **Key changes:**
+
 - `_finalize_cluster()` now tallies `place_id` occurrences across member pings and inherits the majority `place_id` only when at least `MIN_PLACE_PINGS = 3` pings carry it. Previously took the first non-null `place_id` it found.
 - `validate_cluster_places()` deleted along with both call sites in the day-summary path. The threshold-based propagation in `_finalize_cluster()` already prevents the phantom-tag scenario the validator was guarding against, and the validator now actively works against us in the Lazy Acres case.
 - Tests rewritten: `TestClusterPlacePropagation` and `TestValidateClusterPlaces` removed; new `TestClusterPlaceAttribution` covers single-ping (drive-by — no attribution), two pings (still below threshold), three pings (at threshold), majority-wins across multiple place_ids, the no-place baseline, and a Lazy Acres reproduction case where 17 stationary tagged pings survive contamination from 24 walking-leg pings.
 
 **Files added/modified:**
+
 - `src/istota/geo.py` — `MIN_PLACE_PINGS = 3` constant; `_finalize_cluster()` rewritten for majority-vote attribution; `validate_cluster_places()` removed.
 - `src/istota/web_app.py`, `src/istota/skills/location/__init__.py` — drop `validate_cluster_places` import + call from the day-summary path.
 - `tests/test_location.py` — `TestClusterPlaceAttribution` class replaces `TestClusterPlacePropagation` and `TestValidateClusterPlaces`. `TestClusterPings.test_cluster_carries_place_info` updated to use 3 pings (the threshold).
@@ -4271,6 +4588,7 @@ Picked option 6 from the issue write-up over the speed pre-filter. The webhook's
 Followed the analysis in `Notes/Projects/Istota/KG sleep cycle analysis and improvement plan.md`. Items 1–6 from its priority list shipped; items 7 (weekly LLM-assisted pruning) and 8 (mechanical auto-expiry) deferred until we see how the new prompt affects fact yield and staleness. While in the file, moved `sleep_cycle.py` into `src/istota/memory/` — it already imported the three sibling modules and AGENTS.md already framed it as the memory subsystem orchestrator.
 
 **Key changes:**
+
 - **Existing KG facts now passed into the extraction prompt.** `process_user_sleep_cycle` calls the existing `_load_kg_facts_text` helper and threads the result through `build_memory_extraction_prompt(..., existing_facts=...)`. New "Existing knowledge graph facts" section tells the model to skip re-emission and emit only updates/refinements (with `valid_from` set to today, or `valid_until` set to close out a stale fact). Closes the loop where extraction had no idea what was already in the graph and re-emitted facts that mechanical dedup then quietly dropped.
 - **Post-extraction sanity check.** New `_has_bullet_points()` helper plus a check after `_parse_structured_extraction`: if the parsed `MEMORIES:` body contains no `^-\s` bullets, treat the output as malformed (log warning, advance state, skip the file write and KG insert). Catches the 4/26 narration regression where the model said "Memory extraction complete..." instead of producing bullets — passed empty/sentinel checks but lost the day.
 - **`source_task_id` propagated end-to-end.** The FACTS schema in the prompt now documents an optional `source_ref` integer field. `_normalize_fact` coerces it to a positive int (or drops it). `process_user_sleep_cycle` calls `add_fact(source_task_id=fact.get("source_ref"))` so the KG audit trail can trace each fact back to its originating task — the human-readable layer already had this via the `ref:NNNN` markers; the structured layer now has it too.
@@ -4281,10 +4599,12 @@ Followed the analysis in `Notes/Projects/Istota/KG sleep cycle analysis and impr
 **Side cleanup — sleep_cycle relocation.** `src/istota/sleep_cycle.py` → `src/istota/memory/sleep_cycle.py`. The module already imported `memory.knowledge_graph`, `memory.curation`, and `memory.search`; it's the memory subsystem's orchestrator and belongs in the package. Imports inside the file rewritten (`from . import db` → `from .. import db`; `from .memory.X import ...` → `from .X import ...`). `scheduler.py` and the two test files updated. Logger name kept as `istota.sleep_cycle` for log-search continuity. AGENTS.md, `docs/architecture/memory.md`, `docs/architecture/overview.md`, `docs/features/memory.md`, and `.claude/rules/scheduler.md` all updated for the new path.
 
 **Pitfalls navigated:**
+
 - The `_normalize_fact` change had to coerce `source_ref` carefully — the LLM can plausibly emit it as a string, an int, or zero. Positive-int coercion + drop-on-failure keeps the call site simple (`fact.get("source_ref")` is either a usable id or None).
 - The bullet sanity check must not trigger on legitimately empty output. The order of checks is sentinel → empty → `_parse_structured_extraction` → empty parsed memories → bullet check. Empty parsed memories already drops out before the bullet check, so the only path that reaches the bullet check is non-empty narration text.
 
 **Files added/modified:**
+
 - `src/istota/memory/sleep_cycle.py` (moved + edited) — `_has_bullet_points` + `_BULLET_PATTERN`, `MAX_FACT_OBJECT_CHARS = 100`, expanded `SUGGESTED_PREDICATES` (5 new predicates), `build_memory_extraction_prompt(existing_facts=...)` with new KG section + length constraint + `decided` expiry guidance + `source_ref` schema, length-checked `_validate_fact`, `_normalize_fact` preserves `source_ref`, `process_user_sleep_cycle` loads existing facts and runs the bullet sanity check and threads `source_task_id` to `add_fact`. Imports rewritten for the new package location.
 - `src/istota/scheduler.py` — `from .sleep_cycle import …` → `from .memory.sleep_cycle import …` (two sites in `run_scheduler`, two in the daemon main loop).
 - `tests/test_sleep_cycle.py`, `tests/test_channel_sleep_cycle.py` — import paths updated; new tests for each of items 1–4 and 6: `test_prompt_includes_existing_facts_when_provided`, `test_prompt_omits_kg_section_when_no_existing_facts`, `test_prompt_includes_object_length_constraint`, `test_prompt_includes_decided_expiry_guidance`, `test_prompt_includes_source_ref_field`, `test_prompt_includes_new_predicates`, `test_skips_write_when_no_bullets_in_memories`, `test_passes_source_task_id_from_source_ref`, `test_extraction_prompt_receives_existing_kg_facts`, `test_rejects_overly_long_object`, `test_accepts_object_at_length_limit`.
@@ -4297,6 +4617,7 @@ Followed the analysis in `Notes/Projects/Istota/KG sleep cycle analysis and impr
 Follow-up to the morning's memory subsystem rework. Documenting the result surfaced ten gaps; this batch ships nine of them in the suggested order. Plan source: `Memory system gaps round 2 spec.md`. Item 3b (USER.md size pressure) deferred until 3a's data is in.
 
 **Key changes:**
+
 - **Sleep cycle goes through `Brain`.** `process_user_sleep_cycle`, `process_channel_sleep_cycle`, and `curate_user_memory` no longer call `subprocess.run(["claude", "-p", "-", "--model", "sonnet"], ...)` directly — they build a `BrainRequest` and call `make_brain(config.brain).execute(req)`. Privileged shape: `allowed_tools=[]`, `streaming=False`, `sandbox_wrap=None`, no progress callback, no PID tracking. ClaudeCodeBrain's `_build_command` now skips the `--allowedTools`/`--disallowedTools` flags entirely when the list is empty (text-only invocation). New `[sleep_cycle] extraction_model` / `curation_model` and `[channel_sleep_cycle] extraction_model` knobs (default `"sonnet"`). Pulled into a `_run_sleep_cycle_brain(config, prompt, model, label) -> (ok, output)` helper so the three call sites stay readable.
 - **CHANNEL.md is indexed.** New `source_type="channel_memory_durable"` (deliberately distinct from the dated `channel_memory` so retention stays sane). Re-indexed unconditionally each channel sleep cycle (file is small, embed is fast — covers manual edits via Nextcloud). Excluded from `EPHEMERAL_SOURCE_TYPES`. Recall picks it up via the channel namespace.
 - **Recall dedupes against context.** `_build_talk_api_context` and `_build_db_context` now return `(text, task_ids_included)` instead of just text. The set is threaded through to `_recall_memories` → `search(exclude_conversation_task_ids=...)`, which drops chunks where `source_type="conversation"` and `source_id` (cast to str) matches.
@@ -4309,11 +4630,13 @@ Follow-up to the morning's memory subsystem rework. Documenting the result surfa
 - **Subsection editing — docs only.** Surfaced the top-region constraint prominently in `docs/features/memory.md` with a worked example. Marker / sub-headed ops not implemented (lowest-urgency item).
 
 **Pitfalls navigated:**
+
 - Initial substring fast-path used full-string `a in b or b in a` and incorrectly merged `tech_1` into `tech_10` (literal substring but different tokens). Test case in `TestCmdMemory::test_facts_large_set_summarizes` caught it. Switched to token-set subset comparison: `set(object.split()) <= set(other_object.split())`. As a side effect `tree nut` and `sesame seeds` no longer dedup (different tokens) — accepted as the price of word-boundary precision.
 - ClaudeCodeBrain's command builder unconditionally inserted `--allowedTools` followed by the (possibly empty) tool list followed by `--disallowedTools Agent` — with an empty list this becomes `--allowedTools --disallowedTools Agent`, which Click reads as `--allowedTools=--disallowedTools` and breaks. Fixed by skipping the tool flags entirely when the list is empty (privileged text-only path is what sleep cycle wants).
 - 30+ existing sleep-cycle tests patched `istota.sleep_cycle.subprocess.run` and asserted on `MagicMock(returncode=0, stdout=..., stderr=...)`. Bulk-rewrote with a Python regex pass to patch `_run_sleep_cycle_brain` instead and use `(True, "...")` / `(False, "")` tuples. A few timeout/exception cases needed manual edits (the helper collapses TimeoutExpired and FileNotFoundError into `(False, "")` rather than re-raising).
 
 **Files added/modified:**
+
 - `src/istota/sleep_cycle.py` — `_run_sleep_cycle_brain` helper, `_topics_per_chunk` helper, `_maybe_warn_usermd_size` + `USER_MEMORY_SOFT_WARN_BYTES`, `_reindex_channel_durable`, three subprocess sites refactored, user-local `date_str`, KG audit retention pass.
 - `src/istota/brain/claude_code.py` — `_build_command` handles empty `allowed_tools`.
 - `src/istota/memory/knowledge_graph.py` — `knowledge_facts_audit` table + indexes, `_write_audit_row` / `_fact_to_json` / `_audit_dict_json` helpers, audit wiring in `add_fact` / `invalidate_fact` / `delete_fact`, `AuditRow` dataclass, `get_fact_history`, `cleanup_old_audit_rows`, fuzzy-dedup threshold lowered to 0.6 + token-subset fast-path, `select_relevant_facts` rewritten (identity never truncated; matched sorted by `updated_at`).
@@ -4339,6 +4662,7 @@ A 105 MB prod DB snapshot showed 80% of the database was the memory_search subsy
 Three commits address all of this. Plan source: `Notes/Projects/Istota/Memory system fixes and enhancements plan.md`.
 
 **Key changes:**
+
 - **Memory subsystem reorganization.** `memory_search.py` → `memory/search.py` and `knowledge_graph.py` → `memory/knowledge_graph.py` via `git mv`. Mechanical import-path rewrite across 9 source files and 8 test files (~80+ sites). Logger names (`"istota.memory_search"`, `"istota.knowledge_graph"`) intentionally preserved on the theory that operator log filters depend on them. New `memory/__init__.py` re-exports the public surface but **deliberately omits the `search` function** — re-exporting it would shadow the `search` submodule and break the `from istota.memory import search as memory_search_mod` pattern in `commands.py`. Bundled in: skip auto-indexing for `task.heartbeat_silent` jobs in `scheduler.process_one_task`, and re-index USER.md after `curate_user_memory` writes (these were already in the working tree as items 1+2 from the plan).
 - **Op-based USER.md curation.** New package at `src/istota/memory/curation/` with five modules:
   - `types.py` — `Section`, `SectionedDoc`, plus `classify_line` / `normalize_bullet_text` / `top_region_indices` helpers. Bullets recognized as `^\s*([-*]|\d+\.)\s+`. Top region = lines before the first `### subheading`; ops only ever operate on the top region.
@@ -4357,11 +4681,13 @@ Three commits address all of this. Plan source: `Notes/Projects/Istota/Memory sy
 - **Location pipeline (separate commit, ISSUE-059).** Two fixes for dual-source GPS artifacts and grazing-ping place tags. `dedupe_near_duplicate_pings` drops one of any two pings within 5 seconds of each other (Overland on iOS sometimes emits one high-accuracy GPS fix plus one low-accuracy cell/Wi-Fi fix anchored elsewhere); tie-breaks on activity_type presence, then accuracy. `validate_cluster_places` strips a cluster's place_id when the cluster centroid falls outside the place's radius — `_finalize_cluster` propagates place_id from any member ping, so a single grazing ping during a drive-by could otherwise promote transit into a phantom stop downstream because `filter_transit_clusters` bypasses min-pings/min-dwell for place-matched clusters.
 
 **Migration / rollout:**
+
 - `[sleep_cycle] curate_user_memory = false` remains the default. Operators flip after a manual sanity check on a copy of prod USER.md (don't write back). The audit log makes the first few nights reviewable.
 - `[sleep_cycle] memory_retention_days` is now a single knob governing both dated memory FILES (existing behavior) and ephemeral memory_chunks (new). `0` = unlimited (current default). Bug-compatible.
 - New `[sleep_cycle] curation_log_summary` config field (default true). Documented in `config/config.example.toml` and the Ansible role.
 
 **Files added/modified:**
+
 - `src/istota/memory/__init__.py` — new package; re-exports public surface (search function intentionally omitted — see comment).
 - `src/istota/memory/search.py` — moved from `src/istota/memory_search.py`; added `cleanup_old_chunks` + `EPHEMERAL_SOURCE_TYPES`.
 - `src/istota/memory/knowledge_graph.py` — moved from `src/istota/knowledge_graph.py`.
@@ -4390,6 +4716,7 @@ The github mirror used to auto-sync from gitlab; that pipeline is gone, so the d
 README also got a long-overdue refresh covering features that landed since the last edit. The motivation was the lowercase `git/gitlab/github` cleanup, but it turned into a broader pass once we noticed the README was still describing skills and structure from a couple of major refactors ago.
 
 **Key changes:**
+
 - New feature sections: **Email routing** (plus-addressing, emissary thread tracking, untrusted-sender confirmation gate), **Web interface** (SvelteKit + FastAPI dashboard at `/istota` with feeds / location / money), **Pluggable model backend** (Brain protocol).
 - Skills section rewritten to mention two-pass selection (deterministic + Haiku semantic routing) and sticky-skills carryover; inline list updated to reflect current reality (`money` in-process replaces the old accounting/moneyman wording, `google_workspace` added, `git/gitlab/github` lowercased throughout).
 - Per-job `model` / `effort` overrides documented under Scheduling.
@@ -4399,18 +4726,20 @@ README also got a long-overdue refresh covering features that landed since the l
 - Copyright line replaced with `© 2026 Stefan Kubicki • Developed at CYNIUM Labs` (kept the existing markdown links).
 
 **Files modified:**
+
 - `.git/config` — two `pushurl` entries added to `[remote "origin"]`; standalone `github` remote removed.
 - `README.md` — feature additions, skills list refresh, lowercase prose, copyright.
 
 ## 2026-04-27: Per-job effort no longer inherits config.effort under a model override
 
-A user testing the per-job model override (`model = "claude-haiku-4-5"` in CRON.md) realized that `config.effort = "high"` — set globally for the default Opus model — would still flow through to the Haiku subprocess. Haiku doesn't accept `--effort`, so the job would just fail. The previous resolution was a flat `(task.effort or "").strip() or config.effort`, which couples the two configs in the wrong direction: a per-job *model* override is making an editorial choice about the model, and the default-model effort doesn't transfer.
+A user testing the per-job model override (`model = "claude-haiku-4-5"` in CRON.md) realized that `config.effort = "high"` — set globally for the default Opus model — would still flow through to the Haiku subprocess. Haiku doesn't accept `--effort`, so the job would just fail. The previous resolution was a flat `(task.effort or "").strip() or config.effort`, which couples the two configs in the wrong direction: a per-job _model_ override is making an editorial choice about the model, and the default-model effort doesn't transfer.
 
 Fix is small and asymmetric. New `_resolve_effort(task, config)` helper in `executor.py`: when `task.model` is set but `task.effort` isn't, return `""` (no `--effort` flag). Otherwise behave as before — explicit task effort wins, else fall back to `config.effort`. This preserves backwards compat for the common case (no per-job model, config defaults apply) while making per-job overrides effectively a coupled pair: if you want Haiku-with-low-effort, set both fields; if you just say `model = "claude-haiku-4-5"`, you get the model's default behavior.
 
 Same helper imported in `scheduler.py` for the log-channel `(model effort)` annotation so the displayed line matches what actually got passed to the CLI.
 
 **Files modified:**
+
 - `src/istota/executor.py` — added `_resolve_effort()`, switched `BrainRequest.effort` resolution to use it.
 - `src/istota/scheduler.py` — log-channel resolution path uses the same helper.
 - `tests/test_model_override.py` — added `test_no_effort_when_task_overrides_model_only` and `test_task_overrides_both_model_and_effort`. Existing `test_falls_back_to_config_effort` (no per-task overrides → config.effort applies) still passes.
@@ -4432,7 +4761,7 @@ Backward-compat surface kept deliberately wide: `parse_api_error`, `is_transient
 
 Mulder + Scully review caught two real issues:
 
-- **PID write timing regression** — old code wrote the subprocess PID to the DB *before* `process.stdin.write(req.prompt)`; new code did it after. For prompts under 64 KB the stdin write doesn't block, so the window is microseconds, but a `!stop` arriving in that window would no-op. Fixed by moving the `on_pid` call to immediately after `Popen`.
+- **PID write timing regression** — old code wrote the subprocess PID to the DB _before_ `process.stdin.write(req.prompt)`; new code did it after. For prompts under 64 KB the stdin write doesn't block, so the window is microseconds, but a `!stop` arriving in that window would no-op. Fixed by moving the `on_pid` call to immediately after `Popen`.
 - **No stack trace on bare-except in brain** — `ClaudeCodeBrain.execute()`'s catch-all stringified the exception but lost the traceback. Old executor swallowed the same way (status-quo, not a regression), but added `logger.exception(...)` since we were here anyway.
 
 Scully also flagged that there were no unit tests for the factory itself (`make_brain` + `BrainConfig` parsing) — added `tests/test_brain.py` with 10 tests covering the factory contract, protocol conformance, TOML parsing (with and without `[brain]` section, unknown kind loads but rejects at `make_brain`), and BrainRequest/BrainResult defaults.
@@ -4440,6 +4769,7 @@ Scully also flagged that there were no unit tests for the factory itself (`make_
 Ansible role grew one variable: `istota_brain_kind: "claude_code"` (default), rendered into a `[brain]` block in `config.toml.j2`.
 
 **Files added/modified:**
+
 - `src/istota/brain/__init__.py` — `Brain` Protocol re-exports + `make_brain` factory.
 - `src/istota/brain/_types.py` — `BrainRequest`, `BrainResult`, `BrainConfig`, `Brain` Protocol.
 - `src/istota/brain/_events.py` — `StreamEvent` types + Claude Code stream-json parser, moved from `stream_parser.py`.
@@ -4458,15 +4788,16 @@ Ansible role grew one variable: `istota_brain_kind: "claude_code"` (default), re
 
 ## 2026-04-26: New `untrusted_input` companion skill for ingest-shaped skills
 
-Drafted a doc-only `untrusted_input` skill that loads alongside skills which ingest content from outside the trust boundary: `email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`. Pairs with `sensitive_actions` — that one governs outbound; this one governs how inbound content should be *read*. Source-scoped via `companion_skills`, not `always_include`, so there's no prompt cost on tasks without ingest content.
+Drafted a doc-only `untrusted_input` skill that loads alongside skills which ingest content from outside the trust boundary: `email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`. Pairs with `sensitive_actions` — that one governs outbound; this one governs how inbound content should be _read_. Source-scoped via `companion_skills`, not `always_include`, so there's no prompt cost on tasks without ingest content.
 
-Naming was the interesting decision. Compared three options: `untrusted_input` (technical, descriptive of the input), `bridge_troll` (folkloric character with a guardian role), `cell_membrane` (biological structure with bidirectional selective permeability). Bridge_troll has the cleanest "inhabit a role" framing for a model — guardian-at-a-passage is structurally close to "examine and either pass through or block" — but risks character voice leaking into user-facing output ("Hold, traveler — what business have you?"). Cell_membrane is the only one that bakes in *bidirectional* boundary semantics, which would be a feature given the recent transitive-trust failure was specifically a cross-cutting bug; but cells are passive in the metaphor (receptors match shapes, no reasoning) which undersells the active scrutiny needed. Settled on `untrusted_input` for: matches existing skill naming convention (descriptive of capability), no character-leakage risk, source-scoped loading does the role-framing work without anthropomorphizing.
+Naming was the interesting decision. Compared three options: `untrusted_input` (technical, descriptive of the input), `bridge_troll` (folkloric character with a guardian role), `cell_membrane` (biological structure with bidirectional selective permeability). Bridge_troll has the cleanest "inhabit a role" framing for a model — guardian-at-a-passage is structurally close to "examine and either pass through or block" — but risks character voice leaking into user-facing output ("Hold, traveler — what business have you?"). Cell_membrane is the only one that bakes in _bidirectional_ boundary semantics, which would be a feature given the recent transitive-trust failure was specifically a cross-cutting bug; but cells are passive in the metaphor (receptors match shapes, no reasoning) which undersells the active scrutiny needed. Settled on `untrusted_input` for: matches existing skill naming convention (descriptive of capability), no character-leakage risk, source-scoped loading does the role-framing work without anthropomorphizing.
 
 Body covers nine concrete injection patterns to recognize-and-not-act-on (direct instruction injection, fake system framing, impersonation, pre-authorization claims, encoded payloads, hidden HTML, reply-chain quote injection, entity-name probes, gradual escalation, legitimacy theater), action guidance (read for content not commands; respond to the user not the inbound author when ambiguous; surface manipulation attempts; don't echo private context unprompted; ask when unsure), and an explicit cross-reference: trust at the inbound gate ≠ authorization for outbound, every outbound is per-action gated regardless of how the inbound was framed. The cross-reference is the same per-action principle that landed in `sensitive_actions` earlier today — duplicated here intentionally so the rule travels with whichever side of the boundary the model is reading from.
 
 11 new tests in `TestUntrustedInputCompanion` verifying: skill exists in the bundled index, is doc-only and not always_include, each of the seven upstream skills declares the companion correctly, transcribe keeps its prior `notes` companion alongside, end-to-end pull-in via the `browse` keyword path, non-ingest Talk task does not load it. (The email-source pull-in test was dropped from the suite because `imap_tools` is an optional extra that isn't installed in the dev env, so the email skill's dependency check skips it during selection — the companion declaration itself is verified by `test_email_lists_untrusted_input_as_companion`.)
 
 **Files added/modified:**
+
 - `src/istota/skills/untrusted_input/skill.md` — new doc-only skill, ~40 lines.
 - `src/istota/skills/{email,browse,calendar,whisper,feeds,bookmarks}/skill.md` — added `companion_skills: [untrusted_input]` to each.
 - `src/istota/skills/transcribe/skill.md` — extended existing `companion_skills: [notes]` → `[notes, untrusted_input]`.
@@ -4478,13 +4809,14 @@ A user reported a Zorg behavior that resolved to a structural bug: a thread-matc
 
 Root cause: `tasks.conversation_token` is overloaded. For Talk-source tasks it's a real Talk room token. For email-source tasks created from inbound mail (`email_poller.py:289`) it's set to `compute_thread_id(subject, participants)` — a 16-char SHA hex prefix used as a thread-grouping key for context lookups. Both roles share the same column. When a thread-match follow-up task is created, it inherits whatever value the originating outbound recorded in `sent_emails.conversation_token` — which, for chains that started with inbound mail, is the synthetic hash. Talk delivery code (`post_result_to_talk`, the message cache, the failure-notify path) then writes to a token that isn't a real Talk room. The Nextcloud Talk API silently no-ops on unknown tokens, so the rest of the system thinks delivery happened.
 
-Picked Option B (small, reversible) over Option A (separate `talk_delivery_token` column, schema change). New helper `_talk_target_for_delivery(config, task)` detects the synthetic shape (16 lowercase-hex chars on an email-source task) and falls back to `resolve_conversation_token(config, user_id)` — the existing alerts-channel → briefing-token → auto-detected-DM resolution chain in `notifications.py`. `post_result_to_talk` grows a `target_token` override; `process_one_task` resolves `talk_token` once after `execute_task` returns and uses it across the delivery path: confirmation gate, success delivery, heartbeat-silent post, failure-notify branch, deferred-ops gate, the three result dispatches in the dispatch block, and the Talk message cache write. The cache now writes against the resolved token instead of the synthetic one — minor pollution of the alerts channel's local cache with email-task replies, but they *are* part of the conversation flow visible to the user there, so probably fine.
+Picked Option B (small, reversible) over Option A (separate `talk_delivery_token` column, schema change). New helper `_talk_target_for_delivery(config, task)` detects the synthetic shape (16 lowercase-hex chars on an email-source task) and falls back to `resolve_conversation_token(config, user_id)` — the existing alerts-channel → briefing-token → auto-detected-DM resolution chain in `notifications.py`. `post_result_to_talk` grows a `target_token` override; `process_one_task` resolves `talk_token` once after `execute_task` returns and uses it across the delivery path: confirmation gate, success delivery, heartbeat-silent post, failure-notify branch, deferred-ops gate, the three result dispatches in the dispatch block, and the Talk message cache write. The cache now writes against the resolved token instead of the synthetic one — minor pollution of the alerts channel's local cache with email-task replies, but they _are_ part of the conversation flow visible to the user there, so probably fine.
 
 8 new tests in `TestTalkTargetForDelivery`. 303 existing tests still green; the wider suite (3433 passed, 41 skipped) is also unchanged.
 
 This is the smallest fix that resolves the symptom for new tasks. It is not the proper fix. The 16-char-pure-lowercase-hex heuristic is shape detection, not semantic — a real Talk token that happens to match would be wrongly redirected. Low probability, but non-zero. The proper fix is structural: separate `conversation_token` (email-thread grouping key, used for context lookup) from `talk_delivery_token` (real Talk room, used for delivery). Filed as ISSUE-057 in `_ISSUES.md` (in the user's Notes dir, not the repo) along with three related outstanding gaps that came out of the same investigation: (1) thread-match has no inbound confirmation gate — once a contact is "in", every reply runs immediately; (2) email-source tasks have no per-action outbound gate, just the inbound `yes` from the gate confirmation; (3) the self-address exemption in `sensitive_actions` is enforced at the prompt level rather than at the skill-proxy layer, so the model can fire `istota-skill email send --to <user-address>` ad-hoc with no confirmation.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` — added `_talk_target_for_delivery` helper, `target_token` parameter on `post_result_to_talk`, threaded `talk_token` through delivery paths in `process_one_task`.
 - `tests/test_scheduler.py` — new `TestTalkTargetForDelivery` class (8 cases).
 
@@ -4499,6 +4831,7 @@ Strengthened `sensitive_actions/skill.md` to make the public/private boundary, t
 Wrote up the architectural lessons and forward plan as a project-notes spec covering five mitigations: M1 deterministic outbound gate with corrected `trusted_email_senders ∪ user_email_addresses` allowlist (no `processed_emails`, no `sent_emails`), M3 prompt strengthening (partially landed by today's skill edit), M4 emissary thread reply coverage, M5 user-facing trust scope wording, and M6 optional CaMeL-pattern ingress summarizer behind an off-by-default config flag for defense in depth on the ingress side. Production currently runs reverted code with the inbound gate intact and the outbound side back to honor-system; M1 is the structural fix and is queued.
 
 **Files added/modified:**
+
 - `src/istota/skills/sensitive_actions/skill.md` — added public/private boundary, trust-scope, and per-action-authorization sections; broadened the action list to cover non-email egress channels; added worked example. Persona-level boundary phrasing intentionally not duplicated; persona keeps the values, the skill carries the operational rules.
 - Reverts at `67b5200` and `ff381d6`; timestamp-fix re-restoration at `480c16b`.
 
@@ -4510,24 +4843,26 @@ Two distinct bugs braided into one symptom:
 
 1. **Timezone:** on negative-offset machines (PDT = UTC-7) the Python local-time `started_at` looks ~7 hours older than SQLite thinks "now" is. The "release recent stuck running tasks" cleanup in `claim_task` then fires immediately on a fresh task — flips it back to `pending`, increments `attempt_count`, and the per-channel-gate check no longer sees a locked/running sibling, so the wrong task gets claimed.
 
-2. **Format:** even on UTC, the `T` (0x54) vs space (0x20) separator at position 10 makes the Python-formatted timestamp sort *greater* than any `datetime('now', '-N minutes')` string. So `started_at < datetime('now', '-15 minutes')` was *never* true on UTC machines either — the 15-minute stuck-running detection has been silently dead on prod since it was written. Same goes for `cleanup_old_tasks` comparing `completed_at < datetime('now', '-N days')`.
+2. **Format:** even on UTC, the `T` (0x54) vs space (0x20) separator at position 10 makes the Python-formatted timestamp sort _greater_ than any `datetime('now', '-N minutes')` string. So `started_at < datetime('now', '-15 minutes')` was _never_ true on UTC machines either — the 15-minute stuck-running detection has been silently dead on prod since it was written. Same goes for `cleanup_old_tasks` comparing `completed_at < datetime('now', '-N days')`.
 
 Fix is the cleaner of the two options: write timestamps via SQLite's `datetime('now')` directly inside the UPDATE instead of formatting in Python and binding as a parameter. Single source of truth, all UTC, all space-separated, all comparable. Applied to both `update_task_status()` (tasks table) and `update_istota_file_task_status()` (istota_file_tasks). The schema defaults already used `datetime('now')`, so this just makes the in-flight writes match the at-rest format.
 
 Verified: the four failing channel-gate tests now pass on PDT, and the full 3448-test suite is green. The dead 15-minute stuck-running detection is now actually live on UTC machines too — a latent bug that would have eventually bitten prod.
 
 **Files added/modified:**
+
 - `src/istota/db.py` — `update_task_status()` and `update_istota_file_task_status()` now write `started_at` / `completed_at` / `updated_at` via SQLite `datetime('now')` directly instead of `datetime.now().isoformat()` parameters.
 
 ## 2026-04-26: Adversarial defense spec + DNS hardening for browse container
 
-Wrote `Notes/Projects/Istota/Adversarial agent defense spec.md` covering five ranked layers for protecting against prompt-injected agents (not fat-finger leaks — the outbound secret scrubbing spec covers that). Output scrubbing is trivially defeated by an adversarial agent (reverse the string, ROT13, encode in URL paths, smuggle in choice of words); the leverage is in narrowing what the agent *can* do.
+Wrote `Notes/Projects/Istota/Adversarial agent defense spec.md` covering five ranked layers for protecting against prompt-injected agents (not fat-finger leaks — the outbound secret scrubbing spec covers that). Output scrubbing is trivially defeated by an adversarial agent (reverse the string, ROT13, encode in URL paths, smuggle in choice of words); the leverage is in narrowing what the agent _can_ do.
 
 Layers, ranked by leverage: (A) recipient allowlists on email/Nextcloud/ntfy egress, (B) browse skill containment + URL logging, (C) dual-context content processing (CaMeL pattern: stripped extractor LLM with no tools consumes untrusted content, main agent only sees structured summary), (D) pre-action LLM review by a separate Haiku call before sensitive actions execute, (E) trust tagging on tasks (`high`/`medium`/`low`/`untrusted` based on source). Spec ranks build order: Layer A first (cheapest, biggest realistic-attack reduction), then B logging, then D for email/subtasks, then C for inbound email, then E for cleanup, then C for everything else.
 
 Also added Quad9 DNS to `docker/docker-compose.browser.yml` as Layer-B option-zero — the browser container has its own network namespace separate from the CONNECT proxy, making it the widest-open egress channel. DNS filtering doesn't help against attacker-controlled fresh domains but does block known-malicious destinations and compromised legit pages serving malware. Two lines in compose, no maintenance overhead.
 
 **Files added/modified:**
+
 - `Notes/Projects/Istota/Adversarial agent defense spec.md` (in user's Notes dir, not in repo) — five-layer spec with ranked build order and honest limitations.
 - `docker/docker-compose.browser.yml` — added `dns: [9.9.9.9, 149.112.112.112]` (Quad9, security-only filtering, IBM/PCH/GCA non-profit).
 
@@ -4540,6 +4875,7 @@ Discussed two fixes: (1) consolidate at extraction time in `release.sh` so only 
 Replaced the awk extraction with a Python block that splits the section on `^### ` headers, accumulates bodies per header, and emits in Keep-a-Changelog canonical order (Added, Changed, Deprecated, Removed, Fixed, Security). Originally-separate bullet groups under the same header are joined with a blank line so the dev-time grouping is still readable inside the consolidated section. Any non-canonical `###` headers (defensive) are appended after the canonical ones in original order. Verified by dry-running against the 0.8.0 entry — output collapses 4× Changed / 3× Added / 2× Fixed into one of each, bullets preserved in original sequence.
 
 **Files added/modified:**
+
 - `scripts/release.sh` — replaced the awk `NOTES=$(...)` extraction with a Python heredoc that groups `###` subsections by header and emits in Keep-a-Changelog order. CHANGELOG.md file itself is untouched.
 
 ## 2026-04-26: Location web UI — fold Places into History, add place from sidebar
@@ -4559,6 +4895,7 @@ The Today info panel sat top-right and covered the MapLibre zoom controls; the o
 **Mock backend made mutable.** Save was a no-op because `vite-mock-api.ts` returned static lists from POST handlers. Refactored the middleware to read JSON request bodies, dispatch to handlers with `(url, method, body)`, and threaded create/update/delete through `mockPlaces.places` and `mockDismissed.dismissed`. POST `/places` also drops any discovered cluster within `max(req.radius_meters, cluster.radius_meters)` of the new place via a Haversine helper, so the visual feedback ("yellow circle disappears after I name it") works in mock mode the same way it does against the real backend. State is in-memory; resets on dev-server restart.
 
 **Files added/modified:**
+
 - `web/src/routes/location/+layout.svelte` — sidebar `+ New place` button + create/dismiss handlers; `Places` `NavLink` removed; `dismissCluster` import + form `onDismiss` wiring.
 - `web/src/routes/location/+page.svelte` — full-width stats bar + collapsible details panel mirroring history; current visit inlined; floating info card removed.
 - `web/src/routes/location/history/+page.svelte` — `Discover` chip; cluster + dismissed-cluster handlers; map renders even with zero pings when discover is on; `discoverDirty` reload signal.
@@ -4580,6 +4917,7 @@ Follow-up session on the previous mobile UI pass after testing on-device.
 **Transactions list padding.** User noticed the transaction rows were inset more than the `.money-section-header` above them. Cause: `.txn-scroll` had `0 0.5rem 0.5rem` outer padding, and the inner `.txn-row` / `.date-header` already had `0.75rem` horizontal padding — total `1.25rem` vs. the section header's `0.75rem`. Removed the outer horizontal padding from `.txn-scroll` and bumped `.result-bar` from `1rem` to `0.75rem`. Now rows align flush with the section header.
 
 **Files added/modified:**
+
 - `web/src/lib/components/ui/SidebarToggle.svelte` — vertically-centered left-edge tab with `ChevronRight` icon; replaces the bottom-left pill.
 - `web/src/routes/money/+layout.svelte` — mobile rule: tools row stays single-line, filter input flex-grows.
 - `web/src/routes/money/{transactions,reports,accounts}/+layout.svelte` — "All years" → "All".
@@ -4598,6 +4936,7 @@ User reported on iPhone that the top-level nav links (Feeds / Location / Money) 
 **Verification.** `npm run check` is clean for the touched files (the 15 pre-existing errors in `cash-flow/+page.svelte` and `taxes/+page.svelte` are untouched). `npm run build` succeeds in 11.4 s. Could not visually verify in the browser — the Chrome extension wasn't connected — so this needs a hands-on phone/devtools check before shipping.
 
 **Files added/modified:**
+
 - `web/src/routes/+layout.svelte` — `DropdownMenu` hamburger via `child` snippet pattern; mobile-only display rules; per-component menu styles via `:global()`.
 - `web/src/app.css` — `.app-nav .nav-links { display: none }` at the existing 640 px breakpoint.
 - `web/src/lib/components/ui/SidebarToggle.svelte` — fixed bottom-left chip on mobile mirroring `.status-badge`; hidden when `open`.
@@ -4611,6 +4950,7 @@ Second pass through the open items on the April 5 security audit. Two units of w
 **M4 — Linux+bwrap as the only supported deployment.** The audit flagged that without bubblewrap, non-admin filesystem isolation collapses to env-var scoping in the prompt, which is "boundary = model instruction-following" — not a real boundary. Two ways to close that: (a) build a second isolation layer in the skill CLIs (path-validate every file access), or (b) declare bwrap+Linux the only supported config and warn loudly otherwise. We picked (b). The dev/macOS path still runs, just with a `SECURITY UNSUPPORTED CONFIGURATION` WARNING at startup when sandbox is unavailable or disabled with multi-user. Per-skill-CLI path validation was explicitly rejected as belt-and-braces work for an unsupported config. Docs reframed in `docs/deployment/security.md` (new "Supported deployment" section), `AGENTS.md`, and the `README.md` Docker section. The audit doc's M4 entry is now marked resolved with the policy reasoning.
 
 **Low-severity cleanup (L2, L7, L8, L10).** Triaged the L-tier into "real low-hanging fruit", "small-but-think-first", and "design call". The four wins:
+
 - L2: Unix sockets for skill proxy and network proxy were created with default umask permissions, so any local user could connect during a task window. Fixed with `os.chmod(str(self.socket_path), 0o600)` immediately after `bind()` in both proxies.
 - L7: Two web API endpoints (place creation, cluster dismissal) returned `JSONResponse({"error": str(e)}, ...)` to the browser, leaking internal exception text. Replaced with generic messages; full exception is still logged server-side.
 - L8: `!status` ran `SELECT COUNT(*) FROM tasks WHERE status = 'running'` with no `user_id` filter, so non-admins could see global queue depth. Wrapped the system-stats block in `if config.is_admin(user_id):`. Admins keep the full view; non-admins see only their per-user list. The default test fixture has empty `admin_users` (which means "everyone is admin"), so existing tests still pass; the new test sets `admin_users = {"someone_else"}` to force alice non-admin.
@@ -4621,6 +4961,7 @@ L4 (denylist→allowlist for `build_stripped_env`) and L6 (webhook query-param t
 Test pass: 243 in `test_commands / test_notifications / test_skill_proxy / test_network_proxy` all green, including 4 new tests.
 
 **Key changes:**
+
 - M4: scheduler startup warning escalated from INFO to WARNING for unsupported configs (multi-user without bwrap, or sandbox explicitly disabled). Single-user dev configs warn but with a softer "dev-only" label.
 - L2: `0o600` chmod on both proxy sockets immediately after `bind()`, before `listen()` accepts connections.
 - L7: generic error strings on two web_app endpoints; full exception still `logger.error()`-logged.
@@ -4628,6 +4969,7 @@ Test pass: 243 in `test_commands / test_notifications / test_skill_proxy / test_
 - L10: CR/LF stripped from ntfy `Title` and `Tags` at the boundary.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` — security status block in `run_daemon()` reworked into a multi-user × bwrap-available matrix; WARNING for unsupported configurations.
 - `src/istota/skill_proxy.py` — chmod after bind in `SkillProxy.start()`.
 - `src/istota/network_proxy.py` — chmod after bind in `NetworkProxy.start()`, `import os` added.
@@ -4654,16 +4996,18 @@ The fix is two new config knobs and a tiny db helper that walks `parent_task_id`
 
 `db.get_subtask_depth()` walks the parent chain with a 100-step hard cap so it always terminates. The chain rarely matters in practice — typical depth is 0 or 1 — and the cap exists purely to bound the worst case from runaway recursion.
 
-The full pytest suite still has a pre-existing hang when *all* test files run together (some cross-module fixture leak — individual file groups all pass cleanly). Verified the M5 work via targeted runs: 777 passed across `test_scheduler / test_db / test_config / test_sandbox / test_executor / test_executor_streaming` plus the 9 new tests added in this session. Worth filing the suite-level hang separately.
+The full pytest suite still has a pre-existing hang when _all_ test files run together (some cross-module fixture leak — individual file groups all pass cleanly). Verified the M5 work via targeted runs: 777 passed across `test_scheduler / test_db / test_config / test_sandbox / test_executor / test_executor_streaming` plus the 9 new tests added in this session. Worth filing the suite-level hang separately.
 
 Audit doc (`Security audit 2025-04-05.md`) updated: M5 marked RESOLVED with the four mitigations + test list, and the priority matrix grew a Status column reflecting that H1–H4, M1–M3, M5, and M8 are now closed since the audit. M4, M6, M7, and the L-tier are still open.
 
 **Key changes:**
+
 - `scheduler.max_subtask_depth`, `scheduler.max_subtask_prompt_chars`, `scheduler.max_subtasks_per_task` — three new `SchedulerConfig` fields with conservative defaults (3, 8000, 10).
 - `db.get_subtask_depth(conn, task_id)` — walks `parent_task_id` upward, returns depth (0 = root), capped at 100 to terminate on pathological chains.
 - `_process_deferred_subtasks` enforces the depth gate (rejects whole batch when at cap) and the per-prompt size gate (skips individual oversize prompts), keeps the existing per-task fan-out cap, and now logs the prompt prefixes of created subtasks.
 
 **Files added/modified:**
+
 - `src/istota/config.py` — three new SchedulerConfig fields.
 - `src/istota/db.py` — `get_subtask_depth()` helper + `_SUBTASK_DEPTH_HARD_CAP = 100`.
 - `src/istota/scheduler.py` — depth/size gates and prompt-prefix audit log in `_process_deferred_subtasks`.
@@ -4675,19 +5019,20 @@ Audit doc (`Security audit 2025-04-05.md`) updated: M5 marked RESOLVED with the 
 
 ## 2026-04-26: Skill proxy credential authorization — decouple from selection
 
-Audited the skill-proxy credential injection setup against industry patterns and Anthropic's own internal pattern (Claude Code sandboxing post, Nov 2025 — they run essentially the same shape: per-task Unix-socket credential broker, egress allowlist, no in-sandbox secrets). Conclusion: architecture is right; the recurring "implied skill not loaded → credential not available → task fails mysteriously" symptom isn't a proxy-design flaw, it's a *coupling* flaw. The same set (selected_skills) was driving both prompt content and credential authorization.
+Audited the skill-proxy credential injection setup against industry patterns and Anthropic's own internal pattern (Claude Code sandboxing post, Nov 2025 — they run essentially the same shape: per-task Unix-socket credential broker, egress allowlist, no in-sandbox secrets). Conclusion: architecture is right; the recurring "implied skill not loaded → credential not available → task fails mysteriously" symptom isn't a proxy-design flaw, it's a _coupling_ flaw. The same set (selected_skills) was driving both prompt content and credential authorization.
 
-Split that coupling. Skill selection (Pass 1 keyword + Pass 2 semantic routing) still controls which skill *docs* go into the prompt — that's the genuine token-budget trade-off. Credential authorization is now derived purely from credential presence in the task env: if `MINIFLUX_API_KEY` is in the env (because the user has a miniflux resource configured), the `feeds` skill is authorized to request it, regardless of whether the prompt happened to say "feed". The threat model is unchanged because `credential_env` already only contains creds the user has actually configured.
+Split that coupling. Skill selection (Pass 1 keyword + Pass 2 semantic routing) still controls which skill _docs_ go into the prompt — that's the genuine token-budget trade-off. Credential authorization is now derived purely from credential presence in the task env: if `MINIFLUX_API_KEY` is in the env (because the user has a miniflux resource configured), the `feeds` skill is authorized to request it, regardless of whether the prompt happened to say "feed". The threat model is unchanged because `credential_env` already only contains creds the user has actually configured.
 
 Cleanest formulation turned out to be much simpler than the spec note's "user_has_resources_for(skill)" — credential presence in env is a unifying signal that already accounts for both per-user resources (Karakeep, Miniflux, etc.) and instance-level config (SMTP, GitLab/GitHub tokens). One ~20-line helper (`_authorized_skills_from_credentials`) replaces the previous selection-driven derivation.
 
-Also landed: structured WARNING logs on every proxy rejection (`proxy_rejected task_id=… type=skill|credential reason=…`) keyed by task and reason code, plus per-rule INFO logs on Pass 1 skill selection (`pass1_selection count=N: foo(always_include), bar(keyword='kw'), …`). These are the data we'd want before deciding whether semantic-routing's 3-second timeout or prompt is too tight — observability *first*, tune later.
+Also landed: structured WARNING logs on every proxy rejection (`proxy_rejected task_id=… type=skill|credential reason=…`) keyed by task and reason code, plus per-rule INFO logs on Pass 1 skill selection (`pass1_selection count=N: foo(always_include), bar(keyword='kw'), …`). These are the data we'd want before deciding whether semantic-routing's 3-second timeout or prompt is too tight — observability _first_, tune later.
 
 Pass 2 prompt enrichment was the smallest of the four changes: `build_skill_manifest()` now takes an optional `user_resource_types` set and prepends "User has resources: …" plus appends `[needs resource: …]` hints per skill. Lets Haiku reason "user has miniflux → feeds is plausible" without keyword overlap.
 
 Audit note (`Notes/Projects/Istota/Skill proxy credential injection audit.md`) records the architecture comparison, the alternative-network-proxy analysis (TLS implications: it works only when the proxy is the originating TLS client, like 1Password Connect or Vault Agent — not as a transparent forward proxy), and the recommendation sequence.
 
 **Key changes:**
+
 - `_authorized_skills_from_credentials(skill_index, credential_env)` — new helper in `executor.py`; returns CLI skills authorized for credential access based on credential presence in env, not skill selection.
 - `SkillProxy` constructor accepts `task_id` and `authorized_skills`; rejection responses now include structured `reason`, `name`/`skill`, and `authorized_skills` fields. Stderr message lists authorized skills so the model can adapt rather than retry blindly.
 - `select_skills()` records the matching rule per skill and emits a single INFO log: `pass1_selection count=N: foo(always_include), bar(keyword='kw'), …`.
@@ -4696,6 +5041,7 @@ Audit note (`Notes/Projects/Istota/Skill proxy credential injection audit.md`) r
 - 14 new tests across `_authorized_skills_from_credentials`, structured rejection responses, the WARNING log, manifest enrichment, and Pass 1 reason logging. 486 tests green across the touched modules.
 
 **Files added/modified:**
+
 - `src/istota/executor.py` — `_authorized_skills_from_credentials()` helper, replaced `cred_skill_names` derivation, pass `task_id` + `authorized_skills` to `SkillProxy`, added `proxy_authorization` startup INFO log, threaded `user_resource_types` into `classify_skills()`.
 - `src/istota/skill_proxy.py` — `task_id` + `authorized_skills` constructor params; structured rejection responses with `reason` codes; WARNING logs on every rejection.
 - `src/istota/skill_client.py` — surfaces credential-lookup `error` field; ensures stderr ends with newline so the authorized-skills line doesn't run together.
@@ -4720,6 +5066,7 @@ The `--help` discovery hint added to five skills (`money`, `bookmarks`, `locatio
 Pre-existing test failures in `tests/test_skills_email.py` and `tests/test_skills_transcribe.py` (16 cases) confirmed via `git stash` to exist on `main` — they're system-level dep issues with `imap-tools` and PIL/pytesseract in this dev environment, unrelated.
 
 **Key changes:**
+
 - New `src/istota/location_logic.py` — extracted 5 location helpers (~250 lines) from `web_app.py` so both the FastAPI routes and the location skill subprocess use the same code.
 - Five new location CLI subcommands with web parity: `discover`, `dismiss-cluster`, `list-dismissed`, `restore-dismissed`, `place-stats`.
 - `money/skill.md` now lists `run-scheduled` (drift fix) and includes it in the concurrency-rule list.
@@ -4727,6 +5074,7 @@ Pre-existing test failures in `tests/test_skills_email.py` and `tests/test_skill
 - `location/skill.md` documents the five new commands plus example output (place-stats / discover / list-dismissed shapes).
 
 **Files added/modified:**
+
 - `src/istota/location_logic.py` — new shared module.
 - `src/istota/web_app.py` — `_location_*` helpers replaced with `from .location_logic import …`; helper bodies removed (267 lines).
 - `src/istota/skills/location/__init__.py` — `cmd_discover`, `cmd_dismiss_cluster`, `cmd_list_dismissed`, `cmd_restore_dismissed`, `cmd_place_stats` + parser registrations + dispatch table entries; module docstring updated.
@@ -4739,15 +5087,16 @@ Pre-existing test failures in `tests/test_skills_email.py` and `tests/test_skill
 
 ## 2026-04-26: Money module jobs — drop monarch_sync, fold sync into run-scheduled
 
-Two issues surfaced after the moneyman → istota merge. First, the auto-seeded `_module.money.run_scheduled` job at 8 AM was failing every day with "no tool calls": the `run-scheduled` Click subcommand exists in `istota.money.cli` (line 1128) but was never wired into the `istota-skill money` argparse wrapper (`src/istota/skills/money/__init__.py`), so cron fired, the wrapper printed help, exited 1. Second issue exposed by the first: the wrapper *also* auto-seeds `_module.money.monarch_sync` at 6 AM, which duplicates whatever prompt-based monarch sync the user has already written into CRON.md (most users want a narrated/observable sync, not a silent command).
+Two issues surfaced after the moneyman → istota merge. First, the auto-seeded `_module.money.run_scheduled` job at 8 AM was failing every day with "no tool calls": the `run-scheduled` Click subcommand exists in `istota.money.cli` (line 1128) but was never wired into the `istota-skill money` argparse wrapper (`src/istota/skills/money/__init__.py`), so cron fired, the wrapper printed help, exited 1. Second issue exposed by the first: the wrapper _also_ auto-seeds `_module.money.monarch_sync` at 6 AM, which duplicates whatever prompt-based monarch sync the user has already written into CRON.md (most users want a narrated/observable sync, not a silent command).
 
-Fixed both. Wired `run-scheduled` through the wrapper, dropped `monarch_sync` from `DEFAULT_JOBS` entirely, and folded an opportunistic monarch sync into `run-scheduled` itself — so users with `monarch_config` set still get a daily sync, just bundled with the invoice scheduler instead of being its own auto-seeded job. The principle: module-job auto-seeding belongs to operations users wouldn't naturally schedule themselves (the invoice "are any clients due?" check is the canonical example); operations users *do* like to wrap in their own prompt for visibility (monarch sync) shouldn't compete with user CRON.md.
+Fixed both. Wired `run-scheduled` through the wrapper, dropped `monarch_sync` from `DEFAULT_JOBS` entirely, and folded an opportunistic monarch sync into `run-scheduled` itself — so users with `monarch_config` set still get a daily sync, just bundled with the invoice scheduler instead of being its own auto-seeded job. The principle: module-job auto-seeding belongs to operations users wouldn't naturally schedule themselves (the invoice "are any clients due?" check is the canonical example); operations users _do_ like to wrap in their own prompt for visibility (monarch sync) shouldn't compete with user CRON.md.
 
 `run-scheduled` now: if `monarch_config_path` set and `--skip-monarch` not passed → call shared `_run_monarch_sync` helper; then proceed with invoice schedule check. Result JSON includes a `monarch` key when the sync ran. Either half is optional — ledger-only users skip the seeded job entirely (`jobs_for_user` returns `[]`).
 
 The existing `_module.money.monarch_sync` row in production DB will be orphan-deleted automatically on the next scheduler tick by `_sync_money_module_jobs` (`scheduler.py:2631`) since it's no longer in `wanted_by_name`. No manual cleanup needed.
 
 **Key changes:**
+
 - `_module.money.monarch_sync` removed from `DEFAULT_JOBS`. Only `_module.money.run_scheduled` is auto-seeded now.
 - `run-scheduled` runs an opportunistic monarch sync first when `monarch_config_path` is set; new `--skip-monarch` flag for opt-out.
 - `_run_monarch_sync(ctx, dry_run, ledger)` extracted as a shared helper; `sync-monarch` is now a thin wrapper around it.
@@ -4755,6 +5104,7 @@ The existing `_module.money.monarch_sync` row in production DB will be orphan-de
 - `istota-skill money run-scheduled` finally works — the argparse wrapper exposes `--dry-run` and `--skip-monarch`.
 
 **Files added/modified:**
+
 - `src/istota/money/jobs.py` — single-job `DEFAULT_JOBS`, simplified `jobs_for_user` (no per-job `requires` field; one feature gate at the top).
 - `src/istota/money/cli.py` — `_run_monarch_sync` helper, `sync-monarch` wraps it, `run-scheduled` calls it before the invoice check.
 - `src/istota/skills/money/__init__.py` — `cmd_run_scheduled` + `run-scheduled` subparser with `--dry-run` / `--skip-monarch`.
@@ -4766,11 +5116,13 @@ The existing `_module.money.monarch_sync` row in production DB will be orphan-de
 Follow-up to the places sidebar tidy-up. Three problems surfaced once the radius badge was removed and rows tightened up: (1) long place names made the whole sidebar side-scroll, (2) the hover background looked top-heavy because the button's default `line-height: normal` left more visual breathing room above the glyph than below, and (3) the hover background was flush with the sidebar's left edge but had a 0.25rem gutter on the right — asymmetric. Fixed all three; also added mock places to `vite-mock-api.ts` so the next pass on this UI is testable without booting the FastAPI backend.
 
 **Key changes:**
+
 - `Sidebar.svelte`: `.sidebar-list` gained `min-width: 0` and `overflow-x: hidden` — the sidebar no longer side-scrolls regardless of child content. Bottom padding made symmetric: `padding: 0 0.25rem 0.5rem` (was `0 0.25rem 0.5rem 0`), so hover backgrounds sit inside an equal gutter on both sides.
 - `routes/location/+layout.svelte`: `.place-btn` now truncates on the button itself (`white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%`) instead of relying on the inner `<span>` (which couldn't ellipsize as inline content). Padding tightened to `0.2rem 0.75rem` and explicit `line-height: 1.5` set so the hover bg reads symmetric top/bottom.
 - `vite-mock-api.ts`: 12 mock places spanning home/work/social/gym/shopping/food/family/medical/hotel/friend categories, with two intentionally long names ("Berghain Boiler Room (Side Entrance)" and "Café around the corner with the wifi password on the wall") to verify truncation. Added a `/places/{id}/stats` handler returning empty stats so clicking a row in dev mode doesn't 404.
 
 **Files added/modified:**
+
 - `web/src/lib/components/ui/Sidebar.svelte` — overflow-x hidden, min-width 0, symmetric horizontal padding on `.sidebar-list`.
 - `web/src/routes/location/+layout.svelte` — `.place-btn` ellipsis on the button, explicit line-height, padding rebalance.
 - `web/vite-mock-api.ts` — 12 mock places with varied categories and two long names; `/places/{id}/stats` handler.
@@ -4780,6 +5132,7 @@ Follow-up to the places sidebar tidy-up. Three problems surfaced once the radius
 Small follow-up to the shell/primitives consolidation. The places sidebar had a delete `×` that appeared on row hover — too easy to fire by accident, and the `XXm` radius badge next to each name ate sidebar real-estate without earning it. Folded delete into the existing edit modal as a left-aligned link (with a `confirm()` guard) so it requires an explicit two-step action, and dropped the radius from the sidebar. While in `PlaceForm`, also made the category dropdown grow with the user's data: instead of a fixed list of 11 categories, options now merge the base list, every distinct category present on `$locationPlaces`, and the place's own current category, deduped and alphabetized.
 
 **Key changes:**
+
 - Removed hover-to-delete `×` from the places sidebar rows.
 - Removed the radius badge (`100m`, etc.) from sidebar rows — name only now.
 - `PlaceForm` accepts an optional `onDelete` prop; when set and editing, the modal footer shows a left-aligned "Delete" link guarded by `confirm("Delete \"X\"? This cannot be undone.")`.
@@ -4787,6 +5140,7 @@ Small follow-up to the shell/primitives consolidation. The places sidebar had a 
 - `handleDeletePlace` in `routes/location/+layout.svelte` also closes the editing modal if the deleted place was being edited.
 
 **Files added/modified:**
+
 - `web/src/lib/components/location/PlaceForm.svelte` — `onDelete` prop, `handleDelete()` with confirm, left-aligned `.delete-link` button in footer (`margin-right: auto` so it sits opposite Cancel/Update), `$derived` `categoryOptions` reading from `locationPlaces` store.
 - `web/src/routes/location/+layout.svelte` — sidebar rows simplified to a single `.place-btn` (no row wrapper, no radius span, no delete button); `handleDeletePlace` closes `editingPlace` on match; `<PlaceForm>` editing instance receives `onDelete={handleDeletePlace}`. Dead `.place-row` / `.place-radius` / `.place-delete` styles removed.
 
@@ -4795,6 +5149,7 @@ Small follow-up to the shell/primitives consolidation. The places sidebar had a 
 Spent the session standardizing the SvelteKit web frontend. Started as small CSS tweaks ("app-nav background slightly brighter", "secondary navbar chip styling consistent across feeds/location/money", "tighten padding"), then snowballed into a full audit + refactor when alignment drift kept turning up across the four route layouts. Used the Explore agent to inventory duplication; the headline finding was ~400 lines of near-identical shell + sidebar CSS spread across 4 files, plus bits-ui (already a dep) being only 4% utilized — Collapsible only, despite 5 raw `<select>`s in the codebase and a hand-rolled overlay/backdrop modal in `PlaceForm`.
 
 **Built primitives in `web/src/lib/components/ui/`:**
+
 - `AppShell.svelte` — fullscreen flex shell with the breakout-margin trick (`margin: -1.5rem`) and the mobile breakpoint baked in. Header / optional sidebar / optional `extras` (between header and body, used by money's error panel) / children. Eliminates the per-layout `.feed-shell` / `.loc-shell` / `.money-shell` blocks.
 - `ShellHeader.svelte` — `title` + `nav` + `tools` snippets. Standardizes the secondary-nav row.
 - `Sidebar.svelte` — header (title + count) + optional `extras` + scrollable list. Mobile slide-in built in. Default width 220px (matched to transactions, the widest of the three pre-existing sidebars).
@@ -4807,6 +5162,7 @@ Spent the session standardizing the SvelteKit web frontend. Started as small CSS
 - `index.ts` — barrel export.
 
 **Migrations:**
+
 - `routes/location/+layout.svelte` — 562 → 423 lines (~25% reduction). Replaced shell + sidebar + nav CSS; kept stats-panel internals.
 - `routes/feeds/+layout.svelte` — 295 → 145 lines (~50% reduction).
 - `routes/money/+layout.svelte` — uses `AppShell` (no sidebar) + `Select` for the ledger picker. The `.money-section-*` global classes stay (sub-routes still consume them).
@@ -4814,18 +5170,21 @@ Spent the session standardizing the SvelteKit web frontend. Started as small CSS
 - `lib/components/location/PlaceForm.svelte` — overlay/backdrop/category select/buttons all gone; uses `Modal` + `Select` + `Button`.
 
 **Alignment + spacing system:**
+
 - `--chip-padding-x` (0.5rem) and `--chip-gap` (0.1rem) live in `app.css`. Both `Chip` and `NavLink` consume them, so changes propagate.
-- `.nav-hang` utility = `margin-inline-start: calc(-1 * var(--chip-padding-x))`. Drop on any flex nav whose first chip is the leftmost element of a row, and chip *text* visually aligns with the heading text on the row above (the bg pill hangs left into the parent's padding — standard hanging-pill pattern). Applied globally to `.money-section-nav`, so all tertiary navs (reports, business) inherit it.
+- `.nav-hang` utility = `margin-inline-start: calc(-1 * var(--chip-padding-x))`. Drop on any flex nav whose first chip is the leftmost element of a row, and chip _text_ visually aligns with the heading text on the row above (the bg pill hangs left into the parent's padding — standard hanging-pill pattern). Applied globally to `.money-section-nav`, so all tertiary navs (reports, business) inherit it.
 - `Sidebar`'s `.sidebar-list` now has `padding-inline-end: 0.25rem` so item hover backgrounds don't bleed to the right edge of the sidebar.
 - App nav background bumped to `#1a1a1a` to differentiate from the page bg `#111`.
 - Top-right "log out" text link replaced with the Lucide `LogOut` icon.
 
 **Local dev workflow** — added a Vite middleware mock so `npm run dev` works without the FastAPI backend running:
+
 - `web/vite-mock-api.ts` — middleware plugin that intercepts `/istota/api/*` and `/istota/money/api/*`, returns minimal valid responses (auth user, empty feeds/places/pings, ledger list, accounts).
 - `web/vite.config.ts` — gated on `VITE_MOCK_API=1` env var. Without the var, the original proxy-to-localhost behavior is unchanged.
 - Run with `VITE_MOCK_API=1 npm run dev` for pure UI iteration with HMR.
 
 **Files added/modified:**
+
 - `web/src/lib/components/ui/AppShell.svelte` — new
 - `web/src/lib/components/ui/ShellHeader.svelte` — new
 - `web/src/lib/components/ui/Sidebar.svelte` — new
@@ -4877,6 +5236,7 @@ Defer for later (discussed but out of scope this PR): skill-frontmatter `model:`
 40 new tests in `test_model_override.py` + 4 in `test_log_channel.py` covering every link in the chain (parse, generate, sync, migrate, create_task, scheduler propagation, executor flag wiring, !cron listing, validation warnings, log channel resolved values). 846 tests pass across the focused suites; no regressions.
 
 **Files added/modified:**
+
 - `schema.sql` — `model` and `effort` TEXT columns on both `tasks` and `scheduled_jobs`.
 - `src/istota/db.py` — dataclass fields, ALTER TABLE migrations, INSERT, SELECT projections, row→object hydration.
 - `src/istota/cron_loader.py` — CronJob fields, parse/generate/sync/migrate plumbing, `_validate_model` / `_validate_effort`.
@@ -4899,6 +5259,7 @@ Updated the inline comments in `config.example.toml`, `defaults/main.yml`, the `
 Defaults stay empty so existing instances keep using the CLI default unless an operator opts in. To take effort, set both `model` (so the model is one that supports it) and `effort` in `config.toml`, or `istota_model` + `istota_effort` in your Ansible inventory.
 
 **Files added/modified:**
+
 - `src/istota/config.py` — `Config.effort: str = ""` + parser hook.
 - `src/istota/executor.py` — `--effort` CLI arg when `config.effort` is set.
 - `config/config.example.toml` — documented `effort`, rewrote model comment to recommend pinning.
@@ -4916,9 +5277,10 @@ Most of what we have still maps cleanly. Two pieces are worth pulling in:
 
 **2. Refined sleep guidance.** Replaced the single "avoid unnecessary sleep" line with two specific CC rules: don't sleep between commands that can run immediately, and keep the duration short if you must. Skipped the "don't poll a `run_in_background` task" rule — we don't expose background execution to the inner Claude.
 
-Cross-checked against `persona.md`: no conflicts. Persona owns the principle ("ask before taking actions that are hard to undo", "be cautious with anything outward-facing"); the system prompt now operationalizes that principle with concrete examples. The two layers' axes are complementary — persona splits *internal vs outward-facing* (visibility), system prompt splits *reversible vs irreversible* (undo cost). Together they cover both quadrants.
+Cross-checked against `persona.md`: no conflicts. Persona owns the principle ("ask before taking actions that are hard to undo", "be cautious with anything outward-facing"); the system prompt now operationalizes that principle with concrete examples. The two layers' axes are complementary — persona splits _internal vs outward-facing_ (visibility), system prompt splits _reversible vs irreversible_ (undo cost). Together they cover both quadrants.
 
 Skipped from CC's latest:
+
 - `doing-tasks-software-engineering-focus` — bot tasks are mostly email/calendar/files, not code.
 - `tool-usage-subagent-guidance` + `parallel-tool-call-note` — explicit user preference against pushing parallel subagent use.
 - `communication-style` (CC 2.1.104) — interactive-mode focused; persona/guidelines own this.
@@ -4928,6 +5290,7 @@ Skipped from CC's latest:
 Token cost: ~+180 tokens added to the prompt.
 
 **Files added/modified:**
+
 - `config/system-prompt.md` — new "Executing actions with care" section; sleep guidance split into two specific rules.
 
 ## 2026-04-25 (cont. 3): Fix UTC/local-date drift in task prompts (ISSUE-056)
@@ -4944,15 +5307,17 @@ Symptom: the model regularly slipped a day when reasoning about "today" — buck
 
 The `_triage_older_talk_messages` helper still emits UTC inside its triage prompt; that string only ever feeds an internal LLM call, never the user-facing task prompt, so I left it alone.
 
-**Why "just put the TZ in the header" wasn't enough.** It was already there, and slips still happened. The TZ name only becomes useful as a label once *every other* time-bearing string in the prompt is in the same zone — at that point there's nothing to convert against and the slip mode goes away.
+**Why "just put the TZ in the header" wasn't enough.** It was already there, and slips still happened. The TZ name only becomes useful as a label once _every other_ time-bearing string in the prompt is in the same zone — at that point there's nothing to convert against and the slip mode goes away.
 
 **Key changes:**
+
 - New prompt header lines: `Today's date`, `User timezone`.
 - New rules entry covering the auto-memory `currentDate` override.
 - Conversation context (Talk + DB) renders timestamps in user TZ.
 - Single source for tz resolution: `_resolve_user_tz()`.
 
 **Files added/modified:**
+
 - `src/istota/executor.py` — added `_resolve_user_tz()`, plumbed `user_tz` into `_build_talk_api_context` / `_build_db_context`, extended prompt header, added auto-memory override rule.
 - `src/istota/context.py` — `format_talk_context_for_prompt` / `format_context_for_prompt` accept `user_tz`; new `_format_created_at` helper.
 - `tests/test_talk_context.py`, `tests/test_context.py` — coverage for `user_tz`-rendered timestamps.
@@ -4960,7 +5325,7 @@ The `_triage_older_talk_messages` helper still emits UTC inside its triage promp
 
 ## 2026-04-25 (cont. 2): Fix Monarch sync recategorization for income postings
 
-The user caught a real accounting bug after a `sync-monarch` run. An eBay sale that had been synced as business income (DR Owner-Drawings / CR Income:Sales) had its `#business` tag removed in Monarch. The resulting recat entry was wrong: instead of reversing the original posting, it emitted `DR Expenses:Personal-Expense / CR Income:Sales` — credited Income:Sales a *second* time (doubling the credit instead of cancelling it), introduced a phantom Personal-Expense debit, and never undid the original Owner-Drawings debit.
+The user caught a real accounting bug after a `sync-monarch` run. An eBay sale that had been synced as business income (DR Owner-Drawings / CR Income:Sales) had its `#business` tag removed in Monarch. The resulting recat entry was wrong: instead of reversing the original posting, it emitted `DR Expenses:Personal-Expense / CR Income:Sales` — credited Income:Sales a _second_ time (doubling the credit instead of cancelling it), introduced a phantom Personal-Expense debit, and never undid the original Owner-Drawings debit.
 
 **Root cause.** `format_recategorization_entry` was hardcoded for the expense-swap case ("retag this expense from one bucket to another"). It worked accidentally when the original was an expense — swapping one expense for another is sign-symmetric. For income the convention flips and the same shape produced a malformed entry. Worse, only the `posted_account` (the income/expense leg) was stored in `monarch_synced_transactions`; the contra account was lost on insert, so even if the formatter knew to do a true reversal it had nothing to reverse against.
 
@@ -4987,6 +5352,7 @@ The user caught a real accounting bug after a `sync-monarch` run. An eBay sale t
 - 6 pre-existing WeasyPrint/libgobject failures in `test_invoicing.py` are environmental and unchanged.
 
 **Files added/modified:**
+
 - `src/istota/money/db.py` — `contra_account` column + migration; dataclass field; INSERT/SELECT plumbing.
 - `src/istota/money/core/transactions.py` — recategorization formatter rewritten as branching reversal-or-swap; category-change formatter sign-aware; sync loop tracks contra_account and surfaces legacy-skip count.
 - `tests/money/test_transactions.py` — replaced 2 tests with 8 covering both branches and edge cases.
@@ -5108,6 +5474,7 @@ Stage 2 — full rollup (`52bfbec`, this entry's main subject):
 Completed the second half of folding the standalone moneyman service into istota as the in-tree `money` package. Phases 0–2 were already in the working tree (per-request config refactor in moneyman, vendor source into istota, mount routers in the web app). Phases 3–6 land here.
 
 **Key changes:**
+
 - Per-user scheduled job seeding for money (`monarch_sync` daily 6am, `run_scheduled` daily 8am). Reserved `_module.*` name prefix in the scheduler, so CRON.md sync leaves these rows alone — both orphan deletion and `migrate_db_jobs_to_file` filter them out. The seeded command shells out to `MONEYMAN_CONFIG=… money --user … sync-monarch` (or `run-scheduled`); `money` is on PATH because it's a console script in istota's venv. Feature-gated: a user without monarch config gets only the invoice scheduler.
 - Workspace-mode config loading: `INVOICING.md` / `TAX.md` / `MONARCH.md` files (each holding a fenced ```toml block) in the user's workspace `config/` dir. Three core parsers (`parse_invoicing_config`, `parse_tax_config`, `parse_monarch_config`) now route through a new `read_toml_config()` helper that handles both `.md` and plain `.toml`. The web app's money loader picks workspace mode automatically when the resource has no `config_path` extra; legacy mode (a money config TOML referenced by `config_path`) keeps working.
 - Migration script for legacy → workspace TOML→MD conversion. Idempotent: re-running on already-migrated `.md` files re-extracts the toml block instead of double-wrapping. Source files are not deleted.
@@ -5116,12 +5483,14 @@ Completed the second half of folding the standalone moneyman service into istota
 - 38 new tests across `test_money_jobs.py` (12), `test_money_workspace.py` (18), `test_money_extract.py` (8). Final consolidated sweep: 605 passed in the relevant test slice; the 6 pre-existing weasyprint env failures in `tests/money/test_invoicing.py` are unchanged.
 
 **Design notes:**
+
 - Path-of-least-resistance taken for the scheduler integration: option (a) from the spec — DB rows seeded directly with a reserved name prefix — rather than option (b) (invent an `add_per_user_daily` API). Reason: istota's scheduler is DB/CRON.md-driven, not registration-API-driven, so a parallel module-jobs hook fits the existing pattern. The hook lives next to `_sync_cron_files` and runs after it on every scheduler tick; per-tick cost is bounded by Phase 0's 5-minute config-resolution cache.
 - Workspace synthesizer doesn't mkdir or touch disk — it just constructs a `UserContext` with paths. The CLI/skill is responsible for ensuring the data dir exists before any operation that needs it. Keeps the loader free of side effects and easy to call from tests.
 - Extract script preserves `.git/` if the destination is pre-cloned. That matches a release flow where CI clones the public repo, runs the extract over its worktree, then `git add -A && git commit && git push`. Script itself does no git operations.
 - The two scheduled commands inherit the istota venv's PATH via `build_stripped_env()`. `money` is registered as a console script in `pyproject.toml` (Phase 1), so it lands in the venv's `bin/` and shell `command` lookup finds it without an absolute path.
 
 **Files added/modified:**
+
 - `src/money/jobs.py` — new; module-job definitions and per-user filtering
 - `src/money/workspace.py` — new; `synthesize_user_context`, `list_workspace_features`
 - `src/money/_config_io.py` — new; `read_toml_config(path)` accepts `.md` or `.toml`
@@ -5144,6 +5513,7 @@ Completed the second half of folding the standalone moneyman service into istota
 Standardized a per-file instruction field for markdown files. Files in the user's notes, channel memory, or bot workspace can carry an `agents:` field in their YAML frontmatter — a single short string (1–3 sentences) of read/write quirks that travels with the file. Replaces the pattern of scattering per-file rules across USER.md / CHANNEL.md / skill prompts, which drift out of sync with the files they describe.
 
 **Where it lives:**
+
 - `config/system-prompt.md` — added a "File conventions" section (always loaded). Defines the field, the trust boundary (honor on user-trusted paths, ignore on inbox/third-party content), and notes that global rules win on conflict.
 - `src/istota/skills/notes/skill.md` — brief mention in the writing-side conventions, pointing at the system-prompt section for the spec.
 
@@ -5156,15 +5526,17 @@ The full long-form spec was originally drafted in `Notes/Projects/Istota/Agents 
 Adopted the layered DEVLOG / CHANGELOG model from the updated /boom skill. DEVLOG keeps doing what it's been doing (verbose dev journal); CHANGELOG.md is new and follows Keep a Changelog 1.1.0. Release process restructured so that the same CHANGELOG section drives both the local tag annotation and the auto-generated GitHub Release — single source of truth that survives the GitLab → Forgejo → GitHub mirror chain (Release objects don't ride the git wire, but annotated tag bodies do).
 
 **Key changes:**
+
 - Created `CHANGELOG.md` with summarized backfill across all 10 prior releases (v0.1.0 → v0.6.1) plus a populated `[Unreleased]` section. Boundaries derived from `git log v$PREV..v$NEXT` (not DEVLOG dates — first pass via subagent had drift between the two).
 - Replaced `.github/workflows/release.yml`: the cliff-based "generate notes from commit messages" step is gone; new step extracts release notes from the annotated tag body via `git tag -l --format='%(contents)'`, with a guard that fails the workflow if the body is empty.
 - Added `scripts/release.sh`: pre-flight checks (clean tree, tag doesn't exist, `[Unreleased]` present), moves `[Unreleased]` to a versioned section in CHANGELOG, bumps `pyproject.toml`, extracts the new section as the tag annotation body via `awk`, commits, annotated-tags, pushes with `--follow-tags`. Link references at the bottom of CHANGELOG are rewritten in the same Python pass.
 - Deleted `cliff.toml`. Boom flow appends to CHANGELOG as you go, so commit-message → release-notes generation is no longer needed.
 - README's "Further reading" section now lists CHANGELOG (release notes) and DEVLOG (dev journal) as separate artifacts.
 
-**Mirror-chain reasoning:** GitLab Releases / Forgejo Releases / GitHub Releases are platform-side metadata (API objects) and don't propagate via `git push --mirror`. Annotated tag bodies *do* propagate. So the design is: tag annotation = canonical release notes, each downstream platform that wants a Release page builds one from the tag annotation. Forgejo gets nothing (CHANGELOG.md visible in repo is enough); GitHub gets a Release page via the workflow above; GitLab is private so no Release object is needed there.
+**Mirror-chain reasoning:** GitLab Releases / Forgejo Releases / GitHub Releases are platform-side metadata (API objects) and don't propagate via `git push --mirror`. Annotated tag bodies _do_ propagate. So the design is: tag annotation = canonical release notes, each downstream platform that wants a Release page builds one from the tag annotation. Forgejo gets nothing (CHANGELOG.md visible in repo is enough); GitHub gets a Release page via the workflow above; GitLab is private so no Release object is needed there.
 
 **Files added/modified:**
+
 - `CHANGELOG.md` — new, KaC 1.1.0 format, all 10 prior versions backfilled
 - `scripts/release.sh` — new, executable; uses `--cleanup=verbatim` on `git tag -a` so `### Added` etc. headers in the annotation aren't stripped as `#` comments
 - `.github/workflows/release.yml` — rewritten twice: first attempt read tag annotation + `--notes "$X"` inline, second attempt reads `CHANGELOG.md` from the tree + `--notes-file`. Idempotent (`gh release view` → edit-or-create) and adds `workflow_dispatch` with a `tag` input so any past release can be regenerated from the Actions tab
@@ -5173,18 +5545,15 @@ Adopted the layered DEVLOG / CHANGELOG model from the updated /boom skill. DEVLO
 
 **v0.7.0 cut as the test release. Two workflow gotchas surfaced:**
 
-1. `actions/checkout@v4` with `fetch-depth: 0, fetch-tags: true` fetches the tag *ref* but not necessarily the tag *object*. Inside the runner, `git tag -l --format='%(contents)' v0.7.0` fell back to lightweight-tag behavior and returned the *commit message* instead of the annotation body. So the first GitHub Release for v0.7.0 ended up with `Bump version to 0.7.0` as its body. Tag force-push doesn't re-trigger the workflow either, so the corrected annotation never got read.
+1. `actions/checkout@v4` with `fetch-depth: 0, fetch-tags: true` fetches the tag _ref_ but not necessarily the tag _object_. Inside the runner, `git tag -l --format='%(contents)' v0.7.0` fell back to lightweight-tag behavior and returned the _commit message_ instead of the annotation body. So the first GitHub Release for v0.7.0 ended up with `Bump version to 0.7.0` as its body. Tag force-push doesn't re-trigger the workflow either, so the corrected annotation never got read.
 2. Even with a correct extraction, `--notes "${{ steps.notes.outputs.NOTES }}"` substitutes the value text-for-text into the shell command. CHANGELOG bullets contain `"Known facts"`, backticks like `` `!memory facts` ``, etc. — that breaks shell quoting. Always use `--notes-file` (or pass through an `env:` block) for content with arbitrary characters.
 
 Final design avoids both: workflow reads `CHANGELOG.md` from the checked-out tree (always present, no fetch surprises), writes the awk-extracted section to a temp file, passes via `--notes-file`. Tag annotation is still set by `release.sh` for viewers of `git show vX.Y.Z`, but it's not load-bearing.
 
-
-
-
-
 Reworked the service manifest spec to ship in four tiers, smallest first. Tier 1 closes ISSUE-032 (manifest-driven installer wizard) without requiring the full web/UI plugin layer. Same pass cleaned out lingering Fava references — Moneyman runs its own web UI now.
 
 **Key changes:**
+
 - New "Implementation tiers" section in `Service manifest and plugin architecture spec.md` defining T1 installer-only, T2 `/api/services` endpoint, T3 web UI integration, T4 settings + dashboard. Existing sections tagged with the tier they belong to.
 - Manifest location moved to `services/{id}/manifest.json` at repo root so installer + backend + web build all read one source of truth.
 - Added `install` field to the manifest schema with three methods (`script`, `package`, `external`) and a per-service wizard flow (detect → install → connect → register). Added field-table `Tier` column so a reader can see when each field becomes meaningful.
@@ -5195,6 +5564,7 @@ Reworked the service manifest spec to ship in four tiers, smallest first. Tier 1
 - Earlier in the same session: small docs sync commit (`60ce609`) updating `.claude/rules/executor.md`, `.claude/rules/skills.md`, and `AGENTS.md` for the kv skill, sticky-skill flow, post-Pass-2 exclude_skills re-application, and removal of stale ledger/invoicing env vars.
 
 **Files added/modified:**
+
 - `Notes/Projects/Istota/Service manifest and plugin architecture spec.md` — tiers, install field, schema cleanup, Fava removal (outside repo)
 - `AGENTS.md` — Authenticated Web Interface section: Fava-related routes and proxy notes removed
 - `deploy/ansible/tasks/main.yml` — `moneyman-fava.inc` dropped from include-creation loop
@@ -5202,6 +5572,7 @@ Reworked the service manifest spec to ship in four tiers, smallest first. Tier 1
 - `.claude/rules/executor.md`, `.claude/rules/skills.md` (prior commit `60ce609`)
 
 **Notes:**
+
 - Backend route list in AGENTS.md is broadly stale (e.g. `/api/moneyman/ledgers` no longer exists in `web_app.py`, `ledgers` SvelteKit route is gone). Left alone in this pass — outside Fava scope. Worth a separate sweep.
 - Hosts that ran the role previously will keep an orphaned `/etc/nginx/includes/moneyman-fava.inc` on disk. Once nothing references it, nginx ignores it; harmless. No active deletion task added.
 - ISSUE-032 spec is ready; Tier 1 implementation not yet started.
@@ -5211,6 +5582,7 @@ Reworked the service manifest spec to ship in four tiers, smallest first. Tier 1
 Closed ISSUE-033: when an inbound email (or any task) trips Anthropic's safety filter, the scheduler used to retry the same content three times against the same block, then deliver a generic "deep stared back" Talk message — silent failure from the user's perspective. Now policy refusals are detected, retries are skipped, and the user gets an alert naming what was blocked.
 
 **Key changes:**
+
 - `_is_policy_refusal()` classifies an error string as a non-retryable policy refusal: `parse_api_error()` → status 400 + safety/policy/content/refused/harm/blocked keyword in the API message.
 - New branch in `process_one_task()` after `is_cancelled` and before the retry path: policy refusals mark the task `failed` immediately (attempt_count stays at 0), bump scheduled-job failure counters where applicable, and call `_post_policy_refusal_alert()`.
 - `_post_policy_refusal_alert()` extracts the `From:` header from email-task prompts so the alert names the sender; for non-email surfaces it labels by conversation token / source type. Dispatches via `send_notification(surface="talk")`, wrapped in try/except so a missing alerts channel never crashes the scheduler.
@@ -5218,6 +5590,7 @@ Closed ISSUE-033: when an inbound email (or any task) trips Anthropic's safety f
 - 11 new tests across `TestIsPolicyRefusal`, `TestPostPolicyRefusalAlert`, `TestFormatErrorForUser`, `TestProcessOneTask`. Full suite: 3060 passed, 1 skipped.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` — `_is_policy_refusal()`, `_post_policy_refusal_alert()`, `_FROM_HEADER_PATTERN`, `_POLICY_REFUSAL_KEYWORDS`; new policy branch in `process_one_task()`; 400+safety case in `_format_error_for_user()`; module-level `from .notifications import send_notification`
 - `tests/test_scheduler.py` — added `TestIsPolicyRefusal` (8 tests), `TestPostPolicyRefusalAlert` (3 tests), 2 new `TestFormatErrorForUser` cases, 4 new `TestProcessOneTask` cases
 
@@ -5226,10 +5599,12 @@ Closed ISSUE-033: when an inbound email (or any task) trips Anthropic's safety f
 Tightened the persona file and Talk channel guideline to stop reflexive emoji signoffs and a couple of AI-tell phrases that had crept into outputs.
 
 **Key changes:**
+
 - Talk guideline: emoji rule rewritten to "default to none, at most one per reply, only when it adds information the text doesn't already carry." Allowed roles preserved; opening/signoff usage forbidden.
-- Persona: explicit line that "being the octopus is enough — you don't need to signal it with an emoji." New entry in the AI-tells list banning *doing the heavy lifting / the real work / under the hood is where it happens* and similar work-effort puffery.
+- Persona: explicit line that "being the octopus is enough — you don't need to signal it with an emoji." New entry in the AI-tells list banning _doing the heavy lifting / the real work / under the hood is where it happens_ and similar work-effort puffery.
 
 **Files added/modified:**
+
 - `config/guidelines/talk.md` — emoji rule reworded
 - `config/persona.md` — emoji-restraint paragraph + work-effort puffery ban
 
@@ -5238,6 +5613,7 @@ Tightened the persona file and Talk channel guideline to stop reflexive emoji si
 Discovered "unknown places" piled up indefinitely on the location places page — clicking each one only offered a Save action, so frequent transit stops, parking lots, and short street stays kept reappearing. Added a Dismiss path that records a persistent zone instead of a place, so future pings in that area don't form a new cluster either.
 
 **Key changes:**
+
 - New `dismissed_clusters` table (per-user lat/lon/radius_meters/dismissed_at), additive — picks up automatically on next `init_db` since the schema uses `CREATE TABLE IF NOT EXISTS`.
 - `_location_discover_places` now also filters clusters whose center falls inside any dismissed zone, on top of the existing-place exclusion.
 - Discovery query now computes per-cluster `radius_meters` from the actual ping spread (clamped to 50–300 m) so the form pre-fills with the discovered footprint instead of a fixed default.
@@ -5247,6 +5623,7 @@ Discovered "unknown places" piled up indefinitely on the location places page �
 - 7 new tests: DB CRUD, per-user isolation, ownership enforcement on delete, discovery-query filtering, distance check that distant dismissals don't suppress unrelated clusters.
 
 **Files added/modified:**
+
 - `schema.sql` — `dismissed_clusters` table + index
 - `src/istota/db.py` — `insert_dismissed_cluster`, `list_dismissed_clusters`, `delete_dismissed_cluster`
 - `src/istota/web_app.py` — `_location_list_dismissed`, `_location_dismiss_cluster`, `_location_restore_dismissed`, three new API routes, dismissed-zone filter in `_location_discover_places`, cluster radius computation
@@ -5261,6 +5638,7 @@ Discovered "unknown places" piled up indefinitely on the location places page �
 Visits were undercounting dwell time because brief GPS flicker out of a place's radius triggered the 2-ping hysteresis close — e.g. Shinagawa Station showed 1 visit / 9m across what was really a ~24m stay, plus a 1336m-accuracy ping had anchored the visit's start. Replaced the symmetric hysteresis with an asymmetric open/close policy and added a batch reconciler.
 
 **Key changes:**
+
 - Webhook accuracy gate: pings with `horizontal_accuracy > accuracy_threshold_m` (default 100m) are stored but skip place matching and state-machine updates so jittery pings can't open phantom visits.
 - Dwell-based visit close: open visits now close only after continuous "away" time reaches `visit_exit_minutes` (default 5), with `exited_at` recorded as the first away ping. A single in-place ping resets the away clock. Direct place-to-place moves still close + open on the 2-ping hysteresis.
 - Batch reconciler in scheduler cleanup loop: re-derives closed visits from pings in the last `reconcile_lookback_hours` (default 6), stopping `reconcile_buffer_minutes` before now so the open visit is never rewritten. Honours `accuracy_threshold_m` so historical bad pings don't anchor reconciled visits either.
@@ -5269,6 +5647,7 @@ Visits were undercounting dwell time because brief GPS flicker out of a place's 
 - 14 new tests: accuracy gate (3), dwell-based exit (4), reconciliation (6 incl. accuracy filter, window preservation, walk-by filter, place splits, stale-visit replacement).
 
 **Files added/modified:**
+
 - `src/istota/webhook_receiver.py` — accuracy gate in `_process_feature`, dwell-based exit in `_update_state_machine`
 - `src/istota/db.py` — `reconcile_visits()`, `LocationState.exit_started_at`, get/set state plumbing, `ALTER TABLE` migration
 - `src/istota/scheduler.py` — `_reconcile_visits_for_all_users()` hook in `run_cleanup_checks`
@@ -5283,6 +5662,7 @@ Visits were undercounting dwell time because brief GPS flicker out of a place's 
 Closed three open location issues (ISSUE-049, ISSUE-051, ISSUE-052). The map now colors paths by a continuous speed gradient instead of relying on unreliable activity classification, flags public-transit runs heuristically, and groups days by the browser's physical timezone instead of the user's configured home timezone.
 
 **Key changes:**
+
 - Per-edge LineString features with computed `speed_kmh` (distance/time, ignoring noisy GPS speed) and a seven-stop linear gradient (0→120 km/h, deep blue → red) on `path-line`.
 - `detectTransitRuns()` heuristic: ≥2 brief low-speed pauses (<1 m/s, 20–180 s) within a movement run tags edges as transit; rendered speed-colored but dashed on a new `path-transit` layer.
 - Renamed the old teleport-connector layer from `path-transit` to `path-gap` to free the transit name for actual transit detection.
@@ -5290,6 +5670,7 @@ Closed three open location issues (ISSUE-049, ISSUE-051, ISSUE-052). The map now
 - 4 new `TestResolveTz` unit tests.
 
 **Files added/modified:**
+
 - `src/istota/web_app.py` — `_resolve_tz()` helper, `tz` query param on three endpoints
 - `web/src/lib/api.ts` — `browserTz()` + `withBrowserTz()` injected into location API calls
 - `web/src/lib/components/location/LocationMap.svelte` — `buildEdges()`, `detectTransitRuns()`, new gradient/gap/transit layers
@@ -5301,6 +5682,7 @@ Closed three open location issues (ISSUE-049, ISSUE-051, ISSUE-052). The map now
 The sleep cycle was producing both MEMORY bullets and FACTS for the same personal attributes (allergies, relationships, dietary preferences), then the curation pass was promoting those bullets into USER.md under unrelated headings. Investigated approaches from Graphiti (LLM + embedding dedup) and MemPalace (simple exact dedup), settled on a middle ground: freeform predicates with word-level Jaccard fuzzy dedup.
 
 **Key changes:**
+
 - Freeform KG predicates: replaced strict `VALID_PREDICATES` allowlist with suggested predicates — unknown predicates accepted as multi-valued by default
 - Fuzzy fact dedup in `add_fact()`: word-level Jaccard similarity (threshold 0.7) catches near-duplicate facts for the same subject
 - Extraction prompt: personal attributes routed to FACTS only (not also MEMORIES), annotated predicate hints with usage guidance, temporal field instructions (`valid_from`/`valid_until` instead of dates in object strings)
@@ -5310,6 +5692,7 @@ The sleep cycle was producing both MEMORY bullets and FACTS for the same persona
 - `valid_until` now passed through from extracted facts to `add_fact()`
 
 **Files added/modified:**
+
 - `src/istota/knowledge_graph.py` — Added `_fact_similarity()`, fuzzy dedup in `add_fact()`
 - `src/istota/sleep_cycle.py` — `SUGGESTED_PREDICATES` dict with hints, freeform `_validate_fact()`, extraction/curation prompt improvements, `valid_until` passthrough
 - `src/istota/commands.py` — `!memory facts` and `!memory facts <entity>` subcommands
@@ -5329,6 +5712,7 @@ The sleep cycle extraction prompt now requests structured FACTS and TOPICS secti
 Post-implementation review by investigative and verification agents caught six bugs: a connection leak in executor KG loading, LIKE-based entity search with false positives, executescript() implicit commits on shared connections, auto-commits in KG mutation functions breaking batch atomicity, variable shadowing, and a rigid regex parser. All fixed before merge.
 
 **Key changes:**
+
 - `knowledge_graph.py` module with `KnowledgeFact` dataclass, CRUD, dedup/supersession, temporal queries, prompt formatting
 - `knowledge_facts` table in schema.sql with indexes (including partial index on current facts)
 - `topic` and `entities` columns on `memory_chunks` table with migration in db.py
@@ -5341,6 +5725,7 @@ Post-implementation review by investigative and verification agents caught six b
 - `stats` command includes KG fact counts
 
 **Files added/modified:**
+
 - `src/istota/knowledge_graph.py` — New module: KnowledgeFact, add_fact, invalidate_fact, delete_fact, get_current_facts, get_facts_as_of, get_entity_timeline, format_facts_for_prompt
 - `schema.sql` — knowledge_facts table, topic/entities columns on memory_chunks
 - `src/istota/db.py` — Migration for topic/entities columns
@@ -5359,6 +5744,7 @@ Post-implementation review by investigative and verification agents caught six b
 Added a deterministic (non-LLM) confirmation gate for plus-addressed emails from untrusted senders. When an email arrives at `bot+user@domain` from a sender not in the user's trusted list, the task is held in `pending_confirmation` until the user explicitly approves via Talk. Also ran adversarial red-team testing (T1 category) to validate existing prompt injection defenses — all tests passed before the gate was even added, but the gate provides a stronger, non-bypassable layer.
 
 **Key changes:**
+
 - `alerts_channel` and `trusted_email_senders` fields on `UserConfig` for per-user configuration
 - `is_trusted_email_sender()` on `Config` with fnmatch-based pattern matching (exact, `*@domain`, `*@*.domain`)
 - Email gate in `email_poller.py`: plus-addressed emails from untrusted senders create tasks in `pending_confirmation` status
@@ -5372,6 +5758,7 @@ Added a deterministic (non-LLM) confirmation gate for plus-addressed emails from
 - Adversarial test harness in `tests/adversarial/` with SMTP sender script
 
 **Files added/modified:**
+
 - `src/istota/config.py` — `alerts_channel`, `trusted_email_senders`, `is_trusted_email_sender()`
 - `src/istota/email_poller.py` — Confirmation gate after task creation for untrusted plus-address senders
 - `src/istota/talk_poller.py` — Reply metadata extraction moved before confirmation check, three-path lookup, DM token cache
@@ -5393,6 +5780,7 @@ Added a deterministic (non-LLM) confirmation gate for plus-addressed emails from
 Got the Google Workspace skill working end-to-end. The initial implementation had the OAuth flow and DB token storage in place but the gws binary wasn't accessible to the bot, credentials weren't injected properly, and skill selection missed common triggers like "gmail".
 
 **Key changes:**
+
 - Replaced npm global install with direct binary download from GitHub releases (no Node.js dependency for gws)
 - Added CLI passthrough wrapper (`__main__.py`) so gws runs through `istota-skill google_workspace` for credential injection via skill proxy
 - Added `setup_env` hook to set `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` to writable temp dir (sandbox HOME is read-only)
@@ -5402,6 +5790,7 @@ Got the Google Workspace skill working end-to-end. The initial implementation ha
 - Cleaned up stale npm artifacts from server
 
 **Files added/modified:**
+
 - `src/istota/skills/google_workspace/__init__.py` — Added `main()` passthrough and `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` in `setup_env`
 - `src/istota/skills/google_workspace/__main__.py` — New file, CLI entry point
 - `src/istota/skills/google_workspace/skill.md` — Added `cli: true`, "gmail" trigger, updated all examples to use `istota-skill` wrapper
@@ -5420,6 +5809,7 @@ Got the Google Workspace skill working end-to-end. The initial implementation ha
 Completed the migration from separate `skill.toml` sidecar files to YAML frontmatter in `skill.md`. All 26 bundled skills now store their full metadata (routing triggers, boolean flags, resource types, dependencies, env specs) in the frontmatter block of their markdown doc file. The `skill.toml` files are removed from bundled skills; operator overrides in `config/skills/` can still use toml for backward compatibility.
 
 **Key changes:**
+
 - Extended frontmatter parser to handle booleans (`true`/`false`), empty lists, JSON-encoded env specs, and malformed list detection
 - Renamed `_load_skill_toml()` to `_load_skill_meta()` — reads frontmatter first, falls back to toml
 - Merged all metadata from 26 `skill.toml` files into corresponding `skill.md` frontmatter
@@ -5429,6 +5819,7 @@ Completed the migration from separate `skill.toml` sidecar files to YAML frontma
 - Fixed pre-existing test failure (malformed frontmatter fallback to toml)
 
 **Files added/modified:**
+
 - `src/istota/skills/_loader.py` — Extended `_parse_frontmatter()`, renamed `_load_skill_toml` → `_load_skill_meta`
 - `src/istota/skills/_types.py` — Updated docstrings
 - `src/istota/skills/_env.py` — Updated docstring
@@ -5445,6 +5836,7 @@ Added per-user plus-addressed email routing (`bot+user_id@domain`). External con
 Also fixed a UTC date bug in the location GUI (ISSUE-029) and closed ISSUE-027 (Chrome container hardening was already implemented).
 
 **Key changes:**
+
 - `_extract_user_from_recipient()` parses To/Cc headers for `bot+{user_id}@domain` pattern
 - Email polling restructured to read full email before routing (needed for recipient headers)
 - `routing_method` column added to `processed_emails` table (plus_address, sender_match, thread_match, discarded)
@@ -5454,6 +5846,7 @@ Also fixed a UTC date bug in the location GUI (ISSUE-029) and closed ISSUE-027 (
 - Location GUI: replaced `toISOString().slice(0,10)` with `localDate()` helper using local time components
 
 **Files added/modified:**
+
 - `src/istota/email_poller.py` — New `_extract_user_from_recipient()`, restructured routing with `routing_method` tracking
 - `src/istota/db.py` — `routing_method` field on `ProcessedEmail`, `mark_email_processed()` parameter, ALTER TABLE migration
 - `src/istota/executor.py` — Per-user email in prompt header, plus-addressed `SMTP_FROM`
@@ -5469,12 +5862,14 @@ Also fixed a UTC date bug in the location GUI (ISSUE-029) and closed ISSUE-027 (
 Addressed four medium-severity findings from a security audit of the codebase.
 
 **Key changes:**
+
 - Deferred `sent_emails` identity hardening: `user_id` and `conversation_token` now always come from the task object, not from JSON written by the sandboxed subprocess. Prevents spoofing via prompt injection.
 - Network allowlist scoped to current user: `_build_network_allowlist` now only includes the current task user's Miniflux/Moneyman hosts instead of all users' service URLs.
 - CSRF protection on web app: Origin header validation added to all state-changing endpoints (PUT/POST/DELETE). Returns 403 on missing or mismatched Origin.
 - Session rotation on OIDC login: session cleared before writing user info in the callback, preventing session fixation.
 
 **Files modified:**
+
 - `src/istota/scheduler.py` — Removed `entry.get("user_id")` and `entry.get("conversation_token")` overrides in `_process_deferred_sent_emails`
 - `src/istota/executor.py` — Added `user_config` parameter to `_build_network_allowlist`, scoped resource host iteration to current user
 - `src/istota/web_app.py` — Added `_verify_origin` dependency, `_ForbiddenException`, session clear before login, applied CSRF check to 5 endpoints
@@ -5490,6 +5885,7 @@ Integrated Moneyman's per-ledger Fava web viewers into the Istota web UI. Fava i
 Changes span both the Moneyman and Istota repos. On the Moneyman side, added Fava instance awareness to the config and API — a global `fava_enabled` flag auto-generates one Fava instance per user+ledger with deterministic port assignment from a configurable range. The Ansible service template now passes `--prefix` to Fava so it serves under `/istota/fava/{user}/{ledger}/`. On the Istota side, added an `/api/auth-check` endpoint for nginx's `auth_request` module, proxy routes to Moneyman's ledger and fava APIs, and a `ledgers` feature flag.
 
 **Key changes:**
+
 - Moneyman: `FavaInstance` dataclass, `fava_enabled`/`fava_port_start` config, `GET /api/fava` endpoint, `--prefix` in service template
 - Istota backend: `_get_moneyman_creds()`, `/api/auth-check` (nginx auth_request), `/api/moneyman/ledgers`, `/api/moneyman/fava`, `ledgers` feature flag
 - Istota nginx: Fava location blocks with `auth_request` + login redirect on 401
@@ -5497,6 +5893,7 @@ Changes span both the Moneyman and Istota repos. On the Moneyman side, added Fav
 - Tests: 5 new Moneyman tests (config parsing, API filtering), 13 new Istota tests (auth-check, proxy, feature flag)
 
 **Files added/modified (Istota):**
+
 - `src/istota/web_app.py` — auth-check endpoint, moneyman proxy routes, credential helper, feature flag
 - `deploy/ansible/templates/istota.conf.j2` — Fava proxy blocks with auth_request
 - `deploy/ansible/defaults/main.yml` — `istota_fava_instances` variable
@@ -5507,6 +5904,7 @@ Changes span both the Moneyman and Istota repos. On the Moneyman side, added Fav
 - `tests/test_web_app.py` — 13 new tests
 
 **Files added/modified (Moneyman):**
+
 - `src/moneyman/cli.py` — `FavaInstance` dataclass, `_build_fava_instances()`, `fava_enabled` config parsing
 - `src/moneyman/api/fava.py` — new `GET /api/fava` endpoint
 - `src/moneyman/api/app.py` — registered fava router
@@ -5532,6 +5930,7 @@ Fixed geofence circle rendering on the map — the old exponential interpolation
 Also removed dead `get_user_data_path` from storage.py.
 
 **Key changes:**
+
 - Location CLI: `update` (by name or ID, any field), `delete` (by name or ID), `places` includes ID
 - Web UI: place edit form, drag-to-reposition, visit stats panel, expanded category list
 - Visit stats: ping-based with elsewhere-split grouping, walk-by filtering
@@ -5540,6 +5939,7 @@ Also removed dead `get_user_data_path` from storage.py.
 - Removed unused `get_user_data_path`
 
 **Files added/modified:**
+
 - `src/istota/skills/location/__init__.py` — added `cmd_update`, `cmd_delete`, `_resolve_place`, ID in `cmd_places`
 - `src/istota/skills/location/skill.md` — documented update/delete commands with examples
 - `src/istota/web_app.py` — `_location_place_stats` (ping-based), `_location_update_place` (ping reassignment), `/location/places/{id}/stats` endpoint
@@ -5564,12 +5964,14 @@ When enabled, the executor passes `--system-prompt-file` pointing to `config/sys
 Also fixed missing Pillow dependency in the `transcribe` extras group and added `pytest.importorskip` guard so transcribe tests skip gracefully when the extra isn't installed.
 
 **Key changes:**
+
 - `config/system-prompt.md` — minimal system prompt for headless Claude Code usage
 - `custom_system_prompt` config field (bool, default false) with Ansible support
 - Executor conditionally passes `--system-prompt-file` to Claude CLI
 - Pillow added to `transcribe` extras, test file uses `importorskip`
 
 **Files added/modified:**
+
 - `config/system-prompt.md` — new custom system prompt file
 - `src/istota/config.py` — added `custom_system_prompt` field and TOML parsing
 - `src/istota/executor.py` — conditional `--system-prompt-file` flag in command builder
@@ -5586,6 +5988,7 @@ Also fixed missing Pillow dependency in the `transcribe` extras group and added 
 Added viewport-based read tracking to the SvelteKit feed page. Entries are marked as read in Miniflux after being visible in the viewport for 1.5 seconds, using IntersectionObserver with a 0.5 threshold. API calls are batched and debounced (flush every 3s or on page leave).
 
 **Key changes:**
+
 - Batch endpoint for marking multiple entries as read in one API call.
 - IntersectionObserver action on FeedCard with 1.5s timer, skips already-read entries.
 - Read cards shown at 85% opacity (full on hover), lightbox unaffected.
@@ -5593,6 +5996,7 @@ Added viewport-based read tracking to the SvelteKit feed page. Entries are marke
 - Status badge shows unread count alongside total.
 
 **Files added/modified:**
+
 - `src/istota/web_app.py` - Added `PUT /api/feeds/entries/batch` endpoint
 - `web/src/lib/api.ts` - Added `updateEntriesStatus()` batch function
 - `web/src/lib/components/FeedCard.svelte` - Added `trackView` action, `onViewed` prop, read class
@@ -5608,12 +6012,14 @@ The fix makes the stream parser emit `ContextManagementEvent` markers instead of
 Validated against 13 production JSONL session traces covering high-CM (20-36 events), medium (3-9), and low (1-2) scenarios. Correctly deduplicates in all cases without data loss.
 
 **Key changes:**
+
 - `stream_parser.py`: Added `ContextManagementEvent` dataclass, CM events emit marker instead of `None`
 - `executor.py`: Handle `ContextManagementEvent` in event loop (record `cm_boundary` in trace, skip progress)
 - `executor.py`: CM-aware `_compose_full_result` — segments trace at boundaries, walks backwards for last substantial segment
 - `executor.py`: Result file fallback now also goes through `_compose_full_result`
 
 **Files modified:**
+
 - `src/istota/stream_parser.py` — `ContextManagementEvent`, updated `StreamEvent` union
 - `src/istota/executor.py` — CM-aware composition, event loop handler, result file fallback
 - `tests/test_stream_parser.py` — 3 tests updated for `ContextManagementEvent`
@@ -5626,6 +6032,7 @@ Validated against 13 production JSONL session traces covering high-CM (20-36 eve
 Tested install.sh in a Debian 13 amd64 Docker container (with systemd) on Mac M2. Found and fixed five bugs in the bootstrap and Ansible role.
 
 **Key changes:**
+
 - Fixed `pipx ensurepath` prose output being eval'd as shell commands (causing "Success!: command not found")
 - Added `unzip` to system deps (rclone installer requires it)
 - Added `cron` to system deps (backup cron needs `/etc/cron.d`)
@@ -5634,6 +6041,7 @@ Tested install.sh in a Debian 13 amd64 Docker container (with systemd) on Mac M2
 - Changed rclone obscure from `shell` to `command` with full path for reliability
 
 **Files modified:**
+
 - `deploy/install.sh` — pipx ensurepath fix, Ansible output formatting
 - `deploy/ansible/tasks/main.yml` — unzip/cron deps, rclone obscure via `command`
 - `deploy/settings_to_vars.py` — skip empty rclone_password_obscured in vars output
@@ -5645,12 +6053,14 @@ The ISSUE-024 fix for duplicate progress messages used a blanket `stop_reason is
 Replaced the `stop_reason`-based filtering with block-level deduplication: tool_use blocks are deduplicated by their unique block ID, text blocks by message ID + content hash. Context management replays are still filtered by their `context_management` field. The executor now uses a stateful `make_stream_parser()` instead of the stateless `parse_stream_line()`.
 
 **Key changes:**
+
 - `stream_parser.py`: Added `make_stream_parser()` stateful wrapper with block-level dedup
 - `stream_parser.py`: Removed `stop_reason is None` blanket filter, all content types pass through
 - `executor.py`: Uses `make_stream_parser()` for per-task dedup state
 - Integration test with real Claude CLI `stream-json` output confirming tool calls are captured
 
 **Files modified:**
+
 - `src/istota/stream_parser.py` — Block-level dedup replacing message-level filtering
 - `src/istota/executor.py` — Import and use `make_stream_parser()`
 - `tests/test_stream_parser.py` — 46 tests (was 28): dedup tests, real CLI output integration test
@@ -5660,6 +6070,7 @@ Replaced the `stop_reason`-based filtering with block-level deduplication: tool_
 Added a synchronous `!search` command that searches Talk conversation history across three data sources: the semantic memory index (BM25 + vector), the Nextcloud Talk unified search API, and exported conversation files. Results are scoped to the current room by default, with `--all` and `--room <token>` flags for broader searches.
 
 **Key changes:**
+
 - New `!search` command registered in command dispatch system
 - Memory search integration via `_search_memory()` — resolves task IDs to conversation tokens and dates
 - Nextcloud Talk API search via `_search_talk_api()` — queries unified search provider for recent unindexed messages
@@ -5669,6 +6080,7 @@ Added a synchronous `!search` command that searches Talk conversation history ac
 - Output format with numbered results, room/date context, and task/link references
 
 **Files modified:**
+
 - `src/istota/commands.py` — Added `cmd_search`, `_search_memory`, `_search_talk_api`, `_parse_search_args`, `_summarize_chunk`, `_format_search_results`
 - `tests/test_commands.py` — Added 19 tests across 3 test classes (TestCmdSearch, TestSearchMemory, TestSearchTalkApi)
 
@@ -5677,6 +6089,7 @@ Added a synchronous `!search` command that searches Talk conversation history ac
 Replaced the monolithic 1765-line `install.sh` with a thin ~375-line bootstrap that installs Ansible and delegates all provisioning to the existing Ansible role. This eliminates the maintenance burden of two parallel install paths (bash script vs Ansible role). The settings.toml format is preserved for backward compatibility with existing installations.
 
 **Key changes:**
+
 - `install.sh` rewritten as bootstrap: ensures Python/pipx/ansible-core, runs wizard, converts settings, calls `ansible-playbook` in local mode
 - Interactive wizard extracted to standalone `wizard.sh` (unchanged behavior)
 - New `settings_to_vars.py` converts settings.toml (without `istota_` prefix) to Ansible vars YAML (with prefix)
@@ -5686,17 +6099,20 @@ Replaced the monolithic 1765-line `install.sh` with a thin ~375-line bootstrap t
 - `render_config.py` deleted (600 lines of duplicated config generation, replaced by Ansible templates)
 
 **Files added:**
+
 - `deploy/wizard.sh` — extracted interactive setup wizard
 - `deploy/settings_to_vars.py` — settings.toml to Ansible vars YAML converter
 - `deploy/local-playbook.yml` — local-mode Ansible playbook
 
 **Files modified:**
+
 - `deploy/install.sh` — rewritten as bootstrap (1765 → 375 lines)
 - `deploy/ansible/tasks/main.yml` — rclone auto-obscure + Claude credentials tasks
 - `deploy/README.md` — rewritten for single Ansible-based deployment path
 - `AGENTS.md` — updated project structure
 
 **Files deleted:**
+
 - `deploy/render_config.py` — replaced by Ansible templates
 
 ## 2026-03-31: Authenticated web interface with SvelteKit + Nextcloud OIDC
@@ -5704,6 +6120,7 @@ Replaced the monolithic 1765-line `install.sh` with a thin ~375-line bootstrap t
 Added a login-protected web UI with a SvelteKit frontend and FastAPI backend. Nextcloud serves as the OpenID Connect identity provider. The feeds page reads directly from the Miniflux API (no static file generation), with a masonry card grid matching the existing static feed page design.
 
 **Key changes:**
+
 - `WebConfig` dataclass with OIDC issuer, client ID/secret, session secret key
 - FastAPI backend: OIDC auth flow, `/istota/api/me` (user info), `/istota/api/feeds` (Miniflux proxy with HTML sanitization and image extraction), `/istota/api/feeds/entries/{id}` (mark as read)
 - SvelteKit frontend (`web/`): adapter-static with `/istota` base path, dark theme, dashboard with feature cards, feeds page with masonry grid, image/text filters, sort toggles, grid/list view, image lightbox
@@ -5712,12 +6129,14 @@ Added a login-protected web UI with a SvelteKit frontend and FastAPI backend. Ne
 - Ansible: Node.js build step (`npm ci` + `npm run build`), systemd service, nginx proxy, secrets.env, restart triggers on code/config changes
 
 **Files added:**
+
 - `src/istota/web_app.py` — FastAPI backend (auth + API + static file serving)
 - `tests/test_web_app.py` — 20 tests (auth flow, API endpoints, image extraction, sanitization)
 - `web/` — SvelteKit project (routes, components, API client, CSS)
 - `deploy/ansible/templates/istota-web.service.j2` — systemd service template
 
 **Files modified:**
+
 - `src/istota/config.py` — WebConfig dataclass, [web] parsing, env var overrides
 - `pyproject.toml` — web extras group, added to all
 - `config/config.example.toml` — documented [web] section
@@ -5734,12 +6153,14 @@ Added a login-protected web UI with a SvelteKit frontend and FastAPI backend. Ne
 Anthropic now blocks non-official clients from using the `/api/oauth/usage` endpoint (403). This is a policy change enforced via client fingerprinting — subscription OAuth tokens are restricted to the official Claude Code binary. The `!usage` command cannot work under these restrictions, so it's removed entirely.
 
 **Key changes:**
+
 - Removed `cmd_usage`, `_read_claude_oauth_token`, `_format_utilization` from commands.py
 - Removed `httpx` import (only used by usage command)
 - Removed `TestReadClaudeOauthToken`, `TestFormatUtilization`, `TestCmdUsage` test classes
 - Updated AGENTS.md and ARCHITECTURE.md command references
 
 **Files modified:**
+
 - `src/istota/commands.py` — removed usage command and helpers
 - `tests/test_commands.py` — removed ~25 usage-related tests
 - `AGENTS.md` — removed `!usage` from commands list
@@ -5750,6 +6171,7 @@ Anthropic now blocks non-official clients from using the `/api/oauth/usage` endp
 Garmin changed their SSO auth flow in March 2026, breaking the `garth` library that `garminconnect` depends on. The SSO endpoint returns 429/errors permanently for programmatic logins. Rather than chasing the moving target of Garmin's auth, the garmin skill is removed entirely. Garmin data access will be handled through the browse skill with cron prompts (real browser session avoids SSO issues).
 
 **Key changes:**
+
 - Removed `src/istota/skills/garmin/` directory and `tests/test_garmin.py`
 - Removed `garmin` extras group from `pyproject.toml` (drops `garminconnect` dependency)
 - Removed Garmin credential env vars (`GARMIN_EMAIL`, `GARMIN_PASSWORD`, `GARMIN_CONFIG`) from executor, scheduler, skill proxy, and config parser
@@ -5761,11 +6183,13 @@ Garmin changed their SSO auth flow in March 2026, breaking the `garth` library t
 Two minor bug fixes from the issues tracker.
 
 **Key changes:**
+
 - `_read_claude_oauth_token()` now checks `CLAUDE_CODE_OAUTH_TOKEN` env var first, falling back to `~/.claude/.credentials.json`. Production uses the env var; the credentials file token expires.
 - Added `get_user_data_path()` to `storage.py` for runtime state files (parallel to `get_user_config_path()` for config).
 - Briefing digest (`.briefing_digest.md`) moved from user's `config/` dir to `data/` dir where runtime state belongs.
 
 **Files modified:**
+
 - `src/istota/commands.py` — env var check in `_read_claude_oauth_token()`, added `import os`
 - `src/istota/storage.py` — added `get_user_data_path()`
 - `src/istota/skills/briefing/__init__.py` — `_get_briefing_digest_path()` uses `get_user_data_path()`
@@ -5778,6 +6202,7 @@ Two minor bug fixes from the issues tracker.
 Invoice scheduling (monthly auto-generation, pre-generation reminders, overdue detection) and the direct beancount accounting skill have been removed. All accounting functionality now goes through the Moneyman API service. The config files INVOICING.md, ACCOUNTING.md, and FEEDS.md are no longer auto-created or seeded for new users.
 
 **Key changes:**
+
 - Removed `invoice_scheduler.py` module (379 lines) and all supporting DB functions/tables
 - Removed `skills/accounting/` directory (beancount CLI, invoicing engine, Monarch sync)
 - Removed `invoicing_notifications` and `invoicing_conversation_token` from user config
@@ -5789,11 +6214,13 @@ Invoice scheduling (monthly auto-generation, pre-generation reminders, overdue d
 - Updated notifications to resolve conversation token from briefing config only
 
 **Files deleted:**
+
 - `src/istota/invoice_scheduler.py`
 - `src/istota/skills/accounting/` (entire directory)
 - `tests/test_invoice_scheduler.py`, `tests/test_skills_accounting.py`, `tests/test_skills_invoicing.py`
 
 **Files modified:**
+
 - `src/istota/scheduler.py` — removed invoice check calls, Fava restart function
 - `src/istota/executor.py` — removed ledger/invoicing/accounting env vars, MONARCH_SESSION_TOKEN from proxy
 - `src/istota/db.py` — removed InvoiceScheduleState and 6 related functions
@@ -5814,11 +6241,13 @@ Invoice scheduling (monthly auto-generation, pre-generation reminders, overdue d
 `_compose_full_result` was duplicating near-identical text blocks when the model restated itself with minor wording changes. The existing deduplication used exact substring matching, which missed blocks that differed by a few words.
 
 **Key changes:**
+
 - Added `_text_similarity()` using word-bigram Jaccard similarity for fuzzy matching
 - `_compose_full_result` now deduplicates blocks that are >= 50% similar (by bigram overlap) to the result text or to previously accepted blocks
 - Chose bigram Jaccard over `difflib.SequenceMatcher` because SequenceMatcher's autojunk heuristic produces unreliable results for repetitive text
 
 **Files modified:**
+
 - `src/istota/executor.py` — Added `_text_similarity()`, rewrote dedup logic in `_compose_full_result`
 - `tests/test_executor.py` — Added 3 new tests (near-duplicate blocks, near-duplicate of result, distinct blocks), updated existing test data to use realistic non-repetitive strings
 - `.claude/rules/executor.md` — Updated output validation docs
@@ -5830,6 +6259,7 @@ Added a new `moneyman` skill that wraps the Moneyman REST API (a standalone Fast
 Production debugging revealed that skill keyword selection required adding `monarch`, `sync-monarch`, and `moneyman` as keywords since `select_skills` only picks resource-type skills when a keyword also matches. The skill supports two transport modes: CLI subprocess (preferred for same-host deployments) and HTTP REST API (for remote access).
 
 **Key changes:**
+
 - New `moneyman` skill: dual-mode client (CLI subprocess or HTTP) for ledger operations, transactions, invoicing, and work log management
 - `build_bwrap_cmd` gains `extra_ro_binds` parameter for service config dirs
 - Mutual exclusion with `accounting` skill via `exclude_skills` on both sides
@@ -5838,6 +6268,7 @@ Production debugging revealed that skill keyword selection required adding `mona
 - Fixed feeds skill.toml: removed `[skill]` TOML header that caused fields to be ignored by the loader
 
 **Files added:**
+
 - `src/istota/skills/moneyman/__init__.py` — dual-mode client (CLI + HTTP)
 - `src/istota/skills/moneyman/__main__.py` — entry point
 - `src/istota/skills/moneyman/skill.toml` — manifest with env var declarations
@@ -5845,6 +6276,7 @@ Production debugging revealed that skill keyword selection required adding `mona
 - `tests/test_skill_moneyman.py` — 36 tests
 
 **Files modified:**
+
 - `src/istota/executor.py` — credential vars, skill map, network allowlist, extra_ro_binds for /etc/moneyman
 - `src/istota/config.py` — resource config parsing
 - `src/istota/skill_proxy.py` — added moneyman to allowed skills
@@ -5859,6 +6291,7 @@ Production debugging revealed that skill keyword selection required adding `mona
 Updated all architecture documentation to reflect the last week of changes. Bumped version to 0.5.0 and tagged the release.
 
 **Key changes:**
+
 - Updated AGENTS.md: `!more` command, `miniflux` resource type, execution traces, malformed output detection, credential proxy decoupling, sleep cycle improvements, `feeds.py` in project structure
 - Updated executor.md: 4-tuple return type (`execution_trace`), output validation section (`detect_malformed_result`, `_compose_full_result`), stream parsing changes
 - Updated scheduler.md: malformed output guard in task flow, `execution_trace` column, `feed_page_regen_interval`, feed page regen in daemon loop
@@ -5867,6 +6300,7 @@ Updated all architecture documentation to reflect the last week of changes. Bump
 - Updated README.md: Miniflux feeds description, test count
 
 **Files modified:**
+
 - `AGENTS.md`, `README.md` — Architecture and feature descriptions
 - `.claude/rules/executor.md` — Executor internals
 - `.claude/rules/scheduler.md` — Scheduler and DB internals
@@ -5879,10 +6313,12 @@ Updated all architecture documentation to reflect the last week of changes. Bump
 The browse skill's captcha detection was triggering on sites using passive reCAPTCHA (v2 invisible / v3). These load a small visible badge iframe (e.g. 256x60) that matched the `google.com/recaptcha` iframe URL check, causing the API to return `{"status": "captcha"}` even though the page was fully accessible.
 
 **Key changes:**
+
 - Added bounding box size check to the iframe captcha detector — iframes smaller than 400x200 are treated as passive badges and ignored
 - Only large captcha iframes (blocking challenges) now trigger detection
 
 **Files modified:**
+
 - `docker/browser/browsing.py` — Added size threshold after visibility check in `detect_captcha()`
 
 ## 2026-03-21: Malformed model output detection (ISSUE-019, partial)
@@ -5890,6 +6326,7 @@ The browse skill's captcha detection was triggering on sites using passive reCAP
 Added validation layer between Claude Code's result and task completion. Under heavy context pressure (23 tool calls, 187K chars), the model can emit raw XML fragments instead of a response. Previously this was accepted as a successful completion and delivered to the user.
 
 **Key changes:**
+
 - `detect_malformed_result()` function with strict mode for Talk (any tool-call XML outside code fences) and lenient mode for other targets (only flags when entire output is fragments)
 - Proportionality heuristic flags results that are too short relative to tool call count (10+ tools threshold)
 - Scheduler guard after the existing API error guard; malformed results route through existing retry logic (exponential backoff, 3 attempts)
@@ -5899,6 +6336,7 @@ Added validation layer between Claude Code's result and task completion. Under h
 **Deferred:** stream-level detection in parser (E), model-based validation gate with Sonnet/Haiku (F)
 
 **Files modified:**
+
 - `src/istota/executor.py` — Added `detect_malformed_result()`, `_TOOL_SYNTAX_PATTERN`, `_CODE_FENCE_PATTERN`
 - `src/istota/scheduler.py` — Malformed result guard, quality logging, task ID in ack/done messages
 - `tests/test_executor.py` — 24 tests (`TestDetectMalformedResult`)
@@ -5909,6 +6347,7 @@ Added validation layer between Claude Code's result and task completion. Under h
 Migrated the feed system from direct RSS/Tumblr/Are.na polling (feed_poller.py, SQLite storage) to Miniflux as the RSS aggregator. Non-RSS services (Tumblr, Are.na) are bridged via a standalone FastAPI app (rss-bridger) that converts API responses to standard Atom feeds Miniflux can subscribe to.
 
 **Key changes:**
+
 - New `feeds` skill with Miniflux API CLI (list, add, remove, categories, entries, refresh)
 - New `miniflux` resource type following the karakeep pattern (base_url + api_key per user)
 - Static HTML page generation now pulls from Miniflux API instead of local DB
@@ -5924,15 +6363,18 @@ Migrated the feed system from direct RSS/Tumblr/Are.na polling (feed_poller.py, 
 **New project:** `rss-bridger` — FastAPI bridge app with Tumblr and Are.na providers, deployed via miniflux Ansible role.
 
 **Files added:**
+
 - `src/istota/feeds.py` — Miniflux API client + HTML page generation (preserved from feed_poller.py)
-- `src/istota/skills/feeds/` — skill.toml, skill.md, CLI (__init__.py, __main__.py)
+- `src/istota/skills/feeds/` — skill.toml, skill.md, CLI (**init**.py, **main**.py)
 - `tests/test_feeds.py` — 36 tests (mapping, HTML generation, page regeneration)
 - `tests/test_feeds_skill.py` — 13 tests (CLI subcommands)
 
 **Files removed:**
+
 - `src/istota/feed_poller.py`, `tests/test_feed_poller.py`, `src/istota/skills/feeds_config/`
 
 **Files modified:**
+
 - `src/istota/executor.py` — Miniflux env vars, proxy credentials, network allowlist
 - `src/istota/scheduler.py` — Replaced feed poll with page regeneration, removed feed cleanup
 - `src/istota/config.py` — Renamed feed_check_interval, removed feed_item_retention_days
@@ -5949,6 +6391,7 @@ Migrated the feed system from direct RSS/Tumblr/Are.na polling (feed_poller.py, 
 The nightly sleep cycle was producing thin, lossy memories. Five compounding problems: fixed 2K/3K per-task truncation cut off conclusions, no conversation threading, no significance weighting, conservative extraction prompt, and Sonnet's aggressive compression.
 
 **Key changes:**
+
 - Tail-biased excerpts: new `_excerpt()` helper keeps first 40% + last 60% of text, preserving conclusions and decisions that appear at the end of conversations
 - Dynamic budget allocation: per-task budget distributed proportionally from the 50K char total instead of fixed 2K prompt + 3K result. A single long conversation now gets the full budget
 - Conversation grouping: tasks sharing a `conversation_token` are grouped with thread headers so the extraction model sees conversational structure
@@ -5956,6 +6399,7 @@ The nightly sleep cycle was producing thin, lossy memories. Five compounding pro
 - Same truncation fixes applied to `gather_channel_data()`
 
 **Files modified:**
+
 - `src/istota/sleep_cycle.py` — `_excerpt()`, refactored `gather_day_data()` and `gather_channel_data()`, improved `build_memory_extraction_prompt()`
 - `tests/test_sleep_cycle.py` — 11 new tests (excerpt helper, dynamic budget, conversation grouping, prompt quality)
 
@@ -5964,6 +6408,7 @@ The nightly sleep cycle was producing thin, lossy memories. Five compounding pro
 When asked to email external contacts, the bot was composing as the user (first person, signed with the user's name). Added instruction-level fix: bot defaults to sending as itself (assistant identity) for external contacts, only sends as the user when explicitly asked.
 
 **Files modified:**
+
 - `src/istota/skills/email/skill.md` — Added "Sender identity" section with default policy
 - `config/guidelines/email.md` — Added matching etiquette rule
 
@@ -5972,6 +6417,7 @@ When asked to email external contacts, the bot was composing as the user (first 
 Briefing tasks were unreliable because Claude had access to the email skill and would sometimes send emails directly (HTML-formatted, double-delivery). Fixed by making Claude return structured JSON and having the scheduler handle delivery deterministically.
 
 **Key changes:**
+
 - Briefing prompt now requires JSON output: `{"subject": "Morning Briefing", "body": "..."}`
 - Scheduler parses JSON from briefing results and delivers the extracted body (Talk, email, ntfy, digest)
 - Falls back to `strip_briefing_preamble()` if result isn't valid JSON (backward compat)
@@ -5980,6 +6426,7 @@ Briefing tasks were unreliable because Claude had access to the email skill and 
 - Added `parse_briefing_json()` with robust parsing (code fences, preamble, smart quotes)
 
 **Files modified:**
+
 - `src/istota/skills/_types.py` — Added `exclude_skills` field to `SkillMeta`
 - `src/istota/skills/_loader.py` — Parse `exclude_skills` from skill.toml, apply exclusion after selection
 - `src/istota/skills/briefing/skill.toml` — Added `exclude_skills = ["email"]`
@@ -5995,6 +6442,7 @@ Briefing tasks were unreliable because Claude had access to the email skill and 
 When a confirmed task is re-executed (user said "yes" to a confirmation prompt), the bot previously got the same original prompt with no awareness that it was confirmed. It would re-draft instead of executing the confirmed action. Now the bot's previous output is injected into the re-execution prompt so it knows to proceed.
 
 **Key changes:**
+
 - `confirmed_at` field added to Task dataclass and loaded from DB (column existed but was never read back)
 - `confirmation_context` parameter in `build_prompt()` injects a "Confirmed action" section with the bot's previous output and instructions to execute, not re-draft
 - `execute_task()` detects confirmed tasks and passes `confirmation_prompt` as confirmation context
@@ -6002,6 +6450,7 @@ When a confirmed task is re-executed (user said "yes" to a confirmation prompt),
 - Talk poller cancels pending confirmations when the user sends a new message (instead of yes/no), preventing stale confirmations from lingering
 
 **Files modified:**
+
 - `src/istota/db.py` — `confirmed_at` on Task, `cancel_pending_confirmations()`, `confirmed_at` in SELECT queries
 - `src/istota/executor.py` — `confirmation_context` parameter in `build_prompt()`, detection in `execute_task()`
 - `src/istota/talk_poller.py` — Cancel pending confirmations before creating new tasks
@@ -6014,6 +6463,7 @@ When a confirmed task is re-executed (user said "yes" to a confirmation prompt),
 When the bot sends an email on a user's behalf and the recipient replies, the reply was silently dropped because the email poller only creates tasks for known senders. Phase 1 adds outbound email tracking and thread-matched inbound routing so replies from external contacts are surfaced in Talk.
 
 **Key changes:**
+
 - New `sent_emails` table tracks outbound emails (Message-ID, recipient, subject, originating user and Talk conversation)
 - `send_email()` and `reply_to_email()` now return the generated Message-ID
 - `cmd_send()` writes a deferred JSON file (`task_{id}_sent_emails.json`) for scheduler pickup (sandbox-safe)
@@ -6023,6 +6473,7 @@ When the bot sends an email on a user's behalf and the recipient replies, the re
 - Emissary reply prompt instructs the bot to notify the user and draft a response
 
 **Files added/modified:**
+
 - `schema.sql` — New `sent_emails` table with message_id and user indexes
 - `src/istota/db.py` — `SentEmail` dataclass, `record_sent_email()`, `find_sent_email_by_message_id()`, `find_sent_email_by_references()`
 - `src/istota/skills/email/__init__.py` — Return Message-ID from send functions, `_write_deferred_sent_email()`
@@ -6037,11 +6488,13 @@ When the bot sends an email on a user's behalf and the recipient replies, the re
 The briefing pipeline could leak one user's calendar events into another user's briefing. When `_fetch_calendar_events()` returned `None` for a user with no calendars (e.g. bob), the fallback emitted an unscoped "Today's calendar events" instruction. The agent then discovered alice's calendars via CalDAV and included her events in bob's output. The sleep cycle then faithfully extracted these contaminated events into bob's memory files.
 
 **Key changes:**
+
 - Removed unscoped calendar fallback — if a user has no calendars, the calendar component is skipped entirely instead of emitting a bare instruction the agent tries to fulfill with whatever calendars it finds
 - CalDAV credentials (`CALDAV_URL`, `CALDAV_USERNAME`, `CALDAV_PASSWORD`) now only injected into subprocess env when the user has discovered calendars (defense-in-depth)
 - `{user_id}` placeholder in skill templates now programmatically substituted (was left for LLM interpretation, which is fragile when context mentions other users)
 
 **Files modified:**
+
 - `src/istota/skills/briefing/__init__.py` — Replaced calendar fallback with skip + debug log
 - `src/istota/executor.py` — Conditional CalDAV credential injection, `{user_id}` substitution in skills_doc
 - `tests/test_briefing.py` — Updated 5 tests for new behavior (no unscoped fallback)
@@ -6052,12 +6505,14 @@ The briefing pipeline could leak one user's calendar events into another user's 
 The `location history --date` command had two bugs: it filtered by naive UTC timestamps (so a PST user asking for March 16 got midnight-to-midnight UTC, missing the evening), and it capped results at 20 pings regardless of `--date` (a typical day has 100+ pings, so most data was silently dropped). The daily log nightly task was already switched to use `day-summary` which doesn't have these problems, but `history` itself still needed fixing.
 
 **Key changes:**
+
 - `history --date` now converts local day boundaries to UTC using ZoneInfo, matching the pattern already used by `day-summary` and `attendance`
 - Added `--tz` parameter (defaults to `TZ` env var or `America/Los_Angeles`)
 - `--date` without `--limit` returns all pings for that day; explicit `--limit N` still caps results
 - No-date path unchanged (still defaults to 20 most recent pings)
 
 **Files modified:**
+
 - `src/istota/skills/location/__init__.py` — Timezone-aware date filtering, no-limit default for `--date`, `--tz` arg
 - `src/istota/skills/location/skill.md` — Updated docs with `--tz` flag
 - `tests/test_location.py` — 3 new tests: timezone boundaries, all-pings default, explicit limit
@@ -6067,6 +6522,7 @@ The `location history --date` command had two bugs: it filtered by naive UTC tim
 Added a `headlines` component to the briefing system that pre-fetches frontpages from major news sources via the browser container API. This replaces the standalone news cron jobs (news-morning/news-evening) with a proper briefing component that gets dedup, scheduling, and multi-component merging for free.
 
 **Key changes:**
+
 - `HEADLINE_SOURCES` registry with 7 built-in sources: AP, Reuters, Guardian, FT, Al Jazeera, Le Monde, Der Spiegel
 - `_fetch_headlines()` pre-fetches frontpage text via the browse skill's browser container API, with per-source error handling and text truncation
 - `headlines` component in `build_briefing_prompt()` injects raw frontpage text with synthesis instructions (group by theme, cross-source attribution, 10-15 stories)
@@ -6075,6 +6531,7 @@ Added a `headlines` component to the briefing system that pre-fetches frontpages
 - Briefing skill.md updated with cross-source attribution rules for frontpage sources
 
 **Files added/modified:**
+
 - `src/istota/skills/briefing/__init__.py` — Added `HEADLINE_SOURCES`, `_fetch_headlines()`, headlines component in prompt builder
 - `src/istota/skills/briefing/skill.md` — Cross-source attribution, headline+newsletter merge instructions
 - `src/istota/config.py` — `headlines` field on `BriefingDefaultsConfig`
@@ -6089,6 +6546,7 @@ Added a `headlines` component to the briefing system that pre-fetches frontpages
 Two improvements to reduce repetition in briefings and give the bot visibility into calendar event timezones.
 
 **Key changes:**
+
 - Briefing digest: after each briefing, the result is saved to `.briefing_digest.md`. The next briefing prompt includes the previous digest with instructions to focus on new stories and only revisit a story if there's a material update.
 - Calendar `timezone` field: `CalendarEvent` dataclass now captures the original TZID from iCalendar data. The CLI JSON output includes a `timezone` field (`"floating"` when no timezone is set), so the bot can answer questions about timezone handling without diving into source code.
 - Calendar `--tz` flag on `create` and `update` CLI commands: events can now be created with proper timezone-aware datetimes (e.g., `--tz America/Los_Angeles` for flight bookings).
@@ -6096,6 +6554,7 @@ Two improvements to reduce repetition in briefings and give the bot visibility i
 - Fixed pre-existing test failures in `TestMigrateWorkspaceFiles` (tests didn't pre-create `workspace/` dir).
 
 **Files modified:**
+
 - `src/istota/skills/briefing/__init__.py` — Added `save_briefing_digest()`, `load_previous_briefing_digest()`, injected previous digest into prompt
 - `src/istota/scheduler.py` — Save briefing digest after successful completion
 - `src/istota/skills/calendar/__init__.py` — `timezone` field on `CalendarEvent`, TZID extraction, `--tz` CLI flag
@@ -6111,6 +6570,7 @@ Moved user scripts directory from `/Users/{user_id}/scripts/` into the bot direc
 Also added per-user Garmin Connect and Monarch Money credentials as resource entries (`type = "garmin"`, `type = "monarch"`) following the same pattern as Karakeep. Credentials land in `ResourceConfig.extra` dict and the executor reads them to set env vars. The `[garmin]`/`[monarch]` TOML section syntax is also supported and auto-converted to resources during config parsing. Garmin skill now declares `resource_types = ["garmin"]` for automatic skill selection when the user has credentials configured.
 
 **Key changes:**
+
 - Scripts directory moved under bot dir with auto-migration from old location
 - Garmin/Monarch credentials use `[[resources]]` pattern instead of dedicated `UserConfig` fields
 - Removed `garmin_email`, `garmin_password`, `monarch_session_token` from `UserConfig`
@@ -6119,6 +6579,7 @@ Also added per-user Garmin Connect and Monarch Money credentials as resource ent
 - Ansible role updated: `user.toml.j2` renders garmin/monarch as resources, `defaults/main.yml` shows examples
 
 **Files modified:**
+
 - `src/istota/storage.py` — Scripts path under bot dir, migration logic, directory structure
 - `src/istota/config.py` — Remove UserConfig credential fields, parse `[garmin]`/`[monarch]` sections as resources
 - `src/istota/executor.py` — Read garmin/monarch from resource.extra instead of UserConfig fields
@@ -6135,12 +6596,14 @@ Also added per-user Garmin Connect and Monarch Money credentials as resource ent
 Added `prompt_file` field to CRON.md scheduled jobs so long prompts can live in separate files instead of being inlined in the TOML block.
 
 **Key changes:**
+
 - `CronJob` dataclass gets `prompt_file: str` field. The loader resolves the file path against the Nextcloud mount and reads its contents as the prompt at parse time, so downstream code (scheduler, executor) sees a normal prompt string with no changes needed.
 - `generate_cron_md()` preserves `prompt_file` references on round-trip serialization instead of inlining the resolved prompt text back into the TOML.
 - Validation: `prompt_file` is mutually exclusive with `prompt` and `command`. Missing files are warned and skipped.
 - Skill docs updated with the new field.
 
 **Files modified:**
+
 - `src/istota/cron_loader.py` — `prompt_file` field, file resolution in `load_cron_jobs()`, round-trip in `generate_cron_md()`
 - `src/istota/skills/schedules/skill.md` — Documented `prompt_file` field
 - `tests/test_cron_loader.py` — `TestPromptFile` class (8 tests)
@@ -6150,13 +6613,15 @@ Added `prompt_file` field to CRON.md scheduled jobs so long prompts can live in 
 Fixed several progress message edge cases and added a prompt-level fix for incomplete final responses. Also added an opt-in live text message feature for intermediate progress text (off by default).
 
 **Key changes:**
+
 - Fixed ack message stuck on "Riffing..." when task has zero tool calls (`all_descriptions` empty list was falsy).
-- Fixed progress falling back to legacy mode after scheduler restart — reruns now always post an ack ("*Retrying…*") so edit-in-place works.
+- Fixed progress falling back to legacy mode after scheduler restart — reruns now always post an ack ("_Retrying…_") so edit-in-place works.
 - Added opt-in live text message (`progress_show_text = true`, off by default): posts/edits a second Talk message with intermediate text events, then edits it with the final result on completion.
 - Added Talk and email guidelines telling the model its final response is the only text shown, so it should be self-contained and not reference earlier status updates.
 - Intermediate text prepending in executor (safety net) still active alongside the prompt-level approach.
 
 **Files modified:**
+
 - `src/istota/scheduler.py` — Ack on rerun, empty `all_descriptions` fix, live text message callback, result edit-in-place
 - `config/guidelines/talk.md` — Self-contained response instruction
 - `config/guidelines/email.md` — Self-contained response instruction
@@ -6168,11 +6633,13 @@ Fixed several progress message edge cases and added a prompt-level fix for incom
 Evening briefing on Mar 14 had no FinViz market data due to a transient browser API failure with no retry. The fetch function silently returned None and the briefing went out without market headlines, movers, futures, or economic data.
 
 **Key changes:**
+
 - `fetch_finviz_data()` now retries up to 2 times (3 total attempts) with increasing delays (5s, 10s) before giving up.
 - Added warning log when FinViz data is missing from an evening briefing (`Evening briefing for {user_id} will have no FinViz data`).
 - New tests for retry-then-succeed and retry-exhausted scenarios.
 
 **Files modified:**
+
 - `src/istota/skills/markets/finviz.py` — Retry loop with configurable `retries` parameter
 - `src/istota/skills/briefing/__init__.py` — Warning log on missing FinViz data
 - `tests/test_skills_finviz.py` — Retry tests, `retries=0` on failure tests to avoid slow sleeps
@@ -6182,6 +6649,7 @@ Evening briefing on Mar 14 had no FinViz market data due to a transient browser 
 Expanded the Docker deployment from a minimal quickstart to a fully configurable stack approaching parity with the Ansible role. All skills are now available, security layers are preserved, and optional services (browser, GPS webhooks) are integrated via Compose profiles.
 
 **Key changes:**
+
 - Dockerfile installs `--extra all` (accounting, whisper, garmin, memory-search) plus system deps (weasyprint libs, tesseract-ocr, bubblewrap).
 - Entrypoint generates config.toml from ~170 environment variables covering every config section: scheduler intervals, conversation context, progress updates, sleep cycle, memory search, email, ntfy, browser, location, developer skill.
 - Browser container and GPS webhook receiver integrated into main docker-compose.yml via Compose profiles (`--profile browser`, `--profile location`).
@@ -6190,6 +6658,7 @@ Expanded the Docker deployment from a minimal quickstart to a fully configurable
 - README quickstart expanded with step-by-step guide, optional services, configuration notes, and differences from bare metal. Marked as experimental.
 
 **Files modified:**
+
 - `docker/istota/Dockerfile` — `--extra all`, bubblewrap, weasyprint/tesseract system deps
 - `docker/istota/entrypoint.sh` — Full config generation from env vars, security settings
 - `docker/docker-compose.yml` — ~170 env var passthrough, browser + webhooks services
@@ -6202,6 +6671,7 @@ Expanded the Docker deployment from a minimal quickstart to a fully configurable
 Full Docker Compose stack that takes a new user from zero to a working Istota instance with a single `docker compose up`. Bundles Nextcloud, PostgreSQL, Redis, and the Istota scheduler in four containers with automatic provisioning.
 
 **Key changes:**
+
 - Docker Compose stack with postgres, redis, nextcloud, and istota services plus an init container for volume permissions.
 - Istota Dockerfile: Python 3.12 + Node.js 20 + Claude Code + uv, builds at ~795MB.
 - Nextcloud post-install provisioning script creates bot/user accounts, enables Talk/Calendar/External Storage apps, configures per-user external storage mounts on a shared Docker volume.
@@ -6213,6 +6683,7 @@ Full Docker Compose stack that takes a new user from zero to a working Istota in
 - Fixed vestigial `workspace/` directory creation in storage migration code.
 
 **Files added:**
+
 - `docker/docker-compose.yml` — Full compose stack definition
 - `docker/istota/Dockerfile` — Istota container image
 - `docker/istota/entrypoint.sh` — Container entrypoint with provisioning and config generation
@@ -6221,6 +6692,7 @@ Full Docker Compose stack that takes a new user from zero to a working Istota in
 - `.dockerignore` — Build context exclusions
 
 **Files modified:**
+
 - `src/istota/executor.py` — Pass OAuth token when sandbox disabled
 - `src/istota/scheduler.py` — Talk attachment fallback to NC data directory
 - `src/istota/storage.py` — Don't create vestigial `workspace/` directory
@@ -6230,6 +6702,7 @@ Full Docker Compose stack that takes a new user from zero to a working Istota in
 The CONNECT proxy's 30-second request-parsing timeout was persisting into the tunnel phase, causing streaming API responses to die mid-generation when Claude Code didn't send data for >30 seconds (normal during response streaming — the client is just receiving).
 
 **Key changes:**
+
 - Clear socket timeouts to `None` on both client and upstream sockets after the CONNECT tunnel is established, so the tunnel stays alive for the full duration of the API call.
 - Enable TCP keepalive on upstream connections to detect silently dead connections (NAT timeouts, load balancer drops) instead of blocking forever on `recv`.
 - Fix bridge script inside sandbox to use `shutdown(SHUT_WR)` instead of `close()` for graceful half-close, preventing data loss when one direction finishes before the other.
@@ -6237,6 +6710,7 @@ The CONNECT proxy's 30-second request-parsing timeout was persisting into the tu
 - Remove unused `timeout` parameter from `NetworkProxy.__init__` (was accepted and stored but never used).
 
 **Files modified:**
+
 - `src/istota/network_proxy.py` — Timeout fix, TCP keepalive, bridge script fix, debug logging, removed dead code
 - `src/istota/executor.py` — Removed unused `timeout=` kwarg from `NetworkProxy()` call
 
@@ -6245,6 +6719,7 @@ The CONNECT proxy's 30-second request-parsing timeout was persisting into the tu
 Two fixes for response quality and Talk polling performance.
 
 **Key changes:**
+
 - Intermediate text blocks (status updates between tool calls) were being lost from task results. The `ResultEvent` from Claude Code's stream-json only contains the last assistant turn's text, so intermediate `TextEvent`s are now accumulated during streaming and prepended to the final result (deduplicated against the ResultEvent text).
 - Talk poller `list_conversations()` and 6 other TalkClient methods used httpx's default 5s timeout, causing frequent ReadTimeout errors when Nextcloud was busy during task execution. Increased default to 15s via `DEFAULT_TIMEOUT` class constant.
 - Conversation list is now cached with a 60s TTL. Most poll cycles skip the API call entirely. On timeout/error the cached list is used as fallback instead of aborting the cycle.
@@ -6252,6 +6727,7 @@ Two fixes for response quality and Talk polling performance.
 - Replaced manual `_participant_cache.clear()` in tests with an autouse fixture that resets both caches.
 
 **Files modified:**
+
 - `src/istota/executor.py` — Accumulate `TextEvent` texts, prepend missing ones to result
 - `src/istota/talk.py` — Added `DEFAULT_TIMEOUT = 15`, applied to all bare `httpx.AsyncClient()` calls
 - `src/istota/talk_poller.py` — Conversation list cache (60s TTL + error fallback), log level fix
@@ -6263,6 +6739,7 @@ Two fixes for response quality and Talk polling performance.
 Outbound network access from the bwrap sandbox is now restricted to an allowlist of host:port pairs. Each task gets its own network namespace via `--unshare-net`. A CONNECT proxy on a Unix socket (outside the sandbox) tunnels allowed traffic; a TCP-to-Unix bridge inside the sandbox forwards from `127.0.0.1:18080` to the proxy socket. Direct network access from the sandbox is impossible.
 
 **Key changes:**
+
 - `NetworkProxy` class in `network_proxy.py`: Unix socket CONNECT proxy with domain allowlist, per-task lifecycle (same pattern as SkillProxy). No MITM — TLS is end-to-end.
 - Bridge script (`net-bridge`): written to `.developer/` (RO inside sandbox), started as background process by a shell wrapper before `exec`ing Claude Code with `HTTPS_PROXY`/`HTTP_PROXY` env vars.
 - `build_bwrap_cmd()` adds `--unshare-net`, bind-mounts proxy socket, wraps command in shell that starts bridge and execs claude with proxy env vars. Uses `"$@"` to preserve original argv.
@@ -6272,10 +6749,12 @@ Outbound network access from the bwrap sandbox is now restricted to an allowlist
 - Executor uses `contextlib.ExitStack` to manage both SkillProxy and NetworkProxy lifecycles.
 
 **Files added:**
+
 - `src/istota/network_proxy.py` — CONNECT proxy, bridge script, `write_bridge_script()`
 - `tests/test_network_proxy.py` — Proxy lifecycle, blocking (403), tunneling (200 + bidirectional data), bridge script validation
 
 **Files modified:**
+
 - `src/istota/config.py` — Added `NetworkConfig` dataclass, nested in `SecurityConfig`, parsed from `[security.network]`
 - `src/istota/executor.py` — Added `_build_network_allowlist()`, `net_proxy_sock` param on `build_bwrap_cmd()`, network proxy lifecycle with ExitStack
 - `tests/test_sandbox.py` — Added `TestNetworkProxyBwrapIntegration`, `TestBuildNetworkAllowlist`, `TestNetworkConfigParsing`
@@ -6288,6 +6767,7 @@ Outbound network access from the bwrap sandbox is now restricted to an allowlist
 Four fixes from a red team assessment that found the bwrap sandbox had credential exposure vectors. Network isolation (finding #5) is deferred.
 
 **Key changes:**
+
 - Scoped credential-fetch and skill CLI credentials per-skill via `_CREDENTIAL_SKILL_MAP`. The proxy now only returns credentials needed by the task's selected skills, and each skill CLI subprocess only gets its own credentials merged into env. Backward-compatible (None = allow all).
 - Removed `CLAUDE_CODE_OAUTH_TOKEN` from `build_clean_env()` — Claude Code reads auth from `.credentials.json` directly, so the env var was an unnecessary exposure surface.
 - Mounted `~/.claude/.credentials.json` as read-only in the sandbox (was RW) to prevent token persistence attacks.
@@ -6295,6 +6775,7 @@ Four fixes from a red team assessment that found the bwrap sandbox had credentia
 - Scoped Nextcloud mount for admin users — admins now get the same per-user mount as non-admins (own user dir + channel dir + explicit resources) instead of the full Nextcloud content tree. Cross-user file access requires a UserResource or the Nextcloud API skill.
 
 **Files modified:**
+
 - `src/istota/executor.py` — Added `_CREDENTIAL_SKILL_MAP`, `_allowed_credentials_for_skills()`, `_build_skill_credential_map()`. Removed OAuth token passthrough. Changed `.credentials.json` to RO mount. Added `.developer/` RO overlay. Unified admin/non-admin Nextcloud mount scoping. Removed `not is_admin` guard on per-resource mounts.
 - `src/istota/skill_proxy.py` — Added `allowed_credentials` and `skill_credential_map` params to `SkillProxy`. Credential-fetch checks scope before returning. Skill CLI env merge uses per-skill credential map.
 - `tests/test_security.py` — Added `TestCredentialSkillScoping` (15 tests) and OAuth token exclusion test.
@@ -6308,11 +6789,13 @@ The proxy socket at `/tmp/istota-proxy-{task_id}.sock` was invisible inside the 
 Also fixed `_warn_orphaned_email_output` deleting deferred email files for briefings. The function was meant to catch Talk users whose tasks mistakenly used `email output`, but it ran unconditionally and nuked legitimate deferred files before `post_result_to_email` could read them. Added a guard to skip tasks with email-related output targets.
 
 **Key changes:**
+
 - `build_bwrap_cmd` now accepts `proxy_sock` parameter and bind-mounts it (RO) into the sandbox
 - Executor restructured: proxy starts before bwrap args are built (socket must exist for bind-mount)
 - `_warn_orphaned_email_output` skips tasks with `source_type="email"` or `output_target` in `("email", "both", "all")`
 
 **Files modified:**
+
 - `src/istota/executor.py` — Added `proxy_sock` param to `build_bwrap_cmd`, restructured proxy/bwrap ordering
 - `src/istota/scheduler.py` — Added guard condition to `_warn_orphaned_email_output`
 - `tests/test_scheduler.py` — Added 3 tests for orphaned email skip cases
@@ -6322,6 +6805,7 @@ Also fixed `_warn_orphaned_email_output` deleting deferred email files for brief
 Extended the skill proxy to cover `GITLAB_TOKEN` and `GITHUB_TOKEN`. These were previously passed directly to Claude's env because they're consumed by shell scripts (git credential helpers, API wrappers), not by `istota-skill` CLI commands. Now when the proxy is enabled, a `credential-fetch` helper script queries the proxy socket at runtime, and the shell scripts call it instead of reading env vars.
 
 **Key changes:**
+
 - Added `credential` request type to proxy protocol (`{"type": "credential", "name": "GITLAB_TOKEN"}` → `{"value": "glpat-xxx"}`)
 - Added `GITLAB_TOKEN` and `GITHUB_TOKEN` to `_PROXY_CREDENTIAL_VARS` (stripped from Claude's env when proxy enabled)
 - New `credential-fetch` Python script written to `{dev_bin}/` — queries proxy socket for credential values
@@ -6329,6 +6813,7 @@ Extended the skill proxy to cover `GITLAB_TOKEN` and `GITHUB_TOKEN`. These were 
 - Fixed proxy socket path to use `/tmp` to avoid AF_UNIX path length limits
 
 **Files modified:**
+
 - `src/istota/skill_proxy.py` — Added credential lookup handler in `_handle_connection`
 - `src/istota/executor.py` — Added tokens to `_PROXY_CREDENTIAL_VARS`, credential-fetch script generation, proxy-aware shell script templates
 - `tests/test_skill_proxy.py` — Added `TestProxyCredentialLookup` (4 tests), updated token stripping test, added completeness checks
@@ -6339,6 +6824,7 @@ Extended the skill proxy to cover `GITLAB_TOKEN` and `GITHUB_TOKEN`. These were 
 Added a Unix socket proxy that runs skill CLI commands with credentials injected server-side. When enabled, the Claude subprocess never sees secret env vars (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY). A thin client (`istota-skill`) replaces `python -m istota.skills.X` in all skill docs and prompt templates, with a direct-execution fallback when the proxy is disabled.
 
 **Key changes:**
+
 - SkillProxy class: Unix socket server as context manager, threaded accept loop, skill allowlist validation, concurrent request handling
 - `istota-skill` console script: connects to proxy socket or falls back to direct `python -m` execution
 - Executor splits env into credential and clean dicts when `skill_proxy_enabled` is true, starts proxy around Claude execution
@@ -6347,6 +6833,7 @@ Added a Unix socket proxy that runs skill CLI commands with credentials injected
 - Config: `skill_proxy_enabled` (default false) and `skill_proxy_timeout` (300s) in SecurityConfig
 
 **Files added/modified:**
+
 - `src/istota/skill_proxy.py` — New: SkillProxy server with allowlist, protocol, timeout handling
 - `src/istota/skill_client.py` — New: thin client with proxy and direct-exec paths
 - `tests/test_skill_proxy.py` — New: 28 tests (proxy lifecycle, protocol, client, credential splitting, allowlist validation)
@@ -6363,6 +6850,7 @@ Added a Unix socket proxy that runs skill CLI commands with credentials injected
 Moved all briefing logic into `src/istota/skills/briefing/__init__.py`, replaced hardcoded `source_type == "briefing"` checks in executor.py with generic flags driven by skill metadata, then removed all backward-compatibility shims and dead code.
 
 **Key changes:**
+
 - Added `exclude_memory` and `exclude_resources` fields to `SkillMeta` in `_types.py`
 - Created `skills/briefing/__init__.py` consolidating code from `briefing.py`, `briefing_loader.py`, and `scheduler.py`
 - Executor computes `_skip_memory` and `_excluded_resource_types` from selected skill metas
@@ -6372,6 +6860,7 @@ Moved all briefing logic into `src/istota/skills/briefing/__init__.py`, replaced
 - Removed 9 legacy `account`/`himalaya_downloads_dir` parameters from email skill functions
 
 **Files added/modified/deleted:**
+
 - `src/istota/skills/briefing/__init__.py` — New: all briefing logic consolidated
 - `src/istota/skills/_types.py` — Added `exclude_memory`, `exclude_resources` to SkillMeta
 - `src/istota/skills/_loader.py` — Read new fields in loaders
@@ -6390,6 +6879,7 @@ Moved all briefing logic into `src/istota/skills/briefing/__init__.py`, replaced
 Moved heavy optional dependencies out of the base `dependencies` list into extras groups. Skills now declare their Python dependencies in `skill.toml`, and modules use import guards so the system stays importable without optional packages. The `!skills` command now shows availability status with install hints.
 
 **Key changes:**
+
 - Moved 11 packages (caldav, icalendar, yfinance, imap-tools, beancount, beanquery, fava, weasyprint, monarchmoney, pytesseract, garminconnect) from base deps to 6 new extras groups
 - Added `all` extras group for full installs: `uv sync --extra all`
 - Added `dependencies` field to 6 skill.toml files (garmin, transcribe, markets, accounting, calendar, email)
@@ -6401,6 +6891,7 @@ Moved heavy optional dependencies out of the base `dependencies` list into extra
 - Deleted stale `packages/` directory from reverted external-package experiment
 
 **Files modified:**
+
 - `pyproject.toml` — Extras groups, reduced base deps to httpx/croniter/tomli/feedparser/requests
 - `src/istota/skills/{garmin,transcribe,calendar,email}/__init__.py` — Import guards
 - `src/istota/skills/{garmin,transcribe,markets,accounting,calendar,email}/skill.toml` — Added dependencies
@@ -6417,12 +6908,14 @@ Moved heavy optional dependencies out of the base `dependencies` list into extra
 Integrated the standalone `reverse_geocode.py` script into the location skill. Coordinates are reverse geocoded via Nominatim and cached in a new `reverse_geocode_cache` table in the main DB (replacing the script's separate cache DB). GPS pings are clustered into stops with a greedy sequential algorithm, then resolved to place names via saved places, proximity matching, or reverse geocoding.
 
 **Key changes:**
+
 - Added `reverse_geocode_cache` table with rounded REAL keys (4 decimal places, ~11m precision)
 - Added `reverse_geocode()` and `cluster_pings()` to shared `geo.py` module
 - Added `reverse-geocode` and `day-summary` CLI subcommands to location skill
 - Day summary: clusters pings → filters transit → resolves names → merges consecutive same-location stops
 
 **Files added/modified:**
+
 - `schema.sql` — Added `reverse_geocode_cache` table
 - `src/istota/db.py` — Added `get_reverse_geocode()` and `cache_reverse_geocode()`
 - `src/istota/geo.py` — Added `reverse_geocode()` (cache + Nominatim fallback) and `cluster_pings()`
@@ -6436,12 +6929,14 @@ Integrated the standalone `reverse_geocode.py` script into the location skill. C
 After the spring-forward DST transition (March 8), scheduled jobs and briefings fired twice — once at the wrong time and once at the correct time. croniter miscomputes the next fire time when given a tz-aware datetime that crosses a DST boundary (e.g. PST→PDT). The fix strips timezone info before passing to croniter, working entirely with naive wall-clock times for the should-run comparison.
 
 **Key changes:**
+
 - Both `check_briefings()` and `check_scheduled_jobs()` now convert datetimes to naive local wall-clock times before croniter evaluation
 - Conversion chain: UTC from DB → tz-aware UTC → `.astimezone(user_tz)` → `.replace(tzinfo=None)` → croniter
 - All comparison paths naivified: last_run_at, created_at fallback, and today_start fallback
 - `check_scheduled_jobs()` now uses `_now()` wrapper for testability (was `datetime.now()` directly)
 
 **Files modified:**
+
 - `src/istota/scheduler.py` — Naive datetime handling in `check_briefings()` and `check_scheduled_jobs()`
 - `tests/test_scheduler.py` — 4 new DST tests: spring-forward no-double-fire and correct-time-fire for both jobs and briefings
 
@@ -6450,6 +6945,7 @@ After the spring-forward DST transition (March 8), scheduled jobs and briefings 
 Cross-references calendar events with GPS pings to confirm whether the user attended in-person events. Resolves event locations by matching against known places first, then forward geocoding via Nominatim (cached in DB). Filters out all-day events, events without locations, and virtual meetings (Zoom, Teams, etc). Uses a 30-minute buffer around event times and configurable radius (from matched place or default 200m).
 
 **Key changes:**
+
 - Extracted `haversine()` from `webhook_receiver.py` into shared `geo.py` module
 - Added `geocode_cache` table for caching Nominatim results
 - Added `attendance` subcommand to location skill CLI
@@ -6457,6 +6953,7 @@ Cross-references calendar events with GPS pings to confirm whether the user atte
 - Added `calendar` resource type to location skill for skill selection
 
 **Files added/modified:**
+
 - `src/istota/geo.py` — New shared module with `haversine()` and `_EARTH_RADIUS_M`
 - `src/istota/webhook_receiver.py` — Imports haversine from `geo.py`
 - `src/istota/db.py` — Added `get_cached_geocode()` and `cache_geocode()`
@@ -6472,12 +6969,14 @@ Cross-references calendar events with GPS pings to confirm whether the user atte
 Added `skip_log_channel` option for scheduled jobs. Frequent scheduled jobs (e.g., every few minutes) were spamming the per-user log channel with tool-by-tool execution logs. `silent_unless_action` already controls whether results are posted to Talk, but there was no way to suppress log channel output. The new field flows from CRON.md through the full pipeline: CronJob → ScheduledJob (DB) → Task → checked in process_one_task().
 
 **Key changes:**
+
 - `skip_log_channel: bool` field on CronJob, ScheduledJob, and Task dataclasses
 - DB migrations for both `scheduled_jobs` and `tasks` tables
 - Schema, sync, and generation support in cron_loader.py
 - Scheduler suppresses log channel setup when task.skip_log_channel is True
 
 **Files modified:**
+
 - `src/istota/cron_loader.py` — CronJob field, parsing, generation, sync
 - `src/istota/db.py` — ScheduledJob + Task fields, migrations, create_task, row readers
 - `src/istota/scheduler.py` — Flow-through in check_scheduled_jobs, suppression in process_one_task
@@ -6491,6 +6990,7 @@ Added `skip_log_channel` option for scheduled jobs. Frequent scheduled jobs (e.g
 Reviewed the location/webhooks implementation and fixed several issues. Renamed `location_receiver.py` to `webhook_receiver.py` and the systemd service from `istota-location` to `istota-webhooks` to support future webhook endpoints beyond GPS. Renamed nginx config from `istota-site.conf.j2` to `istota.conf.j2` since it now serves both site hosting and webhooks.
 
 **Key changes:**
+
 - Fixed wrong endpoint URL in LOCATION.md template (`/location` → `/webhooks/location`)
 - Simplified dead code in state machine (removed `get_open_visit()` after `close_visit()` that always returned None)
 - Added `client_max_body_size 10m` to nginx webhooks location block
@@ -6500,6 +7000,7 @@ Reviewed the location/webhooks implementation and fixed several issues. Renamed 
 - nginx is now also installed when `istota_location_enabled` is true (was site-only)
 
 **Files modified:**
+
 - `src/istota/webhook_receiver.py` — Simplified state machine dead code
 - `src/istota/storage.py` — Fixed endpoint URL in LOCATION.md template
 - `src/istota/config.py` — Added `location_ping_retention_days` to SchedulerConfig
@@ -6516,6 +7017,7 @@ Added GPS-based location tracking using the Overland iOS app as data source. Thi
 Places are defined in LOCATION.md (TOML-in-markdown, same pattern as CRON.md and BRIEFINGS.md). A hysteresis state machine requires 2 consecutive pings at a new place before confirming a transition, preventing spurious enter/exit events. On transitions, configurable actions fire via ntfy, Talk, or cron_prompt.
 
 **Key changes:**
+
 - New DB tables: `location_pings`, `places`, `visits`, `location_state` with indexes
 - Location loader (`location_loader.py`): parses LOCATION.md, syncs places to DB, builds token-to-user map
 - FastAPI receiver (`webhook_receiver.py`): POST /webhooks/location endpoint with token auth, haversine place resolution, visit state machine with hysteresis
@@ -6526,13 +7028,15 @@ Places are defined in LOCATION.md (TOML-in-markdown, same pattern as CRON.md and
 - Optional dependency group `[location]` for fastapi + uvicorn
 
 **Files added:**
+
 - `src/istota/location_loader.py` — LOCATION.md parser and place sync
 - `src/istota/webhook_receiver.py` — FastAPI webhook receiver with location state machine
-- `src/istota/skills/location/` — Skill directory (CLI, skill.toml, skill.md, __main__.py)
+- `src/istota/skills/location/` — Skill directory (CLI, skill.toml, skill.md, **main**.py)
 - `deploy/ansible/templates/istota-webhooks.service.j2` — Systemd service for webhook receiver
 - `tests/test_location.py` — 45 tests covering loader, DB, haversine, state machine, CLI
 
 **Files modified:**
+
 - `schema.sql` — Added location tables and indexes
 - `src/istota/db.py` — Location DB functions (~300 lines)
 - `src/istota/storage.py` — Location path, template, seeding
@@ -6545,6 +7049,7 @@ Places are defined in LOCATION.md (TOML-in-markdown, same pattern as CRON.md and
 Reviewed the new garmin skill committed from the Zorg fork. Fixed several issues: env var names didn't match what executor.py provides, skill.toml description was stale from an earlier calendar-sync design, workspace path was hardcoded to "zorg" instead of using `bot_dir_name`, and token cache used a global path instead of per-user temp directories.
 
 **Key changes:**
+
 - Fixed env var names: `NEXTCLOUD_MOUNT` → `NEXTCLOUD_MOUNT_PATH`, `ISTOTA_USER` → `ISTOTA_USER_ID`
 - Removed `_default_config_path()` that hardcoded `zorg` workspace name — skill now requires `GARMIN_CONFIG` env var (set by executor) or `--config` flag
 - Added `GARMIN_CONFIG` wiring in executor.py, following same pattern as `INVOICING_CONFIG`/`ACCOUNTING_CONFIG` (resolves via `storage.get_user_config_path()`)
@@ -6553,6 +7058,7 @@ Reviewed the new garmin skill committed from the Zorg fork. Fixed several issues
 - Added `garminconnect>=0.2.0` dependency (was already in pyproject.toml, ran `uv sync`)
 
 **Files modified:**
+
 - `src/istota/skills/garmin/__init__.py` — Fixed env vars, removed hardcoded paths, per-user token dir
 - `src/istota/skills/garmin/skill.toml` — Corrected description and keywords
 - `src/istota/skills/garmin/skill.md` — Updated config path and token dir docs
@@ -6566,12 +7072,14 @@ Production crash: `check_briefings()` held a DB write transaction open while doi
 Also improved browser container stability with memory-aware session management and automatic health-based restarts.
 
 **Key changes:**
+
 - Split `check_briefings()` into 3 phases: short DB read (check schedules), network prefetch (no DB held), short DB write (create tasks). Function now takes `db_path` instead of `conn` and manages its own connections.
 - Browser container: added memory pressure checks (reject new sessions above 85%, evict idle above 80%), renderer process limits, JS heap caps.
 - Browser session management: close tabs fully instead of navigating to about:blank, adjust tab indices after close.
 - Added browser health check cron (`/etc/cron.d/`): restarts container if unhealthy (every 2 min check) plus daily forced restart at 5 AM.
 
 **Files added/modified:**
+
 - `src/istota/scheduler.py` — Refactored `check_briefings()` to avoid holding DB locks during network I/O
 - `tests/test_scheduler.py` — Updated all `check_briefings` calls to pass `db_path` instead of `conn`
 - `docker/browser/browse_api.py` — Memory pressure checks, tab closing, session eviction
@@ -6585,11 +7093,13 @@ Also improved browser container stability with memory-aware session management a
 Three targeted fixes addressing bugs found in production usage.
 
 **Key changes:**
+
 - Clarified email skill docs: added decision section explaining `send` vs `output`, with explicit warning about the common mistake of using `output` for Talk-originated email requests (which silently drops the email since the scheduler only delivers deferred output for email-source tasks).
 - Progress messages in Talk now collapse multi-line tool output (e.g. inline python scripts) to a single line before display. Applied to both Talk progress callback and log channel callback.
 - Moved fava restart from accounting skill to scheduler. The `_restart_fava()` call inside the accounting CLI was running inside the bubblewrap sandbox where `sudo`/`systemctl` aren't available, so it silently failed. The scheduler now restarts fava after any successful task that invoked the accounting skill, running outside the sandbox.
 
 **Files modified:**
+
 - `src/istota/skills/email/skill.md` — Rewrote with `send` vs `output` decision guide and common mistake callout
 - `src/istota/scheduler.py` — Added `_restart_fava_service()`, newline collapsing in progress callbacks
 - `src/istota/skills/accounting/__init__.py` — Removed dead `_restart_fava()` and its call sites
@@ -6602,6 +7112,7 @@ Three targeted fixes addressing bugs found in production usage.
 Added a per-user log channel for verbose task execution logs and replaced the binary progress edit mode with a configurable progress style system.
 
 **Log channel:**
+
 - Dedicated Talk room per user that receives real-time tool call streaming during task execution
 - Enabled by setting `log_channel` (Talk room token) in per-user config; no separate toggle
 - Posts initial message on first tool call, edits in-place on every subsequent call (no rate limiting)
@@ -6611,6 +7122,7 @@ Added a per-user log channel for verbose task execution logs and replaced the bi
 - Composes with existing Talk progress callback as a composite when both are active
 
 **Progress style:**
+
 - Replaced `progress_edit_mode` (bool) with `progress_style` (string): `"replace"`, `"full"`, `"legacy"`, `"none"`
 - `"replace"` (new default): shows latest tool call + elapsed time, e.g. `⏳ *Reading config.py…* (4s)`. No rate limiting. Final: `Done — 12 actions (18s)`
 - `"full"`: previous append-all behavior (maps from `progress_edit_mode = true`)
@@ -6619,9 +7131,11 @@ Added a per-user log channel for verbose task execution logs and replaced the bi
 - Backward compat: existing configs with `progress_edit_mode` auto-map to the right style
 
 **Files added:**
+
 - `tests/test_log_channel.py` — 28 tests for log channel (config, formatting, callbacks, integration)
 
 **Files modified:**
+
 - `src/istota/config.py` — Added `log_channel` to UserConfig, `progress_style` to SchedulerConfig
 - `src/istota/scheduler.py` — Log channel functions (`_resolve_channel_name`, `_make_log_channel_callback`, `_finalize_log_channel`), rewritten `_make_talk_progress_callback` with style branching, composite callback propagation
 - `config/config.example.toml` — Updated progress docs
@@ -6637,6 +7151,7 @@ Added a per-user log channel for verbose task execution logs and replaced the bi
 Progress updates during task execution now edit the initial ack message in-place instead of posting multiple separate messages. This reduces conversation noise from up to 5 progress posts per task down to a single message that updates with a running list of tool actions. The final result still posts as a new message.
 
 **Key changes:**
+
 - `TalkClient.edit_message()` — new method using `PUT /ocs/v2.php/apps/spreed/api/v1/chat/{token}/{messageId}`
 - `edit_talk_message()` async helper in scheduler (wraps the client, returns bool)
 - `_format_progress_body()` — formats accumulated tool descriptions with plain header, italicized tool lines, `[+N earlier]` truncation for long lists
@@ -6648,6 +7163,7 @@ Progress updates during task execution now edit the initial ack message in-place
 - Descriptions use their native emoji from stream_parser (📄, ✏️, ⚙️, etc.) — no double-prefixing
 
 **Files modified:**
+
 - `src/istota/talk.py` — Added `edit_message()` to TalkClient
 - `src/istota/config.py` — Added `progress_edit_mode` and `progress_max_display_items` to SchedulerConfig
 - `src/istota/scheduler.py` — Added `edit_talk_message()`, `_format_progress_body()`, rewrote progress callback, added ack ID capture and final cleanup edit
@@ -6662,6 +7178,7 @@ Progress updates during task execution now edit the initial ack message in-place
 New `!export` command that exports a Talk channel's complete conversation history to a file in the user's Nextcloud workspace. Uses the Talk API directly (rather than the pruned DB cache) to fetch the full history. Supports incremental appends for repeated exports of the same channel.
 
 **Key changes:**
+
 - `!export [markdown|text]` command — exports to `/Users/{user_id}/{bot_dir}/exports/conversations/{token}.md` (or `.txt`)
 - Full history pagination via Talk API (`lookIntoFuture=0` with `lastKnownMessageId`, backwards through all messages)
 - Incremental exports: metadata header tracks `last_id`, subsequent `!export` appends only new messages
@@ -6671,6 +7188,7 @@ New `!export` command that exports a Talk channel's complete conversation histor
 - Three new `TalkClient` methods: `get_conversation_info()`, `fetch_full_history()`, `fetch_messages_since()`
 
 **Files modified:**
+
 - `src/istota/talk.py` — Added `get_conversation_info()`, `fetch_full_history()`, `fetch_messages_since()` methods
 - `src/istota/commands.py` — Added `!export` command handler with formatting helpers (`_format_messages_markdown`, `_format_messages_text`, `_parse_export_metadata`, `_filter_user_messages`)
 - `tests/test_talk.py` — 12 new tests for Talk API methods (conversation info, full history pagination, forward pagination)
@@ -6681,12 +7199,14 @@ New `!export` command that exports a Talk channel's complete conversation histor
 When researching news for briefings, Claude would fetch hub pages (apnews.com, bbc.com) then fabricate plausible-looking article URLs from headline text instead of using actual `href` values. Additionally, some sites detect bot behavior when URLs are loaded directly rather than clicked from the referring page. Fixed both problems with documentation and a new convenience subcommand.
 
 **Key changes:**
+
 - New "Researching from hub/index pages" section in skill.md documenting the click-through workflow (`interact --click` navigates within session, preserving cookies/referrer/state, returns full page content)
 - New "URL discipline" rules: never construct/guess URLs from text, always use `href` values from links array
 - New `links` subcommand: fetches a page and returns only the links array (no page text), with optional `--selector` for extracting links from specific elements via CSS
 - `links --selector` parses `<a href>` from HTML fragments returned by `/extract`, supports both URL+selector and session+selector modes
 
 **Files modified:**
+
 - `src/istota/skills/browse/skill.md` — Added research workflow, URL discipline, and `links` command docs
 - `src/istota/skills/browse/__init__.py` — Added `cmd_links()`, `links` subparser, href extraction from HTML
 - `tests/test_skills_browse.py` — 8 new tests (3 parser + 5 command: basic, selector, session+selector, empty, error)
@@ -6696,6 +7216,7 @@ When researching news for briefings, Claude would fetch hub pages (apnews.com, b
 Coherent personality sweep to make Istota feel more like a cybernetic space octopus and less like a generic bot. Updated persona, progress messages, error messages, and emoji usage across the codebase.
 
 **Key changes:**
+
 - Persona: established octopus identity ("cybernetic space octopus", "eight arms", "comfortable in the deep end")
 - Progress messages: replaced bland acks, added cephalopod verbs (Inking, Tentacling, Suckering, Jetting) and cheeky ones (Instigating, Scheming, Finagling, Gallivanting, Machinating)
 - Error messages: subtle octopus flavor ("the deep stared back", "all eight arms", "drifted too deep", "resurfacing")
@@ -6704,6 +7225,7 @@ Coherent personality sweep to make Istota feel more like a cybernetic space octo
 - Task agent progress emoji: 🤖 → 🐙
 
 **Files modified:**
+
 - `config/persona.md` — Octopus identity in character description
 - `config/guidelines/talk.md` — Ack emoji change
 - `src/istota/scheduler.py` — Progress messages (44 total), error messages, error prefix
@@ -6716,6 +7238,7 @@ Coherent personality sweep to make Istota feel more like a cybernetic space octo
 Six-part enhancement to the multi-tiered memory system. Dated memories are now auto-loaded into prompts, BM25 recall surfaces relevant past context without LLM calls, and a memory size cap prevents prompt bloating. Sleep cycle extraction now includes task provenance references, and an optional nightly USER.md curation pass promotes durable facts from dated memories.
 
 **Key changes:**
+
 - Auto-load recent dated memories into prompts (`auto_load_dated_days`, default 3 days, skip briefings)
 - BM25 memory recall using task prompt as query (`auto_recall` config, independent of context triage)
 - Memory size cap (`max_memory_chars`) with truncation order: recalled → dated → warn
@@ -6725,6 +7248,7 @@ Six-part enhancement to the multi-tiered memory system. Dated memories are now a
 - 44 new tests covering all features (2275 total)
 
 **Files modified:**
+
 - `src/istota/config.py` — New fields: `auto_load_dated_days`, `curate_user_memory`, `auto_recall`, `auto_recall_limit`, `max_memory_chars`
 - `src/istota/executor.py` — `_recall_memories()`, `_apply_memory_cap()`, dated memories auto-load, `recalled_memories` in `build_prompt()`
 - `src/istota/sleep_cycle.py` — `build_curation_prompt()`, `curate_user_memory()`, `ref:TASK_ID` in extraction prompt
@@ -6742,12 +7266,14 @@ Sleep cycle was disabled by default (`enabled = false`), which meant deployments
 Also fixed a bug where `process_user_sleep_cycle()` and `process_channel_sleep_cycle()` returned without updating state when `config.use_mount` was `False`. This caused the sleep cycle to reprocess the same tasks on every run, never advancing its cursor — an infinite loop of wasted Claude calls that produced no output.
 
 **Key changes:**
+
 - `SleepCycleConfig.enabled` default: `False` → `True`
 - `istota_sleep_cycle_enabled` Ansible default: `false` → `true`
 - Added `_update_state()` / `_update_channel_state()` calls before early return in no-mount path
 - Tightened AGENTS.md (455 → 188 lines, moved implementation detail to `.claude/rules/`)
 
 **Files modified:**
+
 - `src/istota/config.py` — Changed `SleepCycleConfig.enabled` default to `True`
 - `src/istota/sleep_cycle.py` — Added state update in no-mount early return (both user and channel)
 - `deploy/ansible/defaults/main.yml` — Changed `istota_sleep_cycle_enabled` to `true`
@@ -6764,6 +7290,7 @@ Also fixed a bug where `lookback_count` was not applied when `use_selection=fals
 Also switched the deploy update script from `git pull` to `git reset --hard origin/$BRANCH` to prevent "divergent branches" errors when the agent accidentally modifies tracked files on the server.
 
 **Key changes:**
+
 - New config fields: `context_recency_hours` (0 = disabled) and `context_min_messages` (default 10)
 - Recency filter applied in both Talk and DB context paths, before selection/triage
 - `lookback_count` now caps message list before the selection check, acting as a hard limit regardless of triage mode
@@ -6772,6 +7299,7 @@ Also switched the deploy update script from `git pull` to `git reset --hard orig
 - Deploy update script uses `git reset --hard` instead of `git pull`/`git checkout`
 
 **Files modified:**
+
 - `src/istota/config.py` — Added fields to `ConversationConfig` and `load_config()` parser
 - `src/istota/executor.py` — Added `_apply_recency_window_talk()` and `_apply_recency_window_db()`, lookback cap before recency in Talk path
 - `src/istota/context.py` — Moved `lookback_count` cap before `use_selection` check in `select_relevant_talk_context()`
@@ -6785,11 +7313,13 @@ Also switched the deploy update script from `git pull` to `git reset --hard orig
 When a user replies to a scheduled job's output (e.g., "Drinking" in reply to a water reminder), the bot was loading 25+ messages of conversation history, picking up unrelated topics, and sending confusing multi-sentence responses. Fixed by scoping context for replies to scheduled/briefing notifications — now only the parent notification is loaded as context, with a prompt hint nudging brief responses for simple acknowledgments.
 
 **Key changes:**
+
 - Added `_detect_notification_reply()` in executor.py to identify when a task is a reply to a scheduled or briefing notification
 - Modified context loading in `execute_task()` to scope context narrowly for notification replies instead of loading full conversation history
 - Fixed `get_reply_parent_task()` SELECT in db.py to include `actions_taken`, `scheduled_job_id`, and `queue` columns
 
 **Files modified:**
+
 - `src/istota/executor.py` — Added `_detect_notification_reply()`, modified context block with notification reply branch
 - `src/istota/db.py` — Added missing columns to `get_reply_parent_task()` SELECT
 - `tests/test_executor.py` — Added `TestDetectNotificationReply` (5 tests) and `TestNotificationReplyContextScoping` (3 tests)
@@ -6801,10 +7331,12 @@ Reduced unnecessary context pollution by tightening skill selection. Previously,
 Also removed the unused `notes_file` resource type and `notes` skill, which was redundant with `reminders_file` and `todo_file`.
 
 **Key changes:**
+
 - Resource-type skills now require both a matching resource AND a keyword hit in the prompt. Skills with `source_types` (e.g., calendar/notes for briefings) still load unconditionally for those source types.
 - Removed `notes` skill directory (`skill.toml` + `skill.md`), executor resource section for `notes_file`, example config entry, and test references.
 
 **Files modified:**
+
 - `src/istota/skills/_loader.py` — Changed resource_types from standalone match to keyword gate
 - `src/istota/skills/notes/` — Removed (skill.toml + skill.md)
 - `src/istota/executor.py` — Removed `notes_file` resource section in `build_prompt()`
@@ -6818,12 +7350,14 @@ Also removed the unused `notes_file` resource type and `notes` skill, which was 
 Extended debugging session to fix bot responses being completely absent from conversation context after the poller-fed cache migration. The root cause was a multi-layered issue involving streaming progress deduplication, race conditions between the poller and scheduler threads, and SQLite upsert semantics.
 
 **Problem chain:**
+
 1. When `progress_text_max_chars=0`, the full bot response is sent as a streaming progress message. The dedup logic then sets `post_talk_message=None`, so `post_result_to_talk()` is never called — no `:result` message is ever posted to Talk.
 2. All bot messages in the cache had `:ack` or `:progress` reference_ids, which `build_talk_context()` correctly filters out (they're noise, not final answers). Zero `:result` messages existed.
 3. Initial fix attempts tried re-tagging the last `:progress` message to `:result` via an UPDATE query after task completion. But the poller and scheduler run in separate threads — the progress message might not be cached yet when the re-tag runs (race condition), causing the UPDATE to match 0 rows.
 4. Even when the re-tag succeeded, the poller's `INSERT OR REPLACE` would overwrite the re-tagged reference_id back to `:progress` on its next poll.
 
 **Key changes:**
+
 - Capture the Talk message ID returned by `post_result_to_talk()` in the progress callback (`last_progress_msg_id`). Previously the return value was discarded.
 - After task completion, use the captured progress message ID to directly upsert a `:result` cache entry. This works whether the poller has cached the message or not — no race condition.
 - Changed `upsert_talk_messages` from `INSERT OR REPLACE` to `ON CONFLICT DO UPDATE` with a CASE clause that preserves `:result` reference_ids. This prevents the poller from overwriting result tags on subsequent polls.
@@ -6832,6 +7366,7 @@ Extended debugging session to fix bot responses being completely absent from con
 - Made `talk_cache_max_per_conversation` configurable via Ansible.
 
 **Commits in this session:**
+
 - `caade40` Fix talk cache cleanup/backfill cycle
 - `4a9228e` Make talk cache cap configurable
 - `a56d8ef` Show task IDs in talk context formatting
@@ -6844,6 +7379,7 @@ Extended debugging session to fix bot responses being completely absent from con
 - `4737a8f` Fix race condition in talk message cache result tagging (final fix)
 
 **Files modified:**
+
 - `src/istota/scheduler.py` — Progress callback captures msg ID, result cache logic simplified from re-tag to direct upsert
 - `src/istota/db.py` — `upsert_talk_messages` uses `ON CONFLICT DO UPDATE` with `:result` preservation CASE; `cleanup_old_talk_messages` changed to per-conversation cap
 - `src/istota/context.py` — `format_talk_context_for_prompt` shows task IDs for bot messages
@@ -6859,6 +7395,7 @@ Extended debugging session to fix bot responses being completely absent from con
 Eliminated per-task HTTP calls to the Talk API for conversation context. The talk poller already sees every message via long-polling — now it stores them in a local `talk_messages` SQLite table. Context building reads from this cache (fast local query, zero API calls). Backfills existing conversations on first encounter via `fetch_chat_history()`. Old messages cleaned up on the same retention schedule as tasks.
 
 **Key changes:**
+
 - New `talk_messages` table with composite PK `(conversation_token, message_id)`.
 - Four DB functions: `upsert_talk_messages`, `get_cached_talk_messages`, `has_cached_talk_messages`, `cleanup_old_talk_messages`.
 - Poller stores all received messages in cache before per-message processing.
@@ -6867,6 +7404,7 @@ Eliminated per-task HTTP calls to the Talk API for conversation context. The tal
 - Cleanup of old cached messages added to `run_cleanup_checks()`, reusing `task_retention_days`.
 
 **Files modified:**
+
 - `schema.sql` — Added `talk_messages` table
 - `src/istota/db.py` — Cache CRUD functions
 - `src/istota/talk_poller.py` — Store after polling, backfill on first encounter
@@ -6880,6 +7418,7 @@ Eliminated per-task HTTP calls to the Talk API for conversation context. The tal
 Replaced the DB-only conversation context pipeline with one that fetches recent messages directly from the Talk chat API. This gives the bot the actual conversation visible to users — including messages from all participants in group chats, not just bot-processed interactions. Bot messages are tagged with `referenceId` fields for correlation back to tasks (actions_taken enrichment). Falls back to DB-based context on API failure.
 
 **Key changes:**
+
 - Added `reference_id` parameter to `TalkClient.send_message()` and tagged all bot messages (ack, progress, result) with `istota:task:{id}:{tag}`.
 - Extracted `clean_message_content()` from `talk_poller.py` to `talk.py` for reuse.
 - Added `fetch_chat_history()` to `TalkClient` for context fetching.
@@ -6889,6 +7428,7 @@ Replaced the DB-only conversation context pipeline with one that fetches recent 
 - Added `talk_context_limit` config field (default 100).
 
 **Files added/modified:**
+
 - `src/istota/talk.py` — `reference_id` param, `fetch_chat_history()`, `clean_message_content()` moved here
 - `src/istota/talk_poller.py` — Imports `clean_message_content` from `talk.py`
 - `src/istota/db.py` — `TalkMessage` dataclass, `get_task_metadata_for_context()`
@@ -6909,6 +7449,7 @@ Replaced the DB-only conversation context pipeline with one that fetches recent 
 The auto-update cron job was failing because `uv sync` regenerates `uv.lock` on the server, and the next `git pull` refuses to merge over the dirty file. Added `git checkout -- uv.lock` before both the branch pull and tag checkout paths.
 
 **Files modified:**
+
 - `deploy/ansible/templates/istota-update.sh.j2` — Reset uv.lock before git pull/checkout
 
 ## 2026-02-23: Fix scheduled notification replies losing context
@@ -6916,11 +7457,13 @@ The auto-update cron job was failing because `uv sync` regenerates `uv.lock` on 
 When a user replies "Done" to a scheduled notification (e.g., vitamins reminder), the bot had no context because `get_conversation_history` excludes scheduled tasks by design, and the previous single-task injection could be displaced by a silent NO_ACTION job in the same room. Extended the injection to fetch the last N tasks instead of just 1.
 
 **Key changes:**
+
 - Renamed `get_previous_task()` → `get_previous_tasks()` in `db.py` — returns a list of up to N recent completed tasks (oldest-first), unfiltered by source_type.
 - Updated executor injection block to iterate over the list, dedup against existing history, and sort after injection.
 - Added `previous_tasks_count` config field to `[conversation]` section (default 3) so the injection depth is configurable.
 
 **Files modified:**
+
 - `src/istota/db.py` — Renamed function, added `limit` parameter, returns `list[ConversationMessage]`
 - `src/istota/executor.py` — Updated injection block to handle list, uses config value
 - `src/istota/config.py` — Added `previous_tasks_count` to `ConversationConfig`
@@ -6934,11 +7477,13 @@ When a user replies "Done" to a scheduled notification (e.g., vitamins reminder)
 Fixed two bugs in briefing email delivery introduced when the deferred email output file was wired up for briefings. Also added an Ansible-managed auto-update mechanism.
 
 **Key changes:**
+
 - Briefing emails contained raw markdown syntax (bold, italic, links) because the deferred file path bypassed `_strip_markdown()`. Added markdown stripping for briefing plain text emails in the deferred file path as a safety net.
 - Duplicate HTML-formatted briefing emails were sent because the email skill was keyword-matched for briefing tasks, causing the model to call `email send` directly during execution on top of the scheduler's own delivery. Added instruction to briefing prompt telling the model not to use email commands.
 - Added Ansible-managed auto-update cron job (`istota_auto_update_enabled`, disabled by default). Polls git for new commits/tags every 5 minutes, runs `uv sync`, DB migrations, and restarts the scheduler. Supports both branch mode and tag-based semver mode.
 
 **Files added/modified:**
+
 - `src/istota/briefing.py` — Added "do not use email commands" instruction to briefing prompt
 - `src/istota/scheduler.py` — Added `_strip_markdown()` in deferred file path for briefing emails
 - `deploy/ansible/defaults/main.yml` — Added `istota_auto_update_enabled` and `istota_auto_update_cron` vars
@@ -6951,10 +7496,12 @@ Fixed two bugs in briefing email delivery introduced when the deferred email out
 Added a script to sync `config/emissaries.md` from the canonical public emissaries repo. This keeps istota's constitutional principles up to date with the upstream source without needing git submodules or CI pipelines.
 
 **Key changes:**
+
 - Added `scripts/sync-emissaries.sh` to fetch the latest `emissaries.md` via curl from the raw file URL.
 - Updated `config/emissaries.md` to match the current canonical version.
 
 **Files added/modified:**
+
 - `scripts/sync-emissaries.sh` — New script to fetch latest emissaries.md from upstream
 - `config/emissaries.md` — Updated to latest canonical version
 
@@ -6963,11 +7510,13 @@ Added a script to sync `config/emissaries.md` from the canonical public emissari
 Prompts were passed as CLI arguments to the `claude` command, which hit the Linux 128KB `execve()` argument limit when conversation context or emissaries made the assembled prompt too large. Switched to passing prompts via stdin instead.
 
 **Key changes:**
+
 - Prompt removed from the `cmd` list — now passed via `input=` to `subprocess.run()` (simple mode) and written to `process.stdin` (streaming mode).
 - `_execute_simple()`, `_execute_streaming_once()`, and `_execute_streaming()` accept a `prompt` parameter, threaded from `execute_task()`.
 - Bypasses the kernel limit entirely since stdin has no size constraint.
 
 **Files modified:**
+
 - `src/istota/executor.py` — Removed prompt from cmd, added stdin-based prompt passing to all execution paths
 - `tests/test_executor.py` — Updated 6 test assertions to read prompt from `call_args.kwargs["input"]` instead of `cmd[2]`
 
@@ -6976,6 +7525,7 @@ Prompts were passed as CLI arguments to the `claude` command, which hit the Linu
 Updated all project documentation to reflect recent changes: nextcloud client refactor, calendar skill enhancements, cron catch-up fix, config search path addition, and test count growth.
 
 **Key changes:**
+
 - AGENTS.md: nextcloud skill upgraded from doc-only to CLI, calendar skill description updated, config search path now includes `~/src/config/config.toml`, added cron expression change catch-up prevention note, test count updated to ~2170/48 files.
 - ARCHITECTURE.md: added `nextcloud_client.py` to subsystems table, added nextcloud and calendar skill CLIs, fixed per-channel gate description (queues instead of rejects), test count updated.
 - `.claude/rules/skills.md`: added calendar `update` subcommand and `--week` flag, added nextcloud skill CLI section.
@@ -6983,6 +7533,7 @@ Updated all project documentation to reflect recent changes: nextcloud client re
 - README.md: test count updated.
 
 **Files modified:**
+
 - `AGENTS.md` — 6 updates across project structure, config, skills, scheduling, testing sections
 - `ARCHITECTURE.md` — 5 updates across subsystems, skills, scheduler, testing sections
 - `.claude/rules/skills.md` — Calendar CLI update + nextcloud CLI section
@@ -6995,11 +7546,13 @@ Updated all project documentation to reflect recent changes: nextcloud client re
 Fixed two scheduling/delivery bugs: cron expression changes triggering catch-up runs for past slots, and duplicate email delivery when Claude sends directly during execution.
 
 **Key changes:**
+
 - `sync_cron_jobs_to_db()` now resets `last_run_at` to `datetime('now')` when a job's cron expression changes, preventing immediate catch-up runs for past time slots in the new expression.
 - `_parse_email_output()` returns `None` instead of raw-text fallback when no structured email JSON is found, preventing the scheduler from sending a duplicate email when Claude already sent via `email send` during execution.
 - `post_result_to_email()` skips delivery when no structured output is available (deferred file or inline JSON), logging that the email was likely sent directly.
 
 **Files modified:**
+
 - `src/istota/cron_loader.py` — Detect cron expression change and reset last_run_at
 - `src/istota/scheduler.py` — Remove raw-text fallback from email parser, add None guard in delivery
 - `tests/test_cron_loader.py` — Split state preservation test, add cron change reset test
@@ -7010,6 +7563,7 @@ Fixed two scheduling/delivery bugs: cron expression changes triggering catch-up 
 Consolidated scattered Nextcloud HTTP code (OCS + WebDAV) into a shared `nextcloud_client.py` module, and fixed several skill gaps found during a calendar/scheduling audit.
 
 **Key changes:**
+
 - Extracted `nextcloud_client.py` — shared OCS GET/POST, WebDAV owner lookup, share management, sharee search. Replaces duplicated httpx code in `nextcloud_api.py`, `storage.py`, `shared_file_organizer.py`, and `tasks_file_poller.py`.
 - Added Nextcloud skill CLI (`python -m istota.skills.nextcloud`) for share management: `list-shares`, `create-share`, `delete-share`, `search-sharees`, `share-folder`.
 - Fixed email output misuse bug: scheduled Talk-targeted jobs were incorrectly using `python -m istota.skills.email output`, producing empty output. Root cause — prompt never told Claude the task's output target. Now `build_prompt()` includes `Source:` and `Output target:` header lines, and the email tool instruction explicitly says "Do NOT use when output target is talk".
@@ -7020,6 +7574,7 @@ Consolidated scattered Nextcloud HTTP code (OCS + WebDAV) into a shared `nextclo
 - AGENTS.md: corrected admin_only skill list (schedules is no longer admin-only).
 
 **Files added:**
+
 - `src/istota/nextcloud_client.py` — Shared Nextcloud HTTP client
 - `src/istota/skills/nextcloud/__init__.py` — Nextcloud skill CLI
 - `src/istota/skills/nextcloud/__main__.py` — CLI entry point
@@ -7028,6 +7583,7 @@ Consolidated scattered Nextcloud HTTP code (OCS + WebDAV) into a shared `nextclo
 - `tests/test_nextcloud_skill_cli.py` — Skill CLI tests
 
 **Files modified:**
+
 - `src/istota/executor.py` — Source/output_target in prompt header, fixed email tool line
 - `src/istota/nextcloud_api.py` — Delegates to nextcloud_client
 - `src/istota/storage.py` — Delegates to nextcloud_client
@@ -7047,6 +7603,7 @@ Deployments now pin to semver tags instead of tracking the tip of `main`. Both `
 Also added `istota --version` which prints the version from `pyproject.toml` (currently `0.1.0`).
 
 **Files modified:**
+
 - `deploy/install.sh` — `deploy_code()` resolves and checks out tags; new `REPO_TAG` variable; wizard writes `repo_tag = "latest"`
 - `deploy/ansible/defaults/main.yml` — `istota_repo_tag: "latest"`
 - `deploy/ansible/tasks/main.yml` — Tag fetch/resolve/checkout block after git clone
@@ -7058,6 +7615,7 @@ Also added `istota --version` which prints the version from `pyproject.toml` (cu
 Small deployment improvements for new users and single-core VMs.
 
 **Key changes:**
+
 - Added Nextcloud All-in-One link to README.md and deploy/README.md prerequisites for users starting fresh
 - Fixed browser container failing on single-core machines (`cpus: "2"` exceeded available CPUs)
 - install.sh now uses `$(nproc)` to cap CPU limit to available cores
@@ -7065,6 +7623,7 @@ Small deployment improvements for new users and single-core VMs.
 - Removed CPU limit from development docker-compose and deploy docs (memory limit is sufficient)
 
 **Files modified:**
+
 - `README.md` — Added Nextcloud All-in-One parenthetical in Requirements
 - `deploy/README.md` — Added Nextcloud All-in-One note, removed CPU limit from browser example
 - `deploy/install.sh` — Dynamic CPU limit via `$(nproc)`
@@ -7076,11 +7635,13 @@ Small deployment improvements for new users and single-core VMs.
 When the prebuilt Claude CLI binary fails (e.g., unsupported CPU on older VMs), install.sh falls back to installing via npm. Previously, the verification step only checked `$ISTOTA_HOME/.local/bin/claude` — which doesn't exist after an npm install — so it would report the CLI as missing even though it was functional on the system PATH.
 
 **Key changes:**
+
 - After npm fallback install, create a symlink at `$ISTOTA_HOME/.local/bin/claude` pointing to the npm-installed binary so the rest of the script (systemd PATH, services) works uniformly
 - Verification now falls back to `command -v claude` if the `.local/bin` path doesn't exist
 - npm fallback verifies `command_exists claude` after install before declaring success
 
 **Files modified:**
+
 - `deploy/install.sh` — npm fallback symlink, resilient verification
 
 ## 2026-02-21: Install wizard optional feature prompts and setup
@@ -7088,6 +7649,7 @@ When the prebuilt Claude CLI binary fails (e.g., unsupported CPU on older VMs), 
 The install wizard previously prompted for some optional features (email, memory search, sleep cycle, browser) but didn't actually set up several of them. Other optional features documented in deploy/README.md (whisper, ntfy, backups, channel sleep cycle) weren't prompted at all. Now all optional features are prompted in the wizard and deployed during installation.
 
 **Key changes:**
+
 - Wizard prompts for channel sleep cycle, whisper (with model selection), ntfy (server/topic/token), automated backups, and browser VNC password
 - New `setup_browser_container()` — installs Docker, creates browser.env and docker-compose.browser.yml, builds and starts the container
 - New `setup_whisper()` — pre-downloads the selected whisper model after venv is ready
@@ -7098,6 +7660,7 @@ The install wizard previously prompted for some optional features (email, memory
 - Post-install summary only lists Fava and Nginx as features not set up by the script
 
 **Files modified:**
+
 - `deploy/install.sh` — Wizard state vars, feature prompts, setup functions, main flow, summary
 - `deploy/render_config.py` — WHISPER_MAX_MODEL env var in systemd service
 - `deploy/README.md` — Updated optional features intro
@@ -7107,6 +7670,7 @@ The install wizard previously prompted for some optional features (email, memory
 Addressed four open issues from the Zorg issue tracker. The headline change replaces the fragile JSON-as-text email output pattern with a dedicated CLI tool that writes structured output to a deferred file — eliminating the transcription corruption (smart-quote substitution) that caused raw JSON to be delivered to users. The developer skill gained mandatory pre-submission checks for namespace verification, MR/PR response verification, and a prohibition on editing live production source files.
 
 **Key changes:**
+
 - New `email output` CLI subcommand writes `task_{id}_email_output.json` to deferred dir (same pattern as subtasks/tracking)
 - Scheduler checks for deferred email output file before falling back to `_parse_email_output()` (backward compat)
 - Smart-quote normalization (Try 4) added to `_parse_email_output()` as a safety net for the legacy path
@@ -7117,6 +7681,7 @@ Addressed four open issues from the Zorg issue tracker. The headline change repl
 - Updated prompt instruction, email skill docs, and email guidelines to reference the output tool
 
 **Files added/modified:**
+
 - `src/istota/skills/email/__init__.py` — Added `cmd_output()` and `output` CLI subcommand
 - `src/istota/scheduler.py` — Added `_load_deferred_email_output()`, smart-quote Try 4, malformed JSON warning
 - `src/istota/executor.py` — Updated prompt instruction for email output tool
@@ -7131,6 +7696,7 @@ Addressed four open issues from the Zorg issue tracker. The headline change repl
 End-to-end testing of install.sh on a fresh Debian VM uncovered a series of issues with the mount service, Claude CLI installation, file permissions, and system dependencies.
 
 **Key changes:**
+
 - Fixed rclone mount service: `Type=notify` → `Type=simple` (rclone doesn't send sd_notify)
 - Added `fuse3` to system packages, switched `ExecStop` to `fusermount3` for Debian 13+
 - Install Claude CLI as the istota user (not root), so files are owned correctly
@@ -7143,6 +7709,7 @@ End-to-end testing of install.sh on a fresh Debian VM uncovered a series of issu
 - Fixed test command in summary to use full venv path
 
 **Files modified:**
+
 - `deploy/install.sh` — Mount service, Claude CLI install, permissions, defaults
 
 ## 2026-02-21: Interactive install wizard
@@ -7150,6 +7717,7 @@ End-to-end testing of install.sh on a fresh Debian VM uncovered a series of issu
 Rewrote `deploy/install.sh` with a polished 7-step interactive wizard for first-time setup on Debian/Ubuntu VMs. The wizard validates Nextcloud connectivity and credentials in real time, auto-generates the obscured rclone password (eliminating a confusing manual step), and produces all config files through the existing `render_config.py` pipeline. Added `--dry-run` mode that runs the full wizard and generates config into a temp directory without touching the system — useful for testing on macOS or previewing what would be deployed.
 
 **Key changes:**
+
 - Pre-flight checks: OS detection, internet connectivity, disk space, Python version
 - Nextcloud URL validation (tests `/status.php`) and credential verification (OCS API)
 - Auto-obscure rclone password from the app password after rclone install
@@ -7159,6 +7727,7 @@ Rewrote `deploy/install.sh` with a polished 7-step interactive wizard for first-
 - `render_config.py`: added GitHub developer settings, `CLAUDE_CODE_OAUTH_TOKEN` to secrets.env
 
 **Files modified:**
+
 - `deploy/install.sh` — Major rewrite (717 → 1200 lines)
 - `deploy/render_config.py` — GitHub secrets, Claude OAuth token support
 
@@ -7167,6 +7736,7 @@ Rewrote `deploy/install.sh` with a polished 7-step interactive wizard for first-
 Replaced the emoji-laden listicle README with a cleaner, more functional version. Requirements and quick start moved to the top. Features consolidated into prose paragraphs grouped by theme. Dropped the "Why Istota?" and "Should I try Istota?" sections (those belong on the website). Added optional dependency groups and git clone to quick start.
 
 **Files modified:**
+
 - `README.md` — Full rewrite
 
 ## 2026-02-21: Emissaries / persona split
@@ -7176,6 +7746,7 @@ Separated constitutional principles ("emissaries") from persona/character into d
 Also tightened both documents to remove cross-layer repetition (power/access principle now owned by emissaries, push-back/opinions consolidated, "ask first" deduplicated) and aligned persona to use "principal" terminology consistent with emissaries.
 
 **Key changes:**
+
 - New `config/emissaries.md` — constitutional principles document
 - Updated `config/persona.md` — character layer only, references emissaries for principles
 - `emissaries_enabled` config field (default true) with TOML parsing
@@ -7184,6 +7755,7 @@ Also tightened both documents to remove cross-layer repetition (power/access pri
 - Ansible defaults and config template updated
 
 **Files added/modified:**
+
 - `config/emissaries.md` — New constitutional principles document
 - `config/persona.md` — Replaced with character-only persona template
 - `src/istota/config.py` — Added `emissaries_enabled` field and parsing
@@ -7198,6 +7770,7 @@ Also tightened both documents to remove cross-layer repetition (power/access pri
 Claude CLI previously required running `claude login` interactively on the server, which could break when tokens expired. Added support for passing `CLAUDE_CODE_OAUTH_TOKEN` as an environment variable — generated locally via `claude setup-token` and stored in Ansible vault. Claude CLI picks this up automatically with no credentials file or refresh needed.
 
 **Key changes:**
+
 - Added `istota_claude_code_oauth_token` Ansible variable with vault comment
 - Token templated into `secrets.env.j2` (loaded via systemd `EnvironmentFile=`)
 - `build_clean_env()` in executor passes token through in restricted mode (permissive inherits it via `os.environ`)
@@ -7205,6 +7778,7 @@ Claude CLI previously required running `claude login` interactively on the serve
 - Ansible login reminder updated to mention both auth options
 
 **Files modified:**
+
 - `deploy/ansible/defaults/main.yml` — Added `istota_claude_code_oauth_token` variable
 - `deploy/ansible/templates/secrets.env.j2` — Added `CLAUDE_CODE_OAUTH_TOKEN` template line
 - `src/istota/executor.py` — Pass `CLAUDE_CODE_OAUTH_TOKEN` in restricted-mode `build_clean_env()`
@@ -7215,11 +7789,13 @@ Claude CLI previously required running `claude login` interactively on the serve
 When a user sent a second message while the bot was still processing the first, the per-channel gate sent "Still working on a previous request" but permanently discarded the message by advancing the poll state past it. The user's message was lost and never processed. Fixed by removing the `continue` after the gate check so the message falls through to normal task creation. The scheduler already handles ordering — tasks are processed serially per user via `claim_task()`.
 
 **Key changes:**
+
 - Per-channel gate now queues gated messages as tasks instead of discarding them
 - "Still working" notification still sent so the user knows there's a queue
 - Test updated: asserts both notification sent AND task created
 
 **Files modified:**
+
 - `src/istota/talk_poller.py` — Removed `continue` from channel gate block
 - `tests/test_talk_poller.py` — Updated gate test to expect task creation
 - `AGENTS.md` — Updated per-channel gate documentation
@@ -7229,12 +7805,14 @@ When a user sent a second message while the bot was still processing the first, 
 When `progress_show_text` is enabled with `progress_text_max_chars = 0` (unlimited), intermediate assistant text sent as progress could repeat in the final result. Added deduplication that handles both exact matches (skip entirely) and prefix matches (strip already-seen prefix from final output). Dedup only applies when text is unlimited to avoid dangling partial sentences from truncated progress. Also added prompt guidance telling Claude to keep intermediate text minimal and save detailed output for the final response.
 
 **Key changes:**
+
 - Progress callback tracks sent texts via `callback.sent_texts` attribute
 - Final result dedup: exact match → skip, prefix match → strip (only when `progress_text_max_chars = 0`)
 - Dedup compares against actually-sent text (truncated `msg`), not raw input
 - Prompt rules updated: intermediate text should be brief, detailed output saved for final response
 
 **Files modified:**
+
 - `src/istota/scheduler.py` — Progress text tracking, dedup logic before `post_result_to_talk`
 - `src/istota/executor.py` — Updated output rules for both admin and non-admin prompts
 
@@ -7243,11 +7821,13 @@ When `progress_show_text` is enabled with `progress_text_max_chars = 0` (unlimit
 The progress callback had a hardcoded 200-char truncation for intermediate assistant text messages. Made this configurable via `progress_text_max_chars` (default 200, 0 = unlimited) so that `progress_show_text = true` can surface full intermediate responses when needed.
 
 **Key changes:**
+
 - Added `progress_text_max_chars` to `SchedulerConfig` dataclass and `load_config()`
 - Progress callback uses configurable limit instead of hardcoded `message[:200]`
 - Log line also uses the truncated `msg` instead of re-slicing
 
 **Files modified:**
+
 - `src/istota/config.py` — Added `progress_text_max_chars: int = 200`
 - `src/istota/scheduler.py` — Updated `_make_talk_progress_callback` to use config value
 - `deploy/ansible/defaults/main.yml` — Added `istota_scheduler_progress_text_max_chars`
@@ -7259,10 +7839,12 @@ The progress callback had a hardcoded 200-char truncation for intermediate assis
 After `!stop`, the cancelled task stays in `running` status until the worker thread cleans up. If the user sends a new message in that window, the per-channel gate sees the still-running task and rejects the message with "Still working on a previous request." Fixed by excluding tasks with `cancel_requested = 1` from the gate check. Also added a prompt note telling the bot where its JSONL execution logs live, so it can retrieve full output from previous tasks when users report truncated responses.
 
 **Key changes:**
+
 - `has_active_foreground_task_for_channel()` now excludes cancelled tasks (`AND cancel_requested = 0`)
 - Added prompt rule pointing the bot to `~/.claude/projects/` for execution JSONL logs
 
 **Files modified:**
+
 - `src/istota/db.py` — Added `cancel_requested = 0` filter to channel gate query
 - `src/istota/executor.py` — Added rule 8 about JSONL log location to admin prompt
 - `tests/test_db.py` — Added `test_false_when_cancel_requested`
@@ -7272,11 +7854,13 @@ After `!stop`, the cancelled task stays in `running` status until the worker thr
 Code review of the multi-worker feature found a mismatch: the dataclass default for `user_max_foreground_workers` was updated to 2 but the `load_config()` fallback was left at 1. In production (config loaded from TOML), deployments without an explicit setting would silently get 1 worker per user instead of the intended 2.
 
 **Key changes:**
+
 - Fixed `load_config()` fallback from 1 to 2 to match the `SchedulerConfig` dataclass default
 - Added regression test verifying `load_config()` defaults match dataclass defaults
 - Updated `.claude/rules/scheduler.md` docs (still showed old default of 1)
 
 **Files modified:**
+
 - `src/istota/config.py` — Fixed `sched.get("user_max_foreground_workers", 1)` → `2`
 - `tests/test_config.py` — Added `test_load_config_user_worker_defaults_match_dataclass`
 - `.claude/rules/scheduler.md` — Updated default in config intervals table
@@ -7286,6 +7870,7 @@ Code review of the multi-worker feature found a mismatch: the dataclass default 
 The previous worker pool keyed workers by `(user_id, queue_type)`, which silently capped each user to exactly 1 foreground worker regardless of `user_max_foreground_workers`. A user with an active task in Room A couldn't get a concurrent worker for Room B. Fixed by switching to 3-tuple keys with slot indices and correcting two bugs in the dispatch formula.
 
 **Key changes:**
+
 - Worker keys changed from `(user_id, queue_type)` to `(user_id, queue_type, slot)` 3-tuple
 - Fixed dispatch formula: `min(cap, pending) - active` → `min(cap - active, pending)` — old formula wouldn't spawn a second worker when one was busy with a running task
 - Fixed slot assignment to fill gaps (e.g., if slot 0 exits while slot 1 is running, reuse slot 0)
@@ -7294,6 +7879,7 @@ The previous worker pool keyed workers by `(user_id, queue_type)`, which silentl
 - Added `count_pending_tasks_for_user_queue()` DB function to avoid spawning idle workers
 
 **Files modified:**
+
 - `src/istota/scheduler.py` — 3-tuple worker keys, multi-slot dispatch logic, updated `UserWorker` and `_on_worker_exit`
 - `src/istota/config.py` — Changed `user_max_foreground_workers` default to 2
 - `src/istota/db.py` — Added `count_pending_tasks_for_user_queue()`
@@ -7308,6 +7894,7 @@ The previous worker pool keyed workers by `(user_id, queue_type)`, which silentl
 Replaced the single `max_total_workers`/`reserved_interactive_workers` approach with three-tier concurrency control: per-channel gate (reject duplicate foreground tasks), separate instance-level fg/bg caps, and per-user worker limits with global defaults.
 
 **Key changes:**
+
 - Added `max_foreground_workers` (default 5) and `max_background_workers` (default 3) instance-level caps to SchedulerConfig
 - Added `user_max_foreground_workers` (default 2) and `user_max_background_workers` (default 1) global per-user defaults
 - Added per-user `max_foreground_workers` and `max_background_workers` overrides in UserConfig (0 = use global default)
@@ -7318,6 +7905,7 @@ Replaced the single `max_total_workers`/`reserved_interactive_workers` approach 
 - Removed legacy `max_total_workers` and `reserved_interactive_workers` fields entirely
 
 **Files added/modified:**
+
 - `src/istota/config.py` — New SchedulerConfig/UserConfig fields, `effective_user_max_fg/bg_workers()` on Config
 - `src/istota/db.py` — Added `has_active_foreground_task_for_channel()`
 - `src/istota/talk_poller.py` — Per-channel gate before task creation
@@ -7337,12 +7925,14 @@ Replaced the single `max_total_workers`/`reserved_interactive_workers` approach 
 Reply threading and @mentions in group chats were being applied to every message including intermediate progress updates (ack, tool use notifications), making the chat noisy. Fixed so only the final response gets reply_to and @mention; progress updates are sent as plain messages.
 
 **Key changes:**
+
 - Added `use_reply_threading` parameter to `post_result_to_talk()` (default `False`)
 - Only the final result delivery passes `use_reply_threading=True`
 - Ack messages and streaming progress updates use the default (no threading)
 - Added test verifying progress updates skip reply threading in group chats
 
 **Files modified:**
+
 - `src/istota/scheduler.py` - Gated reply threading on `use_reply_threading` param
 - `tests/test_scheduler.py` - Updated existing tests, added progress update test (5 tests total)
 
@@ -7351,12 +7941,14 @@ Reply threading and @mentions in group chats were being applied to every message
 In multi-user Talk rooms, the bot now replies to the original message and @mentions the triggering user. This makes it clear what message the bot is responding to and ensures the user gets a notification.
 
 **Key changes:**
+
 - `post_result_to_talk()` passes `reply_to=task.talk_message_id` for the first message part in group chats
 - First message part prepends `@{user_id}` so the user gets a Nextcloud Talk notification
 - Subsequent split parts remain standalone (no reply threading or @mention)
 - DM behavior unchanged
 
 **Files modified:**
+
 - `src/istota/scheduler.py` - Updated `post_result_to_talk()` with group chat reply_to and @mention logic
 - `tests/test_scheduler.py` - Added `TestPostResultToTalk` (4 tests: DM, group chat, split messages, missing message ID)
 
@@ -7365,6 +7957,7 @@ In multi-user Talk rooms, the bot now replies to the original message and @menti
 In group rooms with multiple participants, istota now only responds when @mentioned instead of replying to every message. Rooms with exactly 2 participants (bot + 1 user) still behave like DMs. Conversation context in group chats shows usernames as speaker labels for multi-user attribution.
 
 **Key changes:**
+
 - `is_bot_mentioned()` checks `messageParameters` for `mention-user`/`mention-federated-user` matching bot username (excludes `mention-call`/@all)
 - `clean_message_content()` updated to strip bot's own @mention from prompt and replace other mentions with `@DisplayName`
 - `_is_multi_user_room()` async function with 5-min TTL participant count cache; type 1 (DM) always False, type 2/3 checks count via `get_participants()` API
@@ -7374,6 +7967,7 @@ In group rooms with multiple participants, istota now only responds when @mentio
 - Falls back to DM behavior (respond to everything) on participants API failure
 
 **Files modified:**
+
 - `src/istota/talk.py` - Added `get_participants()` method to `TalkClient`
 - `src/istota/talk_poller.py` - Added `is_bot_mentioned()`, `_is_multi_user_room()`, mention handling in `clean_message_content()`, group room logic in `poll_talk_conversations()`
 - `src/istota/db.py` - Added `user_id` to `ConversationMessage`, updated `get_conversation_history()` and `get_previous_task()` queries
@@ -7389,11 +7983,13 @@ In group rooms with multiple participants, istota now only responds when @mentio
 The `generate_cron_md()` function wrapped all values in basic TOML double quotes without escaping inner `"` characters. When `remove_job_from_cron_md()` rewrote the file after a once-job fired, a command containing `--subject "Operation's Tent"` produced invalid TOML that broke parsing for all 23 jobs. Fixed by using triple-quoted TOML strings (`"""..."""`) whenever a value contains double quotes or newlines.
 
 **Key changes:**
+
 - New `_toml_string()` helper in cron_loader.py — uses triple quotes when value contains `"` or `\n`
 - Both `command` and `prompt` fields now route through `_toml_string()` for safe quoting
 - 2 new round-trip tests for commands and prompts with inner double quotes
 
 **Files modified:**
+
 - `src/istota/cron_loader.py` - Added `_toml_string()`, updated `generate_cron_md()` to use it
 - `tests/test_cron_loader.py` - Added quote round-trip tests
 
@@ -7402,6 +7998,7 @@ The `generate_cron_md()` function wrapped all values in basic TOML double quotes
 One-time scheduled jobs (`once = true`) are now automatically removed from both DB and CRON.md after successful execution. This replaces the previous approach where the reminders skill doc told Claude to manually clean up spent entries (unreliable). Also added periodic cleanup of Claude's JSONL session logs which grow unbounded in the bwrap sandbox.
 
 **Key changes:**
+
 - New `once` field on CronJob dataclass, parsed from TOML, synced to DB, round-trips through generate/migrate
 - New `remove_job_from_cron_md()` function — loads, filters, rewrites cleanly via `generate_cron_md()`
 - New `get_scheduled_job()` and `delete_scheduled_job()` DB functions
@@ -7413,6 +8010,7 @@ One-time scheduled jobs (`once = true`) are now automatically removed from both 
 - 23 new tests: once field parsing/sync/removal (13 in test_cron_loader), once-job auto-removal + JSONL cleanup (10 in test_scheduler)
 
 **Files added/modified:**
+
 - `src/istota/cron_loader.py` - `once` field on CronJob, `remove_job_from_cron_md()`
 - `src/istota/db.py` - `once` on ScheduledJob, migration, `get_scheduled_job()`, `delete_scheduled_job()`
 - `src/istota/scheduler.py` - Once-job auto-removal on success, `cleanup_old_claude_logs()`
@@ -7427,6 +8025,7 @@ One-time scheduled jobs (`once = true`) are now automatically removed from both 
 Voice memos arriving as `[audio.mp3]` had no meaningful text for skill selection — keyword-based skills like reminders, schedules, and calendar never loaded. Fixed by pre-transcribing audio attachments before skill selection so the enriched prompt contains the actual spoken words. Also added `companion_skills` as a generic skill.toml feature and capped whisper auto-selection with a configurable max model.
 
 **Key changes:**
+
 - New `_pre_transcribe_attachments()` in executor.py runs before `select_skills()`, transcribes audio and enriches `task.prompt`
 - Enriched prompt flows through to `build_prompt()` and context selection so Claude sees the transcription
 - Graceful fallback if faster-whisper not installed or transcription fails
@@ -7437,6 +8036,7 @@ Voice memos arriving as `[audio.mp3]` had no meaningful text for skill selection
 - 10 new pre-transcription tests, companion skill tests, updated whisper model tests
 
 **Files added/modified:**
+
 - `src/istota/executor.py` - Added `_pre_transcribe_attachments()`, `_AUDIO_EXTENSIONS`, integrated before skill selection
 - `src/istota/skills/_types.py` - Added `companion_skills` field to SkillMeta
 - `src/istota/skills/_loader.py` - Companion skill resolution in `select_skills()`, load from skill.toml
@@ -7454,6 +8054,7 @@ Voice memos arriving as `[audio.mp3]` had no meaningful text for skill selection
 Added a doc-only `reminders` skill that teaches the bot how to set time-based reminders by writing one-shot entries to CRON.md. Previously the bot would sometimes hallucinate reminders — telling the user it set one without actually writing anything. The skill doc gives explicit step-by-step instructions: parse the time, compute the cron expression, write the CRON.md entry, and confirm. Reminders use `@{user_id}` mentions so Nextcloud Talk triggers a notification.
 
 **Key changes:**
+
 - New `reminders` skill with `skill.toml` (keyword triggers) and `skill.md` (instructions)
 - Keywords cover natural phrases: "remind me", "don't forget", "alert me", "in an hour", "at 3pm", etc.
 - Prompt template uses `@{user_id}` mention for Talk notification alerts
@@ -7462,6 +8063,7 @@ Added a doc-only `reminders` skill that teaches the bot how to set time-based re
 - 7 new tests for keyword matching in skills loader
 
 **Files added/modified:**
+
 - `src/istota/skills/reminders/skill.toml` - New skill metadata with keyword triggers
 - `src/istota/skills/reminders/skill.md` - Reminder instructions for the bot
 - `tests/test_skills_loader.py` - Added TestRemindersSkillSelection (7 tests)
@@ -7471,11 +8073,13 @@ Added a doc-only `reminders` skill that teaches the bot how to set time-based re
 Added a new "Security model" section to the README explaining the three-layer isolation: dedicated VM separation from Nextcloud, bubblewrap sandboxing per Claude Code invocation, and per-user sandbox isolation in multi-user setups. Also rewrote the "Why Istota?" origin story to explain how it started as a mobile Claude Code wrapper for development on the go and evolved into a full assistant.
 
 **Key changes:**
+
 - New "Security model" section: dedicated VM isolation, bubblewrap sandbox (same as Claude Code on Linux), per-user filesystem isolation, credential stripping, deferred DB writes
 - Rewrote origin story: started as thin Claude Code wrapper for mobile dev without SSH, grew into full assistant
 - Updated deployment section to emphasize dedicated VM requirement
 
 **Files modified:**
+
 - `README.md` - Added security model section, rewrote origin story, updated deployment wording
 
 ## 2026-02-17: Markets skill interactive CLI
@@ -7483,6 +8087,7 @@ Added a new "Security model" section to the README explaining the three-layer is
 The markets skill was previously briefing-only — it had no keywords and no CLI, so users couldn't ask "what happened in the markets today" in interactive chat. Added keyword triggers and a full CLI with three subcommands.
 
 **Key changes:**
+
 - Added keywords to `skill.toml` so the skill loads for interactive market questions (market, stock, futures, nasdaq, etc.)
 - Added CLI with `quote`, `summary`, and `finviz` subcommands (all JSON output)
 - `quote AAPL MSFT` fetches quotes for specific symbols via yfinance
@@ -7493,6 +8098,7 @@ The markets skill was previously briefing-only — it had no keywords and no CLI
 - 10 new tests covering parser, all three commands, and error handling
 
 **Files added/modified:**
+
 - `src/istota/skills/markets/skill.toml` - Added keywords and updated description
 - `src/istota/skills/markets/__init__.py` - Added CLI (build_parser, main, cmd_quote, cmd_summary, cmd_finviz)
 - `src/istota/skills/markets/__main__.py` - New, for `python -m` support
@@ -7504,11 +8110,13 @@ The markets skill was previously briefing-only — it had no keywords and no CLI
 Added `feeds_config` doc-only skill so the bot knows how to create and edit a user's `FEEDS.md` file when asked to add/remove RSS, Tumblr, or Are.na feeds via Talk. Also updated the README with previously undocumented features (Karakeep bookmarks, feed reader).
 
 **Key changes:**
+
 - New `feeds_config` skill: documents FEEDS.md file format, location, all three feed types, entry fields, and common operations
 - Keywords: feed, feeds, rss, tumblr, are.na, arena, subscribe, add feed, remove feed
 - README: added feed reader and Karakeep bookmarks to features list
 
 **Files added/modified:**
+
 - `src/istota/skills/feeds_config/skill.toml` - Skill manifest with keywords
 - `src/istota/skills/feeds_config/skill.md` - FEEDS.md format reference doc
 - `README.md` - Added feed reader and Karakeep bookmarks to features
@@ -7518,6 +8126,7 @@ Added `feeds_config` doc-only skill so the bot knows how to create and edit a us
 Restructured the entire skills system from flat files in `config/skills/` with a central `_index.toml` into self-contained directory packages under `src/istota/skills/`. Each skill is now a directory with a `skill.toml` manifest and `skill.md` doc, optionally containing Python modules. This eliminates the need to edit 3-6 scattered files when adding a skill.
 
 **Key changes:**
+
 - New infrastructure: `_types.py` (SkillMeta, EnvSpec dataclasses), `_loader.py` (directory-based discovery with layered priority), `_env.py` (declarative env var resolver + setup_env() hook dispatch)
 - `skills_loader.py` is now a thin re-export wrapper delegating to `skills/_loader.py`
 - Skill manifests (`skill.toml`) declare metadata, keywords, resource/source types, dependencies, and env var wiring via `[[env]]` sections
@@ -7531,6 +8140,7 @@ Restructured the entire skills system from flat files in `config/skills/` with a
 - Executor wired to resolve declarative env vars and dispatch `setup_env()` hooks
 
 **Files added:**
+
 - `src/istota/skills/_types.py` - SkillMeta and EnvSpec dataclasses
 - `src/istota/skills/_loader.py` - Skill discovery, manifest loading, doc resolution
 - `src/istota/skills/_env.py` - Declarative env var resolver + hook dispatch
@@ -7539,6 +8149,7 @@ Restructured the entire skills system from flat files in `config/skills/` with a
 - `tests/test_skill_env.py` - 20 tests for env resolution
 
 **Files modified:**
+
 - `src/istota/skills_loader.py` - Now thin wrapper re-exporting from `skills/_loader.py`
 - `src/istota/executor.py` - Wired declarative env resolution and setup_env hooks
 - `src/istota/config.py` - Added `ResourceConfig.extra`, `Config.bundled_skills_dir`
@@ -7548,6 +8159,7 @@ Restructured the entire skills system from flat files in `config/skills/` with a
 - `tests/test_executor.py` - Updated for bundled_skills_dir isolation
 
 **Files removed:**
+
 - `config/skills/_index.toml` - Replaced by per-skill `skill.toml` manifests
 - `config/skills/*.md` - Moved to `src/istota/skills/*/skill.md`
 - `src/istota/skills/invoicing.py` - Moved to `accounting/invoicing.py`
@@ -7558,11 +8170,13 @@ Restructured the entire skills system from flat files in `config/skills/` with a
 Fixed several hardcoded `istota-` references in the Ansible role that broke deployments using a custom namespace (e.g., `zorg`). The scheduler service file was being written to `istota-scheduler.service` instead of `{{ istota_namespace }}-scheduler.service`, so the actual service never got updated. Same issue with the enable/start task and the deployment info message.
 
 **Key changes:**
+
 - Service file dest: `istota-scheduler.service` → `{{ istota_namespace }}-scheduler.service`
 - Service enable task: hardcoded name → `{{ istota_namespace }}-scheduler`
 - Deployment info message: hardcoded names → namespace-aware
 
 **Files modified:**
+
 - `deploy/ansible/tasks/main.yml` - Fixed service dest, enable task, and display message to use `istota_namespace`
 
 ## 2026-02-17: Architecture doc and Ansible repo dir cleanup
@@ -7570,10 +8184,12 @@ Fixed several hardcoded `istota-` references in the Ansible role that broke depl
 Added comprehensive ARCHITECTURE.md covering the full system architecture. Renamed the Ansible git clone destination from `{{ istota_home }}/src` to `{{ istota_repo_dir }}` (defaults to `{{ istota_home }}/istota`) to avoid the confusing `src/src/istota` path nesting on the server.
 
 **Key changes:**
+
 - ARCHITECTURE.md: core data flow, module map, scheduler internals, executor/prompt assembly, context selection, skills system, four-layer memory model, multi-user isolation, sandbox, Nextcloud integration, database schema, briefings, cron jobs, heartbeat, deployment, testing, design decisions
 - Ansible role: added `istota_repo_dir` variable, replaced all hardcoded `{{ istota_home }}/src` references across defaults, tasks, and templates
 
 **Files added/modified:**
+
 - `ARCHITECTURE.md` - New comprehensive architecture document
 - `deploy/ansible/defaults/main.yml` - Added `istota_repo_dir` variable
 - `deploy/ansible/tasks/main.yml` - Updated all `{{ istota_home }}/src` → `{{ istota_repo_dir }}`
@@ -7586,6 +8202,7 @@ Added comprehensive ARCHITECTURE.md covering the full system architecture. Renam
 Added GitHub pull request workflows alongside existing GitLab merge request support. Same security model: token via env var, credential helper per host, API wrapper with endpoint allowlist. Both platforms can be configured simultaneously with dynamic `GIT_CONFIG_COUNT`. GitHub Enterprise detection uses `{url}/api/v3` instead of `api.github.com`. Also documented that `deploy/ansible/` is the canonical location for the Ansible role (ansible-server symlinks here).
 
 **Key changes:**
+
 - `DeveloperConfig`: added `github_url`, `github_token`, `github_username`, `github_default_owner`, `github_reviewer`, `github_api_allowlist` fields
 - `executor.py`: GitHub credential helper (`x-access-token` default), API wrapper with `Authorization: Bearer` header, dynamic git config indexing for multi-platform support
 - `ISTOTA_GITHUB_TOKEN` env var override for systemd `EnvironmentFile=` usage
@@ -7594,6 +8211,7 @@ Added GitHub pull request workflows alongside existing GitLab merge request supp
 - 7 new executor tests, 3 new config tests (TDD)
 
 **Files added/modified:**
+
 - `src/istota/config.py` - Added github_* fields to DeveloperConfig, env var override
 - `src/istota/executor.py` - GitHub env vars, credential helper, API wrapper, dynamic GIT_CONFIG_COUNT
 - `config/skills/developer.md` - Renamed to "Git, GitLab & GitHub Workflows", added GitHub sections
@@ -7613,6 +8231,7 @@ Added GitHub pull request workflows alongside existing GitLab merge request supp
 Ported the private Ansible role into the repo at `deploy/ansible/` and created a standalone `install.sh` script with interactive setup wizard. External Ansible role dependencies (Docker, rclone, rclone-mount, nginx, Node.js) inlined as direct tasks. Added `render_config.py` (stdlib-only) that generates all config files from a single settings TOML file. Deleted the old `scripts/deploy/` placeholder scripts.
 
 **Key changes:**
+
 - Ported Ansible role: defaults, handlers, tasks (with inlined deps), 14 templates
 - `istota-site.conf.j2`: replaced private nginx includes with inline private-network ACL
 - `deploy/render_config.py`: generates config.toml, user configs, admins, secrets.env, systemd service, logrotate from settings file
@@ -7621,6 +8240,7 @@ Ported the private Ansible role into the repo at `deploy/ansible/` and created a
 - Deleted `scripts/deploy/` (setup-server.sh, install-services.sh, obsolete service files)
 
 **Files added/modified:**
+
 - `deploy/ansible/defaults/main.yml` - Ported from private role (org-specific defaults replaced)
 - `deploy/ansible/handlers/main.yml` - Direct copy
 - `deploy/ansible/tasks/main.yml` - Ported with inlined role dependencies
@@ -7639,6 +8259,7 @@ Ported the private Ansible role into the repo at `deploy/ansible/` and created a
 Added per-user persona override so each user's workspace `PERSONA.md` takes precedence over the global `config/persona.md`. Rewrote persona with clearer structure (Character, Communication, How you work, Boundaries) and leaned into the Culture drone identity. Moved source directory restriction from persona to system prompt. Added AGPL-3.0-or-later license.
 
 **Key changes:**
+
 - Per-user persona: user workspace `PERSONA.md` overrides global `config/persona.md`
 - `load_persona()` checks user workspace first (via mount), falls back to global
 - `ensure_user_directories_v2()` seeds `PERSONA.md` by copying global persona on first run
@@ -7650,6 +8271,7 @@ Added per-user persona override so each user's workspace `PERSONA.md` takes prec
 - README.md rewritten: friendlier tone, emoji feature list, simplified structure, dropped exhaustive CLI/config reference
 
 **Files added/modified:**
+
 - `src/istota/storage.py` - Added `get_user_persona_path()`, PERSONA.md seeding, updated workspace README
 - `src/istota/executor.py` - `load_persona()` accepts `user_id`, user override logic, source dir rule in `build_prompt()`
 - `config/persona.md` - Complete rewrite with Culture drone character
@@ -7667,6 +8289,7 @@ Added per-user persona override so each user's workspace `PERSONA.md` takes prec
 Removed all hardcoded `DEFAULT_BOT_DIR` fallbacks and backward-compat aliases from storage, making `bot_dir` a required parameter throughout. Fixed `bot_dir_name` regex to ASCII-only for locale-independent filesystem paths, and fixed `skills_loader.py` to use properly sanitized `bot_dir` instead of naive `bot_name.lower()`.
 
 **Key changes:**
+
 - Removed `DEFAULT_BOT_DIR = "istota"` constant and `get_user_zorg_path`/`get_user_workspace_path` aliases
 - Made `bot_dir` a required parameter on all storage path functions (no silent defaults)
 - Fixed v2 rclone fallback paths to pass `config.bot_dir_name` correctly
@@ -7677,6 +8300,7 @@ Removed all hardcoded `DEFAULT_BOT_DIR` fallbacks and backward-compat aliases fr
 - Cleaned unused non-v2 imports from `cli.py`
 
 **Files modified:**
+
 - `src/istota/storage.py` - Removed legacy defaults/aliases, required `bot_dir` param everywhere
 - `src/istota/config.py` - ASCII-only regex in `bot_dir_name`
 - `src/istota/skills_loader.py` - Added `bot_dir` parameter to `load_skills()`
@@ -7693,6 +8317,7 @@ Removed all hardcoded `DEFAULT_BOT_DIR` fallbacks and backward-compat aliases fr
 Forked the zorg codebase to create istota as a standalone, open-sourceable project. All technical identifiers use "istota" while the user-facing bot name is configurable via `bot_name` in config.toml (default: "Istota").
 
 **Key changes:**
+
 - Renamed package `zorg` → `istota` (src/, pyproject.toml, CLI entry points)
 - All env vars `ZORG_*` → `ISTOTA_*`
 - DB tables `zorg_file_tasks`/`zorg_kv` → `istota_file_tasks`/`istota_kv`
@@ -7705,6 +8330,7 @@ Forked the zorg codebase to create istota as a standalone, open-sourceable proje
 - Fresh git repo with no history
 
 **Files added/modified:**
+
 - `src/istota/config.py` - Added `bot_name` field, `bot_dir_name` property with sanitization
 - `src/istota/storage.py` - Renamed `get_user_zorg_path` → `get_user_bot_path`, accepts `bot_dir` param
 - `src/istota/executor.py` - Added `_apply_bot_name()` helper for template substitution
@@ -7719,6 +8345,7 @@ Forked the zorg codebase to create istota as a standalone, open-sourceable proje
 Improved rendering of text-heavy RSS feeds (like feuilleton blogs) that embed images inside post content rather than in enclosures or media tags. Also improved text readability in feed cards.
 
 **Key changes:**
+
 - Extract card image from first `<img>` in content HTML when no enclosure/media_content image exists
 - Added `img` to sanitizer allowed tags with `src`/`alt` attribute whitelisting and `loading="lazy"`
 - Brighter excerpt text color (`#999` → `#bbb`), increased paragraph spacing
@@ -7726,6 +8353,7 @@ Improved rendering of text-heavy RSS feeds (like feuilleton blogs) that embed im
 - Bold/italic emphasis styling for better contrast in dark theme
 
 **Files modified:**
+
 - `src/zorg/feed_poller.py` - Inline image extraction, sanitizer img support, CSS improvements
 
 ## 2026-02-13: Track Actions Taken per Task
@@ -7733,6 +8361,7 @@ Improved rendering of text-heavy RSS feeds (like feuilleton blogs) that embed im
 Store tool use descriptions from Claude Code streaming execution and surface them in conversation context. This lets zorg see what tools it used previously (e.g., "Reading CRON.md", "Editing CRON.md") so it can skip redundant searches and go straight to relevant files on follow-up requests.
 
 **Key changes:**
+
 - Added `actions_taken TEXT` column to tasks table (schema + migration)
 - `_execute_streaming_once()` now accumulates `ToolUseEvent.description` into a JSON array
 - All executor functions return 3-tuple `(success, result, actions_taken)` (was 2-tuple)
@@ -7743,6 +8372,7 @@ Store tool use descriptions from Claude Code streaming execution and surface the
 - Capped at 15 actions per message in context display, pipe-separated
 
 **Files modified:**
+
 - `schema.sql` - Added `actions_taken` column
 - `src/zorg/db.py` - Task dataclass, ConversationMessage, update_task_status, get_conversation_history, migration
 - `src/zorg/executor.py` - 3-tuple returns from all execution paths, action accumulation in streaming
@@ -7759,6 +8389,7 @@ Store tool use descriptions from Claude Code streaming execution and surface the
 Tumblr posts were silently being missed because `fetch_tumblr` used a `since_id` parameter that the Tumblr `/blog/{blog}/posts` API endpoint doesn't support — the API silently ignored it and always returned the latest 20 posts. High-volume blogs posting 20+ items between 3-hour poll intervals were losing posts every cycle.
 
 **Key changes:**
+
 - Replaced `since_id` with offset-based pagination in `fetch_tumblr()`
 - Added pagination loop: fetches successive pages of 20 until catching up with known items or hitting 5-page cap (100 posts max per cycle)
 - Added `feed_item_exists()` DB function for duplicate checking during pagination
@@ -7768,6 +8399,7 @@ Tumblr posts were silently being missed because `fetch_tumblr` used a `since_id`
 - Are.na images now use `original` URL (CloudFront JPEG/PNG) instead of `display` URL (base64-encoded webp transform)
 
 **Files modified:**
+
 - `src/zorg/feed_poller.py` - Tumblr pagination, rate-limit logging, Are.na original images, mobile CSS
 - `src/zorg/db.py` - Added `feed_item_exists()` function
 - `tests/test_feed_poller.py` - Added 4 pagination tests, updated Are.na image test
@@ -7777,6 +8409,7 @@ Tumblr posts were silently being missed because `fetch_tumblr` used a `since_id`
 With bubblewrap sandbox enabled and DB mounted read-only, Claude and skill CLIs couldn't write to the DB directly. Implemented a deferred operations pattern where JSON request files are written to the always-RW user temp dir and processed by the scheduler after successful task completion.
 
 **Key changes:**
+
 - `_process_deferred_subtasks()` and `_process_deferred_tracking()` in scheduler.py
 - `_write_deferred_tracking()` helper in accounting skill with fallback to direct DB
 - `ZORG_DEFERRED_DIR` env var always set to user temp dir
@@ -7785,6 +8418,7 @@ With bubblewrap sandbox enabled and DB mounted read-only, Claude and skill CLIs 
 - Deferred files only processed on success (not failure, not confirmation)
 
 **Files modified:**
+
 - `src/zorg/scheduler.py` - Added deferred processing functions + integration in process_one_task()
 - `src/zorg/executor.py` - Added ZORG_DEFERRED_DIR env var, removed sqlite3 tool, updated subtask rule
 - `src/zorg/skills/accounting.py` - Added _write_deferred_tracking(), updated import/sync commands
@@ -7798,17 +8432,20 @@ With bubblewrap sandbox enabled and DB mounted read-only, Claude and skill CLIs 
 Added a scoped KV store backed by a dedicated `zorg_kv` table, giving scripts persistent structured storage through CLI commands without direct DB access. User-isolated and namespace-scoped.
 
 **Key changes:**
+
 - New `zorg_kv` table with composite PK `(user_id, namespace, key)`, JSON-encoded values
 - 5 DB functions: `kv_get`, `kv_set`, `kv_delete`, `kv_list`, `kv_namespaces`
 - CLI: `zorg kv {get|set|list|delete|namespaces}` with JSON output and input validation
 - All operations scoped by user and namespace for isolation
 
 **Files modified:**
+
 - `schema.sql` - Added `zorg_kv` table and index
 - `src/zorg/db.py` - Added KV store functions
 - `src/zorg/cli.py` - Added `kv` subcommand group with 5 subcommands
 
 **Files added:**
+
 - `tests/test_kv.py` - 32 tests (21 DB + 11 CLI)
 
 ## 2026-02-12: Whisper Audio Transcription Skill
@@ -7816,6 +8453,7 @@ Added a scoped KV store backed by a dedicated `zorg_kv` table, giving scripts pe
 Added local CPU-based audio transcription using faster-whisper. First package-style skill (multi-file) with model selection, RAM guard, and subtitle output formats.
 
 **Key changes:**
+
 - New `src/zorg/skills/whisper/` package with CLI entry point, model management, and transcription logic
 - RAM guard via psutil: auto-selects the largest model that fits in available memory, or validates user's choice
 - Output formats: JSON (with word-level timestamps), plain text, SRT, VTT subtitles
@@ -7825,6 +8463,7 @@ Added local CPU-based audio transcription using faster-whisper. First package-st
 - Optional dependency group (`whisper`) — `faster-whisper>=1.1.0` and `psutil>=5.9.0`
 
 **Files added:**
+
 - `src/zorg/skills/whisper/__init__.py` — Package init
 - `src/zorg/skills/whisper/__main__.py` — CLI entry point
 - `src/zorg/skills/whisper/cli.py` — Argparse CLI (transcribe, models, download)
@@ -7834,6 +8473,7 @@ Added local CPU-based audio transcription using faster-whisper. First package-st
 - `tests/test_skills_whisper.py` — 37 tests
 
 **Files modified:**
+
 - `config/skills/_index.toml` — Added whisper skill with audio/voice keywords
 - `pyproject.toml` — Added `whisper` optional dependency group
 - `src/zorg/executor.py` — Added `~/.cache/huggingface/` RO bind mount in bwrap sandbox
@@ -7843,12 +8483,14 @@ Added local CPU-based audio transcription using faster-whisper. First package-st
 Added a new heartbeat check type `self-check` that runs the same diagnostics as the `!check` command but deterministically through the heartbeat system, alerting only on failure. Also added `interval_minutes` to control per-check frequency, since expensive checks like `self-check` shouldn't run every 60-second cycle.
 
 **Key changes:**
+
 - Added `_check_self()` handler mirroring `!check` diagnostics: Claude binary, bwrap (if sandbox enabled), DB health, recent task failure rate, and optional Claude CLI execution test
 - Execution test configurable via `execution_test` config field (default: true) — invokes Claude with echo command, with sandbox wrapping if enabled
 - Added `interval_minutes` field to `HeartbeatCheck` — checks with this set are skipped when `last_check_at` is too recent, using existing heartbeat state. Checks without it run every cycle as before
 - Parsed from HEARTBEAT.md and excluded from the type-specific `config` dict
 
 **Files modified:**
+
 - `src/zorg/heartbeat.py` — Added `_check_self()` handler, `interval_minutes` field and skip logic in `check_heartbeats()`
 - `tests/test_heartbeat.py` — Added `TestCheckSelf` (11 tests) and interval tests (4 tests: config parsing, skip recent, run after elapsed, no-interval always runs). Suite at 60 tests
 - `config/skills/heartbeat.md` — Documented self-check type, interval_minutes, and config examples
@@ -7859,6 +8501,7 @@ Added a new heartbeat check type `self-check` that runs the same diagnostics as 
 Fava running via systemd didn't pick up beancount ledger changes automatically because inotify doesn't work over the rclone mount (VFS caching). Added a mechanism to restart the user's Fava service after any ledger write.
 
 **Key changes:**
+
 - Added `_restart_fava()` helper that calls `sudo systemctl restart zorg-fava-{user_id}.service` after ledger modifications
 - Called from `_append_to_ledger()` (covers monarch import/sync, invoice paid) and `cmd_add_transaction()` (direct yearly file writes)
 - Fails silently if no sudo access or no Fava service exists (non-interactive sudo, timeout, capture output)
@@ -7866,6 +8509,7 @@ Fava running via systemd didn't pick up beancount ledger changes automatically b
 - Sudoers file validated with `visudo` and auto-removed when Fava is disabled
 
 **Files added/modified:**
+
 - `src/zorg/skills/accounting.py` — Added `_restart_fava()`, called after all ledger write paths
 - `tests/test_skills_accounting.py` — Added `TestRestartFava` (4 tests: systemctl args, no-op without user, ignores failures, integration)
 - `ansible-server/roles/zorg/templates/zorg-fava-sudoers.j2` — New sudoers template for Fava restart
@@ -7876,10 +8520,12 @@ Fava running via systemd didn't pick up beancount ledger changes automatically b
 Evening briefings were always showing the same Flaubert quote in the REMINDER section, even when `reminders` was not enabled in the briefing components. Root cause: the `reminders_file` resource path was still listed in the prompt, so Claude read the file on its own and picked the first quote every time (bypassing the shuffle-queue rotation).
 
 **Key changes:**
+
 - Excluded `reminders_file` resources from the prompt for briefing tasks — reminders are pre-fetched by the briefing builder when enabled, so the file path should never be exposed to Claude directly
 - Updated briefing skill doc to explicitly state the REMINDER section should only appear when a pre-selected reminder is provided in the prompt
 
 **Files modified:**
+
 - `src/zorg/executor.py` — Gate `reminders_file` resource display on `task.source_type != "briefing"`
 - `config/skills/briefing.md` — Clarify REMINDER section requires pre-selected reminder; never read files directly
 
@@ -7888,12 +8534,14 @@ Evening briefings were always showing the same Flaubert quote in the REMINDER se
 Deployed the bwrap sandbox to production and ran a full integration test (via zorg itself). Fixed several issues discovered during testing.
 
 **Key changes:**
+
 - Fixed venv PATH resolution: `sys.executable` follows symlinks to system python (`/usr/bin/python3.13`), giving `/usr/bin/` as the venv bin dir. Changed to `sys.prefix` which gives the actual venv root without following binary symlinks. All `python -m zorg.skills.*` commands now work inside the sandbox.
 - Added static site directory (`config.site.base_path`) as RW bind mount for feed generation and HTML writes
 - Added `HARDENING.md` documenting the full security posture against each finding in the security audit
 - Updated the original security audit document with 3G (bwrap sandbox) implementation status
 
 **Files added/modified:**
+
 - `src/zorg/executor.py` — Fixed `build_clean_env()` venv PATH (sys.prefix instead of sys.executable), added site dir bind mount
 - `tests/test_security.py` — Updated PATH assertions for sys.prefix
 - `HARDENING.md` — New file: security hardening status against all audit findings
@@ -7913,12 +8561,14 @@ Fixed three issues preventing the bubblewrap sandbox from working on the product
 **Bug 4: OAuth credentials read-only.** `.credentials.json` was bound RO inside the sandbox. Claude Code uses OAuth (not API keys), and token refresh needs write access. Changed to RW bind.
 
 **Key changes:**
+
 - `_ro_bind()`/`_bind()` now preserve the original path as dest instead of resolving it (fixes symlinked /etc files)
 - Merged-usr compat: `/bin`, `/lib`, `/lib64`, `/sbin` use `--symlink` when they're symlinks on host
 - `.credentials.json` bound RW for OAuth token refresh
 - Ansible sysctl task: `kernel.unprivileged_userns_clone=1` via `/etc/sysctl.d/99-zorg-sandbox.conf`
 
 **Files modified:**
+
 - `src/zorg/executor.py` — Fixed `_ro_bind`/`_bind` dest resolution, merged-usr symlinks, OAuth credentials RW
 - `ansible-server/roles/zorg/tasks/main.yml` — Added sysctl task for unprivileged userns
 
@@ -7929,6 +8579,7 @@ Simplified configuration by making sleep cycle a global setting instead of per-u
 This mirrors how `channel_sleep_cycle` was already structured as a global config section.
 
 **Key changes:**
+
 - `SleepCycleConfig` moved from `UserConfig` to `Config` (global `[sleep_cycle]` TOML section)
 - Removed `conversation_token` field from `SleepCycleConfig`
 - Removed `_post_sleep_summary()` Talk notification function
@@ -7936,6 +8587,7 @@ This mirrors how `channel_sleep_cycle` was already structured as a global config
 - `process_user_sleep_cycle()` reads sleep settings from `config.sleep_cycle` instead of a parameter
 
 **Files modified:**
+
 - `src/zorg/config.py` — Moved `SleepCycleConfig` to global `Config`, removed from `UserConfig`, added TOML loading
 - `src/zorg/sleep_cycle.py` — Updated to use global config, removed notification code
 - `config/config.example.toml` — Added global `[sleep_cycle]` section, removed per-user sleep_cycle
@@ -7957,12 +8609,14 @@ Non-admin agents see only their own Nextcloud subtree, their temp dir, the activ
 The implementation uses selective `/etc` binds (DNS, TLS, user lookup, timezone, linker cache only), PID namespaces for process isolation, tmpfs masking for sensitive config directories, and `Path.resolve()` on all bind paths to prevent symlink escapes. Gracefully degrades on non-Linux or when bwrap is not installed.
 
 **Key changes:**
+
 - `SecurityConfig` gains `sandbox_enabled` (default false) and `sandbox_admin_db_write` (default false) fields
 - `build_bwrap_cmd()` function in executor.py (~120 lines) constructs the bwrap wrapper command
 - `execute_task()` calls `build_bwrap_cmd()` after building the Claude CLI command, before execution
 - Ansible deploys `bubblewrap` package and sets `sandbox_enabled = true` by default
 
 **Files added/modified:**
+
 - `src/zorg/config.py` — Added `sandbox_enabled`, `sandbox_admin_db_write` to `SecurityConfig` + parsing
 - `src/zorg/executor.py` — Added `build_bwrap_cmd()`, wired into `execute_task()`
 - `config/config.example.toml` — Added sandbox config comments to `[security]` section
@@ -7977,12 +8631,14 @@ The implementation uses selective `/etc` binds (DNS, TLS, user lookup, timezone,
 Moved GitLab token out of the git credential helper and API wrapper scripts that were written to the per-user temp directory. Previously, both scripts contained the token as a literal string, leaving credentials on disk after task execution. Now both scripts read from the `$GITLAB_TOKEN` environment variable, which is passed to the Claude Code subprocess and dies with the process.
 
 **Key changes:**
+
 - `git-credential-helper` script now uses `echo password=$GITLAB_TOKEN` instead of embedding the literal token
 - `gitlab-api` wrapper script now uses `--header "PRIVATE-TOKEN: $GITLAB_TOKEN"` instead of embedding the literal token
 - `GITLAB_TOKEN` env var added to the subprocess environment when developer skill is enabled
 - No secrets are written to disk in any temp scripts
 
 **Files modified:**
+
 - `src/zorg/executor.py` — Scripts reference `$GITLAB_TOKEN` env var instead of literal value
 - `tests/test_executor.py` — Updated assertions: token in env, not in script files
 
@@ -7991,6 +8647,7 @@ Moved GitLab token out of the git credential helper and API wrapper scripts that
 Implemented the first four tiers of the security hardening plan: clean subprocess environment for Claude Code, `--allowedTools` flag instead of `--dangerously-skip-permissions` in restricted mode, credential stripping from heartbeat/cron subprocesses, and Ansible `EnvironmentFile=` support for secrets management.
 
 **Key changes:**
+
 - `SecurityConfig` dataclass with `mode` ("permissive"/"restricted") and `passthrough_env_vars`, gated behind `[security]` TOML section
 - `build_clean_env(config)` — restricted mode gives Claude subprocess only PATH/HOME/PYTHONUNBUFFERED plus configured passthrough vars; permissive mode inherits full os.environ
 - `build_stripped_env()` — always-on credential stripping for heartbeat shell commands and cron command tasks (strips vars matching PASSWORD/SECRET/TOKEN/API_KEY/NC_PASS/PRIVATE_KEY/APP_PASSWORD)
@@ -8001,6 +8658,7 @@ Implemented the first four tiers of the security hardening plan: clean subproces
 - Default Ansible deployment uses `zorg_security_mode: "restricted"` and `zorg_use_environment_file: true`
 
 **Files added/modified:**
+
 - `src/zorg/config.py` — Added `SecurityConfig`, env var overrides in `load_config()`
 - `src/zorg/executor.py` — Added `build_clean_env()`, `build_stripped_env()`, `build_allowed_tools()`, refactored `execute_task()` command/env construction
 - `src/zorg/heartbeat.py` — `_check_shell_command()` uses `build_stripped_env()`
@@ -8018,6 +8676,7 @@ Implemented the first four tiers of the security hardening plan: clean subproces
 Improved the Dockerized browser container to handle Chrome crashes gracefully. Previously, if Chrome died inside the container, the Flask API would keep running but all browse requests would fail with no recovery path. Now the API detects a dead browser and restarts it automatically, and Docker provides a fallback restart if auto-recovery also fails.
 
 **Key changes:**
+
 - `_ensure_browser()` checks `browser.is_connected()` on every request via `@app.before_request`; if Chrome is dead, triggers `_restart_browser()` which tears down and re-initializes Playwright
 - `_restart_browser()` clears all dead sessions, best-effort cleanup of old context/playwright, then re-initializes fresh
 - Session/tab limit: `MAX_SESSIONS=3` (configurable via `MAX_BROWSER_SESSIONS` env var), enforced in `_create_session()` by evicting oldest session when at capacity
@@ -8027,6 +8686,7 @@ Improved the Dockerized browser container to handle Chrome crashes gracefully. P
 - Ansible role updated: `zorg_browser_max_sessions` variable, passed as `MAX_BROWSER_SESSIONS` in `browser.env`
 
 **Files added/modified:**
+
 - `docker/browser/browse_api.py` — Added `_ensure_browser()`, `_restart_browser()`, session limit logic, before_request browser check
 - `docker/browser/Dockerfile` — Added `HEALTHCHECK` instruction
 - `src/zorg/skills/browse.py` — Added HTTP 503 error handling for browser restart scenarios
@@ -8038,6 +8698,7 @@ Improved the Dockerized browser container to handle Chrome crashes gracefully. P
 Several improvements to the static feed page: replaced author display with feed source type labels, switched from per-image popover lightbox to a shared JS lightbox (cutting page size by ~33%), and moved the status notice div before the grid to survive HTML truncation from large pages served through nginx reverse proxy over FUSE mounts.
 
 **Key changes:**
+
 - Show feed source type (rss, tumblr, are.na) in card meta instead of author name
 - `feed_types` dict passed from FEEDS.md config through to HTML builder
 - Replaced per-image `[popover]` lightbox with single shared `<div>` + JS click handler
@@ -8047,6 +8708,7 @@ Several improvements to the static feed page: replaced author display with feed 
 - Vertically centered meta row items with `align-items:center`
 
 **Files modified:**
+
 - `src/zorg/feed_poller.py` — Source labels, JS lightbox, status notice placement, meta alignment
 - `tests/test_feed_poller.py` — Updated lightbox and gallery assertions for new markup
 
@@ -8055,6 +8717,7 @@ Several improvements to the static feed page: replaced author display with feed 
 Added comprehensive logging to the feed poller to improve visibility into feed polling and troubleshoot API/RSS issues. Previously, successful polls with 0 new items produced zero log output, making it impossible to distinguish "feed ran and found nothing new" from "feed was silently skipped."
 
 **Key changes:**
+
 - Per-feed INFO logging on new items: `Feed user/name: N new item(s) (fetched M)`
 - Per-feed error recovery logging: `Feed user/name: recovered after N consecutive errors`
 - Improved error messages with consecutive error count
@@ -8066,6 +8729,7 @@ Added comprehensive logging to the feed poller to improve visibility into feed p
 - Removed duplicate log from scheduler.py (feed_poller now handles all logging)
 
 **Files modified:**
+
 - `src/zorg/feed_poller.py` — Added ~15 log statements across fetchers, polling, and page generation
 - `src/zorg/scheduler.py` — Removed duplicate feed poll log (L1522-1523)
 
@@ -8074,6 +8738,7 @@ Added comprehensive logging to the feed poller to improve visibility into feed p
 Added a small fixed status notice to the bottom-right corner of the generated feed page showing when it was last built, how many new items were pulled, and total item count.
 
 **Key changes:**
+
 - `_build_status_text()` helper formats parts with `·` separators (timestamp, +N new, total items)
 - `_build_feed_page_html()` accepts `generated_at` and `new_item_count` params, renders a fixed `.status-notice` div
 - `generate_static_feed_page()` passes timestamp and new item count through from caller
@@ -8081,6 +8746,7 @@ Added a small fixed status notice to the bottom-right corner of the generated fe
 - 6 new tests: 2 for HTML integration, 4 for `_build_status_text` helper
 
 **Files modified:**
+
 - `src/zorg/feed_poller.py` — Added `_build_status_text()`, updated `_build_feed_page_html()` / `generate_static_feed_page()` / `check_feeds()` signatures
 - `tests/test_feed_poller.py` — Added `TestBuildStatusText` class and status notice integration tests
 
@@ -8089,6 +8755,7 @@ Added a small fixed status notice to the bottom-right corner of the generated fe
 Removed the `agent-task` check type from the heartbeat monitoring system. Users should use CRON.md with `silent_unless_action = true` instead, which provides the same functionality through the established scheduled jobs system. Updated documentation for both HEARTBEAT.md and CRON.md to clarify their distinct purposes (monitoring vs scheduling).
 
 **Key changes:**
+
 - Removed `_check_agent_task()` function and agent-task handling from `check_heartbeats()`
 - Removed `heartbeat_check_name` from Task dataclass, `create_task()`, and all SQL queries
 - Removed `pending_task_id` from HeartbeatState dataclass and related DB functions
@@ -8100,6 +8767,7 @@ Removed the `agent-task` check type from the heartbeat monitoring system. Users 
 - Kept `heartbeat_silent` on Task and `_strip_action_prefix()` — still used by silent scheduled jobs
 
 **Files modified:**
+
 - `src/zorg/heartbeat.py` — Removed `_check_agent_task()`, agent-task handling in `check_heartbeats()`
 - `src/zorg/db.py` — Removed `heartbeat_check_name` from Task, `pending_task_id` from HeartbeatState, all related SQL
 - `schema.sql` — Removed columns from tasks and heartbeat_state tables
@@ -8117,6 +8785,7 @@ Removed the `agent-task` check type from the heartbeat monitoring system. Users 
 Extended CRON.md to support direct shell command execution alongside Claude Code prompts. Command jobs flow through the same task queue (getting retry logic, `!stop`, failure tracking, and auto-disable for free) but execute via `subprocess.run()` instead of Claude Code. Each job must have exactly one of `prompt` or `command`.
 
 **Key changes:**
+
 - `CronJob` dataclass: added `command` field, mutual exclusivity validation with `prompt`
 - `schema.sql`: added `command TEXT` column to both `tasks` and `scheduled_jobs` tables
 - `db.py`: `Task` and `ScheduledJob` dataclasses, migrations, `create_task()`, all SELECT/RETURNING queries updated
@@ -8126,6 +8795,7 @@ Extended CRON.md to support direct shell command execution alongside Claude Code
 - 18 new tests across `test_cron_loader.py` (8) and `test_scheduler.py` (10)
 
 **Files modified:**
+
 - `src/zorg/cron_loader.py` — CronJob dataclass, parsing, generation, sync, migration
 - `src/zorg/db.py` — Task/ScheduledJob dataclasses, migrations, create_task, queries
 - `src/zorg/scheduler.py` — `_execute_command_task()`, branching in `process_one_task()`, `check_scheduled_jobs()`
@@ -8140,6 +8810,7 @@ Extended CRON.md to support direct shell command execution alongside Claude Code
 Moved scheduled job definitions from sqlite3-only to user-editable CRON.md files in each user's `zorg/config/` folder. The file uses the same markdown-with-TOML-block pattern as BRIEFINGS.md and HEARTBEAT.md. Definitions sync to the DB on each scheduler cycle, so downstream systems (cron evaluation, failure tracking, `!cron` command) continue working unchanged.
 
 **Key changes:**
+
 - New `cron_loader.py` module: `CronJob` dataclass, file loading, DB sync, and one-time migration from DB→file
 - CRON.md file format: TOML `[[jobs]]` blocks with name, cron, prompt, target, room, enabled, silent_unless_action
 - Sync logic preserves DB state fields (last_run_at, consecutive_failures) while updating definitions from file
@@ -8151,10 +8822,12 @@ Moved scheduled job definitions from sqlite3-only to user-editable CRON.md files
 - Storage module: CRON.md template/example, seeded on user directory creation, included in workspace README
 
 **Files added:**
+
 - `src/zorg/cron_loader.py` — Core module: load, generate, sync, migrate
 - `tests/test_cron_loader.py` — 30 tests for parsing, sync, migration, error handling
 
 **Files modified:**
+
 - `src/zorg/storage.py` — Added `get_user_cron_path()`, CRON templates, seeding in `ensure_user_directories_v2()`
 - `src/zorg/scheduler.py` — Added `_sync_cron_files()` called at top of `check_scheduled_jobs()`
 - `config/skills/schedules.md` — Rewritten for CRON.md file editing (was sqlite3 instructions)
@@ -8167,6 +8840,7 @@ Moved scheduled job definitions from sqlite3-only to user-editable CRON.md files
 Added a root-owned admins file (`/etc/istota/admins`) that defines which users get full system access. Non-admin users get a restricted prompt and environment: no DB access, scoped Nextcloud mount path, no admin-only skills. When no admins file exists, all users are admins (backward compatible).
 
 **Key changes:**
+
 - `Config.admin_users` set loaded from `/etc/istota/admins` (or `ZORG_ADMINS_FILE` env var) at config load time
 - `Config.is_admin(user_id)` returns True if set is empty (no file) or user is in set
 - `SkillMeta.admin_only` field — skills marked `admin_only = true` are filtered out for non-admin users
@@ -8176,6 +8850,7 @@ Added a root-owned admins file (`/etc/istota/admins`) that defines which users g
 - Ansible role deploys `/etc/istota/admins` as root:root 0644 (not editable by zorg user or Claude)
 
 **Files added/modified:**
+
 - `src/zorg/config.py` — Added `admin_users` field, `is_admin()` method, `load_admin_users()` function
 - `src/zorg/skills_loader.py` — Added `admin_only` to `SkillMeta`, filtering in `select_skills()`
 - `src/zorg/executor.py` — Admin-aware `build_prompt()` and `execute_task()` with scoped env vars
@@ -8192,12 +8867,14 @@ Added a root-owned admins file (`/etc/istota/admins`) that defines which users g
 INVOICING.md lives in the user's `zorg/config/` folder by convention and invoicing is built-in functionality, so it shouldn't need an explicit resource entry. Removed the `invoicing` resource type — the system now always resolves INVOICING.md from the user's config folder.
 
 **Key changes:**
+
 - Executor always resolves INVOICING.md from `zorg/config/` via `get_user_invoicing_path()`, no longer checks for an `invoicing` resource
 - Invoice scheduler's `_resolve_invoicing_path()` simplified to only check the default config folder location
 - Removed `"invoicing"` from accounting skill's `resource_types` in `_index.toml` (keywords already trigger skill loading)
 - Removed test for resource-path-takes-precedence behavior
 
 **Files modified:**
+
 - `src/zorg/executor.py` — Removed invoicing resource lookup branch
 - `src/zorg/invoice_scheduler.py` — Simplified `_resolve_invoicing_path()` to use default path only
 - `config/skills/_index.toml` — Removed `"invoicing"` from accounting `resource_types`
@@ -8205,9 +8882,10 @@ INVOICING.md lives in the user's `zorg/config/` folder by convention and invoici
 
 ## 2026-02-09: Website Hosting Migration to Nextcloud Mount
 
-Migrated static website hosting so user tilde pages (`~user`) are served from the Nextcloud mount instead of a standalone directory under the install root/html` directory. Fixed the zorg-scheduler service failing to start due to a stale `ReadWritePaths` referencing the removed directory.
+Migrated static website hosting so user tilde pages (`~user`) are served from the Nextcloud mount instead of a standalone directory under the install root/html`directory. Fixed the zorg-scheduler service failing to start due to a stale`ReadWritePaths` referencing the removed directory.
 
 **Key changes:**
+
 - Fixed zorg-scheduler NAMESPACE error (systemd couldn't mount non-existent `/srv/www/bot.example.com`)
 - Website paths now resolve to `Users/{user_id}/zorg/html` on the Nextcloud mount
 - Added `www-data` to `nextcloud-mount` group so nginx can serve files from the FUSE mount
@@ -8218,6 +8896,7 @@ Migrated static website hosting so user tilde pages (`~user`) are served from th
 - Fixed pre-existing streaming progress test (gerund removal)
 
 **Files added/modified:**
+
 - `src/zorg/executor.py` — Website path resolution uses `nextcloud_mount_path` instead of `site.base_path`
 - `src/zorg/feed_poller.py` — Feed page generation uses Nextcloud mount path
 - `config/skills/website.md` — Updated path description, removed chgrp instructions
@@ -8226,6 +8905,7 @@ Migrated static website hosting so user tilde pages (`~user`) are served from th
 - `tests/test_executor_streaming.py` — Fixed progress callback assertion
 
 **Ansible role changes (ansible-server):**
+
 - `roles/zorg/templates/user-index.html.j2` — New per-user tilde homepage template
 - `roles/zorg/templates/zorg-site.conf.j2` — Added X-Robots-Tag noindex/nofollow
 - `roles/zorg/templates/zorg-scheduler.service.j2` — Removed stale ReadWritePaths
@@ -8239,6 +8919,7 @@ Migrated static website hosting so user tilde pages (`~user`) are served from th
 Renamed the per-user `workspace/` directory to `zorg/` and moved all configuration files (USER.md, TASKS.md, BRIEFINGS.md, etc.) into a new `zorg/config/` subfolder. Also moved `exports/` inside `zorg/` to consolidate bot-managed content.
 
 **New directory layout:**
+
 ```
 /Users/{user_id}/
 ├── zorg/              # Shared with user via OCS (was workspace/)
@@ -8255,6 +8936,7 @@ Renamed the per-user `workspace/` directory to `zorg/` and moved all configurati
 ```
 
 **Key changes:**
+
 - Renamed `get_user_workspace_path()` → `get_user_zorg_path()` (backward-compat alias kept)
 - Added `get_user_config_path()` — all config file paths now resolve through this
 - All path helpers (`get_user_memory_path`, `get_user_tasks_file_path`, etc.) updated to use `zorg/config/`
@@ -8263,6 +8945,7 @@ Renamed the per-user `workspace/` directory to `zorg/` and moved all configurati
 - Migration chain: `notes/` → `workspace/` → `zorg/` (all three steps preserved for old installs)
 
 **Files modified:**
+
 - `src/zorg/storage.py` — Core path functions, directory setup, migration logic, README templates
 - `src/zorg/tasks_file_poller.py` — Uses `get_user_config_path` for TASKS.md discovery
 - `src/zorg/commands.py` — Updated `!memory` command path
@@ -8293,6 +8976,7 @@ Renamed the per-user `workspace/` directory to `zorg/` and moved all configurati
 Added ntfy as a broadcast notification surface alongside Talk and Email. Created a centralized `notifications.py` module that extracts the duplicated notification logic from `invoice_scheduler.py` and `heartbeat.py` into a single dispatcher. Supports `"talk"`, `"email"`, `"ntfy"`, `"both"` (talk+email), and `"all"` (talk+email+ntfy) surface values throughout the system.
 
 **Key changes:**
+
 - New `NtfyConfig` dataclass with server_url, topic, token (bearer), username/password (basic auth), and priority
 - Per-user `ntfy_topic` override on `UserConfig` — topic resolution: explicit call param > user config > global config
 - New `src/zorg/notifications.py` — central `send_notification()` dispatcher with `_send_talk()`, `_send_email()`, `_send_ntfy()` helpers
@@ -8302,6 +8986,7 @@ Added ntfy as a broadcast notification surface alongside Talk and Email. Created
 - 30 new tests in `test_notifications.py` covering all surfaces, auth modes, topic resolution, and error handling
 
 **Files added/modified:**
+
 - `src/zorg/config.py` — `NtfyConfig` dataclass, `ntfy` on `Config`, `ntfy_topic` on `UserConfig`, `[ntfy]` parsing in `load_config()`
 - `src/zorg/notifications.py` — **New** central notification dispatcher
 - `src/zorg/invoice_scheduler.py` — Removed `_send_talk_notification`, `_send_email_notification`, `_resolve_conversation_token`; delegates to `notifications.py`
@@ -8323,6 +9008,7 @@ Added ntfy as a broadcast notification surface alongside Talk and Email. Created
 Fixed three briefing issues: agent "thoughts" leaking into output, calendar timezone handling relying on the agent to pass --tz correctly, and missing red/green emoji indicators on futures quotes.
 
 **Key changes:**
+
 - Added `strip_briefing_preamble()` in scheduler.py — detects first emoji section header and strips everything before it
 - Applied preamble stripping to both Talk and email delivery paths for briefing tasks
 - Strengthened prompt instruction: "Your response must start with the first emoji section header"
@@ -8332,6 +9018,7 @@ Fixed three briefing issues: agent "thoughts" leaking into output, calendar time
 - 14 new tests covering preamble stripping, calendar pre-fetching, and prompt integration
 
 **Files modified:**
+
 - `src/zorg/briefing.py` — Added `_fetch_calendar_events()`, updated calendar component to pre-fetch, tightened prompt instruction
 - `src/zorg/scheduler.py` — Added `strip_briefing_preamble()`, applied to briefing result delivery (Talk + email)
 - `config/skills/briefing.md` — Updated MARKETS section format to show emoji indicators for all quote types
@@ -8345,6 +9032,7 @@ Fixed three briefing issues: agent "thoughts" leaking into output, calendar time
 Fixed multiple issues with Tumblr feed integration: TLS fingerprint rejection, missing reblog images, multi-image photoset rendering, date sorting, and feed item retention.
 
 **Key changes:**
+
 - Switched Tumblr API fetcher from httpx to requests (TLS fingerprint fix for 403s)
 - Extract images from reblog `trail[].content[]` in addition to top-level `content[]`
 - Multi-image support: collect all images per post, store as JSON array in `image_url` column
@@ -8359,6 +9047,7 @@ Fixed multiple issues with Tumblr feed integration: TLS fingerprint rejection, m
 - Added `requests` as explicit dependency
 
 **Files added/modified:**
+
 - `src/zorg/feed_poller.py` — requests swap, trail extraction, multi-image JSON, gallery HTML/CSS, date normalization, retention filtering
 - `src/zorg/config.py` — `feed_item_retention_days` on `SchedulerConfig`
 - `src/zorg/db.py` — `max_age_days` parameter on `get_feed_items`
@@ -8374,11 +9063,13 @@ Fixed multiple issues with Tumblr feed integration: TLS fingerprint rejection, m
 Removed the automatic imperative-to-gerund verb conversion (`_to_gerund`) that was transforming Bash tool descriptions in streaming progress updates (e.g., "List files" became "Listing files"). Descriptions now pass through as-is.
 
 **Key changes:**
+
 - Removed `_to_gerund()` function and `_VOWELS` constant from `stream_parser.py`
 - Bash tool descriptions now displayed verbatim instead of being converted to present participle
 - Removed `TestToGerund` test class (13 tests) and updated 3 assertions in remaining tests
 
 **Files modified:**
+
 - `src/zorg/stream_parser.py` — Removed `_to_gerund()`, `_VOWELS`; pass description through directly
 - `tests/test_stream_parser.py` — Removed `TestToGerund` class, updated expected values
 
@@ -8389,6 +9080,7 @@ Removed the automatic imperative-to-gerund verb conversion (`_to_gerund`) that w
 Added API endpoint allowlist and namespace resolution to the developer skill, reducing the blast radius of the GitLab token. Split `gitlab_username` into separate auth and namespace fields to support a dedicated bot account with Developer role.
 
 **Key changes:**
+
 - `gitlab_api_allowlist` config field — configurable list of `METHOD /path/*` patterns enforced in the generated API wrapper script via shell `case` statement
 - Default allowlist: read all endpoints, create MRs/issues, post comments. Merge, delete, settings, and admin operations blocked
 - Query strings stripped before matching (`${ENDPOINT%%\?*}`) so `?state=opened` doesn't break patterns
@@ -8400,6 +9092,7 @@ Added API endpoint allowlist and namespace resolution to the developer skill, re
 - 7 new tests (suite now at 1421)
 
 **Files modified:**
+
 - `src/zorg/config.py` — `gitlab_api_allowlist` + `gitlab_default_namespace` on `DeveloperConfig`, TOML parsing
 - `src/zorg/executor.py` — `_allowlist_pattern_to_case()` helper, allowlist enforcement in wrapper script, `GITLAB_DEFAULT_NAMESPACE` env var
 - `config/skills/developer.md` — Removed merge section, added allowlist docs + namespace resolution + piping guidance
@@ -8416,6 +9109,7 @@ Added API endpoint allowlist and namespace resolution to the developer skill, re
 Skill-doc-only developer skill that teaches Claude Code git worktree workflows and GitLab merge request management. Uses bare clones for repo storage and git worktrees for branch isolation, with GitLab API for MR lifecycle.
 
 **Key changes:**
+
 - New skill doc (`config/skills/developer.md`) covering clone, worktree, commit, push, MR create/merge/list, follow-up, cleanup
 - `DeveloperConfig` dataclass with `enabled`, `repos_dir`, `gitlab_url`, `gitlab_token`, `gitlab_username`
 - Credential security: GitLab token is never exposed as an env var — executor writes a git credential helper script and a `gitlab-api` wrapper script to the user's temp dir, passes paths instead
@@ -8426,9 +9120,11 @@ Skill-doc-only developer skill that teaches Claude Code git worktree workflows a
 - 9 new tests (5 config, 4 executor); suite now at 1414 tests
 
 **Files added:**
+
 - `config/skills/developer.md` — Skill doc with git worktree + GitLab API workflows
 
 **Files modified:**
+
 - `config/skills/_index.toml` — Added `[developer]` entry with keywords
 - `src/zorg/config.py` — Added `DeveloperConfig`, `[developer]` TOML parsing
 - `src/zorg/executor.py` — Credential helper + API wrapper script generation, env var setup
@@ -8447,6 +9143,7 @@ Skill-doc-only developer skill that teaches Claude Code git worktree workflows a
 Comprehensive isolation improvements for scheduled/background jobs to prevent them from polluting interactive conversations, hogging worker slots, and producing noisy output.
 
 **Key changes:**
+
 - Context isolation: `get_conversation_history()` now excludes `scheduled`, `briefing`, and `heartbeat` source types from interactive Talk/email context
 - Worker pool isolation: Two-phase `dispatch()` prioritizes interactive (talk/email) tasks over background jobs, with configurable `reserved_interactive_workers` (default: 2)
 - Output suppression: Scheduled jobs support `silent_unless_action` — only posts output when response contains `ACTION:` prefix, suppresses `NO_ACTION:` results
@@ -8458,6 +9155,7 @@ Comprehensive isolation improvements for scheduled/background jobs to prevent th
 - 34 new tests (suite now at ~1384 tests)
 
 **Files modified:**
+
 - `src/zorg/db.py` — `exclude_source_types` on `get_conversation_history()`, `scheduled_job_id` on tasks, new ScheduledJob fields + query functions, worker isolation queries
 - `src/zorg/scheduler.py` — Two-phase `WorkerPool.dispatch()`, `_strip_action_prefix()`, silent scheduled job handling, failure tracking + auto-disable in `process_one_task()`
 - `src/zorg/executor.py` — Passes exclusion list to context history queries
@@ -8478,11 +9176,13 @@ Comprehensive isolation improvements for scheduled/background jobs to prevent th
 Changed default `memory_retention_days` from 90 to 0 (unlimited). Dated memory files are small, not auto-loaded into prompts, and only accessed on demand via memory search — no practical reason to delete them. Setting `memory_retention_days = 0` now skips cleanup entirely.
 
 **Key changes:**
+
 - Both `cleanup_old_memory_files()` and `cleanup_old_channel_memory_files()` return early when `retention_days <= 0`
 - Default changed from 90 to 0 on `SleepCycleConfig` and `ChannelSleepCycleConfig` dataclasses and TOML parsing fallbacks
 - Updated config example, Ansible defaults, and user template to match
 
 **Files modified:**
+
 - `src/zorg/sleep_cycle.py` — Early return guard in both cleanup functions
 - `src/zorg/config.py` — Default changed to 0, updated comments
 - `config/config.example.toml` — Updated comments to document `0 = unlimited`
@@ -8499,6 +9199,7 @@ Changed default `memory_retention_days` from 90 to 0 (unlimited). Dated memory f
 Added channel-level nightly memory extraction that runs parallel to user sleep cycles. Auto-discovers active channels from recent completed tasks — no explicit channel list needed. Extracts shared decisions, agreements, and project status from channel conversations, writes dated files to `/Channels/{token}/memories/`, and indexes them into the semantic memory search system under `channel:{token}` namespace.
 
 **Key changes:**
+
 - `ChannelSleepCycleConfig` dataclass with `enabled`, `cron`, `lookback_hours`, `memory_retention_days`
 - Auto-discovery of active channels via `get_active_channel_tokens()` — queries recent completed tasks with conversation tokens
 - Channel memory extraction prompt focused on shared context (decisions, agreements, project status)
@@ -8509,9 +9210,11 @@ Added channel-level nightly memory extraction that runs parallel to user sleep c
 - 54 new tests across channel sleep cycle, config, DB, and memory search (suite at ~1296 tests)
 
 **Files added:**
+
 - `tests/test_channel_sleep_cycle.py` — 25 tests for channel sleep cycle
 
 **Files modified:**
+
 - `src/zorg/sleep_cycle.py` — Added channel sleep cycle functions (gather, extract, process, cleanup, check)
 - `src/zorg/config.py` — Added `ChannelSleepCycleConfig` dataclass + parsing
 - `src/zorg/db.py` — Added channel sleep cycle state table + queries, active channel discovery
@@ -8533,6 +9236,7 @@ Added channel-level nightly memory extraction that runs parallel to user sleep c
 Split workspace file templates into minimal user configs and comprehensive `examples/` reference files. User files now contain just a header and commented-out TOML starter block, with a pointer to `examples/` for full documentation. Example files are always overwritten on startup to stay current with the codebase. Moved the Ansible-managed INVOICING.md reference block into zorg's own example files.
 
 **Key changes:**
+
 - Split all 6 workspace templates (`README`, `TASKS`, `BRIEFINGS`, `HEARTBEAT`, `INVOICING`, `ACCOUNTING`) into minimal `*_TEMPLATE` + comprehensive `*_EXAMPLE` constants
 - `ensure_user_directories_v2()` now creates `workspace/examples/` and writes all example files on every run
 - Removed Ansible `blockinfile` task and `invoicing-reference.md.j2` template — reference docs now managed by zorg directly
@@ -8540,11 +9244,13 @@ Split workspace file templates into minimal user configs and comprehensive `exam
 - 4 new tests for example file creation, content verification, and overwrite behavior (suite at 1296 tests)
 
 **Files modified:**
+
 - `src/zorg/storage.py` — Refactored templates, added `*_EXAMPLE` constants, updated `ensure_user_directories_v2()`
 - `tests/test_storage.py` — Added example file tests, updated briefings assertion
 - `roles/zorg/tasks/main.yml` — Removed INVOICING.md blockinfile tasks
 
 **Files removed:**
+
 - `roles/zorg/templates/invoicing-reference.md.j2`
 
 ---
@@ -8554,6 +9260,7 @@ Split workspace file templates into minimal user configs and comprehensive `exam
 Added hybrid BM25 + vector search over conversations and memory files. Uses FTS5 for keyword search and sqlite-vec + sentence-transformers for semantic similarity, fused via Reciprocal Rank Fusion. Gracefully degrades to BM25-only if sqlite-vec or torch is unavailable. Disabled by default — enable via `[memory_search]` config section.
 
 **Key changes:**
+
 - New `memory_chunks` table with FTS5 virtual table and auto-sync triggers
 - Core module with chunking (paragraph/sentence/word boundaries with overlap), content-hash dedup, lazy-loaded embedding model, and hybrid search
 - CLI skill following standard `build_parser()`/`main()` pattern: `search`, `index`, `reindex`, `stats` commands
@@ -8564,6 +9271,7 @@ Added hybrid BM25 + vector search over conversations and memory files. Uses FTS5
 - 52 new tests (36 core + 16 CLI), full suite at 1292 tests across 33 files
 
 **Files added:**
+
 - `src/zorg/memory_search.py` — Core module: embedding, chunking, indexing, hybrid search, RRF fusion
 - `src/zorg/skills/memory_search.py` — CLI skill with search/index/reindex/stats commands
 - `config/skills/memory-search.md` — Skill documentation for Claude Code
@@ -8571,6 +9279,7 @@ Added hybrid BM25 + vector search over conversations and memory files. Uses FTS5
 - `tests/test_skills_memory_search.py` — 16 tests for CLI skill
 
 **Files modified:**
+
 - `schema.sql` — Added `memory_chunks` table, FTS5 virtual table, sync triggers
 - `src/zorg/config.py` — Added `MemorySearchConfig` dataclass + parsing
 - `src/zorg/scheduler.py` — Post-completion conversation indexing hook
@@ -8587,14 +9296,17 @@ Added hybrid BM25 + vector search over conversations and memory files. Uses FTS5
 Added an Ansible-managed reference block that gets appended to each user's INVOICING.md file during deployment. Documents all available config options (global settings, company/entity, clients, client invoicing, services, work log entries). Uses `ini` fenced code blocks instead of `toml` to prevent the invoicing parser from treating reference examples as actual config.
 
 **Key changes:**
+
 - New Jinja2 template covering all config option groups with defaults and descriptions
 - Ansible tasks: `stat` check for existing INVOICING.md files + `blockinfile` to insert/update the reference
 - `blockinfile` markers (`<!-- BEGIN/END ANSIBLE MANAGED BLOCK -->`) ensure idempotent updates on re-deploy
 
 **Files added:**
+
 - `roles/zorg/templates/invoicing-reference.md.j2` — Config reference template
 
 **Files modified:**
+
 - `roles/zorg/tasks/main.yml` — Added stat + blockinfile tasks between ledger backups and Fava sections
 
 ---
@@ -8604,6 +9316,7 @@ Added an Ansible-managed reference block that gets appended to each user's INVOI
 Added automatic invoice generation to the scheduler. Clients with `schedule = "monthly"` in INVOICING.md now get invoices auto-generated on their configured `day`. A configurable reminder is sent N days before generation, and a summary notification is sent after invoices are created. Notifications are sent directly (not via Claude tasks) through Talk, email, or both — surface is configurable per-client, per-config, and per-user with a fallback chain.
 
 **Key changes:**
+
 - New `invoice_scheduler.py` module with `check_scheduled_invoices()` — checks all users/clients for due reminders and generations
 - Added `reminder_days` (default 3, 0 disables) and `notifications` fields to `ClientConfig` in invoicing.py
 - Added `notifications` field to `InvoicingConfig` for global default
@@ -8616,10 +9329,12 @@ Added automatic invoice generation to the scheduler. Clients with `schedule = "m
 - Updated Ansible deployment role: `user.toml.j2` template and `defaults/main.yml`
 
 **Files added:**
+
 - `src/zorg/invoice_scheduler.py` — Core scheduling + notification logic
 - `tests/test_invoice_scheduler.py` — 39 tests
 
 **Files modified:**
+
 - `src/zorg/skills/invoicing.py` — Added `reminder_days`, `notifications` to `ClientConfig`/`InvoicingConfig` + parsing
 - `src/zorg/config.py` — Added `invoicing_notifications`, `invoicing_conversation_token` to `UserConfig`
 - `src/zorg/db.py` — Added `InvoiceScheduleState` dataclass and get/set functions
@@ -8639,10 +9354,12 @@ Added automatic invoice generation to the scheduler. Clients with `schedule = "m
 Fixed a bug in `_parse_ledger_transactions()` where parsed amounts from the ledger were not wrapped in `abs()`, causing hash mismatches with callers (e.g. `cmd_import_monarch`, `cmd_sync_monarch`) that compute hashes using `abs(amount)`. This could cause duplicate imports when a ledger entry had a negative amount posting.
 
 **Key changes:**
+
 - Applied `abs()` to parsed amounts in `_parse_ledger_transactions()` so content hashes match callers
 - Added test for negative amount parsing in ledger dedup
 
 **Files modified:**
+
 - `src/zorg/skills/accounting.py` — `abs()` fix in `_parse_ledger_transactions()`
 - `tests/test_skills_accounting.py` — New `test_applies_abs_to_negative_amounts` test
 
@@ -8653,6 +9370,7 @@ Fixed a bug in `_parse_ledger_transactions()` where parsed amounts from the ledg
 Added Fava as a per-user systemd service managed by the Ansible role. Each user with ledger resources and a configured `fava_port` gets their own Fava instance on a dedicated port, providing a web-based beancount ledger viewer. Access is restricted to wireguard/private networks via existing UFW rules.
 
 **Key changes:**
+
 - Added `fava>=1.29` as a project dependency (installs alongside beancount in shared venv)
 - New Ansible variables: `zorg_fava_enabled`, `zorg_fava_host` (defaults to `0.0.0.0`)
 - Per-user systemd service template (`zorg-fava.service.j2`) with security hardening and read-only Nextcloud mount
@@ -8661,6 +9379,7 @@ Added Fava as a per-user systemd service managed by the Ansible role. Each user 
 - Users opt in by setting `fava_port` in their config; users without it are skipped
 
 **Files added/modified:**
+
 - `pyproject.toml` — Added `fava>=1.29` dependency
 - `roles/zorg/defaults/main.yml` — Added `zorg_fava_enabled` and `zorg_fava_host` variables
 - `roles/zorg/templates/zorg-fava.service.j2` — **New** per-user systemd unit template
@@ -8674,6 +9393,7 @@ Added Fava as a per-user systemd service managed by the Ansible role. Each user 
 Added auto-recategorization for Monarch transactions when the business tag is removed. When a previously-synced transaction loses its qualifying tag in Monarch, the sync creates a reversal entry that moves the expense to a personal account (default: `Expenses:Personal-Expense`). This handles the case where transactions are initially categorized as business but later reclassified as personal.
 
 **Key changes:**
+
 - Extended `monarch_synced_transactions` schema with metadata for reconciliation: `tags_json`, `amount`, `merchant`, `posted_account`, `txn_date`, `recategorized_at`
 - Added `recategorize_account` config option (default: `Expenses:Personal-Expense`) in `[monarch.sync]` section
 - New `_format_recategorization_entry()` helper generates reversal postings
@@ -8684,6 +9404,7 @@ Added auto-recategorization for Monarch transactions when the business tag is re
 - 4 new tests, all 98 accounting tests pass
 
 **Files modified:**
+
 - `schema.sql` — Extended `monarch_synced_transactions` with reconciliation columns
 - `src/zorg/db.py` — `MonarchSyncedTransaction` dataclass, updated tracking functions, new reconciliation functions, migrations
 - `src/zorg/skills/accounting.py` — `recategorize_account` config, `_format_recategorization_entry()`, reconciliation logic in `cmd_sync_monarch()`
@@ -8696,6 +9417,7 @@ Added auto-recategorization for Monarch transactions when the business tag is re
 Added Monarch Money API integration for automated beancount ledger syncing. Transactions can now be synced directly from the Monarch Money API using a session token, with support for account/category mapping and tag-based filtering. Also fixed the existing CSV import which had incorrect column mappings, and added deduplication tracking to prevent duplicate imports.
 
 **Key changes:**
+
 - New `ACCOUNTING.md` config template with TOML block for Monarch Money settings (credentials, account/category mappings, tag filters)
 - New `sync-monarch` CLI command with `--dry-run` flag for API-based transaction sync
 - Fixed `_parse_monarch_csv()` to use correct column order (Date,Merchant,Category,Account,Original Statement,Notes,Amount,Tags,Owner)
@@ -8706,6 +9428,7 @@ Added Monarch Money API integration for automated beancount ledger syncing. Tran
 - `ACCOUNTING_CONFIG` env var handling in executor
 
 **Files added/modified:**
+
 - `src/zorg/skills/accounting.py` — Config dataclasses, `_extract_toml_from_markdown()`, `parse_accounting_config()`, fixed `_parse_monarch_csv()`, `_fetch_monarch_transactions()`, `cmd_sync_monarch()`, tag filtering functions
 - `src/zorg/storage.py` — `ACCOUNTING_TEMPLATE`, `get_user_accounting_path()`, seeding in `ensure_user_directories_v2()`
 - `src/zorg/db.py` — Deduplication functions: `is_monarch_transaction_synced()`, `track_monarch_transaction()`, `compute_transaction_hash()`, `is_csv_transaction_imported()`, `track_csv_transaction()`, batch variants
@@ -8721,6 +9444,7 @@ Added Monarch Money API integration for automated beancount ledger syncing. Tran
 Changed invoice generation from date-based entry selection to "uninvoiced entries" selection. After generation, processed entries are stamped with `invoice = "INV-000042"` in the work log file. This prevents duplicate invoicing and provides an audit trail. The `--period` flag is now optional (acts as upper date bound instead of exact month match).
 
 **Key changes:**
+
 - New `invoice` field on `WorkEntry` dataclass, parsed from work log TOML
 - New `select_uninvoiced_entries()` function — primary filter is entries where `invoice` field is empty; `--period` acts as optional upper date bound (`date <= last day of month`)
 - New `stamp_work_log_entries()` function — regex-based write-back to raw markdown, processes entries in reverse index order to avoid position shifts
@@ -8730,6 +9454,7 @@ Changed invoice generation from date-based entry selection to "uninvoiced entrie
 - 29 new tests, all 1115 tests pass
 
 **Files modified:**
+
 - `src/zorg/skills/invoicing.py` — `WorkEntry.invoice` field, `select_uninvoiced_entries()`, `stamp_work_log_entries()`, updated `parse_work_log()`, `generate_invoices_for_period()`, `WORK_LOG_TEMPLATE`
 - `src/zorg/skills/accounting.py` — `--period` optional, updated response messages
 - `tests/test_skills_invoicing.py` — 29 new tests in 5 classes: `TestWorkEntryInvoiceField`, `TestSelectUninvoicedEntries`, `TestStampWorkLogEntries`, `TestGenerateInvoicesStamping`, `TestCLIPeriodOptional`
@@ -8741,6 +9466,7 @@ Changed invoice generation from date-based entry selection to "uninvoiced entrie
 Added support for multiple billing entities (e.g., personal and LLC) in the invoicing system. Users can now define multiple companies in their config and assign clients and work entries to specific entities. Each entity can have its own logo, payment instructions, A/R account, bank account, and currency. Fully backward compatible — existing single `[company]` configs continue to work unchanged.
 
 **Key changes:**
+
 - New `[companies.<key>]` config format alongside existing `[company]` (backward compat: single company wrapped as key `"default"`)
 - Entity resolution chain: `entry.entity > client.entity > config.default_entity`
 - Per-entity overrides: `ar_account`, `bank_account`, `currency`, `logo`, `payment_instructions`
@@ -8753,6 +9479,7 @@ Added support for multiple billing entities (e.g., personal and LLC) in the invo
 - All 149 existing invoicing tests still pass (backward compatibility confirmed)
 
 **Files modified:**
+
 - `src/zorg/skills/invoicing.py` — Added `key`/`ar_account`/`bank_account`/`currency` to `CompanyConfig`, `entity` to `ClientConfig` and `WorkEntry`, `companies`/`default_entity` to `InvoicingConfig`. New resolution helpers: `resolve_entity()`, `resolve_ar_account()`, `resolve_bank_account()`, `resolve_currency()`. Updated parser, work log, generation, and A/R posting.
 - `src/zorg/skills/accounting.py` — Added `--entity/-e` flag to `invoice generate` and `invoice create`. Entity validation and resolution in `cmd_invoice_create`.
 - `src/zorg/storage.py` — Updated `INVOICING_TEMPLATE` with multi-entity config examples
@@ -8766,6 +9493,7 @@ Added support for multiple billing entities (e.g., personal and LLC) in the invo
 Added a full invoicing system for config-driven invoice generation with PDF export and beancount A/R integration. The system reads config from `INVOICING.md` (markdown with TOML), tracks billable work in `_INVOICES.md`, and generates professional PDF invoices via WeasyPrint. All invoice generation is deterministic — no data sent to Claude.
 
 **Key changes:**
+
 - New `invoicing.py` module with config parsing, work log parsing, invoice generation, HTML/PDF export, and beancount posting creation
 - CLI commands: `invoice generate`, `invoice list`, `invoice paid`, `invoice create` (added to existing accounting skill)
 - Service billing types: `hours`, `days`, `flat`, `other` (for expenses/reimbursements)
@@ -8780,10 +9508,12 @@ Added a full invoicing system for config-driven invoice generation with PDF expo
 - Fixed pre-existing `resource_name` → `display_name` bug in executor.py for ledger resources
 
 **Files added:**
+
 - `src/zorg/skills/invoicing.py` — Core invoicing module (~780 lines) with dataclasses, parsing, HTML/PDF generation, beancount integration
 - `tests/test_skills_invoicing.py` — 78 tests covering config parsing, work log, bundling, line items, HTML output, A/R postings, CLI commands
 
 **Files modified:**
+
 - `src/zorg/skills/accounting.py` — Added `invoice` subcommand with `generate`/`list`/`paid`/`create` subparsers
 - `src/zorg/executor.py` — Added `INVOICING_CONFIG` and `NEXTCLOUD_MOUNT_PATH` env vars, auto-creation logic, fixed `resource_name` bug
 - `src/zorg/storage.py` — Added `INVOICING_TEMPLATE`, `get_user_invoicing_path()`, creation in `ensure_user_directories_v2`
@@ -8800,12 +9530,14 @@ Added a full invoicing system for config-driven invoice generation with PDF expo
 Implemented user-friendly error handling for Anthropic API failures. Users now see personality-infused messages instead of raw JSON error payloads. Transient errors (5xx, rate limits) are automatically retried before counting against task attempts.
 
 **Key changes:**
+
 - Auto-retry transient API errors (500, 502, 503, 504, 529, 429) up to 3 times with 5-second delays
 - User-friendly error messages with Zorg personality (e.g., "Lost contact with the mothership...")
 - Email errors are silently logged — users don't receive confusing error emails
 - Full error details (including request_id) preserved in logs and DB for debugging
 
 **Error messages now match the Culture Drone persona:**
+
 - 5xx: "Lost contact with the mothership. Anthropic's having a moment — try again shortly."
 - 429: "Being throttled by the mothership. Apparently I'm too chatty. Give it a minute."
 - Auth: "Can't authenticate with Anthropic — I've been locked out of my own brain."
@@ -8813,9 +9545,11 @@ Implemented user-friendly error handling for Anthropic API failures. Users now s
 - Timeout: "Got lost in thought and timed out."
 
 **Files added:**
+
 - `tests/test_executor.py` — 30 tests for API error parsing and retry logic
 
 **Files modified:**
+
 - `src/zorg/executor.py` — Added `parse_api_error()`, `is_transient_api_error()`, retry wrapper
 - `src/zorg/scheduler.py` — Added `_format_error_for_user()` with personality
 - `tests/test_scheduler.py` — Added 12 tests for error formatting
@@ -8827,6 +9561,7 @@ Implemented user-friendly error handling for Anthropic API failures. Users now s
 Added an OCR skill that runs Tesseract and returns structured text. Claude Code (which already has vision) can use this as a complementary data source for images with text content.
 
 **Key changes:**
+
 - New `transcribe` skill with `ocr` command for text extraction from images
 - Returns text, confidence score (0-1), and word count
 - Optional `--preprocess` flag applies grayscale + contrast enhancement for low-quality images
@@ -8834,17 +9569,20 @@ Added an OCR skill that runs Tesseract and returns structured text. Claude Code 
 - Keyword-triggered loading: "transcribe", "ocr", "screenshot", "text in image", "handwriting"
 
 **CLI usage:**
+
 ```bash
 python -m zorg.skills.transcribe ocr /path/to/image.png
 python -m zorg.skills.transcribe ocr /path/to/image.png --preprocess
 ```
 
 **Files added:**
+
 - `src/zorg/skills/transcribe.py` — CLI skill with Tesseract OCR wrapper
 - `config/skills/transcribe.md` — Skill documentation with reconciliation guidelines
 - `tests/test_skills_transcribe.py` — 18 unit tests
 
 **Files modified:**
+
 - `config/skills/_index.toml` — Registered transcribe skill with keywords
 - `pyproject.toml` — Added `pytesseract>=0.3.10` dependency
 
@@ -8855,6 +9593,7 @@ python -m zorg.skills.transcribe ocr /path/to/image.png --preprocess
 Added `add-transaction` CLI command to the accounting skill for deterministic transaction entry, preventing hallucination risks when Claude handles financial data.
 
 **Key changes:**
+
 - New `add-transaction` command for single transaction entry with validation
 - Validates date format (YYYY-MM-DD), amount (positive numeric), escapes quotes
 - Appends transactions to year-based files (e.g., `transactions/2026.beancount`)
@@ -8863,11 +9602,13 @@ Added `add-transaction` CLI command to the accounting skill for deterministic tr
 
 **Design principle:**
 Claude should orchestrate deterministic scripts, not do financial calculations:
+
 - All number input → validated CLI commands
 - All number output → bean-query results
 - No manual file editing for amounts
 
 **CLI usage:**
+
 ```bash
 python -m zorg.skills.accounting add-transaction \
   --date 2026-02-04 \
@@ -8879,6 +9620,7 @@ python -m zorg.skills.accounting add-transaction \
 ```
 
 **Files modified:**
+
 - `src/zorg/skills/accounting.py` — Added `cmd_add_transaction()`, parser entry, command dispatch
 - `config/skills/accounting.md` — Replaced "Direct Ledger Editing" with CLI-first guidance
 - `tests/test_skills_accounting.py` — Added 9 new tests for add-transaction command
@@ -8890,6 +9632,7 @@ python -m zorg.skills.accounting add-transaction \
 Added a new heartbeat check type `agent-task` that queues natural language prompts as tasks for Claude to process asynchronously. Includes "silent unless action taken" behavior to prevent alert fatigue for routine checks.
 
 **Key changes:**
+
 - New `agent-task` check type in heartbeat system that creates queued tasks
 - Tasks run through normal executor workflow with priority 3
 - `silent_unless_action` mode (default: true) only posts results if Claude prefixes response with `ACTION:`
@@ -8898,10 +9641,12 @@ Added a new heartbeat check type `agent-task` that queues natural language promp
 - Failure handling updates heartbeat state with error count
 
 **Prompt injection for silent mode:**
+
 - When `silent_unless_action = true`, prompt is wrapped with instructions to prefix response with `ACTION:` (made changes) or `NO_ACTION:` (nothing needed)
 - Scheduler strips prefix before posting, suppresses `NO_ACTION:` results entirely
 
 **Files modified:**
+
 - `schema.sql` — Added `heartbeat_check_name`, `heartbeat_silent` to tasks table; `pending_task_id` to heartbeat_state
 - `src/zorg/db.py` — Added new columns to Task dataclass, create_task(), _row_to_task(), all SELECT queries; added pending_task_id support to HeartbeatState
 - `src/zorg/heartbeat.py` — Added `_check_agent_task()` handler, updated `check_heartbeats()` for special handling
@@ -8915,6 +9660,7 @@ Added a new heartbeat check type `agent-task` that queues natural language promp
 Added a periodic health check system that evaluates user-defined conditions and alerts when something needs attention. Checks run directly in the scheduler loop (no LLM involved) for lightweight, fast monitoring.
 
 **Key changes:**
+
 - New `heartbeat.py` module with config loading, check handlers, alerting, and quiet hours support
 - Five check types: `file-watch`, `shell-command`, `url-health`, `calendar-conflicts`, `task-deadline`
 - Cooldown system prevents alert fatigue (per-check or global `default_cooldown_minutes`)
@@ -8924,11 +9670,13 @@ Added a periodic health check system that evaluates user-defined conditions and 
 - Skill doc teaches Claude Code the HEARTBEAT.md format
 
 **Files added:**
+
 - `src/zorg/heartbeat.py` — Core module with config loading, check handlers, alerting
 - `config/skills/heartbeat.md` — Skill documentation for Claude
 - `tests/test_heartbeat.py` — 45 unit tests
 
 **Files modified:**
+
 - `schema.sql` — Added `heartbeat_state` table
 - `src/zorg/db.py` — Added `HeartbeatState` dataclass, `get_heartbeat_state()`, `update_heartbeat_state()`
 - `src/zorg/config.py` — Added `heartbeat_check_interval` to `SchedulerConfig`
@@ -8944,6 +9692,7 @@ Added a periodic health check system that evaluates user-defined conditions and 
 Changed user-facing briefing configuration from `BRIEFINGS.toml` to `BRIEFINGS.md` — a Markdown file with embedded TOML in a fenced code block. This makes the file more user-friendly by including documentation and component reference directly in the config file.
 
 **Key changes:**
+
 - Renamed `get_user_briefings_path()` return from `BRIEFINGS.toml` to `BRIEFINGS.md`
 - New `BRIEFINGS_TEMPLATE` includes description, component reference docs, and TOML code block
 - Loader uses regex to extract first ` ```toml...``` ` block, parses with `tomli.loads()`
@@ -8951,6 +9700,7 @@ Changed user-facing briefing configuration from `BRIEFINGS.toml` to `BRIEFINGS.m
 - Updated skill doc with new format and example
 
 **Files modified:**
+
 - `src/zorg/storage.py` — Path, template, and seeding for BRIEFINGS.md
 - `src/zorg/briefing_loader.py` — Regex extraction from Markdown, text-mode parsing
 - `config/skills/briefings-config.md` — Updated format documentation
@@ -8964,6 +9714,7 @@ Changed user-facing briefing configuration from `BRIEFINGS.toml` to `BRIEFINGS.m
 Added a `!command` dispatch system that intercepts `!`-prefixed messages in the Talk poller before they enter the task queue. Simple deterministic operations (`!help`, `!stop`, `!status`, `!memory`) now execute immediately without spinning up a Claude Code agent session.
 
 **Key changes:**
+
 - Created `commands.py` with decorator-based command registry, parser, and async dispatcher
 - `!help` lists all registered commands with descriptions
 - `!stop` cancels user's active task via DB flag + SIGTERM to stored PID
@@ -8975,10 +9726,12 @@ Added a `!command` dispatch system that intercepts `!`-prefixed messages in the 
 - Scheduler handles "Cancelled by user" result without retry
 
 **Files added:**
+
 - `src/zorg/commands.py` — Command registry, parser, dispatcher, and 4 command handlers
 - `tests/test_commands.py` — 33 tests (parser, dispatch, all commands, DB helpers, poller interception)
 
 **Files modified:**
+
 - `src/zorg/talk_poller.py` — 6-line insertion for command dispatch before task creation
 - `src/zorg/db.py` — Migration columns (`cancel_requested`, `worker_pid`), `update_task_pid()`, `is_task_cancelled()`
 - `src/zorg/executor.py` — PID storage after Popen, cancellation check in streaming loop
@@ -8989,6 +9742,7 @@ Added a `!command` dispatch system that intercepts `!`-prefixed messages in the 
 Converted Zorg's single-worker FIFO queue into per-user concurrent queues using threading. Users never block each other; tasks within a single user's queue run serially. The main scheduler loop now dispatches worker threads instead of processing tasks directly.
 
 **Key changes:**
+
 - Added `UserWorker` daemon thread class that processes tasks serially for one user, exits after idle timeout
 - Added `WorkerPool` class that manages per-user workers with thread-safe dispatch and concurrency cap
 - `run_daemon()` now creates a `WorkerPool` and calls `pool.dispatch()` each loop iteration instead of calling `process_one_task()` directly
@@ -9001,12 +9755,14 @@ Converted Zorg's single-worker FIFO queue into per-user concurrent queues using 
 - Added `max_total_workers` (default 5) and `worker_idle_timeout` (default 30s) config fields
 
 **Thread safety notes:**
+
 - `get_db()` creates fresh connections per call — safe for concurrent threads
 - WAL mode + 30s timeout handles concurrent writers
 - `claim_task()` atomic UPDATE...RETURNING prevents double-claiming
 - `asyncio.run()` in workers creates new event loop per call — safe from threads
 
 **Files modified:**
+
 - `src/zorg/config.py` - Added `max_total_workers` and `worker_idle_timeout` to `SchedulerConfig`
 - `src/zorg/db.py` - Added `user_id` param to `claim_task()`, added `get_users_with_pending_tasks()`
 - `src/zorg/scheduler.py` - Added `UserWorker`, `WorkerPool` classes; updated `get_worker_id()`, `process_one_task()`, `run_daemon()`
@@ -9021,6 +9777,7 @@ Converted Zorg's single-worker FIFO queue into per-user concurrent queues using 
 Fixed email delivery failures caused by newlines in header fields. The initial fix only sanitized Subject, but the real culprit was `In-Reply-To` and `References` headers from the original email containing RFC 5322 folded newlines (long headers get wrapped with CRLF+whitespace by mail servers). When imap-tools reads these back, the folding is preserved, and Python's `EmailMessage` rejects them.
 
 **Key changes:**
+
 - Added `_sanitize_header()` helper that strips `\r` and `\n` from header values
 - Applied to Subject in `send_email()` and `reply_to_email()`
 - Applied to `In-Reply-To` and `References` headers in `reply_to_email()` — this was the actual bug causing task 644's failure
@@ -9028,6 +9785,7 @@ Fixed email delivery failures caused by newlines in header fields. The initial f
 - Added 9 new tests: header sanitization (5), subject sanitization (2), threading header sanitization (1), email failure marks task failed (1)
 
 **Files modified:**
+
 - `src/zorg/skills/email.py` - Added `_sanitize_header()`, applied to Subject, In-Reply-To, and References
 - `src/zorg/scheduler.py` - `post_result_to_email()` returns bool, `process_one_task()` handles failure
 - `tests/test_skills_email.py` - Added sanitization tests for all affected headers
@@ -9038,6 +9796,7 @@ Fixed email delivery failures caused by newlines in header fields. The initial f
 Replaced the `reminders_file` string field on `UserConfig` with a `reminders_file` resource type, matching how `todo_file` works. This standardizes all file-based user config under the resources system.
 
 **Key changes:**
+
 - Removed `reminders_file: str` field from `UserConfig`, replaced with `ResourceConfig(type="reminders_file", ...)`
 - Added backward-compat migration in config parsing: legacy `reminders_file` TOML key auto-creates a resource
 - Changed `_fetch_random_reminder()` to look up resources (like `_fetch_todo_items`), supports multiple reminders files
@@ -9045,6 +9804,7 @@ Replaced the `reminders_file` string field on `UserConfig` with a `reminders_fil
 - Updated Ansible template to emit `reminders_file` as a `[[resources]]` block
 
 **Files modified:**
+
 - `src/zorg/config.py` - Removed field, added migration in `_parse_user_data()`, updated type comment
 - `src/zorg/briefing.py` - Rewritten `_fetch_random_reminder(config, user_id)` using resources lookup
 - `src/zorg/executor.py` - Added `reminders_file` resource type rendering block
@@ -9062,12 +9822,14 @@ Replaced the `reminders_file` string field on `UserConfig` with a `reminders_fil
 Fixed three bugs preventing briefings from firing and leaking private data into briefing output.
 
 **Key changes:**
+
 - Fixed empty/commented-out BRIEFINGS.toml suppressing admin briefings — empty `[]` was truthy for `is not None` check, blocking fallback to admin config
 - Fixed email-only briefings silently skipped — `conversation_token` was required for all briefings, but email output doesn't need a Talk room
 - Excluded user memory (USER.md) from briefing prompts to prevent private context (portfolio positions, personal decisions) from leaking into newsletter-style output
 - Stopped auto-loading dated memories into all prompts — they remain stored at `/Users/{user_id}/memories/` for Claude to read on demand, avoiding prompt bloat
 
 **Files modified:**
+
 - `src/zorg/briefing_loader.py` - Changed `is not None` to truthy check for workspace briefings fallback
 - `src/zorg/scheduler.py` - Only require `conversation_token` for talk/both output targets
 - `src/zorg/executor.py` - Skip user memory and dated memories for briefing tasks; removed dated memory auto-loading entirely
@@ -9080,6 +9842,7 @@ Fixed three bugs preventing briefings from firing and leaking private data into 
 Overhauled conversation context selection to use a hybrid approach: recent messages are always included without a model call, while older messages are triaged by Haiku. Added prompt size logging with per-component breakdown, configurable response truncation, and improved log formatting.
 
 **Key changes:**
+
 - Hybrid context selection: `always_include_recent` (default 5) messages guaranteed, older messages triaged by selection model
 - Added `use_selection` config option to disable LLM selection entirely (includes all lookback messages)
 - Added `context_truncation` config option to control bot response truncation in context (0 = disabled)
@@ -9091,6 +9854,7 @@ Overhauled conversation context selection to use a hybrid approach: recent messa
 - Prefixed scheduler startup logs with `STARTUP` for consistent formatting and grep filtering
 
 **Files added/modified:**
+
 - `src/zorg/context.py` - Hybrid selection with `_triage_older_messages()`, robust JSON extraction
 - `src/zorg/config.py` - Added `use_selection`, `always_include_recent`, `context_truncation` to ConversationConfig
 - `src/zorg/executor.py` - Prompt size breakdown logging, pass truncation config to formatter
@@ -9104,12 +9868,14 @@ Overhauled conversation context selection to use a hybrid approach: recent messa
 Updated the conversation context selection prompt to err on the side of including more potentially relevant messages rather than excluding them. The previous rules were conservative ("only include messages that directly help"), which could cause the model to drop messages that provided useful background context.
 
 **Key changes:**
+
 - Added "when in doubt, INCLUDE" as the primary selection rule
 - Broadened inclusion criteria: messages that "could help or provide background" instead of only "directly help"
 - Added rule to include messages about ongoing topics even if not directly referenced
 - Narrowed exclusion to only "clearly unrelated" messages (different topic, fully resolved, trivial small talk)
 
 **Files modified:**
+
 - `src/zorg/context.py` - Updated selection prompt rules to favor inclusion over exclusion
 
 ## 2026-02-01: Workspace Briefings + Nextcloud User Metadata Hydration
@@ -9117,6 +9883,7 @@ Updated the conversation context selection prompt to err on the side of includin
 Two new features: user-editable briefing schedules via workspace BRIEFINGS.toml, and automatic user metadata enrichment from the Nextcloud API.
 
 **Key changes:**
+
 - Users can create `BRIEFINGS.toml` in their workspace to control briefing schedules, delivery, and components
 - Workspace briefings override admin config at the briefing name level (merge by name)
 - Added `[briefing_defaults]` admin config section for shared market tickers and news sources
@@ -9130,6 +9897,7 @@ Two new features: user-editable briefing schedules via workspace BRIEFINGS.toml,
 - 28 new tests (18 briefing loader, 10 nextcloud API)
 
 **Files added:**
+
 - `src/zorg/briefing_loader.py` — Workspace BRIEFINGS.toml loading, boolean expansion, merging
 - `src/zorg/nextcloud_api.py` — Nextcloud OCS API user info, timezone, hydration
 - `config/skills/briefings-config.md` — Skill doc for BRIEFINGS.toml format
@@ -9137,6 +9905,7 @@ Two new features: user-editable briefing schedules via workspace BRIEFINGS.toml,
 - `tests/test_nextcloud_api.py` — 10 tests for API calls, hydration, graceful degradation
 
 **Files modified:**
+
 - `src/zorg/config.py` — Added `BriefingDefaultsConfig` dataclass and `briefing_defaults` field
 - `src/zorg/storage.py` — Added `get_user_briefings_path()`, updated WORKSPACE_README
 - `src/zorg/scheduler.py` — Uses `get_briefings_for_user()` in check_briefings(), hydration calls in run_daemon/run_scheduler
@@ -9152,6 +9921,7 @@ Two new features: user-editable briefing schedules via workspace BRIEFINGS.toml,
 Added a `python -m zorg.skills.email send` CLI command so Claude Code can send emails directly during execution, instead of outputting JSON that the scheduler routes. This fixes the problem where a Talk user asking "email me X" would see raw JSON in the chat instead of receiving an email.
 
 **Key changes:**
+
 - Added CLI entry point to `email.py` with `send` subcommand (`--to`, `--subject`, `--body`, `--body-file`, `--html`)
 - Config built from env vars (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, plus IMAP vars for save-to-sent)
 - Executor passes email credentials as env vars when `config.email.enabled`
@@ -9160,6 +9930,7 @@ Added a `python -m zorg.skills.email send` CLI command so Claude Code can send e
 - Documented the CLI pattern for skills in CLAUDE.md (same pattern as `browse.py`)
 
 **Files modified:**
+
 - `src/zorg/skills/email.py` — Added `_config_from_env()`, `cmd_send()`, `build_parser()`, `main()`, `__main__` block
 - `src/zorg/executor.py` — Added SMTP/IMAP env vars to subprocess environment
 - `config/skills/email.md` — Rewritten with CLI send section + email-reply JSON section
@@ -9172,6 +9943,7 @@ Added a `python -m zorg.skills.email send` CLI command so Claude Code can send e
 Series of improvements to briefing generation: weekend market quote skip, LLM-driven news/market story sorting, source attribution, yfinance quote authority, cleaner quote formatting with color indicators, and enforced section ordering.
 
 **Key changes:**
+
 - Market quote fetching skipped on Saturdays and Sundays (newsletters still fetched)
 - Newsletter content fetched once; prompt instructs Claude to sort stories by topic into NEWS (politics, world events, policy) vs MARKETS (earnings, central bank, commodities, economic data)
 - Source attribution (`[Semafor, NYT]`) added to each story paragraph, derived from newsletter sender headers
@@ -9182,6 +9954,7 @@ Series of improvements to briefing generation: weekend market quote skip, LLM-dr
 - Enforced section ordering: prompt now instructs "Output sections in the exact order shown in the briefing skill"
 
 **Files modified:**
+
 - `src/zorg/briefing.py` — Weekend detection, newsletter split, yfinance authority instruction, section order enforcement
 - `src/zorg/skills/markets.py` — Removed ticker from `format_quote()`, added color emoji prefix
 - `config/skills/briefing.md` — Section descriptions, story targets, source attribution, updated quote examples
@@ -9192,6 +9965,7 @@ Series of improvements to briefing generation: weekend market quote skip, LLM-dr
 Added a headless browser skill backed by a Dockerized Playwright container with stealth anti-fingerprinting and VNC captcha fallback. Claude Code calls a thin Python CLI client that talks to a Flask API inside the container. For captcha-protected sites, the user gets a noVNC link to solve the challenge manually.
 
 **Key changes:**
+
 - Docker container with Playwright + Chromium, playwright-stealth, Xvfb/x11vnc/noVNC
 - Flask API with endpoints: `/browse`, `/screenshot`, `/extract`, `/interact`, `/sessions`, `/health`
 - Session management with 10-minute auto-expiry for multi-step browsing workflows
@@ -9205,6 +9979,7 @@ Added a headless browser skill backed by a Dockerized Playwright container with 
 - Ansible deployment: conditional docker compose build/start, VNC password, external URL config
 
 **Files added:**
+
 - `docker/browser/Dockerfile` — Playwright container with Xvfb + VNC stack
 - `docker/browser/browse_api.py` — Flask API with session management and captcha detection
 - `docker/browser/entrypoint.sh` — Starts Xvfb, x11vnc, noVNC proxy, Flask
@@ -9215,6 +9990,7 @@ Added a headless browser skill backed by a Dockerized Playwright container with 
 - `tests/test_skills_browse.py` — 24 unit tests
 
 **Files modified:**
+
 - `config/skills/_index.toml` — Added `[browse]` entry with keyword triggers
 - `src/zorg/config.py` — Added `BrowserConfig` dataclass and `[browser]` parsing
 - `src/zorg/executor.py` — Browser env vars and prompt integration
@@ -9227,12 +10003,14 @@ Added a headless browser skill backed by a Dockerized Playwright container with 
 Added `nextcloud.md` skill teaching Claude Code how to use the Nextcloud OCS Share API for creating user shares, public links, listing/deleting shares, and looking up sharees. Credentials exposed as `NC_URL`, `NC_USER`, `NC_PASS` env vars in executor alongside existing CalDAV vars.
 
 **Key changes:**
+
 - New skill covering OCS Share API (create user share, public link, list/delete shares, sharee lookup)
 - Curl examples using `$NC_URL`, `$NC_USER`, `$NC_PASS` env vars, consistent with CalDAV pattern
 - Permission values reference (1=read, 2=update, 4=create, 8=delete, 16=share, 31=all)
 - Keyword-triggered loading: "share", "sharing", "public link", "unshare", "nextcloud", "permission", "access"
 
 **Files added/modified:**
+
 - `config/skills/nextcloud.md` — New skill with curl examples for OCS Share API
 - `config/skills/_index.toml` — Added nextcloud skill entry with keyword triggers
 - `src/zorg/executor.py` — Added NC_URL/NC_USER/NC_PASS to execution environment
@@ -9244,6 +10022,7 @@ Added `nextcloud.md` skill teaching Claude Code how to use the Nextcloud OCS Sha
 Moved the user-facing files (USER.md, TASKS.md) from the user root directory into `workspace/`, so everything the user interacts with lives in the single shared folder. The workspace directory is the only folder auto-shared with the user via OCS, making it a single pane of glass for user interaction.
 
 **Key changes:**
+
 - `get_user_memory_path()` now returns `/Users/{id}/workspace/USER.md`
 - `get_user_tasks_file_path()` now returns `/Users/{id}/workspace/TASKS.md`
 - Added `_migrate_workspace_files()` migration: moves USER.md and TASKS.md from root to workspace/ if not already migrated
@@ -9252,6 +10031,7 @@ Moved the user-facing files (USER.md, TASKS.md) from the user root directory int
 - All path references updated across codebase, docs, config examples, and Ansible role
 
 **Files modified:**
+
 - `src/zorg/storage.py` — Updated path helpers, added migration, rewrote WORKSPACE_README
 - `src/zorg/tasks_file_poller.py` — Scan workspace/ for TASKS.md discovery
 - `src/zorg/cli.py` — Updated user init output message
@@ -9268,6 +10048,7 @@ Moved the user-facing files (USER.md, TASKS.md) from the user root directory int
 Renamed the bot-managed `notes/` directory to `workspace/` and reframed it as a bidirectional collaboration folder where both the user and zorg have read/write access. Includes automatic migration from existing `notes/` directories.
 
 **Key changes:**
+
 - Renamed `get_user_notes_path()` → `get_user_workspace_path()` in storage.py
 - Renamed `NOTES_README` → `WORKSPACE_README` with updated content explaining the shared collaboration space
 - Added `_migrate_notes_to_workspace()` migration: renames `notes/` → `workspace/` if workspace doesn't exist yet
@@ -9276,6 +10057,7 @@ Renamed the bot-managed `notes/` directory to `workspace/` and reframed it as a 
 - Updated Ansible example path for `reminders_file`
 
 **Files modified:**
+
 - `src/zorg/storage.py` — Renamed function/constant, added migration, updated subdirs
 - `src/zorg/cli.py` — Updated user init output message
 - `config/skills/memory.md` — Updated directory structure diagram
@@ -9289,6 +10071,7 @@ Renamed the bot-managed `notes/` directory to `workspace/` and reframed it as a 
 Restructured channel directories to mirror the user directory pattern and added `conversation_token` to prompt metadata so the bot knows which room it's responding in. Also reduced rclone mount `--dir-cache-time` from 5m to 5s (server is localhost) so files shared in Talk appear on the mount almost immediately.
 
 **Key changes:**
+
 - Channel memory moved from `/Channels/{token}/context/memory.md` to `/Channels/{token}/CHANNEL.md`
 - Added `/Channels/{token}/memories/` directory for future dated channel summaries
 - Migration logic copies old `context/memory.md` → `CHANNEL.md` on first access
@@ -9299,6 +10082,7 @@ Restructured channel directories to mirror the user directory pattern and added 
 - Removed deprecated `logs/` directory from Ansible zorg role
 
 **Files modified:**
+
 - `src/zorg/executor.py` — Added `Conversation token:` to prompt metadata
 - `src/zorg/storage.py` — Restructured channel paths, added migration, removed context path helper
 - `config/skills/memory.md` — Updated channel memory paths, added directory structure diagram
@@ -9316,6 +10100,7 @@ Fixed a bug where the first message in a newly discovered Talk room was skipped,
 **Fix:** On first discovery of a group/public room, set `lastKnownMessageId` to `latest_id - 1` and fall through to the normal poll batch. This picks up the triggering message on the same cycle.
 
 **Files modified:**
+
 - `src/zorg/talk_poller.py` — Changed first-poll behavior to process the latest message immediately
 - `tests/test_talk_poller.py` — Replaced 1 test with 3 tests covering the new behavior (28 → 30 tests)
 
@@ -9324,6 +10109,7 @@ Fixed a bug where the first message in a newly discovered Talk room was skipped,
 Implemented the persistent memory system (sleep cycle) that extracts long-term memories from the day's interactions and writes dated memory files. Also added per-user temp directories as a prerequisite to isolate task artifacts.
 
 **Key changes:**
+
 - Per-user temp directories: task prompt/result files now go to `{temp_dir}/{user_id}/` instead of flat `{temp_dir}/`
 - Nightly sleep cycle: configurable per-user cron job that gathers completed tasks, calls Claude CLI to extract memories, writes dated `YYYY-MM-DD.md` files to `/Users/{user}/context/`
 - Dated memory files are auto-loaded into prompts as "Recent context (from previous days)" section
@@ -9335,10 +10121,12 @@ Implemented the persistent memory system (sleep cycle) that extracts long-term m
 - Added sleep cycle state tracking in SQLite (`sleep_cycle_state` table)
 
 **Files added:**
+
 - `src/zorg/sleep_cycle.py` — Main module (gather, extract, process, cleanup, cron check)
 - `tests/test_sleep_cycle.py` — 22 tests covering all functions
 
 **Files modified:**
+
 - `src/zorg/config.py` — Added `SleepCycleConfig` dataclass, `sleep_cycle` field on `UserConfig`
 - `src/zorg/db.py` — Added sleep cycle state functions, `get_completed_tasks_since()`
 - `src/zorg/executor.py` — `get_user_temp_dir()`, per-user temp dirs, dated memories in prompt
@@ -9355,12 +10143,12 @@ Implemented the persistent memory system (sleep cycle) that extracts long-term m
 - Ansible `templates/config.toml.j2` — Sleep cycle template block
 - Ansible `defaults/main.yml` — Sleep cycle example in comments
 
-
 ## 2026-01-29: Comprehensive Test Suite
 
 Built a full test suite covering all modules, growing from 4 test files (~65 tests) to 20 test files (~513 tests). Adopted test-driven development as the project's standard going forward.
 
 **Key changes:**
+
 - Created `tests/conftest.py` with shared fixtures: `db_path` (real SQLite via schema.sql), `make_task`, `make_config`, `make_user_config` factories
 - Added unit tests for all untested modules: db, config, skills_loader, context, zorg_file_poller, email_poller, talk_poller, talk, storage, briefing, scheduler, shared_file_organizer, markets, skills/files, skills/email
 - Added `test_talk_integration.py` with 22 integration tests that verify real Nextcloud Talk connectivity (authentication, message sending/polling, reply tracking, poll state continuity)
@@ -9371,6 +10159,7 @@ Built a full test suite covering all modules, growing from 4 test files (~65 tes
 - Replaced CLAUDE.md "Verified Working" / "Needs Testing" sections with "Test Coverage" section listing all test files
 
 **Files added:**
+
 - `tests/conftest.py` — Shared fixtures
 - `tests/test_db.py` — 80 tests (task lifecycle, stale handling, retry, confirmations, resources, history, cleanup)
 - `tests/test_config.py` — 33 tests (defaults, TOML loading, methods, email config)
@@ -9390,6 +10179,7 @@ Built a full test suite covering all modules, growing from 4 test files (~65 tes
 - `tests/test_talk_integration.py` — 22 integration tests (real Nextcloud Talk API)
 
 **Files modified:**
+
 - `pyproject.toml` — Added pytest marker config, asyncio_mode
 - `CLAUDE.md` — Added Testing section with TDD workflow, replaced Verified/Needs Testing with Test Coverage
 - `README.md` — Updated Development section with TDD and test commands
@@ -9401,6 +10191,7 @@ Built a full test suite covering all modules, growing from 4 test files (~65 tes
 Switched from `subprocess.run` to `subprocess.Popen` with `--output-format stream-json` to parse Claude Code's streaming events in real time. For Talk tasks, meaningful progress messages (tool use descriptions like "Reading TODO.txt", "Running script...") are now sent to the chat during execution, so users can see what the bot is doing instead of waiting in silence.
 
 **Key changes:**
+
 - New `stream_parser.py` module that parses stream-json lines into typed events (`ToolUseEvent`, `TextEvent`, `ResultEvent`). Extracts human-readable descriptions from tool use blocks (Bash descriptions, Read/Write filenames, Grep patterns, etc.).
 - Rewrote `executor.py` execution to use `Popen` with line-by-line stdout parsing. Added `on_progress` callback parameter. Uses `threading.Timer` for 10-minute timeout. Falls back to result file or raw stdout if stream parsing fails.
 - Added rate-limited progress callback in `scheduler.py` that posts italic progress messages to Talk with configurable debounce interval and max message count. Logs progress to `task_logs` for debugging.
@@ -9410,6 +10201,7 @@ Switched from `subprocess.run` to `subprocess.Popen` with `--output-format strea
 - Added note to CLAUDE.md about keeping Ansible role in sync after config changes.
 
 **Files added:**
+
 - `src/zorg/stream_parser.py` - Stream-json event parser with tool description extraction
 - `tests/__init__.py` - Test package init
 - `tests/test_stream_parser.py` - 31 tests for parser and tool descriptions
@@ -9418,6 +10210,7 @@ Switched from `subprocess.run` to `subprocess.Popen` with `--output-format strea
 - `tests/test_config_progress.py` - 4 tests for config defaults and TOML parsing
 
 **Files modified:**
+
 - `src/zorg/executor.py` - Popen + stream-json parsing, on_progress callback
 - `src/zorg/config.py` - Progress config fields in SchedulerConfig
 - `src/zorg/scheduler.py` - `_make_talk_progress_callback()`, wired into `process_one_task`
@@ -9433,12 +10226,14 @@ Switched from `subprocess.run` to `subprocess.Popen` with `--output-format strea
 Replaced the rigid line-by-line reminder parser with a block-based approach. The old parser split multi-line entries (long quotes with attributions, bullet points with explanations) into individual line fragments, meaning most selected "reminders" were incomplete. The new parser splits on blank lines so each block stays together as one selectable item.
 
 **Key changes:**
+
 - Rewrote `_parse_reminders()` to split content on blank lines into blocks instead of parsing individual lines. Headers and horizontal rules are filtered out; multi-line entries stay intact.
 - Removed forced `*"Quote text."* —Author Name` formatting from briefing skill — reminders are now included as-is since most aren't short attributed quotes.
 - Simplified prompt instruction from "formatted with quotes and attribution" to just "include this reminder at the end."
 - Also updated briefing NEWS section spec to emphasize global perspective and paragraph format, and added market news summary instruction.
 
 **Files modified:**
+
 - `src/zorg/briefing.py` - Rewrote `_parse_reminders()` block-based parser, simplified prompt instruction
 - `config/skills/briefing.md` - Flexible reminder formatting, updated NEWS/MARKETS section specs
 
@@ -9446,15 +10241,17 @@ Replaced the rigid line-by-line reminder parser with a block-based approach. The
 
 ## 2026-01-28: Fix DB Lock in Talk/Email Result Posting
 
-Found the root cause of briefings not appearing in Talk despite tasks completing successfully. `post_result_to_talk()` and `post_result_to_email()` were called inside the `with db.get_db()` block that holds the write transaction. If the Talk/email post fails, the error handler opened a *second* DB connection to log the error, causing `sqlite3.OperationalError: database is locked`. This crashed the entire process, potentially leaving task status in an inconsistent state.
+Found the root cause of briefings not appearing in Talk despite tasks completing successfully. `post_result_to_talk()` and `post_result_to_email()` were called inside the `with db.get_db()` block that holds the write transaction. If the Talk/email post fails, the error handler opened a _second_ DB connection to log the error, causing `sqlite3.OperationalError: database is locked`. This crashed the entire process, potentially leaving task status in an inconsistent state.
 
 **Key changes:**
+
 - Moved all Talk/email posting outside the `with db.get_db()` block in `process_one_task()`, using the same pattern already used for zorg_file handling
 - Changed `post_result_to_talk()` error handling from nested DB write to `logger.error()`
 - Changed `post_result_to_email()` error handling the same way
 - Result delivery variables (`post_talk_message`, `post_email`) are set inside the DB transaction, then acted on after it closes
 
 **Files modified:**
+
 - `src/zorg/scheduler.py` - Move result posting outside DB context, fix nested DB connections in error handlers
 
 ---
@@ -9464,6 +10261,7 @@ Found the root cause of briefings not appearing in Talk despite tasks completing
 Fixed reminder file reading broken on mount-based deployments, rewrote briefing formatting spec, and improved newsletter HTML stripping.
 
 **Key changes:**
+
 - Fixed `_fetch_random_reminder()` to use mount-aware `read_text(config, path)` instead of `rclone_read_text()` which silently fails when rclone CLI isn't configured
 - Rewrote `config/skills/briefing.md` with section-by-section format spec using emoji headers (NEWS, MARKETS, CALENDAR, TODOS, NOTES, EMAIL, REMINDER)
 - Simplified `config/guidelines/briefing.md` to high-level rules only (concise, time-sensitive first, local timezone, data-only sections)
@@ -9472,6 +10270,7 @@ Fixed reminder file reading broken on mount-based deployments, rewrote briefing 
 - Updated briefing prompt builder: removed "### headings" instruction (conflicted with no-headings rule), removed market commentary instruction, aligned with emoji-prefixed section headers
 
 **Files modified:**
+
 - `src/zorg/briefing.py` - Fixed reminder reading, improved HTML stripping, updated prompt format instructions
 - `config/skills/briefing.md` - Full rewrite with emoji-headed section format spec
 - `config/guidelines/briefing.md` - Trimmed to four high-level rules
@@ -9483,6 +10282,7 @@ Fixed reminder file reading broken on mount-based deployments, rewrote briefing 
 Stuck and old tasks now fail fast instead of being endlessly retried. Previously, `claim_task()` would blindly reset stuck running tasks to pending regardless of age, causing hour-old Talk messages and briefings to get retried and produce irrelevant responses.
 
 **Key changes:**
+
 - `claim_task()` now checks task age before deciding retry vs fail: tasks created less than `max_retry_age_minutes` ago (default: 60) get retried, older tasks are failed immediately
 - Same age-based logic applied to both stuck running tasks and stale locked tasks
 - Lowered `stale_pending_fail_hours` default from 24 to 2 (safety net for anything that slips through)
@@ -9490,6 +10290,7 @@ Stuck and old tasks now fail fast instead of being endlessly retried. Previously
 - Updated Ansible role defaults and config template to match
 
 **Files modified:**
+
 - `src/zorg/config.py` - Added `max_retry_age_minutes`, changed `stale_pending_fail_hours` default to 2
 - `src/zorg/db.py` - Split stuck-task recovery in `claim_task()` into age-based retry vs fail paths
 - `src/zorg/scheduler.py` - Pass `max_retry_age_minutes` config to `claim_task()`
@@ -9503,6 +10304,7 @@ Stuck and old tasks now fail fast instead of being endlessly retried. Previously
 Standardized Claude Code's email output as JSON with `subject`, `body`, and `format` keys. This gives Claude control over email subjects (especially for new/scheduled emails) and enables HTML formatting when appropriate.
 
 **Key changes:**
+
 - Added `_parse_email_output()` helper to scheduler that parses Claude's JSON output with backward-compatible fallback to raw text
 - Updated `post_result_to_email()` to use parsed subject, body, and format for both reply and fresh email paths
 - Added `content_type` parameter to `send_email()` and `reply_to_email()` in the email skill, using `msg.set_content(body, subtype=content_type)`
@@ -9511,6 +10313,7 @@ Standardized Claude Code's email output as JSON with `subject`, `body`, and `for
 - Updated executor prompt to reference JSON output format for email tasks
 
 **JSON schema:**
+
 ```json
 {
   "subject": "Optional subject line",
@@ -9522,6 +10325,7 @@ Standardized Claude Code's email output as JSON with `subject`, `body`, and `for
 **Backward compatibility:** If Claude outputs raw text instead of JSON, the parser falls back to `{subject: null, body: message, format: "plain"}`, matching previous behavior exactly.
 
 **Files modified:**
+
 - `src/zorg/scheduler.py` - Added `json` import, `_parse_email_output()` helper, updated `post_result_to_email()`
 - `src/zorg/skills/email.py` - Added `content_type` parameter to `send_email()` and `reply_to_email()`
 - `config/skills/email.md` - Added JSON output format instructions
@@ -9535,6 +10339,7 @@ Standardized Claude Code's email output as JSON with `subject`, `body`, and `for
 Added runtime-manageable recurring cron jobs via a `scheduled_jobs` SQLite table. The scheduler evaluates cron expressions each loop and queues matching jobs as tasks. Zorg can create, modify, and delete scheduled jobs directly via sqlite3 commands — no code changes needed per new job.
 
 **Key changes:**
+
 - Added `scheduled_jobs` table with cron expression, prompt, optional conversation token, and per-user unique name constraint
 - Added `ScheduledJob` dataclass and query functions (`get_enabled_scheduled_jobs`, `set_scheduled_job_last_run`) to db.py
 - Added `check_scheduled_jobs()` to scheduler following the same pattern as `check_briefings()` (timezone-aware cron evaluation via croniter)
@@ -9543,6 +10348,7 @@ Added runtime-manageable recurring cron jobs via a `scheduled_jobs` SQLite table
 - Registered `[schedules]` in `_index.toml` with keyword matching for "schedule", "recurring", "cron", "daily", "weekly", etc.
 
 **Files added/modified:**
+
 - `schema.sql` - Added `scheduled_jobs` table with `UNIQUE(user_id, name)` constraint and user index
 - `src/zorg/db.py` - Added `ScheduledJob` dataclass, `get_enabled_scheduled_jobs()`, `set_scheduled_job_last_run()`
 - `src/zorg/scheduler.py` - Added `check_scheduled_jobs()`, wired into single-run and daemon loops
@@ -9556,11 +10362,13 @@ Added runtime-manageable recurring cron jobs via a `scheduled_jobs` SQLite table
 Taught zorg to create and maintain reusable Python scripts in a persistent `Scripts/` directory on its Nextcloud mount. When zorg recognizes a recurring or automatable task, it can now proactively offer to script it rather than doing it by hand each time.
 
 **Key changes:**
+
 - Created `config/skills/scripts.md` skill file with guidelines for script creation, naming, style, and directory management
 - Registered `[scripts]` in `config/skills/_index.toml` with `always_include = true` so zorg always knows scripting is an option
 - Added "Think in scripts" line to `config/persona.md` proactive behavior section
 
 **Files added/modified:**
+
 - `config/skills/scripts.md` - New skill: scripts live at `/srv/mount/nextcloud/content/Scripts/`, Python functional style, standalone
 - `config/skills/_index.toml` - Added `[scripts]` entry with `always_include = true`
 - `config/persona.md` - One-line addition about recognizing scriptable patterns
@@ -9572,15 +10380,18 @@ Taught zorg to create and maintain reusable Python scripts in a persistent `Scri
 Fixed email threading by implementing proper RFC 5322 References header handling. Previously, zorg's replies only included the parent's Message-ID in the References header, breaking thread continuity in email clients when conversations extended beyond two messages.
 
 **Problem:**
+
 - User's second email had correct References chain: `<original-msg-id> <zorg-reply-1-msg-id>`
 - Zorg's second reply had broken References: only `<user-msg-2-id>` instead of the full ancestry chain
 - Email clients couldn't properly thread conversations beyond the first reply
 
 **RFC 5322 requires:**
+
 - `In-Reply-To`: Just the Message-ID of the message being replied to (single ID)
 - `References`: The parent's References header + the parent's Message-ID (full ancestry chain)
 
 **Key changes:**
+
 - Added `references` field to `Email` dataclass and capture it from IMAP headers
 - Added `references` column to `processed_emails` table for persistence
 - Updated `mark_email_processed()` to accept and store References header
@@ -9589,6 +10400,7 @@ Fixed email threading by implementing proper RFC 5322 References header handling
 - Quote `"references"` in SQL (reserved keyword in SQLite)
 
 **Files modified:**
+
 - `schema.sql` - Added `"references"` column to `processed_emails`
 - `src/zorg/db.py` - Updated `ProcessedEmail` dataclass, `mark_email_processed()`, `get_email_for_task()`
 - `src/zorg/skills/email.py` - Added `references` field to `Email`, capture in `read_email()`
@@ -9596,6 +10408,7 @@ Fixed email threading by implementing proper RFC 5322 References header handling
 - `src/zorg/scheduler.py` - Build RFC 5322 compliant References chain in `post_result_to_email()`
 
 **Database migration:**
+
 ```sql
 ALTER TABLE processed_emails ADD COLUMN "references" TEXT;
 ```
@@ -9607,18 +10420,21 @@ ALTER TABLE processed_emails ADD COLUMN "references" TEXT;
 Fixed a bug where follow-up questions like "What's it about?" failed to connect to the previous message. The root cause was that the most recent message was subject to Sonnet's relevance judgment, which could incorrectly exclude it. Additionally, any error (timeout, parse failure) returned an empty list, leaving zorg with no context.
 
 **Problem:**
+
 - User asks about "The Machine Stops" in message 1
 - User follows up with "What's it about?" in message 2
 - Zorg explained "The Culture series" (from its persona) instead of the book mentioned in the previous message
 - The most recent message could be excluded by Sonnet's selection or on any error
 
 **Solution:**
+
 - Most recent message is now ALWAYS included unconditionally
 - Sonnet selection only runs on older messages in the history
 - On any error (timeout, parse error, etc.), returns `[most_recent]` instead of `[]`
 - Selection prompt updated to clarify it's selecting from OLDER messages only
 
 **Key changes:**
+
 - Extract `most_recent = history[-1]` before any selection logic
 - Run Sonnet selection on `older_history = history[:-1]` only
 - Return `selected_older + [most_recent]` on success (chronological order)
@@ -9626,6 +10442,7 @@ Fixed a bug where follow-up questions like "What's it about?" failed to connect 
 - Elevated context logging from DEBUG to INFO for better visibility
 
 **Files modified:**
+
 - `src/zorg/context.py` - Core logic change: always include most recent, select from older only
 - `src/zorg/executor.py` - Elevated context skip/empty logging from DEBUG to INFO
 
@@ -9636,6 +10453,7 @@ Fixed a bug where follow-up questions like "What's it about?" failed to connect 
 Replaced the himalaya Rust CLI tool with native Python email handling using `imap-tools` for IMAP and stdlib `smtplib` for SMTP. This eliminates external dependency issues, subprocess overhead, and parsing workarounds.
 
 **Why the change:**
+
 - Himalaya had issues parsing emails with emojis in subjects (required stderr parsing workaround)
 - Inconsistent date formats in output
 - Subprocess calls for every operation added overhead
@@ -9643,6 +10461,7 @@ Replaced the himalaya Rust CLI tool with native Python email handling using `ima
 - Config generation complexity
 
 **Key changes:**
+
 - Rewrote `src/zorg/skills/email.py` with imap-tools and smtplib
 - Created `EmailConfig` dataclass for clean configuration passing
 - Simplified attachment handling (direct download to target directory)
@@ -9653,18 +10472,21 @@ Replaced the himalaya Rust CLI tool with native Python email handling using `ima
 - Wrapped Talk progress messages in markdown italic formatting
 
 **Email threading fix:**
+
 - SMTP doesn't auto-save to Sent folder - added `_save_to_sent()` to append via IMAP
 - Generate unique Message-ID for all outgoing emails
 - Add Date header to all outgoing emails
 - Threading headers (In-Reply-To, References) now properly preserved in Sent Items
 
 **Newsletter HTML stripping:**
+
 - Strips HTML tags while preserving structure (newlines for block elements)
 - Removes invisible Unicode characters (nbsp, zero-width spaces, BOM, etc.)
 - Handles Substack-style padding at top of emails
 - Decodes HTML entities
 
 **Files added/modified:**
+
 - `src/zorg/skills/email.py` - Complete rewrite with imap-tools/smtplib, Sent folder save, Message-ID generation
 - `src/zorg/email_poller.py` - Updated for new email module, added `get_email_config()`
 - `src/zorg/scheduler.py` - Removed himalaya setup, updated reply sending, italic progress messages
@@ -9682,6 +10504,7 @@ Replaced the himalaya Rust CLI tool with native Python email handling using `ima
 Updated all skills documentation to use the rclone mount exclusively. Removed references to `/tmp` temp files and rclone CLI commands since Nextcloud is now mounted as a local filesystem at `/srv/mount/nextcloud/content`.
 
 **Key changes:**
+
 - Simplified `files.md` to mount-only access (removed rclone CLI section)
 - Updated `memory.md` to use direct filesystem writes instead of rclone commands
 - Updated `todos.md` and `notes.md` to use mount paths
@@ -9690,6 +10513,7 @@ Updated all skills documentation to use the rclone mount exclusively. Removed re
 - Updated Talk attachment docs to reference direct mount access
 
 **Files modified:**
+
 - `config/skills/files.md` - Mount-only file operations
 - `config/skills/memory.md` - Direct filesystem writes to memory file
 - `config/skills/todos.md` - Mount path for TODO files
@@ -9703,12 +10527,14 @@ Updated all skills documentation to use the rclone mount exclusively. Removed re
 Completely replaced the webhook-based Talk integration with a polling-based architecture. Zorg now runs as a regular Nextcloud user (not a registered bot) and polls conversations directly via the Nextcloud Talk user API.
 
 **Why the change:**
+
 - Webhook-based bot API required registering a bot and running a FastAPI webhook server
 - Polling allows zorg to run as a regular user with simpler deployment (no webhook server needed)
 - Long-polling provides near-instant message detection
 - Cleaner architecture: just run the scheduler daemon
 
 **Key changes:**
+
 - Deleted `main.py` (FastAPI webhook server no longer needed)
 - Removed FastAPI, uvicorn dependencies from `pyproject.toml`
 - Rewrote `talk.py` to use user API instead of bot API (room listing uses v4, chat uses v1)
@@ -9718,11 +10544,13 @@ Completely replaced the webhook-based Talk integration with a polling-based arch
 - First poll initializes state without processing historical messages
 
 **API version discovery:**
+
 - Room listing endpoint requires API v4: `/ocs/v2.php/apps/spreed/api/v4/room`
 - Chat endpoints require API v1: `/ocs/v2.php/apps/spreed/api/v1/chat/{token}`
 - Both require `Accept: application/json` header (defaults to XML)
 
 **Configuration changes:**
+
 ```toml
 [talk]
 enabled = true
@@ -9734,11 +10562,13 @@ talk_poll_timeout = 30  # long-poll server timeout
 ```
 
 **Deployment:**
+
 - No webhook server needed - just run `uv run zorg-scheduler -d`
 - Zorg user must be added as participant in Talk conversations
 - Scheduler polls all rooms concurrently (instant detection regardless of room count)
 
 **Files added/modified:**
+
 - `src/zorg/talk_poller.py` - NEW: Polling logic with concurrent room monitoring
 - `src/zorg/talk.py` - Rewritten for user API (v4 rooms, v1 chat, Accept headers)
 - `src/zorg/db.py` - Added `get_talk_poll_state()`, `set_talk_poll_state()` functions
@@ -9754,6 +10584,7 @@ talk_poll_timeout = 30  # long-poll server timeout
 Added support for mounting Nextcloud WebDAV as a local filesystem via rclone mount. This enables direct filesystem access without subprocess overhead for every file operation. Also reorganized the bot-managed directory structure from `/Zorg/users/` to `/Users/` for cleaner paths.
 
 **Key changes:**
+
 - Added `nextcloud_mount_path` config option for mount-based file access
 - Created mount-aware wrapper functions in `skills/files.py` (list_files, read_text, write_text, etc.)
 - Created mount-aware storage functions (`*_v2` versions) for user directories and memory
@@ -9762,6 +10593,7 @@ Added support for mounting Nextcloud WebDAV as a local filesystem via rclone mou
 - Reorganized directory paths from `/Zorg/users/{user}/` to `/Users/{user}/`
 
 **Ansible changes (in ansible-server repo):**
+
 - Created `roles/rclone-mount/tasks/nextcloud.yml` - Nextcloud mount setup tasks
 - Created `roles/rclone-mount/templates/mount-nextcloud.service.j2` - systemd service
 - Updated `roles/rclone-mount/tasks/main.yml` - Added conditional import for nextcloud
@@ -9771,6 +10603,7 @@ Added support for mounting Nextcloud WebDAV as a local filesystem via rclone mou
 - Updated `roles/zorg/templates/config.toml.j2` - Added mount path config
 
 **Configuration:**
+
 ```toml
 # Option 1: rclone CLI (default)
 rclone_remote = "nextcloud"
@@ -9780,6 +10613,7 @@ nextcloud_mount_path = "/srv/mount/nextcloud/content"
 ```
 
 **New directory structure:**
+
 ```
 /Users/{user_id}/
 ├── inbox/      # Files user wants bot to process
@@ -9790,6 +10624,7 @@ nextcloud_mount_path = "/srv/mount/nextcloud/content"
 ```
 
 **Files modified:**
+
 - `src/zorg/config.py` - Added `nextcloud_mount_path` field and `use_mount` property
 - `src/zorg/skills/files.py` - Added mount-aware wrapper functions
 - `src/zorg/storage.py` - Added `*_v2` mount-aware functions, changed path from `/Zorg/users` to `/Users`
@@ -9812,6 +10647,7 @@ Removed the auto-sync approach for memory files because `/tmp/memory.md` is shar
 Also added automatic cleanup of old temp files since all permanent storage should be in Nextcloud.
 
 **Key changes:**
+
 - Removed `sync_user_memory()` function from storage.py
 - Removed auto-sync code block from executor.py
 - Updated memory.md skill with direct rclone instructions (one-liner and multi-step approaches)
@@ -9820,12 +10656,14 @@ Also added automatic cleanup of old temp files since all permanent storage shoul
 - Temp files older than retention period are automatically deleted
 
 **Configuration:**
+
 ```toml
 [scheduler]
 temp_file_retention_days = 7  # Delete temp files older than N days, 0 to disable
 ```
 
 **Files modified:**
+
 - `src/zorg/executor.py` - Removed auto-sync code and import
 - `src/zorg/storage.py` - Removed `sync_user_memory()` function
 - `config/skills/memory.md` - Updated with direct rclone instructions
@@ -9842,17 +10680,20 @@ temp_file_retention_days = 7  # Delete temp files older than N days, 0 to disabl
 Fixed issue where Claude Code would claim to update the user's memory file but changes weren't persisted to Nextcloud. The problem was that Claude Code would write to `/tmp/memory.md` but not always run the `rclone copy` command to sync back.
 
 **Solution:**
+
 - Executor now automatically checks for `/tmp/memory.md` after task completion
 - If the file exists, it's synced to Nextcloud and then deleted locally
 - This is a fail-safe that doesn't rely on Claude Code following instructions perfectly
 
 **Key changes:**
+
 - Added `sync_user_memory()` helper function to storage.py
 - Executor auto-syncs memory file after Claude Code completes
 - Updated memory.md skill to recommend writing to `/tmp/memory.md` (auto-synced)
 - Simplified skill instructions with one-liner alternative
 
 **Files modified:**
+
 - `src/zorg/storage.py` - Added `sync_user_memory()` function
 - `src/zorg/executor.py` - Added auto-sync logic after task execution
 - `config/skills/memory.md` - Simplified instructions, mention auto-sync
@@ -9868,12 +10709,14 @@ Fixed Talk file attachment handling. Previously, downloads failed because the we
 **Solution:** When the zorg Nextcloud user is added as a conversation participant (not just the bot), files shared in Talk automatically appear in zorg's `/Talk/` folder. The webhook handler now just returns the path to this local copy instead of trying to download.
 
 **Key changes:**
+
 - `extract_attachments()` no longer downloads/uploads - returns `Talk/{filename}` path directly
 - `extract_message()` now replaces `{file0}` placeholders with `[filename]` for clarity
 - Removed unused imports and simplified the attachment extraction logic
 - Reverted complex `download_attachment()` method to simple WebDAV version
 
 **Files modified:**
+
 - `src/zorg/main.py` - Simplified attachment handling, added file placeholder replacement
 - `src/zorg/talk.py` - Reverted download method to simple version
 
@@ -9886,6 +10729,7 @@ Fixed Talk file attachment handling. Previously, downloads failed because the we
 Added functionality to automatically discover files/folders shared with the zorg Nextcloud user, move them to `/Zorg/users/{owner}/shared/`, and auto-create resource entries. Updated ZORG.md polling to use the new location.
 
 **Key changes:**
+
 - Created `shared_file_organizer.py` module for discovering and organizing shared files
 - Added `shared/` directory to bot-managed user directories
 - Added `get_user_shared_path()` helper function to storage.py
@@ -9894,6 +10738,7 @@ Added functionality to automatically discover files/folders shared with the zorg
 - Owner is now determined from path structure (no PROPFIND needed for ZORG.md discovery)
 
 **How it works:**
+
 1. Scheduler periodically scans root level for files/folders (configurable interval)
 2. Owner is determined via WebDAV PROPFIND (`oc:owner-id` property)
 3. Files from configured users are moved to `/Zorg/users/{owner}/shared/`
@@ -9901,17 +10746,20 @@ Added functionality to automatically discover files/folders shared with the zorg
 5. Files already in `/Zorg/` path are skipped (already bot-managed)
 
 **Benefits:**
+
 - No manual resource setup needed - just share a file with the bot
 - Clean organization: all user files under `/Zorg/users/{user}/shared/`
 - ZORG.md files are automatically moved and tracked
 
 **Configuration:**
+
 ```toml
 [scheduler]
 shared_file_check_interval = 120  # seconds (default)
 ```
 
 **Files added/modified:**
+
 - `src/zorg/shared_file_organizer.py` - NEW: Discovery and organization logic
 - `src/zorg/storage.py` - Added `get_user_shared_path()`, updated directory lists
 - `src/zorg/config.py` - Added `shared_file_check_interval` setting
@@ -9926,6 +10774,7 @@ shared_file_check_interval = 120  # seconds (default)
 Improved briefing output for Nextcloud Talk with Talk-compatible formatting guidelines and random reminder selection from user's REMINDERS file.
 
 **Key changes:**
+
 - Created `config/skills/briefing.md` with Talk-compatible formatting rules (no tables, basic markdown only)
 - Added random reminder selection from `notes_file` resources containing "REMINDERS" in the path
 - Added `_fetch_random_reminder()` and `_parse_reminders()` functions to briefing.py
@@ -9933,16 +10782,19 @@ Improved briefing output for Nextcloud Talk with Talk-compatible formatting guid
 - Added `reminders = { enabled = true }` briefing component option
 
 **Bug fixes:**
+
 - Fixed `_fetch_random_reminder()` to use `UserResource` attributes instead of dict `.get()` access
 - Fixed newsletter date filtering - added `_parse_email_date()` to handle both RFC 2822 and ISO 8601 date formats (was including old emails because ISO dates failed to parse)
 
 **Configuration:**
+
 ```toml
 [users.alice.briefings.components]
 reminders = { enabled = true }  # Random quote from notes_file named REMINDERS
 ```
 
 **Files added/modified:**
+
 - `config/skills/briefing.md` - NEW: Talk-compatible formatting guidelines
 - `config/skills/_index.toml` - Added `[briefing]` skill entry with `source_types = ["briefing"]`
 - `src/zorg/briefing.py` - Added reminder fetching, updated signature with `user_resources`
@@ -9957,6 +10809,7 @@ reminders = { enabled = true }  # Random quote from notes_file named REMINDERS
 Added scheduler cleanup to automatically delete emails older than a configurable threshold from the IMAP inbox, following the existing scheduler cleanup patterns.
 
 **Key changes:**
+
 - Added `email_retention_days` config field (default: 7 days, 0 to disable)
 - Added `delete_email()` function to himalaya wrapper
 - Added `cleanup_old_emails()` function to email poller
@@ -9964,12 +10817,14 @@ Added scheduler cleanup to automatically delete emails older than a configurable
 - Cleanup runs at same interval as other cleanup checks (briefing_check_interval)
 
 **Configuration:**
+
 ```toml
 [scheduler]
 email_retention_days = 7  # Delete emails older than N days, 0 to disable
 ```
 
 **Files modified:**
+
 - `src/zorg/config.py` - Added `email_retention_days` to `SchedulerConfig`
 - `src/zorg/skills/email.py` - Added `delete_email()` function
 - `src/zorg/email_poller.py` - Added `cleanup_old_emails()` function
@@ -9983,14 +10838,17 @@ email_retention_days = 7  # Delete emails older than N days, 0 to disable
 Fixed a bug where scheduled briefings executed successfully but results never appeared in the target Nextcloud Talk room.
 
 **Problem:**
+
 - Briefings have `source_type="briefing"` but the result posting logic only handled `source_type == "talk"`
 - Briefings fell through the conditional with no action taken
 
 **Key changes:**
+
 - Modified scheduler to include `"briefing"` in Talk posting conditions
 - Added `--source-type` CLI option for testing different source types
 
 **Files modified:**
+
 - `src/zorg/scheduler.py` - Changed conditions at lines 111 and 131 to `source_type in ("talk", "briefing")`
 - `src/zorg/cli.py` - Added `--source-type` argument to task command for testing
 
@@ -10001,6 +10859,7 @@ Fixed a bug where scheduled briefings executed successfully but results never ap
 Added automated cleanup for problematic tasks that get stuck in various states. The scheduler now handles stuck confirmations, stale pending tasks, ancient tasks, and database bloat automatically.
 
 **Key changes:**
+
 - Auto-cancel tasks in `pending_confirmation` after configurable timeout (default: 2 hours)
 - Log warnings for tasks pending longer than expected (default: 30 minutes)
 - Auto-fail tasks pending too long without being processed (default: 24 hours)
@@ -10009,6 +10868,7 @@ Added automated cleanup for problematic tasks that get stuck in various states. 
 - Cleanup checks run every 60 seconds in daemon mode
 
 **Configuration:**
+
 ```toml
 [scheduler]
 confirmation_timeout_minutes = 120  # Auto-cancel pending_confirmation
@@ -10018,6 +10878,7 @@ task_retention_days = 7             # Delete old completed tasks
 ```
 
 **Files modified:**
+
 - `src/zorg/config.py` - Added 4 new fields to `SchedulerConfig`
 - `src/zorg/db.py` - Added cleanup functions: `expire_stale_confirmations()`, `get_stale_pending_tasks()`, `fail_ancient_pending_tasks()`, `cleanup_old_tasks()`
 - `src/zorg/scheduler.py` - Added `run_cleanup_checks()`, integrated into daemon loop
@@ -10031,6 +10892,7 @@ task_retention_days = 7             # Delete old completed tasks
 Replaced manual per-user ZORG.md configuration with automatic discovery. Any `ZORG.md` or `_ZORG.md` file shared with the zorg Nextcloud user is now automatically detected and processed.
 
 **Key changes:**
+
 - Auto-discover ZORG files at root level via rclone listing
 - Determine file owner via WebDAV PROPFIND (`oc:owner-id` property)
 - Match owner to configured users for processing
@@ -10039,12 +10901,14 @@ Replaced manual per-user ZORG.md configuration with automatic discovery. Any `ZO
 - Updated pattern to match `_ZORG.md.md` variant (Nextcloud edge case)
 
 **How it works:**
+
 1. Scheduler polls root directory for files matching `*ZORG.md` pattern
 2. For each match, queries WebDAV to get `oc:owner-id`
 3. If owner is a configured user, processes the file for that user
 4. Email notifications sent automatically if user has `email_addresses` configured
 
 **Files modified:**
+
 - `src/zorg/zorg_file_poller.py` - Added `discover_zorg_files()`, `get_file_owner()`, refactored polling
 - `src/zorg/config.py` - Removed `ZorgFileConfig` dataclass
 - `src/zorg/cli.py` - Updated `zorg-file poll/status` for auto-discovery
@@ -10059,12 +10923,14 @@ Replaced manual per-user ZORG.md configuration with automatic discovery. Any `ZO
 Fixed email polling error where the scheduler failed to read emails with `Expecting value: line 1 column 1 (char 0)`. The root cause was an invalid `id:{email_id}` query syntax introduced in commit 21272e4 - himalaya doesn't support `id:` queries, only `date`, `before`, `after`, `from`, `to`, `subject`, `body`, `flag`.
 
 **Key changes:**
+
 - Refactored `read_email()` to accept optional envelope metadata parameter
 - When envelope is passed (from caller who already has it), uses metadata directly
 - Fallback path fetches all envelopes and finds matching ID (no invalid query)
 - Updated `poll_emails()` to pass the envelope it already has from `list_emails()`
 
 **Files modified:**
+
 - `src/zorg/skills/email.py` - Added `envelope` parameter to `read_email()`, removed broken `id:` query
 - `src/zorg/email_poller.py` - Pass envelope to `read_email()` to avoid redundant fetch
 
@@ -10075,6 +10941,7 @@ Fixed email polling error where the scheduler failed to read emails with `Expect
 Added a new input channel where users can share a `ZORG.md` file with the bot for automatic task processing. The daemon monitors the file continuously, picks up new pending tasks, processes them, and updates the file with results.
 
 **Key features:**
+
 - File format with status markers: `[ ]` pending, `[~]` in progress, `[x]` completed, `[!]` failed
 - Stable task identification using SHA-256 hash of normalized content (survives edits)
 - Automatic file updates when task status changes (adds timestamps, results, errors)
@@ -10083,10 +10950,12 @@ Added a new input channel where users can share a `ZORG.md` file with the bot fo
 - CLI commands for manual polling and status checking
 
 **Database changes:**
+
 - Added `zorg_file_tasks` table to track tasks from ZORG.md files
 - Content hash ensures duplicate prevention and stable task identity
 
 **Configuration:**
+
 ```toml
 [users.alice.zorg_file]
 enabled = true
@@ -10098,6 +10967,7 @@ zorg_file_poll_interval = 30
 ```
 
 **Files added/modified:**
+
 - `src/zorg/zorg_file_poller.py` - NEW: Core module with parsing, hashing, file updates, polling
 - `src/zorg/config.py` - Added `ZorgFileConfig` dataclass, updated `UserConfig` and `SchedulerConfig`
 - `src/zorg/db.py` - Added `ZorgFileTask` dataclass and CRUD functions
@@ -10114,6 +10984,7 @@ zorg_file_poll_interval = 30
 Replaced the monolithic `config/skills.md` (328 lines) with individual skill files that are selectively loaded based on task relevance. This significantly reduces prompt size by only including skills needed for each task.
 
 **Key changes:**
+
 - Split skills.md into 9 individual skill files in `config/skills/`
 - Created `_index.toml` with skill metadata (keywords, resource types, source types)
 - Implemented skills_loader.py with selection logic based on:
@@ -10124,10 +10995,12 @@ Replaced the monolithic `config/skills.md` (328 lines) with individual skill fil
 - Updated executor to use selective skill loading instead of loading entire file
 
 **Prompt size reduction:**
+
 - Simple query, no resources: 328 → 43 lines (87% smaller)
 - Query with calendar/todo resources: significantly smaller than all skills
 
 **Files added/modified:**
+
 - `config/skills/*.md` - Individual skill files (files, email, calendar, todos, memory, tasks, markets, notes, sensitive-actions)
 - `config/skills/_index.toml` - Skill metadata for selection
 - `src/zorg/skills_loader.py` - NEW: Skill loading and selection logic
@@ -10144,18 +11017,21 @@ Replaced the monolithic `config/skills.md` (328 lines) with individual skill fil
 Hardened the task locking mechanism to prevent potential race conditions and reverted context selection to use Sonnet (from Haiku) for better judgment.
 
 **Task locking improvements:**
+
 - Added SQLite `busy_timeout=30.0` to wait for locks instead of failing immediately
 - Added daemon lockfile (`/tmp/zorg-scheduler-daemon.lock`) to prevent multiple scheduler instances
 - Added cleanup for stuck 'running' tasks older than 15 minutes (with retry logic)
 - Tasks exhausting retries while stuck are marked as failed
 
 **Context selection changes:**
+
 - Reverted selection model from Haiku back to Sonnet for better context judgment
 - Increased selection timeout from 15s to 30s for Sonnet
 - Added `skip_selection_threshold` config option (include all messages if history ≤ threshold)
 - Added timestamps to selection prompt for better recency judgment
 
 **Files modified:**
+
 - `src/zorg/db.py` - Added busy_timeout, running task cleanup in claim_task()
 - `src/zorg/scheduler.py` - Added daemon lockfile with fcntl locking
 - `src/zorg/config.py` - Updated defaults to Sonnet, added skip_selection_threshold
@@ -10170,6 +11046,7 @@ Hardened the task locking mechanism to prevent potential race conditions and rev
 Comprehensive documentation review and update to sync CLAUDE.md and README.md with the actual implementation. Also fixed email sending to use proper MIME headers and quoted-printable encoding.
 
 **Documentation updates:**
+
 - Added all CLI commands including calendar discover/test, user init/status, task list/show
 - Documented config file search locations (config/config.toml, ~/.config/zorg/, /etc/istota/)
 - Added CalDAV auto-derivation explanation (derived from Nextcloud settings)
@@ -10180,6 +11057,7 @@ Comprehensive documentation review and update to sync CLAUDE.md and README.md wi
 - Synced README.md with CLAUDE.md (fixed @mention requirement, added scheduler section)
 
 **Email MIME encoding:**
+
 - Added `_encode_quoted_printable()` helper function
 - Send emails with proper MIME headers (MIME-Version, Content-Type, Content-Transfer-Encoding)
 - Body encoded as quoted-printable for proper UTF-8 character handling
@@ -10187,6 +11065,7 @@ Comprehensive documentation review and update to sync CLAUDE.md and README.md wi
 - Improved Message-ID extraction to be case-insensitive
 
 **Files modified:**
+
 - `CLAUDE.md` - Comprehensive update with all features and commands
 - `README.md` - Synced with CLAUDE.md, added scheduler config, user memory section
 - `TODO.md` - Checked off completed items (memory, confirmation flow, attachments, calendar, docs)
@@ -10201,11 +11080,13 @@ Comprehensive documentation review and update to sync CLAUDE.md and README.md wi
 Fixed critical bug where conversation context was never being loaded due to invalid CLI flags, plus improved truncation limits and added debugging capabilities.
 
 **Problem identified:**
+
 - Users reported bot couldn't remember previous messages (e.g., "email this to me" after receiving a detailed response failed with "I don't know what 'this' refers to")
 - Root cause: `--max-tokens` flag doesn't exist in Claude CLI, causing context selection to fail silently
 - Secondary issue: 500-character truncation was too aggressive for detailed bot responses
 
 **Key changes:**
+
 - Removed invalid `--max-tokens` flag from Claude CLI call in context selection
 - Increased context truncation limit from 500 to 3000 characters
 - Added comprehensive logging throughout context selection flow
@@ -10213,11 +11094,13 @@ Fixed critical bug where conversation context was never being loaded due to inva
 - Logging now shows: skip reasons, history count, selection results, errors
 
 **Debugging improvements:**
+
 - `executor.py` logs why context was skipped (disabled, wrong source type, no token, etc.)
 - `context.py` logs selection failures (timeout, parse error, invalid format)
 - Scheduler configures logging when `-v` flag is used
 
 **Files modified:**
+
 - `src/zorg/context.py` - Removed `--max-tokens`, increased truncation, added logging
 - `src/zorg/executor.py` - Added context loading diagnostics
 - `src/zorg/scheduler.py` - Added `-v/--verbose` flag with logging configuration
@@ -10229,6 +11112,7 @@ Fixed critical bug where conversation context was never being loaded due to inva
 Added support for email attachments and proper reply threading. Users can now send emails with attachments (e.g., "summarize this PDF") and have them processed by the bot. Replies are now properly threaded in email clients.
 
 **Key changes:**
+
 - Email attachments are downloaded via himalaya and uploaded to user's Nextcloud inbox
 - Attachments stored at `/Zorg/users/{user_id}/inbox/{uuid}_{filename}`
 - Added `message_id` tracking for RFC 5322 email threading
@@ -10236,6 +11120,7 @@ Added support for email attachments and proper reply threading. Users can now se
 - Himalaya config now includes `downloads-dir` for attachment handling
 
 **Email attachment flow:**
+
 1. Email poller downloads attachments to temp directory via himalaya
 2. Attachments uploaded to user's Nextcloud inbox with unique prefix
 3. Attachment paths (Nextcloud) included in task prompt
@@ -10243,6 +11128,7 @@ Added support for email attachments and proper reply threading. Users can now se
 5. Temp files cleaned up, persistent copy remains in Nextcloud
 
 **Files modified:**
+
 - `src/zorg/skills/email.py` - Added `download_attachments()`, `message_id` capture, threading headers in `reply_to_email()`
 - `src/zorg/email_poller.py` - Download attachments, upload to Nextcloud, pass `message_id`
 - `src/zorg/email_setup.py` - Added `downloads-dir` to himalaya config
@@ -10258,6 +11144,7 @@ Added support for email attachments and proper reply threading. Users can now se
 Added email as an input channel for Zorg. The bot now polls for new emails, creates tasks from messages sent by known users, and replies via email when tasks complete.
 
 **Key changes:**
+
 - Extended `EmailConfig` with IMAP/SMTP settings (host, port, user, password, poll_folder, bot_email)
 - Added `email_addresses` field to `UserConfig` for mapping email addresses to users
 - Created `processed_emails` table to track processed emails and avoid duplicates
@@ -10268,6 +11155,7 @@ Added email as an input channel for Zorg. The bot now polls for new emails, crea
 - Added CLI commands: `zorg email setup|show-config|poll|list|test` and `zorg user list|lookup`
 
 **Email flow:**
+
 1. Scheduler polls INBOX via himalaya (configured from zorg settings)
 2. Emails from known senders (mapped via `email_addresses`) create tasks with `source_type="email"`
 3. Thread ID computed from normalized subject + participants for conversation context
@@ -10275,6 +11163,7 @@ Added email as an input channel for Zorg. The bot now polls for new emails, crea
 5. Unknown senders are marked as processed but no task created
 
 **Files added/modified:**
+
 - `src/zorg/email_setup.py` - NEW: Generate himalaya config from zorg settings
 - `src/zorg/email_poller.py` - NEW: Poll emails and create tasks
 - `src/zorg/config.py` - Added IMAP/SMTP fields, user email_addresses, find_user_by_email()
@@ -10293,6 +11182,7 @@ Added email as an input channel for Zorg. The bot now polls for new emails, crea
 Implemented conversation context feature that uses Sonnet to intelligently select relevant previous messages before each Claude Code execution. This enables the bot to maintain conversational continuity across multiple exchanges in a Talk room.
 
 **Key changes:**
+
 - Added `ConversationConfig` dataclass to config with `enabled`, `lookback_count`, `selection_model`, and `selection_timeout` fields
 - Created `get_conversation_history()` in db.py to retrieve completed tasks from the same conversation token
 - Built new `context.py` module with Sonnet-based context selection via Claude CLI
@@ -10301,6 +11191,7 @@ Implemented conversation context feature that uses Sonnet to intelligently selec
 - Added CLI flags: `-t/--conversation-token` for testing context, `--no-context` to disable
 
 **Flow:**
+
 1. New message arrives with conversation_token (Talk room ID)
 2. Retrieve recent completed tasks from same room
 3. Sonnet analyzes history and selects relevant messages (JSON response with IDs)
@@ -10308,6 +11199,7 @@ Implemented conversation context feature that uses Sonnet to intelligently selec
 5. On any error (timeout, parse error), proceeds without context (graceful degradation)
 
 **Files added/modified:**
+
 - `src/zorg/context.py` - NEW: Context selection with `select_relevant_context()` and `format_context_for_prompt()`
 - `src/zorg/config.py` - Added `ConversationConfig` dataclass
 - `src/zorg/db.py` - Added `ConversationMessage` dataclass and `get_conversation_history()`
@@ -10322,6 +11214,7 @@ Implemented conversation context feature that uses Sonnet to intelligently selec
 Tested the full execution pipeline with actual Claude Code (not dry-run). Created a local testing configuration using rclone's local filesystem backend to simulate Nextcloud file operations.
 
 **Key changes:**
+
 - Created `config/config.toml` for local testing with `testlocal` rclone remote
 - Configured rclone local remote for testing without Nextcloud
 - Verified end-to-end task execution: queue → executor → Claude Code → result
@@ -10329,6 +11222,7 @@ Tested the full execution pipeline with actual Claude Code (not dry-run). Create
 - Confirmed Claude Code correctly parses user resources and uses rclone for file I/O
 
 **Test results:**
+
 - Simple questions: Working
 - Resource awareness: Claude Code lists user's assigned resources
 - Read TODO file: Successfully parsed pending/completed tasks via rclone
@@ -10336,6 +11230,7 @@ Tested the full execution pipeline with actual Claude Code (not dry-run). Create
 - Update TODO file: Marked tasks complete with checkbox update
 
 **Files added/modified:**
+
 - `config/config.toml` - Local testing configuration with testlocal rclone remote
 
 ---
@@ -10345,6 +11240,7 @@ Tested the full execution pipeline with actual Claude Code (not dry-run). Create
 Built the core infrastructure for Zorg, a Claude Code-powered bot with Nextcloud Talk interface. The system uses a task queue architecture where messages from Talk (or CLI) are queued in SQLite, then processed by a scheduler that invokes Claude Code with appropriate context and skills.
 
 **Key changes:**
+
 - Created project structure with uv for package management
 - Implemented SQLite-based task queue with atomic locking and retry logic
 - Built FastAPI webhook handler for Nextcloud Talk integration
@@ -10355,6 +11251,7 @@ Built the core infrastructure for Zorg, a Claude Code-powered bot with Nextcloud
 - Created skills reference document that gets included in Claude Code prompts
 
 **Files added:**
+
 - `src/zorg/cli.py` - CLI interface for testing and administration
 - `src/zorg/config.py` - TOML configuration loading
 - `src/zorg/db.py` - SQLite operations (tasks, resources, briefings, logs)
