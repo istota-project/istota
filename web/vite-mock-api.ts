@@ -2642,6 +2642,83 @@ const handlers: MockHandler[] = [
   ({ url }) => (url.startsWith('/istota/api/money/ledgers') ? ledgers : undefined),
   ({ url }) => (url.startsWith('/istota/api/money/check') ? checkResp : undefined),
   ({ url }) => (url.startsWith('/istota/api/money/accounts') ? accountsResp : undefined),
+
+  // Money reports (income statement / balance sheet / cash flow). The three
+  // Reports tabs 404'd against the mock while working fine against the real
+  // API, so the whole section was uninspectable in dev.
+  //
+  // Beancount's sign convention is reproduced rather than prettified: income
+  // accrues negative (a credit) and expenses positive. The pages take
+  // Math.abs() of each side, so mocking income as positive would still render
+  // — and would then disagree with production the moment anything downstream
+  // cares about the sign.
+  ({ url }) => {
+    const match = url.match(/^\/istota\/api\/money\/report\/([a-z-]+)(?:\?|$)/);
+    if (!match) return undefined;
+    const reportType = match[1];
+    const year = Number(new URLSearchParams(url.split('?')[1] ?? '').get('year')) || 2026;
+
+    if (reportType === 'income-statement') {
+      const results = [
+        { account: 'Income:Consulting', 'sum(position)': '-84000.00 USD' },
+        { account: 'Income:Design', 'sum(position)': '-31500.00 USD' },
+        { account: 'Income:Retainer', 'sum(position)': '-18000.00 USD' },
+        { account: 'Expenses:Contractors', 'sum(position)': '26400.00 USD' },
+        { account: 'Expenses:Food', 'sum(position)': '7310.55 USD' },
+        { account: 'Expenses:Rent', 'sum(position)': '21600.00 USD' },
+        { account: 'Expenses:Software', 'sum(position)': '4188.20 USD' },
+        { account: 'Expenses:Travel', 'sum(position)': '9127.40 USD' },
+      ];
+      return { status: 'ok', report_type: reportType, year, row_count: results.length, results };
+    }
+
+    if (reportType === 'balance-sheet') {
+      // No year filter on this one, matching the real query.
+      const results = [
+        { account: 'Assets:Checking', 'sum(position)': '48250.15 USD' },
+        { account: 'Assets:Receivable', 'sum(position)': '12400.00 USD' },
+        { account: 'Assets:Savings', 'sum(position)': '96000.00 USD' },
+        { account: 'Liabilities:CreditCard', 'sum(position)': '-3182.66 USD' },
+        { account: 'Liabilities:TaxPayable', 'sum(position)': '-18940.00 USD' },
+        { account: 'Equity:Opening-Balances', 'sum(position)': '-65000.00 USD' },
+      ];
+      return {
+        status: 'ok',
+        report_type: reportType,
+        year: null,
+        row_count: results.length,
+        results,
+      };
+    }
+
+    if (reportType === 'cash-flow') {
+      // Grouped by year/month/account, so the page can build its month picker
+      // and chart. Twelve months of gently varying figures beats one flat month.
+      const accounts: [string, number][] = [
+        ['Income:Consulting', -7000],
+        ['Income:Design', -2625],
+        ['Expenses:Contractors', 2200],
+        ['Expenses:Food', 609],
+        ['Expenses:Rent', 1800],
+        ['Expenses:Software', 349],
+        ['Expenses:Travel', 760],
+      ];
+      const results = [];
+      for (let month = 1; month <= 12; month++) {
+        // Deterministic wobble — a mock that changes on every reload makes a
+        // chart impossible to eyeball against itself.
+        const wobble = 1 + (((month * 37) % 23) - 11) / 100;
+        for (const [account, base] of accounts) {
+          const amount = (base * wobble).toFixed(2);
+          results.push({ year, month, account, 'sum(position)': `${amount} USD` });
+        }
+      }
+      return { status: 'ok', report_type: reportType, year, row_count: results.length, results };
+    }
+
+    // Mirrors the real handler's rejection of an unknown report type.
+    return { __status: 400, error: 'unknown report type' };
+  },
   // Money module mock — invoicing config, transactions, invoices and work
   // entries in one stateful closure, so the CRUD surfaces (client/entity/
   // service forms, the kebab actions, the delete guards) are exercisable
