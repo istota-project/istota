@@ -91,6 +91,9 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
+    /* design-lint-allow: --card-padding is the documented hook a consuming page
+       sets to override this padding without raising specificity; it is defined
+       by the caller, so it is deliberately absent from the token roster. */
     padding: var(--card-padding, 0.75rem 0.9rem);
     box-sizing: border-box;
     min-width: 0;

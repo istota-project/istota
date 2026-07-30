@@ -66,6 +66,8 @@
     position: fixed;
     inset: 0;
     z-index: 100;
+    /* design-lint-allow: fixed chrome — the lightbox is a theme-invariant dark
+       overlay over the image; darkening is the whole point of the surface. */
     background: rgba(0, 0, 0, 0.9);
     display: flex;
     justify-content: center;
@@ -99,21 +101,25 @@
     height: 2.5rem;
     border: none;
     border-radius: 50%;
+    /* design-lint-allow-begin: fixed chrome — the lightbox is a theme-invariant
+       dark overlay over the image, so its controls stay dark-on-white in both
+       themes. */
     background: rgba(0, 0, 0, 0.5);
-    /* design-lint-allow: fixed chrome — the lightbox is a theme-invariant dark
-       overlay over the image, so its controls stay white in both themes. */
     color: #fff;
+    /* design-lint-allow-end */
     cursor: pointer;
     transition: background 120ms;
   }
   .nav:hover {
+    /* design-lint-allow: fixed chrome — see .nav above. */
     background: rgba(0, 0, 0, 0.75);
   }
   .counter {
     padding: 0.25rem 0.6rem;
+    /* design-lint-allow-begin: fixed chrome — see .nav above. */
     background: rgba(0, 0, 0, 0.5);
-    /* design-lint-allow: fixed chrome — see .nav above. */
     color: #fff;
+    /* design-lint-allow-end */
     font-size: 0.8rem;
     border-radius: 0.25rem;
     pointer-events: none;

@@ -1141,7 +1141,7 @@
   }
 
   .endpoint {
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--text-sm);
     font-weight: 400;
     color: var(--text-secondary);

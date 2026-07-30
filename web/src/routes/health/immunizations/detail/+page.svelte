@@ -290,7 +290,7 @@
     flex-wrap: wrap;
   }
   h1 {
-    font-size: var(--text-lg, 1.05rem);
+    font-size: var(--text-lg);
     font-weight: 500;
     margin: 0;
   }

@@ -114,6 +114,9 @@
     const values = trend.points.map((p) => p.value);
     const high = trend.ref_range_high;
     const low = trend.ref_range_low;
+    /* design-lint-allow: data viz — Chart.js is handed a config object and
+       never reads the cascade, so it cannot resolve var(). The out-of-range
+       zone fill and the dashed reference lines below are series colours. */
     const OUT_OF_RANGE = 'rgba(204, 102, 102, 0.22)';
 
     const datasets: any[] = [];
@@ -176,6 +179,7 @@
       datasets.push({
         label: '_low_marker',
         data: values.map(() => low),
+        /* design-lint-allow: data viz — a Chart.js series colour. */
         borderColor: 'rgba(204, 102, 102, 0.5)',
         borderDash: [4, 4],
         borderWidth: 1,
@@ -188,6 +192,7 @@
       datasets.push({
         label: '_high_marker',
         data: values.map(() => high),
+        /* design-lint-allow: data viz — a Chart.js series colour. */
         borderColor: 'rgba(204, 102, 102, 0.5)',
         borderDash: [4, 4],
         borderWidth: 1,

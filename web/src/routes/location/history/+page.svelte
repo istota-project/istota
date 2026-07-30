@@ -518,6 +518,8 @@
     text-align: center;
     /* Dark pill in BOTH themes — it floats over the map canvas, whose
 	     lightness the theme does not control — so its text is fixed too. */
+    /* design-lint-allow: fixed chrome — see the comment above; the pill floats
+       over the map canvas, whose lightness the theme does not control. */
     background: rgba(17, 17, 17, 0.9);
     border: 1px solid var(--border-default);
     color: var(--on-scrim-fg);

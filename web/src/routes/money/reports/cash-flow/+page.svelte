@@ -195,6 +195,9 @@
             type: 'bar',
             label: 'Income',
             data: incomeData,
+            /* design-lint-allow-begin: data viz — Chart.js takes a config
+               object and never reads the cascade, so it cannot resolve var().
+               Chart chrome is themed by $lib/chartTheme; these are series. */
             backgroundColor: 'rgba(74, 219, 192, 0.35)',
             borderColor: 'rgba(74, 219, 192, 0.6)',
             borderWidth: 1,
@@ -208,6 +211,7 @@
             data: expenseData,
             backgroundColor: 'rgba(212, 106, 181, 0.35)',
             borderColor: 'rgba(212, 106, 181, 0.6)',
+            /* design-lint-allow-end */
             borderWidth: 1,
             borderRadius: 2,
             stack: 'main',

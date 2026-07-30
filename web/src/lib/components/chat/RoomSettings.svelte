@@ -254,7 +254,7 @@
 
   .token-row .token {
     flex: 1;
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-dim);
   }

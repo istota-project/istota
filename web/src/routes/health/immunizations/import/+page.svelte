@@ -339,7 +339,7 @@
     margin-bottom: 0.75rem;
   }
   h1 {
-    font-size: var(--text-lg, 1.05rem);
+    font-size: var(--text-lg);
     font-weight: 500;
     margin: 0;
   }
@@ -461,7 +461,7 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
     color: var(--text-primary);
-    font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+    font-family: var(--font-mono);
     font-size: var(--text-sm);
     box-sizing: border-box;
     resize: vertical;
@@ -579,7 +579,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+    font-family: var(--font-mono);
     font-size: 0.78rem;
     color: var(--text-dim);
   }

@@ -301,7 +301,7 @@
     background: var(--surface-raised);
     color: var(--text-primary);
     font-size: var(--text-sm);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.3);
+    box-shadow: var(--shadow-md);
   }
   /* The row fits on a 320px viewport at the default text scale; at a larger
      one the label still has to wrap, so balance it into even lines rather than
@@ -352,7 +352,7 @@
     border-radius: var(--radius-card);
     padding: 0.25rem;
     z-index: 60;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-md);
     outline: none;
   }
 

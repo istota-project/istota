@@ -99,6 +99,6 @@
     padding: 0.5rem 0.6rem;
     font-size: var(--text-xs);
     line-height: 1.45;
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+    box-shadow: var(--shadow-md);
   }
 </style>

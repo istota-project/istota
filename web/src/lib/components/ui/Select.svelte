@@ -135,11 +135,14 @@
     border-radius: 0.4rem;
     padding: 0.25rem;
     z-index: 100;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-md);
+    /* design-lint-allow: bits-ui sets --bits-select-* on the popover at open
+       time, so it is defined at runtime rather than in the token roster. */
     min-width: var(--bits-select-anchor-width, 8rem);
     /* Never wider than the space left after collisionPadding. Option labels
        are content (a condition name, a provider), so without this a long one
        sets the popover width and pushes it off a phone screen. */
+    /* design-lint-allow: bits-ui runtime property, as above. */
     max-width: var(--bits-select-content-available-width, 100vw);
     box-sizing: border-box;
     max-height: 18rem;

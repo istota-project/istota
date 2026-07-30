@@ -110,7 +110,7 @@
   .confirm-challenge code {
     background: var(--surface-raised);
     padding: 0.05rem 0.3rem;
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
   }
   .confirm-challenge-input {
@@ -118,7 +118,7 @@
     box-sizing: border-box;
     background: var(--surface-raised);
     border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     padding: 0.35rem 0.5rem;
     color: var(--text-primary);
     font: inherit;

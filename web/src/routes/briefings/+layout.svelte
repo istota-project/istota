@@ -325,6 +325,6 @@
   .sidebar-error {
     padding: 0.4rem 0.5rem;
     font-size: var(--text-xs);
-    color: var(--danger, var(--status-danger-fg));
+    color: var(--status-danger-fg);
   }
 </style>

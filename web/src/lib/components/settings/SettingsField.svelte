@@ -92,7 +92,7 @@
   }
 
   .field :global(textarea) {
-    font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+    font-family: var(--font-mono);
     resize: vertical;
   }
 

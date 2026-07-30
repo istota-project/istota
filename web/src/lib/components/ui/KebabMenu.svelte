@@ -76,7 +76,7 @@
     border-radius: 0.4rem;
     padding: 0.25rem;
     z-index: 100;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-md);
     min-width: 9rem;
     outline: none;
   }

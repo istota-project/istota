@@ -799,7 +799,7 @@
   .login-form input {
     font: inherit;
     padding: 0.35rem 0.5rem;
-    border-radius: var(--radius-sm, 0.3rem);
+    border-radius: var(--radius-sm);
     border: 1px solid var(--border-default);
     background: var(--surface-base);
     color: var(--text-primary);
@@ -813,7 +813,7 @@
   .login-status {
     font-size: var(--text-xs);
     padding: 0.35rem 0.5rem;
-    border-radius: var(--radius-sm, 0.3rem);
+    border-radius: var(--radius-sm);
     border: 1px solid var(--border-default);
   }
 

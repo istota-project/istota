@@ -199,7 +199,7 @@
     background: var(--surface-overlay);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card, 0.5rem);
-    box-shadow: var(--shadow-md, 0 8px 24px rgba(0, 0, 0, 0.4));
+    box-shadow: var(--shadow-md);
   }
 
   .ac-option {
@@ -208,7 +208,7 @@
     text-align: left;
     padding: 0.35rem 0.5rem;
     border: none;
-    border-radius: var(--radius-sm, 0.3rem);
+    border-radius: var(--radius-sm);
     background: none;
     color: var(--text-secondary);
     font-size: var(--text-sm);
@@ -216,12 +216,12 @@
   }
 
   .ac-option.mono {
-    font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+    font-family: var(--font-mono);
   }
 
   .ac-option.active,
   .ac-option:hover {
-    background: var(--surface-hover, var(--surface-raised));
+    background: var(--surface-raised);
     color: var(--text-primary);
   }
 </style>

@@ -159,8 +159,12 @@
         datasets: [
           {
             data: values,
+            /* design-lint-allow-begin: data viz — Chart.js takes a config
+               object and never reads the cascade, so it cannot resolve var().
+               Chart chrome is themed by $lib/chartTheme; this is a series. */
             borderColor: 'rgb(122, 163, 216)',
             backgroundColor: 'rgba(122, 163, 216, 0.15)',
+            /* design-lint-allow-end */
             borderWidth: 1.5,
             tension: 0.25,
             fill: true,

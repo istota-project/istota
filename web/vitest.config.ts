@@ -21,7 +21,10 @@ export default defineConfig({
     conditions: ['browser'],
   },
   test: {
-    include: ['src/**/*.test.ts'],
+    // scripts/ holds the design-lint rule tests: the lint's failure mode is a
+    // regex that quietly stops matching, so the rules need coverage like any
+    // other logic.
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
     environment: 'jsdom',
     setupFiles: ['./vitest-setup.ts'],
   },

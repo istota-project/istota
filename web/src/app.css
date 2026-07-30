@@ -107,6 +107,11 @@
   /* Text on a dark scrim that stays dark in both themes (map hints, media
 	   captions). Softer than pure white so it does not glare. */
   --on-scrim-fg: #ececef;
+  /* The scrim behind a dialog. One value in both themes, like --on-scrim-fg:
+	   its job is to darken whatever is under it, which the theme does not
+	   change. A media viewer (lightbox, feed reader) deliberately goes heavier
+	   and keeps its own literal behind an allow comment. */
+  --scrim-bg: rgba(0, 0, 0, 0.6);
   /* A small pill laid over media of unknown lightness — it flips scrim
 	   direction with the theme so it reads on a dark card and a light one. */
   --scrim-pill-bg: rgba(0, 0, 0, 0.55);
@@ -118,14 +123,25 @@
 	   to separate two dark surfaces; a black shadow that strong reads harsh on
 	   white. */
   --shadow-overlay: 0 1px 3px rgba(0, 0, 0, 0.22);
+  /* Two elevations above --shadow-overlay, each written out five times before
+	   it became a token. --shadow-md is a popover/menu/dropdown: it separates a
+	   small floating panel from the surface a few pixels below it.
+	   --shadow-lg is a dialog or reading panel — the thing on top of a scrim. */
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
   /* The octopus sigil ships as one flat near-white silhouette on transparency,
 	   so light theme inverts it to near-black rather than carrying a second file.
 	   A token rather than a per-site override, because more than one surface
 	   draws it (the nav wordmark, the dashboard welcome card). */
   --sigil-filter: none;
 
-  /* Radii */
-  --radius-card: 0.5rem;
+  /* Radii. --radius-sm is 4px at the unscaled root, matching the px literals it
+	   replaces, but stays in rem so it tracks the text-scale preference like the
+	   rest of the scale. --radius-card is the semantic name for the medium step;
+	   both spellings are in the tree, and they must not be able to drift apart. */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-card: var(--radius-md);
   --radius-pill: 999px;
 
   /* Chip / pill horizontal padding — referenced by Chip + NavLink so a parent
@@ -176,12 +192,22 @@
 
   /* Typography */
   --font-sans: system-ui, -apple-system, sans-serif;
+  /* One monospace stack. Five slightly different ones were written out as
+	   var(--font-mono, …) fallbacks, so the token they all named never existed
+	   and each site quietly used its own. */
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
   /* Uppercase status chips only — caps read a size larger, so a chip set at
      --text-xs sits heavier than the table header above it. */
   --text-2xs: 0.55rem;
   --text-xs: 0.7rem;
   --text-sm: 0.75rem;
   --text-base: 0.85rem;
+  /* Headings. Undefined for a long time, which is worse than it sounds:
+	   `font-size: var(--text-lg)` on an undefined property is invalid at
+	   computed-value time, so it inherits rather than falling back to the UA
+	   heading size — seven <h1>s rendered at body-text size. */
+  --text-lg: 1.05rem;
+  --text-xl: 1.25rem;
 }
 
 /* Mobile: the avatar column is pure chrome, so it is what gives up width to the
@@ -289,6 +315,10 @@
   --scrim-pill-fg: var(--text-secondary);
   --shimmer-tint: rgba(0, 0, 0, 0.06);
   --shadow-overlay: 0 1px 2px rgba(0, 0, 0, 0.1);
+  /* Much lighter than their dark counterparts. A shadow at 0.4 alpha separates
+	   two dark surfaces; on white the same value reads as a smudge. */
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.16);
   --sigil-filter: invert(1);
 }
 

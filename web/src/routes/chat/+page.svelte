@@ -777,7 +777,7 @@
   }
   .model-badge:hover {
     color: var(--text-primary);
-    border-color: var(--border-strong, var(--border-default));
+    border-color: var(--border-hover);
   }
 
   .chat-pane {

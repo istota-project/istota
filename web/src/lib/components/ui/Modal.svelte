@@ -43,7 +43,7 @@
   :global(.ui-modal-overlay) {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: var(--scrim-bg);
     z-index: 50;
   }
   :global(.ui-modal-content) {

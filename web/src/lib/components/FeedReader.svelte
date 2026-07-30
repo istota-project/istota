@@ -317,6 +317,8 @@
     position: fixed;
     inset: 0;
     z-index: 60;
+    /* design-lint-allow: fixed chrome — a modal scrim is dark in both themes;
+       it exists to darken whatever is behind it, not to follow the surface. */
     background: rgba(0, 0, 0, 0.9);
     display: flex;
     align-items: center;
@@ -334,7 +336,7 @@
     background: var(--surface-card);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-card);
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow-lg);
     display: flex;
     flex-direction: column;
     /* Resolves against the backdrop's padded content box, so the cap tracks the
@@ -490,10 +492,11 @@
     width: 64px;
     height: 64px;
     border-radius: 50%;
+    /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
+       the scrim and the glyph on it are fixed in both themes. */
     background: rgb(0 0 0 / 0.6);
-    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
-       media, so it is white in both themes. */
     color: #fff;
+    /* design-lint-allow-end */
     /* A triangle's optical centre sits left of its bounding box's. */
     padding-left: 5px;
     transition: background 0.15s ease;
@@ -501,6 +504,7 @@
   }
 
   .reader-video:hover .play-badge {
+    /* design-lint-allow: fixed chrome — the scrim above, one step darker. */
     background: rgb(0 0 0 / 0.8);
   }
 
@@ -509,11 +513,12 @@
     top: 0.5rem;
     right: 0.5rem;
     padding: 0.15rem 0.4rem;
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
+    /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
+       the scrim and the glyph on it are fixed in both themes. */
     background: rgb(0 0 0 / 0.7);
-    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
-       media, so it is white in both themes. */
     color: #fff;
+    /* design-lint-allow-end */
     font-size: 0.65rem;
     font-weight: 600;
     letter-spacing: 0.04em;
@@ -598,16 +603,18 @@
     height: 3rem;
     border: none;
     border-radius: 50%;
+    /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
+       the scrim and the glyph on it are fixed in both themes. */
     background: rgba(0, 0, 0, 0.5);
-    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
-       media, so it is white in both themes. */
     color: #fff;
+    /* design-lint-allow-end */
     cursor: pointer;
     z-index: 61;
     transition: background var(--transition-fast);
   }
 
   .nav:hover:not(:disabled) {
+    /* design-lint-allow: fixed chrome — the scrim above, one step darker. */
     background: rgba(0, 0, 0, 0.75);
   }
 

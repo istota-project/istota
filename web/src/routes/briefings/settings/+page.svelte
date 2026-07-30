@@ -1672,7 +1672,7 @@
 
   .kind-pill {
     display: inline-block;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     padding: 0.05rem 0.4rem;
     border-radius: var(--radius-pill);
@@ -1899,8 +1899,8 @@
     margin-top: 0.75rem;
     padding: 1rem;
     border: 1px solid var(--border-default);
-    border-radius: var(--radius-md, 0.5rem);
-    background: var(--surface-sunken, transparent);
+    border-radius: var(--radius-md);
+    background: var(--surface-base);
   }
   .shared-editor h4 {
     margin: 0;
@@ -1940,7 +1940,7 @@
     gap: 0.5rem 1rem;
     padding: 0.75rem 2.25rem 0.75rem 0.75rem;
     border: 1px solid var(--border-default);
-    border-radius: var(--radius-md, 0.5rem);
+    border-radius: var(--radius-md);
     background: var(--surface-base);
   }
   .sb-source :global(.field) {

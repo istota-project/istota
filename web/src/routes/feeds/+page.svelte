@@ -542,10 +542,11 @@
     width: 56px;
     height: 56px;
     border-radius: 50%;
+    /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
+       the scrim and the glyph on it are fixed in both themes. */
     background: rgb(0 0 0 / 0.6);
-    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
-       media, so it is white in both themes. */
     color: #fff;
+    /* design-lint-allow-end */
     /* Nudge the glyph off centre — a triangle's optical centre sits left
 		   of its bounding box's. */
     padding-left: 4px;
@@ -554,6 +555,7 @@
   }
 
   .feed-grid :global(.card-video:hover .play-badge) {
+    /* design-lint-allow: fixed chrome — the scrim above, one step darker. */
     background: rgb(0 0 0 / 0.8);
   }
 
@@ -596,11 +598,12 @@
     top: 0.5rem;
     right: 0.5rem;
     padding: 0.15rem 0.4rem;
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
+    /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
+       the scrim and the glyph on it are fixed in both themes. */
     background: rgb(0 0 0 / 0.7);
-    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
-       media, so it is white in both themes. */
     color: #fff;
+    /* design-lint-allow-end */
     font-size: 0.65rem;
     font-weight: 600;
     letter-spacing: 0.04em;
@@ -660,10 +663,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
+       the scrim and the glyph on it are fixed in both themes. */
     background: rgba(0, 0, 0, 0.55);
-    /* design-lint-allow: fixed chrome — glyph sits on a dark scrim over
-       media, so it is white in both themes. */
     color: #fff;
+    /* design-lint-allow-end */
     font-size: 1.2rem;
     font-weight: 600;
     pointer-events: none;

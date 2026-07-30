@@ -753,7 +753,7 @@
     background: var(--surface-raised);
     padding: 0.05rem 0.45rem;
     border-radius: 0.25rem;
-    font-family: var(--font-mono, ui-monospace, 'SF Mono', monospace);
+    font-family: var(--font-mono);
   }
   .sev {
     display: inline-flex;
