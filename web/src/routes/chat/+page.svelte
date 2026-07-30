@@ -1053,7 +1053,7 @@
     font: inherit;
     font-size: var(--text-base);
     cursor: pointer;
-    padding: var(--space-2) var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-sm);
     text-align: left;
     transition: color var(--transition-fast);
