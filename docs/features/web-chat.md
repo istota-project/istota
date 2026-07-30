@@ -31,7 +31,12 @@ If the SSE stream falls back to polling, the client recovers without flashing an
 ## Confirmations and attachments
 
 - **Confirmations** — an action that needs approval parks correctly and renders a Confirm/Cancel card; staged side effects wait until you confirm.
-- **Attachments** — drag-drop or paste files; a message can only reference files the user uploaded.
+- **Attachments** — drag, paste, or use the `+` button. In a browser that opens the file picker; in the iOS app it opens a menu offering your photo library, the camera, or a file. A message can only reference files you uploaded.
+- **Voice messages** — the microphone button in the composer records, shows the elapsed time, and lets you discard or keep the take. The recording is attached like any other file and transcribed on arrival. It needs a secure connection to reach the microphone at all, so the button is simply absent over plain http, and transcription needs the optional speech extra.
+- **Sending only a file** — a message with attachments and no text is accepted; the transcript shows what was sent in place of the missing text.
+- **Chips** — each attachment appears as a chip that survives leaving and re-opening the room, and links to the file itself, served from inside your own session. A file the browser cannot serve you — one attached in Talk, or another member's upload in a shared room — stays a plain label rather than a link that would fail.
+
+Size and type limits are the server's: the browser checks against the numbers the server publishes and refuses early with the real figure, and the server rejects anything that gets past it. See **Configuration** below.
 
 ## Web chat as a delivery surface
 
@@ -53,10 +58,13 @@ If SSE is unavailable (a buffering proxy, say), the client falls back to polling
 
 The surface is always enabled when the web UI is on. Tune limits and streaming cadence under `[web.chat]`:
 
+`max_attachment_mb` has one non-obvious property: on an Ansible deployment it is **also** where nginx's `client_max_body_size` comes from, and the role ships 100 rather than the application default of 25. Set them apart and nginx refuses the upload with its own HTML error page, which the browser client cannot parse into a message. Docker has no such variable — nginx is given a generous ceiling there and the application's own 25 MB is the binding limit, so raise it in `config.toml` by hand.
+
 ```toml
 [web.chat]
 max_prompt_chars = 32000
-max_attachment_mb = 25
+max_attachment_mb = 25          # application default; the Ansible role sets 100
+# attachment_extensions defaults to images (incl. heic), documents, text and audio
 rate_limit_messages = 30
 rate_limit_window_seconds = 300
 sse_poll_interval_ms = 200

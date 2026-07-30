@@ -72,3 +72,9 @@ Nextcloud's native data volume is mounted RO in istota at `/mnt/nc-data` for Tal
 | `USER_NAME` / `USER_PASSWORD` | Your Nextcloud account |
 | `BOT_PASSWORD` | Bot's Nextcloud account |
 | `POSTGRES_PASSWORD` | Database |
+
+## Upload limits
+
+nginx is given a generous `NGINX_CLIENT_MAX_BODY_SIZE` (default `512M`), so the binding limit on a chat attachment is the application's own `[web.chat] max_attachment_mb` — 25 MB unless you raise it in `config.toml`. This is the opposite arrangement to the Ansible deployment, which derives the nginx ceiling from the application setting so the two cannot drift; there is no equivalent variable here.
+
+The web service also runs uvicorn without `--timeout-graceful-shutdown`, so a `docker compose restart` with a browser tab holding the chat room stream open waits out the stop timeout before the container is killed.

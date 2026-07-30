@@ -82,7 +82,7 @@ Requires OAuth connection via the [web dashboard](../features/google-workspace.m
 
 | Skill | Keywords | CLI |
 |---|---|---|
-| `health` | health, weight, bloodwork, labs, biomarker, panel, blood pressure | yes -- log, stats, latest, panels, add-panel, add-biomarker, trend, upload, import-csv, export-csv, summary, settings, set, encounters, add-encounter, diagnoses, add-diagnosis, history-summary, immunizations, add-immunization, vaccine-refs, coverage, garmin-status, garmin-sync, garmin-disconnect |
+| `health` | health, weight, bloodwork, labs, biomarker, panel, blood pressure | yes -- log, stats, latest, panels, panel, add-panel, add-biomarker, trend, upload, import-csv, export-csv, summary, settings, set, encounters, encounter, add-encounter, update-encounter, delete-encounter, diagnoses, diagnosis, add-diagnosis, update-diagnosis, resolve-diagnosis, delete-diagnosis, link-encounter, unlink-encounter, history-summary, immunizations, immunization, add-immunization, update-immunization, delete-immunization, vaccine-refs, coverage, import-immunizations, explain-immunization, garmin-status, garmin-sync, garmin-disconnect, documents, document, attach-document, detach-document |
 
 Requires the `health` module to be enabled (on by default).
 

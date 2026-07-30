@@ -1,6 +1,6 @@
 # Health tracking
 
-Body stats, bloodwork panels, biomarker trends, Garmin Connect daily summaries, immunization registry, and medical history. Per-user SQLite at `{workspace}/health/data/health.db`. All measurements stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
+Body stats, bloodwork panels, biomarker trends, Garmin Connect daily summaries, immunization registry, and medical history. Per-user SQLite on local disk at `Config.module_db_path(user, "health")` (default `{db_path.parent}/modules/{user}/health.db`); user-facing uploads stay in the workspace on the mount. All measurements stored metric (kg, cm, °C, mmHg, bpm); the display layer converts to the user's preferred units.
 
 Health is an on-by-default module with per-user opt-out via `disabled_modules` in user settings.
 
@@ -18,6 +18,8 @@ Health is an on-by-default module with per-user opt-out via `disabled_modules` i
 
 **Medical history** — Encounters (doctor visits, procedures, screenings, hospitalizations) and diagnoses (active, resolved, chronic) with ICD-10 codes. `history-summary` command generates a new-doctor packet.
 
+A condition is linked to every appointment it was seen at, not just one: something a GP found, a specialist was referred for and a follow-up reviewed carries all three, and appears under each of them. Link and unlink from either side — an encounter's page lists its conditions, a condition lists its appointments — and unlinking keeps both records; removing the last link does not delete the condition. Links recorded before this existed are carried over on first upgrade.
+
 ## Setup
 
 Health requires no additional configuration — it's enabled by default for all users. To disable for a specific user, add `health` to their `disabled_modules` list in user settings or via the web UI Preferences page.
@@ -34,7 +36,7 @@ OCR upload also requires `pdftotext` (from poppler-utils) for PDF text extractio
 
 ## Database
 
-Per-user SQLite at `{workspace}/health/data/health.db`. Tables:
+Per-user SQLite on local disk (see above). Tables:
 
 | Table | Purpose |
 |---|---|
@@ -47,6 +49,7 @@ Per-user SQLite at `{workspace}/health/data/health.db`. Tables:
 | `immunization_refs` | Bundled canonical vaccine reference list and schedules |
 | `encounters` | Medical encounters (visits, procedures, screenings) |
 | `diagnoses` | Diagnoses with status (active, resolved, chronic) |
+| `diagnosis_encounters` | Which appointments a condition was seen at (many-to-many) |
 | `health_settings` | Key/value store for profile (DOB, height, sex) and unit display preferences |
 | `documents` | Stored paperwork — scans, discharge summaries, vaccination cards |
 | `document_links` | Which records a document evidences (encounter / diagnosis / immunization) |
@@ -80,7 +83,8 @@ The `health` skill exposes `istota-skill health <subcommand>`. Key subcommands:
 - `upload`, `import-csv`, `export-csv` — bulk data operations
 - `settings`, `set` — profile and display preferences
 - `encounters`, `add-encounter`, `update-encounter`, `delete-encounter` — medical visits
-- `diagnoses`, `add-diagnosis`, `resolve-diagnosis`, `update-diagnosis`, `delete-diagnosis` — conditions
+- `diagnoses`, `diagnosis`, `add-diagnosis`, `resolve-diagnosis`, `update-diagnosis`, `delete-diagnosis` — conditions
+- `link-encounter`, `unlink-encounter` — attach a condition to an appointment it was seen at, or detach it (both records are kept)
 - `immunizations`, `add-immunization`, `update-immunization`, `delete-immunization` — vaccine records
 - `vaccine-refs`, `coverage`, `explain-immunization` — reference data and coverage
 - `import-immunizations` — bulk import from clipboard/paste

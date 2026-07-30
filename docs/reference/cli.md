@@ -63,7 +63,7 @@ briefing-source `path`, with no convention-default filename).
 
 ```bash
 # Schedule + delivery
-istota briefings schedule ensure -u USER --name NAME --cron CRON [--conversation-token TOKEN] [--output talk|email|ntfy|both] [--disabled]
+istota briefings schedule ensure -u USER --name NAME --cron CRON [--title TITLE] [--conversation-token TOKEN] [--output talk|email|ntfy|both] [--disabled]
 istota briefings schedule list   -u USER
 istota briefings schedule delete -u USER --name NAME
 

@@ -71,6 +71,13 @@ All variables with defaults are in `deploy/ansible/defaults/main.yml`. Key group
 - **Security**: `istota_security_sandbox_enabled`, `istota_use_environment_file`
 - **Users**: `istota_users` (dict), `istota_admin_users` (list)
 - **Scheduler**: `istota_scheduler_*` (poll intervals, worker limits, timeouts)
+- **Web**: `istota_web_enabled`, `istota_web_port`, `istota_web_chat_max_attachment_mb`, `istota_web_graceful_shutdown_seconds`, `istota_web_stop_timeout_seconds`
+
+Two web variables are worth knowing about before changing them:
+
+`istota_web_chat_max_attachment_mb` (default **100**, against an application default of 25) feeds **two** consumers — the `[web.chat] max_attachment_mb` setting in `config.toml` and nginx's `client_max_body_size`. Do not split them: if nginx's ceiling is the lower of the two it rejects the upload with its own HTML error page, which the browser client cannot parse into a message.
+
+`istota_web_graceful_shutdown_seconds` bounds uvicorn's wait for open connections. It matters because the web chat room stream is a session-lived SSE connection whose generator exits only on client disconnect — which a server shutdown does not trigger — so without the flag a restart with any browser tab open sat out the full `TimeoutStopSec` and was eventually SIGKILLed. Note the unit template is skipped in web-only mode, so a changed value lands on the next full or `istota_update_only` run.
 
 ## Inlined dependencies
 

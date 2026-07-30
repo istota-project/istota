@@ -15,7 +15,7 @@ Source kinds (`kind = …`):
 | `browse` | A bundled preset frontpage or an arbitrary URL (needs the browser) |
 | `markets` | Futures / indices via yfinance |
 | `calendar` | Today's / tomorrow's events |
-| `todos` | Pending todo items from a workspace file |
+| `todos` | Pending todo items from a workspace file, grouped by section |
 | `reminders` | A random reminder |
 | `notes` | Recent notes |
 | `shared_block` | Pre-made curated content from the shared KV store (see [Shared curated content](#shared-curated-content)) |
@@ -27,7 +27,7 @@ Source kinds (`kind = …`):
 Schedule + delivery are loaded from (higher precedence wins):
 
 1. `briefing_configs` DB table — provisioned via `istota briefings schedule ensure` (Ansible) or the web UI (briefings tab → settings); `enabled=0` mutes a row without scheduling.
-2. `[[users.alice.briefings]]` in main `config/config.toml` (name/cron/output; DB rows win by name).
+2. `[[users.alice.briefings]]` in main `config/config.toml` (name/cron/title/output; DB rows win by name).
 
 Content **blocks** are seeded once into the per-user briefings module DB from config-authored `[[users.X.briefings.blocks]]` and are then edited in the web block editor.
 
@@ -46,6 +46,7 @@ Briefing prompts intentionally exclude USER.md and dated memories. This prevents
 name = "morning"
 cron = "0 6 * * *"               # 6am in user's timezone
 conversation_token = "room123"    # Talk room to post to
+title = "Morning Briefing"        # optional; blank derives it from the name
 output = "both"                   # "talk", "email", or "both"
 
   [[users.alice.briefings.blocks]]
@@ -158,7 +159,17 @@ Each generated briefing is archived on delivery and pruned by `[briefings] archi
 
 ## Output format
 
-Claude returns structured JSON (`{"subject": "...", "body": "..."}`). The scheduler parses it and handles delivery deterministically. The email skill is excluded from briefing tasks via `exclude_skills` to prevent the model from sending emails directly.
+The model returns structured JSON — `{"body": "..."}`, body only. The scheduler parses it and handles delivery deterministically. The **title is not the model's to choose**: it is composed from the briefing's configured `title` (blank derives it from the name, so `morning` becomes "Morning Briefing") plus the run date in the user's timezone, and the archive entry, the email subject and the ntfy push title all call the same function, so they cannot disagree about the same run. A stray `subject` from an in-flight run is tolerated and ignored. The email skill is excluded from briefing tasks via `exclude_skills` to prevent the model from sending emails directly.
+
+## Reading a todo file
+
+The `todos` source keeps each item's place in the file rather than flattening it. That is what makes a directive like "only cover what's under NOW" followable instead of merely ignorable — previously the headings were stripped before the briefing was written, so every item arrived as one undifferentiated list.
+
+Sections are detected in **one dialect per file**, chosen from what the file actually uses, in the order ATX (`### NOW`) → setext (an underlined title) → bold (`**NOW**`) → label (`NOW:`). One dialect rather than all at once, because a stray `Blockers:` line in an ATX file would otherwise steal the items sitting under `### NOW`. Detection is strict and labelling lenient: `#tags` is not enough to establish an ATX file, but inside one, `#NOW` still labels. Items are matched before headings, so a bullet reading `- NOW:` stays a bullet. A leading YAML frontmatter block is dropped, but only when it really is one — a note that opens with a `---` rule keeps its content, whereas a notes-app header block was previously read as todos and led the list with the file's own tags.
+
+Checkboxes (`- [ ]`), bullets and numbered items all count; `- [x]` is done and excluded. Section membership is flat — the nearest heading above the item, at any level, not a breadcrumb. The rendered block labels each group with a plain `Section:` line rather than a markdown heading, since the block prompt forbids headings in output.
+
+The size cap is `[briefings] max_source_chars`, spent item by item: an item that doesn't fit is dropped whole along with everything after it, and the provenance line says how many were left out. Never mid-item — half a todo reads as a todo saying something your file doesn't. The first item is always kept.
 
 ## Scheduling
 

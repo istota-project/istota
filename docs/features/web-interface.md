@@ -124,11 +124,17 @@ If the token response doesn't include `user_id` (older NC versions or custom aut
 
 Users not in the config are rejected with a 403 even if they have a valid Nextcloud account.
 
+A callback that fails does not 500. A state mismatch or a declined authorization renders a login-shaped error card with a 400, and an unreachable provider a 502; the card never echoes provider- or exception-derived text back to the browser. Logging out is confirmation-gated in the UI — the logout and menu icons sit side by side and are small on a phone, so a mistap used to end the session and send you back through the login screen.
+
 A light/dark theme toggle in the shell header switches the whole UI between themes; the choice persists per browser.
+
+## Installing to a home screen
+
+The UI ships a favicon, an Apple touch icon and a web app manifest, so adding it to a phone's home screen gives the Istota mark rather than a screenshot of the page, and the browser chrome takes the colour of the theme you picked in the app rather than the system's. There is no service worker: hashed assets are cached for a year and everything else revalidates, so a deployment can never leave an installed app pinned to a shell whose chunks the server has since deleted. When a new build lands, a toast offers a Reload rather than reloading under you — it also re-checks when you return to the app, since a suspended one stops polling.
 
 ## Pages
 
-**Chat**: an always-on, full-page in-app chat console — the first nav tab, before Feeds. Discord/Slack-style rooms in a sidebar, live SSE streaming of tool use and intermediate text, `!commands` and the `!model` prefix, confirmation cards, and drag-drop/paste attachments. See [Web chat](web-chat.md) for the full surface.
+**Chat**: an always-on, full-page in-app chat console — the first nav tab, before Feeds. Discord/Slack-style rooms in a sidebar, live SSE streaming of tool use and intermediate text, `!commands` and the `!model` prefix, confirmation cards, attachments (drag, paste, the `+` button, or a voice message), and clickable attachment chips. See [Web chat](web-chat.md) for the full surface.
 
 **Dashboard**: shows available features for the authenticated user. When [Google Workspace](google-workspace.md) is enabled, the dashboard also shows a connect/disconnect card for linking a Google account.
 

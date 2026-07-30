@@ -98,8 +98,11 @@ Invoice timing tables (`invoice_schedule_state`, `invoice_overdue_notified`) liv
 |---|---|
 | `feed_categories` | User-defined feed categories |
 | `feeds` | Subscribed RSS/Atom/Tumblr/Are.na sources + per-feed poll state |
-| `feed_entries` | Aggregated feed content + read/star state |
-| `schema_meta` | Schema version + global default poll interval |
+| `feed_entries` | Aggregated feed content + read/star state, plus `embed_url` (an inline video player) and `file_url` (an attachment such as a PDF) |
+| `entry_images` | Repeat-image index (`entry_id`, `image_key`, `seen_ts`) backing the reader's reblog-image suppression |
+| `schema_meta` | Schema version, the global default poll interval, and `feeds_settings.image_dedupe_window_days` |
+
+A poll **updates** an entry it has already seen rather than discarding it, so a provider fix or a richer render reaches entries already on file instead of applying only to new ones. User state (`status`, `starred`, `starred_at`) and `fetched_at` are never overwritten — `fetched_at` is the first sighting, which keeps "recently added" ordering and the image-dedupe look-back stable — and a field is only overwritten by a non-empty value, so a sparser re-fetch cannot blank a title. The "N new entries" count still means newly inserted; refreshes are counted separately.
 
 ### Location (per-user location.db)
 
@@ -114,6 +117,27 @@ Location tables live in a per-user `location.db`, not in the framework DB. The m
 | `dismissed_clusters` | Clusters the user chose not to save as places |
 
 The two Nominatim caches (`geocode_cache`, `reverse_geocode_cache`) remain in the framework `istota.db` for cross-user dedup.
+
+### Health (per-user health.db)
+
+| Table | Purpose |
+|---|---|
+| `stats` | Body stat time series (metric, value, unit, date, source) |
+| `panels` | Bloodwork panels |
+| `biomarkers` | Individual results linked to a panel |
+| `biomarker_explainers` | Cached explainer text per (name, direction) |
+| `biomarker_refs` | Bundled canonical reference ranges and aliases |
+| `encounters` | Visits, procedures, screenings, hospitalizations |
+| `diagnoses` | Conditions with status (active, resolved, chronic) |
+| `diagnosis_encounters` | Which appointments a condition was seen at (many-to-many; real FKs, cascading) |
+| `immunizations` | Vaccine administration records |
+| `immunization_refs` | Bundled canonical vaccine list and schedules |
+| `documents` | Stored paperwork, one row per blob, deduped by content hash |
+| `document_links` | Polymorphic join: which records a document evidences |
+| `health_settings` | Profile (DOB, height, sex) and unit display preferences |
+| `schema_meta` | Schema version |
+
+Only the `.db` is local; document and panel bytes stay in the workspace on the mount.
 
 ### Briefings (per-user briefings.db)
 

@@ -255,8 +255,8 @@ Module-level settings for the briefings module (per-user content store + archive
 |---|---|---|
 | `archive_retention_days` | `90` | Prune archived briefing results older than this, on insert (0 = keep forever) |
 | `default_lookback_hours` | `12` | Seeds the `email` / `rss` source window when a source omits it |
-| `max_source_chars` | `5000` | Cap on a single source's gathered text |
-| `max_browse_chars` | `20000` | The same cap for a `browse` source, which gathers markdown rather than flattened text. Bigger because the URLs the markdown keeps cost characters, and a frontpage spends its first couple of thousand on masthead chrome before the headline grid starts. A source's own `max_chars` wins over either cap. |
+| `max_source_chars` | `5000` | Cap on a single source's gathered text. The `todos` source spends it item by item and never cuts one in half — a half-item would read as a todo the file does not contain — dropping from the end and saying in its provenance line how many were left out |
+| `max_browse_chars` | `20000` | The same cap for a `browse` source, which gathers markdown rather than flattened text. Bigger because the URLs the markdown keeps cost characters, and a frontpage spends its first couple of thousand on masthead chrome before the headline grid starts. A `browse` source's own `max_chars` wins over either cap — it is the only kind that reads one; `email`, `notes` and `todos` take the module cap directly. |
 | `shared_block_timezone` | `"UTC"` | Timezone module-owned shared blocks evaluate their cron in. Shared blocks are global (generated once, no per-user timezone), so this is one operator-chosen zone — typically the operator's own, so morning/evening regeneration lines up with their day. An invalid name falls back to UTC at run time. |
 
 ## `[[briefing_shared_blocks]]`
@@ -338,6 +338,8 @@ See [Google Workspace](../features/google-workspace.md) for setup instructions.
 
 ## `[site]`
 
+`hostname` is load-bearing beyond OAuth2 and the origin check: minting a location ingest token refuses with a 409 while it is unset, because the webhook URL it assembles would be a relative path and the phone's QR decoder accepts only `https://`. A standalone local install with no hostname therefore cannot provision a device by QR.
+
 The deployment's public DNS name.
 
 | Setting | Default | Description |
@@ -367,8 +369,8 @@ Knobs for the in-app web chat surface (the "Chat" tab). The surface is always en
 | Setting | Default | Description |
 |---|---|---|
 | `max_prompt_chars` | `32000` | Max characters accepted per chat message |
-| `max_attachment_mb` | `25` | Max attachment size, in MB |
-| `attachment_extensions` | (image/pdf/text set) | Allowed attachment file extensions |
+| `max_attachment_mb` | `25` | Max attachment size, in MB. Application default — the Ansible role sets `100` and renders nginx's `client_max_body_size` from the same variable (see below) |
+| `attachment_extensions` | `pdf png jpg jpeg heic webp gif txt md csv wav mp3 m4a ogg webm docx xlsx` | Allowed attachment file extensions — images (including `heic`, what an iPhone photo is), documents, text, and the audio formats a voice message arrives in |
 | `rate_limit_messages` | `30` | Messages allowed per user per window |
 | `rate_limit_window_seconds` | `300` | Rate-limit window (5 minutes) |
 | `sse_poll_interval_ms` | `200` | Server-side `task_events` poll cadence for the SSE stream |

@@ -8,9 +8,10 @@ Root `AGENTS.md` ("Web UI" section) carries the _rationale_ — why `HintPopover
 
 1. `cat src/lib/components/ui/index.ts` — the full primitive inventory. If a primitive fits, use it; do not hand-roll a second one.
 2. `grep -n '^\s*--' src/app.css` — the token roster. Every color you write must be an existing token, or a new token pair added to **both** theme blocks in `app.css`.
-3. Find the nearest sibling page and read it. A new money page copies `routes/money/transactions`; a new module settings page copies `routes/feeds/settings`. Match its structure before inventing one.
-4. `npm run lint:design` before you commit. It fails on new hardcoded colors and new per-page theme overrides.
-5. `npm run format` — prettier, 2-space, single quotes, 100 cols. Never tabs.
+3. `ls src/lib/platform/` — the native-shell facade. Anything that behaves differently inside the iOS app goes through it and nowhere else.
+4. Find the nearest sibling page and read it. A new money page copies `routes/money/transactions`; a new module settings page copies `routes/feeds/settings`. Match its structure before inventing one.
+5. `npm run lint:design` before you commit. It fails on new hardcoded colors and new per-page theme overrides.
+6. `npm run format` — prettier, 2-space, single quotes, 100 cols. Never tabs.
 
 ## Component inventory
 
@@ -44,7 +45,7 @@ Import everything from the barrel: `import { Button, Modal } from '$lib/componen
 | --------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Modal`         | Any dialog                                                          | bits-ui `Dialog`. Never hand-roll a `.modal-backdrop`                                                                                                                         |
 | `ConfirmDialog` | Every destructive, irreversible or session-ending action            | Imperative `title` with no "?", full "Are you sure…" `message`. `confirmVariant="danger"`. `challenge` adds a type-the-name gate for hard deletes. **Never `window.confirm`** |
-| `NoticeBanner`  | A single-line collapsible notice with a variant-colored left border | Variants follow the status scale                                                                                                                                              |
+| `NoticeBanner`  | A single-line collapsible notice with a variant-colored left border | `info` / `warn` / `danger` — a subset of the status scale, with no `success` (a banner that persists is not how a success is reported; use `notify()`)                        |
 | `HintPopover`   | Optional guidance behind a "?"                                      | See the `SettingsField` rule below before reaching for it directly                                                                                                            |
 | `NoticeDrawer`  | Nothing — `AppShell` mounts it. Call `notify()` instead             | The one transient-feedback surface, and the one component deliberately absent from the barrel: a second mount is two live regions for one notice. See the rule below          |
 
@@ -67,9 +68,10 @@ Every module settings page is `SettingsLayout` → `SettingsCard` → `SettingsF
 | `SettingsLayout` | The page frame: `title`, `description`, `loading`, `error`, `info`, `headerActions`. `title` is optional — omit it when the `ShellHeader` above already names the page, and the header row collapses |
 | `SettingsCard`   | A titled group of fields, with its own `actions` and `status`. `actions` is for actions belonging to _that card_ ("Refresh all now") — not the page's save, see below                                |
 | `HeaderSave`     | The app bar's slot for a page's single save. Pair with `useSettingsSave`                                                                                                                             |
-| `SettingsField`  | One labelled control. `wide` for full-width, `checkbox` for checkbox rows                                                                                                                            |
+| `SettingsField`  | One labelled control. `wide` for full-width, `checkbox` for checkbox rows, `labelled={false}` when the slot holds a `<button>` — see the rule below                                                  |
 | `SecretField`    | A write-only credential input (bullet-masked, `configured` shows it is set without echoing it)                                                                                                       |
 | `ServiceCard`    | A connected-service card on `/settings` or a module settings page                                                                                                                                    |
+| `GarminCard`     | The Garmin connect/MFA/disconnect flow — a `custom_ui` service whose auth is an interactive exchange, not a set of writable fields                                                                   |
 
 **A settings page has exactly one Save, and it lives in the app bar.** Call `useSettingsSave(() => ({ dirty, saving, save }))` during component init and render `<HeaderSave />` in the `ShellHeader`'s `tools` snippet — in the page itself for `/settings`, in the module `+layout.svelte` for a module settings page, where it renders nothing on every other page of the section. Return `null` from the callback to withdraw the contribution (a page whose module is switched off has nothing to save). Do not put a page-level Save on a `SettingsCard`.
 
@@ -79,6 +81,8 @@ Two placement rules the component depends on. `<HeaderSave />` goes **before** t
 
 Still their own buttons, because they are per-record forms rather than the page's state: "save this source" / "save this shared block" on briefings settings, and the entity/service modals on money settings. Clearing a stored secret also stays immediate and separately confirmed — a deletion is not an edit awaiting a Save.
 
+**A `SettingsField` whose control is a `<button>` must set `labelled={false}`.** The component wraps its label text and its control in one `<label>`, and a `<button>` is a labelable element — so it becomes the label's implicit control and clicking the field's caption activates it. This is the same hazard recorded for `HintPopover` above, and it shipped as a real bug: clicking the caption "Tracking" on the device tracker card stopped the tracker. With the prop off, the wrapper renders as a `<div>`.
+
 **`SettingsField` supplementary text is three-slotted by whether the user must see it.** `hint` is optional guidance and renders in a `HintPopover` behind a "?" beside the label. `warning` and `error` render inline, because a hover popover is discoverable, not seen. A data-integrity notice ("this client is never invoiced automatically") is a `warning`, not a `hint` — do not put anything the user needs to act on behind hover.
 
 ## Color
@@ -87,12 +91,16 @@ Every recurring meaning-bearing color is a token in `src/app.css`, defined in **
 
 - `--status-{danger,warn,success,info}-{fg,bg}` — severity. `-fg` for a bare status label, `-bg` for a filled chip's fill (pairs with the same `-fg`). Errors, warnings, status chips, badges, danger buttons, delete links.
 - `--accent-blue` — the _interactive_ blue: primary buttons, active tabs, focus rings, in-app cross-references. Distinct from `--status-info-fg`, which marks a severity rather than something actionable.
-- `--accent-amber` — the bot's identity accent, and the "starred" color.
+- `--accent-amber` — the bot's identity accent, and the "starred" color. `--accent-amber-fill{,-hover,-fg}` is its filled-button form.
+- `--status-dot-{ok,bad,warn,info}` — the admin dashboard's live-status dots. Off the `-fg` tint scale on purpose, and one value in both themes: a dot carries no text, so it needs saturation a tint cannot give it, and a theme-tracking dot reads as two states rather than one. (`--status-dot-info` is declared with no consumer yet.)
+- `--link` — content links, and the single decision point for them. A surface joins by putting `prose` on its container, **not** by writing a local `a` rule; chat, the briefings reader and the feeds reader each had their own before, so briefing links were not visibly links and feed links were grey and permanently underlined. Hover is the underline only — the color already marks the link, and moving both reads as a state change.
 - `--money-{income,expense}` — signed-amount direction. Deliberately off the status scale: an expense is not an error.
 
 `--status-critical-{bg,fg}` is a fifth severity above danger, for a value that is not merely out of range but clinically critical (the bloodwork `flag-C` cell). Unlike the four above it, it is a solid saturated fill rather than a tint, so its `-fg` is the text laid _on_ `-bg`.
 
 Supporting scales: `--surface-{base,card,raised,badge,overlay,reading}`, `--text-{primary,secondary,muted,dim,reading}`, `--border-{default,subtle,hover}`, `--radius-{card,pill}`, `--text-{2xs,xs,sm,base}`.
+
+Not colors, but declared alongside them and read the same way: `--font-sans`, `--transition-fast`, `--chip-{padding-x,gap}`, `--chat-{row-inline,gutter,avatar,avatar-gap}`, `--sigil-filter` (tints the octopus mark per theme), and the geometry tokens `--safe-{top,bottom,left,right}` / `--app-height` / `--kb-height`. The last three groups are written by code, not by a stylesheet — see "Platform and the native shell".
 
 - `--surface-overlay` — chrome floating _over_ content: a feed card's title overlay, the fixed status badge, an autocomplete popover, jump-to-latest.
 - `--surface-reading` / `--text-reading` — a long-form reading pane (the chat transcript, the briefings reader) and its softened body text. The surface is card-colored in dark but pure white in light.
@@ -127,6 +135,11 @@ Not linted at all: `*.test.ts`, which asserts on the very literals the rules for
 - A row of small icon controls needs its touch targets reasoned about **together**. Reach the ~44px minimum with an out-of-flow `::before` overlay so the bar keeps its height (`SidebarToggle`, `.nav-icon-btn`), and widen the row's gap to match — overlays that overlap hand the tap in the seam to whichever wins the stacking order, which is the accidental-tap bug rather than a fix for it.
 - A status chip needs a `min-width`, or its variable width shifts every column after it, row by row.
 - A toolbar holding only a result count needs a `min-height` so it matches one holding filters.
+- **Do not style scrollbars.** Touching `::-webkit-scrollbar`, `scrollbar-width` or `scrollbar-color` opts out of the fading overlay bar the platform draws and gets a permanent one whose track takes width. That was tolerable while pages scrolled as documents; the app is now one screen tall and scrolls inside its panes, so a styled bar becomes a fixed strip beside every list.
+- **An edge-pinned element pads with `max(<its own padding>, var(--safe-*))`**, never with the inset alone — the inset is 0 on a device without a notch, and the element would then sit flush against the edge. A `position: fixed` overlay escapes every ancestor's padding, so the insets go on its **backdrop** (`.overlay-safe`), not on the panel inside it.
+- **Never reintroduce `100vh` or `calc(100vh - Npx)`** for a full-height surface. Height comes from `--app-height` and `--kb-height`; see below.
+- Below 640px the nav, the shell header and the settings wrapper all align on an inline edge of **0.75rem** — the same figure the money shell fixes. A page that sets its own drifts out of line with the bar above it.
+- **Touch affordances reveal on tap, not on hover.** iOS synthesizes `:hover` on tap and then leaves it applied, so a hover-revealed control stays lit on the row you last touched. `chat/tapActivation.ts` is the shared primitive: a tap is a press within its slop and time bounds, and one active row at a time stands in for hover. Reveal instantly — a fade on an affordance the user has already reached for reads as lag.
 
 ## Page skeletons
 
@@ -134,13 +147,47 @@ Not linted at all: `*.test.ts`, which asserts on the very literals the rules for
 
 **Module settings page** (`routes/<module>/settings/+page.svelte`): `SettingsLayout` wrapping `SettingsCard`s. Call `getModuleServices(<module>)` first and render the "Module disabled" banner when `module_enabled` is false, instead of the configuration UI.
 
-**Every top-level route renders an `AppShell` and is listed in the `app-content-fill` class on `routes/+layout.svelte`'s `<main>`.** The two are one decision, not two: without the shell nothing pins the app nav, and without the class the document scrolls and carries the nav off the top of the screen — which is only noticeable on a phone or in the iOS app, where the nav is the only way back to another section. A single-page section (`/chat`, `/admin`, `/settings`) puts the shell in its `+page.svelte`; a section with sub-routes puts it in `+layout.svelte`. `ShellHeader`'s `title` is the page's name in the fixed bar.
+**Every top-level route renders an `AppShell` and is listed in the `app-content-fill` class on `routes/+layout.svelte`'s `<main>`.** The two are one decision, not two: without the shell nothing pins the app nav, and without the class the document scrolls and carries the nav off the top of the screen — which is only noticeable on a phone or in the iOS app, where the nav is the only way back to another section. The class also locks document scrolling and stops overscroll chaining, so touch scrolling belongs to the panes rather than the page — a fill route that scrolls the document has lost its nav. A single-page section (`/`, `/chat`, `/admin`, `/settings`) puts the shell in its `+page.svelte`; a section with sub-routes puts it in `+layout.svelte`. `ShellHeader`'s `title` is the page's name in the fixed bar.
 
-**Money list page**: the record-table shell is defined once as globals in `routes/money/+layout.svelte` — `.money-toolbar`, `.money-notice-bar`, `.money-table`, `.money-table-header`, `.money-table-row`, `.money-sortable`, `.money-status`, `.money-amount`, `.money-kebab-spacer`, `.money-table-empty`. A page styles only its own columns (widths, alignment) and inherits everything else. The shell fixes the inline edge at `0.75rem` for every element on the page; do not set your own.
+The one exception is `routes/+error.svelte`, which renders no `AppShell` — an error page has no section to be in — and instead flattens `main.app-content` from inside itself. Adding a route means adding it to that class list; several in-tree comments still count the routes by hand and go stale, so trust the class list, not the count beside it.
+
+**Loading and empty states** use `.center-msg`, the one shared whole-pane status message, and the page holds its chrome back behind the load so the message centres on the pane rather than under a half-drawn header. The older `.loading` / `.error-msg` pair survives only for a line inside a card.
+
+**Money list page**: the record-table shell is defined once as globals in `routes/money/+layout.svelte` — `.money-toolbar`, `.money-notice-bar`, `.money-table`, `.money-table-header`, `.money-table-row`, `.money-sortable`, `.money-status`, `.money-amount`, `.money-kebab-spacer`, `.money-table-empty`, `.money-control-input`, `.money-result-count`, `.money-sort-arrow`. A page styles only its own columns (widths, alignment) and inherits everything else. The shell fixes the inline edge at `0.75rem` for every element on the page; do not set your own.
+
+## Platform and the native shell
+
+The web app also runs inside a native iOS shell (its own repo, `istota-mobile` — a Capacitor WKWebView pointed at the deployment URL, so the URL is the only build-time coupling). `src/lib/platform/` is the facade over everything that differs there. Two rules govern it, and both exist because the web deploys in minutes while the shell binary lags a TestFlight cycle:
+
+1. **Every export degrades to plain-web behaviour off the shell** — a no-op, or the browser's own control. Nothing may require the shell to work.
+2. **Every shell-dependent capability is gated on the shell version that introduced it**, via `shellAtLeast()`. An older app must get a working page that says what it cannot do, not a control that silently fails.
+
+**Detection is the `IstotaApp/<version>` user-agent token, not `window.Capacitor`.** The UA is present on the first request, survives SSR, and carries a version the injected bridge does not — and a page can carry a `Capacitor` shim without being in the shell at all, so a plugin object's presence is not evidence of the shell. Route every call through one accessor that checks both the gate and the plugin, so the two cannot diverge: shipping six of eight tracker calls gated on the plugin alone is a defect this rule already caught.
+
+Capabilities and their gates: soft-keyboard geometry (0.2.0), camera / photo library / document picker (0.3.0), upload-from-disk (`IstotaUploader`, presence-detected), the background location tracker (0.6.0) and the QR scanner (0.7.0) — the last two gated separately, so a 0.6.0 app tracks but says it cannot scan. Where a capability's *shape* changed rather than its existence, feature-detect the response instead of adding a version (the pickers returning a path rather than base64).
+
+**The height model.** `--app-height` and `--kb-height` are written by `lib/viewport.ts`; body height is `calc(var(--app-height, 100dvh) - var(--kb-height, 0px))`. Four invariants worth knowing before touching it:
+
+- `--app-height` is published **only in standalone**. A browser tab keeps `dvh`, because there `innerHeight` is the layout viewport and does not track a collapsing toolbar — which is what `dvh` was adopted for. It exists at all because of an iOS 26 WebKit bug where, after a keyboard dismissal, the visual viewport stays short and `dvh` follows it down.
+- The published height is the **tallest viewport seen**, and short readings are never published. A keyboard can only make a viewport smaller, so a smaller reading is never evidence of how tall the app should be; holding a slightly-too-tall height briefly beats a band nothing later corrects. The one path that adopts a smaller baseline is a shrink outlasting the whole settle window with nothing focused — a split view or a resized window, not a keyboard.
+- The keyboard gate takes focus as the signal and overrules a focused field only when **both** viewports are back within tolerance. Requiring both is what makes it right on either platform: an installed app resizes the layout viewport, a browser tab only the visual one. Testing one turned an intermittent gap into a permanent one.
+- `--kb-height` bypasses the settle machinery entirely — it comes from the shell's `keyboardWillShow`, at the start of the animation rather than after it, and that number does not lie. It has to come from the shell because viewport units deliberately ignore virtual keyboards.
+
+`?vpdebug=1` turns on an on-device readout of the shell version and the live geometry (`?vpdebug=0` clears it). It is the only way to see this subsystem working on a real phone, and it prints the version precisely so "a gate with no height behind it" is visible without a rebuild.
 
 ## Client-local preferences
 
 Theme and text scale are localStorage-persisted per browser, not profile fields — they must apply before first paint, and profile data arrives after it. Both follow one shape: a `writable` seeded from `loadSetting`, a normalizer folding any unrecognized value onto the default, an `apply*` setting an attribute on `<html>`, and a matching branch in the single blocking `<script>` in `app.html`. Add to that script; never add a second one. Controls for these live in the **Appearance** card on `/settings`, which sits outside the `{#if profile}` block and applies on change — keep client-local controls out of the profile cards, whose fields need the shared Save button.
+
+The theme is stated in three places that must agree: the token in `app.css`, the `theme-color` meta seeded by that same pre-paint script in `app.html`, and `applyTheme` in `stores/theme.ts`, which keeps the meta current as the user switches. A test asserts all three, so changing the dark surface color in one place fails there rather than shipping a browser chrome that no longer matches the app.
+
+## Shipping a build
+
+There is **no service worker**. Caching is HTTP headers plus SvelteKit's own version poll, and the server sends two classes: hashed `_app/immutable/` assets are immutable for a year, everything else — the HTML shell, `version.json`, the manifest, the icons — is `no-cache` and revalidates. Sending neither (the previous state) let an installed home-screen app pin the shell indefinitely and then ask for hashed chunks the server had already deleted.
+
+A new build is surfaced, not forced: the root layout watches SvelteKit's `updated` state and shows a toast with a Reload button. It is a tap rather than an automatic reload because reloading discards a half-typed message. It also re-checks on `visibilitychange`, since the poll timer is throttled in a background tab and stopped outright in a suspended PWA — without that, a phone returning to the app after a day would be running whatever it had.
+
+`static/` holds the manifest and the four icons. Manifest paths stay **relative** and head links go through `%sveltekit.assets%`, because the whole app is served under the `/istota` base and at varying route depths.
 
 ## Checks
 

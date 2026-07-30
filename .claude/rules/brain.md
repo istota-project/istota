@@ -224,8 +224,10 @@ Wraps the `claude` CLI subprocess. Owns:
    `is_signal_termination(text)` is the shared marker predicate the scheduler
    classifies on (the executor drops `stop_reason` at its return boundary, so
    the scheduler reads failure *text* — same as OOM and cancellation).
-8. **API retry** — wraps single-attempt execution in a 3-attempt loop with
-   5s fixed sleep when `is_transient_api_error()` matches (5xx/429).
+8. **API retry** — wraps single-attempt execution in a 3-attempt loop when
+   `is_transient_api_error()` matches (every 5xx, plus 408/425/429). The
+   delay is the provider's own `Retry-After` where it supplied one, capped
+   at `RETRY_AFTER_MAX_SECONDS`, else `API_RETRY_DELAY_SECONDS`.
    Retries do NOT count against the task's `attempt_count`.
 9. **Result fallback** — prefers ResultEvent > result_file > stderr.
 
@@ -236,7 +238,7 @@ produce `(result_text, execution_trace)` and the executor reconciles them.
 | Function | Purpose |
 |---|---|
 | `parse_api_error(text) -> dict \| None` | status_code/message/request_id from `API Error: NNN {json}` **or** the bodyless `API Error: NNN <text>` the CLI also emits (ISSUE-212 — matching only the JSON form meant a bare `API Error: 529 Overloaded` parsed as nothing: not transient, not retried, not a fallback trigger). Tail stops at the newline |
-| `is_transient_api_error(text) -> bool` | True for a capacity status (`TRANSIENT_STATUS_CODES \| {429}`) **or** a network-level failure (connection reset / timeout / DNS / `ECONNRESET`-class errno). The network branch is gated on an `API Error` marker (or an unambiguous errno) because this predicate also runs against arbitrary tmux pane text; an explicit status is authoritative, so a 400 quoting "connection reset" stays permanent (NB-13a) |
+| `is_transient_api_error(text) -> bool` | True for a capacity status (**every 5xx**, plus 408/425/429 — see `_status_is_transient` below) **or** a network-level failure (connection reset / timeout / DNS / `ECONNRESET`-class errno). The network branch is gated on an `API Error` marker (or an unambiguous errno) because this predicate also runs against arbitrary tmux pane text; an explicit status is authoritative, so a 400 quoting "connection reset" stays permanent (NB-13a) |
 | `is_permanent_api_error(text) -> bool` | True for a request-shaped failure: `PERMANENT_STATUS_CODES` (`400/401/403/404/405/413/414/422`), context-length, content-filter, `invalid_request_error`-class bodies. A transient status wins over request-shaped body text |
 | `api_error_stop_reason(text) -> str \| None` | The single classifier every execution path uses: `usage_limit` > `error` (permanent) > `transient_api_error` > `None` (not a provider error). `_failure_stop_reason` is `api_error_stop_reason(text) or "error"` |
 | `_status_is_transient(status) -> bool` | The live transient rule: **every** 5xx, plus 408/425/429. `TRANSIENT_STATUS_CODES` is kept as documentation of the common cases but is no longer the gate — enumerating was a latent second copy of this bug (a Cloudflare-fronted provider emits 520-526, none of which were listed, so each would have dead-ended exactly as 529 did) |
@@ -742,7 +744,7 @@ promoting that is ISSUE-211. The host needs
 `tmux` on `PATH` (a missing binary → `not_found` → headless fallback); the Docker
 image installs it.
 
-**Production hardening** (`Specs/Active/claude-tmux-production-readiness.md`):
+**Production hardening** (`Specs/Done/claude-tmux-production-readiness.md`):
 
 - **Per-session hook isolation (§2).** Each session's hook lives in its own
   `CLAUDE_CONFIG_DIR`, not a shared project `.claude/` — so two concurrent

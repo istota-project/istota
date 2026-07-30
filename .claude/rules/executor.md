@@ -97,7 +97,7 @@ def build_prompt(
 | Email | `SMTP_HOST/PORT/USER/PASSWORD`, `SMTP_FROM` | `config.email.*` (`SMTP_FROM` is plus-addressed: `bot+user_id@domain`) |
 | Email | `IMAP_HOST/PORT/USER/PASSWORD` | `config.email.*` |
 | Karakeep | `KARAKEEP_BASE_URL`, `KARAKEEP_API_KEY` | From resource config `extra` |
-| Monarch | `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN` | From the encrypted `secrets` table (cookie-pair auth). The legacy `MONARCH_EMAIL` / `MONARCH_PASSWORD` / `MONARCH_SESSION_TOKEN` were removed when the API switched to Django CSRF auth on `/graphql` — the cookie pair is the only credential. |
+| Monarch | `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN` | From the encrypted `secrets` table (cookie-pair auth). The legacy `MONARCH_EMAIL` / `MONARCH_PASSWORD` / `MONARCH_SESSION_TOKEN` were removed when the API switched to Django CSRF auth on `/graphql` — the cookie pair is the only credential *stored*. It is mintable server-side: `POST /api/money/monarch/login` takes email/password (plus an MFA code or an emailed OTP) transiently, signs in at the endpoint Monarch's own web app uses and with the client version its `version.json` reports, and persists only the resulting pair. Those inputs never reach a task env. |
 | Money | `MONEY_USER` | The istota user_id (in-process facade; config resolved from the per-user money DB via `resolve_for_user`). `MONEY_CONFIG` is gone — there is no standalone money config path. |
 | Feeds | `FEEDS_USER` | From the user's `feeds` resource (in-process; defaults to istota user_id) |
 | Location | `LOCATION_DB_PATH` | `istota.location.resolve_for_user(user_id, config).db_path` via the location skill's `setup_env` hook. Per-user `{workspace}/location/data/location.db`. Skill subcommands needing the framework geocode caches (`reverse_geocode`, `day_summary`) open a second conn to `ISTOTA_DB_PATH`. |
@@ -276,12 +276,12 @@ The legacy Jaccard near-duplicate gluing path is gone; `_text_similarity`
 remains in the source as a dead helper but is no longer called.
 
 ## API retry constants (re-exported from brain.claude_code)
-- `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` + `429`
+- The live transient rule is **every 5xx**, plus `408`/`425`/`429` (`_status_is_transient`). `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` is kept as documentation of the common cases and is **not** the gate — enumerating was itself the ISSUE-212 bug class
 - `PERMANENT_STATUS_CODES = {400, 401, 403, 404, 405, 413, 414, 422}` — no retry,
   no fallback attempt (retrying or paying for a fallback call that would fail
   identically buys nothing)
 - `API_RETRY_MAX_ATTEMPTS = 3`
-- `API_RETRY_DELAY_SECONDS = 5` (fixed, not exponential) — overridden per attempt
+- `API_RETRY_DELAY_SECONDS = 5` — the default when the provider named no wait, not a floor; superseded per attempt
   by `parse_retry_after(text)` when the provider supplied a `Retry-After`,
   capped at `RETRY_AFTER_MAX_SECONDS = 60`
 - Patterns: `API Error: (\d{3}) (\{.*\})` first, then the bodyless
@@ -304,17 +304,18 @@ remains in the source as a dead helper but is no longer called.
 | `build_clean_env(config)` | Minimal env for Claude subprocess (PATH, HOME, PYTHONUNBUFFERED + `USER`/`LOGNAME` + passthrough vars). `USER`/`LOGNAME` are process-identity basics (not secrets) that the macOS Keychain lookup needs — without them the `claude` CLI's login-Keychain OAuth read fails and every task reports "Not logged in" on a standalone mac; harmless on Linux where the credential is a file under `HOME`. |
 | `build_stripped_env()` | os.environ minus credential vars (PASSWORD/TOKEN/SECRET/API_KEY/NC_PASS/PRIVATE_KEY/APP_PASSWORD). For heartbeat/cron commands. Always-on. |
 | `build_allowed_tools(is_admin, skill_names)` | Returns `["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"]`. For ClaudeCodeBrain / TmuxClaudeBrain the *list contents* no longer reach the CLI — both run with `--dangerously-skip-permissions` (no `--allowedTools` allowlist), so the model gets its full default toolset and the bwrap sandbox + network proxy + clean env are the boundary. The list survives as (a) NativeBrain's in-process tool filter and (b) the non-empty/empty signal distinguishing a tool-bearing task from a text-only one. `Agent` + `Workflow` (the harness's multi-agent fan-out) stay denied via `--disallowedTools`. |
-| `_PROXY_CREDENTIAL_VARS` | Frozenset of specific env vars stripped when proxy enabled (CALDAV_PASSWORD, NC_PASS, SMTP_PASSWORD, IMAP_PASSWORD, KARAKEEP_API_KEY, GITLAB_TOKEN, GITHUB_TOKEN, MONARCH_SESSION_ID, MONARCH_CSRFTOKEN, GOOGLE_WORKSPACE_CLI_TOKEN) |
-| `_CREDENTIAL_SKILL_MAP` | Maps each credential env var to the set of skills that need it (scopes proxy responses) |
-| `_authorized_skills_from_credentials(skill_index, credential_env)` | Returns skills authorized for credential access this task — any skill in `_CREDENTIAL_SKILL_MAP` is authorized if at least one of its mapped credentials is present in `credential_env`. Includes doc-only skills (notably `developer`) whose creds are consumed via `credential-fetch` lookups from helper scripts the executor writes (git credential helper, gitlab-api wrapper). Decoupled from skill selection: a keyword miss in Pass 1 doesn't lock out a skill the user has clearly configured. Threat model is unchanged because `credential_env` only contains creds the user's resources / instance config supplied. |
+| `derive_credential_set(skill_index)` | Every sensitive env-var name declared by any skill manifest. **Manifest-derived** — this replaced the hand-maintained `_PROXY_CREDENTIAL_VARS` frozenset, so adding a credential to a skill's `env:` block is the only step needed; there is no list to keep in step. |
+| `derive_authorized_skills(selected_skills, skill_index, ctx)` | Skills authorized for credential access this task: a skill qualifies if it was **selected**, or if **any** of its sensitive `EnvSpec`s resolves (the user has at least one of its credentials configured). `any`, not `all`, so a multi-provider skill (`developer` — GitLab *or* GitHub) authorizes when one provider is set up. Decoupled from skill selection, so a selection miss doesn't lock out a skill the user has clearly configured; the threat model is unchanged because only credentials the user supplied ever resolve. Replaced `_authorized_skills_from_credentials`. |
+| `derive_skill_credential_map(authorized_skills, skill_index)` | Per-skill: the sensitive env vars its own manifest declares. The proxy scopes injection with it, so a skill CLI invocation only ever sees its own credentials. Replaced `_build_skill_credential_map`. |
+| `derive_lookup_allowlist(authorized_skills, skill_index)` | Union of the credentials any authorized skill may fetch via `credential-fetch` — the path helper scripts use (the git credential helper, the gitlab-api wrapper). Subtracts `_PROXY_LOOKUP_BLOCKED` as a hard reject (today `ISTOTA_SECRET_KEY`). Replaced `_allowed_credentials_for_skills`. |
 
 ## Skill Proxy Authorization Model
 
 The proxy (`skill_proxy.py`) takes two distinct skill sets:
 - `allowed_skills` (frozenset): all CLI skills (`cli: true`) — global whitelist used to reject typos / non-existent skill names.
-- `authorized_skills` (frozenset): per-task subset returned by `_authorized_skills_from_credentials()`. Used purely for the informative-rejection error message returned to the client, and logged at proxy startup as `proxy_authorization task_id=… selected=… authorized=… …`.
+- `authorized_skills` (frozenset): per-task subset returned by `derive_authorized_skills()`. Used purely for the informative-rejection error message returned to the client, and logged at proxy startup as `proxy_authorization task_id=… selected=… authorized=… …`.
 
-The `skill_credential_map` (built from `authorized_skills` via `_build_skill_credential_map`) controls which credential env vars actually get injected for a given skill CLI invocation — that is the real enforcement boundary. Skill selection controls only which skill *docs* (eager bodies) go in the prompt; it no longer gates credential access.
+The `skill_credential_map` (built from `authorized_skills` via `derive_skill_credential_map`) controls which credential env vars actually get injected for a given skill CLI invocation — that is the real enforcement boundary. Skill selection controls only which skill *docs* (eager bodies) go in the prompt; it no longer gates credential access.
 
 Every proxy rejection emits a structured WARNING — `proxy_rejected task_id=… type=skill|credential … reason=unknown_skill|not_authorized|not_authorized_credential|credential_not_present`. Use these to count selection misses vs. real abuse attempts.
 
