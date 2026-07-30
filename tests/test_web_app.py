@@ -23,6 +23,7 @@ if _has_web_deps:
 
 from istota.config import (
     Config,
+    LocationReceiverConfig,
     NextcloudConfig,
     ResourceConfig,
     SiteConfig,
@@ -1782,6 +1783,197 @@ class TestSettingsEndpoints:
         from istota import secrets_store
         assert secrets_store.get_secret(self._db_path, "alice", "monarch", "session_id") == "SID-alice"
         assert secrets_store.get_secret(self._db_path, "bob", "monarch", "session_id") is None
+
+
+@_needs_web_deps
+class TestGenerateIngestToken:
+    """Server-minted ingest token for the location receiver.
+
+    The one endpoint that returns a secret in its response body, because a
+    token the user never sees cannot go in a QR code — and typing a 32-byte
+    secret into a phone is the provisioning step this exists to delete. It
+    is returned exactly once; every later read is write-only, like the rest
+    of the secrets API.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _secret_key(self, monkeypatch, tmp_path):
+        from istota import db
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _make_test_config(self, tmp_path):
+        cfg = _make_config(
+            tmp_path,
+            users={
+                "alice": UserConfig(display_name="Alice"),
+                "bob": UserConfig(
+                    display_name="Bob", disabled_modules=["location"],
+                ),
+            },
+        )
+        cfg.db_path = self._db_path
+        # The receiver is off by default in the lean footprint, and a token
+        # is useless without it — so the endpoint gates on both halves.
+        cfg.location = LocationReceiverConfig(enabled=True)
+        return cfg
+
+    async def _login(self, client, app, user_id="alice"):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": user_id,
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    _URL = "/istota/api/settings/secrets/overland/ingest_token/generate"
+
+    async def test_generate_returns_and_stores_a_token(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, app)
+        resp = await client.post(
+            self._URL, cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        token = resp.json()["token"]
+        # token_urlsafe(32) is ~43 chars; assert it is not guessable rather
+        # than pinning an exact length.
+        assert len(token) >= 32
+
+        from istota import secrets_store
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "overland", "ingest_token",
+        ) == token
+
+    async def test_generate_returns_the_webhook_url(self, tmp_path, client, app):
+        """The QR carries the whole URL, not a token the user then has to
+        paste into an address they assemble by hand."""
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, app)
+        resp = await client.post(
+            self._URL, cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        body = resp.json()
+        assert body["webhook_url"].startswith("https://example.com/webhooks/location")
+        assert body["token"] in body["webhook_url"]
+
+    async def test_generate_rotates_an_existing_token(self, tmp_path, client, app):
+        from istota import secrets_store
+        secrets_store.set_secret(
+            self._db_path, "alice", "overland", "ingest_token", "old-token",
+        )
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, app)
+        resp = await client.post(
+            self._URL, cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        new_token = resp.json()["token"]
+        assert new_token != "old-token"
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "overland", "ingest_token",
+        ) == new_token
+
+    async def test_generate_signals_the_receiver(self, tmp_path, client, app):
+        """Otherwise the token 403s until the receiver process restarts."""
+        from istota.location import ingest_signal
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        before = ingest_signal.reload_stamp(self._db_path)
+        cookies = await self._login(client, app)
+        await client.post(
+            self._URL, cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert ingest_signal.reload_stamp(self._db_path) > before
+
+    async def test_manual_token_write_also_signals(self, tmp_path, client, app):
+        """A pasted token has the same staleness problem as a minted one."""
+        from istota.location import ingest_signal
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        before = ingest_signal.reload_stamp(self._db_path)
+        cookies = await self._login(client, app)
+        resp = await client.put(
+            "/istota/api/settings/secrets/overland/ingest_token",
+            json={"value": "hand-typed"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert ingest_signal.reload_stamp(self._db_path) > before
+
+    async def test_unrelated_secret_write_does_not_signal(self, tmp_path, client, app):
+        from istota.location import ingest_signal
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, app)
+        await client.put(
+            "/istota/api/settings/secrets/monarch/session_id",
+            json={"value": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert ingest_signal.reload_stamp(self._db_path) == 0.0
+
+    async def test_generate_refused_when_location_is_off(self, tmp_path, client, app):
+        """A token for a disabled module is a token that 403s on first use —
+        the receiver only scans users with the module on. Refusing here says
+        why; issuing it would be a silent dead end."""
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, app, user_id="bob")
+        resp = await client.post(
+            self._URL, cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 409
+
+        from istota import secrets_store
+        assert secrets_store.get_secret(
+            self._db_path, "bob", "overland", "ingest_token",
+        ) is None
+
+    async def test_generate_requires_csrf_origin(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, app)
+        resp = await client.post(
+            self._URL, cookies=cookies,
+            headers={"origin": "https://evil.example.com"},
+        )
+        assert resp.status_code == 403
+
+    async def test_generate_requires_auth(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        resp = await client.post(
+            self._URL, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code in (401, 403)
+
+    async def test_token_is_not_readable_afterwards(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, app)
+        resp = await client.post(
+            self._URL, cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        token = resp.json()["token"]
+
+        listing = await client.get(
+            "/istota/api/settings/module-services/location", cookies=cookies,
+        )
+        assert token not in listing.text
+        info = await client.get(
+            "/istota/api/location/settings-info", cookies=cookies,
+        )
+        assert token not in info.text
 
 
 @_needs_web_deps
