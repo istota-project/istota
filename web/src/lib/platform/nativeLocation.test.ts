@@ -4,7 +4,10 @@ import {
   scannerAvailable,
   trackerStatus,
   startTracking,
+  stopTracking,
   sendNow,
+  requestPermissions,
+  openAppSettings,
   configureTracker,
   scanAndDecode,
   type TrackerStatus,
@@ -132,7 +135,7 @@ describe('sendNow', () => {
     await expect(sendNow()).resolves.toBe(7);
   });
 
-  it('is zero off-shell', async () => {
+  it('is zero when the plugin is absent', async () => {
     installPlugins({});
     await expect(sendNow()).resolves.toBe(0);
   });
@@ -147,9 +150,85 @@ describe('configureTracker', () => {
     expect(plugins.IstotaLocation.configure).toHaveBeenCalledWith(GOOD);
   });
 
-  it('throws off-shell rather than reporting a device that was never configured', async () => {
+  it('throws when the plugin is absent, rather than reporting a device that was never configured', async () => {
     installPlugins({});
     await expect(configureTracker(GOOD)).rejects.toThrow(/no tracker/i);
+  });
+});
+
+describe('every export is version-gated, not merely plugin-gated', () => {
+  // The two are not the same test. A page can carry a `window.Capacitor` shim
+  // without being in the shell at all — that is the premise of the very first
+  // test in this file — so a check for the plugin alone would let a browser
+  // call straight into it. Each case below leaves the plugins installed and
+  // downgrades only the User Agent.
+  beforeEach(() => {
+    setUserAgent(PLAIN_SAFARI);
+    installPlugins({ IstotaLocation: fakeTracker(), IstotaQrScanner: { scan: vi.fn() } });
+  });
+
+  it('trackerStatus answers null', async () => {
+    await expect(trackerStatus()).resolves.toBeNull();
+  });
+
+  it('startTracking answers null and never reaches the plugin', async () => {
+    const plugins = (
+      globalThis as { Capacitor?: { Plugins?: Record<string, ReturnType<typeof fakeTracker>> } }
+    ).Capacitor!.Plugins!;
+    await expect(startTracking('places')).resolves.toBeNull();
+    expect(plugins.IstotaLocation.start).not.toHaveBeenCalled();
+  });
+
+  it('stopTracking answers null', async () => {
+    await expect(stopTracking()).resolves.toBeNull();
+  });
+
+  it('sendNow answers zero', async () => {
+    await expect(sendNow()).resolves.toBe(0);
+  });
+
+  it('requestPermissions answers null', async () => {
+    await expect(requestPermissions()).resolves.toBeNull();
+  });
+
+  it('openAppSettings never reaches the plugin', async () => {
+    const plugins = (
+      globalThis as { Capacitor?: { Plugins?: Record<string, ReturnType<typeof fakeTracker>> } }
+    ).Capacitor!.Plugins!;
+    await openAppSettings();
+    expect(plugins.IstotaLocation.openAppSettings).not.toHaveBeenCalled();
+  });
+
+  it('configureTracker throws rather than silently doing nothing', async () => {
+    await expect(configureTracker(GOOD)).rejects.toThrow(/no tracker/i);
+  });
+
+  it('scanAndDecode reports unavailable', async () => {
+    await expect(scanAndDecode()).resolves.toEqual({ ok: false, reason: 'unavailable' });
+  });
+});
+
+describe('stopTracking', () => {
+  it('returns the status the plugin resolves with', async () => {
+    await expect(stopTracking()).resolves.toEqual({ ...STATUS, tracking: false });
+  });
+});
+
+describe('requestPermissions', () => {
+  it('reports the authorization as it stands', async () => {
+    // Resolves with the current state rather than waiting on the prompt, so
+    // two calls is the normal shape (iOS refuses Always as a first ask).
+    await expect(requestPermissions()).resolves.toBe('always');
+  });
+});
+
+describe('openAppSettings', () => {
+  it('reaches the plugin', async () => {
+    const plugins = (
+      globalThis as { Capacitor?: { Plugins?: Record<string, ReturnType<typeof fakeTracker>> } }
+    ).Capacitor!.Plugins!;
+    await openAppSettings();
+    expect(plugins.IstotaLocation.openAppSettings).toHaveBeenCalled();
   });
 });
 
@@ -173,22 +252,20 @@ describe('scanAndDecode', () => {
     await expect(scanAndDecode()).resolves.toEqual({ ok: false, reason: 'unrecognised' });
   });
 
-  it('treats a rejection naming a cancellation as a cancel', async () => {
+  it('lets a camera failure through, since only that is worth reporting', async () => {
+    // The plugin resolves for a cancel and rejects only when the camera
+    // refused, so there is no message-matching here to misclassify a future
+    // error whose text happens to contain the word "cancel".
     withScan(async () => {
-      throw new Error('Scan cancelled by user');
+      throw new Error('Camera access is denied. Allow it in iOS Settings to scan a code.');
     });
-    await expect(scanAndDecode()).resolves.toEqual({ ok: false, reason: 'cancelled' });
+    await expect(scanAndDecode()).rejects.toThrow(/camera access is denied/i);
   });
 
-  it('lets a real camera failure through, since only that is worth reporting', async () => {
-    withScan(async () => {
-      throw new Error('Camera access denied');
-    });
-    await expect(scanAndDecode()).rejects.toThrow(/camera access denied/i);
-  });
-
-  it('reads as a cancel when there is no scanner at all', async () => {
+  it('reports an absent scanner as unavailable, not as a cancel', async () => {
+    // Folding this into 'cancelled' would give a Scan button that appears to
+    // do nothing, since the card says nothing at all about a cancel.
     installPlugins({ IstotaLocation: fakeTracker() });
-    await expect(scanAndDecode()).resolves.toEqual({ ok: false, reason: 'cancelled' });
+    await expect(scanAndDecode()).resolves.toEqual({ ok: false, reason: 'unavailable' });
   });
 });

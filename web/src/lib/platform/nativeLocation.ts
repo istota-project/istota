@@ -72,6 +72,20 @@ export function trackerAvailable(): boolean {
 }
 
 /**
+ * The tracker plugin, or null when this client has no business calling it.
+ *
+ * Every entry point goes through this rather than reading `plugins()`
+ * directly, so the version gate cannot be present on some calls and absent on
+ * others. It is not hypothetical that the two differ: a page can carry a
+ * `window.Capacitor` shim without being in the shell at all, which is what the
+ * first test in this module's suite is about.
+ */
+function tracker(): NonNullable<LocationPlugins['IstotaLocation']> | null {
+  if (!trackerAvailable()) return null;
+  return plugins()?.IstotaLocation ?? null;
+}
+
+/**
  * Can it scan a code, or does the user provision some other way?
  *
  * Gated separately from the tracker: 0.6.0 has the tracker and no scanner, and
@@ -89,9 +103,7 @@ export function scannerAvailable(): boolean {
  * differently — a browser gets the stand-in line, a phone gets an Off switch.
  */
 export async function trackerStatus(): Promise<TrackerStatus | null> {
-  const tracker = plugins()?.IstotaLocation;
-  if (!tracker || !trackerAvailable()) return null;
-  return tracker.status();
+  return (await tracker()?.status()) ?? null;
 }
 
 /**
@@ -102,22 +114,16 @@ export async function trackerStatus(): Promise<TrackerStatus | null> {
  * missing rather than reporting a tracker that runs and logs nothing.
  */
 export async function startTracking(profile?: TrackingProfile): Promise<TrackerStatus | null> {
-  const tracker = plugins()?.IstotaLocation;
-  if (!tracker) return null;
-  return tracker.start(profile ? { profile } : undefined);
+  return (await tracker()?.start(profile ? { profile } : undefined)) ?? null;
 }
 
 export async function stopTracking(): Promise<TrackerStatus | null> {
-  const tracker = plugins()?.IstotaLocation;
-  if (!tracker) return null;
-  return tracker.stop();
+  return (await tracker()?.stop()) ?? null;
 }
 
 /** Flush the queue now. Returns how many points the server took. */
 export async function sendNow(): Promise<number> {
-  const tracker = plugins()?.IstotaLocation;
-  if (!tracker) return 0;
-  return (await tracker.sendNow()).sent;
+  return (await tracker()?.sendNow())?.sent ?? 0;
 }
 
 /**
@@ -128,9 +134,7 @@ export async function sendNow(): Promise<number> {
  * twice — When In Use first, then Always on the second tap.
  */
 export async function requestPermissions(): Promise<string | null> {
-  const tracker = plugins()?.IstotaLocation;
-  if (!tracker) return null;
-  return (await tracker.requestPermissions()).authorization;
+  return (await tracker()?.requestPermissions())?.authorization ?? null;
 }
 
 /**
@@ -141,48 +145,47 @@ export async function requestPermissions(): Promise<string | null> {
  * has silently stopped.
  */
 export async function openAppSettings(): Promise<void> {
-  await plugins()?.IstotaLocation?.openAppSettings();
+  await tracker()?.openAppSettings();
 }
 
 export async function configureTracker(p: Provisioning): Promise<void> {
-  const tracker = plugins()?.IstotaLocation;
-  if (!tracker) throw new Error('No tracker on this device.');
-  await tracker.configure({ endpoint: p.endpoint, token: p.token });
-}
-
-/** A cancelled scan is not a failure — the same shape as the pickers. */
-function isCancellation(e: unknown): boolean {
-  const message = e instanceof Error ? e.message : String(e ?? '');
-  return /cancel/i.test(message);
+  const plugin = tracker();
+  if (!plugin) throw new Error('No tracker on this device.');
+  await plugin.configure({ endpoint: p.endpoint, token: p.token });
 }
 
 /**
  * Scan a provisioning code.
  *
- * Returns null when the user backed out, and throws when the camera itself
- * refused (denied permission, no camera) — the card can only say something
- * useful about the second. A code that scans but is not one of ours resolves
- * to null from the decoder, which the caller reports as "not recognised";
- * distinguishing that from a cancel is why the decode does not happen here.
+ * Three outcomes, deliberately distinct. `null` means this client has no
+ * scanner to call — not the same as a user declining, and the card says so.
+ * `{value: null}` is the user backing out, which the plugin reports by
+ * resolving rather than rejecting precisely so it needs no message-matching
+ * here. A throw is the camera itself refusing (denied permission, no capture
+ * device), which is the only case worth putting in front of someone.
+ *
+ * A code that scans but is not one of ours decodes to null one level up;
+ * keeping the decode out of here is what lets that stay distinguishable from
+ * a cancel.
  */
 export async function scanProvisioning(): Promise<{ value: string | null } | null> {
+  if (!scannerAvailable()) return null;
   const scanner = plugins()?.IstotaQrScanner;
   if (!scanner) return null;
-  try {
-    const result = await scanner.scan();
-    return { value: result.value ?? null };
-  } catch (e) {
-    if (isCancellation(e)) return { value: null };
-    throw e;
-  }
+  const result = await scanner.scan();
+  return { value: result.value ?? null };
 }
 
 /** Scan and parse in one step, for the card's single "Scan" button. */
 export async function scanAndDecode(): Promise<
-  { ok: true; provisioning: Provisioning } | { ok: false; reason: 'cancelled' | 'unrecognised' }
+  | { ok: true; provisioning: Provisioning }
+  | { ok: false; reason: 'cancelled' | 'unrecognised' | 'unavailable' }
 > {
   const scanned = await scanProvisioning();
-  if (!scanned || scanned.value === null) return { ok: false, reason: 'cancelled' };
+  // Not folded into 'cancelled': the card says nothing at all about a cancel,
+  // so an absent plugin would be a Scan button that appears to do nothing.
+  if (!scanned) return { ok: false, reason: 'unavailable' };
+  if (scanned.value === null) return { ok: false, reason: 'cancelled' };
   const provisioning = decodeProvisioning(scanned.value);
   if (!provisioning) return { ok: false, reason: 'unrecognised' };
   return { ok: true, provisioning };
