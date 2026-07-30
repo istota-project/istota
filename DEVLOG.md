@@ -2,6 +2,31 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-30: Monarch login 503 — a header constant that no test could ever catch going stale
+
+Reported as "503 despite correct info" on the Monarch email/password connect flow. The deployment server's web-unit journal named it on the first look: `monarch_login_client_outdated current=2025.10.0`, with Monarch answering 403 `"Please update to the latest version of the app to continue login."` We send a `monarch-client-version` header; ours had gone stale.
+
+**The interesting part is why it rotted invisibly.** Monarch checks the version *after* validating credentials. Probing `/auth/login/` with a bogus email returns 404 "Invalid email and password combination" and never reaches the gate — confirmed from the deployment host with both the old and new header values, which behave identically against a bad account. So no credential-free probe can detect staleness, no unit test can, and the only symptom is a *correct* login 503-ing, which reads like a Monarch outage rather than our bug. That is a defect class worth naming: a value that is only exercised on the success path, behind a gate you can't reach without real credentials.
+
+**The value is not stable enough to hardcode, which changed the design mid-session.** The plan was to bump the constant and self-heal on rejection. Then `app.monarch.com/version.json` — a 23-byte `{"version": …}` manifest carrying exactly the `clientVersion` the app bundle sends — returned `v1.0.3697` early in the session and `v1.0.3696` a couple of hours later, consistently, from two hosts. It moves within hours and not always forwards. So discovery moved *ahead* of the login rather than being a recovery path: resolve from the manifest first (cached per process), attempt, and only on rejection re-read and retry once. Pre-fetching is what avoids spending a failed credential submission on every cold process against an endpoint the module itself documents as rate-limited behind a sticky CAPTCHA gate. The constant survives purely as a cold-start fallback for an unreachable manifest. Exactly one retry, never a loop.
+
+DEVLOG 2026-05-15 recorded the original value as live-verified — Monarch validated the field loosely then ("anything reasonable-looking is accepted"). That's worth keeping straight: `2025.10.0` was accepted when chosen and later refused, not wrong from the start. It sets the expectation that this will drift again.
+
+**Two bugs that would have made the whole fix silently inert**, both found by running the real function against the live endpoint rather than trusting green tests. Cloudflare 403s aiohttp's default `Python/3.x aiohttp/3.y` User-Agent while curl from the same host gets a 200 — so discovery would have failed everywhere and quietly fallen back to the stale constant. And Monarch's ~9.5 KB CSP header exceeds aiohttp's 8190-byte field cap, which aborts the read as a bogus `400 Got more than 8190 bytes when reading` before the body is ever parsed. Both are now pinned by tests, because both are the kind of thing that looks like an unrelated network flake.
+
+**Review (Mulder + Scully) found three real defects in the first cut.** `_safe_json` was annotated `-> dict` but only guarded `JSONDecodeError`, so a valid non-object body (`[]`, `null`, `123`) raised `AttributeError` on the following `.get` — from inside error-handling code, which would have converted the actionable 503 into a masked 500. A refused retry that carried a TOTP reported "bad credentials", when the first attempt had already validated and therefore consumed the code; it now asks for a fresh one, since telling an MFA user their password is wrong sends them somewhere useless. And the give-up path reset the cached version, which meant every subsequent call repeated the whole two-attempt sequence — doubling the sustained failed-login rate against precisely the gate the one-retry cap exists to protect. Keeping the value makes the next call short-circuit after one attempt.
+
+Scully also caught that a full revert of the GraphQL header change survived the suite, so the request-shape test now pins that pair too. Nine mutations were checked against the new assertions; all nine fail.
+
+**Deliberately not done.** Persisting the discovered version across restarts — each process pays one 23-byte GET, which is cheaper than coordinating shared state. And Mulder's point that a Chrome UA over an aiohttp TLS fingerprint is a UA/JA3 mismatch that could *raise* Cloudflare's bot score on the API path: the browser UA was an explicit instruction and it verifies working from the deployment host, but it's the first thing to revisit if Monarch sync starts getting challenged.
+
+**Files added/modified:**
+- `src/istota/money/_vendor/monarch_client.py` - manifest-backed version resolution (`fetch_live_client_version`, `_resolve_client_version`), pre-fetch + single retry, per-transport client names, browser UA, header-size ceiling on all three sessions, `_safe_json` non-object guard
+- `src/istota/web_app.py` - route docstring now names all three conditions behind its 503
+- `scripts/probe_monarch_login.py` - reports the live version, and handles the outdated/CAPTCHA cases instead of tracebacking on the one failure mode it exists to diagnose
+- `tests/money/test_monarch_client.py` - 40 → 53 tests; strict response queue so an over-consuming regression fails instead of replaying
+- `CHANGELOG.md`
+
 ## 2026-07-30: Reviewing the ntfy header fix against the real receiver, then giving push notifications formatting
 
 Two halves: verifying yesterday's ISSUE-213 fix against something other than its own tests, and adding the markdown capability the transport never had.

@@ -824,8 +824,8 @@ class TestOutdatedClientRecovery:
     @pytest.mark.asyncio
     async def test_captcha_required_distinguished(self, monkeypatch):
         """Monarch's bot-protection gate: 429 with error_code CAPTCHA_REQUIRED.
-        Verified live 2026-05-15 against alice@example.com after the account
-        was flagged. Once tripped, programmatic login is permanently dead for
+        Verified live 2026-05-15 against a real account after it was
+        flagged. Once tripped, programmatic login is permanently dead for
         that (account, IP) pair — UI must route the user to cookie-paste.
         """
         _install_fake_session(
