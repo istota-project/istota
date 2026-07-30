@@ -25,6 +25,13 @@
      * belonging to it.
      */
     align?: 'start' | 'center' | 'end';
+    /**
+     * Height class, matching `Button`'s. `sm` is the default because the
+     * trigger's own metrics already landed there — it sits in dense toolbars
+     * beside `Chip`s. Pass `md` when it shares a row with a default `Button`,
+     * or the two are ~2.6px apart.
+     */
+    size?: 'sm' | 'md';
   }
 
   let {
@@ -36,6 +43,7 @@
     ariaLabel,
     fullWidth = false,
     align = 'start',
+    size = 'sm',
   }: Props = $props();
 
   const selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? placeholder);
@@ -43,7 +51,7 @@
 
 <BitsSelect.Root type="single" bind:value {onValueChange} {disabled}>
   <BitsSelect.Trigger
-    class={fullWidth ? 'ui-select-trigger ui-select-trigger--full' : 'ui-select-trigger'}
+    class="ui-select-trigger ui-select-trigger--{size}{fullWidth ? ' ui-select-trigger--full' : ''}"
     aria-label={ariaLabel}
   >
     <span class="ui-select-label">{selectedLabel}</span>
@@ -87,6 +95,14 @@
     max-width: 100%;
     min-width: 0;
     box-sizing: border-box;
+  }
+
+  :global(.ui-select-trigger--sm) {
+    min-height: var(--control-height-sm);
+  }
+  :global(.ui-select-trigger--md) {
+    min-height: var(--control-height-md);
+    font-size: var(--text-sm);
   }
   :global(.ui-select-trigger:hover) {
     background: var(--surface-raised);

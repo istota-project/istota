@@ -383,6 +383,7 @@
         placeholder={linkOptions.length ? 'Link an existing condition…' : 'No conditions to link'}
         disabled={linking || linkOptions.length === 0}
         ariaLabel="Link an existing condition"
+        size="md"
       />
       <Button
         onclick={linkCondition}

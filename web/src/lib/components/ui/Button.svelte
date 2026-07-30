@@ -112,10 +112,12 @@
   }
 
   .btn-sm {
+    min-height: var(--control-height-sm);
     padding: 0.15rem var(--space-2);
     font-size: var(--text-xs);
   }
   .btn-md {
+    min-height: var(--control-height-md);
     padding: var(--space-1) var(--space-2);
   }
 

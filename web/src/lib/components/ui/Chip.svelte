@@ -19,6 +19,7 @@
 <style>
   .chip {
     display: inline-flex;
+    min-height: var(--control-height-sm);
     align-items: center;
     padding: 0.15rem var(--chip-padding-x);
     border: none;

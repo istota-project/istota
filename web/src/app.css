@@ -166,6 +166,20 @@
   --space-6: 1.5rem;
   --space-8: 2rem;
 
+  /* Inline control heights. Button, Chip and the Select trigger each computed
+	   their own box out of a font size, a padding and (for Select) a border, and
+	   landed on four different answers — so a Select beside a Button in a form
+	   row sat ~2.6px short, by an amount that *changed with the text-scale
+	   preference*, since everything but the border is in rem.
+
+	   A min-height rather than a fixed height: the content still sets the box
+	   when it is taller (a wrapped option label), and every one of these
+	   controls is an inline-flex with align-items:center, so the content
+	   centres in the guaranteed box. Set both on any new control that shares a
+	   row with these. */
+  --control-height-sm: 1.2rem;
+  --control-height-md: 1.4rem;
+
   /* Chip / pill horizontal padding — referenced by Chip + NavLink so a parent
 	   container can use `margin-inline-start: calc(-1 * var(--chip-padding-x))`
 	   to make the chip *text* align with surrounding content. */

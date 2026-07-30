@@ -73,6 +73,30 @@ describe('theme parity', () => {
   });
 });
 
+describe('control heights', () => {
+  // Button, Chip and the Select trigger each computed their own box out of a
+  // font size, a padding and (for Select) a border, and landed on four
+  // different answers — so a Select beside a Button sat ~2.6px short, by an
+  // amount that changed with the text-scale preference, since everything but
+  // the border is in rem.
+  it('defines both steps', () => {
+    expect(dark['--control-height-sm']).toBeDefined();
+    expect(dark['--control-height-md']).toBeDefined();
+  });
+
+  it('orders sm below md', () => {
+    const rem = (v: string) => Number(v.replace('rem', ''));
+    expect(rem(dark['--control-height-sm'])).toBeLessThan(rem(dark['--control-height-md']));
+  });
+
+  it('is in rem, so a control tracks the text-scale preference', () => {
+    // px here would reintroduce the original bug in the other direction: the
+    // box would stay put while the type inside it grew.
+    expect(dark['--control-height-sm']).toMatch(/rem$/);
+    expect(dark['--control-height-md']).toMatch(/rem$/);
+  });
+});
+
 describe('z-index scale', () => {
   const z = (name: string) => {
     const raw = dark[name];

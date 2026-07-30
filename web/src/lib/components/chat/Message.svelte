@@ -371,7 +371,7 @@
     gap: var(--chat-avatar-gap);
     /* Extra bottom padding so the hover highlight isn't flush with the last
 		   line of text. */
-    padding: 0.1rem var(--chat-row-inline) 0.45rem;
+    padding: 0.1rem var(--chat-row-inline) var(--space-2);
     align-items: flex-start;
     /* Anchor for the absolutely-positioned .meta-footer (top-right). */
     position: relative;
@@ -747,9 +747,11 @@
   }
   /* A tool-first turn opens with a chip directly under the author header. Flush
 	   reads cramped against the header, a full paragraph gap reads detached — so
-	   it gets half the neighbour gap. */
+	   it gets half the neighbour gap. Derived rather than written out: it was
+	   0.425rem, half of the 0.85rem `gap-below` used to be, and that half went
+	   stale the moment the neighbour moved onto the scale. */
   .meta + .chip-slot {
-    margin-top: 0.425rem;
+    margin-top: calc(var(--space-3) / 2);
   }
 
   .msg.error .body,
