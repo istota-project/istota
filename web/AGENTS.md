@@ -10,7 +10,7 @@ Root `AGENTS.md` ("Web UI" section) carries the _rationale_ — why `HintPopover
 2. `grep -n '^\s*--' src/app.css` — the token roster. Every color you write must be an existing token, or a new token pair added to **both** theme blocks in `app.css`.
 3. `ls src/lib/platform/` — the native-shell facade. Anything that behaves differently inside the iOS app goes through it and nowhere else.
 4. Find the nearest sibling page and read it. A new money page copies `routes/money/transactions`; a new module settings page copies `routes/feeds/settings`. Match its structure before inventing one.
-5. `npm run lint:design` before you commit. It fails on new hardcoded colors and new per-page theme overrides.
+5. `npm run lint:design` before you commit. It fails on a new color literal in any notation, a `var()` naming a token nothing defines, a spacing value off the scale, a redefined primitive class, a per-page theme override, a `window.confirm`, and a deep import.
 6. `npm run format` — prettier, 2-space, single quotes, 100 cols. Never tabs.
 
 ## Component inventory
@@ -99,7 +99,8 @@ Still their own buttons, because they are per-record forms rather than the page'
 Every recurring meaning-bearing color is a token in `src/app.css`, defined in **both** the `:root` and `:root[data-theme='light']` blocks. Four roles:
 
 - `--status-{danger,warn,success,info}-{fg,bg}` — severity. `-fg` for a bare status label, `-bg` for a filled chip's fill (pairs with the same `-fg`). Errors, warnings, status chips, badges, danger buttons, delete links.
-- `--accent-blue` — the _interactive_ blue: primary buttons, active tabs, focus rings, in-app cross-references. Distinct from `--status-info-fg`, which marks a severity rather than something actionable.
+- `--accent` — the primary-action fill. `Button`'s `primary` variant is filled with it, and that is normative: health carried a second `.btn` system that outlined `primary` in `--accent-blue` instead, and the two could not both be right.
+- `--accent-blue` — the _interactive_ blue: active tabs, focus rings, in-app cross-references. Distinct from `--status-info-fg`, which marks a severity rather than something actionable. Not primary buttons — see `--accent` above.
 - `--accent-amber` — the bot's identity accent, and the "starred" color. `--accent-amber-fill{,-hover,-fg}` is its filled-button form.
 - `--status-dot-{ok,bad,warn,info}` — the admin dashboard's live-status dots. Off the `-fg` tint scale on purpose, and one value in both themes: a dot carries no text, so it needs saturation a tint cannot give it, and a theme-tracking dot reads as two states rather than one. (`--status-dot-info` is declared with no consumer yet.)
 - `--link` — content links, and the single decision point for them. A surface joins by putting `prose` on its container, **not** by writing a local `a` rule; chat, the briefings reader and the feeds reader each had their own before, so briefing links were not visibly links and feed links were grey and permanently underlined. Hover is the underline only — the color already marks the link, and moving both reads as a state change.
@@ -107,7 +108,13 @@ Every recurring meaning-bearing color is a token in `src/app.css`, defined in **
 
 `--status-critical-{bg,fg}` is a fifth severity above danger, for a value that is not merely out of range but clinically critical (the bloodwork `flag-C` cell). Unlike the four above it, it is a solid saturated fill rather than a tint, so its `-fg` is the text laid _on_ `-bg`.
 
-Supporting scales: `--surface-{base,card,raised,badge,overlay,reading}`, `--text-{primary,secondary,muted,dim,reading}`, `--border-{default,subtle,hover}`, `--radius-{card,pill}`, `--text-{2xs,xs,sm,base}`.
+Supporting scales: `--surface-{base,card,raised,badge,overlay,reading}`, `--text-{primary,secondary,muted,dim,reading}`, `--border-{default,subtle,hover}`, `--text-{2xs,xs,sm,base,lg,xl}`, `--font-{sans,mono}`, `--shadow-{overlay,md,lg}`.
+
+**Spacing** is `--space-{1,2,3,4,6,8}` — a 4px ramp (0.25 / 0.5 / 0.75 / 1 / 1.5 / 2rem) in `rem`, so it tracks the text-scale preference. Use a step; the `off-scale-space` rule flags a raw `rem` in a spacing property. Values below `--space-1` are off the ramp on purpose (hairline nudges, icon gaps) and are baselined rather than rounded. `px` is right for a border, `em` for something sized against its own control.
+
+**Radius** is `--radius-{sm,md,pill}`, with `--radius-card` as the semantic alias for `md`. **Stacking** is `--z-{sticky,drawer-backdrop,drawer,notice,modal,modal-panel,viewer,viewer-control,lightbox,popover,toast}` — one hard constraint, asserted in `lib/styles/tokens.test.ts`: `--z-popover` must clear `--z-modal-panel`, because a `Select` inside a `Modal` portals alongside it. A small integer inside a component's own stacking context (a sticky table corner) is not on this scale and should not be.
+
+**Focus** is one global `:focus-visible` rule in `app.css`, in `--focus-ring-color` at `--focus-ring-width`. Do not add a per-component ring. If a control genuinely needs the outline suppressed — a text input inside a wrapper that carries `:focus-within` — say why in a comment, because three suppressions had nothing standing in for them.
 
 Not colors, but declared alongside them and read the same way: `--font-sans`, `--transition-fast`, `--chip-{padding-x,gap}`, `--chat-{row-inline,gutter,avatar,avatar-gap}`, `--sigil-filter` (tints the octopus mark per theme), and the geometry tokens `--safe-{top,bottom,left,right}` / `--app-height` / `--kb-height`. The last three groups are written by code, not by a stylesheet — see "Platform and the native shell".
 
@@ -162,6 +169,8 @@ The one exception is `routes/+error.svelte`, which renders no `AppShell` — an 
 
 **Loading and empty states** use `.center-msg`, the one shared whole-pane status message, and the page holds its chrome back behind the load so the message centres on the pane rather than under a half-drawn header. The older `.loading` / `.error-msg` pair survives only for a line inside a card.
 
+**Health page**: the module's shell is defined once as globals in `routes/health/+layout.svelte` — `.card`, `.banner` spacing, `.table-scroll`, `table.grid` (`--dense` for an input-bearing table). A page styles only its own columns. Health has no `.btn`, `.msg` or `.badge` of its own; use `Button`, `.banner` and `Badge`.
+
 **Money list page**: the record-table shell is defined once as globals in `routes/money/+layout.svelte` — `.money-toolbar`, `.money-notice-bar`, `.money-table`, `.money-table-header`, `.money-table-row`, `.money-sortable`, `.money-status`, `.money-amount`, `.money-kebab-spacer`, `.money-table-empty`, `.money-control-input`, `.money-result-count`, `.money-sort-arrow`. A page styles only its own columns (widths, alignment) and inherits everything else. The shell fixes the inline edge at `0.75rem` for every element on the page; do not set your own.
 
 ## Platform and the native shell
@@ -201,13 +210,15 @@ A new build is surfaced, not forced: the root layout watches SvelteKit's `update
 ## Checks
 
 ```bash
-npm run lint:design    # hardcoded colors + per-page theme overrides
+npm run lint:design    # colors, tokens, spacing scale, redefined primitives
 npm run check          # svelte-check
 npm run test           # vitest
 npm run format         # prettier (run before committing)
 ```
 
-`lint:design` compares against `scripts/design-lint-baseline.json`, which records permitted violations per file. **The baseline is currently empty — the tree is clean.** Keep it that way: fix the violation, or mark it with an allow comment and a reason. Adding a baseline entry is the last resort and needs one too.
+`lint:design` compares against `scripts/design-lint-baseline.json`, which records permitted violations per file. **The baseline is not empty**, and what is in it is deliberate: the sub-`--space-1` spacing band, a handful of categorical palettes, and the icon-button and form-field forks that have not been converged yet. It is a list of known exceptions, not a licence — fix the violation, or mark it with an allow comment and a reason. Adding a baseline entry is the last resort and needs one too.
+
+The rules themselves are tested (`scripts/design-lint.test.ts`). A lint whose regex quietly stops matching reports a clean tree, which is exactly what happened while 87 color literals in `rgba()`/`hsla()` notation sat in the source — and while an `accept="image/*"` attribute opened a block comment that never closed, exempting four whole files from every rule.
 
 `npm run lint:design -- --list [rule]` dumps every violation regardless of baseline — the triage view. `-- --update-baseline` regenerates.
 

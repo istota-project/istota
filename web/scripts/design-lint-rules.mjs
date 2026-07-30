@@ -85,6 +85,34 @@ function undefinedTokensOn(line, ctx, wantFallback) {
   return names.length ? names : null;
 }
 
+// Spacing off the 4px ramp. The tree had 33 distinct rem values across 1,218
+// spacing declarations before the scale existed, roughly half on no ramp at
+// all — which is how the same gap ended up written as 0.3, 0.35 and 0.4rem on
+// three pages that meant the same thing.
+//
+// Only rem is checked. px is correct for a border or a hairline nudge, em is
+// relative to the control it sits on, and % / vh / dvh are layout rather than
+// spacing. A value inside calc()/clamp()/min()/max() is skipped: it is
+// arithmetic, and the operands are not independently meaningful.
+const SPACE_PROPS =
+  '(?:padding|margin|gap|row-gap|column-gap|inset)' +
+  '(?:-(?:top|right|bottom|left|inline|block)(?:-(?:start|end))?)?';
+const SPACE_DECL = new RegExp(`^\\s*${SPACE_PROPS}\\s*:\\s*([^;]+);`);
+const SPACE_VALUE = /(?<![\w.-])(\d*\.?\d+)rem(?![\w-])/g;
+const SPACE_FN = /(?:calc|clamp|min|max)\(/;
+const SPACE_SCALE = new Set(['0.25', '0.5', '0.75', '1', '1.5', '2']);
+
+function offScaleSpacing(line) {
+  const decl = SPACE_DECL.exec(line);
+  if (!decl || SPACE_FN.test(decl[1])) return null;
+  const found = [];
+  for (const [, raw] of decl[1].matchAll(SPACE_VALUE)) {
+    const value = raw.includes('.') ? raw.replace(/0+$/, '').replace(/\.$/, '') : raw;
+    if (!SPACE_SCALE.has(value)) found.push(`${raw}rem`);
+  }
+  return found.length ? found : null;
+}
+
 // A page redefining a primitive's class name is how health ended up with a
 // second .btn system that inverted what `primary` meant — filled in one, an
 // outlined blue in the other — and with .btn.danger rendering red on three
@@ -137,6 +165,12 @@ export const RULES = [
       'src/lib/styles/settings.css',
     ],
     hint: 'this class belongs to a ui/ primitive — use the component instead',
+  },
+  {
+    id: 'off-scale-space',
+    match: (line) => offScaleSpacing(line),
+    exempt: ['src/app.css'],
+    hint: 'use a --space-* token, or mark the exception with a reason',
   },
   {
     id: 'undefined-token',

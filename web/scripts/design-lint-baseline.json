@@ -1,18 +1,49 @@
 {
   "src/lib/components/briefings/SourceConfigFields.svelte": {
+    "off-scale-space": 5,
     "redefined-primitive": 2
   },
+  "src/lib/components/chat/ActivityTrace.svelte": {
+    "off-scale-space": 2
+  },
   "src/lib/components/chat/Composer.svelte": {
-    "redefined-primitive": 8
+    "redefined-primitive": 8,
+    "off-scale-space": 2
+  },
+  "src/lib/components/chat/Message.svelte": {
+    "off-scale-space": 9
   },
   "src/lib/components/chat/RoomSettings.svelte": {
-    "redefined-primitive": 3
+    "redefined-primitive": 3,
+    "off-scale-space": 2
+  },
+  "src/lib/components/chat/SearchResults.svelte": {
+    "off-scale-space": 2
   },
   "src/lib/components/FeedReader.svelte": {
-    "redefined-primitive": 3
+    "redefined-primitive": 3,
+    "off-scale-space": 5
+  },
+  "src/lib/components/health/DocumentCard.svelte": {
+    "off-scale-space": 1
   },
   "src/lib/components/location/PlaceForm.svelte": {
     "redefined-primitive": 5
+  },
+  "src/lib/components/location/StopTimeline.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/location/TripList.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/money/ClientForm.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/money/EntityForm.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/money/ServiceForm.svelte": {
+    "off-scale-space": 1
   },
   "src/lib/components/money/TransactionForm.svelte": {
     "redefined-primitive": 3
@@ -20,36 +51,154 @@
   "src/lib/components/money/WorkEntryForm.svelte": {
     "redefined-primitive": 3
   },
+  "src/lib/components/settings/SecretField.svelte": {
+    "off-scale-space": 2
+  },
+  "src/lib/components/ui/Badge.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/ui/Button.svelte": {
+    "off-scale-space": 2
+  },
+  "src/lib/components/ui/CategoryGroup.svelte": {
+    "off-scale-space": 5
+  },
+  "src/lib/components/ui/Chip.svelte": {
+    "off-scale-space": 2
+  },
+  "src/lib/components/ui/ConfirmDialog.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/ui/Field.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/ui/HeaderNav.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/ui/IconButton.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/ui/KebabMenu.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/ui/NavLink.svelte": {
+    "off-scale-space": 1
+  },
+  "src/lib/components/ui/NoticeDrawer.svelte": {
+    "off-scale-space": 2
+  },
+  "src/lib/components/ui/Select.svelte": {
+    "off-scale-space": 2
+  },
+  "src/lib/styles/settings.css": {
+    "off-scale-space": 5
+  },
+  "src/lib/styles/sidebar.css": {
+    "off-scale-space": 2
+  },
+  "src/routes/+error.svelte": {
+    "off-scale-space": 2
+  },
+  "src/routes/+page.svelte": {
+    "off-scale-space": 2
+  },
   "src/routes/admin/+page.svelte": {
+    "off-scale-space": 11,
     "redefined-primitive": 1,
     "raw-color": 1
   },
+  "src/routes/briefings/+layout.svelte": {
+    "off-scale-space": 1
+  },
+  "src/routes/briefings/+page.svelte": {
+    "off-scale-space": 1
+  },
+  "src/routes/briefings/settings/+page.svelte": {
+    "off-scale-space": 7
+  },
+  "src/routes/chat/+page.svelte": {
+    "off-scale-space": 2
+  },
+  "src/routes/feeds/+page.svelte": {
+    "off-scale-space": 4
+  },
   "src/routes/feeds/settings/+page.svelte": {
+    "off-scale-space": 5,
     "raw-color": 1
   },
   "src/routes/health/bloodwork/+page.svelte": {
-    "raw-color": 3
+    "raw-color": 3,
+    "off-scale-space": 2
   },
   "src/routes/health/bloodwork/marker/+page.svelte": {
+    "off-scale-space": 8,
     "raw-color": 8
   },
   "src/routes/health/bloodwork/panel/+page.svelte": {
+    "off-scale-space": 1,
     "raw-color": 1
   },
+  "src/routes/health/bloodwork/upload/+page.svelte": {
+    "off-scale-space": 1
+  },
   "src/routes/health/history/+page.svelte": {
+    "off-scale-space": 9,
     "redefined-primitive": 2,
     "raw-color": 4
   },
   "src/routes/health/history/diagnoses/+page.svelte": {
+    "off-scale-space": 8,
     "raw-color": 3
+  },
+  "src/routes/health/history/encounter/+page.svelte": {
+    "off-scale-space": 4
   },
   "src/routes/health/history/import/+page.svelte": {
     "raw-color": 1
   },
+  "src/routes/health/immunizations/+page.svelte": {
+    "off-scale-space": 2
+  },
+  "src/routes/health/immunizations/detail/+page.svelte": {
+    "off-scale-space": 1
+  },
   "src/routes/health/immunizations/import/+page.svelte": {
     "raw-color": 1
   },
+  "src/routes/health/immunizations/vaccine/+page.svelte": {
+    "off-scale-space": 3
+  },
   "src/routes/health/stats/+page.svelte": {
-    "raw-color": 1
+    "off-scale-space": 1
+  },
+  "src/routes/location/+layout.svelte": {
+    "off-scale-space": 3
+  },
+  "src/routes/location/history/+page.svelte": {
+    "off-scale-space": 1
+  },
+  "src/routes/money/+layout.svelte": {
+    "off-scale-space": 9
+  },
+  "src/routes/money/business/invoices/+page.svelte": {
+    "off-scale-space": 3
+  },
+  "src/routes/money/business/work/+page.svelte": {
+    "off-scale-space": 1
+  },
+  "src/routes/money/settings/+page.svelte": {
+    "off-scale-space": 3
+  },
+  "src/routes/money/taxes/+page.svelte": {
+    "off-scale-space": 5
+  },
+  "src/routes/money/transactions/+layout.svelte": {
+    "off-scale-space": 4
+  },
+  "src/routes/money/transactions/+page.svelte": {
+    "off-scale-space": 3
+  },
+  "src/routes/settings/+page.svelte": {
+    "off-scale-space": 1
   }
 }

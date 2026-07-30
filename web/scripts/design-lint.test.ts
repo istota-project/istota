@@ -257,6 +257,92 @@ ${styled('color: #abc;')}`;
   });
 });
 
+describe('off-scale-space', () => {
+  it.each(['0.3rem', '0.35rem', '0.6rem', '0.9rem'])('flags %s', (value) => {
+    expect(rules(styled(`padding: ${value};`))).toContain('off-scale-space');
+  });
+
+  it.each(['0.25rem', '0.5rem', '0.75rem', '1rem', '1.5rem', '2rem'])(
+    'allows %s, which is on the ramp',
+    (value) => {
+      expect(rules(styled(`padding: ${value};`))).not.toContain('off-scale-space');
+    },
+  );
+
+  it('allows a token', () => {
+    expect(rules(styled('gap: var(--space-2);'))).not.toContain('off-scale-space');
+  });
+
+  it('checks every value in a shorthand', () => {
+    const found = lint(styled('padding: 0.3rem 0.5rem 0.9rem 1rem;')).filter(
+      (v) => v.rule === 'off-scale-space',
+    );
+    expect(found).toHaveLength(2);
+  });
+
+  it.each([
+    ['px, which is right for a border', 'padding: 3px;'],
+    ['em, which is relative to its own control', 'padding: 0.4em;'],
+    ['percentages, which are layout', 'margin: 10%;'],
+    ['arithmetic, whose operands are not independently meaningful', 'padding: calc(1rem - 2px);'],
+    ['a clamp', 'gap: clamp(0.3rem, 2vw, 1rem);'],
+  ])('allows %s', (_label, decl) => {
+    expect(rules(styled(decl))).not.toContain('off-scale-space');
+  });
+
+  it('ignores non-spacing properties', () => {
+    // A type size or a radius is not on this ramp and has its own tokens.
+    expect(rules(styled('font-size: 0.85rem;', 'width: 3.5rem;'))).not.toContain('off-scale-space');
+  });
+
+  it('does not lint app.css, which defines the ramp', () => {
+    expect(rules(styled('padding: 0.3rem;'), 'src/app.css')).toHaveLength(0);
+  });
+});
+
+describe('redefined-primitive', () => {
+  it.each(['.btn', '.badge', '.icon-btn', '.field', '.chip'])('flags %s', (cls) => {
+    expect(rules(`<style>\n  ${cls} {\n    color: red;\n  }\n</style>`)).toContain(
+      'redefined-primitive',
+    );
+  });
+
+  it('flags a modifier on a primitive class', () => {
+    expect(rules('<style>\n  .btn.danger {\n    color: red;\n  }\n</style>')).toContain(
+      'redefined-primitive',
+    );
+  });
+
+  it('flags a :global() escape of one', () => {
+    expect(
+      rules('<style>\n  :global(.field.full) {\n    grid-column: 1;\n  }\n</style>'),
+    ).toContain('redefined-primitive');
+  });
+
+  it('allows the component that owns the class', () => {
+    expect(
+      rules(
+        '<style>\n  .btn {\n    color: red;\n  }\n</style>',
+        'src/lib/components/ui/Button.svelte',
+      ),
+    ).not.toContain('redefined-primitive');
+  });
+
+  it('allows a descendant-scoped placement rule', () => {
+    // `.form :global(.field.full)` places an instance inside one page; it does
+    // not redefine the primitive, and it cannot leak out of that page.
+    expect(
+      rules('<style>\n  .form :global(.field.full) {\n    grid-column: 1;\n  }\n</style>'),
+    ).not.toContain('redefined-primitive');
+  });
+
+  it('allows an unrelated class that merely starts the same way', () => {
+    expect(rules('<style>\n  .btn-group {\n    display: flex;\n  }\n</style>')).not.toContain(
+      'redefined-primitive',
+    );
+  });
+});
+
 describe('stray-money-global', () => {
   it('flags a money shell class defined outside the money layout', () => {
     expect(rules(':global(.money-table-row) { padding: 0; }')).toContain('stray-money-global');
