@@ -14,13 +14,41 @@
     error?: string;
     wide?: boolean;
     checkbox?: boolean;
+    /**
+     * Render as a `<div>` rather than a `<label>`.
+     *
+     * Required whenever the slot holds a **button**. A `<button>` is a
+     * labelable element, so inside a `<label>` it becomes the label's implicit
+     * control and clicking the field's caption activates it — which for a
+     * Stop button means the caption stops the thing. `HintPopover` dodges the
+     * same hazard by rendering its trigger as `<span role="button">`, but that
+     * only protects the "?" and not whatever the caller passes in.
+     *
+     * A `<label>` is still right, and still the default, for the ordinary case
+     * of one input: clicking the caption should focus it.
+     */
+    labelled?: boolean;
     children: Snippet;
   }
 
-  let { label, hint, warning, error, wide = false, checkbox = false, children }: Props = $props();
+  let {
+    label,
+    hint,
+    warning,
+    error,
+    wide = false,
+    checkbox = false,
+    labelled = true,
+    children,
+  }: Props = $props();
 </script>
 
-<label class="field" class:field-wide={wide} class:checkbox>
+<svelte:element
+  this={labelled ? 'label' : 'div'}
+  class="field"
+  class:field-wide={wide}
+  class:checkbox
+>
   {#if checkbox}
     {@render children()}
     <span class="field-label">{label}<HintPopover text={hint} label="About {label}" /></span>
@@ -30,7 +58,7 @@
   {/if}
   {#if warning}<small class="field-warning">{warning}</small>{/if}
   {#if error}<small class="field-error">{error}</small>{/if}
-</label>
+</svelte:element>
 
 <style>
   .field {

@@ -129,6 +129,130 @@ describe('permission states', () => {
     await settle();
     expect(tracker.requestPermissions).toHaveBeenCalled();
   });
+
+  it('keeps Stop reachable when the permission was downgraded mid-run', async () => {
+    // The permission prompt used to *replace* the toggle, so a user whose
+    // authorization dropped to While Using could not stop the tracker at all.
+    const { tracker } = installShell({ authorization: 'whenInUse', tracking: true });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText('Allow always')).toBeTruthy();
+    await fireEvent.click(screen.getByText('Stop'));
+    await settle();
+    expect(tracker.stop).toHaveBeenCalled();
+  });
+
+  it('offers Start alongside the prompt when permission was never asked for', async () => {
+    installShell({ authorization: 'notDetermined', tracking: false });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText('Allow location')).toBeTruthy();
+    expect(screen.getByText('Start')).toBeTruthy();
+  });
+});
+
+describe('the caption is not a control', () => {
+  it('clicking the word "Tracking" does not stop the tracker', async () => {
+    // SettingsField wraps its label text and its slot in one <label>, and a
+    // <button> is a labelable element — so without `labelled={false}` the
+    // caption becomes the Stop button's trigger and stops background
+    // location tracking on a click that looks inert.
+    const { tracker } = installShell({ tracking: true });
+    render(DeviceTrackerCard);
+    await settle();
+    await fireEvent.click(screen.getByText('Tracking'));
+    await settle();
+    expect(tracker.stop).not.toHaveBeenCalled();
+  });
+
+  it('clicking the word "Profile" does not change the profile', async () => {
+    const { tracker } = installShell({ tracking: true });
+    render(DeviceTrackerCard);
+    await settle();
+    await fireEvent.click(screen.getByText('Profile'));
+    await settle();
+    expect(tracker.start).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The bits-ui Select cannot be opened under jsdom — it needs pointer-capture
+ * APIs jsdom does not implement, and stubbing them is not enough to make the
+ * popover mount. So the switch itself is not driven here. What is asserted is
+ * everything the DOM does expose about the policy behind it: that a stopped
+ * tracker says the choice is deferred, and that Start carries a profile.
+ */
+describe('the profile picker', () => {
+  it('says the choice is deferred while tracking is off', async () => {
+    // `start` is the plugin's only way to set a profile and it also arms the
+    // tracker, so applying the choice on selection would begin recording for
+    // someone who had deliberately stopped. The card holds it instead.
+    installShell({ tracking: false, profile: 'detailed' });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText(/applies when you start tracking/i)).toBeTruthy();
+  });
+
+  it('says nothing of the sort while tracking, where a switch is immediate', async () => {
+    installShell({ tracking: true, profile: 'detailed' });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.queryByText(/applies when you start tracking/i)).toBeNull();
+  });
+
+  it('carries a profile into Start rather than leaving it to the plugin default', async () => {
+    const { tracker } = installShell({ tracking: false, profile: 'places' });
+    render(DeviceTrackerCard);
+    await settle();
+    await fireEvent.click(screen.getByText('Start'));
+    await settle();
+    expect(tracker.start).toHaveBeenCalledWith({ profile: 'places' });
+  });
+});
+
+describe('failure handling', () => {
+  it('shows a refusal and falls back to what the device actually has', async () => {
+    // A rejected action leaves the tracker as it was, so the readout has to go
+    // back to the device rather than keep showing what was asked for.
+    const { tracker } = installShell({ tracking: true });
+    tracker.stop.mockRejectedValue(new Error('location authorization is required'));
+    render(DeviceTrackerCard);
+    await settle();
+    await fireEvent.click(screen.getByText('Stop'));
+    await settle();
+    expect(screen.getByText(/location authorization is required/i)).toBeTruthy();
+    // Once on mount, once re-reading the device after the refusal.
+    expect(tracker.status).toHaveBeenCalledTimes(2);
+  });
+
+  it('surfaces a dropped-point count and the last error, which are the alarm', async () => {
+    installShell({ droppedPoints: 3, lastError: 'The request timed out.' });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.getByText('Dropped')).toBeTruthy();
+    expect(screen.getByText('3')).toBeTruthy();
+    expect(screen.getByText('The request timed out.')).toBeTruthy();
+  });
+
+  it('hides both rows when there is nothing wrong', async () => {
+    installShell();
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.queryByText('Dropped')).toBeNull();
+    expect(screen.queryByText('Last error')).toBeNull();
+  });
+
+  it('does not let a stale success outlive the action it described', async () => {
+    const { tracker } = installShell();
+    render(DeviceTrackerCard);
+    await settle();
+    await fireEvent.click(screen.getByText('Send now'));
+    await settle();
+    expect(screen.getByText(/sent 12 points/i)).toBeTruthy();
+    await fireEvent.click(screen.getByText('Refresh'));
+    await settle();
+    expect(screen.queryByText(/sent 12 points/i)).toBeNull();
+  });
 });
 
 describe('provisioning', () => {

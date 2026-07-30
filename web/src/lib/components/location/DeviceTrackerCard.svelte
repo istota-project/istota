@@ -29,11 +29,25 @@
     type TrackerStatus,
     type TrackingProfile,
   } from '$lib/platform/nativeLocation';
+  import { hostOf } from '$lib/location/provisioning';
 
   let status: TrackerStatus | null = $state(null);
   let busy = $state(false);
   let error = $state('');
   let note = $state('');
+
+  /**
+   * The profile the picker is showing.
+   *
+   * Held here rather than read straight off `status` for two reasons. While
+   * tracking is *off* the choice has nowhere to live on the device — the
+   * plugin's only way to set a profile is `start`, which also arms the
+   * tracker, so applying it on selection would turn tracking on for someone
+   * who had deliberately stopped it. And when a switch is refused (the plugin
+   * rejects unless location is authorized) the picker must fall back to what
+   * the device actually has, which it cannot do while bound to the child.
+   */
+  let profileChoice: TrackingProfile = $state('detailed');
 
   const available = trackerAvailable();
   const canScan = scannerAvailable();
@@ -56,14 +70,33 @@
   async function run(action: () => Promise<TrackerStatus | null | void>) {
     busy = true;
     error = '';
+    // Cleared here rather than at the call sites, so a "Sent 12 points."
+    // cannot outlive the queue it was counting and go on making a claim that
+    // a Refresh or a Stop has since made false.
+    note = '';
     try {
       const result = await action();
-      status = result ?? (await trackerStatus());
+      adopt(result ?? (await trackerStatus()));
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+      // A refused action leaves the device as it was, so the card has to go
+      // back to the device rather than keep showing what was asked for — a
+      // rejected profile switch would otherwise leave the picker displaying a
+      // profile the tracker is not running.
+      try {
+        adopt(await trackerStatus());
+      } catch {
+        // The readout is already carrying an error; a failure to re-read it
+        // is not a second thing to tell the user about.
+      }
     } finally {
       busy = false;
     }
+  }
+
+  function adopt(next: TrackerStatus | null) {
+    status = next;
+    if (next) profileChoice = next.profile;
   }
 
   async function refresh() {
@@ -71,29 +104,44 @@
   }
 
   async function scan() {
-    note = '';
     await run(async () => {
       const result = await scanAndDecode();
       if (!result.ok) {
-        // A cancel is a decision, not a failure — say nothing about it.
+        // A cancel is a decision, not a failure — say nothing about it. The
+        // other two are worth reporting, and differently: one is the wrong
+        // code, the other is an app that cannot scan at all.
         if (result.reason === 'unrecognised') {
           error = 'That code is not an Istota provisioning code.';
+        } else if (result.reason === 'unavailable') {
+          error = 'This app cannot scan a code. Update it from TestFlight.';
         }
         return null;
       }
       await configureTracker(result.provisioning);
-      note = `Provisioned against ${result.provisioning.endpoint}.`;
+      note = `Provisioned against ${hostOf(result.provisioning.endpoint)}.`;
       return null;
     });
   }
 
   async function flush() {
-    note = '';
     await run(async () => {
       const sent = await sendNow();
       note = sent === 0 ? 'Nothing queued to send.' : `Sent ${sent} point${sent === 1 ? '' : 's'}.`;
       return null;
     });
+  }
+
+  /**
+   * Apply a profile choice.
+   *
+   * While tracking, `start` re-arms in place so the switch costs no gap in
+   * coverage. While stopped it would *begin* tracking, so the choice is only
+   * remembered and travels with the next Start.
+   */
+  async function chooseProfile(next: TrackingProfile) {
+    profileChoice = next;
+    if (!status?.tracking) return;
+    await run(() => startTracking(next));
   }
 
   /**
@@ -170,44 +218,69 @@
         </p>
       {/if}
     {:else}
-      <SettingsField label="Tracking" warning={authorizationWarning}>
+      <!-- labelled={false} because this slot holds buttons: inside a <label>
+           a <button> becomes the label's implicit control, and clicking the
+           caption "Tracking" would stop the tracker. -->
+      <SettingsField label="Tracking" warning={authorizationWarning} labelled={false}>
         <div class="tracker-row">
           <span class="tracker-state" class:on={status.tracking}>
             {status.tracking ? 'On' : 'Off'}
           </span>
+          <!-- Start/Stop is present in every state a user can act on. Only a
+               denied authorization replaces it, because there the tracker
+               cannot run at all until Settings says otherwise; a downgrade to
+               While Using still has to be stoppable from here. -->
           {#if status.authorization === 'denied'}
-            <Button variant="secondary" size="sm" onclick={() => run(openAppSettings)}>
-              Open iOS Settings
-            </Button>
-          {:else if status.authorization !== 'always'}
-            <Button variant="secondary" size="sm" onclick={askPermission} disabled={busy}>
-              {status.authorization === 'whenInUse' ? 'Allow always' : 'Allow location'}
-            </Button>
-          {:else if status.tracking}
-            <Button variant="secondary" size="sm" onclick={() => run(stopTracking)} disabled={busy}>
-              Stop
-            </Button>
-          {:else}
             <Button
-              variant="primary"
+              variant="secondary"
               size="sm"
-              onclick={() => run(() => startTracking())}
+              onclick={() => run(openAppSettings)}
               disabled={busy}
             >
-              Start
+              Open iOS Settings
             </Button>
+          {:else}
+            {#if status.tracking}
+              <Button
+                variant="secondary"
+                size="sm"
+                onclick={() => run(stopTracking)}
+                disabled={busy}
+              >
+                Stop
+              </Button>
+            {:else}
+              <Button
+                variant="primary"
+                size="sm"
+                onclick={() => run(() => startTracking(profileChoice))}
+                disabled={busy}
+              >
+                Start
+              </Button>
+            {/if}
+            {#if status.authorization !== 'always'}
+              <Button variant="ghost" size="sm" onclick={askPermission} disabled={busy}>
+                {status.authorization === 'whenInUse' ? 'Allow always' : 'Allow location'}
+              </Button>
+            {/if}
           {/if}
         </div>
       </SettingsField>
 
-      <SettingsField label="Profile" hint={PROFILE_HINT[status.profile]}>
+      <SettingsField
+        label="Profile"
+        hint={PROFILE_HINT[profileChoice]}
+        warning={status.tracking ? '' : 'Applies when you start tracking.'}
+        labelled={false}
+      >
         <Select
-          value={status.profile}
+          value={profileChoice}
           options={PROFILES}
           fullWidth
           disabled={busy}
           ariaLabel="Tracking profile"
-          onValueChange={(v) => run(() => startTracking(v as TrackingProfile))}
+          onValueChange={(v) => chooseProfile(v as TrackingProfile)}
         />
       </SettingsField>
 
