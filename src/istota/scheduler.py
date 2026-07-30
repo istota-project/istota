@@ -51,6 +51,7 @@ from .skills.briefing import (
     strip_briefing_preamble,
 )
 from .config import Config, load_config
+from .brain.claude_code import is_api_error_banner, is_permanent_api_error
 from .executor import (
     detect_malformed_result,
     discover_calendars_for_task,
@@ -281,7 +282,14 @@ def recover_orphaned_tasks_on_startup(config: Config) -> None:
 
 
 def _is_policy_refusal(error_text: str) -> bool:
-    """Check if a task failure is an API policy/safety refusal (non-retryable)."""
+    """Check if a task failure is an API policy/safety refusal (non-retryable).
+
+    Requires a *banner-shaped* error: this both suppresses retry and fires a
+    "your content was blocked" alert at the user, so an answer that merely
+    discusses a 400 content-policy error must not trigger it.
+    """
+    if not is_api_error_banner(error_text):
+        return False
     parsed = parse_api_error(error_text)
     if not parsed:
         return False
@@ -340,6 +348,17 @@ def _format_error_for_user(error_text: str) -> str:
     Handles API errors, OOM, timeouts, and other common failure modes.
     Logs the full error details but returns a friendly message with personality.
     """
+    from .executor import FALLBACK_EXHAUSTED_MARKER
+
+    if FALLBACK_EXHAUSTED_MARKER in error_text:
+        # Primary *and* fallback both unavailable. Say so plainly rather than
+        # echoing whichever raw provider error came back last (ISSUE-212).
+        logger.debug("both brains unavailable: %s", error_text[:300])
+        return (
+            "Both my primary and backup brains are unavailable right now — the "
+            "provider is having a moment. Try again shortly."
+        )
+
     parsed = parse_api_error(error_text)
     if parsed:
         status = parsed["status_code"]
@@ -363,11 +382,41 @@ def _format_error_for_user(error_text: str) -> str:
     # Non-API errors: strip technical details, keep it friendly
     if "killed (likely out of memory)" in error_text:
         return "Ran out of memory — tried to hold too much in all eight arms at once. Try something simpler?"
+
+    # A network-level provider failure carries no status code to parse, but it
+    # is the same "the provider is unreachable" story — and it must be checked
+    # before the bare "timed out" substring below, which would otherwise blame
+    # the user's task for a connection timeout (ISSUE-212).
+    if is_transient_api_error(error_text):
+        logger.debug("transient provider error for user message: %s", error_text[:300])
+        return "Lost contact with the mothership. Anthropic's having a moment — try again shortly."
+
     if "timed out" in error_text.lower():
         return "Drifted too deep and timed out. Maybe break this into smaller pieces?"
 
     # Generic fallback - don't expose raw error
     return "Something went sideways and I'm not entirely sure what. Resurfacing — try again?"
+
+
+def _error_event_message(error_text: str) -> str:
+    """The user-facing message for a terminal ``error`` task event.
+
+    Stream surfaces (web chat, REPL) render this payload directly as the turn
+    body — they never pass through `_format_error_for_user`, which only the Talk
+    push path calls. So a raw provider error, and the internal
+    `FALLBACK_EXHAUSTED_MARKER`, would reach the user verbatim there (ISSUE-212
+    asks that they never do).
+
+    Only *provider-availability* failures are reworded; every other failure
+    keeps its original text, which is usually the most useful thing a developer
+    watching the REPL can see. The raw text is still stored on `tasks.error`
+    either way.
+    """
+    from .executor import FALLBACK_EXHAUSTED_MARKER
+
+    if FALLBACK_EXHAUSTED_MARKER in error_text or is_transient_api_error(error_text):
+        return _format_error_for_user(error_text)
+    return error_text[:500]
 
 
 def _is_shutdown_collateral(result: str) -> bool:
@@ -1485,7 +1534,7 @@ def run_task_inline(
 
     # Same success-guards the daemon applies: API errors masquerading as
     # success, and malformed (leaked tool-call XML) output.
-    if success and parse_api_error(result):
+    if success and is_api_error_banner(result):
         success = False
     if success:
         malformed = detect_malformed_result(result, output_target=task.output_target)
@@ -1503,7 +1552,10 @@ def run_task_inline(
             # surfaces (web/REPL) and must not be clipped (ISSUE-178).
             event_writer.emit("result", {"text": result, "truncated": False})
         else:
-            event_writer.emit("error", {"message": result[:500], "stop_reason": "error"})
+            event_writer.emit(
+                "error",
+                {"message": _error_event_message(result), "stop_reason": "error"},
+            )
         event_writer.emit("done", {
             "stop_reason": "completed" if success else "error",
             "duration_seconds": round(event_writer.elapsed_seconds(), 1),
@@ -1766,8 +1818,13 @@ def process_one_task(
     is_failure_notify = False
 
     # Guard: detect API errors masquerading as successful results
-    # (Claude Code may exit 0 with API error text as output)
-    if success and parse_api_error(result):
+    # (Claude Code may exit 0 with API error text as output).
+    # The STRICT banner detector, not `parse_api_error`: this discards a
+    # completed answer and fails the task permanently, so a successful reply
+    # that merely *quotes* a provider error ("the earlier run died with API
+    # Error: 529") must not match. The brain now classifies the same case at
+    # source (`_success_frame_stop_reason`), leaving this as the backstop.
+    if success and is_api_error_banner(result):
         logger.warning(
             "Task %d: result contains API error despite success flag, treating as failure",
             task_id,
@@ -1956,6 +2013,18 @@ def process_one_task(
             is_cancelled = result == "Cancelled by user"
             is_policy = _is_policy_refusal(result)
             is_shutdown_collateral = _is_shutdown_collateral(result)
+            # A request-shaped provider failure (bad model id, expired key,
+            # oversized prompt) fails identically on every attempt, so the
+            # 1/4/16-minute ladder buys nothing but delay (ISSUE-212). The brain
+            # already skips its own in-brain retry for these; this is the task
+            # level. Banner-gated so a normal answer discussing a 400 can't
+            # suppress a legitimate retry.
+            is_permanent = is_api_error_banner(result) and is_permanent_api_error(result)
+            if is_permanent:
+                logger.warning(
+                    "Task %d: permanent provider error, not retrying: %s",
+                    task_id, result[:200],
+                )
             if is_cancelled:
                 db.update_task_status(conn, task_id, "cancelled", error=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task cancelled by user via !stop")
@@ -2004,7 +2073,8 @@ def process_one_task(
                 _purge_deferred_files_for_retry(
                     task, get_user_temp_dir(config, task.user_id),
                 )
-            elif task.attempt_count < task.max_attempts - 1 and not is_oom:
+            elif task.attempt_count < task.max_attempts - 1 and not is_oom \
+                    and not is_permanent:
                 # Exponential backoff: 1, 4, 16 minutes
                 delay = 1 << (task.attempt_count * 2)
                 db.set_task_pending_retry(conn, task_id, result, delay)
@@ -2071,12 +2141,15 @@ def process_one_task(
         is_policy = (not success) and _is_policy_refusal(result)
         is_oom = (not success) and "killed (likely out of memory)" in result
         is_requeued = (not success) and _is_shutdown_collateral(result)
+        is_permanent_api = (not success) and is_api_error_banner(result) \
+            and is_permanent_api_error(result)
         will_retry = (
             (not success)
             and not is_cancelled
             and not is_policy
             and not is_oom
             and not is_requeued
+            and not is_permanent_api
             and task.attempt_count < task.max_attempts - 1
         )
         if is_requeued:
@@ -2105,7 +2178,7 @@ def process_one_task(
                 event_writer.emit("cancelled")
             else:
                 event_writer.emit("error", {
-                    "message": result[:500], "stop_reason": "error",
+                    "message": _error_event_message(result), "stop_reason": "error",
                 })
             event_writer.emit("done", {
                 "stop_reason": "completed" if success else "error",

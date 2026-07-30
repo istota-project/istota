@@ -40,49 +40,240 @@ from ._types import BrainRequest, BrainResult
 logger = logging.getLogger("istota.brain.claude_code")
 
 
-# Pattern to detect Anthropic API errors in output
+# Pattern to detect Anthropic API errors carrying a JSON body.
 API_ERROR_PATTERN = re.compile(r"API Error: (\d{3}) (\{.*\})", re.DOTALL)
 
-# Transient HTTP status codes that warrant retry
+# The CLI does not always attach a JSON body — `API Error: 529 Overloaded`,
+# `API Error: 500` and `API Error: 400 Bad Request` are all real shapes. Matching
+# only the JSON form meant a bare 529 parsed as *nothing*: not transient, so not
+# retried, classified as a generic error, and therefore not a fallback trigger
+# (ISSUE-212). The tail stops at the newline so a stack trace below the banner
+# doesn't become the "message".
+_API_ERROR_PLAIN_PATTERN = re.compile(r"API Error:?\s+(\d{3})\b[ \t]*([^\n]*)")
+
+# "API Error" in any of its punctuations — `API Error: …`, `API Error (…)`. Used
+# as a *gate* on the text-shaped predicates below so ordinary prose that happens
+# to discuss a connection reset is never dragged onto the retry path.
+_API_ERROR_MARKER = re.compile(r"API Error\b", re.IGNORECASE)
+
+# Transient HTTP status codes that warrant retry. Documentation of the common
+# cases — the live rule is `_status_is_transient`, which treats *every* 5xx as
+# transient. Enumerating was a latent version of the bug this fixes: a
+# Cloudflare-fronted provider emits 520-526 ("Web Server Returned an Unknown
+# Error" / "Connection Timed Out"), none of which were listed, so each would
+# dead-end exactly as the 529 did.
 TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}  # 529 = overloaded
+
+# Non-5xx statuses that are still capacity/timing signals rather than a problem
+# with the request: 408 Request Timeout, 425 Too Early, 429 Too Many Requests.
+_TRANSIENT_4XX = frozenset({408, 425, 429})
+
+
+def _status_is_transient(status: int) -> bool:
+    """Whether an HTTP status is a capacity/availability signal worth retrying."""
+    return status >= 500 or status in _TRANSIENT_4XX
+
+# Request-shaped statuses: retrying or switching brains cannot help, and doing
+# either wastes a call (and on a paid fallback, money). The complement of
+# TRANSIENT_STATUS_CODES for the codes we actually see.
+PERMANENT_STATUS_CODES = frozenset({400, 401, 403, 404, 405, 413, 414, 422})
+
+# Network/transport failures the CLI reports as an API error. Capacity-shaped in
+# the same sense as a 529: the request was fine, the path to the provider wasn't.
+_NETWORK_TRANSIENT_RE = re.compile(
+    r"connection (?:error|reset|refused|closed|aborted)|"
+    r"(?:request|read|socket|connect)?\s*time[d]?\s?out|"
+    r"socket hang ?up|network error|fetch failed|premature close|"
+    r"getaddrinfo|dns (?:lookup )?fail|"
+    # The CLI's own documented capacity-throttle banner: "Server is
+    # temporarily limiting requests (not your usage limit)". Explicitly a
+    # server-side throttle, so it belongs in the fallback trigger set.
+    r"temporarily limiting requests|limiting requests",
+    re.IGNORECASE,
+)
+
+# Node/libc errno strings are diagnostic enough to stand without the API Error
+# marker — they don't occur in prose, and the CLI doesn't always wrap them.
+_NET_ERRNO_RE = re.compile(
+    r"\b(ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND)\b"
+)
+
+# Request-shaped bodies: the *content* of the request is the problem, so no
+# amount of retrying or brain-switching changes the outcome.
+_REQUEST_SHAPED_RE = re.compile(
+    r"invalid_request_error|authentication_error|permission_error|not_found_error|"
+    r"content[_ ]filter|prompt is too long|"
+    r"context[ _-]?(?:length|window|size)|maximum context",
+    re.IGNORECASE,
+)
+
+# `retry-after: 30`, `"retry_after": 30`, `Retry-After 30`. `[ \t]*` rather than
+# `\s*`: the pair `\s*[:=]?\s*` is ambiguous and backtracks quadratically on a
+# long whitespace run, and the input here is unbounded provider/stderr text.
+_RETRY_AFTER_RE = re.compile(
+    r"retry[-_ ]?after[\"']?[ \t]*[:=]?[ \t]*[\"']?(\d+(?:\.\d+)?)", re.IGNORECASE
+)
 
 # Retry configuration for transient API errors
 API_RETRY_MAX_ATTEMPTS = 3
 API_RETRY_DELAY_SECONDS = 5
+# Ceiling on a provider-supplied Retry-After. A worker parked on the provider's
+# word for an hour is worse than failing the attempt and letting the task's own
+# retry ladder (1/4/16 min) or the fallback brain take over.
+RETRY_AFTER_MAX_SECONDS = 60.0
+# Slice length for the retry backoff, so `!stop` lands within a slice
+# instead of waiting out a (now potentially 60s) provider-requested delay.
+_RETRY_SLEEP_SLICE_SECONDS = 0.5
 
 
 def parse_api_error(text: str) -> dict | None:
     """Parse API error string into structured data.
 
     Returns dict with status_code, message, request_id on match, or None.
+    Prefers the JSON-bodied form; falls back to the bodyless
+    ``API Error: NNN <text>`` shape the CLI also emits.
     """
+    if not text:
+        return None
     match = API_ERROR_PATTERN.search(text)
+    if match:
+        status_code = int(match.group(1))
+        try:
+            payload = json.loads(match.group(2))
+            return {
+                "status_code": status_code,
+                "message": payload.get("error", {}).get("message", "Unknown error"),
+                "request_id": payload.get("request_id"),
+            }
+        except json.JSONDecodeError:
+            return {
+                "status_code": status_code,
+                "message": "Unknown error",
+                "request_id": None,
+            }
+
+    plain = _API_ERROR_PLAIN_PATTERN.search(text)
+    if not plain:
+        return None
+    return {
+        "status_code": int(plain.group(1)),
+        "message": plain.group(2).strip() or "Unknown error",
+        "request_id": None,
+    }
+
+
+def parse_retry_after(text: str) -> float | None:
+    """The provider's requested wait in seconds, capped, or None.
+
+    Capped at ``RETRY_AFTER_MAX_SECONDS`` and floored at 0 — a negative or
+    absurd value is treated as absent rather than obeyed.
+    """
+    if not text:
+        return None
+    match = _RETRY_AFTER_RE.search(text)
     if not match:
         return None
-    status_code = int(match.group(1))
     try:
-        payload = json.loads(match.group(2))
-        return {
-            "status_code": status_code,
-            "message": payload.get("error", {}).get("message", "Unknown error"),
-            "request_id": payload.get("request_id"),
-        }
-    except json.JSONDecodeError:
-        return {"status_code": status_code, "message": "Unknown error", "request_id": None}
+        value = float(match.group(1))
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return min(value, RETRY_AFTER_MAX_SECONDS)
+
+
+def _looks_like_api_error(text: str) -> bool:
+    """Whether ``text`` carries a provider API-error signal at all."""
+    if not text:
+        return False
+    return bool(
+        parse_api_error(text)
+        or _API_ERROR_MARKER.search(text)
+        or _NET_ERRNO_RE.search(text)
+    )
 
 
 def is_transient_api_error(text: str) -> bool:
     """Check if the error text represents a transient API error worth retrying.
+
+    Two signals: a capacity/gateway *status code* (429 + 5xx + 529), or a
+    network-level failure. The network branch is gated on the ``API Error``
+    marker (or an unambiguous errno) so ordinary prose mentioning a connection
+    reset can't route a task onto the retry/fallback path — this predicate is
+    also run against arbitrary tmux pane text.
 
     A 429 whose body signals *quota/subscription exhaustion* is NOT transient —
     ``is_usage_limit_error`` catches that case first at every call site, so a
     usage limit reroutes to the configured fallback brain instead of being
     retried against the same exhausted primary.
     """
-    parsed = parse_api_error(text)
-    if not parsed:
+    if not text:
         return False
-    return parsed["status_code"] in TRANSIENT_STATUS_CODES or parsed["status_code"] == 429
+    parsed = parse_api_error(text)
+    if parsed:
+        status = parsed["status_code"]
+        if _status_is_transient(status):
+            return True
+        if status in PERMANENT_STATUS_CODES:
+            # An explicit request-shaped status is authoritative: a 400 whose
+            # body quotes "connection reset" is still a client error (NB-13a).
+            return False
+        # An unclassified status (a provider's own 4xx extension) falls through
+        # to the text signals rather than being declared non-transient.
+    if _NET_ERRNO_RE.search(text):
+        return True
+    return bool(
+        _API_ERROR_MARKER.search(text) and _NETWORK_TRANSIENT_RE.search(text)
+    )
+
+
+def is_permanent_api_error(text: str) -> bool:
+    """True when the error is request-shaped: no retry, no fallback attempt.
+
+    400 / 401 / 403 / 404 / 413 and friends, plus context-length and
+    content-filter refusals. The status code wins over the body text, so a 529
+    whose message happens to quote a request-shaped phrase stays transient.
+    """
+    if not text:
+        return False
+    parsed = parse_api_error(text)
+    if parsed:
+        status = parsed["status_code"]
+        if _status_is_transient(status):
+            return False
+        if status in PERMANENT_STATUS_CODES:
+            return True
+    # Text-only fall-through. Gated on the API-error marker for the same reason
+    # the transient one is: "the model's context window is 200k tokens" is an
+    # answer, not a failure. A network signal wins, so an unparseable
+    # "API Error: connection reset while building the context window" doesn't
+    # read as permanent on the strength of a phrase in its message.
+    if not _looks_like_api_error(text) or _NETWORK_TRANSIENT_RE.search(text):
+        return False
+    return bool(_REQUEST_SHAPED_RE.search(text))
+
+
+def api_error_stop_reason(text: str) -> str | None:
+    """The ``stop_reason`` for a provider API error, or None if not one.
+
+    The single classifier the execution paths use, so "is this worth a retry /
+    a fallback attempt?" is answered the same way everywhere. Precedence:
+    a usage limit is persistent and outranks its own 429 status; a
+    request-shaped failure is permanent; capacity and network failures are
+    transient; anything else that still looks like an API error is a plain
+    error (unknown status → don't gamble a fallback call on it).
+    """
+    if not text:
+        return None
+    if is_usage_limit_error(text):
+        return "usage_limit"
+    if not _looks_like_api_error(text):
+        return None
+    if is_permanent_api_error(text):
+        return "error"
+    if is_transient_api_error(text):
+        return "transient_api_error"
+    return "error"
 
 
 # Substrings (case-insensitive) that mark a subscription/quota/billing limit —
@@ -202,13 +393,131 @@ def is_usage_limit_banner(text: str) -> bool:
     )
 
 
+# A bare provider error delivered as the whole answer opens with the marker;
+# a real answer that *discusses* one has it somewhere in the middle. Anchored at
+# the start (past up to 8 chars of decoration — an emoji, a bullet, a quote
+# marker) and length-gated, mirroring ``is_usage_limit_banner``.
+_API_ERROR_BANNER_RE = re.compile(
+    r"^[\s\W]{0,8}API Error\b[\s:(\[,-]*"       # marker + whatever separates it
+    r"(?:(?P<status>\d{3})\b[ \t]*)?"           # optional status code
+    r"(?P<tail>[^\n]*)",
+    re.IGNORECASE,
+)
+
+
+def is_api_error_banner(text: str) -> bool:
+    """True iff ``text`` *is* a bare provider API-error banner.
+
+    For the paths where ``claude`` reports an API failure as a **successful**
+    result frame (rc 0, the error text as the whole answer) — the mechanism that
+    put a raw ``API Error: 529 Overloaded`` in front of the user as the final
+    reply (ISSUE-212), and the same one already handled for usage limits by
+    :func:`is_usage_limit_banner`.
+
+    Strict on purpose: it must not fire on a genuine answer that *mentions* an
+    API error, because the callers act on it destructively — the brain reroutes
+    to a (paid) fallback, and ``scheduler``'s masquerading-success guard fails
+    the task outright.
+
+    Three gates. **Anchored** at the start, so an answer discussing an error
+    mid-sentence is out. **Length**-gated, so a long answer that merely opens
+    with the phrase is out. And the token after the marker (or after the status
+    code) must be **JSON or Title-cased** — every real banner is a reason
+    phrase (``529 Overloaded``, ``500 Internal Server Error``, ``Connection
+    error.``) or a JSON body, whereas prose continues in lowercase
+    (``API Error: 529 means the provider is overloaded``). That last gate is
+    what separates the banner from a sentence that legitimately starts with it.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped or len(stripped) > _BANNER_MAX_CHARS:
+        return False
+    match = _API_ERROR_BANNER_RE.match(stripped)
+    if not match:
+        return False
+    if not match.group("status") and not _looks_like_api_error(stripped):
+        return False
+    tail = match.group("tail").strip()
+    if not tail:
+        # "API Error: 529" — a status and nothing else is unambiguous. Without a
+        # status it is a bare "API Error" with no content, which is not one.
+        return bool(match.group("status"))
+    return tail[0].isupper() or tail[0] in "{[\"'"
+
+
+def _interruptible_sleep(seconds: float, req: BrainRequest) -> bool:
+    """Sleep in slices, polling ``req.cancel_check`` between them.
+
+    A provider-supplied Retry-After can be far longer than the old fixed 5s, and
+    `time.sleep` is not cancellable — a `!stop` issued during the backoff would
+    otherwise sit unanswered for the whole wait. Returns True if the caller
+    should stop (cancellation requested).
+    """
+    # Counts the slices down rather than watching a deadline: the loop must
+    # terminate on its own arithmetic, not on wall-clock progress it can't
+    # observe (and a patched time.sleep would otherwise spin forever).
+    remaining = max(0.0, seconds)
+    while remaining > 0:
+        if req.cancel_check is not None:
+            try:
+                if req.cancel_check():
+                    return True
+            except Exception:
+                logger.debug("cancel_check raised during retry backoff", exc_info=True)
+        slice_seconds = min(_RETRY_SLEEP_SLICE_SECONDS, remaining)
+        time.sleep(slice_seconds)
+        remaining -= slice_seconds
+    return False
+
+
+def _is_retryable(result: "BrainResult") -> bool:
+    """Whether a failed attempt should be retried against the same primary.
+
+    Reads the ``stop_reason`` first (the ``_execute_*_once`` paths already
+    classified the text) and falls back to re-classifying the text for any path
+    that returned a bare ``error``.
+
+    ``work_committed`` vetoes the retry outright: a run that reached the model
+    and then reported a provider error may already have executed tools, so
+    re-invoking the same prompt would repeat those side effects. Such a failure
+    is reroute-only — the executor sends it to the fallback brain.
+    """
+    if result.work_committed:
+        return False
+    if result.stop_reason == "transient_api_error":
+        return True
+    if result.stop_reason in ("usage_limit", "cancelled", "timeout", "oom", "not_found"):
+        return False
+    return is_transient_api_error(result.result_text)
+
+
+def _success_frame_stop_reason(text: str) -> str | None:
+    """The stop_reason when a *successful* CLI result actually carries a
+    provider failure banner, or None when it is a genuine answer.
+
+    ``claude -p`` reports both a subscription limit and a provider API error as
+    a success (rc 0 / ``subtype:"success"``) with the banner as the whole
+    answer. Left alone, both are delivered to the user verbatim as the final
+    reply and neither can ever reach the fallback brain.
+    """
+    if is_usage_limit_banner(text):
+        return "usage_limit"
+    if is_api_error_banner(text):
+        return api_error_stop_reason(text) or "error"
+    return None
+
+
 def _failure_stop_reason(text: str) -> str:
-    """Classify a failure's text into ``usage_limit`` (persistent) or ``error``.
+    """Classify a failure's text into ``usage_limit`` / ``transient_api_error``
+    / ``error``.
 
     Used at ClaudeCodeBrain's error-return points so a usage-limit body carries
-    the distinct stop_reason before the generic ``error`` path swallows it.
+    the distinct stop_reason before the generic ``error`` path swallows it, and
+    so a capacity error is visibly transient rather than an anonymous failure
+    the fallback trigger set can't match.
     """
-    return "usage_limit" if is_usage_limit_error(text) else "error"
+    return api_error_stop_reason(text) or "error"
 
 
 _OOM_TEXT = "Claude Code was killed (likely out of memory)"
@@ -617,19 +926,25 @@ class ClaudeCodeBrain:
             if result.stop_reason == "usage_limit":
                 return result
 
-            if not is_transient_api_error(result.result_text):
+            if not _is_retryable(result):
                 return result
 
             last_error = result.result_text
             parsed = parse_api_error(result.result_text)
             request_id = parsed.get("request_id", "unknown") if parsed else "unknown"
+            delay = parse_retry_after(result.result_text) or API_RETRY_DELAY_SECONDS
 
             if attempt < API_RETRY_MAX_ATTEMPTS - 1:
                 logger.warning(
-                    "Transient API error (attempt %d/%d, request_id=%s), retrying in %ds...",
-                    attempt + 1, API_RETRY_MAX_ATTEMPTS, request_id, API_RETRY_DELAY_SECONDS,
+                    "Transient API error (attempt %d/%d, request_id=%s), retrying in %ss...",
+                    attempt + 1, API_RETRY_MAX_ATTEMPTS, request_id, delay,
                 )
-                time.sleep(API_RETRY_DELAY_SECONDS)
+                if _interruptible_sleep(delay, req):
+                    return BrainResult(
+                        success=False,
+                        result_text="Cancelled by user",
+                        stop_reason="cancelled",
+                    )
             else:
                 logger.error(
                     "Transient API error persisted after %d attempts (request_id=%s)",
@@ -660,21 +975,26 @@ class ClaudeCodeBrain:
         if signal_death is not None:
             return signal_death
 
-        # A session/quota limit is reported by `claude -p` as a *successful*
-        # completion (rc 0, the limit text as the answer), so classify it on the
-        # success branch too — otherwise it defaults to stop_reason="completed",
-        # never matches the fallback trigger set, and gets delivered as the reply.
+        # A session/quota limit or a provider API error is reported by
+        # `claude -p` as a *successful* completion (rc 0, the banner as the
+        # answer), so classify both on the success branch too — otherwise they
+        # default to stop_reason="completed", never match the fallback trigger
+        # set, and get delivered to the user as the reply.
         if result.returncode == 0 and output:
-            if is_usage_limit_banner(output):
+            reclassified = _success_frame_stop_reason(output)
+            if reclassified:
                 return BrainResult(
-                    success=False, result_text=output, stop_reason="usage_limit",
+                    success=False, result_text=output, stop_reason=reclassified,
+                    work_committed=True,
                 )
             return BrainResult(success=True, result_text=output)
         if result.returncode == 0 and req.result_file and req.result_file.exists():
             file_text = req.result_file.read_text().strip()
-            if is_usage_limit_banner(file_text):
+            reclassified = _success_frame_stop_reason(file_text)
+            if reclassified:
                 return BrainResult(
-                    success=False, result_text=file_text, stop_reason="usage_limit",
+                    success=False, result_text=file_text, stop_reason=reclassified,
+                    work_committed=True,
                 )
             return BrainResult(success=True, result_text=file_text)
         if output:
@@ -714,19 +1034,25 @@ class ClaudeCodeBrain:
             if result.stop_reason == "usage_limit":
                 return result
 
-            if not is_transient_api_error(result.result_text):
+            if not _is_retryable(result):
                 return result
 
             last_error = result.result_text
             parsed = parse_api_error(result.result_text)
             request_id = parsed.get("request_id", "unknown") if parsed else "unknown"
+            delay = parse_retry_after(result.result_text) or API_RETRY_DELAY_SECONDS
 
             if attempt < API_RETRY_MAX_ATTEMPTS - 1:
                 logger.warning(
-                    "Transient API error (attempt %d/%d, request_id=%s), retrying in %ds...",
-                    attempt + 1, API_RETRY_MAX_ATTEMPTS, request_id, API_RETRY_DELAY_SECONDS,
+                    "Transient API error (attempt %d/%d, request_id=%s), retrying in %ss...",
+                    attempt + 1, API_RETRY_MAX_ATTEMPTS, request_id, delay,
                 )
-                time.sleep(API_RETRY_DELAY_SECONDS)
+                if _interruptible_sleep(delay, req):
+                    return BrainResult(
+                        success=False,
+                        result_text="Cancelled by user",
+                        stop_reason="cancelled",
+                    )
             else:
                 logger.error(
                     "Transient API error persisted after %d attempts (request_id=%s)",
@@ -924,20 +1250,23 @@ class ClaudeCodeBrain:
         if final_result is not None:
             result_text = final_result.text.strip()
             if final_result.success:
-                # `claude -p` reports a session/quota limit as a success result
-                # frame (subtype:"success", the limit banner as `result`). Classify
-                # it here so it reroutes to the fallback brain instead of being
-                # delivered as the answer with the default stop_reason="completed".
-                # Use the strict *banner* detector: the broad keyword one would
-                # misread a genuine answer that merely quotes a limit word (e.g. a
-                # memory extraction summarising a past outage) as a fresh outage.
-                if is_usage_limit_banner(result_text):
+                # `claude -p` reports a session/quota limit — and a provider API
+                # error — as a success result frame (subtype:"success", the
+                # banner as `result`). Classify both here so they reroute to the
+                # fallback brain instead of being delivered as the answer with
+                # the default stop_reason="completed". Use the strict *banner*
+                # detectors: the broad keyword ones would misread a genuine
+                # answer that merely quotes a limit word or an earlier API error
+                # (e.g. a memory extraction summarising a past outage).
+                reclassified = _success_frame_stop_reason(result_text)
+                if reclassified:
                     return BrainResult(
                         success=False,
                         result_text=result_text,
                         execution_trace=trace_json,
-                        stop_reason="usage_limit",
+                        stop_reason=reclassified,
                         model_used=model_seen or req.model,
+                        work_committed=True,
                     )
                 return BrainResult(
                     success=True,
@@ -958,13 +1287,15 @@ class ClaudeCodeBrain:
         if req.result_file and req.result_file.exists():
             output = req.result_file.read_text()
             if process.returncode == 0:
-                if is_usage_limit_banner(output):
+                reclassified = _success_frame_stop_reason(output)
+                if reclassified:
                     return BrainResult(
                         success=False,
                         result_text=output.strip(),
                         execution_trace=trace_json,
-                        stop_reason="usage_limit",
+                        stop_reason=reclassified,
                         model_used=model_seen or req.model,
+                        work_committed=True,
                     )
                 return BrainResult(
                     success=True,
@@ -973,9 +1304,9 @@ class ClaudeCodeBrain:
                     execution_trace=trace_json,
                     model_used=model_seen or req.model,
                 )
-            # A limit message written to the result file (rather than a
-            # ResultEvent) must still classify as usage_limit, not a generic
-            # error — otherwise it's not a fallback trigger.
+            # A limit or API-error message written to the result file (rather
+            # than a ResultEvent) must still carry its own stop_reason, not a
+            # generic error — otherwise it's not a fallback trigger.
             return BrainResult(
                 success=False,
                 result_text=output.strip(),

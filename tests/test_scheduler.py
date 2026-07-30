@@ -532,6 +532,33 @@ class TestFormatErrorForUser:
         result = _format_error_for_user(error)
         assert "the deep stared back" in result.lower()
 
+    def test_formats_bodyless_529(self):
+        # ISSUE-212: the CLI does not always attach a JSON body, and the bare
+        # form used to fall through to the generic "sideways" message.
+        result = _format_error_for_user("API Error: 529 Overloaded")
+        assert "mothership" in result.lower()
+        assert "API Error" not in result
+
+    def test_formats_bodyless_429(self):
+        result = _format_error_for_user("API Error: 429 Too Many Requests")
+        assert "throttled" in result.lower()
+
+    def test_formats_network_level_api_error(self):
+        result = _format_error_for_user("API Error: Connection error.")
+        assert "mothership" in result.lower()
+        assert "Connection error" not in result
+
+    def test_formats_both_brains_unavailable(self):
+        from istota.executor import FALLBACK_EXHAUSTED_MARKER
+
+        error = f"{FALLBACK_EXHAUSTED_MARKER} API Error: 529 Overloaded"
+        result = _format_error_for_user(error)
+        assert "backup" in result.lower()
+        assert "try again" in result.lower()
+        # No raw provider text leaks through.
+        assert "API Error" not in result
+        assert FALLBACK_EXHAUSTED_MARKER not in result
+
     def test_formats_oom_error(self):
         error = "Claude Code was killed (likely out of memory)"
         result = _format_error_for_user(error)
@@ -616,6 +643,16 @@ class TestIsPolicyRefusal:
         assert _is_policy_refusal("Process killed (likely out of memory)") is False
         assert _is_policy_refusal("Cancelled by user") is False
         assert _is_policy_refusal("") is False
+
+    def test_prose_discussing_a_400_is_not_a_refusal(self):
+        # ISSUE-212 regression: this both suppresses retry and fires a "your
+        # content was blocked" alert at the user, so it must require a
+        # banner-shaped error rather than any text quoting one.
+        answer = (
+            "I explained that API Error: 400 content policy violations happen "
+            "when the prompt trips the safety classifier."
+        )
+        assert _is_policy_refusal(answer) is False
 
 
 # ---------------------------------------------------------------------------
@@ -2545,9 +2582,17 @@ class TestProcessOneTask:
     ))
     @patch("istota.scheduler._post_policy_refusal_alert")
     @patch("istota.scheduler.asyncio.run", return_value=None)
-    def test_non_policy_400_still_retries(
+    def test_non_policy_400_is_not_retried(
         self, mock_arun, mock_alert, mock_exec, db_path, tmp_path,
     ):
+        """A 400 is request-shaped: every attempt fails identically.
+
+        This used to ride the 1/4/16-minute ladder to a permanent failure ~21
+        minutes later. ISSUE-212 asks for "surface a clean, human-readable error
+        immediately (no pointless retry)" for exactly this class, so it now
+        fails on the first attempt. It is still not a *policy* refusal, so no
+        content-blocked alert fires.
+        """
         config = self._make_config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
             db.create_task(conn, prompt="Big request", user_id="testuser", source_type="cli")
@@ -2558,9 +2603,7 @@ class TestProcessOneTask:
 
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
-        # Plain 400 should follow normal retry logic
-        assert task.status == "pending"
-        assert task.attempt_count == 1
+        assert task.status == "failed"
         mock_alert.assert_not_called()
 
     @patch("istota.scheduler.execute_task", return_value=(
@@ -7091,6 +7134,55 @@ class TestApiErrorInSuccessResult:
         with db.get_db(db_path) as conn:
             task = db.get_task(conn, task_id)
         assert task.status == "completed"
+
+    @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_answer_quoting_an_api_error_stays_successful(
+        self, mock_arun, mock_exec, db_path, tmp_path,
+    ):
+        """ISSUE-212 regression: the masquerading-success guard must use the
+        strict banner detector, not a bare parse.
+
+        Widening `parse_api_error` to the bodyless form made this guard match any
+        successful answer that *mentions* a provider error — so a log summary or
+        an ops question about a 529 was discarded, retried three times producing
+        the same answer, and failed permanently.
+        """
+        answer = (
+            "Yesterday's incident report: the 03:12 run died with API Error: 529 "
+            "Overloaded, and the 03:40 retry succeeded. No action needed."
+        )
+        mock_exec.return_value = (True, answer, None, None)
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="Summarise", user_id="testuser", source_type="briefing")
+
+        result = process_one_task(config)
+        assert result is not None
+        task_id, success = result
+        assert success is True
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "completed"
+
+    @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.asyncio.run", return_value=None)
+    def test_bodyless_banner_still_flips_to_failure(
+        self, mock_arun, mock_exec, db_path, tmp_path,
+    ):
+        """The other half: the bare banner the issue was filed about."""
+        mock_exec.return_value = (True, "API Error: 529 Overloaded", None, None)
+        config = self._make_config(db_path, tmp_path)
+
+        with db.get_db(db_path) as conn:
+            db.create_task(conn, prompt="Briefing", user_id="testuser", source_type="briefing")
+
+        result = process_one_task(config)
+        assert result is not None
+        _task_id, success = result
+        assert success is False
 
 
 # ---------------------------------------------------------------------------

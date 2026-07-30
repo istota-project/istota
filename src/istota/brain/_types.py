@@ -124,6 +124,15 @@ class BrainResult:
     # determine it — the executor then falls back to the requested model.
     model_used: str = ""
 
+    # True when the run reached the model and may have executed tools before
+    # failing, so re-running the same prompt would repeat those side effects
+    # (a re-sent email, a re-applied edit). Set by the paths that reclassify a
+    # *successful* CLI result frame carrying a provider error banner: the CLI
+    # ran to completion, so the in-brain retry loop must not re-invoke it —
+    # the failure reroutes to the fallback brain instead (ISSUE-212).
+    # Default False keeps every existing return site behaving as before.
+    work_committed: bool = False
+
 
 class Brain(Protocol):
     """The single boundary every brain implementation satisfies.

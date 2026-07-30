@@ -96,11 +96,16 @@ class TestParseApiError:
         assert result["message"] == "Unknown error"
         assert result["request_id"] is None
 
-    def test_returns_none_for_unclosed_json(self):
-        # JSON without closing brace cannot be matched
+    def test_unclosed_json_still_yields_the_status(self):
+        # The JSON pattern needs a closing brace, so this used to parse as "not
+        # an API error at all" — which meant a truncated 500 was never retried
+        # and never reached the fallback (ISSUE-212). A 500 is a 500; only the
+        # message is lost.
         error_text = 'API Error: 500 {broken json'
         result = parse_api_error(error_text)
-        assert result is None
+        assert result is not None
+        assert result["status_code"] == 500
+        assert result["request_id"] is None
 
     def test_handles_missing_error_field(self):
         error_text = 'API Error: 500 {"type":"error","request_id":"req_123"}'
@@ -236,7 +241,12 @@ class TestExecuteStreamingRetry:
         assert result.success is True
         assert result.result_text == "Success after retry"
         assert mock_exec_once.call_count == 2
-        mock_sleep.assert_called_once_with(API_RETRY_DELAY_SECONDS)
+        # The backoff is slept in slices so a `!stop` lands during it rather
+        # than after (ISSUE-212 — the wait can now be a provider-supplied
+        # Retry-After, not just the fixed 5s). The total is the contract.
+        assert sum(c.args[0] for c in mock_sleep.call_args_list) == pytest.approx(
+            API_RETRY_DELAY_SECONDS
+        )
 
     @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
     @patch("istota.brain.claude_code.time.sleep")
@@ -282,7 +292,9 @@ class TestExecuteStreamingRetry:
         assert result.success is False
         assert "500" in result.result_text
         assert mock_exec_once.call_count == API_RETRY_MAX_ATTEMPTS
-        assert mock_sleep.call_count == API_RETRY_MAX_ATTEMPTS - 1
+        assert sum(c.args[0] for c in mock_sleep.call_args_list) == pytest.approx(
+            API_RETRY_DELAY_SECONDS * (API_RETRY_MAX_ATTEMPTS - 1)
+        )
 
     @patch("istota.brain.claude_code.ClaudeCodeBrain._execute_streaming_once")
     def test_success_on_first_try_no_retry(self, mock_exec_once, tmp_path):

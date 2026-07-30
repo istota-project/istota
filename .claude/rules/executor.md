@@ -160,7 +160,7 @@ brain when the primary is unavailable. Kept executor-level: brains have no
 - **Stickiness:** when the breaker `should_skip(primary_kind, cooldown)`, the
   primary is skipped entirely and the task goes straight to the fallback.
 - **Trigger set** `{usage_limit, not_found, fallback}` (+ `transient_api_error`
-  iff `fallback_on_transient`): on a matching `brain_result.stop_reason` with a
+  iff `fallback_on_transient`, **on by default** since ISSUE-212): on a matching `brain_result.stop_reason` with a
   fallback configured, the executor reruns via `_run_fallback`. **Cooldown set**
   `{usage_limit, not_found}` opens the breaker (`open()` returns True once →
   `_fire_fallback_alert`, one operator alert). `fallback` is excluded from the
@@ -172,7 +172,7 @@ brain when the primary is unavailable. Kept executor-level: brains have no
   (`dataclasses.replace(brain_config, kind=fallback_kind)`, overlaying the
   per-user native key when `native`), resolves model/effort via
   `_resolve_fallback_model_effort`, and reruns `dataclasses.replace(req,
-  model=…, effort=…)`. A construction failure returns `None` (keep the primary
+  model=…, effort=…)`, passing the result through `_mark_if_exhausted`. A construction failure returns `None` (keep the primary
   result); an unexpected `execute` exception becomes a failed `BrainResult`.
 - `_resolve_fallback_model_effort(task, config, fallback_brain, effort)` →
   `(model, effort, dropped_pin)`. Empty requested model → fallback's own default
@@ -189,6 +189,27 @@ brain when the primary is unavailable. Kept executor-level: brains have no
   a single italic line naming the dropped pin and the model actually used
   (`actual_model` = the persisted `model_used`). Delivers uniformly across
   surfaces (it's part of `result_text`).
+
+- `_mark_if_exhausted(fb_result)` — when the *fallback* also failed for an
+  availability reason (`{usage_limit, fallback, transient_api_error}` — `not_found`
+  is excluded: a missing fallback binary is an operator misconfiguration, and
+  "try again shortly" would be false),
+  prefixes `FALLBACK_EXHAUSTED_MARKER` (`"[brain-fallback-exhausted]"`) onto its
+  `result_text`. `scheduler._format_error_for_user` checks that marker first and
+  says "both my primary and backup brains are unavailable" instead of echoing a
+  raw provider error at the user (ISSUE-212). A marker rather than a formatted
+  sentence because `execute_task`'s return contract is a plain string — the
+  scheduler owns the user-facing wording, and the underlying cause stays in the
+  text for the logs. A *task-level* fallback failure (`timeout` / `oom` /
+  `cancelled`) is deliberately not marked: it isn't an availability problem.
+  Two consumers, because only one of them is Talk: `_format_error_for_user`
+  (the Talk push path) and `scheduler._error_event_message`, which the
+  terminal `error` **task event** goes through — stream surfaces (web chat,
+  REPL) render that payload directly as the turn body and never touch the
+  Talk formatter, so without it the marker and the raw provider text would
+  reach the user there. It reworders only provider-availability failures;
+  every other failure keeps its original text (useful in the REPL), and
+  `tasks.error` keeps the raw text either way.
 
 No fallback configured (`fallback = ""`, non-tmux primary) collapses the whole
 block to the plain `brain.execute(req)` call. See `.claude/rules/brain.md`
@@ -223,12 +244,21 @@ remains in the source as a dead helper but is no longer called.
 
 ## API retry constants (re-exported from brain.claude_code)
 - `TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}` + `429`
+- `PERMANENT_STATUS_CODES = {400, 401, 403, 404, 405, 413, 414, 422}` — no retry,
+  no fallback attempt (retrying or paying for a fallback call that would fail
+  identically buys nothing)
 - `API_RETRY_MAX_ATTEMPTS = 3`
-- `API_RETRY_DELAY_SECONDS = 5` (fixed, not exponential)
-- Pattern: `API Error: (\d{3}) (\{.*\})`
+- `API_RETRY_DELAY_SECONDS = 5` (fixed, not exponential) — overridden per attempt
+  by `parse_retry_after(text)` when the provider supplied a `Retry-After`,
+  capped at `RETRY_AFTER_MAX_SECONDS = 60`
+- Patterns: `API Error: (\d{3}) (\{.*\})` first, then the bodyless
+  `API Error:?\s+(\d{3})\b[ \t]*([^\n]*)`
 - Retries do NOT count against task attempts
 - `parse_api_error`, `is_transient_api_error` re-exported from `executor`
   for `scheduler.py` and tests; canonical home is `brain/claude_code.py`.
+  `is_permanent_api_error` / `api_error_stop_reason` / `is_api_error_banner` /
+  `parse_retry_after` are new and are imported from `brain.claude_code` directly
+  (nothing needs a back-compat re-export).
 
 ## Key Constants
 - Background task types excluded from context: `["scheduled", "briefing"]`

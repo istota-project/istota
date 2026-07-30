@@ -67,7 +67,10 @@ kind = "{{ istota_brain_kind | default('claude_code', true) }}"
 # (a tmux_claude primary still defaults to claude_code).
 fallback = "{{ istota_brain_fallback }}"
 {% endif %}
-fallback_on_transient = {{ istota_brain_fallback_on_transient | default(false, true) | lower }}
+{# No boolean flavour on default(): `| default(x, true)` treats a legitimate
+   `false` as "undefined" and substitutes the default, so an operator opting out
+   would silently get the opt-in back. #}
+fallback_on_transient = {{ istota_brain_fallback_on_transient | default(true) | lower }}
 fallback_cooldown_seconds = {{ istota_brain_fallback_cooldown_seconds | default(900, true) }}
 {% if istota_brain_kind == 'native' or istota_brain_fallback == 'native' or istota_brain_source_type_overrides %}
 
