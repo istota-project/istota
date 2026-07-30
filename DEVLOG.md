@@ -2,6 +2,44 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-30: Copying a chat message, and three workarounds that were one design mistake
+
+The copy half of ISSUE-210 (per-message copy and delete in web chat). Copy shipped on its own because it needs no backend at all; delete needs the soft-versus-hard call, a decision about what happens to the paired turn's LLM context, and a new frame kind on the room stream — the cursor there is `messages.id`, strictly ascending, so a deletion is invisible to every connected client by construction. None of that blocks copy.
+
+**Copy hangs off the block, not the turn.** The first design put one copy control in the message's hover bar beside the star. That is wrong for the shape of the data: an assistant turn is an ordered list of prose groups separated by activity chips, so a turn-level copy has to decide which parts to include, and the answer nobody wants is "the tool traces". Per block, the question does not arise — a prose group is `{kind: 'prose', id, text}` and `text` is the markdown source, so the copy is exact by construction and the chips are excluded because they are a different `kind`. It also matches how the text is used: you lift one paragraph or one snippet out of an answer.
+
+**A per-code-block button was built and then removed.** It was the standard affordance — injected into `{@html}` output, wrapped per `<pre>` so it survived horizontal scrolling of a wide line, idempotent across re-renders. It went because it duplicated what already worked: the block copy is the markdown *source*, which carries the fences, so copying a block containing a snippet already yields the code ready to paste. About 60 lines of CSS, a 100-line action and its 12 tests came out. The reasoning is now a test rather than a comment — copying a block with a fence asserts both that the clipboard gets the fenced source and that the same block rendered as a highlighted `<pre><code>`.
+
+**The three workarounds were one mistake.** Placing the button at `bottom: -1.25rem`, outside its block's box, cost a fix per round of use:
+
+- `padding-top: 0.6rem` on the button, to grow its box back up across the two dead pixels between it and `.body`. Crossing them un-hovered the parent, so the button vanished on the way to being clicked.
+- A `::after` hover bridge on the block, because the block is full-width: a cursor moving *diagonally* toward the button leaves through the bottom edge somewhere left of its ~20px box and lands on nothing. Going sideways first and then down worked, which was the tell.
+- `z-index: 1` on the button, because `::after` is generated after the element's children in the box tree — so the bridge painted over the button and, once armed, took the click the button had been revealed for.
+
+Each fixed a defect the previous one introduced, and none of them was checkable: jsdom has no layout and no hit-testing, so every one was found by hand. The fix was to stop hanging the button outside the box. `.body` now reserves `--chat-copy-reserve` below its text and the button sits at `bottom: 0`, inside its own hover target. All three workarounds deleted. The general form: when a control lives outside the element that reveals it, every approach path is a bug you will find one at a time.
+
+**`:last-child` was matching the button, not the content.** Reserving space exposed a doubling: `.markdown p:last-child` resets a trailing paragraph's margin, but `ul`, `ol`, `blockquote` and `pre` all carry `0 0 1rem` with no reset, so a reply ending in a list got 1rem on top of the reserve while one ending in prose did not. The general rule `.markdown > *:last-child` fixes it — except the copy button was the last child, so the rule matched *it* and would have silently done nothing. The button is now rendered before the content; it is absolutely positioned, so document order does not place it. There is a test pinning that ordering, because moving it back to the end looks like tidying.
+
+**Two invariants a reader would otherwise undo.** The button must stay a DOM child of the block it copies — the reveal is `.body:hover .copy-block`, and `:hover` following the DOM ancestor chain rather than geometry is the only reason it survives the cursor being on a control positioned outside its parent. And `.user-body` carries `white-space: pre-wrap`, so a button placed inside it renders the markup's own newlines and indentation as blank space around every user message; the text lives in its own `.user-text` span and the button is a sibling. Both have tests, because neither is visible in the markup.
+
+**Failure is the interesting path for a clipboard.** `navigator.clipboard` is absent outside a secure context, so on a plain-http deployment every copy would do nothing, indistinguishably from working. `copyText` centralizes that, plus the refusal case, and raises the confirmation. All copies share one notice key so copying several blocks counts up in one band instead of queueing identical banners — the first real customer for the coalescing that landed with the notice drawer earlier the same day.
+
+**No check-mark flip on the button**, which is the standard flourish. A timed icon swap on a hover-revealed control is ISSUE-201's bug class exactly — two visual properties transitioning independently on WebKit — and this component's own comments record the star having been stranded lit by that mechanism. The notice covers every device, including touch, where the button is under the finger.
+
+**Key changes:**
+- `clipboard.ts` — `copyText`, the only sanctioned clipboard write; handles the absent-API and refused-write cases that otherwise pass for success.
+- `Message.svelte` — a `copyButton` snippet on each prose group, the user body and command output; the reserve, and the per-block hover scope so exactly one icon lights at a time.
+- `app.css` — `--chat-copy-reserve`, and `.markdown > *:last-child` widening the trailing-margin reset beyond `p`.
+- `.chip-slot.gap-above` drops to `0.1rem`; the block above now supplies that separation via its reserve. Kept non-zero rather than deleted so the two stay visibly coupled.
+
+**Files added/modified:**
+- `web/src/lib/clipboard.ts` + `clipboard.test.ts` - the copy helper
+- `web/src/lib/components/chat/Message.svelte` - per-block button, reserve, hover scope
+- `web/src/lib/components/chat/Message.copy.svelte.test.ts` - 12 tests
+- `web/src/app.css` - reserve token, trailing-margin reset
+- `web/vite-mock-api.ts` - a fenced block in the mock reply
+- `web/AGENTS.md` - the `copyText` rule
+
 ## 2026-07-30: Provisioning the iOS tracker by QR, and four ways a settings card lied about state it did not own
 
 Stage 4 of the native-iOS spec: mint a location ingest token on `/location/settings`, render it as a QR, scan it from the app on the phone, and drive the background tracker from a card that renders only inside the shell. The server half of provisioning (the generate endpoint, the receiver reload sentinel) landed earlier the same day as Stage 3; this is the surface on top of it.
