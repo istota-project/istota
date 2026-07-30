@@ -140,9 +140,16 @@
   // Delete needs a durable row — a live placeholder isn't stored yet — and a
   // handler willing to confirm it.
   const showDelete = $derived(typeof message.msgId === 'number' && !!onDelete);
-  // The row is in the layout whenever either half could be there, so revealing
-  // it never reflows the transcript under the pointer.
-  const hasRowActions = $derived(showCopy || showDelete);
+  // Star appears twice on a turn, and the two are not redundant. The hover bar's
+  // is the one that *persists* at rest on a starred row, which is what makes a
+  // starred message legible without hovering it; this one is where the hand
+  // already is once the row's actions are open, next to the other two things you
+  // do to a whole turn. Same condition as the bar's, so they can't disagree
+  // about whether the turn is starrable.
+  const showRowStar = $derived(starrable);
+  // The row is in the layout whenever any of the three could be there, so
+  // revealing it never reflows the transcript under the pointer.
+  const hasRowActions = $derived(showCopy || showRowStar || showDelete);
 </script>
 
 <!-- Turn-level actions, left-aligned under the message body. In the flow
@@ -170,6 +177,25 @@
         type="button"
       >
         <Copy size={15} />
+      </button>
+    {/if}
+    {#if showRowStar}
+      <!-- Between copy and delete: the row then reads left to right in
+           ascending consequence, and the destructive button ends up at the end
+           of the row rather than immediately beside the benign one. -->
+      <button
+        class="turn-action star"
+        class:starred={message.starred}
+        onclick={(e) => {
+          onToggleStar?.(message.cid);
+          if (e.detail > 0) e.currentTarget.blur();
+        }}
+        aria-label={message.starred ? 'Unstar message' : 'Star message'}
+        aria-pressed={message.starred ? 'true' : 'false'}
+        title={message.starred ? 'Unstar' : 'Star'}
+        type="button"
+      >
+        <Star size={15} fill={message.starred ? 'currentColor' : 'none'} />
       </button>
     {/if}
     {#if showDelete}
@@ -613,6 +639,13 @@
   }
   .turn-action.danger:hover {
     color: var(--status-danger-fg);
+  }
+  /* The starred colour is state, so it holds without hover — but the row it
+	   sits in is itself revealed on hover, so this never shows on a resting row.
+	   The hover-bar star is the one that persists at rest; see the script block. */
+  .turn-action.star.starred,
+  .turn-action.star:hover {
+    color: var(--accent-amber);
   }
   /* Touch targets, as an out-of-flow overlay so reaching them costs the row no
 	   height (SidebarToggle's device).

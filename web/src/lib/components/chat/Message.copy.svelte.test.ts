@@ -322,3 +322,126 @@ describe('per-message delete', () => {
     expect(deleteButtons(container)).toHaveLength(1);
   });
 });
+
+describe('star in the turn action row', () => {
+  function rowStars(container: HTMLElement): HTMLButtonElement[] {
+    return Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.turn-actions .turn-action.star'),
+    );
+  }
+
+  const durable = (over: Partial<ChatMessage> = {}): ChatMessage => ({
+    cid: 9,
+    role: 'assistant',
+    text: '',
+    segments: [prose('t1', 'The answer.')],
+    streaming: false,
+    msgId: 42,
+    ...over,
+  });
+
+  it('sits between copy and delete', () => {
+    // The row reads left to right in ascending consequence: take a copy, mark
+    // it, remove it. Star in the middle also puts the destructive button at
+    // the end of the row rather than beside the benign one.
+    const { container } = render(Message, {
+      ...base,
+      message: durable(),
+      onToggleStar: noop,
+      onDelete: noop,
+    });
+
+    const labels = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.turn-actions .turn-action'),
+    ).map((b) => b.getAttribute('aria-label'));
+
+    expect(labels).toEqual(['Copy message', 'Star message', 'Delete message']);
+  });
+
+  it('fires with the message cid', () => {
+    const onToggleStar = vi.fn();
+    const { container } = render(Message, { ...base, message: durable(), onToggleStar });
+
+    rowStars(container)[0].click();
+
+    expect(onToggleStar).toHaveBeenCalledWith(9);
+  });
+
+  it('renders starred when the message is starred', () => {
+    // The same toggle appears twice on a turn (here and in the hover bar), so
+    // both have to read the state — a star that looks empty in one place and
+    // filled in the other is worse than one place.
+    const { container } = render(Message, {
+      ...base,
+      message: durable({ starred: true }),
+      onToggleStar: noop,
+    });
+
+    const star = rowStars(container)[0];
+    expect(star.classList.contains('starred')).toBe(true);
+    expect(star.getAttribute('aria-pressed')).toBe('true');
+    expect(star.getAttribute('aria-label')).toBe('Unstar message');
+    expect(star.querySelector('svg')?.getAttribute('fill')).toBe('currentColor');
+  });
+
+  it('renders nothing without a handler', () => {
+    const { container } = render(Message, { ...base, message: durable() });
+
+    expect(rowStars(container)).toHaveLength(0);
+  });
+
+  it('renders nothing for a row with no durable id', () => {
+    // Same rule as delete: there is no stored row to mark yet.
+    const { container } = render(Message, {
+      ...base,
+      message: durable({ msgId: undefined }),
+      onToggleStar: noop,
+    });
+
+    expect(rowStars(container)).toHaveLength(0);
+  });
+
+  it('stays available on a streaming turn once it has a durable id', () => {
+    // Copy is withheld while the text moves; starring is a mark on the row,
+    // not on the text, so it is not.
+    const { container } = render(Message, {
+      ...base,
+      message: durable({ streaming: true }),
+      onToggleStar: noop,
+    });
+
+    expect(copyButtons(container)).toHaveLength(0);
+    expect(rowStars(container)).toHaveLength(1);
+  });
+
+  it('is offered on a system row too', () => {
+    const { container } = render(Message, {
+      ...base,
+      message: {
+        cid: 11,
+        role: 'system',
+        text: 'Alert body',
+        segments: [],
+        streaming: false,
+        msgId: 77,
+      },
+      onToggleStar: noop,
+    });
+
+    expect(rowStars(container)).toHaveLength(1);
+  });
+
+  it('leaves the hover-bar star in place', () => {
+    // Two places, deliberately: the hover bar's star is the one that persists
+    // at rest on a starred row, which is what makes a starred message legible
+    // without hovering it.
+    const { container } = render(Message, {
+      ...base,
+      message: durable({ starred: true }),
+      onToggleStar: noop,
+    });
+
+    expect(container.querySelectorAll('.star-btn')).toHaveLength(1);
+    expect(rowStars(container)).toHaveLength(1);
+  });
+});
