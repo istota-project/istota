@@ -3,6 +3,7 @@
   "short_name": "Istota",
   "description": "Your secure personal AI operating system.",
   "display": "standalone",
+  "orientation": "portrait",
   "start_url": ".",
   "scope": ".",
   "background_color": "#111111",
