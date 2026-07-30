@@ -2,6 +2,35 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-30: Gating logout, and why the obvious touch-target fix reproduces the bug it fixes
+
+ISSUE-209: the logout icon sits next to the menu trigger in the app nav, both are small on a phone, and a mistap ended the session outright — bounced to the login flow, transient view state gone. Two halves, a guard and the ergonomics underneath it.
+
+The guard was the easy half, and smaller than the issue expected. The write-up proposed building a reusable `confirm({...})` primitive as this feature's first customer; `ConfirmDialog` already existed (bits-ui `Dialog` over `Modal` — focus trap, `role="dialog"`, Esc and backdrop tap both cancelling), built for destructive deletes, so this was a customer rather than a build. Logout became a `<button>` opening it instead of an anchor to `/logout`.
+
+**That it stops being a link is worth its own note.** `/istota/logout` is a GET that clears the session, so as an anchor it was reachable by anything that follows links speculatively — a prefetcher, a link scanner, a crawler with a session cookie. Not the reported bug, and not why the change was made, but the same edit closes it.
+
+**The sizing half is where the interesting mistake lives, because the obvious version of it recreates the bug.** Giving each of the three nav icons a 44px hit area, one control at a time, is the natural reading of "bump both to the ~44px minimum". It is wrong: the icons are 14–18px glyphs at a `0.75rem` gap, so 44px targets *overlap*, and a tap in the seam lands on whichever won the stacking order rather than on what the user aimed at — which is precisely the accidental-logout mechanism, now with a larger seam. Targets in a row have to be sized as a row. So the gap goes to `1.25rem` first (centres ≥44px apart at the default text scale), and only then does each control get its area — as an out-of-flow `::before` overlay, reusing `SidebarToggle`'s device so reaching the minimum costs the nav no height. Scoped to ≤640px; pointer precision on a desktop doesn't need it and oversized invisible targets there would only swallow clicks.
+
+**Consolidating the three controls onto a shared `.nav-icon-btn` rule was not tidying.** Hoisting the repeated reset put `background: none` in a rule with the same specificity as each component's scoped `:hover` — `.app-nav .nav-right .nav-icon-btn` and `.theme-btn.svelte-hash:hover` are both (0,3,0), a tie broken only by stylesheet order, i.e. a hover that works until something reorders CSS. The hover is byte-identical across all three anyway, so it moved up with the reset and the tie is gone.
+
+The one seam added is a `navigate` prop on `LogoutButton`, defaulting to the real `window.location.href` assignment. It exists only because jsdom refuses that assignment and "did it navigate?" is the entire behaviour under test. Verified by mutation: wiring the button straight to `logout()` fails all five tests.
+
+**Not verified:** the ~44px geometry is arithmetic against rendered box sizes, not a measured screenshot — the browser tooling wasn't reachable this session. Worth a look on a real phone.
+
+**Key changes:**
+- Logout is a confirmed action, not a bare link — `LogoutButton.svelte` wrapping the existing shared `ConfirmDialog`.
+- The three nav icon controls share one `.nav-icon-btn` rule carrying layout, reset and hover; only resting colour stays per control.
+- Below 640px each gets a ~44px out-of-flow hit area, and the row's gap widens so those areas stay disjoint.
+- `web/AGENTS.md` gained the size-a-row-of-targets-together rule, since the overlap trap is not obvious from the 44px guideline alone.
+
+**Files added/modified:**
+- `web/src/lib/components/LogoutButton.svelte` - new; button + confirm dialog, injectable `navigate`
+- `web/src/lib/components/LogoutButton.svelte.test.ts` - new; 5 tests, all failing without the gate
+- `web/src/routes/+layout.svelte` - logout markup replaced by the component; scoped styles reduced to resting colour
+- `web/src/app.css` - shared `.nav-icon-btn` rule + the mobile gap and hit-area block
+- `web/AGENTS.md`, `CHANGELOG.md`
+
 ## 2026-07-30: Monarch login 503 — a header constant that no test could ever catch going stale
 
 Reported as "503 despite correct info" on the Monarch email/password connect flow. The deployment server's web-unit journal named it on the first look: `monarch_login_client_outdated current=2025.10.0`, with Monarch answering 403 `"Please update to the latest version of the app to continue login."` We send a `monarch-client-version` header; ours had gone stale.
