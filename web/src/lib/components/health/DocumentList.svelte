@@ -198,7 +198,7 @@
     padding: 0;
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   @media (max-width: 1100px) {
@@ -218,7 +218,7 @@
     width: 100%;
     height: 100%;
     min-height: 4.5rem;
-    padding: 0.7rem 0.9rem;
+    padding: var(--space-3) var(--space-4);
     background: transparent;
     border: 1px dashed var(--border-default);
     border-radius: var(--radius-card);
@@ -242,7 +242,7 @@
   }
 
   .doc-error {
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--space-2);
     font-size: var(--text-xs);
     color: var(--status-danger-fg);
   }

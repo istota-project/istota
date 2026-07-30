@@ -189,8 +189,8 @@
     pointer-events: auto;
     display: flex;
     align-items: center;
-    gap: 0.6rem;
-    padding: 0.55rem 0.75rem;
+    gap: var(--space-2);
+    padding: 0.55rem var(--space-3);
     background: var(--notice-bg);
     color: var(--notice-fg);
     border-bottom: 1px solid var(--border-subtle);
@@ -256,7 +256,7 @@
     border: 1px solid currentColor;
     border-radius: var(--radius-pill);
     color: inherit;
-    padding: 0.15rem 0.7rem;
+    padding: 0.15rem var(--space-3);
     cursor: pointer;
   }
 

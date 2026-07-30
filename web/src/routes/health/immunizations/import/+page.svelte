@@ -296,7 +296,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 0.75rem;
+    margin-bottom: var(--space-3);
   }
   h1 {
     font-size: var(--text-lg);
@@ -309,8 +309,8 @@
 
   .tabs {
     display: flex;
-    gap: 0.25rem;
-    margin-bottom: 0.75rem;
+    gap: var(--space-1);
+    margin-bottom: var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
   }
   .tab {
@@ -320,7 +320,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-sm);
-    padding: 0.45rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     cursor: pointer;
     margin-bottom: -1px;
   }
@@ -333,11 +333,11 @@
   }
 
   .card {
-    padding: 0.85rem 1rem;
-    margin-bottom: 0.75rem;
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: var(--space-3);
   }
 
   .hint {
@@ -348,7 +348,7 @@
 
   .paste {
     width: 100%;
-    padding: 0.5rem 0.65rem;
+    padding: var(--space-2) var(--space-3);
     background: var(--surface-raised);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
@@ -364,11 +364,11 @@
 
   .actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
   }
   .card .actions {
-    margin-top: 0.25rem;
+    margin-top: var(--space-1);
   }
 
   .extracting {
@@ -378,13 +378,13 @@
     display: flex;
     flex-direction: row;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     color: var(--text-muted);
     font-size: var(--text-sm);
   }
 
   .attach-note {
-    margin: 0 0 0.75rem;
+    margin: 0 0 var(--space-3);
     font-size: var(--text-xs);
     color: var(--text-muted);
   }
@@ -392,8 +392,8 @@
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 0.5rem;
-    margin: 0.75rem 0 0.5rem;
+    gap: var(--space-2);
+    margin: var(--space-3) 0 var(--space-2);
   }
   .meta {
     font-size: var(--text-xs);
@@ -401,8 +401,8 @@
   }
   code {
     background: var(--surface-raised);
-    padding: 0 0.3rem;
-    border-radius: 0.2rem;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
     font-size: 0.85em;
   }
 
@@ -424,10 +424,10 @@
     color: var(--text-dim);
   }
   input {
-    padding: 0.25rem 0.4rem;
+    padding: var(--space-1) var(--space-2);
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);

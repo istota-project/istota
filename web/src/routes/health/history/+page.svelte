@@ -413,8 +413,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 1rem;
-    margin-bottom: 1rem;
+    gap: var(--space-4);
+    margin-bottom: var(--space-4);
   }
   h1 {
     font-size: var(--text-lg);
@@ -423,7 +423,7 @@
   }
   .actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
   }
   /* Three pill buttons plus the title do not fit a phone on one line, and
@@ -433,7 +433,7 @@
     .header {
       flex-direction: column;
       align-items: stretch;
-      gap: 0.6rem;
+      gap: var(--space-2);
     }
     .actions {
       flex-wrap: wrap;
@@ -450,23 +450,23 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.85rem 1rem;
-    margin-bottom: 1rem;
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   .quick-form .row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   .quick-form input,
   .quick-form textarea {
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
@@ -487,7 +487,7 @@
   .conditions-field {
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: var(--space-2);
     min-width: 0;
   }
   .conditions-field .field-label {
@@ -500,13 +500,13 @@
     padding: 0;
     display: flex;
     flex-wrap: wrap;
-    gap: 0.35rem;
+    gap: var(--space-2);
   }
   .staged li {
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
-    padding: 0.1rem 0.3rem 0.1rem 0.55rem;
+    gap: var(--space-2);
+    padding: 0.1rem var(--space-1) 0.1rem 0.55rem;
     background: var(--surface-raised);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
@@ -544,14 +544,14 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 1rem;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
   }
   .date-inputs {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 0.35rem;
+    gap: var(--space-2);
     min-width: 0;
   }
   .range-sep {
@@ -564,8 +564,8 @@
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--text-xs);
-    padding: 0.2rem 0.4rem;
-    border-radius: 0.25rem;
+    padding: 0.2rem var(--space-2);
+    border-radius: var(--radius-sm);
     /* iOS renders a date input at its intrinsic width, which is wider than a
 		   phone once two of them sit on one row. */
     min-width: 0;
@@ -592,11 +592,11 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   .card {
     display: block;
-    padding: 0.7rem 0.9rem;
+    padding: var(--space-3) var(--space-4);
     color: var(--text-primary);
   }
   .card:hover {
@@ -606,7 +606,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 0.35rem;
+    margin-bottom: var(--space-2);
   }
   .card-body .who {
     font-weight: 500;
@@ -618,7 +618,7 @@
     text-transform: lowercase;
   }
   .card-body .reason {
-    margin-top: 0.25rem;
+    margin-top: var(--space-1);
     font-size: var(--text-sm);
     color: var(--text-muted);
   }
@@ -632,7 +632,7 @@
     font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    padding: 0.1rem 0.5rem;
+    padding: 0.1rem var(--space-2);
     border-radius: var(--radius-pill);
     font-weight: 500;
   }
@@ -693,14 +693,14 @@
       border-left: none;
       border-top: 1px solid var(--border-subtle);
       padding-left: 0;
-      padding-top: 1rem;
+      padding-top: var(--space-4);
     }
   }
   .sidebar h2 {
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
   .sidebar h3 {
-    margin: 0.85rem 0 0.4rem;
+    margin: var(--space-3) 0 var(--space-2);
     font-size: var(--text-xs);
     font-weight: 500;
     color: var(--text-dim);
@@ -720,7 +720,7 @@
     padding: 0;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
-    gap: 0.4rem;
+    gap: var(--space-2);
   }
   /* Equal heights only where cards actually sit beside each other. Above the
 	   breakpoint this is the 280px sidebar — a single column, where `1fr` rows
@@ -751,8 +751,8 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 0.35rem;
-    padding: 0.5rem 0.65rem;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
@@ -773,7 +773,7 @@
   .severity {
     display: inline-block;
     flex: 0 0 auto;
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem var(--space-2);
     font-size: 0.55rem;
     font-weight: 600;
     text-transform: uppercase;

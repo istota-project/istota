@@ -152,7 +152,7 @@
 
 <style>
   .report-content {
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
   }
 
   .section-total {
@@ -181,7 +181,7 @@
   }
 
   .tree-section {
-    padding: 0.25rem 0 0.5rem;
+    padding: var(--space-1) 0 var(--space-2);
   }
 
   .tree-name {
@@ -218,9 +218,9 @@
   .net-row {
     display: flex;
     align-items: baseline;
-    padding: 1rem 0.75rem 0.5rem;
+    padding: var(--space-4) var(--space-3) var(--space-2);
     border-top: 2px solid var(--border-default);
-    margin-top: 0.75rem;
+    margin-top: var(--space-3);
   }
 
   .net-label {

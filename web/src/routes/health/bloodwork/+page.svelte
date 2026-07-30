@@ -295,7 +295,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
   }
   h1 {
     font-size: var(--text-lg);
@@ -304,7 +304,7 @@
   }
   .actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
   }
 
@@ -312,11 +312,11 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.75rem 1rem;
-    margin-bottom: 1rem;
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-4);
   }
   .drafts h2 {
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
   .drafts ul {
     list-style: none;
@@ -324,15 +324,15 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: var(--space-1);
   }
   .drafts a {
     display: grid;
     grid-template-columns: auto 7rem 1fr 1fr;
-    gap: 0.6rem;
+    gap: var(--space-2);
     align-items: center;
     padding: 0;
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     text-decoration: none;
     font-size: var(--text-sm);
@@ -374,7 +374,7 @@
     background: var(--surface-raised);
     z-index: 2;
     text-align: center;
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
     font-weight: 400;
     color: var(--text-muted);
@@ -416,7 +416,7 @@
     letter-spacing: 0.05em;
     color: var(--text-muted);
     text-transform: uppercase;
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     background: hsla(var(--cat-h), var(--cat-s), 65%, 0.22);
   }
   .cat-band {
@@ -432,7 +432,7 @@
     display: flex;
     flex-direction: row;
     align-items: baseline;
-    gap: 0.35rem;
+    gap: var(--space-2);
     color: inherit;
     text-decoration: none;
     width: 100%;
@@ -473,7 +473,7 @@
   }
   tbody td {
     text-align: center;
-    padding: 0.25rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
     white-space: nowrap;
     color: var(--text-primary);
@@ -547,7 +547,7 @@
     background: var(--surface-card);
     z-index: 1;
     text-align: left;
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     vertical-align: middle;
   }
   thead th.sticky-left {
@@ -617,30 +617,30 @@
     .header {
       flex-direction: column;
       align-items: stretch;
-      gap: 0.5rem;
-      margin-bottom: 0.75rem;
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
     }
     .actions {
-      gap: 0.3rem;
+      gap: var(--space-1);
       flex-wrap: nowrap;
     }
     /* The toolbar shrinks its buttons on a phone, which Button has no prop
        for — a size is a fixed choice, not a responsive one. Scoped to this
        page's own .actions so it cannot reach another module's buttons. */
     .actions :global(.btn) {
-      padding: 0.2rem 0.5rem;
+      padding: 0.2rem var(--space-2);
       font-size: var(--text-xs);
       white-space: nowrap;
       flex: 0 0 auto;
     }
     .drafts {
-      padding: 0.75rem 0.6rem;
+      padding: var(--space-3) var(--space-2);
     }
     .drafts a {
       /* Stack the columns; the desktop 4-column grid wraps off-screen. */
       grid-template-columns: auto auto 1fr;
       grid-template-rows: auto auto;
-      gap: 0.2rem 0.5rem;
+      gap: 0.2rem var(--space-2);
       font-size: var(--text-xs);
     }
     .drafts a > :nth-child(4) {

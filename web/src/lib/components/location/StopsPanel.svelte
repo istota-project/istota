@@ -48,13 +48,13 @@
     max-height: 200px;
     overflow-y: auto;
     border-top: 1px solid var(--border-subtle);
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     flex-shrink: 0;
   }
 
   .panel-section {
-    padding-bottom: 0.5rem;
-    margin-bottom: 0.25rem;
+    padding-bottom: var(--space-2);
+    margin-bottom: var(--space-1);
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -70,6 +70,6 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-weight: 500;
-    margin-bottom: 0.25rem;
+    margin-bottom: var(--space-1);
   }
 </style>

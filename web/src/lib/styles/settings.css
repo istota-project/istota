@@ -6,7 +6,7 @@
   width: 100%;
   max-width: 980px;
   margin: 0 auto;
-  padding: 1.5rem 1rem 4rem;
+  padding: var(--space-6) var(--space-4) 4rem;
   display: flex;
   flex-direction: column;
   /* Grows into the pane so a whole-pane state (`.center-msg`, the loading
@@ -14,7 +14,7 @@
      which keep their natural height at the top of the column — basis auto and
      no shrink, so a long settings page still scrolls. */
   flex: 1 0 auto;
-  gap: 1rem;
+  gap: var(--space-4);
   box-sizing: border-box;
   container-type: inline-size;
   container-name: settings;
@@ -24,7 +24,7 @@
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 1rem;
+  gap: var(--space-4);
   flex-wrap: wrap;
 }
 
@@ -35,7 +35,7 @@
 }
 
 .settings .hint {
-  margin: 0.25rem 0 0;
+  margin: var(--space-1) 0 0;
   font-size: var(--text-sm);
   color: var(--text-muted);
   max-width: 60ch;
@@ -44,15 +44,15 @@
 .settings .hint code,
 .settings code {
   background: var(--surface-raised);
-  padding: 0 0.3rem;
-  border-radius: 0.2rem;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
   font-size: 0.8em;
 }
 
 .settings .header-actions {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: var(--space-2);
 }
 
 .settings .dirty-badge {
@@ -64,10 +64,10 @@
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-card);
-  padding: 1rem;
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--space-3);
 }
 
 .settings .card h2 {
@@ -87,7 +87,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 
@@ -95,7 +95,7 @@
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-  margin: 0.5rem 0 -0.25rem;
+  margin: var(--space-2) 0 -0.25rem;
 }
 
 .settings .subsection-heading h2 {
@@ -111,7 +111,7 @@
 .settings .title {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
 
 .settings .meta {
@@ -121,7 +121,7 @@
 
 .settings .status-pill {
   font-size: var(--text-xs);
-  padding: 0.05rem 0.4rem;
+  padding: 0.05rem var(--space-2);
   border-radius: var(--radius-pill);
   background: var(--surface-raised);
   color: var(--text-muted);
@@ -147,7 +147,7 @@
 
 .settings .row {
   display: flex;
-  gap: 0.4rem;
+  gap: var(--space-2);
   align-items: center;
 }
 
@@ -172,7 +172,7 @@
 .settings .grid th,
 .settings .grid td {
   text-align: left;
-  padding: 0.4rem 0.5rem;
+  padding: var(--space-2) var(--space-2);
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
 }
@@ -198,23 +198,23 @@
 
 @media (max-width: 768px) {
   .settings {
-    padding: 1rem 0.75rem 3rem;
+    padding: var(--space-4) var(--space-3) 3rem;
   }
   .settings-header {
     flex-direction: column;
     align-items: stretch;
   }
   .settings .card {
-    padding: 0.75rem;
+    padding: var(--space-3);
   }
 }
 
 @media (max-width: 640px) {
   .settings {
-    padding: 0.75rem 0.75rem 3rem;
+    padding: var(--space-3) var(--space-3) 3rem;
   }
   .settings .card {
-    padding: 0.6rem;
+    padding: var(--space-2);
   }
 }
 

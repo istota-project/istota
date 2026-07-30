@@ -187,15 +187,15 @@
 
   .used-by code {
     background: var(--surface-raised);
-    padding: 0 0.3rem;
-    border-radius: 0.2rem;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
     font-size: 0.9em;
     color: var(--text-muted);
   }
 
   .oauth-actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .saved-flash {
@@ -205,7 +205,7 @@
 
   .clear-confirm {
     display: flex;
-    gap: 0.4rem;
+    gap: var(--space-2);
     align-items: center;
     font-size: var(--text-xs);
     color: var(--text-muted);

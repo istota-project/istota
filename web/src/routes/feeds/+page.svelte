@@ -416,14 +416,14 @@
     display: flex;
     flex-direction: column;
     flex: 1 0 auto;
-    padding: 0.75rem;
+    padding: var(--space-3);
   }
 
   /* Grid layout */
   .feed-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
-    gap: 1rem;
+    gap: var(--space-4);
   }
 
   .feed-grid.list-view {
@@ -465,10 +465,10 @@
     font-size: 0.55rem;
     font-weight: 600;
     letter-spacing: 0.04em;
-    padding: 0.1rem 0.35rem;
+    padding: 0.1rem var(--space-2);
     background: var(--scrim-pill-bg);
     color: var(--scrim-pill-fg);
-    border-radius: 0.2rem;
+    border-radius: var(--radius-sm);
     pointer-events: none;
     z-index: 2;
   }
@@ -597,7 +597,7 @@
     position: absolute;
     top: 0.5rem;
     right: 0.5rem;
-    padding: 0.15rem 0.4rem;
+    padding: 0.15rem var(--space-2);
     border-radius: var(--radius-sm);
     /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
        the scrim and the glyph on it are fixed in both themes. */
@@ -675,7 +675,7 @@
 
   /* Title overlay */
   .feed-grid :global(.card-title-overlay) {
-    padding: 0.25rem 0.6rem;
+    padding: var(--space-1) var(--space-2);
     background: var(--surface-overlay);
     font-size: var(--text-xs);
     color: var(--text-muted);
@@ -701,7 +701,7 @@
 
   .feed-grid :global(.card-body h3) {
     margin: 0;
-    padding: 0.5rem 0.75rem 0.25rem;
+    padding: var(--space-2) var(--space-3) var(--space-1);
     font-size: 0.8rem;
     font-weight: 600;
   }
@@ -720,7 +720,7 @@
 	   is the shared one; FeedReader's .reader-body matches it. */
   .feed-grid :global(.excerpt) {
     margin: 0;
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     font-size: var(--text-base);
     line-height: 1.6;
     color: var(--text-secondary);
@@ -729,7 +729,7 @@
 
   /* Link color comes from the shared `prose` contract in app.css. */
   .feed-grid :global(.excerpt p) {
-    margin: 0 0 0.85rem;
+    margin: 0 0 var(--space-3);
   }
 
   .feed-grid :global(.excerpt figure) {
@@ -740,7 +740,7 @@
     max-width: 100%;
     height: auto;
     border-radius: var(--radius-card);
-    margin: 0.6rem 0;
+    margin: var(--space-2) 0;
     display: block;
   }
 
@@ -787,9 +787,9 @@
   /* Meta */
   .feed-grid :global(.meta) {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     font-size: var(--text-sm);
     color: var(--text-dim);
     border-top: 1px solid var(--border-subtle);
@@ -798,8 +798,8 @@
 
   .feed-grid :global(.feed-name) {
     background: var(--surface-badge);
-    padding: 0.1rem 0.4rem;
-    border-radius: 0.2rem;
+    padding: 0.1rem var(--space-2);
+    border-radius: var(--radius-sm);
   }
 
   .feed-grid :global(.repeat-note) {
@@ -822,7 +822,7 @@
   .sentinel {
     height: 1px;
     text-align: center;
-    padding: 1rem 0;
+    padding: var(--space-4) 0;
   }
 
   .loading-more {
@@ -838,8 +838,8 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     background: var(--surface-overlay);
-    padding: 0.3rem 0.6rem;
-    border-radius: 0.25rem;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     z-index: 5;
     pointer-events: none;
   }

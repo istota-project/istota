@@ -34,7 +34,7 @@
   }
 
   .chip.icon {
-    padding: 0.3rem;
+    padding: var(--space-1);
   }
 
   .chip:hover {
@@ -49,10 +49,10 @@
 
   @media (max-width: 640px) {
     .chip {
-      padding: 0.2rem 0.45rem;
+      padding: 0.2rem var(--space-2);
     }
     .chip.icon {
-      padding: 0.25rem;
+      padding: var(--space-1);
     }
   }
 </style>

@@ -90,8 +90,8 @@
     background: var(--surface-card);
     color: var(--text-primary);
     border: 1px solid var(--border-default);
-    border-radius: 0.35rem;
-    padding: 0.5rem 0.6rem;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-2);
     font-size: var(--text-xs);
     line-height: 1.45;
     box-shadow: var(--shadow-md);

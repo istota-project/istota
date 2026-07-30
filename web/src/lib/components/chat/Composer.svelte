@@ -688,7 +688,7 @@
 	   fill — the pill below, the attachment chips, the error chips. */
   .composer {
     position: relative;
-    padding: 0.6rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     /* The composer is the bottom edge of the app, so it absorbs the device's
 		   safe-area insets: the fill still runs into the corners / under the home
 		   indicator, but the textarea and buttons sit above them. max() keeps the
@@ -886,24 +886,24 @@
     position: absolute;
     bottom: 100%;
     left: max(0.75rem, var(--safe-left));
-    margin-bottom: 0.3rem;
-    padding: 0.25rem;
+    margin-bottom: var(--space-1);
+    padding: var(--space-1);
     display: flex;
     flex-direction: column;
     min-width: 12rem;
     background: var(--surface-card);
     border: 1px solid var(--border-default);
-    border-radius: 0.4rem;
+    border-radius: var(--radius-sm);
     box-shadow: var(--shadow-md);
     z-index: var(--z-popover);
   }
   .attach-menu-item {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.6rem;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-2);
     border: none;
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     background: transparent;
     font: inherit;
     font-size: var(--text-sm);
@@ -919,8 +919,8 @@
   .attach-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.3rem;
-    margin-bottom: 0.4rem;
+    gap: var(--space-1);
+    margin-bottom: var(--space-2);
   }
   /* Raised fill, not --surface-card: the dock behind these now paints the pane
 	   fill (which *is* --surface-card in the dark theme), so a card-filled chip
@@ -928,13 +928,13 @@
   .attach-chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: var(--space-1);
     font-size: var(--text-xs);
     color: var(--text-secondary);
     background: var(--surface-raised);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
-    padding: 0.15rem 0.45rem;
+    padding: 0.15rem var(--space-2);
   }
   .attach-chip.uploading {
     color: var(--text-muted);
@@ -956,18 +956,18 @@
   .notice-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.3rem;
-    margin-bottom: 0.4rem;
+    gap: var(--space-1);
+    margin-bottom: var(--space-2);
   }
   .attach-error {
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: var(--space-1);
     font-size: var(--text-xs);
     color: var(--status-danger-fg);
     background: var(--status-danger-bg);
     border: 1px solid color-mix(in srgb, var(--status-danger-fg) 45%, transparent);
     border-radius: var(--radius-pill);
-    padding: 0.15rem 0.45rem;
+    padding: 0.15rem var(--space-2);
   }
 </style>

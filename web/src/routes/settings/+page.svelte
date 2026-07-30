@@ -539,20 +539,20 @@
 	   the OAuth service cards below it line up. */
   .oauth-actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .module-toggles {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.4rem;
+    gap: var(--space-2);
   }
 
   .module-chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
-    padding: 0.15rem 0.5rem;
+    gap: var(--space-1);
+    padding: 0.15rem var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
     font-size: var(--text-xs);

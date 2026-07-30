@@ -70,12 +70,12 @@
   :global(.ui-select-trigger) {
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     background: var(--surface-card);
     color: var(--text-primary);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
-    padding: 0.15rem 0.5rem;
+    padding: 0.15rem var(--space-2);
     font: inherit;
     font-size: var(--text-xs);
     line-height: 1.2;
@@ -103,8 +103,8 @@
     max-width: 24rem;
     box-sizing: border-box;
     background: var(--surface-base);
-    border-radius: 0.3rem;
-    padding: 0.3rem 0.5rem;
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
     font-size: var(--text-sm);
     /* Match native text-input height: inputs inherit line-height 1.5, but the
 		   base trigger pins 1.2, which left the full-width trigger ~4px shorter
@@ -132,8 +132,8 @@
   :global(.ui-select-content) {
     background: var(--surface-card);
     border: 1px solid var(--border-default);
-    border-radius: 0.4rem;
-    padding: 0.25rem;
+    border-radius: var(--radius-sm);
+    padding: var(--space-1);
     z-index: var(--z-popover);
     box-shadow: var(--shadow-md);
     /* design-lint-allow: bits-ui sets --bits-select-* on the popover at open
@@ -159,10 +159,10 @@
   }
 
   :global(.ui-select-item) {
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-secondary);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     outline: none;
     user-select: none;

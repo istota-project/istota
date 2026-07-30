@@ -403,7 +403,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
   }
   h1 {
     font-size: var(--text-lg);
@@ -412,7 +412,7 @@
   }
   .actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
   }
 
@@ -420,27 +420,27 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.85rem 1rem;
-    margin-bottom: 1rem;
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   .quick-form .row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   .quick-form :global(.field.full) {
     grid-column: 1 / -1;
-    margin-top: 0.25rem;
+    margin-top: var(--space-1);
   }
   .quick-form input,
   .quick-form textarea {
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
@@ -467,10 +467,10 @@
   }
   .coverage h2,
   .history h2 {
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
   .coverage h3 {
-    margin: 0.85rem 0 0.4rem;
+    margin: var(--space-3) 0 var(--space-2);
     font-size: var(--text-xs);
     font-weight: 500;
     color: var(--text-dim);
@@ -492,9 +492,9 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 0.4rem;
+    gap: var(--space-2);
     width: 100%;
-    padding: 0.7rem 0.9rem;
+    padding: var(--space-3) var(--space-4);
     color: var(--text-primary);
   }
   .card .name {
@@ -514,31 +514,31 @@
   }
 
   .risk-based {
-    margin-top: 0.75rem;
+    margin-top: var(--space-3);
   }
   .risk-based > summary {
     cursor: pointer;
     font-size: var(--text-sm);
     color: var(--text-muted);
-    padding: 0.35rem 0;
+    padding: var(--space-2) 0;
     user-select: none;
   }
   .risk-based[open] > summary {
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--space-2);
   }
 
   .history-head {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 0.75rem;
-    margin-bottom: 0.5rem;
+    gap: var(--space-3);
+    margin-bottom: var(--space-2);
   }
   .filter-input {
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     background: var(--surface-raised);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
@@ -560,7 +560,7 @@
   td.row-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.25rem;
+    gap: var(--space-1);
   }
   a.link {
     color: var(--text-primary);

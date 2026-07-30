@@ -58,8 +58,8 @@
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-xs);
-    padding: 0.2rem 0.4rem;
-    border-radius: 0.25rem;
+    padding: 0.2rem var(--space-2);
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
 

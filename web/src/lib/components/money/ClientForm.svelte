@@ -285,7 +285,7 @@
   .form-grid {
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: var(--space-2);
   }
 
   .static-key {
@@ -311,19 +311,19 @@
 
   details {
     border-top: 1px solid var(--border-subtle);
-    padding-top: 0.5rem;
+    padding-top: var(--space-2);
   }
 
   summary {
     cursor: pointer;
     font-size: var(--text-xs);
     color: var(--text-muted);
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--space-2);
   }
 
   .form-error {
     font-size: var(--text-xs);
     color: var(--status-danger-fg);
-    margin-top: 0.5rem;
+    margin-top: var(--space-2);
   }
 </style>

@@ -342,7 +342,7 @@
   .tracker-row {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
+    gap: var(--space-2);
   }
 
   .tracker-state {
@@ -362,7 +362,7 @@
   .tracker-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .tracker-error {
@@ -396,7 +396,7 @@
   .kv {
     display: grid;
     grid-template-columns: max-content 1fr;
-    gap: 0.25rem 0.75rem;
+    gap: var(--space-1) var(--space-3);
     margin: 0;
     font-size: var(--text-sm);
   }

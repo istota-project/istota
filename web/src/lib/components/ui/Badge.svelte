@@ -32,7 +32,7 @@
     font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    padding: 0.1rem 0.5rem;
+    padding: 0.1rem var(--space-2);
     border-radius: var(--radius-pill);
     font-weight: 500;
     /* A status label that wraps mid-word stops reading as one token, and its

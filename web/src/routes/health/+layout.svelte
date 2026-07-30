@@ -73,7 +73,7 @@
   .health-frame {
     max-width: 1280px;
     margin: 0 auto;
-    padding: 1rem;
+    padding: var(--space-4);
     width: 100%;
     box-sizing: border-box;
     display: flex;
@@ -110,7 +110,7 @@
   .health-frame :global(table.grid th),
   .health-frame :global(table.grid td) {
     text-align: left;
-    padding: 0.4rem 0.5rem;
+    padding: var(--space-2) var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
     vertical-align: middle;
   }
@@ -125,7 +125,7 @@
 
   .health-frame :global(table.grid--dense th),
   .health-frame :global(table.grid--dense td) {
-    padding: 0.3rem 0.4rem;
+    padding: var(--space-1) var(--space-2);
   }
 
   /* The .msg boxes this replaced each carried their own margin-bottom —
@@ -133,7 +133,7 @@
      than as twelve page rules re-forking the primitive; the majority value
      wins, so the bloodwork toolbar's notice gains 0.25rem. */
   .health-frame :global(.banner) {
-    margin-bottom: 0.75rem;
+    margin-bottom: var(--space-3);
   }
 
   .health-frame :global(.card) {
@@ -161,7 +161,7 @@
     .health-frame {
       /* Match ShellHeader's mobile padding so the page heading lines
 			   up with the subnav title above it. */
-      padding: 0.5rem 0.75rem;
+      padding: var(--space-2) var(--space-3);
     }
   }
 </style>

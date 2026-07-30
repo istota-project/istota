@@ -694,7 +694,7 @@
      the top of the page. The banner chrome (border, toggle, title) lives in the
      NoticeBanner component; only the caveat list is styled here. */
   .standalone-lead {
-    margin: 0 0 0.4rem;
+    margin: 0 0 var(--space-2);
     opacity: 0.85;
     font-size: 0.9rem;
   }
@@ -705,7 +705,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .standalone-caveats li {
@@ -766,7 +766,7 @@
     height: 8px;
     border-radius: 50%;
     background: var(--text-dim);
-    margin-right: 0.25rem;
+    margin-right: var(--space-1);
     flex-shrink: 0;
   }
   .dot-ok {
@@ -800,9 +800,9 @@
 	   one carries a number, not an identity. */
   .badge {
     display: inline-block;
-    margin-left: 0.4rem;
+    margin-left: var(--space-2);
     font-size: var(--text-xs);
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem var(--space-2);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
     color: var(--text-muted);
@@ -812,8 +812,8 @@
 	   amber is the identity accent, not a severity. */
   .admin-badge {
     display: inline-block;
-    margin-left: 0.4rem;
-    padding: 0.05rem 0.4rem;
+    margin-left: var(--space-2);
+    padding: 0.05rem var(--space-2);
     font-size: 0.55rem;
     font-weight: 600;
     text-transform: uppercase;
@@ -865,14 +865,14 @@
   .source-bars {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
-    margin-top: 0.25rem;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
   }
 
   .source-row {
     display: grid;
     grid-template-columns: minmax(80px, 100px) 1fr minmax(70px, max-content);
-    gap: 0.75rem;
+    gap: var(--space-3);
     align-items: center;
     font-size: var(--text-sm);
   }
@@ -881,7 +881,7 @@
     color: var(--text-muted);
     display: flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: var(--space-1);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -904,7 +904,7 @@
   }
 
   .failed-inline {
-    margin-left: 0.4rem;
+    margin-left: var(--space-2);
     color: var(--status-danger-fg);
     font-size: var(--text-xs);
   }
@@ -945,7 +945,7 @@
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
-    gap: 0.25rem;
+    gap: var(--space-1);
   }
 
   .source-summary strong {
@@ -962,7 +962,7 @@
     height: 5px;
     border-radius: 3px;
     overflow: hidden;
-    margin: 0.25rem 0;
+    margin: var(--space-1) 0;
     background: var(--surface-base);
   }
 
@@ -974,21 +974,21 @@
   .source-list {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.4rem;
+    gap: var(--space-2);
     margin-top: 0.15rem;
   }
 
   .source-pill {
     display: inline-flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: var(--space-1);
     font-size: var(--text-xs);
     color: var(--text-muted);
   }
 
   .failed-pill {
     display: inline-block;
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem var(--space-2);
     background: rgba(255, 90, 90, 0.15);
     color: var(--status-danger-fg);
     border-radius: var(--radius-pill);
@@ -1026,7 +1026,7 @@
     content: '!';
     display: inline-block;
     color: var(--status-danger-fg);
-    margin-right: 0.4rem;
+    margin-right: var(--space-2);
     font-weight: 700;
   }
 
@@ -1035,19 +1035,19 @@
   }
 
   .module-child-row td:first-child {
-    padding-left: 1.5rem;
+    padding-left: var(--space-6);
   }
 
   .disclosure {
     display: inline-block;
     width: 1em;
     color: var(--text-dim);
-    margin-right: 0.25rem;
+    margin-right: var(--space-1);
   }
 
   .error-row td {
     background: var(--surface-base);
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
   }
 
   .error-row pre {
@@ -1070,7 +1070,7 @@
     background: var(--surface-base);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-card);
-    padding: 0.75rem 0.9rem;
+    padding: var(--space-3) var(--space-4);
   }
 
   .module-warn {
@@ -1080,13 +1080,13 @@
   .module-name {
     font-weight: 600;
     font-size: var(--text-base);
-    margin-bottom: 0.4rem;
+    margin-bottom: var(--space-2);
   }
 
   .module-fields {
     display: grid;
     grid-template-columns: max-content 1fr;
-    gap: 0.1rem 0.75rem;
+    gap: 0.1rem var(--space-3);
     margin: 0;
     font-size: var(--text-xs);
   }
@@ -1104,7 +1104,7 @@
   .kv {
     display: grid;
     grid-template-columns: max-content 1fr;
-    gap: 0.25rem 1.5rem;
+    gap: var(--space-1) var(--space-6);
     margin: 0;
     font-size: var(--text-sm);
   }
@@ -1119,20 +1119,20 @@
 
   /* Models / brain backend */
   .model-kv {
-    gap: 0.35rem 1.25rem;
+    gap: var(--space-2) 1.25rem;
     align-items: baseline;
   }
 
   .model-value {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
   }
 
   /* Separate the config block (Brain/Endpoint) from the resolution list. */
   .role-kv {
-    margin-top: 0.6rem;
-    padding-top: 0.6rem;
+    margin-top: var(--space-2);
+    padding-top: var(--space-2);
     border-top: 1px solid var(--border-subtle);
   }
 
@@ -1152,14 +1152,14 @@
   }
 
   .endpoint-provider {
-    margin-left: 0.5rem;
+    margin-left: var(--space-2);
     color: var(--text-dim);
     white-space: nowrap;
   }
 
   .effort-chip {
     display: inline-block;
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem var(--space-2);
     font-size: 0.55rem;
     font-weight: 600;
     text-transform: uppercase;
@@ -1170,10 +1170,10 @@
   }
 
   .overrides {
-    margin-top: 0.75rem;
+    margin-top: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: var(--space-2);
   }
 
   /* Mobile: drop low-priority columns and tighten the source cell.
@@ -1248,7 +1248,7 @@
 		   visible — they're the only colour-independent legend the user
 		   gets when hover tooltips aren't available. */
     .source-list {
-      gap: 0.3rem;
+      gap: var(--space-1);
     }
     .source-pill {
       font-size: 0.7rem;

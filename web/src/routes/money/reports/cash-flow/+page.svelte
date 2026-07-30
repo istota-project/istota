@@ -430,34 +430,34 @@
 
 <style>
   .cashflow-page {
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
   }
 
   .chart-container {
     height: 280px;
-    padding: 0.75rem;
+    padding: var(--space-3);
     background: var(--surface-card);
     border-radius: var(--radius-card);
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
   }
 
   .month-title {
     font-size: 1.1rem;
     font-weight: 600;
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
   }
 
   .summary-cards {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    gap: 0.75rem;
-    padding: 0.5rem 0.75rem;
-    margin-bottom: 0.75rem;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-3);
   }
 
   .card {
     text-align: center;
-    padding: 0.75rem 0.5rem;
+    padding: var(--space-3) var(--space-2);
     background: var(--surface-card);
     border-radius: var(--radius-card);
   }
@@ -466,7 +466,7 @@
     font-size: 1rem;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-    margin-bottom: 0.25rem;
+    margin-bottom: var(--space-1);
   }
 
   .card-label {
@@ -492,7 +492,7 @@
   }
 
   .breakdowns {
-    padding: 0 0.75rem;
+    padding: 0 var(--space-3);
   }
 
   .caret {
@@ -507,16 +507,16 @@
   }
 
   .breakdown-list {
-    padding: 0.25rem 0 0.5rem;
+    padding: var(--space-1) 0 var(--space-2);
   }
 
   .breakdown-row {
     display: flex;
     align-items: baseline;
-    gap: 0.25rem;
-    padding: 0.3rem 0.75rem;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-3);
     font-size: var(--text-sm);
-    border-radius: 0.25rem;
+    border-radius: var(--radius-sm);
     transition: background var(--transition-fast);
   }
 

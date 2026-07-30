@@ -348,8 +348,8 @@
   .reader-head {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.75rem;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
     font-size: var(--text-sm);
     color: var(--text-dim); /* matches the card .meta row */
@@ -372,7 +372,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 0.3rem;
+    padding: var(--space-1);
     border: none;
     background: none;
     color: var(--text-dim);
@@ -397,13 +397,13 @@
 	   a post sits at the same inset inline and expanded. */
   .reader-body {
     overflow-y: auto;
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
   }
 
   .reader-title {
     font-size: 1rem;
     line-height: 1.25;
-    margin: 0 0 1rem;
+    margin: 0 0 var(--space-4);
     color: var(--text-primary);
   }
 
@@ -419,7 +419,7 @@
   .reader-hero {
     margin: 0 0 1.1rem;
     display: grid;
-    gap: 0.4rem;
+    gap: var(--space-2);
   }
 
   .reader-hero.multi {
@@ -512,7 +512,7 @@
     position: absolute;
     top: 0.5rem;
     right: 0.5rem;
-    padding: 0.15rem 0.4rem;
+    padding: 0.15rem var(--space-2);
     border-radius: var(--radius-sm);
     /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
        the scrim and the glyph on it are fixed in both themes. */
@@ -545,7 +545,7 @@
   /* Body copy mirrors the card .excerpt. Link color comes from the shared
 	   `prose` contract in app.css, not from here. */
   .repeat-note {
-    margin: 0 0 1rem;
+    margin: 0 0 var(--space-4);
     font-size: var(--text-sm);
     color: var(--text-dim);
     font-style: italic;
@@ -562,11 +562,11 @@
     max-width: 100%;
     height: auto;
     border-radius: var(--radius-card);
-    margin: 0.6rem 0;
+    margin: var(--space-2) 0;
   }
 
   .reader-content :global(p) {
-    margin: 0 0 0.85rem;
+    margin: 0 0 var(--space-3);
   }
 
   .reader-content :global(figure) {
@@ -576,9 +576,9 @@
   .open-original {
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: var(--space-2);
     margin-top: 1.2rem;
-    padding: 0.45rem 0.8rem;
+    padding: var(--space-2) 0.8rem;
     border-radius: var(--radius-card);
     background: var(--surface-raised);
     color: var(--text-primary);

@@ -441,7 +441,7 @@
   .filters {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     flex-wrap: wrap;
   }
 
@@ -489,7 +489,7 @@
 
   .work-desc {
     color: var(--text-dim);
-    margin-left: 0.35rem;
+    margin-left: var(--space-2);
     font-size: var(--text-xs);
   }
 
@@ -516,7 +516,7 @@
   .work-warning {
     font-size: var(--text-xs);
     color: var(--status-warn-fg);
-    padding: 0 0.75rem 0.35rem 3.25rem;
+    padding: 0 var(--space-3) var(--space-2) 3.25rem;
   }
 
   @media (max-width: 640px) {
@@ -534,7 +534,7 @@
       min-width: 4rem;
     }
     .work-warning {
-      padding-left: 0.75rem;
+      padding-left: var(--space-3);
     }
   }
 </style>

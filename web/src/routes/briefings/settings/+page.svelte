@@ -1561,9 +1561,9 @@
   .add-form {
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
-    padding-top: 0.6rem;
-    margin-top: 0.6rem;
+    gap: var(--space-2);
+    padding-top: var(--space-2);
+    margin-top: var(--space-2);
     border-top: 1px solid var(--border-subtle);
   }
 
@@ -1576,7 +1576,7 @@
   .add-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: 0.6rem;
+    gap: var(--space-2);
     /* Bottom-align so the Enabled checkbox row lines up with the other
 		   fields' inputs (which sit below their labels), not their labels. */
     align-items: end;
@@ -1585,7 +1585,7 @@
   /* Nudge the checkbox down so it visually rests on the inputs' baseline
 	   row rather than floating a touch high in its bottom-aligned cell. */
   .add-grid :global(.field.checkbox) {
-    padding-bottom: 0.35rem;
+    padding-bottom: var(--space-2);
   }
 
   .add-actions {
@@ -1595,9 +1595,9 @@
 
   .briefing-pick {
     display: flex;
-    gap: 0.75rem;
+    gap: var(--space-3);
     align-items: flex-end;
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
   }
 
   /* ---- Blocks table ---- */
@@ -1626,7 +1626,7 @@
   .block-name {
     display: inline-flex;
     align-items: baseline;
-    gap: 0.4rem;
+    gap: var(--space-2);
     background: none;
     border: none;
     padding: 0;
@@ -1659,7 +1659,7 @@
   .render-pill {
     display: inline-block;
     font-size: var(--text-xs);
-    padding: 0.05rem 0.45rem;
+    padding: 0.05rem var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
     color: var(--text-muted);
@@ -1668,14 +1668,14 @@
   .kind-pills {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.25rem;
+    gap: var(--space-1);
   }
 
   .kind-pill {
     display: inline-block;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
     color: var(--text-secondary);
@@ -1697,19 +1697,19 @@
   }
 
   .block-detail {
-    padding: 0.85rem 1rem 1rem;
+    padding: var(--space-3) var(--space-4) var(--space-4);
     border-left: 2px solid var(--border-default);
   }
 
   .detail-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
-    gap: 0.6rem 1rem;
+    gap: var(--space-2) var(--space-4);
   }
 
   .sources-block {
-    margin-top: 1rem;
-    padding-top: 0.75rem;
+    margin-top: var(--space-4);
+    padding-top: var(--space-3);
     border-top: 1px dashed var(--border-subtle);
   }
 
@@ -1717,8 +1717,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
-    margin-bottom: 0.5rem;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
   }
 
   .sources-head h4 {
@@ -1732,7 +1732,7 @@
   /* The nested sources table shares the .grid look but drops the heavy header. */
   .grid.sub {
     background: var(--surface-raised);
-    border-radius: var(--radius-card, 0.5rem);
+    border-radius: var(--radius-card);
     overflow: hidden;
   }
 
@@ -1764,14 +1764,14 @@
   .toggle {
     display: inline-flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: var(--space-1);
     font-size: var(--text-xs);
     color: var(--text-muted);
   }
 
   .empty.small {
     font-size: var(--text-sm);
-    padding: 0.5rem 0.25rem;
+    padding: var(--space-2) var(--space-1);
   }
 
   .muted.small,
@@ -1793,15 +1793,15 @@
   .source-form {
     display: flex;
     flex-direction: column;
-    gap: 0.7rem;
-    padding: 0.7rem 0.5rem 0.75rem;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-2) var(--space-3);
   }
 
   .source-form-head {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding-bottom: 0.6rem;
+    gap: var(--space-2);
+    padding-bottom: var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -1822,12 +1822,12 @@
   .source-form-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5rem;
+    gap: var(--space-2);
     margin-top: 0.2rem;
   }
 
   .path-msg {
-    margin: 0.3rem 0 0;
+    margin: var(--space-1) 0 0;
     font-size: 0.85rem;
   }
 
@@ -1841,17 +1841,17 @@
 
   .add-block {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
-    margin-top: 0.75rem;
+    margin-top: var(--space-3);
   }
 
   .add-block input {
     flex: 1;
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
-    padding: 0.4rem 0.5rem;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-2);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
@@ -1896,9 +1896,9 @@
   .shared-editor {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
-    margin-top: 0.75rem;
-    padding: 1rem;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+    padding: var(--space-4);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-md);
     background: var(--surface-base);
@@ -1914,13 +1914,13 @@
   .sb-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 0.4rem 1.25rem;
+    gap: var(--space-2) 1.25rem;
     align-items: start;
   }
   .shared-sources {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   .shared-sources-head {
     display: flex;
@@ -1938,8 +1938,8 @@
     display: flex;
     flex-wrap: wrap;
     align-items: flex-end;
-    gap: 0.5rem 1rem;
-    padding: 0.75rem 2.25rem 0.75rem 0.75rem;
+    gap: var(--space-2) var(--space-4);
+    padding: var(--space-3) 2.25rem var(--space-3) var(--space-3);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-md);
     background: var(--surface-base);
@@ -1963,7 +1963,7 @@
     cursor: pointer;
     font-size: 1.25rem;
     line-height: 1;
-    padding: 0.1rem 0.3rem;
+    padding: 0.1rem var(--space-1);
     color: var(--text-muted);
   }
   .sb-source-remove:hover {

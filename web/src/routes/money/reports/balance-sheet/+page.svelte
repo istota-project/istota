@@ -186,14 +186,14 @@
 
 <style>
   .report-content {
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
   }
 
   .net-worth-banner {
     display: flex;
     align-items: baseline;
-    padding: 1rem 0.75rem;
-    margin-bottom: 0.5rem;
+    padding: var(--space-4) var(--space-3);
+    margin-bottom: var(--space-2);
     background: var(--surface-card);
     border-radius: var(--radius-card);
   }
@@ -237,7 +237,7 @@
   }
 
   .tree-section {
-    padding: 0.25rem 0 0.5rem;
+    padding: var(--space-1) 0 var(--space-2);
   }
 
   .tree-name {

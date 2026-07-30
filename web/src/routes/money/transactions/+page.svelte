@@ -349,7 +349,7 @@
   .txn-scroll {
     flex: 1;
     overflow-y: auto;
-    padding: 0 0 0.5rem;
+    padding: 0 0 var(--space-2);
     padding-bottom: max(0.5rem, var(--safe-bottom));
     transition: opacity var(--transition-fast);
   }
@@ -364,9 +364,9 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-weight: 500;
-    padding: 0.75rem 0.75rem 0.25rem;
+    padding: var(--space-3) var(--space-3) var(--space-1);
     border-top: 1px solid var(--border-subtle);
-    margin-top: 0.25rem;
+    margin-top: var(--space-1);
   }
 
   .date-header:first-child {
@@ -378,7 +378,7 @@
     flex: 1;
     min-width: 0;
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     overflow: hidden;
   }
 
@@ -428,7 +428,7 @@
   }
 
   .postings {
-    padding: 0.15rem 0.75rem 0.4rem 2.5rem;
+    padding: 0.15rem var(--space-3) var(--space-2) 2.5rem;
     background: var(--surface-card);
     border-radius: 0 0 0.25rem 0.25rem;
     margin-top: -0.15rem;
@@ -437,7 +437,7 @@
   .posting-row {
     display: flex;
     align-items: baseline;
-    gap: 0.75rem;
+    gap: var(--space-3);
     padding: 0.15rem 0;
     font-size: var(--text-xs);
   }
@@ -469,8 +469,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 1rem;
-    padding: 0.75rem;
+    gap: var(--space-4);
+    padding: var(--space-3);
     flex-shrink: 0;
     border-top: 1px solid var(--border-subtle);
   }
@@ -482,7 +482,7 @@
     color: var(--text-secondary);
     font: inherit;
     font-size: var(--text-sm);
-    padding: 0.3rem 0.75rem;
+    padding: var(--space-1) var(--space-3);
     cursor: pointer;
     transition: all var(--transition-fast);
   }

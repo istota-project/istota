@@ -95,7 +95,7 @@
     text-decoration: none;
     align-items: center;
     justify-content: center;
-    gap: 0.35rem;
+    gap: var(--space-2);
     border: none;
     font: inherit;
     font-size: var(--text-sm);
@@ -112,11 +112,11 @@
   }
 
   .btn-sm {
-    padding: 0.15rem 0.5rem;
+    padding: 0.15rem var(--space-2);
     font-size: var(--text-xs);
   }
   .btn-md {
-    padding: 0.25rem 0.6rem;
+    padding: var(--space-1) var(--space-2);
   }
 
   .btn-primary {
@@ -161,7 +161,7 @@
   .btn-subtle {
     background: transparent;
     color: var(--text-dim);
-    padding-inline: 0.35rem;
+    padding-inline: var(--space-2);
   }
   .btn-subtle:hover:not(:disabled) {
     color: var(--text-muted);
@@ -182,7 +182,7 @@
   .btn-danger-icon {
     background: transparent;
     color: var(--text-dim);
-    padding: 0.2rem 0.35rem;
+    padding: 0.2rem var(--space-2);
   }
   .btn-danger-icon:hover:not(:disabled) {
     color: var(--status-danger-fg);

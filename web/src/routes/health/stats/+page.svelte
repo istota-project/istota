@@ -500,11 +500,11 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
   }
   .ranges {
     display: flex;
-    gap: 0.3rem;
+    gap: var(--space-1);
   }
   .ranges button {
     background: none;
@@ -512,7 +512,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-xs);
-    padding: 0.25rem 0.6rem;
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-pill);
     cursor: pointer;
   }
@@ -521,7 +521,7 @@
     border-color: var(--text-primary);
   }
   .log-btn {
-    padding: 0.35rem 0.85rem;
+    padding: var(--space-2) var(--space-3);
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
@@ -567,28 +567,28 @@
   .value {
     font-size: 1.6rem;
     font-weight: 500;
-    margin-top: 0.25rem;
+    margin-top: var(--space-1);
     line-height: 1.1;
   }
   .unit {
     font-size: var(--text-sm);
     color: var(--text-muted);
-    margin-left: 0.25rem;
+    margin-left: var(--space-1);
   }
   .chart {
     flex: 1;
     min-height: 70px;
-    margin-top: 0.4rem;
+    margin-top: var(--space-2);
   }
   .meta {
     font-size: var(--text-xs);
     color: var(--text-dim);
-    margin-top: 0.25rem;
+    margin-top: var(--space-1);
   }
 
   .value-row {
     display: flex;
-    gap: 0.4rem;
+    gap: var(--space-2);
     align-items: center;
   }
   /* :global because the value input is an <Input> now — Svelte prunes a rule
@@ -609,13 +609,13 @@
   .unit-static {
     font-size: var(--text-sm);
     color: var(--text-muted);
-    padding: 0.3rem 0.2rem;
+    padding: var(--space-1) 0.2rem;
   }
   .modal-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
   }
 
   /* Light theme overrides — dark rules above untouched. */

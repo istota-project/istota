@@ -294,8 +294,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 0.75rem;
-    padding: 0.5rem 0.5rem 0.5rem 1rem;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
@@ -313,7 +313,7 @@
     font: inherit;
     border: none;
     border-radius: var(--radius-pill);
-    padding: 0.3rem 0.85rem;
+    padding: var(--space-1) var(--space-3);
     background: var(--accent-blue);
     color: var(--on-accent-fg);
     cursor: pointer;
@@ -350,7 +350,7 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.25rem;
+    padding: var(--space-1);
     z-index: var(--z-popover);
     box-shadow: var(--shadow-md);
     outline: none;
@@ -358,11 +358,11 @@
 
   :global(.app-nav-menu-link) {
     display: block;
-    padding: 0.4rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     font-size: var(--text-base);
     color: var(--text-muted);
     text-decoration: none;
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     outline: none;
   }
 

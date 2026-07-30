@@ -377,8 +377,8 @@
     position: relative;
   }
   .msg:not(.continuation) {
-    margin-top: 0.7rem;
-    padding-top: 0.45rem;
+    margin-top: var(--space-3);
+    padding-top: var(--space-2);
   }
   /* Reveal rules. With a real pointer the row's own :hover drives them; under a
 	   finger the list marks a single `.active` row instead. Splitting them
@@ -406,7 +406,7 @@
   .msg-actions {
     display: flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: var(--space-2);
   }
   /* Fresh group: the bar is the trailing member of the .meta header, so the
 		   shared `align-items: baseline` puts its text on the timestamp's baseline by
@@ -598,7 +598,7 @@
     font: inherit;
     font-size: var(--text-xs);
     line-height: 1.2;
-    padding: 0.05rem 0.5rem;
+    padding: 0.05rem var(--space-2);
     cursor: pointer;
     max-width: 12rem;
     overflow: hidden;
@@ -622,7 +622,7 @@
   .avatar {
     width: var(--chat-avatar);
     height: var(--chat-avatar);
-    border-radius: 0.5rem;
+    border-radius: var(--radius-md);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -654,7 +654,7 @@
 
     .avatar {
       font-size: var(--text-xs);
-      border-radius: 0.3rem;
+      border-radius: var(--radius-sm);
     }
 
     /* The continuation-row stamp shares that column, and a `06:25 PM` does not
@@ -689,7 +689,7 @@
   .meta {
     display: flex;
     align-items: baseline;
-    gap: 0.5rem;
+    gap: var(--space-2);
     margin-bottom: 0.1rem;
   }
   .author {
@@ -743,7 +743,7 @@
     margin-top: 0.1rem;
   }
   .chip-slot.gap-below {
-    margin-bottom: 0.85rem;
+    margin-bottom: var(--space-3);
   }
   /* A tool-first turn opens with a chip directly under the author header. Flush
 	   reads cramped against the header, a full paragraph gap reads detached — so
@@ -765,7 +765,7 @@
     position: relative;
   }
   .cmd-row .room-chip {
-    margin-bottom: 0.25rem;
+    margin-bottom: var(--space-1);
   }
   /* A command row has neither header nor gutter, so its star floats top-right
 	   on its own. (The bar is only absolute here and on continuation rows.) */
@@ -781,8 +781,8 @@
     color: var(--text-secondary);
     background: var(--surface-raised);
     border: 1px solid var(--border-subtle);
-    border-radius: 0.4rem;
-    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
     text-align: left;
     word-break: break-word;
   }
@@ -790,8 +790,8 @@
   .attachments {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.3rem;
-    margin-top: 0.3rem;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
   }
   .attachment {
     font-size: var(--text-xs);
@@ -799,7 +799,7 @@
     background: var(--surface-base);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-pill);
-    padding: 0.1rem 0.45rem;
+    padding: 0.1rem var(--space-2);
   }
   .attachment-link {
     text-decoration: none;
@@ -814,7 +814,7 @@
   .progress {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     min-width: 0;
     color: var(--text-muted);
     font-size: var(--text-sm);

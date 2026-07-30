@@ -87,12 +87,12 @@
   }
 
   .icon-btn-sm {
-    padding: 0.15rem 0.35rem;
+    padding: 0.15rem var(--space-2);
     border-radius: var(--radius-sm);
   }
 
   .icon-btn-md {
-    padding: 0.3rem;
+    padding: var(--space-1);
     border-radius: var(--radius-sm);
   }
 

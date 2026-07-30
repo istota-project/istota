@@ -71,19 +71,19 @@
 
 <style>
   .cat-group {
-    margin-bottom: 0.25rem;
+    margin-bottom: var(--space-1);
   }
 
   .cat-label {
     display: flex;
     align-items: baseline;
-    gap: 0.35rem;
+    gap: var(--space-2);
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-weight: 500;
-    padding: 0.35rem 0.75rem 0.15rem;
+    padding: var(--space-2) var(--space-3) 0.15rem;
   }
 
   .cat-label-button {
@@ -110,7 +110,7 @@
     display: flex;
     align-items: stretch;
     gap: 0.1rem;
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     transition: background var(--transition-fast);
   }
 
@@ -128,14 +128,14 @@
     background: none;
     border: none;
     cursor: pointer;
-    padding: 0.35rem 0.15rem 0.15rem 0.6rem;
+    padding: var(--space-2) 0.15rem 0.15rem var(--space-2);
   }
 
   .cat-select {
     flex: 1;
     display: flex;
     align-items: baseline;
-    gap: 0.35rem;
+    gap: var(--space-2);
     background: none;
     border: none;
     font: inherit;
@@ -146,7 +146,7 @@
     color: var(--text-dim);
     cursor: pointer;
     text-align: left;
-    padding: 0.35rem 0.75rem 0.15rem 0;
+    padding: var(--space-2) var(--space-3) 0.15rem 0;
     transition: color var(--transition-fast);
   }
 

@@ -184,7 +184,7 @@
   .active-filter {
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: var(--space-2);
     background: var(--surface-raised);
     border: none;
     color: var(--text-primary);
@@ -223,7 +223,7 @@
     border: none;
     color: var(--text-dim);
     cursor: pointer;
-    padding: 0.15rem 0.25rem;
+    padding: 0.15rem var(--space-1);
     display: inline-flex;
     align-items: center;
     flex-shrink: 0;
@@ -255,8 +255,8 @@
     font: inherit;
     font-size: var(--text-sm);
     cursor: pointer;
-    padding: 0.2rem 0.5rem;
-    border-radius: 0.3rem;
+    padding: 0.2rem var(--space-2);
+    border-radius: var(--radius-sm);
     text-align: left;
     white-space: nowrap;
     overflow: hidden;

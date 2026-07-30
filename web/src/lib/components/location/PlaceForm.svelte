@@ -194,14 +194,14 @@
   .meta {
     font-size: var(--text-xs);
     color: var(--text-dim);
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--space-2);
   }
 
   .field {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    margin-bottom: 0.75rem;
+    gap: var(--space-1);
+    margin-bottom: var(--space-3);
   }
 
   .field span {
@@ -217,8 +217,8 @@
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
-    padding: 0.35rem 0.5rem;
-    border-radius: 0.25rem;
+    padding: var(--space-2) var(--space-2);
+    border-radius: var(--radius-sm);
   }
 
   .field textarea {
@@ -233,7 +233,7 @@
 
   .coords {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .coord {
@@ -252,7 +252,7 @@
     font: inherit;
     font-size: var(--text-sm);
     cursor: pointer;
-    padding: 0.25rem 0.4rem;
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-pill);
     transition: color var(--transition-fast);
   }

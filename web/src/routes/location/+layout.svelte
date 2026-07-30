@@ -410,10 +410,10 @@
 
 <style>
   .sidebar-actions {
-    padding: 0 0.75rem 0.5rem;
+    padding: 0 var(--space-3) var(--space-2);
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-2);
     flex-shrink: 0;
   }
 
@@ -423,7 +423,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-xs);
-    padding: 0.4rem 0.6rem;
+    padding: var(--space-2) var(--space-2);
     border-radius: var(--radius-pill);
     cursor: pointer;
     text-align: center;
@@ -449,7 +449,7 @@
 
   .stats-panel {
     border-bottom: 1px solid var(--border-subtle);
-    padding: 0.6rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     flex-shrink: 0;
   }
 
@@ -457,7 +457,7 @@
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--space-2);
   }
 
   .stats-name {
@@ -477,7 +477,7 @@
     color: var(--text-dim);
     font-size: var(--text-sm);
     cursor: pointer;
-    padding: 0 0.25rem;
+    padding: 0 var(--space-1);
     line-height: 1;
   }
 
@@ -489,8 +489,8 @@
   .stats-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 0.4rem 0.75rem;
-    margin-bottom: 0.5rem;
+    gap: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-2);
   }
 
   .stat {
@@ -528,7 +528,7 @@
     color: var(--text-muted);
     font-style: italic;
     white-space: pre-wrap;
-    padding: 0.25rem 0;
+    padding: var(--space-1) 0;
     border-top: 1px solid var(--border-subtle);
   }
 
@@ -544,8 +544,8 @@
     font-size: var(--text-sm);
     line-height: 1.5;
     cursor: pointer;
-    padding: 0.2rem 0.75rem;
-    border-radius: 0.3rem;
+    padding: 0.2rem var(--space-3);
+    border-radius: var(--radius-sm);
     transition: background var(--transition-fast);
     text-align: left;
     white-space: nowrap;

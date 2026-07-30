@@ -52,7 +52,7 @@
     border: 1px solid var(--border-subtle);
     border-left: 3px solid var(--notice-accent);
     border-radius: var(--radius-card);
-    padding: 0.7rem 0.9rem;
+    padding: var(--space-3) var(--space-4);
   }
 
   .notice-warn {
@@ -69,7 +69,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: var(--space-2);
     width: 100%;
     background: none;
     border: none;
@@ -97,6 +97,6 @@
   }
 
   .notice-body {
-    margin-top: 0.5rem;
+    margin-top: var(--space-2);
   }
 </style>

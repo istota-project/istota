@@ -455,15 +455,15 @@
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    gap: 1rem;
-    margin-bottom: 1rem;
+    gap: var(--space-4);
+    margin-bottom: var(--space-4);
   }
   .back {
     display: inline-block;
     font-size: var(--text-xs);
     color: var(--text-muted);
     text-decoration: none;
-    margin-bottom: 0.25rem;
+    margin-bottom: var(--space-1);
   }
   .back:hover {
     text-decoration: underline;
@@ -474,24 +474,24 @@
     margin: 0;
   }
   h2 {
-    margin: 1.25rem 0 0.5rem;
+    margin: 1.25rem 0 var(--space-2);
   }
 
   .actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .meta {
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.85rem 1rem;
+    padding: var(--space-3) var(--space-4);
   }
   .meta dl {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
-    gap: 0.6rem 1.5rem;
+    gap: var(--space-2) var(--space-6);
     margin: 0;
   }
   .meta dt {
@@ -511,8 +511,8 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.85rem 1rem;
-    margin-top: 1rem;
+    padding: var(--space-3) var(--space-4);
+    margin-top: var(--space-4);
   }
   .notes h2 {
     margin-top: 0;
@@ -533,7 +533,7 @@
     padding: 0;
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   @media (max-width: 1100px) {
     .card-grid {
@@ -550,10 +550,10 @@
   .card-grid li > a {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-2);
     height: 100%;
     box-sizing: border-box;
-    padding: 0.7rem 0.9rem;
+    padding: var(--space-3) var(--space-4);
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
@@ -575,13 +575,13 @@
   .card-grid .tags {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     flex-wrap: wrap;
   }
   .card-grid .card-meta {
     display: flex;
     align-items: baseline;
-    gap: 0.75rem;
+    gap: var(--space-3);
     font-size: var(--text-xs);
     color: var(--text-dim);
     flex-wrap: wrap;
@@ -590,42 +590,42 @@
     font-size: var(--text-xs);
     color: var(--text-muted);
     background: var(--surface-raised);
-    padding: 0.05rem 0.45rem;
-    border-radius: 0.25rem;
+    padding: 0.05rem var(--space-2);
+    border-radius: var(--radius-sm);
     font-family: var(--font-mono);
   }
   .count-tag {
     font-size: var(--text-xs);
     color: var(--text-muted);
     background: var(--surface-raised);
-    padding: 0.05rem 0.45rem;
-    border-radius: 0.25rem;
+    padding: 0.05rem var(--space-2);
+    border-radius: var(--radius-sm);
   }
 
   .form {
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.85rem 1rem;
+    padding: var(--space-3) var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: 0.65rem;
-    margin-bottom: 1rem;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
   }
   .form .row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   .form :global(.field.full) {
     grid-column: 1 / -1;
   }
   .form input,
   .form textarea {
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
@@ -639,7 +639,7 @@
   .form-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   /* The diagnoses grid keeps the shared grid geometry but moves the card
@@ -648,10 +648,10 @@
   .dx-grid li.dx-card {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-2);
     height: 100%;
     box-sizing: border-box;
-    padding: 0.7rem 0.9rem;
+    padding: var(--space-3) var(--space-4);
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
@@ -664,7 +664,7 @@
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   .dx-card .name {
     color: var(--text-primary);
@@ -677,8 +677,8 @@
   .link-row {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     flex-wrap: wrap;
-    margin-top: 0.75rem;
+    margin-top: var(--space-3);
   }
 </style>

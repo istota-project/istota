@@ -90,7 +90,7 @@
     transform: translateX(-50%);
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     cursor: default;
   }
   .nav {
@@ -115,13 +115,13 @@
     background: rgba(0, 0, 0, 0.75);
   }
   .counter {
-    padding: 0.25rem 0.6rem;
+    padding: var(--space-1) var(--space-2);
     /* design-lint-allow-begin: fixed chrome — see .nav above. */
     background: rgba(0, 0, 0, 0.5);
     color: #fff;
     /* design-lint-allow-end */
     font-size: 0.8rem;
-    border-radius: 0.25rem;
+    border-radius: var(--radius-sm);
     pointer-events: none;
     white-space: nowrap;
   }

@@ -35,7 +35,7 @@
   .header-save {
     display: inline-flex;
     align-items: center;
-    gap: 0.6rem;
+    gap: var(--space-2);
   }
 
   /* Same treatment as `.settings .dirty-badge` (settings.css), restated

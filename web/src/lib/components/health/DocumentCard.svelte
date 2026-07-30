@@ -58,13 +58,13 @@
 
 <style>
   .doc-card {
-    padding: 0.7rem 0.9rem;
+    padding: var(--space-3) var(--space-4);
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-2);
     min-width: 0;
   }
 
@@ -72,7 +72,7 @@
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .name {
@@ -94,7 +94,7 @@
   .tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.3rem;
+    gap: var(--space-1);
   }
 
   .tag {
@@ -102,13 +102,13 @@
     color: var(--text-muted);
     background: var(--surface-raised);
     border-radius: var(--radius-pill);
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem var(--space-2);
   }
 
   .doc-meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.6rem;
+    gap: var(--space-2);
     font-size: var(--text-xs);
     color: var(--text-dim);
   }

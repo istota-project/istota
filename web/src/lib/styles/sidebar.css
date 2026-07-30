@@ -24,15 +24,15 @@
 .sidebar .views {
   display: flex;
   flex-direction: column;
-  margin-bottom: 0.5rem;
-  padding-bottom: 0.5rem;
+  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-2);
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .sidebar .view-btn {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: var(--space-2);
   width: 100%;
   background: none;
   border: none;
@@ -40,8 +40,8 @@
   font: inherit;
   font-size: var(--text-base);
   cursor: pointer;
-  padding: 0.3rem 0.6rem;
-  border-radius: 0.3rem;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
   transition: background var(--transition-fast);
   text-align: left;
 }
@@ -68,7 +68,7 @@
   display: flex;
   align-items: center;
   gap: 0.15rem;
-  border-radius: 0.3rem;
+  border-radius: var(--radius-sm);
   padding-right: 0.2rem;
   transition: background var(--transition-fast);
 }

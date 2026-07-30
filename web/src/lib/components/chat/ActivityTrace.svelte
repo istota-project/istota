@@ -77,7 +77,7 @@
     /* Vertical spacing is owned by Message's `.chip-slot` (neighbour-aware);
 		   keep this margin 0 so a tool-first chip sits flush under the meta. */
     margin: 0;
-    border-radius: 0.4rem;
+    border-radius: var(--radius-sm);
     background: var(--surface-badge);
     max-width: 100%;
     width: fit-content;
@@ -119,14 +119,14 @@
   .head {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     width: 100%;
     background: none;
     border: none;
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-xs);
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     cursor: pointer;
     text-align: left;
     min-width: 0;
@@ -169,7 +169,7 @@
     min-width: 0;
     display: flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: var(--space-1);
     overflow: hidden;
   }
   .chain-action {
@@ -195,7 +195,7 @@
     font-variant-numeric: tabular-nums;
     background: var(--surface-base);
     border-radius: var(--radius-pill);
-    padding: 0 0.4rem;
+    padding: 0 var(--space-2);
     font-size: 0.65rem;
     opacity: 0.8;
   }
@@ -208,6 +208,6 @@
     font-size: var(--text-xs);
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: var(--space-1);
   }
 </style>

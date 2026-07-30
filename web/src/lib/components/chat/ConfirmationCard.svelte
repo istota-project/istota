@@ -18,16 +18,16 @@
 
 <style>
   .confirm-card {
-    margin-top: 0.5rem;
+    margin-top: var(--space-2);
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
+    gap: var(--space-3);
     flex-wrap: wrap;
     background: var(--surface-base);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.5rem 0.65rem;
+    padding: var(--space-2) var(--space-3);
   }
   .confirm-label {
     font-size: var(--text-sm);
@@ -35,6 +35,6 @@
   }
   .confirm-actions {
     display: flex;
-    gap: 0.4rem;
+    gap: var(--space-2);
   }
 </style>

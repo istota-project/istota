@@ -54,7 +54,7 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 1rem;
+    padding: var(--space-4);
     width: var(--modal-width, 420px);
     /* The panel is pinned to the viewport centre rather than laid out inside a
 		   padded backdrop, so it can't use .overlay-safe — the insets come off its
@@ -70,20 +70,20 @@
   :global(.ui-modal-title) {
     font-size: var(--text-base);
     font-weight: 600;
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
     color: var(--text-primary);
   }
   :global(.ui-modal-description) {
     font-size: var(--text-sm);
     color: var(--text-muted);
-    margin: 0 0 0.75rem;
+    margin: 0 0 var(--space-3);
   }
   :global(.ui-modal-footer) {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5rem;
-    margin-top: 1rem;
-    padding-top: 0.75rem;
+    gap: var(--space-2);
+    margin-top: var(--space-4);
+    padding-top: var(--space-3);
     border-top: 1px solid var(--border-subtle);
   }
 </style>

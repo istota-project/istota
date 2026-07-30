@@ -281,7 +281,7 @@
 
   .client-grid {
     --card-min: 280px;
-    padding: 0 0.75rem 0.75rem;
+    padding: 0 var(--space-3) var(--space-3);
   }
 
   .client-card {
@@ -300,8 +300,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
-    padding: 0.6rem 0.75rem;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -318,15 +318,15 @@
   }
 
   .card-body {
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: var(--space-1);
   }
 
   .card-field {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     font-size: var(--text-sm);
     line-height: 1.4;
   }

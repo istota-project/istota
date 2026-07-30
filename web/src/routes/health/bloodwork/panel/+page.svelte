@@ -383,7 +383,7 @@
   .page {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: var(--space-4);
     /* Grows so the loading state centers in the pane, like every other health
 	     page (whose content sits directly in the frame). */
     flex: 1 0 auto;
@@ -392,7 +392,7 @@
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    gap: 0.6rem;
+    gap: var(--space-2);
   }
   .back {
     font-size: var(--text-xs);
@@ -402,7 +402,7 @@
   h1 {
     font-size: var(--text-lg);
     font-weight: 500;
-    margin: 0.25rem 0;
+    margin: var(--space-1) 0;
   }
   .lab,
   .type {
@@ -412,23 +412,23 @@
   .header-meta {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-2);
     min-width: 0;
   }
   .header-edit {
     display: grid;
     grid-template-columns: auto 1fr 1fr;
-    gap: 0.5rem 0.75rem;
+    gap: var(--space-2) var(--space-3);
     max-width: 32rem;
   }
   .header-edit input {
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     min-width: 0;
   }
   .header-edit .full-row {
@@ -452,13 +452,13 @@
 	   size used by the main bloodwork header on mobile. */
   .actions {
     display: flex;
-    gap: 0.3rem;
+    gap: var(--space-1);
     flex-wrap: wrap;
   }
   .split {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 1rem;
+    gap: var(--space-4);
   }
   @media (max-width: 900px) {
     .split {
@@ -470,11 +470,11 @@
     max-width: 9rem;
     background: var(--surface-raised);
     border: 1px solid var(--border-default);
-    border-radius: 0.2rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-xs);
-    padding: 0.15rem 0.3rem;
+    padding: 0.15rem var(--space-1);
   }
   .marker-link {
     color: var(--text-primary);
@@ -491,7 +491,7 @@
     justify-content: center;
     align-items: center;
     min-width: 1.5rem;
-    padding: 0 0.4rem;
+    padding: 0 var(--space-2);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
     font-weight: 500;
@@ -511,7 +511,7 @@
     color: var(--status-critical-fg);
   }
   .add {
-    margin-top: 0.5rem;
+    margin-top: var(--space-2);
   }
   .del {
     background: none;
@@ -526,11 +526,11 @@
   .source {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-2);
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.75rem;
+    padding: var(--space-3);
   }
   .source-header {
     font-size: var(--text-sm);

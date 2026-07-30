@@ -157,7 +157,7 @@
   .form-grid {
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: var(--space-2);
   }
 
   .static-key {
@@ -184,6 +184,6 @@
   .form-error {
     font-size: var(--text-xs);
     color: var(--status-danger-fg);
-    margin-top: 0.5rem;
+    margin-top: var(--space-2);
   }
 </style>

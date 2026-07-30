@@ -275,8 +275,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 1rem;
-    margin-bottom: 1rem;
+    gap: var(--space-4);
+    margin-bottom: var(--space-4);
     flex-wrap: wrap;
   }
   h1 {
@@ -286,20 +286,20 @@
   }
   .actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     flex-wrap: wrap;
   }
 
   .card {
-    padding: 0.85rem 1rem;
+    padding: var(--space-3) var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   .form .row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   /* Scoped to this page's own form: a bare :global(.field.full) leaks
      app-wide, which is the hazard the money report pages already hit. */
@@ -308,10 +308,10 @@
   }
   input,
   textarea {
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
@@ -334,7 +334,7 @@
     margin-top: 1.25rem;
   }
   .linked h2 {
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
   .linked-card {
     display: block;
@@ -348,7 +348,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 0.35rem;
+    margin-bottom: var(--space-2);
   }
   .date {
     font-size: var(--text-xs);

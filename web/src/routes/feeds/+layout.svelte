@@ -290,7 +290,7 @@
     display: flex;
     gap: var(--chip-gap);
     /* Preserve the separation the sort dropdown's old margin-right gave. */
-    margin-left: 0.4rem;
+    margin-left: var(--space-2);
   }
 
   /* The Images / Text chips are a desktop affordance: on a phone a feed is a
@@ -308,15 +308,15 @@
   .feed-btn {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     width: 100%;
     background: none;
     border: none;
     color: inherit;
     font: inherit;
     cursor: pointer;
-    padding: 0.3rem 0.75rem;
-    border-radius: 0.3rem;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
     transition: background var(--transition-fast);
     text-align: left;
   }

@@ -123,7 +123,7 @@
   .account-list {
     display: flex;
     flex-direction: column;
-    padding: 0.25rem 0;
+    padding: var(--space-1) 0;
   }
 
   .account-toggle {

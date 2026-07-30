@@ -192,13 +192,13 @@
     position: fixed;
     z-index: var(--z-popover);
     margin: 0;
-    padding: 0.25rem;
+    padding: var(--space-1);
     list-style: none;
     max-height: 12rem;
     overflow-y: auto;
     background: var(--surface-overlay);
     border: 1px solid var(--border-default);
-    border-radius: var(--radius-card, 0.5rem);
+    border-radius: var(--radius-card);
     box-shadow: var(--shadow-md);
   }
 
@@ -206,7 +206,7 @@
     display: block;
     width: 100%;
     text-align: left;
-    padding: 0.35rem 0.5rem;
+    padding: var(--space-2) var(--space-2);
     border: none;
     border-radius: var(--radius-sm);
     background: none;

@@ -227,8 +227,8 @@
   .field {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    margin-bottom: 0.85rem;
+    gap: var(--space-1);
+    margin-bottom: var(--space-3);
   }
 
   .field > span {
@@ -242,13 +242,13 @@
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
-    padding: 0.35rem 0.5rem;
-    border-radius: 0.25rem;
+    padding: var(--space-2) var(--space-2);
+    border-radius: var(--radius-sm);
   }
 
   .token-row {
     display: flex;
-    gap: 0.4rem;
+    gap: var(--space-2);
     align-items: stretch;
   }
 
@@ -265,8 +265,8 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-xs);
-    padding: 0 0.6rem;
-    border-radius: 0.25rem;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
     cursor: pointer;
     white-space: nowrap;
     transition:
@@ -289,7 +289,7 @@
   }
 
   .hide-hint {
-    margin: 0 0 0.6rem;
+    margin: 0 0 var(--space-2);
   }
 
   .talk-btn {
@@ -298,8 +298,8 @@
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
-    padding: 0.35rem 0.6rem;
-    border-radius: 0.25rem;
+    padding: var(--space-2) var(--space-2);
+    border-radius: var(--radius-sm);
     cursor: pointer;
     transition:
       background var(--transition-fast),
@@ -327,7 +327,7 @@
     font: inherit;
     font-size: var(--text-sm);
     cursor: pointer;
-    padding: 0.25rem 0.4rem;
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-pill);
     transition: color var(--transition-fast);
   }

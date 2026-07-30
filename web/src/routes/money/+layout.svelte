@@ -155,7 +155,7 @@
 
   .error-panel {
     background: var(--status-danger-bg);
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--status-danger-fg);
     max-height: 200px;
     overflow-y: auto;
@@ -173,8 +173,8 @@
   :global(.money-section-header) {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.5rem 0.75rem;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
   }
@@ -193,7 +193,7 @@
     line-height: 1.2;
     color: var(--text-muted);
     text-decoration: none;
-    padding: 0.15rem 0.5rem;
+    padding: 0.15rem var(--space-2);
     border-radius: var(--radius-pill);
     transition: all var(--transition-fast);
   }
@@ -210,7 +210,7 @@
     margin-left: auto;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   :global(.money-control-input) {
@@ -218,7 +218,7 @@
     color: var(--text-primary);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
-    padding: 0.2rem 0.6rem;
+    padding: 0.2rem var(--space-2);
     font-size: var(--text-xs);
     font-family: inherit;
     min-width: 12rem;
@@ -258,9 +258,9 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
+    gap: var(--space-3);
     min-height: 2.2rem;
-    padding: 0.4rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     flex-shrink: 0;
     flex-wrap: wrap;
   }
@@ -271,8 +271,8 @@
   :global(.money-notice-bar) {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.75rem 0;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3) 0;
   }
 
   :global(.money-result-count) {
@@ -286,14 +286,14 @@
   :global(.money-table) {
     flex: 1;
     overflow-y: auto;
-    padding: 0 0 0.5rem;
+    padding: 0 0 var(--space-2);
   }
 
   :global(.money-table-header) {
     display: flex;
     align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.3rem 0.75rem 0.4rem;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-3) var(--space-2);
     font-size: var(--text-xs);
     color: var(--text-dim);
     border-bottom: 1px solid var(--border-subtle);
@@ -306,10 +306,10 @@
   :global(.money-table-row) {
     display: flex;
     align-items: baseline;
-    gap: 0.75rem;
-    padding: 0.4rem 0.75rem;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     font-size: var(--text-sm);
-    border-radius: 0.25rem;
+    border-radius: var(--radius-sm);
     transition: background var(--transition-fast);
     text-align: left;
     width: 100%;
@@ -334,7 +334,7 @@
      indent guide, not a table of records. The four implementations this
      replaces differed only in these two values. */
   :global(.money-table-row--tree) {
-    gap: 0.25rem;
+    gap: var(--space-1);
     padding-block: 0.2rem;
   }
 
@@ -377,7 +377,7 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     flex-shrink: 0;
-    padding: 0.1rem 0.4rem;
+    padding: 0.1rem var(--space-2);
     border-radius: var(--radius-pill);
     white-space: nowrap;
     text-align: center;
@@ -426,7 +426,7 @@
   :global(.money-table-empty) {
     color: var(--text-dim);
     font-size: var(--text-base);
-    padding: 2rem 1rem;
+    padding: var(--space-8) var(--space-4);
     text-align: center;
   }
 
@@ -441,7 +441,7 @@
 
   @media (max-width: 768px) {
     :global(.money-section-header) {
-      padding: 0.5rem 0.75rem;
+      padding: var(--space-2) var(--space-3);
       flex-wrap: wrap;
     }
 

@@ -41,8 +41,8 @@
   .sidebar-header {
     display: flex;
     align-items: baseline;
-    gap: 0.4rem;
-    padding: 0.75rem;
+    gap: var(--space-2);
+    padding: var(--space-3);
     flex-shrink: 0;
   }
 
@@ -64,7 +64,7 @@
     min-width: 0;
     overflow-x: hidden;
     overflow-y: auto;
-    padding: 0 0.25rem 0.5rem;
+    padding: 0 var(--space-1) var(--space-2);
   }
 
   .sidebar-backdrop {

@@ -253,15 +253,15 @@
   .chip-list {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.3rem;
-    margin-bottom: 0.4rem;
+    gap: var(--space-1);
+    margin-bottom: var(--space-2);
   }
   .chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: var(--space-1);
     font-size: var(--text-xs);
-    padding: 0.1rem 0.2rem 0.1rem 0.5rem;
+    padding: 0.1rem 0.2rem 0.1rem var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--surface-card);
     border: 1px solid var(--border-default);
@@ -278,7 +278,7 @@
   }
   .chip-add {
     display: flex;
-    gap: 0.4rem;
+    gap: var(--space-2);
     align-items: center;
   }
   .chip-add input {

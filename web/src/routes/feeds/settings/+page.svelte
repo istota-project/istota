@@ -708,7 +708,7 @@
   .diag {
     background: var(--surface-raised);
     border-radius: var(--radius-card);
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
@@ -829,8 +829,8 @@
     background: transparent;
     color: var(--text-primary);
     border: 1px solid transparent;
-    border-radius: 0.2rem;
-    padding: 0.2rem 0.3rem;
+    border-radius: var(--radius-sm);
+    padding: 0.2rem var(--space-1);
     font: inherit;
     font-size: var(--text-sm);
   }
@@ -843,7 +843,7 @@
   .type-pill {
     display: inline-block;
     font-size: var(--text-xs);
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
     color: var(--text-muted);
@@ -874,7 +874,7 @@
 
   .opml-actions {
     display: flex;
-    gap: 0.6rem;
+    gap: var(--space-2);
     align-items: center;
     flex-wrap: wrap;
   }
@@ -892,7 +892,7 @@
   .modal-body {
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: var(--space-2);
   }
 
   /* Container-based: hide low-priority table columns as the content area
@@ -942,7 +942,7 @@
 
     .grid th,
     .grid td {
-      padding: 0.4rem 0.35rem;
+      padding: var(--space-2) var(--space-2);
     }
   }
 
@@ -956,7 +956,7 @@
     }
 
     .diag {
-      padding: 0.4rem 0.5rem;
+      padding: var(--space-2) var(--space-2);
     }
   }
 </style>

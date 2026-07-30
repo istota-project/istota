@@ -391,8 +391,8 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.5rem 0.75rem;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
   }
@@ -400,7 +400,7 @@
   .date-inputs {
     display: flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: var(--space-2);
   }
 
   .date-inputs label {
@@ -413,8 +413,8 @@
     border: 1px solid var(--border-default);
     color: var(--text-primary);
     font-size: var(--text-xs);
-    padding: 0.2rem 0.4rem;
-    border-radius: 0.25rem;
+    padding: 0.2rem var(--space-2);
+    border-radius: var(--radius-sm);
     font-family: inherit;
   }
 
@@ -431,8 +431,8 @@
   .stats-bar {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.4rem 0.75rem;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-top: 1px solid var(--border-subtle);
     flex-shrink: 0;
   }
@@ -460,7 +460,7 @@
   .chip-count {
     font-weight: 500;
     opacity: 0.8;
-    margin-left: 0.25rem;
+    margin-left: var(--space-1);
   }
 
   .discover-hint {
@@ -481,7 +481,7 @@
     border: 1px solid var(--border-default);
     color: var(--on-scrim-fg);
     font-size: var(--text-sm);
-    padding: 0.45rem 0.9rem;
+    padding: var(--space-2) var(--space-4);
     border-radius: var(--radius-pill);
     pointer-events: none;
     z-index: var(--z-sticky);

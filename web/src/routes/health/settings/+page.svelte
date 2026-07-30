@@ -265,7 +265,7 @@
   .ft-in-row,
   .cm-row {
     display: flex;
-    gap: 0.4rem;
+    gap: var(--space-2);
     align-items: center;
   }
   .ft-in-row input,

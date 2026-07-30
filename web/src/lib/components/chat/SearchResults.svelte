@@ -98,7 +98,7 @@
   .search-results {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-2);
     max-width: 46rem;
   }
   .head,
@@ -108,16 +108,16 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-2);
   }
   .card {
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-card);
     background: var(--surface-raised);
-    padding: 0.5rem 0.65rem;
+    padding: var(--space-2) var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: var(--space-1);
   }
   .card.memory {
     background: var(--surface-base);
@@ -125,7 +125,7 @@
   .card-head {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     font-size: var(--text-xs);
     color: var(--text-muted);
   }
@@ -152,7 +152,7 @@
   .jump-btn {
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: var(--space-1);
     background: none;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-pill);

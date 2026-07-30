@@ -496,15 +496,15 @@
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    gap: 1rem;
-    margin-bottom: 1rem;
+    gap: var(--space-4);
+    margin-bottom: var(--space-4);
   }
   .back {
     display: inline-block;
     font-size: var(--text-xs);
     color: var(--text-muted);
     text-decoration: none;
-    margin-bottom: 0.25rem;
+    margin-bottom: var(--space-1);
   }
   .back:hover {
     text-decoration: underline;
@@ -515,10 +515,10 @@
     margin: 0;
   }
   h2 {
-    margin: 1.5rem 0 0.5rem;
+    margin: var(--space-6) 0 var(--space-2);
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   .count {
     font-size: var(--text-xs);
@@ -547,11 +547,11 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.85rem 1rem;
-    margin-bottom: 1rem;
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   .form-title {
     font-size: var(--text-sm);
@@ -564,17 +564,17 @@
   .form .row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   .form :global(.field.full) {
     grid-column: 1 / -1;
   }
   .form input,
   .form textarea {
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
@@ -593,7 +593,7 @@
   .encounters-field {
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: var(--space-2);
     min-width: 0;
   }
   .encounters-field .field-label {
@@ -606,13 +606,13 @@
     padding: 0;
     display: flex;
     flex-wrap: wrap;
-    gap: 0.35rem;
+    gap: var(--space-2);
   }
   .staged li {
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
-    padding: 0.1rem 0.3rem 0.1rem 0.55rem;
+    gap: var(--space-2);
+    padding: 0.1rem var(--space-1) 0.1rem 0.55rem;
     background: var(--surface-raised);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
@@ -647,7 +647,7 @@
     padding: 0;
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   @media (max-width: 1100px) {
     .list {
@@ -660,13 +660,13 @@
     }
   }
   .list li {
-    padding: 0.7rem 0.9rem;
+    padding: var(--space-3) var(--space-4);
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-2);
     min-width: 0;
   }
   .list.resolved li {
@@ -676,7 +676,7 @@
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   .name {
     margin: 0;
@@ -692,15 +692,15 @@
   .tags {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     flex-wrap: wrap;
   }
   .icd {
     font-size: var(--text-xs);
     color: var(--text-muted);
     background: var(--surface-raised);
-    padding: 0.05rem 0.45rem;
-    border-radius: 0.25rem;
+    padding: 0.05rem var(--space-2);
+    border-radius: var(--radius-sm);
     font-family: var(--font-mono);
   }
   .sev {
@@ -709,7 +709,7 @@
     font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    padding: 0.05rem 0.5rem;
+    padding: 0.05rem var(--space-2);
     border-radius: var(--radius-pill);
     font-weight: 500;
   }
@@ -731,7 +731,7 @@
        the (stretched) card height. */
     display: flex;
     align-items: baseline;
-    gap: 0.75rem;
+    gap: var(--space-3);
     font-size: var(--text-xs);
     color: var(--text-dim);
     flex-wrap: wrap;
@@ -764,8 +764,8 @@
     color: var(--text-muted);
     background: var(--surface-raised);
     border: none;
-    padding: 0.05rem 0.45rem;
-    border-radius: 0.25rem;
+    padding: 0.05rem var(--space-2);
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .docs:hover {

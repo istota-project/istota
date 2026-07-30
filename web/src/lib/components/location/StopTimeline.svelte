@@ -56,14 +56,14 @@
 
   .timeline-item {
     display: flex;
-    gap: 0.75rem;
+    gap: var(--space-3);
     background: none;
     border: none;
     color: inherit;
     font: inherit;
     cursor: pointer;
     text-align: left;
-    padding: 0.25rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius-card);
     transition: background var(--transition-fast);
   }
@@ -76,7 +76,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding-top: 0.35rem;
+    padding-top: var(--space-2);
     width: 12px;
     flex-shrink: 0;
   }
@@ -98,7 +98,7 @@
   }
 
   .timeline-content {
-    padding-bottom: 0.75rem;
+    padding-bottom: var(--space-3);
     min-width: 0;
   }
 
@@ -118,6 +118,6 @@
 
   .stop-duration {
     color: var(--text-dim);
-    margin-left: 0.35rem;
+    margin-left: var(--space-2);
   }
 </style>

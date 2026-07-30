@@ -98,7 +98,7 @@
   .field-label {
     display: flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: var(--space-1);
     color: var(--text-muted);
   }
 
@@ -108,8 +108,8 @@
     background: var(--surface-base);
     color: var(--text-primary);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
-    padding: 0.3rem 0.5rem;
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
     font: inherit;
     font-size: var(--text-sm);
     width: 100%;
@@ -131,7 +131,7 @@
   .field.checkbox {
     flex-direction: row;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     color: var(--text-primary);
   }
 

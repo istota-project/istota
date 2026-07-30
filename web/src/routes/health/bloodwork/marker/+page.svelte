@@ -434,7 +434,7 @@
     text-decoration: none;
   }
   .page-header {
-    margin: 0.25rem 0 1rem;
+    margin: var(--space-1) 0 var(--space-4);
   }
   h1 {
     font-size: var(--text-xl);
@@ -443,14 +443,14 @@
   }
   .meta {
     display: flex;
-    gap: 0.75rem;
+    gap: var(--space-3);
     align-items: baseline;
-    margin-top: 0.25rem;
+    margin-top: var(--space-1);
     font-size: var(--text-sm);
     color: var(--text-muted);
   }
   .cat {
-    padding: 0 0.5rem;
+    padding: 0 var(--space-2);
     background: var(--surface-raised);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
@@ -466,9 +466,9 @@
   .related {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.4rem;
+    gap: var(--space-2);
     align-items: baseline;
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
   }
   .related-label {
     font-size: var(--text-xs);
@@ -491,8 +491,8 @@
     background: rgba(204, 102, 102, 0.08);
     border: 1px solid rgba(204, 102, 102, 0.35);
     border-radius: var(--radius-card);
-    padding: 1rem 1.25rem;
-    margin-bottom: 1rem;
+    padding: var(--space-4) 1.25rem;
+    margin-bottom: var(--space-4);
   }
   .alert-low {
     background: rgba(122, 163, 216, 0.08);
@@ -501,8 +501,8 @@
   .alert header {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
-    margin-bottom: 0.6rem;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
     flex-wrap: wrap;
   }
   .alert-pill {
@@ -525,7 +525,7 @@
   }
   .alert-tag {
     font-size: 10px;
-    padding: 0.05rem 0.4rem;
+    padding: 0.05rem var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
     color: var(--text-dim);
@@ -536,10 +536,10 @@
     font-size: var(--text-sm);
     line-height: 1.55;
     color: var(--text-primary);
-    margin: 0 0 0.85rem;
+    margin: 0 0 var(--space-3);
   }
   .alert .block {
-    margin-bottom: 0.75rem;
+    margin-bottom: var(--space-3);
   }
   .alert .block h3 {
     font-size: var(--text-xs);
@@ -547,7 +547,7 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
-    margin: 0 0 0.35rem;
+    margin: 0 0 var(--space-2);
   }
   .alert ul {
     margin: 0;
@@ -560,8 +560,8 @@
     margin-bottom: 0.2rem;
   }
   .alert .disclaimer {
-    margin-top: 0.6rem;
-    padding-top: 0.6rem;
+    margin-top: var(--space-2);
+    padding-top: var(--space-2);
     border-top: 1px solid rgba(255, 255, 255, 0.08);
     font-size: var(--text-xs);
     color: var(--text-dim);
@@ -581,8 +581,8 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 1rem;
-    margin-bottom: 1rem;
+    padding: var(--space-4);
+    margin-bottom: var(--space-4);
   }
   .chart-wrap {
     height: 340px;
@@ -591,25 +591,25 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 1rem;
-    margin-bottom: 1rem;
+    padding: var(--space-4);
+    margin-bottom: var(--space-4);
   }
   .about h2,
   .history h2 {
     font-size: var(--text-base);
     font-weight: 500;
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
   .about p {
     font-size: var(--text-sm);
     color: var(--text-muted);
     line-height: 1.55;
-    margin: 0 0 0.75rem;
+    margin: 0 0 var(--space-3);
   }
   .about dl {
     display: grid;
     grid-template-columns: 9rem 1fr;
-    gap: 0.3rem 0.75rem;
+    gap: var(--space-1) var(--space-3);
     font-size: var(--text-sm);
     margin: 0;
   }
@@ -627,7 +627,7 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 1rem;
+    padding: var(--space-4);
   }
   .history table {
     width: 100%;
@@ -635,7 +635,7 @@
   }
   .history th,
   .history td {
-    padding: 0.35rem 0.5rem;
+    padding: var(--space-2) var(--space-2);
     text-align: left;
     font-size: var(--text-sm);
     border-bottom: 1px solid var(--border-subtle);
@@ -655,7 +655,7 @@
     justify-content: center;
     align-items: center;
     min-width: 1.5rem;
-    padding: 0 0.4rem;
+    padding: 0 var(--space-2);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
     font-weight: 500;

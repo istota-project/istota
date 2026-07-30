@@ -93,19 +93,19 @@
   .dropzone {
     border: 2px dashed var(--border-default);
     border-radius: var(--radius-card);
-    padding: 1.5rem;
+    padding: var(--space-6);
     text-align: center;
     color: var(--text-muted);
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .picked {
     color: var(--text-primary);
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     justify-content: center;
   }
 

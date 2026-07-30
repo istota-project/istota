@@ -643,13 +643,13 @@
   .kv {
     display: grid;
     grid-template-columns: max-content 1fr;
-    gap: 0.25rem 0.75rem;
+    gap: var(--space-1) var(--space-3);
     margin: 0;
     font-size: var(--text-sm);
   }
 
   .kv.compact {
-    gap: 0.15rem 0.6rem;
+    gap: 0.15rem var(--space-2);
     font-size: var(--text-xs);
   }
 
@@ -676,17 +676,17 @@
     background: var(--surface-base);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: var(--space-2);
   }
 
   .entity-head {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    gap: 0.5rem;
+    gap: var(--space-2);
     font-weight: 600;
     color: var(--text-primary);
     font-size: var(--text-sm);
@@ -695,7 +695,7 @@
   .entity-key {
     display: flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: var(--space-1);
     font-weight: 400;
     color: var(--text-dim);
     font-size: var(--text-xs);
@@ -711,20 +711,20 @@
     background: var(--surface-base);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.75rem 1rem;
+    padding: var(--space-3) var(--space-4);
     font-size: var(--text-sm);
     color: var(--text-secondary);
   }
 
   .monarch-help h3 {
-    margin: 0 0 0.4rem;
+    margin: 0 0 var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-primary);
   }
 
   .monarch-help p,
   .monarch-help ol {
-    margin: 0.25rem 0;
+    margin: var(--space-1) 0;
   }
 
   .monarch-help ol {
@@ -737,22 +737,22 @@
 
   .monarch-help code {
     background: var(--surface-raised);
-    padding: 0 0.25rem;
-    border-radius: 0.2rem;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
     font-size: 0.92em;
   }
 
   .monarch-help .legacy-note {
-    margin-top: 0.5rem;
+    margin-top: var(--space-2);
     color: var(--text-dim);
     font-size: var(--text-xs);
   }
 
   .monarch-help details {
-    margin: 0.4rem 0;
+    margin: var(--space-2) 0;
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.5rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     background: var(--surface-raised);
   }
 
@@ -769,25 +769,25 @@
   .monarch-help .summary-label {
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
   }
 
   .monarch-help .hint {
     color: var(--text-dim);
     font-size: var(--text-xs);
-    margin: 0.3rem 0;
+    margin: var(--space-1) 0;
   }
 
   .login-form {
     display: grid;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
   }
 
   .login-form label {
     display: grid;
     grid-template-columns: 120px 1fr;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
     font-size: var(--text-sm);
   }
@@ -798,7 +798,7 @@
 
   .login-form input {
     font: inherit;
-    padding: 0.35rem 0.5rem;
+    padding: var(--space-2) var(--space-2);
     border-radius: var(--radius-sm);
     border: 1px solid var(--border-default);
     background: var(--surface-base);
@@ -812,7 +812,7 @@
 
   .login-status {
     font-size: var(--text-xs);
-    padding: 0.35rem 0.5rem;
+    padding: var(--space-2) var(--space-2);
     border-radius: var(--radius-sm);
     border: 1px solid var(--border-default);
   }

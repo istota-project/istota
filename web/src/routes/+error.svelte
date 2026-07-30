@@ -117,7 +117,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.35rem;
+    gap: var(--space-2);
     text-align: center;
   }
 
@@ -127,7 +127,7 @@
     justify-content: center;
     width: 3.75rem;
     height: 3.75rem;
-    margin-bottom: 0.9rem;
+    margin-bottom: var(--space-4);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
     background: var(--surface-card);
@@ -173,9 +173,9 @@
   /* The thrown message, when it says more than the heading. Monospace and boxed
      so it reads as diagnostic output rather than as prose addressed to the user. */
   .error-message {
-    margin: 0.9rem 0 0;
+    margin: var(--space-4) 0 0;
     max-width: 34rem;
-    padding: 0.45rem 0.7rem;
+    padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-card);
     background: var(--surface-card);
@@ -191,15 +191,15 @@
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     margin-top: 1.4rem;
   }
 
   .action {
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
-    padding: 0.4rem 0.85rem;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
     background: var(--surface-card);

@@ -307,7 +307,7 @@
   .page {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: var(--space-4);
   }
   .back {
     font-size: var(--text-xs);
@@ -322,13 +322,13 @@
   h2 {
     font-size: var(--text-base);
     font-weight: 500;
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
   .card {
-    padding: 1rem;
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: var(--space-3);
   }
   .hint {
     color: var(--text-dim);
@@ -337,25 +337,25 @@
   .metadata {
     display: grid;
     grid-template-columns: auto 1fr 1fr;
-    gap: 0.5rem 0.75rem;
-    margin-bottom: 0.75rem;
-    padding-bottom: 0.75rem;
+    gap: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-3);
+    padding-bottom: var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
   }
   input {
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
   }
   .actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
-    margin-top: 0.75rem;
+    margin-top: var(--space-3);
   }
   .actions .spacer {
     flex: 1;
@@ -363,12 +363,12 @@
   .extracting {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
   .split {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 1rem;
+    gap: var(--space-4);
   }
   @media (max-width: 900px) {
     .split {
@@ -377,7 +377,7 @@
   }
   .range-pair {
     display: flex;
-    gap: 0.25rem;
+    gap: var(--space-1);
   }
   .range-pair input {
     max-width: 5rem;
@@ -385,7 +385,7 @@
   .review-table input {
     max-width: 9rem;
     font-size: var(--text-xs);
-    padding: 0.15rem 0.3rem;
+    padding: 0.15rem var(--space-1);
   }
   .del {
     background: none;
@@ -400,12 +400,12 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.75rem;
+    padding: var(--space-3);
   }
   .source-header {
     font-size: var(--text-sm);
     color: var(--text-muted);
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--space-2);
   }
   .source img {
     width: 100%;

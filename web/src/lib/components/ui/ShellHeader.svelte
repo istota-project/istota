@@ -42,8 +42,8 @@
   .header {
     display: flex;
     align-items: center;
-    gap: 1rem;
-    padding: 0.75rem;
+    gap: var(--space-4);
+    padding: var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -84,19 +84,19 @@
     margin-left: auto;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   @media (max-width: 768px) {
     .header {
-      padding: 0.5rem 0.75rem;
+      padding: var(--space-2) var(--space-3);
       /* Tight enough that the title lands on the app nav's wordmark: the toggle
 			   occupies 0.4→2.0rem after its negative margins, so this gap is what puts
 			   the title at the shared 2.25rem inset (see app.css). The toggle itself is
 			   left alone — it is also used outside this bar, and its own margins are
 			   what centre the glyph on the row's left edge. Nav chips carry
 			   --chip-padding-x, so their text still clears the title by 0.75rem. */
-      gap: 0.25rem;
+      gap: var(--space-1);
     }
   }
 </style>

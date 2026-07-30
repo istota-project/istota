@@ -64,15 +64,15 @@
   .trip-item {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     width: 100%;
     background: none;
     border: none;
     color: inherit;
     font: inherit;
     cursor: pointer;
-    padding: 0.3rem 0.5rem;
-    border-radius: 0.3rem;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     text-align: left;
     transition: background var(--transition-fast);
   }

@@ -124,12 +124,12 @@
 	   this, and the bottom one on its scroll pane, so plain values are right
 	   here. */
   .dashboard {
-    padding: 1.5rem;
+    padding: var(--space-6);
   }
 
   @media (max-width: 640px) {
     .dashboard {
-      padding: 1rem 0.75rem;
+      padding: var(--space-4) var(--space-3);
     }
   }
 
@@ -140,7 +140,7 @@
 		   stretches to its row's height and the two lines would otherwise sit high
 		   in a box taller than they are. */
     align-items: center;
-    gap: 0.85rem;
+    gap: var(--space-3);
     background: var(--surface-card);
     border: 1px solid var(--border-subtle);
     border-left: 2px solid var(--accent-amber);
@@ -178,7 +178,7 @@
     color: var(--text-primary);
   }
   .welcome-note {
-    margin: 0.25rem 0 0;
+    margin: var(--space-1) 0 0;
     font-size: 0.85rem;
     color: var(--text-muted);
     /* A plus-address is one unbroken token and can be long; on a phone it would
@@ -224,10 +224,10 @@
   .feature-title {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     font-weight: 600;
     font-size: 0.9rem;
-    margin-bottom: 0.25rem;
+    margin-bottom: var(--space-1);
     color: var(--text-primary);
   }
   /* Size the glyph in CSS rather than through lucide's `size` prop, which

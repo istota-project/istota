@@ -58,24 +58,24 @@
     position: absolute;
     bottom: 100%;
     left: 0;
-    margin: 0 0 0.3rem 0;
-    padding: 0.25rem;
+    margin: 0 0 var(--space-1) 0;
+    padding: var(--space-1);
     list-style: none;
     width: min(28rem, 100%);
     max-height: 15rem;
     overflow-y: auto;
     background: var(--surface-card);
     border: 1px solid var(--border-default);
-    border-radius: 0.4rem;
+    border-radius: var(--radius-sm);
     box-shadow: var(--shadow-md);
     z-index: var(--z-popover);
   }
   .ac-item {
     display: flex;
     align-items: baseline;
-    gap: 0.5rem;
-    padding: 0.3rem 0.5rem;
-    border-radius: 0.3rem;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     cursor: pointer;
     white-space: nowrap;
   }

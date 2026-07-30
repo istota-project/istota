@@ -768,7 +768,7 @@
     background: var(--surface-base);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
-    padding: 0.2rem 0.5rem;
+    padding: 0.2rem var(--space-2);
     cursor: pointer;
     white-space: nowrap;
     transition:
@@ -851,7 +851,7 @@
 		   channel width, Discord-style). Just a little breathing room here. */
     /* The bottom reserve is the `.composer-reserve` spacer at the end of the
 			 list rather than padding here — see its comment in the markup. */
-    padding: 0.5rem 0 0;
+    padding: var(--space-2) 0 0;
     width: 100%;
   }
 
@@ -876,7 +876,7 @@
     justify-content: center;
     width: 36px;
     height: 36px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid var(--border-default);
     background: var(--surface-overlay);
     color: var(--text-primary);
@@ -908,7 +908,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     color: var(--text-dim);
     /* Matches the whole-pane loading message every other section uses
 	     (`.center-msg`, app.css). The empty states set their own larger type on
@@ -932,7 +932,7 @@
     text-align: center;
     color: var(--text-dim);
     font-size: var(--text-sm);
-    padding: 0.5rem 0.75rem 0.7rem;
+    padding: var(--space-2) var(--space-3) var(--space-3);
   }
   .older-status.begin {
     color: var(--text-dim);
@@ -944,9 +944,9 @@
   .day-divider {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
-    margin: 0.9rem 0 0.3rem;
-    padding: 0 0.75rem;
+    gap: var(--space-2);
+    margin: var(--space-4) 0 var(--space-1);
+    padding: 0 var(--space-3);
   }
   .day-divider::before,
   .day-divider::after {
@@ -972,20 +972,20 @@
   /* No horizontal padding: this sits inside .sidebar-list, which already
 	   insets its children, so the button lines up with the rows around it. */
   .room-new {
-    padding: 0 0 0.4rem;
+    padding: 0 0 var(--space-2);
   }
   .room-add {
     display: flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: var(--space-2);
     width: 100%;
     background: none;
     border: 1px dashed var(--border-default);
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-sm);
-    padding: 0.35rem 0.6rem;
-    border-radius: 0.35rem;
+    padding: var(--space-2) var(--space-2);
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .room-add:hover {
@@ -999,14 +999,14 @@
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
-    padding: 0.35rem 0.5rem;
-    border-radius: 0.35rem;
+    padding: var(--space-2) var(--space-2);
+    border-radius: var(--radius-sm);
   }
 
   .room-btn {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     flex: 1;
     min-width: 0;
     background: none;
@@ -1015,8 +1015,8 @@
     font: inherit;
     font-size: var(--text-base);
     cursor: pointer;
-    padding: 0.35rem 0.6rem;
-    border-radius: 0.3rem;
+    padding: var(--space-2) var(--space-2);
+    border-radius: var(--radius-sm);
     text-align: left;
     transition: color var(--transition-fast);
   }
@@ -1037,7 +1037,7 @@
   .room-line {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: var(--space-2);
     min-width: 0;
   }
   .room-name {
@@ -1062,7 +1062,7 @@
     justify-content: center;
     min-width: 1.15rem;
     height: 1.15rem;
-    padding: 0 0.35rem;
+    padding: 0 var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--accent);
     color: var(--surface-base);

@@ -264,8 +264,8 @@
     color: inherit;
     font: inherit;
     cursor: pointer;
-    padding: 0.4rem 0.5rem;
-    border-radius: 0.3rem;
+    padding: var(--space-2) var(--space-2);
+    border-radius: var(--radius-sm);
   }
 
   .archive-row.active .archive-btn {
@@ -287,11 +287,11 @@
 
   .load-more {
     width: 100%;
-    margin-top: 0.4rem;
-    padding: 0.4rem;
+    margin-top: var(--space-2);
+    padding: var(--space-2);
     background: none;
     border: 1px solid var(--border-subtle);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-xs);
@@ -304,13 +304,13 @@
   }
 
   .sidebar-empty {
-    padding: 0.5rem;
+    padding: var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-dim);
   }
 
   .sidebar-error {
-    padding: 0.4rem 0.5rem;
+    padding: var(--space-2) var(--space-2);
     font-size: var(--text-xs);
     color: var(--status-danger-fg);
   }

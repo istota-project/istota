@@ -103,13 +103,13 @@
     line-height: 1.5;
   }
   .confirm-challenge {
-    margin: 0.75rem 0 0.35rem;
+    margin: var(--space-3) 0 var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-muted);
   }
   .confirm-challenge code {
     background: var(--surface-raised);
-    padding: 0.05rem 0.3rem;
+    padding: 0.05rem var(--space-1);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
   }
@@ -119,7 +119,7 @@
     background: var(--surface-raised);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
-    padding: 0.35rem 0.5rem;
+    padding: var(--space-2) var(--space-2);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);

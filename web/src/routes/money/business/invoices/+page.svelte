@@ -315,7 +315,7 @@
   }
 
   .inv-details {
-    padding: 0.15rem 0.75rem 0.4rem 2rem;
+    padding: 0.15rem var(--space-3) var(--space-2) var(--space-8);
     background: var(--surface-card);
     border-radius: 0 0 0.25rem 0.25rem;
     margin-top: -0.15rem;
@@ -324,7 +324,7 @@
   .detail-row {
     display: flex;
     align-items: baseline;
-    gap: 0.75rem;
+    gap: var(--space-3);
     padding: 0.15rem 0;
     font-size: var(--text-xs);
   }
@@ -337,7 +337,7 @@
 
   .detail-note {
     color: var(--text-dim);
-    margin-left: 0.25rem;
+    margin-left: var(--space-1);
   }
 
   .detail-qty {
@@ -369,7 +369,7 @@
        number carries the status colors instead — same tokens as the chip. */
     .inv-number {
       min-width: 5.25rem;
-      padding: 0.1rem 0.4rem;
+      padding: 0.1rem var(--space-2);
       border-radius: var(--radius-pill);
       text-align: center;
     }
@@ -389,7 +389,7 @@
       min-width: 4rem;
     }
     .inv-details {
-      padding-left: 0.75rem;
+      padding-left: var(--space-3);
     }
     .detail-qty {
       display: none;

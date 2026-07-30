@@ -61,7 +61,7 @@
     cursor: pointer;
     padding: 0 0.1rem;
     line-height: 1;
-    border-radius: 0.25rem;
+    border-radius: var(--radius-sm);
     flex-shrink: 0;
     transition: color var(--transition-fast);
   }
@@ -73,8 +73,8 @@
   :global(.ui-kebab-content) {
     background: var(--surface-card);
     border: 1px solid var(--border-default);
-    border-radius: 0.4rem;
-    padding: 0.25rem;
+    border-radius: var(--radius-sm);
+    padding: var(--space-1);
     z-index: var(--z-popover);
     box-shadow: var(--shadow-md);
     min-width: 9rem;
@@ -83,10 +83,10 @@
   }
 
   :global(.ui-kebab-item) {
-    padding: 0.35rem 0.6rem;
+    padding: var(--space-2) var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-secondary);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     outline: none;
     user-select: none;

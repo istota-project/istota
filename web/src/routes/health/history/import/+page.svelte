@@ -337,7 +337,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 0.75rem;
+    margin-bottom: var(--space-3);
   }
   h1 {
     font-size: var(--text-lg);
@@ -357,11 +357,11 @@
   }
 
   .card {
-    padding: 0.85rem 1rem;
-    margin-bottom: 0.75rem;
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: var(--space-3);
   }
 
   .hint {
@@ -372,11 +372,11 @@
 
   .actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
     align-items: center;
   }
   .card .actions {
-    margin-top: 0.25rem;
+    margin-top: var(--space-1);
   }
 
   .extracting {
@@ -386,13 +386,13 @@
     display: flex;
     flex-direction: row;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     color: var(--text-muted);
     font-size: var(--text-sm);
   }
 
   .attach-note {
-    margin: 0 0 0.75rem;
+    margin: 0 0 var(--space-3);
     font-size: var(--text-xs);
     color: var(--text-muted);
   }
@@ -400,8 +400,8 @@
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 0.5rem;
-    margin: 0.75rem 0 0.5rem;
+    gap: var(--space-2);
+    margin: var(--space-3) 0 var(--space-2);
   }
   .meta {
     font-size: var(--text-xs);
@@ -412,11 +412,11 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.85rem 1rem;
-    margin-bottom: 0.75rem;
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: var(--space-3);
   }
   .enc-card.warn {
     background: hsla(35, 60%, 60%, 0.08);
@@ -429,14 +429,14 @@
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: 0.65rem;
+    gap: var(--space-3);
   }
   input,
   textarea {
-    padding: 0.3rem 0.5rem;
+    padding: var(--space-1) var(--space-2);
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
+    border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-sm);
@@ -452,15 +452,15 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-top: 0.25rem;
+    margin-top: var(--space-1);
     border-top: 1px solid var(--border-subtle);
-    padding-top: 0.65rem;
+    padding-top: var(--space-3);
   }
 
   /* Compact inputs inside the diagnoses table — mirrors the immunization
 	   review-table sizing so the nested grid doesn't overpower the card. */
   table.grid input {
-    padding: 0.25rem 0.4rem;
+    padding: var(--space-1) var(--space-2);
   }
   td.row-actions,
   th.row-actions {

@@ -149,6 +149,23 @@
   --radius-card: var(--radius-md);
   --radius-pill: 999px;
 
+  /* Spacing ramp — 4px steps at the unscaled root, in rem so they track the
+	   text-scale preference. Nine off-ramp values (0.3 / 0.35 / 0.4 / 0.45 /
+	   0.6 / 0.65 / 0.7 / 0.85 / 0.9rem, ~410 declarations) were collapsed onto
+	   these, which is where the sub-2px shifts across the app came from.
+
+	   Values below 0.25rem are deliberately NOT on this ramp: 0.05-0.2rem are
+	   hairline optical nudges and icon gaps, and rounding them to 4px is a
+	   visible change rather than a tidy-up. Same for the sparse tail above
+	   1rem. Both are reported by the off-scale-space lint rule and baselined,
+	   so they are counted rather than quietly accepted. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
   /* Chip / pill horizontal padding — referenced by Chip + NavLink so a parent
 	   container can use `margin-inline-start: calc(-1 * var(--chip-padding-x))`
 	   to make the chip *text* align with surrounding content. */

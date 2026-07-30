@@ -261,8 +261,8 @@
   .stats-bar {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.4rem 0.75rem;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-top: 1px solid var(--border-subtle);
     flex-shrink: 0;
     flex-wrap: wrap;
@@ -271,7 +271,7 @@
   .current {
     display: inline-flex;
     align-items: baseline;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .place {

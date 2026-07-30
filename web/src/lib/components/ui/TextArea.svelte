@@ -38,7 +38,7 @@
     color: var(--text-primary);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
-    padding: 0.35rem 0.5rem;
+    padding: var(--space-2) var(--space-2);
     font: inherit;
     font-size: var(--text-sm);
     /* Vertical only: a horizontally resizable textarea escapes its column and

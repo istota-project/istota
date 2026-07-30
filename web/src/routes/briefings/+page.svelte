@@ -97,7 +97,7 @@
 		   the empty state keep their natural height at the top of the column. */
     display: flex;
     flex-direction: column;
-    padding: 1.5rem 2rem;
+    padding: var(--space-6) var(--space-8);
     /* The shell hands this route the bottom safe area (insetBottom={onSettings}),
 		   so the fill runs to the screen edge and the text clears the home
 		   indicator — rather than the fill stopping short and leaving a band of the
@@ -114,7 +114,7 @@
 	   body copy lines up with the titles above it. */
   @media (max-width: 768px) {
     .reader {
-      padding: 1rem 0.75rem;
+      padding: var(--space-4) var(--space-3);
       padding-bottom: max(1rem, var(--safe-bottom));
     }
   }
@@ -134,17 +134,17 @@
 	   indent; the marker aligns with the left edge of the surrounding text. */
   .body :global(ul),
   .body :global(ol) {
-    margin: 0 0 1rem;
+    margin: 0 0 var(--space-4);
     padding-left: 0;
     list-style-position: inside;
   }
 
   .body :global(li) {
-    margin: 0.25rem 0;
+    margin: var(--space-1) 0;
   }
 
   .briefing-head h1 {
-    margin: 0 0 0.25rem;
+    margin: 0 0 var(--space-1);
     font-size: 1.25rem;
   }
 
@@ -157,7 +157,7 @@
   .body :global(h1),
   .body :global(h2) {
     font-size: 1.05rem;
-    margin-top: 1.5rem;
+    margin-top: var(--space-6);
   }
 
   .body :global(table) {
@@ -168,12 +168,12 @@
   .body :global(th),
   .body :global(td) {
     border: 1px solid var(--border-subtle);
-    padding: 0.3rem 0.6rem;
+    padding: var(--space-1) var(--space-2);
     text-align: left;
   }
 
   .status {
-    padding: 1.5rem 0;
+    padding: var(--space-6) 0;
     color: var(--text-dim);
   }
 
@@ -187,7 +187,7 @@
 
   .empty-state h1 {
     font-size: 1.1rem;
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
 
   .muted {

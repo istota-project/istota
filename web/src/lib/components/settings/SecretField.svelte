@@ -58,7 +58,7 @@
 
   .secret-row {
     display: flex;
-    gap: 0.4rem;
+    gap: var(--space-2);
     align-items: center;
   }
 
@@ -66,8 +66,8 @@
     background: var(--surface-base);
     color: var(--text-primary);
     border: 1px solid var(--border-default);
-    border-radius: 0.3rem;
-    padding: 0.3rem 0.5rem;
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
     font: inherit;
     font-size: var(--text-sm);
     width: 100%;
@@ -81,8 +81,8 @@
     border: none;
     color: var(--text-dim);
     cursor: pointer;
-    padding: 0.1rem 0.35rem;
-    border-radius: 0.2rem;
+    padding: 0.1rem var(--space-2);
+    border-radius: var(--radius-sm);
     font: inherit;
     font-size: var(--text-base);
     line-height: 1;

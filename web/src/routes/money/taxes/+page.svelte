@@ -424,7 +424,7 @@
   /* A growing column so the whole-pane states (`.center-msg`) center in the
 	   section body rather than sitting against the top edge. */
   .tax-content {
-    padding: 0.5rem;
+    padding: var(--space-2);
     display: flex;
     flex-direction: column;
     flex: 1 0 auto;
@@ -433,7 +433,7 @@
   .tax-layout {
     display: grid;
     grid-template-columns: 280px 1fr;
-    gap: 1.5rem;
+    gap: var(--space-6);
     align-items: start;
   }
 
@@ -441,7 +441,7 @@
     font-size: var(--text-base);
     font-weight: 600;
     color: var(--text-primary);
-    margin: 0 0 0.5rem 0.25rem;
+    margin: 0 0 var(--space-2) var(--space-1);
   }
 
   /* Inputs */
@@ -449,10 +449,10 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.75rem;
+    padding: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: var(--space-2);
   }
 
   .input-group {
@@ -471,19 +471,19 @@
     align-items: center;
     background: var(--surface-base);
     border: 1px solid var(--border-default);
-    border-radius: 0.25rem;
+    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
   .input-prefix {
-    padding: 0.3rem 0 0.3rem 0.5rem;
+    padding: var(--space-1) 0 var(--space-1) var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-dim);
   }
 
   .input-field input {
     flex: 1;
-    padding: 0.3rem 0.5rem 0.3rem 0.25rem;
+    padding: var(--space-1) var(--space-2) var(--space-1) var(--space-1);
     background: transparent;
     border: none;
     color: var(--text-primary);
@@ -503,7 +503,7 @@
   }
 
   .input-suffix {
-    padding: 0.3rem 0.5rem 0.3rem 0;
+    padding: var(--space-1) var(--space-2) var(--space-1) 0;
     font-size: var(--text-xs);
     color: var(--text-dim);
   }
@@ -514,9 +514,9 @@
 
   .input-meta {
     display: flex;
-    gap: 0.75rem;
-    margin-top: 0.25rem;
-    padding: 0 0.25rem;
+    gap: var(--space-3);
+    margin-top: var(--space-1);
+    padding: 0 var(--space-1);
     font-size: var(--text-xs);
     color: var(--text-dim);
   }
@@ -524,8 +524,8 @@
   /* Summary cards */
   .summary-cards {
     display: flex;
-    gap: 0.75rem;
-    margin-bottom: 1rem;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
   }
 
   .summary-card {
@@ -533,7 +533,7 @@
     background: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: 0.6rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     display: flex;
     flex-direction: column;
     gap: 0.15rem;
@@ -565,7 +565,7 @@
 
   .breakdown-header {
     display: flex;
-    padding: 0.4rem 0.75rem;
+    padding: var(--space-2) var(--space-3);
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
@@ -575,7 +575,7 @@
   }
 
   .breakdown-group-label {
-    padding: 0.4rem 0.75rem 0.15rem;
+    padding: var(--space-2) var(--space-3) 0.15rem;
     font-size: var(--text-xs);
     color: var(--text-dim);
     font-weight: 500;
@@ -584,21 +584,21 @@
 
   .breakdown-row {
     display: flex;
-    padding: 0.2rem 0.75rem;
+    padding: 0.2rem var(--space-3);
     font-size: var(--text-sm);
   }
 
   .breakdown-row.highlight {
     font-weight: 600;
-    padding-top: 0.3rem;
-    padding-bottom: 0.3rem;
+    padding-top: var(--space-1);
+    padding-bottom: var(--space-1);
   }
 
   .breakdown-row.result {
     font-weight: 600;
     background: var(--surface-raised);
-    padding-top: 0.4rem;
-    padding-bottom: 0.4rem;
+    padding-top: var(--space-2);
+    padding-bottom: var(--space-2);
   }
 
   .breakdown-label {
@@ -636,12 +636,12 @@
   /* Info panels */
   .info-panel {
     margin: 0;
-    padding: 0 0.75rem;
+    padding: 0 var(--space-3);
     border-top: 1px solid var(--border-subtle);
   }
 
   .info-panel summary {
-    padding: 0.35rem 0;
+    padding: var(--space-2) 0;
     font-size: var(--text-xs);
     color: var(--text-dim);
     cursor: pointer;
@@ -663,7 +663,7 @@
   }
 
   .info-panel p {
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
     font-size: var(--text-xs);
     color: var(--text-muted);
     line-height: 1.5;
@@ -671,8 +671,8 @@
 
   .empty code {
     background: var(--surface-raised);
-    padding: 0.1rem 0.3rem;
-    border-radius: 0.2rem;
+    padding: 0.1rem var(--space-1);
+    border-radius: var(--radius-sm);
     font-size: var(--text-sm);
   }
 

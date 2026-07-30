@@ -212,7 +212,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
   }
   h1 {
     font-size: var(--text-lg);
@@ -226,18 +226,18 @@
 		   (0,3,0) and beats a page-local `.card` at (0,2,0), so the declaration
 		   never applied and every card sat at the layout default. */
     --card-padding: 0.85rem 1rem;
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
   }
   .coverage-card .status-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--space-2);
   }
   .grid-stats {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr));
-    gap: 0.75rem 1rem;
+    gap: var(--space-3) var(--space-4);
     margin: 0;
   }
   dt {
@@ -253,7 +253,7 @@
     color: var(--text-primary);
   }
   .description {
-    margin: 0.75rem 0 0;
+    margin: var(--space-3) 0 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
     line-height: 1.55;
@@ -267,7 +267,7 @@
   }
 
   .explainer h2 {
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
   details.explainer {
     /* Zero the panel's own padding — via the hook, for the same specificity
@@ -282,12 +282,12 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: var(--space-2);
     /* Matches .card's padding so the collapsed panel is the same box as the
 		   coverage card above it. The padding lives on the summary and the
 		   content rather than on the <details>, or the click target would stop
 		   short of the panel's edges. */
-    padding: 0.85rem 1rem;
+    padding: var(--space-3) var(--space-4);
     user-select: none;
   }
   details.explainer > summary::-webkit-details-marker {
@@ -316,10 +316,10 @@
   details.explainer > .content {
     /* No top padding: the summary's own bottom padding already separates the
 		   label from the body, so adding more would double it once open. */
-    padding: 0 1rem 0.85rem;
+    padding: 0 var(--space-4) var(--space-3);
   }
   .explainer h3 {
-    margin: 0.85rem 0 0.35rem;
+    margin: var(--space-3) 0 var(--space-2);
     font-size: var(--text-xs);
     font-weight: 500;
     color: var(--text-dim);
@@ -348,7 +348,7 @@
     max-width: 75ch;
   }
   .explainer .disclaimer {
-    margin: 0.85rem 0 0;
+    margin: var(--space-3) 0 0;
     font-size: var(--text-xs);
     color: var(--text-dim);
     font-style: italic;
@@ -358,7 +358,7 @@
   }
 
   .history h2 {
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-2);
   }
   td.notes {
     max-width: 260px;

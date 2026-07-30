@@ -58,9 +58,9 @@
   :global(.report-frame .section-header) {
     display: flex;
     align-items: baseline;
-    padding: 0.75rem 0.75rem 0.4rem;
+    padding: var(--space-3) var(--space-3) var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
-    margin-top: 0.5rem;
+    margin-top: var(--space-2);
   }
 
   :global(.report-frame .section-header:first-child) {
@@ -78,6 +78,6 @@
     padding: 0;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 </style>

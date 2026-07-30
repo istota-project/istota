@@ -238,9 +238,9 @@
 <style>
   .status-row {
     display: flex;
-    gap: 2rem;
+    gap: var(--space-8);
     flex-wrap: wrap;
-    margin-bottom: 0.75rem;
+    margin-bottom: var(--space-3);
   }
   .label {
     font-size: var(--text-sm);
@@ -251,8 +251,8 @@
   }
   .actions {
     display: flex;
-    gap: 0.5rem;
-    margin-top: 0.75rem;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
   }
   .muted {
     color: var(--text-muted);

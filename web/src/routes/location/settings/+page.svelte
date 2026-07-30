@@ -198,14 +198,14 @@
     display: flex;
     flex-wrap: wrap;
     align-items: flex-start;
-    gap: 1rem;
+    gap: var(--space-4);
   }
 
   .provision-copy {
     flex: 1 1 16rem;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
 
   .mint-error {
@@ -216,7 +216,7 @@
 
   .webhook-url {
     display: block;
-    padding: 0.4rem 0.6rem;
+    padding: var(--space-2) var(--space-2);
     font-family: ui-monospace, SFMono-Regular, monospace;
     word-break: break-all;
   }
@@ -224,7 +224,7 @@
   .kv {
     display: grid;
     grid-template-columns: max-content 1fr;
-    gap: 0.25rem 0.75rem;
+    gap: var(--space-1) var(--space-3);
     margin: 0;
     font-size: var(--text-sm);
   }
