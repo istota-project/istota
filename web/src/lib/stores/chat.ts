@@ -9,13 +9,15 @@
  * A single module-level instance is shared across the /chat surfaces.
  */
 import { get, writable, type Writable } from 'svelte/store';
-import { notifyError, notifyWarning } from './notices';
+import { notifyError, notifySuccess, notifyWarning } from './notices';
 import {
   cancelChatTask,
   chatStreamUrl,
   confirmChatTask,
   createChatRoom,
+  deleteChatMessage,
   deleteChatRoom,
+  ChatMessageBusyError,
   ChatRoomBusyError,
   getChatConfig,
   getChatMessagesView,
@@ -182,6 +184,10 @@ export interface ChatSession {
   // Star / unstar the durable message behind a transcript row (optimistic,
   // reverted on failure). No-op for rows without a msgId.
   toggleStar: (cid: number) => Promise<void>;
+  // Hard-delete the durable message behind a transcript row. No-op for rows
+  // without a msgId (a live placeholder isn't stored yet). The caller is
+  // expected to have confirmed first — this does not prompt.
+  deleteMessage: (cid: number) => Promise<void>;
   // Advance every room's web read cursor at once (header mark-all chip).
   markAllRead: () => Promise<void>;
   // Older-history paging (ISSUE-131): whether an older page exists, an
@@ -285,6 +291,12 @@ function createSession(): ChatSession {
   // on a page the user has left.
   let initGeneration = 0;
   let roomCursor = 0;
+  // The deletion tail's own cursor. Separate from `roomCursor` because a
+  // delete is hard — there is no `messages` row left for the id-ordered event
+  // tail to carry — so the server keeps a ledger and this tracks it. Passed
+  // back on reconnect, or a message deleted while the tab was disconnected
+  // would come back to life on the next resume.
+  let roomDeletionCursor = 0;
   let lastRoomEventAt = Date.now();
   let hiddenSince: number | null = null;
   // Frames that land while a recovery reload is in flight. The reload's
@@ -730,6 +742,18 @@ function createSession(): ChatSession {
     if (room) bumpBackgroundRoom(room.id, row, opts.countUnread ?? true);
   }
 
+  // `message_deleted` frame: rows another client (or another tab) removed.
+  // Applied to whatever is on screen — the room transcript and the aggregate
+  // panes are one `messages` store, so one filter covers both. Unread badges
+  // are deliberately left alone: they are the server's count and the 30s
+  // reconciler settles them, and decrementing here would double-count against
+  // a badge the deleting client's own read cursor may already have cleared.
+  function applyDeletions(deletions: { msg_id: number }[]) {
+    if (!deletions.length) return;
+    const gone = new Set(deletions.map((d) => d.msg_id));
+    messages.update((arr) => arr.filter((m) => m.msgId == null || !gone.has(m.msgId)));
+  }
+
   // Replay the frames held for the duration of a send, now that the turn's
   // task id is on screen and the ordinary dedup can recognise our own echo.
   function drainPendingSend() {
@@ -812,7 +836,13 @@ function createSession(): ChatSession {
         try {
           // limit=1 → the server does the cheap MAX(id) gate and hands back a
           // cursor without serializing a backlog we're about to discard.
-          target = (await getRoomEvents(roomCursor, 1, RECOVERY_FETCH_TIMEOUT_MS)).cursor;
+          const seed = await getRoomEvents(roomCursor, 1, RECOVERY_FETCH_TIMEOUT_MS);
+          target = seed.cursor;
+          // The reload below re-reads from the server, which has already
+          // dropped the deleted rows — so skip past them rather than replaying
+          // deletions for messages that are no longer on screen.
+          const d = Number(seed.deletion_cursor) || 0;
+          if (d > roomDeletionCursor) roomDeletionCursor = d;
         } catch {
           target = null;
         }
@@ -894,8 +924,14 @@ function createSession(): ChatSession {
     const poll = async () => {
       if (stopped) return;
       try {
-        const page = await getRoomEvents(roomCursor);
+        const page = await getRoomEvents(roomCursor, 0, 0, roomDeletionCursor);
         lastRoomEventAt = Date.now();
+        // Deletions first, and before the gap bail-out: a gap reloads the open
+        // room from the server, which already omits the deleted rows, but the
+        // cursor still has to advance or every poll re-sends the same batch.
+        applyDeletions(page.deletions ?? []);
+        const delCursor = Number(page.deletion_cursor) || 0;
+        if (delCursor > roomDeletionCursor) roomDeletionCursor = delCursor;
         if (page.gap) {
           if (page.cursor > roomCursor) roomCursor = page.cursor;
           void recoverStream(page.cursor);
@@ -934,7 +970,9 @@ function createSession(): ChatSession {
       if (stopped || es) return;
       lastSseAttemptAt = Date.now();
       try {
-        es = new EventSource(chatRoomStreamUrl(roomCursor), { withCredentials: true });
+        es = new EventSource(chatRoomStreamUrl(roomCursor, roomDeletionCursor), {
+          withCredentials: true,
+        });
       } catch {
         es = null;
         startPolling();
@@ -979,6 +1017,20 @@ function createSession(): ChatSession {
         lastRoomEventAt = Date.now();
         try {
           applyRoomFrame(JSON.parse(e.data));
+        } catch {
+          /* swallow */
+        }
+      });
+      // Auxiliary frame — it carries no SSE `id:` (that cursor belongs to the
+      // message tail), so the deletion cursor travels inside the payload.
+      es.addEventListener('message_deleted', (e: MessageEvent) => {
+        if (e.data == null) return;
+        lastRoomEventAt = Date.now();
+        try {
+          const payload = JSON.parse(e.data);
+          applyDeletions(payload.deletions ?? []);
+          const c = Number(payload.cursor) || 0;
+          if (c > roomDeletionCursor) roomDeletionCursor = c;
         } catch {
           /* swallow */
         }
@@ -1186,6 +1238,27 @@ function createSession(): ChatSession {
     }
   }
 
+  // Hard-delete a transcript row. Pessimistic, unlike `toggleStar`: a star
+  // reverts cleanly, but a row removed optimistically and then restored would
+  // reappear in the middle of the transcript after the user watched it go —
+  // and the request is one round trip.
+  async function deleteMessage(cid: number) {
+    const m = get(messages).find((x) => x.cid === cid);
+    if (!m || typeof m.msgId !== 'number') return;
+    try {
+      await deleteChatMessage(m.msgId);
+    } catch (e) {
+      notifyError(
+        e instanceof ChatMessageBusyError
+          ? 'That turn is still running — delete it once it finishes.'
+          : "Couldn't delete the message.",
+      );
+      return;
+    }
+    messages.update((arr) => arr.filter((x) => x.cid !== cid));
+    notifySuccess('Message deleted.', { key: 'chat:message-delete' });
+  }
+
   // Mark every room read in one shot (the header chip). Badges zero locally on
   // success; an open Unread view reloads to its (likely empty) fresh state.
   async function markAllRead() {
@@ -1293,9 +1366,15 @@ function createSession(): ChatSession {
       // (limit=1 → the server answers from its MAX(id) gate, not a serialized
       // page.)
       try {
-        roomCursor = (await getRoomEvents(0, 1)).cursor;
+        const seed = await getRoomEvents(0, 1);
+        roomCursor = seed.cursor;
+        // Seed the deletion cursor too, from the same call: the history load
+        // below already reflects every deletion so far, so replaying them as
+        // frames would be pure noise.
+        roomDeletionCursor = Number(seed.deletion_cursor) || 0;
       } catch {
         roomCursor = 0;
+        roomDeletionCursor = 0;
       }
       if (superseded()) return;
       // Restore the last selection. An aggregate view is a selection in its own
@@ -1719,6 +1798,7 @@ function createSession(): ChatSession {
     view,
     selectView,
     toggleStar,
+    deleteMessage,
     markAllRead,
     hasMore,
     loadingOlder,

@@ -228,6 +228,32 @@ class TalkClient:
         response.raise_for_status()
         return response.json()
 
+    async def delete_message(
+        self, conversation_token: str, message_id: int,
+    ) -> dict:
+        """Delete a message from a Talk conversation.
+
+        Talk replaces the message with a "Message deleted by …" placeholder
+        rather than removing the row, and only the author (or a moderator) may
+        do it — so which credential this client carries decides whether the
+        call succeeds. A `403` therefore means "not yours to delete", not a
+        misconfiguration, and callers propagating a web-side delete treat it as
+        an expected outcome.
+        """
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat"
+            f"/{conversation_token}/{message_id}"
+        )
+        logger.debug(
+            "Deleting message %d in %s", message_id, conversation_token,
+        )
+        client = await self._ensure_open()
+        response = await client.delete(
+            url, auth=self.auth, headers=self._headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def create_conversation(
         self, name: str, room_type: int = 2,
     ) -> dict:

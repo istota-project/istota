@@ -2048,6 +2048,31 @@ export function setChatMessageStarred(
   });
 }
 
+/** A message can't be deleted while its turn is still running (HTTP 409) —
+ * the scheduler writes the assistant row at completion, so the delete would
+ * silently undo itself. Distinguished from a generic failure because "try
+ * again once it finishes" is actionable and "couldn't delete" isn't. */
+export class ChatMessageBusyError extends Error {
+  constructor() {
+    super('message belongs to a task in progress');
+    this.name = 'ChatMessageBusyError';
+  }
+}
+
+/** Hard-delete one transcript row. Gone from every read path at once, and —
+ * in a Talk-bound room — best-effort from the mirrored Talk message too. */
+export async function deleteChatMessage(msgId: number): Promise<{ status: string }> {
+  const resp = await fetch(`${base}/api/chat/messages/${msgId}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  });
+  if (resp.status === 409) throw new ChatMessageBusyError();
+  // 404 → already gone (another tab, a repeat click); idempotent from here.
+  if (resp.status === 404) return { status: 'gone' };
+  if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+  return resp.json();
+}
+
 /** Advance every room's web read cursor at once (the header mark-all chip). */
 export function markAllRoomsRead(): Promise<{ ok: boolean; updated: number }> {
   return apiFetch<{ ok: boolean; updated: number }>('/chat/rooms/read-all', {
@@ -2122,19 +2147,37 @@ export interface ChatRoomEventsPage {
   /** The delta was too large to replay; reload instead (rooms list + the open
    * room), then adopt `cursor`. */
   gap: boolean;
+  /** Messages deleted since `since_deletion_id`. A separate tail because a
+   * delete is hard: there is no `messages` row left for the id-ordered event
+   * tail to carry, so the ledger is what tells another open tab. */
+  deletions?: ChatMessageDeletion[];
+  /** Cursor to adopt for the deletion tail — its own sequence, unrelated to
+   * `cursor`. */
+  deletion_cursor?: number;
+}
+
+export interface ChatMessageDeletion {
+  msg_id: number;
+  room_token: string;
 }
 
 /** Snapshot of the room-event tail — the polling fallback behind the room
  * stream. `limit=1` asks only for a fresh cursor (used after a reload). */
-export function getRoomEvents(sinceId = 0, limit = 0, timeoutMs = 0): Promise<ChatRoomEventsPage> {
+export function getRoomEvents(
+  sinceId = 0,
+  limit = 0,
+  timeoutMs = 0,
+  sinceDeletionId = 0,
+): Promise<ChatRoomEventsPage> {
   const params = new URLSearchParams({ since_id: String(sinceId) });
   if (limit > 0) params.set('limit', String(limit));
+  if (sinceDeletionId > 0) params.set('since_deletion_id', String(sinceDeletionId));
   return apiFetch<ChatRoomEventsPage>(`/chat/events?${params.toString()}`, undefined, timeoutMs);
 }
 
 /** SSE endpoint carrying every message visible to the user, across all rooms. */
-export function chatRoomStreamUrl(sinceId: number): string {
-  return `${base}/api/chat/stream?since_id=${sinceId}`;
+export function chatRoomStreamUrl(sinceId: number, sinceDeletionId = 0): string {
+  return `${base}/api/chat/stream?since_id=${sinceId}&since_deletion_id=${sinceDeletionId}`;
 }
 
 export interface ChatAttachment {

@@ -43,11 +43,16 @@ function assistant(segments: Segment[]): ChatMessage {
 }
 
 function copyButtons(container: HTMLElement): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll<HTMLButtonElement>('.copy-block'));
+  return Array.from(
+    container.querySelectorAll<HTMLButtonElement>('.turn-action[aria-label="Copy message"]'),
+  );
 }
 
-describe('per-block copy', () => {
-  it('gives each prose group its own button', () => {
+describe('per-turn copy', () => {
+  it('gives a multi-block turn one button, not one per block', () => {
+    // The affordance moved from the block to the turn: a reply is normally
+    // taken whole, and one row per turn is what lets copy and delete sit
+    // together instead of in two differently-placed affordances.
     const { container } = render(Message, {
       ...base,
       message: assistant([
@@ -57,10 +62,23 @@ describe('per-block copy', () => {
       ]),
     });
 
-    expect(copyButtons(container)).toHaveLength(2);
+    expect(copyButtons(container)).toHaveLength(1);
   });
 
-  it('copies that group source markdown, not the rendered html', async () => {
+  it('copies every prose block, joined, in render order', async () => {
+    const written = stubClipboard();
+    const { container } = render(Message, {
+      ...base,
+      message: assistant([prose('t1', LONG), tool('c1', 'ran a thing'), prose('t2', 'Second.')]),
+    });
+
+    copyButtons(container)[0].click();
+    await Promise.resolve();
+
+    expect(written).toEqual([`${LONG}\n\nSecond.`]);
+  });
+
+  it('copies the source markdown, not the rendered html', async () => {
     const written = stubClipboard();
     const { container } = render(Message, {
       ...base,
@@ -73,22 +91,26 @@ describe('per-block copy', () => {
     expect(written).toEqual(['The **answer** is 42.']);
   });
 
-  it('copies each group independently', async () => {
+  it('leaves the activity trace off the clipboard', async () => {
+    // The one property the per-block version really protected: a tool trace is
+    // never something anyone wants pasted.
     const written = stubClipboard();
     const { container } = render(Message, {
       ...base,
-      message: assistant([prose('t1', LONG), tool('c1', 'ran a thing'), prose('t2', 'Second.')]),
+      message: assistant([
+        prose('t1', LONG),
+        tool('c1', 'ran a very distinctive thing'),
+        prose('t2', 'Done.'),
+      ]),
     });
 
-    copyButtons(container)[1].click();
+    copyButtons(container)[0].click();
     await Promise.resolve();
 
-    expect(written).toEqual(['Second.']);
+    expect(written[0]).not.toContain('distinctive');
   });
 
-  it('gives an activity chip no copy button', () => {
-    // The whole point of hanging copy off the block rather than the turn: a
-    // tool trace is never something you want on the clipboard.
+  it('offers no copy on a tool-only turn', () => {
     const { container } = render(Message, {
       ...base,
       message: assistant([tool('c1', 'ran a thing')]),
@@ -147,8 +169,8 @@ describe('per-block copy', () => {
   });
 
   it('holds the button back while the turn is still streaming', () => {
-    // A half-written block copies half an answer, and the button would sit
-    // under text that is still moving.
+    // A half-written turn copies half an answer, and the row would sit under
+    // text that is still moving.
     const msg = assistant([prose('t1', 'partial')]);
     msg.streaming = true;
     const { container } = render(Message, { ...base, message: msg });
@@ -176,31 +198,14 @@ describe('per-block copy', () => {
     });
 
     const text = container.querySelector('.user-text')!;
-    expect(text.querySelector('.copy-block')).toBeNull();
+    expect(text.querySelector('.turn-action')).toBeNull();
     expect(text.textContent).toBe('hello');
   });
 
-  it('keeps each button a child of the block it copies', () => {
-    // The reveal is `.body:hover .copy-block`, and the button is positioned
-    // outside its parent's box — so it stays visible while the cursor is on
-    // it only because `:hover` follows the DOM ancestor chain. Hoisting the
-    // button to a sibling would look identical and un-hover on approach.
-    const { container } = render(Message, {
-      ...base,
-      message: assistant([prose('t1', LONG), tool('c1', 'ran a thing'), prose('t2', 'Second.')]),
-    });
-
-    const buttons = copyButtons(container);
-    expect(buttons).toHaveLength(2);
-    for (const btn of buttons) {
-      expect(btn.parentElement?.classList.contains('body')).toBe(true);
-    }
-  });
-
-  it('includes fenced code in the block copy', async () => {
+  it('includes fenced code in the copy', async () => {
     // Why there is no per-code-block copy button: the copy is the markdown
-    // *source*, which carries the fences, so copying the block already hands
-    // back the code ready to paste. A second button would duplicate it.
+    // *source*, which carries the fences, so copying the turn already hands
+    // back the code ready to paste.
     const written = stubClipboard();
     const src = 'Run this:\n\n```bash\nnpm run build\n```\n\nThen reload.';
     const { container } = render(Message, {
@@ -216,19 +221,104 @@ describe('per-block copy', () => {
     expect(container.querySelector('pre code')?.textContent).toContain('npm run build');
   });
 
-  it('renders the button before the block content', () => {
-    // Load-bearing despite the button being absolutely positioned: as a last
-    // child it is what `.markdown > *:last-child` matches, and that rule
-    // exists to strip the trailing margin off the last *content* block. Move
-    // the button back to the end and a reply ending in a list or a code block
-    // gets its 1rem margin on top of the reserve.
+  it('keeps the action row out of the rendered body', () => {
+    // `.markdown > *:last-child` strips the trailing margin off the last
+    // *content* block. A button inside `.body` would be what it matched, so a
+    // reply ending in a list or a code block would keep its 1rem margin.
     const { container } = render(Message, {
       ...base,
       message: assistant([prose('t1', 'Line one.\n\n- a\n- b')]),
     });
 
     const body = container.querySelector('.body.markdown')!;
-    expect(body.firstElementChild?.classList.contains('copy-block')).toBe(true);
+    expect(body.querySelector('.turn-action')).toBeNull();
     expect(body.lastElementChild?.tagName).toBe('UL');
+  });
+});
+
+describe('per-message delete', () => {
+  function deleteButtons(container: HTMLElement): HTMLButtonElement[] {
+    return Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.turn-action[aria-label="Delete message"]'),
+    );
+  }
+
+  const durable = (over: Partial<ChatMessage> = {}): ChatMessage => ({
+    cid: 9,
+    role: 'assistant',
+    text: '',
+    segments: [prose('t1', 'The answer.')],
+    streaming: false,
+    msgId: 42,
+    ...over,
+  });
+
+  it('sits in the same row as copy', () => {
+    const { container } = render(Message, {
+      ...base,
+      message: durable(),
+      onDelete: noop,
+    });
+
+    const row = container.querySelector('.turn-actions')!;
+    expect(row.querySelectorAll('.turn-action')).toHaveLength(2);
+  });
+
+  it('fires with the message cid', () => {
+    const onDelete = vi.fn();
+    const { container } = render(Message, { ...base, message: durable(), onDelete });
+
+    deleteButtons(container)[0].click();
+
+    expect(onDelete).toHaveBeenCalledWith(9);
+  });
+
+  it('renders nothing without a handler', () => {
+    // The surface decides whether delete is offered; the component only draws
+    // the affordance. Without a handler there is no confirmation either.
+    const { container } = render(Message, { ...base, message: durable() });
+
+    expect(deleteButtons(container)).toHaveLength(0);
+  });
+
+  it('renders nothing for a row with no durable id', () => {
+    // A live placeholder isn't stored yet, so there is nothing to delete.
+    const { container } = render(Message, {
+      ...base,
+      message: durable({ msgId: undefined }),
+      onDelete: noop,
+    });
+
+    expect(deleteButtons(container)).toHaveLength(0);
+  });
+
+  it('stays available on a streaming turn once it has a durable id', () => {
+    // Copy is withheld while the text is still moving; delete is not tied to
+    // the text at all, and a turn you want gone is often one still going.
+    const { container } = render(Message, {
+      ...base,
+      message: durable({ streaming: true }),
+      onDelete: noop,
+    });
+
+    expect(copyButtons(container)).toHaveLength(0);
+    expect(deleteButtons(container)).toHaveLength(1);
+  });
+
+  it('is offered on a system row too', () => {
+    const { container } = render(Message, {
+      ...base,
+      message: {
+        cid: 11,
+        role: 'system',
+        text: 'Alert body',
+        segments: [],
+        streaming: false,
+        msgId: 77,
+      },
+      onDelete: noop,
+    });
+
+    expect(deleteButtons(container)).toHaveLength(1);
   });
 });

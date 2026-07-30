@@ -2163,6 +2163,40 @@ def _room_events_batch(
     return {"events": events, "cursor": cursor, "gap": False}
 
 
+def _room_deletions_batch(username: str, since_id: int) -> dict:
+    """Deletions visible to ``username`` with ledger id > ``since_id``.
+
+    A second cursor alongside the message tail, and it has to be: a hard delete
+    leaves no `messages` row for the id-ordered message tail to carry, so
+    without its own ledger the news reaches another open tab only on the next
+    full reload. Same O(1)-gate shape as `_room_events_batch` — on a deployment
+    where nobody has ever deleted anything, this costs one trivial MAX() per
+    connection per tick and never runs the visibility join.
+    """
+    from . import db
+    max_batch = int(_chat_knob("room_stream_max_batch", 500))
+    with db.get_db(
+        _config.db_path, busy_timeout_ms=_ROOM_STREAM_BUSY_TIMEOUT_MS,
+    ) as conn:
+        max_id = db.max_message_deletion_id(conn)
+        if max_id <= since_id:
+            return {"deletions": [], "cursor": since_id}
+        rows = db.list_message_deletions_since(
+            conn, username, since_id=since_id, limit=max_batch,
+        )
+    return {
+        "deletions": [
+            {"msg_id": int(r["message_id"]), "room_token": r["room_token"]}
+            for r in rows
+        ],
+        # The max id *scanned*, not the last one delivered — the same reason
+        # the message tail advances past invisible rows: otherwise a cursor
+        # behind someone else's deletions never catches up and the gate never
+        # short-circuits again.
+        "cursor": max_id,
+    }
+
+
 def _room_snapshot(username: str) -> dict[str, dict]:
     """Room metadata the sidebar renders, keyed by canonical token.
 
@@ -2215,22 +2249,39 @@ def _room_delta_frames(before: dict[str, dict], after: dict[str, dict]) -> list[
 
 @api_router.get("/chat/events")
 async def chat_room_events(
-    since_id: int = 0, limit: int = 0, user: dict = Depends(_require_api_auth),
+    since_id: int = 0,
+    since_deletion_id: int = 0,
+    limit: int = 0,
+    user: dict = Depends(_require_api_auth),
 ):
     """Snapshot of the room event tail — the polling fallback behind
     ``/chat/stream``, mirroring how ``/chat/tasks/{id}/events`` backs
     ``/chat/tasks/{id}/stream``. ``limit=0`` means "the server's own cap"; the
     client passes ``limit=1`` when it only wants a fresh cursor after a
-    reload."""
-    return await asyncio.to_thread(
-        _room_events_batch, user["username"], max(0, since_id),
+    reload.
+
+    Carries the deletion tail on the same response so the fallback path is not
+    a downgrade — a deletion would otherwise be invisible to a client that had
+    dropped to polling until its next full reload."""
+    username = user["username"]
+    batch = await asyncio.to_thread(
+        _room_events_batch, username, max(0, since_id),
         limit if limit > 0 else None,
     )
+    deletions = await asyncio.to_thread(
+        _room_deletions_batch, username, max(0, since_deletion_id),
+    )
+    batch["deletions"] = deletions["deletions"]
+    batch["deletion_cursor"] = deletions["cursor"]
+    return batch
 
 
 @api_router.get("/chat/stream")
 async def chat_room_stream(
-    request: Request, since_id: int = 0, user: dict = Depends(_require_api_auth),
+    request: Request,
+    since_id: int = 0,
+    since_deletion_id: int = 0,
+    user: dict = Depends(_require_api_auth),
 ):
     """SSE stream of every message visible to the caller, across all their rooms.
 
@@ -2239,8 +2290,11 @@ async def chat_room_stream(
     it is session-lived, which is why it emits a keepalive comment frame.
 
     Only message-bearing frames carry an SSE ``id:``. EventSource retains the
-    last id it saw, so an auxiliary frame (keepalive, room metadata) carrying an
-    unrelated id would move the resume cursor to the wrong place on reconnect.
+    last id it saw, so an auxiliary frame (keepalive, room metadata, deletions)
+    carrying an unrelated id would move the resume cursor to the wrong place on
+    reconnect. The deletion tail therefore carries its own cursor *inside* the
+    frame payload, and the client passes it back as ``since_deletion_id`` — a
+    reconnect after a delete must not silently resurrect the message.
     """
     username = user["username"]
     header_id = request.headers.get("last-event-id")
@@ -2261,6 +2315,7 @@ async def chat_room_stream(
 
     async def _generate():
         cursor = since_id
+        del_cursor = since_deletion_id
         last_frame = time.monotonic()
         last_room_check = 0.0
         snapshot: dict[str, dict] | None = None
@@ -2298,6 +2353,25 @@ async def chat_room_stream(
                     # *message* id (auxiliary advances carry no frame), so a
                     # resume merely re-scans a range — harmless.
                     cursor = max(cursor, int(batch["cursor"]))
+
+                try:
+                    dels = await asyncio.to_thread(
+                        _room_deletions_batch, username, del_cursor,
+                    )
+                except sqlite3.OperationalError:
+                    dels = None  # lock held past the budget — skip this tick
+                except Exception:  # noqa: BLE001 — must not kill the stream
+                    logger.warning("room stream: deletions failed", exc_info=True)
+                    dels = None
+                if dels and dels["deletions"]:
+                    # No `id:` — this is an auxiliary frame, and moving
+                    # EventSource's resume cursor onto a ledger id would strand
+                    # the message tail. The payload carries its own cursor.
+                    yield ("event: message_deleted\n"
+                           f"data: {json.dumps(dels)}\n\n")
+                    last_frame = time.monotonic()
+                if dels:
+                    del_cursor = max(del_cursor, int(dels["cursor"]))
 
                 now = time.monotonic()
                 if room_check and now - last_room_check >= room_check:
@@ -3716,6 +3790,119 @@ def _chat_set_message_star(username: str, message_id: int, starred: bool) -> boo
     return True
 
 
+_ACTIVE_TASK_STATUSES = ("pending", "locked", "running", "pending_confirmation")
+
+
+def _chat_delete_message(username: str, message_id: int) -> str | dict:
+    """Hard-delete one transcript row for ``username``.
+
+    Returns ``"not_found"`` (unknown id, or the caller isn't a member of its
+    room — deliberately indistinguishable, same as the star endpoint, so the
+    route can't be used to probe foreign message ids), ``"busy"`` when the
+    turn's task is still in flight, or a dict describing what to propagate to
+    Talk.
+
+    The busy guard mirrors the room delete's: a running turn's assistant row is
+    still being written, and deleting it would have the scheduler recreate it
+    at completion — the delete would silently undo itself.
+
+    The Talk mirror ids are read *here*, inside the same transaction, because
+    after the delete the `external_ids` ledger no longer exists.
+    """
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        token = db.get_message_room(conn, message_id)
+        if token is None or not db.is_room_member(conn, token, username):
+            return "not_found"
+        row = conn.execute(
+            "SELECT task_id FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+        task_id = row["task_id"] if row else None
+        if task_id is not None:
+            task = db.get_task(conn, int(task_id))
+            if task is not None and task.status in _ACTIVE_TASK_STATUSES:
+                return "busy"
+        talk_message_id = db.get_message_external_ids(conn, message_id).get("talk")
+        talk_ref = next(
+            (b.surface_ref for b in db.list_room_bindings(conn, token)
+             if b.surface == "talk"),
+            None,
+        )
+        db.delete_message(conn, message_id, username)
+    logger.info(
+        "message delete user=%s msg_id=%s room=%s", username, message_id, token,
+    )
+    return {
+        "room_token": token,
+        "talk_ref": talk_ref,
+        "talk_message_id": talk_message_id,
+    }
+
+
+async def _delete_from_talk(
+    username: str, talk_ref: str, talk_message_id: str,
+) -> None:
+    """Best-effort removal of a deleted message's Talk counterpart.
+
+    Which credential can do this depends on who Talk thinks wrote the message:
+    a user turn mirrored by post-as-user is authored by the *user*, an
+    assistant reply by the bot, and Talk lets only the author (or a moderator)
+    delete. So both are tried — the user's own OAuth token first when the
+    feature is on and a live token exists, then the bot account. A `403` from
+    one is the ordinary "not yours" answer, not an error, which is why the
+    fallback exists rather than a single hardcoded credential.
+
+    Never raises into the request path: the web-side delete has already
+    committed, and a Talk that is down or a message past Talk's own deletion
+    window must not turn a successful delete into a failed one. The divergence
+    it can leave (gone in web, still in Talk) is bounded and visible.
+    """
+    from .talk import TalkClient
+
+    try:
+        msg_id = int(talk_message_id)
+    except (TypeError, ValueError):
+        return
+
+    async def _attempt(client: "TalkClient", who: str) -> bool:
+        try:
+            await client.delete_message(talk_ref, msg_id)
+            logger.debug(
+                "talk delete ok as=%s room=%s msg=%s", who, talk_ref, msg_id,
+            )
+            return True
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else 0
+            logger.debug(
+                "talk delete refused as=%s room=%s msg=%s status=%s",
+                who, talk_ref, msg_id, status,
+            )
+            return False
+        except Exception as e:  # noqa: BLE001
+            logger.debug("talk delete failed as=%s: %s", who, e)
+            return False
+
+    from . import web_tokens
+
+    if _config and web_tokens.feature_enabled(_config):
+        access = await asyncio.to_thread(
+            web_tokens.get_access_token, _config.db_path, _config, username,
+        )
+        if access and await _attempt(
+            TalkClient(_config, bearer_token=access, timeout=5), "user",
+        ):
+            return
+
+    if not _config or not _config.nextcloud.url:
+        return
+    from .async_runtime import get_talk_client
+    if not await _attempt(get_talk_client(_config), "bot"):
+        logger.info(
+            "talk delete not propagated room=%s msg=%s (no credential could)",
+            talk_ref, msg_id,
+        )
+
+
 def _cross_room_message_dict(r, username: str) -> dict:
     """One `db._CROSS_ROOM_COLUMNS` row → the history payload shape.
 
@@ -3841,6 +4028,39 @@ async def chat_star_message(
     if not ok:
         return JSONResponse({"error": "message not found"}, status_code=404)
     return {"ok": True, "starred": starred}
+
+
+@api_router.delete("/chat/messages/{message_id}")
+async def chat_delete_message(
+    message_id: int,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Hard-delete one transcript row.
+
+    Gone from every read path at once — the room view, the All/Unread/Starred
+    panes, and the LLM's own conversation context. Other open clients learn of
+    it through the `message_deleted` frame on `/chat/stream`, which tails the
+    `message_deletions` ledger (the `messages` row itself is gone, so the
+    ordinary message tail has nothing left to carry).
+
+    A Talk-bound room additionally gets a best-effort delete of the mirrored
+    Talk message, fire-and-forget: the web-side delete has already committed
+    and must not be reported as failed because Talk was unreachable.
+    """
+    username = user["username"]
+    result = await asyncio.to_thread(_chat_delete_message, username, message_id)
+    if result == "not_found":
+        return JSONResponse({"error": "message not found"}, status_code=404)
+    if result == "busy":
+        return JSONResponse(
+            {"error": "message belongs to a task in progress"}, status_code=409,
+        )
+    if result["talk_ref"] and result["talk_message_id"]:
+        _fire_and_forget(_delete_from_talk(
+            username, result["talk_ref"], result["talk_message_id"],
+        ))
+    return {"ok": True, "message_id": message_id}
 
 
 @api_router.post("/chat/rooms/read-all")

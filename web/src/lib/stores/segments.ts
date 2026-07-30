@@ -276,6 +276,28 @@ export function renderGroups(m: ChatMessage, threshold = SUBSTANTIAL_TEXT_CHARS)
   return groups;
 }
 
+/** The whole of a message as markdown source, for a turn-level copy.
+ *
+ * Prose only: the activity chips are dropped, because a tool trace is never
+ * something anyone wants on the clipboard, and the groups are exactly the
+ * blocks the transcript rendered — so what lands on the clipboard is what the
+ * reader saw, in the order they saw it. Blocks are joined by a blank line so
+ * the result is still valid markdown rather than two paragraphs run together.
+ *
+ * A user or system row has no segments; its `text` is the whole message.
+ *
+ * Source, not rendered html: pasting elsewhere should give back the markdown
+ * the message was written in. That is also why fenced code needs no copy
+ * button of its own — the source carries its fences. */
+export function messageCopyText(m: ChatMessage): string {
+  if (m.role !== 'assistant') return m.text;
+  return renderGroups(m)
+    .filter((g): g is Extract<RenderGroup, { kind: 'prose' }> => g.kind === 'prose')
+    .map((g) => g.text.trim())
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 // ---- Reducer ----------------------------------------------------------------
 
 /** Apply one `task_event` to an assistant message, mutating it in place.

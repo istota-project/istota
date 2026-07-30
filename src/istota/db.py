@@ -2751,6 +2751,7 @@ def delete_web_chat_room(
         (token,),
     )
     conn.execute("DELETE FROM messages WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM message_deletions WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_bindings WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_read_state WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_members WHERE room_token = ?", (token,))
@@ -3469,9 +3470,111 @@ def set_message_starred(
     return True
 
 
+def delete_message(
+    conn: sqlite3.Connection, message_id: int, user_id: str,
+) -> str | None:
+    """Hard-delete one transcript row. Returns the room token it belonged to,
+    or None when the id is unknown (so a repeat delete is a clean no-op rather
+    than a fabricated success).
+
+    Hard, not a tombstone: the row is gone from every read path at once, which
+    is the whole point of the affordance. Every other row keyed on the message
+    id has to go by hand — `PRAGMA foreign_keys` is unset, so the schema's
+    cascades are decorative — and the deletion is recorded in
+    `message_deletions` so the room stream can tell other open clients.
+
+    Read cursors (`room_read_state.last_read_message_id`) are deliberately left
+    alone: they are a high-water mark, not a reference, so a deleted id simply
+    stops existing below the line.
+    """
+    row = conn.execute(
+        "SELECT room_token FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    token = row["room_token"]
+    conn.execute("DELETE FROM message_stars WHERE message_id = ?", (message_id,))
+    conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+    conn.execute(
+        "INSERT INTO message_deletions (message_id, room_token, deleted_by) "
+        "VALUES (?, ?, ?)",
+        (message_id, token, user_id),
+    )
+    return token
+
+
+def get_message_external_ids(
+    conn: sqlite3.Connection, message_id: int,
+) -> dict[str, str]:
+    """The `{surface: external_id}` mirror ledger for one message, or `{}`.
+
+    Read *before* a delete by the Talk-propagation path — the row is gone
+    afterwards, and the Talk message id lives nowhere else."""
+    row = conn.execute(
+        "SELECT external_ids FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    if row is None or not row["external_ids"]:
+        return {}
+    try:
+        ext = json.loads(row["external_ids"])
+    except (ValueError, TypeError):
+        return {}
+    return {str(k): str(v) for k, v in ext.items()} if isinstance(ext, dict) else {}
+
+
+def max_message_deletion_id(conn: sqlite3.Connection) -> int:
+    """The highest `message_deletions.id`, or 0 when nothing was ever deleted.
+
+    The room stream's O(1) gate for the deletion tail, mirroring
+    `max_message_id` — on a deployment where nobody deletes anything (the
+    overwhelming case) the per-user visibility join never runs at all."""
+    row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS m FROM message_deletions"
+    ).fetchone()
+    return int(row["m"])
+
+
+def list_message_deletions_since(
+    conn: sqlite3.Connection, user_id: str, *, since_id: int, limit: int = 500,
+) -> list[sqlite3.Row]:
+    """Deletions with `id > since_id` in rooms ``user_id`` can see, oldest-first.
+
+    Scoped by the same membership-minus-dismissal-minus-archived predicate the
+    message tail uses, so a deletion frame can never disclose that a message
+    existed in a room the caller was never in.
+    """
+    return conn.execute(
+        "SELECT d.id AS id, d.message_id AS message_id, "
+        "  d.room_token AS room_token "
+        "FROM message_deletions d "
+        "JOIN rooms r ON r.token = d.room_token AND r.archived = 0 "
+        "JOIN room_members mm ON mm.room_token = d.room_token "
+        "  AND mm.user_id = :user "
+        "WHERE NOT EXISTS (SELECT 1 FROM room_dismissals dd "
+        "  WHERE dd.room_token = d.room_token AND dd.user_id = :user) "
+        "AND d.id > :since_id ORDER BY d.id ASC LIMIT :limit",
+        {"user": user_id, "since_id": since_id, "limit": limit},
+    ).fetchall()
+
+
+def prune_message_deletions(conn: sqlite3.Connection, retention_days: int) -> int:
+    """Drop ledger rows older than ``retention_days`` (0 = keep forever).
+
+    The ledger only exists to catch clients up, and a client further behind
+    than this has long since reloaded from scratch. Returns rows removed."""
+    if retention_days <= 0:
+        return 0
+    cur = conn.execute(
+        "DELETE FROM message_deletions "
+        "WHERE deleted_at < datetime('now', ?)",
+        (f"-{int(retention_days)} days",),
+    )
+    return cur.rowcount or 0
+
+
 def get_message_room(conn: sqlite3.Connection, message_id: int) -> str | None:
     """The room token a message belongs to (for server-side membership checks
-    on the star endpoint), or None for an unknown id."""
+    on the star and delete endpoints), or None for an unknown id."""
     row = conn.execute(
         "SELECT room_token FROM messages WHERE id = ?", (message_id,)
     ).fetchone()

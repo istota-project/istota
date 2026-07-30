@@ -282,7 +282,10 @@ class TestRoomEventsSnapshot:
         resp = await stream_client.get(
             f"/istota/api/chat/events?since_id={mid}", cookies=cookies,
         )
-        assert resp.json() == {"events": [], "cursor": mid, "gap": False}
+        # The deletion tail rides the same response (per-message delete), so
+        # this asserts the message half rather than the whole payload.
+        body = resp.json()
+        assert (body["events"], body["cursor"], body["gap"]) == ([], mid, False)
 
     async def test_row_cap_trips_a_gap_carrying_the_scanned_max(self, stream_client):
         cookies = await _login(stream_client, "alice")

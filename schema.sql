@@ -770,6 +770,27 @@ CREATE TABLE IF NOT EXISTS message_stars (
 CREATE INDEX IF NOT EXISTS idx_message_stars_user
     ON message_stars (user_id, message_id);
 
+-- Deletion ledger for per-message delete. A message delete is HARD — the
+-- `messages` row is gone — so the room stream, which tails `messages.id >
+-- cursor`, has nothing left to carry the news to another open tab. This table
+-- is that carrier: its own monotonic id is a second stream cursor, and a client
+-- resumes from it exactly as it resumes from the message cursor.
+--
+-- Deliberately NOT a tombstone on `messages`: every read path would then have
+-- to filter it, and a soft-deleted row still occupies its slot in the
+-- (room_token, role, task_id) unique index, so a re-run of the same turn would
+-- collide with a message the user believes they removed.
+--
+-- `room_token` is retained (rather than joined back through the vanished
+-- message) so the frame can be scoped to the rooms a caller may see.
+CREATE TABLE IF NOT EXISTS message_deletions (
+    id          INTEGER PRIMARY KEY,
+    message_id  INTEGER NOT NULL,
+    room_token  TEXT NOT NULL,
+    deleted_by  TEXT NOT NULL DEFAULT '',
+    deleted_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- One-time data-migration ledger (markered, so heavy backfills run once).
 CREATE TABLE IF NOT EXISTS _migration_state (
     name        TEXT PRIMARY KEY,

@@ -415,6 +415,32 @@
     await session.markAllRead();
   }
 
+  // Per-message delete. The message component only offers the affordance; the
+  // confirm lives here so the whole page has one dialog rather than one per
+  // transcript row, and so the delete button sitting next to Copy in the same
+  // small row can't remove a message on a single mistap.
+  let confirmDeleteMessage = $state(false);
+  let pendingDeleteCid: number | null = null;
+
+  function askDeleteMessage(cid: number) {
+    pendingDeleteCid = cid;
+    confirmDeleteMessage = true;
+  }
+
+  // Named only when the room really is Talk-bound: a delete that reaches into
+  // Nextcloud Talk is a materially bigger action than one that doesn't, and
+  // saying so unconditionally would be a warning about something that isn't
+  // going to happen in a web-only room.
+  const deleteReachesTalk = $derived(!!activeRoom?.talk_token);
+
+  async function performDeleteMessage() {
+    const cid = pendingDeleteCid;
+    confirmDeleteMessage = false;
+    pendingDeleteCid = null;
+    if (cid == null) return;
+    await session.deleteMessage(cid);
+  }
+
   async function createRoom() {
     const name = newRoomName.trim();
     if (!name) return;
@@ -654,6 +680,7 @@
               onConfirm={session.confirm}
               onReject={session.reject}
               onToggleStar={session.toggleStar}
+              onDelete={askDeleteMessage}
               onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
               onJump={(token, taskId) => session.jumpToTask(token, taskId)}
               aggregate={inViewMode}
@@ -752,6 +779,17 @@
     confirmLabel="Mark all read"
     confirmVariant="primary"
     onConfirm={performMarkAllRead}
+  />
+
+  <ConfirmDialog
+    bind:open={confirmDeleteMessage}
+    title="Delete message"
+    message={deleteReachesTalk
+      ? "Are you sure you want to delete this message? It will be removed from this conversation and from the Nextcloud Talk room it's synced with. This can't be undone."
+      : "Are you sure you want to delete this message? This can't be undone."}
+    confirmLabel="Delete"
+    onCancel={() => (pendingDeleteCid = null)}
+    onConfirm={performDeleteMessage}
   />
 </AppShell>
 

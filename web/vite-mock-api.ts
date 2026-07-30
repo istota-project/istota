@@ -494,6 +494,11 @@ function mockCommandResult(text: string): string | null {
 // Stars are keyed on the synthetic per-message ids below (user = id*10+1,
 // assistant = id*10+2) so both room history and the aggregate views agree.
 const mockStars = new Set<number>();
+// Per-message delete. Rows here are derived from tasks rather than stored, so
+// a delete is a suppression set; the ordered log stands in for the backend's
+// `message_deletions` ledger, which is what the deletion tail cursors on.
+const mockDeletedMsgIds = new Set<number>();
+const mockDeletionLog: { id: number; msg_id: number; room_token: string }[] = [];
 const mockUserMsgId = (t: MockChatTask) => t.id * 10 + 1;
 const mockAsstMsgId = (t: MockChatTask) => t.id * 10 + 2;
 // Everything newer than this reads as unread (assistant rows only); read-all
@@ -585,7 +590,9 @@ function mockAggregateRows(): any[] {
     });
   }
   rows.sort((a, b) => a.createdAt - b.createdAt || a.msg.msg_id - b.msg.msg_id);
-  return rows.map((r) => ({ ...r.msg, _createdAtMs: r.createdAt }));
+  return rows
+    .filter((r) => !mockDeletedMsgIds.has(r.msg.msg_id))
+    .map((r) => ({ ...r.msg, _createdAtMs: r.createdAt }));
 }
 
 function mockUnreadCount(token: string): number {
@@ -701,16 +708,32 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
   if (path === '/istota/api/chat/events' && method === 'GET') {
     const q = new URL(`http://x${url}`).searchParams;
     const sinceId = Math.max(0, Number(q.get('since_id') || '0'));
+    const sinceDelId = Math.max(0, Number(q.get('since_deletion_id') || '0'));
     const limitParam = Number(q.get('limit') || '0');
     const rows = mockAggregateRows();
     const maxId = rows.reduce((n, m) => Math.max(n, m.msg_id), 0);
     const fresh = rows.filter((m) => m.msg_id > sinceId);
     const want = limitParam > 0 ? Math.min(limitParam, 500) : 500;
-    if (fresh.length > want) return { events: [], cursor: maxId, gap: true };
+    // The deletion tail rides the same response as on the real backend, so the
+    // polling fallback isn't a downgrade — and it is emitted even on a `gap`,
+    // whose reload would otherwise leave the cursor stuck resending it.
+    const deletions = mockDeletionLog.filter((d) => d.id > sinceDelId);
+    const delCursor = mockDeletionLog.reduce((n, d) => Math.max(n, d.id), sinceDelId);
+    if (fresh.length > want) {
+      return {
+        events: [],
+        cursor: maxId,
+        gap: true,
+        deletions: deletions.map(({ msg_id, room_token }) => ({ msg_id, room_token })),
+        deletion_cursor: delCursor,
+      };
+    }
     return {
       events: fresh.map(({ _createdAtMs, ...m }) => m),
       cursor: Math.max(maxId, sinceId),
       gap: false,
+      deletions: deletions.map(({ msg_id, room_token }) => ({ msg_id, room_token })),
+      deletion_cursor: delCursor,
     };
   }
   const starMatch = path.match(/^\/istota\/api\/chat\/messages\/(\d+)\/star$/);
@@ -720,6 +743,21 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     if (starred) mockStars.add(msgId);
     else mockStars.delete(msgId);
     return { ok: true, starred };
+  }
+  const msgDelete = path.match(/^\/istota\/api\/chat\/messages\/(\d+)$/);
+  if (msgDelete && method === 'DELETE') {
+    const msgId = Number(msgDelete[1]);
+    if (mockDeletedMsgIds.has(msgId)) return { status: 'gone' };
+    const row = mockAggregateRows().find((m) => m.msg_id === msgId);
+    if (!row) return { __status: 404, error: 'message not found' };
+    mockDeletedMsgIds.add(msgId);
+    mockStars.delete(msgId);
+    mockDeletionLog.push({
+      id: mockDeletionLog.length + 1,
+      msg_id: msgId,
+      room_token: row.room_token,
+    });
+    return { ok: true, message_id: msgId };
   }
   if (path === '/istota/api/chat/rooms' && method === 'POST') {
     const room: MockChatRoom = {
@@ -793,7 +831,9 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         // Finished turn: the shared builder carries msg_id/starred (and the
         // full segments/tools shape) so history matches the backend payload.
         const turn = mockFinishedTurn(t);
-        messages.push(turn.user, turn.assistant);
+        for (const m of [turn.user, turn.assistant]) {
+          if (!mockDeletedMsgIds.has(m.msg_id)) messages.push(m);
+        }
       } else {
         // In-flight: aux-only on the backend too — no msg_id, not starrable.
         messages.push({

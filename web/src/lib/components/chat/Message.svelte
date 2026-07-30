@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { Copy, Star } from 'lucide-svelte';
+  import { Copy, Star, Trash2 } from 'lucide-svelte';
   import { chatFileUrl } from '$lib/api';
   import { copyText } from '$lib/clipboard';
   import { renderMarkdown } from '$lib/markdown';
   import type { ChatMessage } from '$lib/stores/chat';
-  import { renderGroups } from '$lib/stores/segments';
+  import { messageCopyText, renderGroups } from '$lib/stores/segments';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
   import SearchResults from './SearchResults.svelte';
@@ -17,6 +17,7 @@
     onConfirm,
     onReject,
     onToggleStar,
+    onDelete,
     onRoomClick,
     onJump,
     aggregate = false,
@@ -34,6 +35,9 @@
     // Star toggle for durable messages (rows carrying msgId). Absent → no
     // star affordance (e.g. surfaces that don't support starring).
     onToggleStar?: (cid: number) => void;
+    // Delete a durable message. The handler owns the confirmation — this
+    // component only offers the affordance. Absent → no delete affordance.
+    onDelete?: (cid: number) => void;
     // Aggregate views: click the message's room label to jump into that room.
     // Only rendered when both the handler and message.roomName are present.
     onRoomClick?: (token: string) => void;
@@ -119,39 +123,70 @@
   const showStar = $derived(starrable && (revealed || !!message.starred));
   const hasActions = $derived(showStar || showMeta);
 
-  // Copy hangs off each *block*, not the turn. A turn is an ordered list of
-  // prose groups separated by activity chips, and a tool trace is never
-  // something you want on the clipboard — so a per-turn copy would have to
-  // decide which parts to include, while a per-block one is exact by
-  // construction. It also matches how the text is actually used: you lift one
-  // paragraph or one snippet out of an answer, not the whole answer.
+  // Copy is per *turn*, in a row under the message, alongside delete.
   //
-  // Withheld while streaming: a half-written block copies half an answer, and
-  // the button would sit under text that is still moving.
-  const showCopy = $derived(!message.streaming);
+  // It used to hang off each prose block, on the theory that you lift one
+  // paragraph out of an answer rather than the whole thing. In practice the
+  // opposite is true — a reply is usually taken whole — and the per-block
+  // version put a second, differently-placed affordance on a surface that
+  // already had one (the star), which is what made adding delete the moment to
+  // collapse them. `messageCopyText` keeps the property the per-block version
+  // was really protecting: activity chips are excluded, so a tool trace still
+  // never reaches the clipboard.
+  const copySource = $derived(messageCopyText(message));
+  // Withheld while streaming: copying a half-written turn hands back half an
+  // answer, and the row would sit under text that is still moving.
+  const showCopy = $derived(!message.streaming && !!copySource.trim());
+  // Delete needs a durable row — a live placeholder isn't stored yet — and a
+  // handler willing to confirm it.
+  const showDelete = $derived(typeof message.msgId === 'number' && !!onDelete);
+  // The row is in the layout whenever either half could be there, so revealing
+  // it never reflows the transcript under the pointer.
+  const hasRowActions = $derived(showCopy || showDelete);
 </script>
 
-<!-- Hangs just below the block it copies, at the right edge. Absolute, so it
-     costs no layout at rest and reserves no space; sitting in the gap rather
-     than over the last line is what lets it be a bare icon with no background
-     to separate it from text. -->
-{#snippet copyButton(text: string, label: string)}
-  <button
-    class="copy-block"
-    onclick={(e) => {
-      void copyText(text, { label });
-      // Same reason as the star: a pointer click leaves the button focused,
-      // and a focus ring that also reveals it is a second way for it to sit
-      // there lit after the user has moved on. A keyboard activation reports
-      // detail 0, so this can't take focus away from keyboard use.
-      if (e.detail > 0) e.currentTarget.blur();
-    }}
-    aria-label="Copy this text"
-    title="Copy"
-    type="button"
-  >
-    <Copy size={13} />
-  </button>
+<!-- Turn-level actions, left-aligned under the message body. In the flow
+     rather than absolutely positioned: it sits below the content it acts on,
+     so it needs to take the space it occupies — the old per-block button was
+     absolute because it overlapped the block's own bottom padding. `revealed`
+     gates opacity only; the row keeps its box either way, so nothing shifts
+     when it appears. -->
+{#snippet turnActions()}
+  <div class="turn-actions" class:revealed>
+    {#if showCopy}
+      <button
+        class="turn-action"
+        onclick={(e) => {
+          void copyText(copySource, { label: 'Copied' });
+          // Same reason as the star: a pointer click leaves the button
+          // focused, and a focus ring that also reveals it is a second way for
+          // it to sit there lit after the user has moved on. A keyboard
+          // activation reports detail 0, so this can't take focus away from
+          // keyboard use.
+          if (e.detail > 0) e.currentTarget.blur();
+        }}
+        aria-label="Copy message"
+        title="Copy"
+        type="button"
+      >
+        <Copy size={15} />
+      </button>
+    {/if}
+    {#if showDelete}
+      <button
+        class="turn-action danger"
+        onclick={(e) => {
+          onDelete?.(message.cid);
+          if (e.detail > 0) e.currentTarget.blur();
+        }}
+        aria-label="Delete message"
+        title="Delete"
+        type="button"
+      >
+        <Trash2 size={15} />
+      </button>
+    {/if}
+  </div>
 {/snippet}
 
 {#snippet starButton()}
@@ -211,11 +246,6 @@
       <SearchResults data={message.searchResults} {onJump} />
     {:else}
       <div class="cmd-output markdown" class:error={message.error}>
-        <!-- Before the content, for the `:last-child` reason in the prose
-             branch above. -->
-        {#if showCopy && message.text.trim()}
-          {@render copyButton(message.text, 'Copied')}
-        {/if}
         {@html bodyHtml}
       </div>
     {/if}
@@ -223,6 +253,11 @@
       <div class="msg-actions cmd-actions">
         {@render starButton()}
       </div>
+    {/if}
+    <!-- A search-results row renders cards, not markdown, so there is no
+         source worth copying and no durable body to remove. -->
+    {#if hasRowActions && !message.searchResults}
+      {@render turnActions()}
     {/if}
   </div>
 {:else}
@@ -272,7 +307,6 @@
                blank space in every user message. -->
           <div class="body user-body">
             <span class="user-text">{message.text}</span>
-            {#if showCopy}{@render copyButton(message.text, 'Copied')}{/if}
           </div>
         {/if}
         {#if message.attachments?.length}
@@ -316,18 +350,7 @@
               />
             </div>
           {:else}
-            <!-- Button first, though it renders bottom-right either way: it is
-                 absolutely positioned, so document order doesn't place it, but
-                 as the last child it would be what `.markdown > *:last-child`
-                 matches — and that rule exists to strip the trailing margin off
-                 the last *content* block.
-
-                 The copied text is the group's own markdown source, not the
-                 rendered html. That is also why fenced code needs no copy button
-                 of its own: the source carries the fences, so copying the block
-                 already yields the code as markdown. -->
             <div class="body markdown">
-              {#if showCopy}{@render copyButton(g.text, 'Copied')}{/if}
               {@html renderMarkdown(g.text)}
             </div>
           {/if}
@@ -348,6 +371,10 @@
           onConfirm={() => onConfirm(message.cid, message.taskId!)}
           onReject={() => onReject(message.cid, message.taskId!)}
         />
+      {/if}
+
+      {#if hasRowActions}
+        {@render turnActions()}
       {/if}
     </div>
 
@@ -376,8 +403,13 @@
     /* Anchor for the absolutely-positioned .meta-footer (top-right). */
     position: relative;
   }
+  /* A fresh author group separates itself with padding alone. It also carried a
+	   `--space-3` top margin, which stacked with this row's own bottom padding and
+	   the previous row's — three sources of gap for one boundary, and by far the
+	   largest. Padding rather than margin is what the row wants anyway: the hover
+	   highlight spans the padding box, so gap expressed as margin is a dead strip
+	   between two rows that neither one lights up. */
   .msg:not(.continuation) {
-    margin-top: var(--space-3);
     padding-top: var(--space-2);
   }
   /* Reveal rules. With a real pointer the row's own :hover drives them; under a
@@ -517,75 +549,99 @@
   .cmd-row.touch .star-btn,
   .msg.touch .meta-footer,
   .msg.touch .hover-time,
-  .msg.touch .copy-block,
-  .cmd-row.touch .copy-block {
+  .msg.touch .turn-actions,
+  .cmd-row.touch .turn-actions {
     transition: none;
   }
 
-  /* Per-block copy. Follows the star's reveal contract exactly — hidden *and*
-	   inert at rest, revealed by pointer hover or the touch `.active`
-	   surrogate — because it shares the failure mode: a control at zero opacity
-	   is still hit-testable, and this one sits where a thumb scrolling the
-	   transcript naturally lands.
+  /* Turn-level action row: copy + delete, left-aligned under the message body.
+	   One row per turn rather than a button per block — see the script block for
+	   why that moved.
 
-	   Anchored to the block rather than the row so a turn with several prose
-	   groups gets one per group, each copying its own text. */
-  /* The block reserves the strip its copy button sits in, rather than the
-	   button hanging outside the block's box. That single decision is what
-	   makes the affordance behave: the button is inside its own hover target,
-	   so there is no dead gap to cross on the way to it, no angle of approach
-	   that leaves the target early, and nothing overlapping the content below.
-	   Hanging it outside cost a padding bridge, a pseudo-element hover bridge
-	   and a z-index — each fixing a defect the previous one introduced, none
-	   of them checkable by the test suite (jsdom has no hit-testing).
+	   Unlike the star, this is *in the flow*: it sits below the content it acts
+	   on, so it has to take the space it occupies or revealing it would push the
+	   next message down. The row is therefore always in the layout and only its
+	   opacity is gated, which is also what lets the buttons be bare icons with
+	   no background — they never overlap text.
 
-	   The cost is the reserve itself: this much space under every block,
-	   empty when nothing is hovered. `--chat-copy-reserve` is that one number. */
-  .body,
-  .cmd-output {
-    position: relative;
-    padding-bottom: var(--chat-copy-reserve);
-  }
-  .copy-block {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    display: inline-flex;
+	   `pointer-events` follows opacity for the same reason the star's does: a
+	   control at zero opacity is still hit-testable, and a delete button a thumb
+	   can hit without seeing is the worst version of that bug. */
+  .turn-actions {
+    display: flex;
     align-items: center;
-    justify-content: center;
-    padding: 0.2rem;
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font: inherit;
-    cursor: pointer;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
     opacity: 0;
     pointer-events: none;
-    transition:
-      opacity var(--transition-fast),
-      color var(--transition-fast);
+    transition: opacity var(--transition-fast);
   }
-  /* Scoped to the hovered block, not the row: a turn with several prose groups
-	   would otherwise light every one of its buttons at once, and only the one
-	   under the cursor means anything. Hover still holds while the cursor is on
-	   the button itself — `:hover` follows the DOM ancestor chain, so the button
-	   sitting visually outside its parent's box doesn't break the chain. */
+  /* Two guards, as everywhere else in this file: the media query knows a phone
+	   has no hover at all, `.touch` knows a finger was used on a device that also
+	   reports one. `.revealed` is the touch surrogate the row already computes. */
   @media (hover: hover) {
-    .msg:not(.touch) .body:hover .copy-block,
-    .cmd-row:not(.touch) .cmd-output:hover .copy-block {
+    .msg:not(.touch):hover .turn-actions,
+    .cmd-row:not(.touch):hover .turn-actions {
       opacity: 1;
       pointer-events: auto;
     }
-    .msg:not(.touch) .copy-block:hover,
-    .cmd-row:not(.touch) .copy-block:hover {
-      color: var(--text-primary);
-    }
   }
-  .msg.active .copy-block,
-  .cmd-row.active .copy-block,
-  .copy-block:focus-visible {
+  .msg.active .turn-actions.revealed,
+  .cmd-row.active .turn-actions.revealed,
+  .turn-actions:focus-within {
     opacity: 1;
     pointer-events: auto;
+  }
+  .turn-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-1);
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-dim);
+    font: inherit;
+    cursor: pointer;
+    transition:
+      color var(--transition-fast),
+      background var(--transition-fast);
+  }
+  .turn-action:hover {
+    color: var(--text-primary);
+    background: var(--surface-raised);
+  }
+  .turn-action.danger:hover {
+    color: var(--status-danger-fg);
+  }
+  /* Touch targets, as an out-of-flow overlay so reaching them costs the row no
+	   height (SidebarToggle's device).
+
+	   The full 44px is only taken vertically. Horizontally the overlay is the
+	   button plus one gap, so two adjacent overlays meet exactly at the gap's
+	   midpoint: a tap in the seam resolves to the side it actually fell on,
+	   rather than to whichever won the stacking order. Two 44px-wide overlays
+	   would need ~21px between these buttons to stay apart, which is far wider
+	   than two adjacent icons should sit — so the width is what gives, and it is
+	   derived from the gap rather than restated, or tightening one would silently
+	   reintroduce the overlap. */
+  @media (max-width: 768px) {
+    .turn-actions {
+      --turn-action-gap: var(--space-2);
+      gap: var(--turn-action-gap);
+    }
+    .turn-action {
+      position: relative;
+    }
+    .turn-action::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: calc(100% + var(--turn-action-gap));
+      height: 44px;
+      transform: translate(-50%, -50%);
+    }
   }
 
   /* Room label chip (aggregate views): a small clickable room tag in the
@@ -735,12 +791,12 @@
     margin: 0;
   }
   /* A chip's preceding neighbour is always a prose block (tool runs coalesce,
-	   so chips never abut), and that block now carries `--chat-copy-reserve`
-	   below its text — which is the separation this margin used to supply. Kept
-	   at a reduced value rather than deleted so the two are tuned together: if
-	   the reserve goes, this goes back up. */
+	   so chips never abut), and this margin is the whole of the separation
+	   between them. It was briefly cut to a hairline while each block reserved a
+	   strip below its text for a per-block copy button; that reserve is gone
+	   with the button, so it is back to matching `gap-below`. */
   .chip-slot.gap-above {
-    margin-top: 0.1rem;
+    margin-top: var(--space-3);
   }
   .chip-slot.gap-below {
     margin-bottom: var(--space-3);

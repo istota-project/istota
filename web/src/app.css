@@ -197,15 +197,6 @@
   --chat-gutter: 2.25rem;
   --chat-avatar: 2.1rem;
   --chat-avatar-gap: 0.6rem;
-  /* Space each message block reserves below its text for the copy button, so
-	   the button sits inside its own hover target instead of hanging outside
-	   the block. Must clear the button's height (a 13px icon plus 0.2rem of
-	   padding either side); the remainder is breathing room between the last
-	   line and the icon. Tune with `.chip-slot.gap-above` in Message.svelte —
-	   that margin was what separated a block from the chip below it, and this
-	   reserve now does that job. */
-  --chat-copy-reserve: 1.35rem;
-
   /* Device safe-area insets — the rounded screen corners, the notch, and the
 	   home-indicator strip. Non-zero only because app.html opts into
 	   `viewport-fit=cover`; without that the browser letterboxes the page for us
@@ -803,18 +794,12 @@ body:has(.app-content-fill) {
 .markdown p:last-child {
   margin-bottom: 0;
 }
-/* The container supplies the space below its last block — in the chat
-   transcript that is `--chat-copy-reserve`, the strip the copy button sits in.
-   A trailing margin lands on top of it and reads as a gap twice the size.
-   `p` was already reset above (that rule also covers a nested last paragraph,
-   inside a blockquote); this covers every other block type — a reply ending in
-   a list, a quote or a fenced code block, all of which carry `0 0 1rem`.
-   Direct children only, so nested list rhythm is untouched.
-
-   Note this depends on the copy button being rendered *before* the content in
-   Message.svelte: it is absolutely positioned, so it renders bottom-right
-   wherever it sits in the markup, but as a last child it would be what this
-   matches. */
+/* The container supplies the space below its last block; a trailing margin
+   lands on top of it and reads as a gap twice the size. `p` was already reset
+   above (that rule also covers a nested last paragraph, inside a blockquote);
+   this covers every other block type — a reply ending in a list, a quote or a
+   fenced code block, all of which carry `0 0 1rem`. Direct children only, so
+   nested list rhythm is untouched. */
 .markdown > *:last-child {
   margin-bottom: 0;
 }

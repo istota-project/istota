@@ -36,6 +36,9 @@ _psutil_unavailable_warned = False
 # flood (a `* * * * *` cron aging out 130+ backed-up runs).
 _AUTOMATED_SOURCE_TYPES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"})
 
+# How long a per-message deletion stays in the ledger the room stream tails.
+_MESSAGE_DELETION_RETENTION_DAYS = 30
+
 from . import db
 from .brain import make_brain
 from .consumers import (
@@ -3567,6 +3570,14 @@ def run_cleanup_checks(config: Config) -> None:
         deleted_count = db.cleanup_old_tasks(conn, sched.task_retention_days)
         if deleted_count > 0:
             logger.info(f"Cleaned up {deleted_count} old task(s)")
+
+        # 4b. Age out the per-message deletion ledger. It exists only to tell a
+        # live client what vanished; one further behind than this reloaded from
+        # scratch long ago. Fixed 30 days rather than a knob — the row is tiny
+        # and nothing about it is worth tuning.
+        pruned = db.prune_message_deletions(conn, _MESSAGE_DELETION_RETENTION_DAYS)
+        if pruned > 0:
+            logger.info(f"Pruned {pruned} message-deletion ledger row(s)")
 
     # 5. Clean up old emails from IMAP (outside db context)
     if config.email.enabled and sched.email_retention_days > 0:
