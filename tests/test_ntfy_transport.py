@@ -130,6 +130,35 @@ class TestPostNtfyBlocking:
         assert _post_ntfy_blocking(_settings(), "m", DeliveryOptions()) is False
 
     @patch("istota.transport.ntfy.httpx")
+    def test_markdown_opt_in_sets_the_header(self, mock_httpx):
+        mock_httpx.post.return_value = MagicMock(raise_for_status=MagicMock())
+        _post_ntfy_blocking(
+            _settings(), "**bold**", DeliveryOptions(markdown=True),
+        )
+        assert mock_httpx.post.call_args[1]["headers"]["Markdown"] == "yes"
+
+    @patch("istota.transport.ntfy.httpx")
+    def test_plain_text_is_the_default(self, mock_httpx):
+        # A body full of *, _ and # must keep arriving verbatim unless a caller
+        # asks for markdown, so enabling it can't change any existing send.
+        mock_httpx.post.return_value = MagicMock(raise_for_status=MagicMock())
+        _post_ntfy_blocking(_settings(), "3 * 4 = 12 #win", DeliveryOptions())
+        assert "Markdown" not in mock_httpx.post.call_args[1]["headers"]
+
+    @patch("istota.transport.ntfy.httpx")
+    def test_markdown_survives_the_ascii_retry(self, mock_httpx):
+        # The lossy fallback flattens free text; it must not silently drop the
+        # render mode and deliver markup as plain text.
+        mock_httpx.post.side_effect = [
+            UnicodeEncodeError("ascii", "x", 0, 1, "boom"),
+            MagicMock(raise_for_status=MagicMock()),
+        ]
+        assert _post_ntfy_blocking(
+            _settings(), "**bold**", DeliveryOptions(title="📈", markdown=True),
+        ) is True
+        assert mock_httpx.post.call_args_list[1][1]["headers"]["Markdown"] == "yes"
+
+    @patch("istota.transport.ntfy.httpx")
     def test_non_ascii_title_and_tags_are_rfc2047_encoded(self, mock_httpx):
         # ISSUE-213: httpx serializes headers as ASCII, so an emoji title used to
         # raise UnicodeEncodeError and drop the whole push.

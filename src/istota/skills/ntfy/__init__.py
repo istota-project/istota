@@ -114,6 +114,8 @@ def cmd_send(args: argparse.Namespace) -> int:
         headers["Tags"] = _scrub(args.tags)
     if args.click:
         headers["Click"] = _scrub(args.click)
+    if getattr(args, "markdown", False):
+        headers["Markdown"] = "yes"
 
     try:
         resp = httpx.post(
@@ -157,6 +159,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     send.add_argument("--tags", default=None, help="Comma-separated tags / emoji shortcodes")
     send.add_argument("--click", default=None, help="URL to open when the notification is tapped")
+    send.add_argument(
+        "--markdown", action="store_true",
+        help="Render the body as markdown (ntfy web app only; a phone popup shows the source)",
+    )
 
     return parser
 

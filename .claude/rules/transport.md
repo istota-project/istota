@@ -97,8 +97,15 @@ paths). It is the only email code outside `transport/email/`.
   keep working — `user_routable` only governs what the UI *offers*.
 - **`DeliveryOptions`** (frozen) — optional per-delivery metadata passed
   alongside `deliver(target, text, *, options=…)`: `title` / `priority` /
-  `tags`. `NtfyTransport.deliver` reads them; surfaces that don't use them
-  ignore them. A typed object rather than untyped `**extra`.
+  `tags` / `markdown`. `NtfyTransport.deliver` reads them; surfaces that don't
+  use them ignore them. A typed object rather than untyped `**extra`.
+  `markdown` asks the surface to render the body as markup rather than literal
+  text (ntfy: a `Markdown: yes` header). **Opt-in** — a plain-text body
+  routinely carries `*`, `_` and `#` a renderer would eat, so default-on would
+  silently rewrite every existing notification. The ntfy transport sets the
+  header outside the `encode_header_value` path: it is a fixed ASCII literal, so
+  the ASCII-only retry has nothing to flatten and must not downgrade the render
+  mode and deliver raw markup as prose.
 - **`Transport`** (`@runtime_checkable` Protocol) — `name`, `capabilities`, and
   `async poll() -> list[IncomingMessage]`, `async deliver(target, text, *, task,
   reply_to, reference_id, threaded) -> int | None`, `async edit(target,

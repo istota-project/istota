@@ -140,6 +140,23 @@ class TestNtfySend:
         assert _decode_header(h["Tags"]) == "über"
         httpx.Headers(h)
 
+    def test_send_markdown_flag_sets_the_header(self, monkeypatch):
+        monkeypatch.setenv("NTFY_TOPIC", "t")
+        args = build_parser().parse_args(["send", "**bold**", "--markdown"])
+        with patch("istota.skills.ntfy.httpx.post", return_value=_ok_response()) as post:
+            assert cmd_send(args) == 0
+        assert post.call_args.kwargs["headers"]["Markdown"] == "yes"
+
+    def test_send_is_plain_text_without_the_flag(self, monkeypatch):
+        # Existing sends must be byte-identical: a body full of *, _ and # keeps
+        # arriving verbatim rather than being reinterpreted as markup.
+        monkeypatch.setenv("NTFY_TOPIC", "t")
+        args = build_parser().parse_args(["send", "3 * 4 = 12 #win"])
+        with patch("istota.skills.ntfy.httpx.post", return_value=_ok_response()) as post:
+            assert cmd_send(args) == 0
+        assert "Markdown" not in post.call_args.kwargs["headers"]
+        assert post.call_args.kwargs["content"] == "3 * 4 = 12 #win"
+
     def test_send_no_topic_returns_error(self, monkeypatch, capsys):
         monkeypatch.delenv("NTFY_TOPIC", raising=False)
         args = build_parser().parse_args(["send", "hi"])

@@ -2,6 +2,32 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-30: Reviewing the ntfy header fix against the real receiver, then giving push notifications formatting
+
+Two halves: verifying yesterday's ISSUE-213 fix against something other than its own tests, and adding the markdown capability the transport never had.
+
+**The review's method mattered more than its findings.** The fix rests on one claim the unit tests structurally cannot check — that the *receiver* decodes RFC 2047 encoded-words. A test that encodes with Python and decodes with Python proves the encoder is self-consistent, not that ntfy understands it. So the verification went outside: ntfy's docs name RFC 2047 support for title/tags/actions, and its `maybeDecodeHeader` applies the decode to **every** header read through `readParam` — which incidentally covers the skill CLI's `Click` header, the one the docs don't mention. The multi-word split has the same shape of risk, since it relies on the decoder dropping whitespace *between* adjacent encoded-words; confirmed in Go's `mime/encodedword.go` (`betweenWords` / `hasNonWhitespace`), so the space-joined chunks round-trip and the tests' Python model agrees with the real decoder on the one point where they could have diverged. The chunk arithmetic checks out exactly: 12 chars of prefix+suffix plus 60 base64 chars is 72, and 46 raw bytes would overflow to 76 — 45 is the largest safe value, not a round number someone picked.
+
+Two claims in the fix's own write-up were worth confirming rather than accepting: the diagnosis correction (httpx encodes headers as ASCII, not latin-1 — so `Äpfel` failed too) and the widened blast radius (`format_briefing_title` hardcodes an em-dash, so every briefing pushed to a phone had been failing). Both hold.
+
+Findings were all minor and none were fixed, deliberately — the review wasn't asked to change code. Recorded in the issue entry instead: `_MAX_CHUNK_BYTES` is hand-derived from a constant that production code never reads; control characters other than CR/LF still pass through untouched (pre-existing — the old inline scrub replaced exactly the same two characters); the ASCII-retry backstop exists on the transport but not the skill CLI.
+
+**Then markdown, which is mostly a judgement call about a platform caveat.** ntfy renders markdown in its web app only — a phone notification popup shows the source, so `**3 builds failed**` arrives with the asterisks visible. Most pushes are read on a phone, which makes an always-on flag actively worse than plain text, and makes the interesting part of this feature the guidance rather than the header. The skill body therefore tells the model to default to plain text, reach for the flag only when the message is structured enough that the shape carries meaning *and* the markers stay readable in the popup, and never to use it just to bold a word.
+
+Opt-in also protects existing behaviour for a second reason: a plain body like `3 * 4 = 12 #win` would be mangled by a renderer. Two tests pin that — no header and a verbatim body when the flag is absent — which is what makes them regression guards rather than feature tests.
+
+One non-obvious implementation detail. The `Markdown` header is set *outside* the `encode_header_value` path the other free-text headers go through. It is a fixed ASCII literal, so the lossy ASCII-only retry has nothing to flatten, and routing it through there would let a fallback silently downgrade the render mode and deliver raw markup as prose. There's a test for that specific path.
+
+Scope call: `DeliveryOptions.markdown` is reachable by internal producers that construct the object directly (the briefing push does), but no `markdown=` kwarg was threaded through `notifications.send_notification` — that function spans every surface and the request was for the skill path.
+
+**Files added/modified:**
+- `src/istota/transport/_types.py` - `DeliveryOptions.markdown` field + the opt-in rationale
+- `src/istota/transport/ntfy/__init__.py` - emits `Markdown: yes`, outside the encode/flatten path
+- `src/istota/skills/ntfy/__init__.py` - `--markdown` flag on `send`
+- `src/istota/skills/ntfy/skill.md` - "Formatting" section: supported subset, the web-app-only caveat, when not to use it
+- `tests/test_ntfy_transport.py`, `tests/test_skills_ntfy.py` - 5 tests, 3 of them written failing first; 2 are plain-text regression guards
+- `AGENTS.md`, `.claude/rules/transport.md` - ntfy header encoding + markdown; `ntfy_headers.py` added to the module tree (missing from the previous commit)
+
 ## 2026-07-26: Live-testing the nextcloud skill against a real server — five bugs the mocks couldn't see, and an authenticated file handover for web chat
 
 The nextcloud skill shipped with ~350 mocked tests and no run against an actual Nextcloud. Standing one up found five real defects, two of which meant a verb had never worked at all.

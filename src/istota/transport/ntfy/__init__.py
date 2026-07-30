@@ -101,6 +101,11 @@ def _build_headers(
         tags = encode(options.tags)
         if tags:
             headers["Tags"] = tags
+    if options.markdown:
+        # Rendered in ntfy's web app; a phone popup shows the source either way.
+        # Set unconditionally — it's a fixed ASCII literal, so the lossy retry
+        # has nothing to flatten and must not silently downgrade the render mode.
+        headers["Markdown"] = "yes"
     return headers
 
 

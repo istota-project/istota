@@ -25,11 +25,28 @@ istota-skill ntfy send "PR ready for review" --click "https://github.com/foo/bar
 
 # Route to a specific topic (overrides the configured default for this call)
 istota-skill ntfy send "morning briefing ready" --topic briefings
+
+# Render the body as markdown (see "Formatting" below before reaching for this)
+istota-skill ntfy send "**3 builds failed**
+- api: timeout
+- web: lint" --markdown
 ```
 
 `--topic` overrides the user's default topic for one call — same server and auth, different destination. Use it to route by category (alerts vs briefings vs newsletters) so the user can subscribe selectively per device.
 
 Returns JSON on stdout: `{"status":"ok"}` on success, `{"status":"error","error":"..."}` on failure (and exit code 1).
+
+## Formatting
+
+The body is plain text unless you pass `--markdown`. With the flag, ntfy renders bold, italics, inline code and code blocks, headings, links, bullet and numbered lists, blockquotes, and horizontal rules. Tables are not supported — use aligned columns or a list.
+
+The catch: **markdown renders in the ntfy web app only.** On a phone, the notification popup shows the source, so `**3 builds failed**` arrives with the asterisks visible. Most pushes are read on a phone, so:
+
+- Default to plain text. A one-line push has nothing to format.
+- Reach for `--markdown` when the message is long or structured enough that the shape carries meaning — a list of failures, a short report — and the markers stay readable if the user only sees the popup.
+- Never use it just to bold a word or two. That trades a clean phone notification for emphasis nobody sees.
+
+The title is always plain text: `--title` is an HTTP header and is never rendered as markdown.
 
 ## When to use
 

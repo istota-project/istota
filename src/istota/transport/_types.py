@@ -108,13 +108,20 @@ class DeliveryOptions:
     """Optional per-delivery metadata carried alongside ``deliver(target, text)``.
 
     Push surfaces that don't use these ignore them; ``NtfyTransport.deliver``
-    reads ``title`` / ``priority`` / ``tags``. Kept a typed object (rather than
-    untyped ``**extra``) so the protocol change is one explicit field set.
+    reads ``title`` / ``priority`` / ``tags`` / ``markdown``. Kept a typed
+    object (rather than untyped ``**extra``) so the protocol change is one
+    explicit field set.
+
+    ``markdown`` asks the surface to render the body as markdown rather than
+    literal text. Opt-in, because a plain-text body routinely contains ``*``,
+    ``_`` and ``#`` that a renderer would eat — a default-on flag would silently
+    rewrite every existing notification.
     """
 
     title: str | None = None
     priority: int | None = None
     tags: str | None = None
+    markdown: bool = False
 
 
 @runtime_checkable
