@@ -31,18 +31,18 @@ Import everything from the barrel: `import { Button, Modal } from '$lib/componen
 
 ### Controls
 
-| Component           | Use for                                  | Notes                                                                                                                                                    |
-| ------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Button`            | Every button                             | Variants: `primary`, `secondary`, `ghost`, `pill`, `subtle`, `danger`, `danger-icon`. Sizes `sm`/`md`. Never style a bare `<button>` as a primary action |
-| `Select`            | Every dropdown                           | bits-ui backed. `fullWidth` for settings forms so it matches text inputs                                                                                 |
-| `Input`             | Any text/number/date input               | Rest props pass through, so `min`/`step`/`placeholder`/`autocomplete` work. `monospace` for paths/tokens/ids, `invalid` sets `aria-invalid`              |
-| `TextArea`          | Multi-line input                         | Same contract, `rows` instead of `type`. Vertical resize only                                                                                            |
-| `Field`             | A labelled form row                      | Label + control + `hint`/`warning`/`error`. `labelled={false}` renders a `<div>` — required when the slot holds a button, or several controls. `SettingsField` delegates to it                     |
-| `AutocompleteInput` | Text input with a suggestion pool        | `monospace` for paths/tokens/ids, `onCommit` (blur) is the validation hook                                                                               |
-| `Chip`              | Toggleable filter chips and small labels | `checked` for on/off state                                                                                                                               |
-| `Badge`             | A small uppercase status pill            | Variants follow the status scale plus `partial` (part-done, off the severity ramp). A categorical badge sets `--badge-bg`/`--badge-fg` on the element    |
-| `IconButton`        | An icon-only button                      | `label` is required and becomes the `aria-label`. Sizes `sm`/`md`/`round`; `danger` for a destructive action                                             |
-| `KebabMenu`         | Per-row and per-card actions             | Takes `KebabItem[]`. One kebab per row — do not line up bare icon buttons instead                                                                        |
+| Component           | Use for                                  | Notes                                                                                                                                                                          |
+| ------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Button`            | Every button                             | Variants: `primary`, `secondary`, `ghost`, `pill`, `subtle`, `danger`, `danger-icon`. Sizes `sm`/`md`. Never style a bare `<button>` as a primary action                       |
+| `Select`            | Every dropdown                           | bits-ui backed. `fullWidth` for settings forms so it matches text inputs                                                                                                       |
+| `Input`             | Any text/number/date input               | Rest props pass through, so `min`/`step`/`placeholder`/`autocomplete` work. `monospace` for paths/tokens/ids, `invalid` sets `aria-invalid`                                    |
+| `TextArea`          | Multi-line input                         | Same contract, `rows` instead of `type`. Vertical resize only                                                                                                                  |
+| `Field`             | A labelled form row                      | Label + control + `hint`/`warning`/`error`. `labelled={false}` renders a `<div>` — required when the slot holds a button, or several controls. `SettingsField` delegates to it |
+| `AutocompleteInput` | Text input with a suggestion pool        | `monospace` for paths/tokens/ids, `onCommit` (blur) is the validation hook                                                                                                     |
+| `Chip`              | Toggleable filter chips and small labels | `checked` for on/off state                                                                                                                                                     |
+| `Badge`             | A small uppercase status pill            | Variants follow the status scale plus `partial` (part-done, off the severity ramp). A categorical badge sets `--badge-bg`/`--badge-fg` on the element                          |
+| `IconButton`        | An icon-only button                      | `label` is required and becomes the `aria-label`. Sizes `sm`/`md`/`round`; `danger` for a destructive action                                                                   |
+| `KebabMenu`         | Per-row and per-card actions             | Takes `KebabItem[]`. One kebab per row — do not line up bare icon buttons instead                                                                                              |
 
 ### Overlays and feedback
 

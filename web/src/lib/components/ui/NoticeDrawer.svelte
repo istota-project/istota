@@ -171,17 +171,17 @@
      testing too — so the panel cannot be left invisible-but-tappable partway
      through the animation (the ISSUE-197 failure).
 
-     Above the mobile sidebar drawer and its backdrop (20 / 19 in Sidebar):
-     both resolve in the same stacking context as this, and an equal z-index
-     would hand the overlap to whichever comes later in the tree, which is the
-     drawer. */
+     Above the mobile sidebar drawer and its backdrop (--z-drawer /
+     --z-drawer-backdrop): both resolve in the same stacking context as this,
+     and an equal z-index would hand the overlap to whichever comes later in
+     the tree, which is the drawer. */
   .notice-region {
     position: absolute;
     top: 100%;
     left: 0;
     right: 0;
     overflow: hidden;
-    z-index: 30;
+    z-index: var(--z-notice);
     pointer-events: none;
   }
 

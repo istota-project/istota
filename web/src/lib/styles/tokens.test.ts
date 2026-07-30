@@ -85,6 +85,7 @@ describe('z-index scale', () => {
       '--z-sticky',
       '--z-drawer-backdrop',
       '--z-drawer',
+      '--z-notice',
       '--z-modal',
       '--z-modal-panel',
       '--z-viewer',

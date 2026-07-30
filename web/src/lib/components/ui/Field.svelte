@@ -59,7 +59,12 @@
   caller passes in — a bare <input>, a Select, a SecretField. Input/TextArea
   bring their own identical appearance so they also work on their own.
 -->
-<svelte:element this={labelled ? 'label' : 'div'} class="field" class:field-wide={wide} class:checkbox>
+<svelte:element
+  this={labelled ? 'label' : 'div'}
+  class="field"
+  class:field-wide={wide}
+  class:checkbox
+>
   {#if checkbox}
     {@render children()}
     <span class="field-label">{label}<HintPopover text={hint} label="About {label}" /></span>
