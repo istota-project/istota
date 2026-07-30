@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Row actions look and work the same everywhere in the web UI. Briefings, content blocks, sources, shared blocks, feed subscriptions and categories, immunizations and diagnoses all put their actions behind the same ⋮ menu the money pages already used, replacing a mix of pencil and cross icons on some pages and text buttons on others. Reorder arrows stay where they are, since burying them would cost a click per nudge.
 - Briefings, blocks, sources and shared blocks can be duplicated — an action the old icon rows had no room for. A duplicated briefing copies its blocks and their sources, and arrives switched off under a free name so it can't run before you have looked it over.
+- The Istota iOS app stays in portrait when you turn the phone, and a home-screen install on Android follows the same preference. The layout is a single column with a docked composer, and landscape left too little height for it once the keyboard was up. iPad still rotates, as does an ordinary browser tab, which no site is allowed to lock.
 
 ### Fixed
 
