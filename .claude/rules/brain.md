@@ -154,7 +154,7 @@ first. Operator overrides plug in for free via `_roles.py`.
 | `effort: str` | `task.effort` or `config.effort`; brain default if empty |
 | `custom_system_prompt_path: Path \| None` | Override system prompt (claude_code-specific knob) |
 | `streaming: bool` | True when `on_progress` callback is supplied |
-| `on_progress: Callable[[StreamEvent], None] \| None` | Per-event callback. Widened `StreamEvent` union (task-event-streaming spec): `ToolUseEvent` (carries a real `tool_call_id`) \| `TextEvent` \| `TextDeltaEvent` (per-token incremental answer text — NativeBrain per provider `TextDelta`, ClaudeCodeBrain via the CLI's `--include-partial-messages` `text_delta` frames) \| `ResultEvent` \| `ContextManagementEvent` \| `ToolEndEvent` (NativeBrain only — `success` + loop-measured `duration_ms`) \| `ToolProgressEvent` (NativeBrain only) \| `ThinkingEvent` (whole reasoning block) \| `ThinkingDeltaEvent` (incremental reasoning — NativeBrain `reasoning` deltas, ClaudeCodeBrain `thinking_delta` partials). The executor's `_on_brain_event` adapter maps these to `TaskEvent`s via `EventWriter` (`istota/events.py`): `TextDeltaEvent` → coalesced `text_delta` on stream surfaces (web/repl), dropped on push surfaces; `ThinkingDeltaEvent`/`ThinkingEvent` → coalesced `thinking`, stream surfaces only. A loop-based brain MUST dispatch this callback off its event loop (NativeBrain's `run_in_executor` hop) so the synchronous Talk/log subscribers' `asyncio.run` calls don't collide (ISSUE-111 generalized). Both brains stay surface-agnostic — they emit both per-token deltas *and* whole-block `TextEvent`/`ThinkingEvent`s; the executor dedupes deltas-vs-whole-block per surface (stream: keep deltas, drop the redundant whole block; push: drop deltas, forward intermediate `TextEvent`s as `progress_text`, drop thinking). NativeBrain additionally suppresses the **final** turn's `TextEvent` (its text becomes the result). |
+| `on_progress: Callable[[StreamEvent], None] \| None` | Per-event callback. Widened `StreamEvent` union (task-event-streaming spec): `ToolUseEvent` (carries a real `tool_call_id`) \| `TextEvent` \| `TextDeltaEvent` (per-token incremental answer text — NativeBrain per provider `TextDelta`, ClaudeCodeBrain via the CLI's `--include-partial-messages` `text_delta` frames) \| `ResultEvent` \| `ContextManagementEvent` \| `ToolEndEvent` (NativeBrain only — `success` + loop-measured `duration_ms`) \| `ToolProgressEvent` (NativeBrain only) \| `ThinkingEvent` (whole reasoning block) \| `ThinkingDeltaEvent` (incremental reasoning — NativeBrain `reasoning` deltas, ClaudeCodeBrain `thinking_delta` partials). The executor's `_on_brain_event` adapter maps these to `TaskEvent`s via `EventWriter` (`istota/events.py`): `TextDeltaEvent` → coalesced `text_delta` on stream surfaces (web/repl), dropped on push surfaces; `ThinkingDeltaEvent`/`ThinkingEvent` → coalesced `thinking`, stream surfaces only. A loop-based brain MUST dispatch this callback off its event loop (NativeBrain's `run_in_executor` hop) so the synchronous Talk/log subscribers' `asyncio.run` calls don't collide (ISSUE-111 generalized). Both brains stay surface-agnostic — they emit both per-token deltas *and* whole-block `TextEvent`/`ThinkingEvent`s; the executor dedupes deltas-vs-whole-block per surface (stream: keep deltas, drop the redundant whole block; push: drop deltas, forward intermediate `TextEvent`s as `progress_text`, drop thinking). NativeBrain additionally suppresses the **final** turn's `TextEvent` (its text becomes the result); if the final turn carries no text the held block is released as progress instead, since it is no longer the answer. |
 | `cancel_check: Callable[[], bool] \| None` | Polled between events; True → kill subprocess, return `cancelled` |
 | `on_pid: Callable[[int], None] \| None` | Called once with subprocess PID after spawn |
 | `sandbox_wrap: Callable[[list[str]], list[str]] \| None` | Wraps raw cmd (e.g. with bwrap); no-op if not provided |
@@ -396,6 +396,32 @@ face of this policy; together they define the essentialness/skip-pin-fail-clean
 contract in both directions.
 
 NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
+- **Final-turn answer (ISSUE-211).** `result_text` is `final_turn_text` — the
+  text of the turn the run actually ended on. It used to be
+  `last_assistant_text` (the last turn that happened to carry *any* text), so a
+  tool-only or empty final turn shipped an earlier turn's between-tool-calls
+  narration verbatim as the answer. An empty final turn now leaves `result_text`
+  empty and `session.result._ensure_final_answer` surfaces "the turn ended
+  without a final response" instead. Both values are tracked, because the
+  **abnormal-stop paths deliberately keep the old behaviour**: a
+  `_TRUNCATION_MARKERS` hit (NB-15) or a `_PARTIAL_ANSWER_STOP_REASONS` stop
+  (`max_turns` / `loop_detected`, ISSUE-187) delivers the text *with a marker
+  saying it is incomplete*, so falling back to `last_assistant_text` there is
+  honest — and without it a capped run whose last turn was tool-only would ship
+  a bare marker and drop the partial work, while a `max_tokens` turn after a
+  real answer would flip a success into a retried failure.
+- **Trace document order (ISSUE-211).** The agent loop runs a turn's tools
+  *before* emitting its `turn_end` (`agent/loop.py`: `_execute_tool_batch` then
+  `turn_end`), so appending tool entries as they fired recorded them **ahead of
+  the text the model wrote first** — every native trace was inverted, which is
+  measurable: 100% of native traces in production start with a `tool` entry
+  against a 53/46 split for the CLI brains. The brain now buffers a turn's tool
+  entries (`pending_tools`) and flushes them after that turn's text at
+  `turn_end`, with a post-loop flush for a run torn off mid-turn. This matters
+  beyond cosmetics: the finality rule in `session/result.py` reads "text after
+  the last tool call" as the final message, so an inverted trace made narration
+  look like the answer, and the web transcript's render groups showed tools
+  ahead of the narration that preceded them.
 - **Reasoning effort.** `req.effort or native.effort` → the OpenAI-compat
   `reasoning_effort` field, gated on `get_model_info(model).supports_thinking`
   (dropped + DEBUG-logged for non-reasoning endpoints). `xhigh`/`max` fold to
@@ -681,7 +707,11 @@ buffer-pasted, submitted, and the submit is confirmed (`_turn_started`) before
 `_wait_for_completion` polls; the Stop hook fires → sentinel → parse the
 transcript JSONL → `BrainResult`. Result text prefers the Stop payload's
 `last_assistant_message`; the trace is reconstructed from the transcript
-(`parse_transcript`, settled via `_transcript_has_final_turn`). The host needs
+(`parse_transcript`, settled via `_transcript_has_final_turn`). When the
+payload omits the message, `parse_transcript` synthesizes the answer from the
+last `end_turn` turn, falling back to the last text-bearing turn **that issued
+no tool calls** — a turn that went on to call a tool was narrating, and
+promoting that is ISSUE-211. The host needs
 `tmux` on `PATH` (a missing binary → `not_found` → headless fallback); the Docker
 image installs it.
 

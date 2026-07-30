@@ -140,17 +140,21 @@ from .session.result import (  # noqa: E402,F401
     _AUTOMATED_SOURCE_TYPES,
     _CM_SEGMENT_MIN_CHARS,
     _CODE_FENCE_PATTERN,
+    _NO_FINAL_ANSWER_NOTICE,
     _TERSE_REFERENCE_RE,
     _TERSE_RESULT_MAX_CHARS,
     _TOOL_SYNTAX_PATTERN,
     _TRAILING_REGION_MIN_CHARS,
     _compose_full_result,
+    _ensure_final_answer,
     _is_automated_task,
+    _is_back_reference,
     _is_terse,
     _last_substantial_region,
     _log_compose_override,
     _text_similarity,
     detect_malformed_result,
+    is_no_final_answer,
 )
 
 
@@ -3705,12 +3709,22 @@ def execute_task(
         # CM-aware / terse-result composition: reconcile result_text with
         # the trace so substantial intermediate text isn't lost when the
         # final ResultEvent is terse. Same logic both brains will need.
-        if success and trace:
-            try:
-                trace_list = json.loads(trace)
-                result = _compose_full_result(result, trace_list, task=task)
-            except (json.JSONDecodeError, TypeError):
-                pass
+        # Runs whenever the task succeeded, trace or not — its other job is the
+        # empty-result guard, and a successful turn that produced no trace at
+        # all still must not deliver a blank reply (ISSUE-211).
+        if success:
+            trace_list: list = []
+            if trace:
+                try:
+                    parsed_trace = json.loads(trace)
+                except (json.JSONDecodeError, TypeError):
+                    parsed_trace = None
+                if isinstance(parsed_trace, list):
+                    # Element-wise, not just list-ness: the walker calls
+                    # .get() on every entry, so one stray non-dict would
+                    # turn a completed run into an execution error.
+                    trace_list = [e for e in parsed_trace if isinstance(e, dict)]
+            result = _compose_full_result(result, trace_list, task=task)
 
         # Visible fallback note: a non-portable model pin that couldn't cross the
         # provider boundary was dropped, so the fallback ran on its own default.

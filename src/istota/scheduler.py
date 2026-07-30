@@ -55,6 +55,7 @@ from .executor import (
     detect_malformed_result,
     discover_calendars_for_task,
     execute_task,
+    is_no_final_answer,
     is_signal_termination,
     is_transient_api_error,
     parse_api_error,
@@ -1815,9 +1816,14 @@ def process_one_task(
     # deferred-op-skip branches below.
     _own_origin_web = plan_web and task.source_type == "web"
     _confirmable_surface = (plan_talk and talk_token and not plan_ntfy) or _own_origin_web
+    # A no-final-answer result embeds mid-turn text the model wrote to itself,
+    # not to the user, so its "should I proceed?" is not a question awaiting an
+    # answer. Parking the task on it would hold it for the whole confirmation
+    # timeout with a synthesized notice as the prompt (ISSUE-211).
     is_confirmation_request = bool(
         success
         and _confirmable_surface
+        and not is_no_final_answer(result)
         and CONFIRMATION_PATTERN.search(result)
     )
 
@@ -1869,10 +1875,15 @@ def process_one_task(
                 # Skip silent scheduled jobs: high-volume retrieve-and-render
                 # crons whose conversations have no recall value but inflate
                 # memory_chunks (and the vec/FTS indexes derived from it).
+                # Skip a no-final-answer result for the same reason: it is the
+                # composer's boilerplate wrapped around mid-turn narration from
+                # a turn that broke, so repeated failures would seed recall with
+                # near-identical text that never answered anything (ISSUE-211).
                 if (
                     config.memory_search.enabled
                     and config.memory_search.auto_index_conversations
                     and not task.heartbeat_silent
+                    and not is_no_final_answer(result)
                 ):
                     try:
                         from .memory.search import index_conversation as _index_conv

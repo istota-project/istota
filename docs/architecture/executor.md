@@ -85,13 +85,17 @@ Cancellation is polled between events via the `cancel_check` callback, which cal
 
 ## Result composition
 
-The result goes through `_compose_full_result()`, which has two narrowly-scoped mechanisms sharing a `_last_substantial_region()` walker. Both mechanisms **replace** `result_text` outright — they never prepend or glue recovered text in front of the model's final output.
+The result goes through `_compose_full_result()`, which has two narrowly-scoped mechanisms sharing a `_last_substantial_region()` walker. Both mechanisms **replace** `result_text` outright — they never prepend or glue recovered text in front of the model's final output. (The one path that synthesizes text instead of choosing between candidates is `_ensure_final_answer`, described below, and only when there is no answer at all to protect.)
 
 **Mechanism A — CM-aware (ISSUE-026):** When any `cm_boundary` events exist in the trace, segments the trace at those boundaries and returns the last region whose text is at least 200 chars (`_CM_SEGMENT_MIN_CHARS`). Always runs when CM events are present, including for automated tasks (scheduled / briefing / heartbeat). Falls back to `result_text` if no segment qualifies.
 
 **Mechanism B — terse-recovery (ISSUE-025):** Segments the trace by both `tool` and `cm_boundary` events and returns the last region of at least 500 chars (`_TRAILING_REGION_MIN_CHARS`). Gated by **both** `_is_automated_task(task)` returning False **and** `_is_terse(result_text)` returning True (text shorter than 150 chars or matching a short reference regex like "see above" / "done" / "ok"). Structured-output tasks and substantial results bypass this mechanism. Skipped when CM events exist (Mechanism A wins).
 
-Every override emits a single `compose_full_result: mechanism=… task_id=… original_chars=… recovered_chars=…` INFO log so the 500-char floor can be calibrated against production data.
+**The finality rule (ISSUE-211):** the channel guidelines promise the model that text written between tool calls streams as a progress indicator and is not the saved reply, so a text region followed by a tool call is mid-turn narration by construction — the model kept working after writing it. Both mechanisms therefore restrict recovery to the region after the last `tool` entry (`trailing_only`), so only the model's final message is eligible. The exception is an explicit back-reference ("see above" / "done"), where the model itself says the answer is earlier — that is the ISSUE-025 case, so reaching back honours it rather than guessing. Note this deliberately revokes the earlier property that a tool is not a CM-mode delimiter.
+
+**`_ensure_final_answer`** is the tail of both paths. When `result_text` is empty and nothing was recovered, it adopts any text after the last tool call however short (the size floors exist to protect a non-empty result, and there is none), and otherwise returns "The turn ended without a final response." with the last earlier region appended under a label — so the work stays visible without being passed off as the answer. Automated tasks are exempt because their output is parsed rather than read. Callers that interpret a result use `is_no_final_answer()` to tell composer-synthesized text apart from something the model wrote; the scheduler's confirmation gate and memory indexing both do.
+
+Every override emits a single `compose_full_result: mechanism=… task_id=… original_chars=… recovered_chars=…` INFO log so the 500-char floor can be calibrated against production data. The `no_final_answer` path shares the prefix but logs `partial_chars=…` in place of the original/recovered pair.
 
 Result priority: ResultEvent > result file > stderr > fallback error.
 

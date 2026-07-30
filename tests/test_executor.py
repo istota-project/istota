@@ -14,6 +14,7 @@ from istota.executor import (
     _text_similarity,
     _AUTOMATED_SOURCE_TYPES,
     _CM_SEGMENT_MIN_CHARS,
+    _NO_FINAL_ANSWER_NOTICE,
     _TERSE_RESULT_MAX_CHARS,
     _TRAILING_REGION_MIN_CHARS,
     detect_malformed_result,
@@ -3467,12 +3468,27 @@ class TestComposeFullResult:
         result = _compose_full_result("See above.", trace, task=_make_task())
         assert result == findings
 
-    def test_terse_short_result_with_substantial_trailing_region(self):
-        """Result < 150 chars but not a known reference — still triggers."""
+    def test_terse_short_result_does_not_reach_back_past_a_tool(self):
+        """A short result that isn't an explicit back-reference is a real (if
+        brief) answer. Reaching back past a tool call for it would promote
+        mid-turn narration — ISSUE-211. Only the trailing region qualifies."""
         findings = _block("Findings.", 800)
         trace = [
             {"type": "text", "text": findings},
             {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result(
+            "Operation completed.", trace, task=_make_task(),
+        )
+        assert result == "Operation completed."
+
+    def test_terse_short_result_with_substantial_trailing_region(self):
+        """Result < 150 chars but not a known reference — the region *after*
+        the last tool call is the model's final message, so it still wins."""
+        findings = _block("Findings.", 800)
+        trace = [
+            {"type": "tool", "text": "Write file"},
+            {"type": "text", "text": findings},
         ]
         result = _compose_full_result(
             "Operation completed.", trace, task=_make_task(),
@@ -3488,10 +3504,12 @@ class TestComposeFullResult:
         assert _compose_full_result("Done.", trace, task=_make_task()) == findings
 
     def test_empty_result_with_substantial_trailing_region(self):
+        """An empty result with real text after the last tool call: the brain
+        lost the final message, the trace still has it."""
         findings = _block("Findings.", 800)
         trace = [
-            {"type": "text", "text": findings},
             {"type": "tool", "text": "Write file"},
+            {"type": "text", "text": findings},
         ]
         assert _compose_full_result("", trace, task=_make_task()) == findings
 
@@ -3684,13 +3702,59 @@ class TestComposeFullResultCM:
             {"type": "text", "text": "Old analysis."},
             {"type": "cm_boundary"},
             {"type": "text", "text": block1},
+            {"type": "text", "text": block2},
+        ]
+        # Adjacent text blocks with nothing between them are one streamed
+        # message and are joined.
+        result = _compose_full_result("Doubled.", trace)
+        assert result == f"{block1}\n\n{block2}"
+
+    def test_cm_segment_split_by_a_tool_keeps_only_the_trailing_part(self):
+        """The original ISSUE-026 fixture, kept with its new expectation.
+
+        "A tool is NOT a CM-mode delimiter" was the documented property before
+        ISSUE-211; the finality rule deliberately revokes it, so the same shape
+        now yields the post-tool block alone rather than both joined.
+        """
+        block1 = _block("BlockA.", 450)
+        block2 = _block("BlockB.", 450)
+        trace = [
+            {"type": "text", "text": "Old analysis."},
+            {"type": "cm_boundary"},
+            {"type": "text", "text": block1},
             {"type": "tool", "text": "Read file"},
             {"type": "text", "text": block2},
         ]
-        # Tool is NOT a CM-mode delimiter — both text blocks belong to the
-        # post-CM segment and are joined.
+        assert _compose_full_result("Doubled.", trace) == block2
+
+    def test_cm_answer_split_by_a_trailing_tool_falls_back_to_result(self):
+        """The cost of the revocation, pinned deliberately: an answer split by
+        a trailing tool call whose tail is under the CM floor recovers nothing
+        and keeps the (CM-truncated) result rather than gluing the halves."""
+        part_a = _block("PartA.", 450)
+        trace = [
+            {"type": "cm_boundary"},
+            {"type": "text", "text": part_a},
+            {"type": "tool", "text": "Read file"},
+            {"type": "text", "text": "Short tail."},
+        ]
+        assert _compose_full_result("CM-truncated result.", trace) == "CM-truncated result."
+
+    def test_cm_recovery_stops_at_the_last_tool_call(self):
+        """ISSUE-211: a block the model wrote *before* issuing another tool
+        call is mid-turn narration, not part of the final message, so CM
+        recovery must not glue it onto the answer."""
+        narration = _block("Let me look this up.", 450)
+        answer = _block("Answer.", 450)
+        trace = [
+            {"type": "text", "text": "Old analysis."},
+            {"type": "cm_boundary"},
+            {"type": "text", "text": narration},
+            {"type": "tool", "text": "Read file"},
+            {"type": "text", "text": answer},
+        ]
         result = _compose_full_result("Doubled.", trace)
-        assert result == f"{block1}\n\n{block2}"
+        assert result == answer
 
     def test_cm_real_pattern_pre_and_post_cm_responses(self):
         pre_cm = (
@@ -3745,6 +3809,115 @@ class TestComposeFullResultCM:
         # No segment after final CM has text; walking back finds `block`.
         # If result_text is exactly block, no override.
         assert _compose_full_result(block, trace) == block
+
+
+class TestFinalAnswerGuard:
+    """ISSUE-211 — mid-turn narration must never become the durable reply.
+
+    The guidelines promise the model that text written between tool calls is a
+    live progress indicator and is not the saved answer. Recovery may promote
+    a region the model wrote *after* its last tool call (that is its final
+    message, just missing from the brain's result), and may reach further back
+    only when the result is an explicit back-reference ("see above") — there
+    the model itself says the answer is earlier.
+    """
+
+    def test_short_answer_is_not_replaced_by_pre_tool_narration(self):
+        narration = _block("Let me check the calendar.", 800)
+        trace = [
+            {"type": "text", "text": narration},
+            {"type": "tool", "text": "Read calendar"},
+        ]
+        result = _compose_full_result(
+            "Your meeting is at 3pm.", trace, task=_make_task(),
+        )
+        assert result == "Your meeting is at 3pm."
+
+    def test_empty_answer_labels_narration_instead_of_promoting_it(self):
+        narration = _block("Let me check the calendar.", 800)
+        trace = [
+            {"type": "text", "text": narration},
+            {"type": "tool", "text": "Read calendar"},
+        ]
+        result = _compose_full_result("", trace, task=_make_task())
+        assert result != narration
+        assert result.startswith(_NO_FINAL_ANSWER_NOTICE)
+        # The work isn't thrown away — it is labelled as progress, not answer.
+        assert narration in result
+
+    def test_trailing_region_after_last_tool_is_still_recovered(self):
+        narration = _block("Checking.", 600)
+        answer = _block("Here is the answer.", 600)
+        trace = [
+            {"type": "text", "text": narration},
+            {"type": "tool", "text": "Read calendar"},
+            {"type": "text", "text": answer},
+        ]
+        result = _compose_full_result("", trace, task=_make_task())
+        assert result == answer
+
+    def test_short_trailing_answer_is_adopted_not_labelled(self):
+        """A brief final message the brain lost is still the answer — the
+        size floors protect a non-empty result, and there is none here."""
+        trace = [
+            {"type": "text", "text": _block("Checking.", 600)},
+            {"type": "tool", "text": "Read calendar"},
+            {"type": "text", "text": "Your meeting is at 3pm."},
+        ]
+        result = _compose_full_result("", trace, task=_make_task())
+        assert result == "Your meeting is at 3pm."
+
+    def test_explicit_back_reference_still_reaches_past_a_tool(self):
+        """ISSUE-025 stays fixed: "see above" points at earlier text."""
+        findings = _block("Findings.", 800)
+        trace = [
+            {"type": "text", "text": findings},
+            {"type": "tool", "text": "Write file"},
+        ]
+        assert _compose_full_result("See above.", trace, task=_make_task()) == findings
+
+    def test_cm_recovery_does_not_reach_back_past_a_tool(self):
+        narration = _block("Let me look this up.", 450)
+        trace = [
+            {"type": "text", "text": narration},
+            {"type": "cm_boundary"},
+            {"type": "tool", "text": "Write file"},
+        ]
+        result = _compose_full_result("Saved.", trace, task=_make_task())
+        assert result == "Saved."
+
+    def test_empty_result_with_no_trace_yields_the_notice(self):
+        assert _compose_full_result("", [], task=_make_task()) == _NO_FINAL_ANSWER_NOTICE
+
+    def test_notice_carries_even_a_short_partial(self):
+        trace = [
+            {"type": "text", "text": "Let me check the calendar."},
+            {"type": "tool", "text": "Read calendar"},
+        ]
+        result = _compose_full_result("", trace, task=_make_task())
+        assert result.startswith(_NO_FINAL_ANSWER_NOTICE)
+        assert "Let me check the calendar." in result
+
+    def test_automated_task_empty_result_left_alone(self):
+        """A briefing's body is parsed as JSON and an empty result flows to the
+        existing quiet retry — a prose notice would be parsed as the body."""
+        trace = [
+            {"type": "text", "text": _block("Narration.", 800)},
+            {"type": "tool", "text": "Read feed"},
+        ]
+        assert _compose_full_result(
+            "", trace, task=_make_task(source_type="briefing"),
+        ) == ""
+
+    def test_real_answer_never_replaced_by_the_notice(self):
+        assert _compose_full_result(
+            "The answer.", [], task=_make_task(),
+        ) == "The answer."
+
+    def test_whitespace_only_answer_treated_as_empty(self):
+        assert _compose_full_result(
+            "   \n ", [], task=_make_task(),
+        ) == _NO_FINAL_ANSWER_NOTICE
 
 
 class TestComposeHelpers:

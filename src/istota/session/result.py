@@ -6,8 +6,11 @@ the session layer rather than inside a specific brain. Extracted verbatim from
 ``executor.py`` in Phase 0 of the agent-loop migration; the executor re-exports
 every public symbol for backward compatibility.
 
-Two mechanisms share one ``_last_substantial_region()`` walker and both
-**replace** ``result_text`` outright — never prepend or glue:
+Two mechanisms share one ``_last_substantial_region()`` walker. Both
+**replace** ``result_text`` outright — never prepend or glue. (The one path
+that synthesizes text rather than choosing between candidates is
+``_ensure_final_answer``, and only when there is no answer at all to protect;
+see the finality rule below.)
 
 - **Mechanism A — CM-aware (ISSUE-026):** runs whenever ``cm_boundary`` events
   exist in the trace. Segments by ``cm_boundary`` and returns the last region
@@ -15,6 +18,18 @@ Two mechanisms share one ``_last_substantial_region()`` walker and both
 - **Mechanism B — terse-recovery (ISSUE-025):** runs only on non-automated
   tasks whose ``result_text`` is terse. Segments by both ``tool`` and
   ``cm_boundary`` and returns the last region ≥ ``_TRAILING_REGION_MIN_CHARS``.
+
+Both are bounded by the **finality rule** (ISSUE-211). The channel guidelines
+promise the model that text written between tool calls streams as a progress
+indicator and is not the saved reply, so a text region followed by a tool call
+is mid-turn narration by construction — the model kept working after writing
+it — and can never stand in as the final answer. Recovery therefore looks only
+at the region after the last ``tool`` entry. The one exception is an explicit
+back-reference ("see above", "done"): there the model itself says the answer
+is earlier, which is the ISSUE-025 case, so reaching back is honouring it
+rather than guessing. When neither the brain nor the trace yields a final
+message, ``_ensure_final_answer`` says so instead of silently promoting the
+last status fragment.
 """
 
 import logging
@@ -95,6 +110,30 @@ _TERSE_REFERENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# What a completed turn delivers when neither the brain nor the trace produced
+# a final message. Better than an empty reply, and better than passing off the
+# last progress note as the answer (ISSUE-211).
+_NO_FINAL_ANSWER_NOTICE = "The turn ended without a final response."
+
+# Lead-in when there *is* earlier work to show. Labelled rather than promoted:
+# the user still gets what the turn produced, framed as unfinished rather than
+# presented as the answer. Deliberately a statement of fact about *where* the
+# text came from, not a claim about what it is — the composer can see that the
+# model went on to call another tool, but not whether what it wrote first was
+# narration or a complete answer it then followed with a save.
+_PARTIAL_PROGRESS_LEAD = (
+    f"{_NO_FINAL_ANSWER_NOTICE} This is the last text it produced before "
+    "stopping:"
+)
+
+
+def is_no_final_answer(text: str) -> bool:
+    """True when ``text`` is the composer's synthesized no-final-answer output
+    rather than something the model wrote. Callers that interpret a result —
+    the scheduler's confirmation gate above all — must not read the embedded
+    mid-turn text as if the model had addressed it to the user."""
+    return text.startswith(_NO_FINAL_ANSWER_NOTICE)
+
 
 def _text_similarity(a: str, b: str) -> float:
     """Return 0.0–1.0 Jaccard similarity between two strings using word bigrams.
@@ -118,6 +157,8 @@ def _last_substantial_region(
     trace: list[dict],
     delimiters: set[str],
     min_chars: int,
+    *,
+    trailing_only: bool = False,
 ) -> str | None:
     """Walk the trace, group text events into regions delimited by event types
     in ``delimiters``, then return the joined text of the last region whose
@@ -126,7 +167,19 @@ def _last_substantial_region(
     Adjacent ``text`` events within a region are joined with ``\\n\\n``, so
     a paragraph split into multiple events by streaming aggregates back into
     one region — no per-block size filter is needed.
+
+    ``trailing_only`` restricts the walk to what the model wrote after its last
+    tool call — its final message. Everything earlier is mid-turn narration by
+    construction (a tool call followed it), and promoting that to the durable
+    answer is ISSUE-211.
     """
+    if trailing_only:
+        cut = -1
+        for i, entry in enumerate(trace):
+            if entry.get("type") == "tool":
+                cut = i
+        trace = trace[cut + 1:]
+
     regions: list[list[str]] = [[]]
     for entry in trace:
         et = entry.get("type")
@@ -175,6 +228,49 @@ def _is_terse(text: str) -> bool:
     return bool(_TERSE_REFERENCE_RE.match(s))
 
 
+def _is_back_reference(text: str) -> bool:
+    """True when the model's final text explicitly points at earlier output
+    ("see above", "done"). That licenses recovery to reach back past a tool
+    boundary — the model is telling us where the answer is, not narrating."""
+    return bool(_TERSE_REFERENCE_RE.match(text.strip()))
+
+
+def _ensure_final_answer(result_text: str, trace: list[dict], task) -> str:
+    """Last line of defence: a completed turn must not deliver an empty reply,
+    and must not pass a mid-turn status fragment off as the answer.
+
+    When ``result_text`` is empty and recovery found no final message, say so.
+    Any earlier work is appended under a label so it is still visible without
+    being presented as the answer. Automated tasks are exempt because their
+    output is parsed rather than read — a briefing body goes through
+    ``parse_briefing_json``, so prose here would be archived as the digest.
+    """
+    if result_text.strip() or _is_automated_task(task):
+        return result_text
+    # Nothing came back from the brain, so there is no good answer to protect
+    # and the size floors above don't apply: whatever the model wrote after its
+    # last tool call is its final message, however short, and is adopted as-is.
+    trailing = _last_substantial_region(
+        trace, {"cm_boundary"}, 1, trailing_only=True,
+    )
+    if trailing:
+        _log_compose_override(task, "empty_result", result_text, trailing)
+        return trailing
+    # Only mid-turn narration is left. Show it, labelled — no size floor, since
+    # anything the turn produced beats nothing when the answer is gone.
+    partial = _last_substantial_region(trace, {"tool", "cm_boundary"}, 1)
+    logger.info(
+        "compose_full_result: mechanism=no_final_answer task_id=%s "
+        "source_type=%s partial_chars=%d",
+        getattr(task, "id", None),
+        getattr(task, "source_type", None),
+        len(partial or ""),
+    )
+    if not partial:
+        return _NO_FINAL_ANSWER_NOTICE
+    return f"{_PARTIAL_PROGRESS_LEAD}\n\n{partial}"
+
+
 def _log_compose_override(
     task,
     mechanism: str,
@@ -215,35 +311,43 @@ def _compose_full_result(
       Gated by ``_is_automated_task`` and ``_is_terse(result_text)`` —
       structured-output tasks and substantial results bypass.
 
+    Both mechanisms are bounded by the finality rule (ISSUE-211): only the
+    region after the last tool call is eligible, unless ``result_text`` is an
+    explicit back-reference. When nothing usable is left and ``result_text`` is
+    empty, ``_ensure_final_answer`` surfaces that rather than shipping the last
+    status fragment.
+
     Returns ``result_text`` unchanged when no override is justified. Override
-    or trust — never glue. Logs every override for calibration.
+    or trust — never glue; the sole synthesis path is ``_ensure_final_answer``,
+    reached only when there is no answer to protect. Logs every override for
+    calibration.
     """
-    if not execution_trace:
-        return result_text
+    trace = execution_trace or []
+    # A back-reference is the model pointing at its own earlier text, which is
+    # the only case where mid-turn text may be adopted as the answer.
+    reach_back = _is_back_reference(result_text)
 
     # Mechanism A — CM-aware. Always runs when CM events exist.
-    if any(e.get("type") == "cm_boundary" for e in execution_trace):
+    if any(e.get("type") == "cm_boundary" for e in trace):
         recovered = _last_substantial_region(
-            execution_trace, {"cm_boundary"}, _CM_SEGMENT_MIN_CHARS,
+            trace, {"cm_boundary"}, _CM_SEGMENT_MIN_CHARS,
+            trailing_only=not reach_back,
         )
         if recovered is not None and recovered.strip() != result_text.strip():
             _log_compose_override(task, "cm_aware", result_text, recovered)
             return recovered
-        return result_text
+        return _ensure_final_answer(result_text, trace, task)
 
     # Mechanism B — terse-recovery. Source-type and terseness gates.
-    if _is_automated_task(task):
-        return result_text
-    if not _is_terse(result_text):
-        return result_text
+    if _is_automated_task(task) or not _is_terse(result_text):
+        return _ensure_final_answer(result_text, trace, task)
 
     recovered = _last_substantial_region(
-        execution_trace, {"tool", "cm_boundary"}, _TRAILING_REGION_MIN_CHARS,
+        trace, {"tool", "cm_boundary"}, _TRAILING_REGION_MIN_CHARS,
+        trailing_only=not reach_back,
     )
-    if recovered is None:
-        return result_text
-    if recovered in result_text:
-        return result_text
+    if recovered is None or recovered in result_text:
+        return _ensure_final_answer(result_text, trace, task)
 
     _log_compose_override(task, "terse_recovery", result_text, recovered)
     return recovered

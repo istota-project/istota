@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from istota.brain import BrainRequest, make_brain
+from istota.brain._events import TextEvent
 from istota.brain.native import NativeBrain
 from istota.config import BrainConfig, NativeBrainConfig
 from istota.llm.provider import (
@@ -144,6 +145,36 @@ class TestTextCompletion:
         assert result.result_text.strip()  # non-empty, informative
         assert "truncated" in result.result_text.lower()
         assert "output token" in result.result_text.lower()
+
+    def test_max_tokens_after_a_text_turn_keeps_the_partial(self, tmp_path):
+        """NB-15 must survive the ISSUE-211 final-turn rule: the run produced
+        an answer, the *final* turn was the empty truncated one. Failing here
+        would discard the partial and burn all three attempts on a reasoning
+        model that reliably exhausts its output budget."""
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[
+                        TextContent(text="Partial analysis so far."),
+                        ToolCallContent(
+                            id="c1",
+                            name="Write",
+                            arguments={"file_path": "out.txt", "content": "hi"},
+                        ),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                AssistantMessage(
+                    content=[ThinkingContent(thinking="(all budget on thinking)")],
+                    usage=Usage(input_tokens=10, output_tokens=16384),
+                    stop_reason="max_tokens",
+                ),
+            ]
+        )
+        result = _brain(provider).execute(_req("hi", tmp_path, tools=["Write"]))
+        assert result.success is True
+        assert "Partial analysis so far." in result.result_text
+        assert "truncated" in result.result_text.lower()
 
     def test_content_filter_empty_is_failure(self, tmp_path):
         # Same contract as max_tokens: a content-filter clip that yielded no
@@ -425,6 +456,42 @@ class TestErrorAndStops:
         # Only ran up to the cap, not all 20 scripted turns.
         assert len(provider.calls) <= 4
 
+    def test_max_turns_keeps_the_narration_it_was_capped_mid(self, tmp_path):
+        """ISSUE-187 defects 1-2 must survive the ISSUE-211 final-turn rule.
+
+        A cap lands on whatever turn the model was on, routinely a tool-only
+        one. The marker labels the text as incomplete, so delivering the last
+        thing the model said alongside it is honest — dropping it would leave
+        the user a bare "reached the maximum number of steps".
+        """
+        turns = [
+            AssistantMessage(
+                content=[
+                    TextContent(text="Let me move to Otodom and OLX next."),
+                    ToolCallContent(
+                        id="c0", name="Read", arguments={"file_path": "README"}
+                    ),
+                ],
+                stop_reason="tool_use",
+            ),
+        ] + [
+            AssistantMessage(
+                content=[
+                    ToolCallContent(
+                        id=f"c{i}", name="Read", arguments={"file_path": "README"}
+                    )
+                ],
+                stop_reason="tool_use",
+            )
+            for i in range(1, 20)
+        ]
+        result = _brain(MockProvider(turns), max_turns=2).execute(
+            _req("search", tmp_path, tools=["Read"])
+        )
+        assert result.stop_reason == "max_turns"
+        assert "Let me move to Otodom and OLX next." in result.result_text
+        assert "maximum number of steps" in result.result_text
+
     def test_cancellation(self, tmp_path):
         provider = MockProvider(
             [
@@ -698,6 +765,130 @@ class TestThinkingStreaming:
         assert deltas == ["The ", "answer."]
         assert result.result_text == "The answer."
         assert "Let me" not in result.result_text
+
+
+class TestFinalTurnIsTheAnswer:
+    """ISSUE-211 — the durable answer is the *final* turn's text, never an
+    earlier turn's between-tool-calls narration."""
+
+    def test_empty_final_turn_does_not_promote_earlier_narration(self, tmp_path):
+        provider = MockProvider(
+            [
+                # Turn 1: narration, then a tool call — mid-flight by construction.
+                AssistantMessage(
+                    content=[
+                        TextContent(text="Let me check the calendar."),
+                        ToolCallContent(
+                            id="c1",
+                            name="Write",
+                            arguments={"file_path": "out.txt", "content": "hi"},
+                        ),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                # Turn 2: the model stops with nothing to say.
+                AssistantMessage(content=[], stop_reason="end_turn"),
+            ]
+        )
+        result = _brain(provider).execute(_req("what's on today", tmp_path, tools=["Write"]))
+        assert result.success is True
+        assert "Let me check the calendar." not in result.result_text
+        assert result.result_text.strip() == ""
+
+    def test_orphaned_narration_still_reaches_progress(self, tmp_path):
+        """The held block is no longer the answer, so it must be released as a
+        progress event rather than suppressed into nothing."""
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[
+                        TextContent(text="Let me check the calendar."),
+                        ToolCallContent(
+                            id="c1",
+                            name="Write",
+                            arguments={"file_path": "out.txt", "content": "hi"},
+                        ),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                AssistantMessage(content=[], stop_reason="end_turn"),
+            ]
+        )
+        captured: list = []
+        req = _req("what's on today", tmp_path, tools=["Write"])
+        req.on_progress = lambda ev: captured.append(ev)
+        _brain(provider).execute(req)
+        # Must be the whole-turn TextEvent, not the TextDeltaEvent that streams
+        # regardless — asserting on `.text` alone would pass with the release
+        # branch deleted, since both event types carry that attribute.
+        assert any(
+            isinstance(e, TextEvent) and e.text == "Let me check the calendar."
+            for e in captured
+        )
+
+    def test_trace_keeps_document_order_through_composition(self, tmp_path):
+        """End-to-end: the brain's own trace, composed the way the executor
+        composes it, must not hand back narration.
+
+        The agent loop executes a turn's tools before emitting its turn_end, so
+        appending tool entries as they fire recorded them *ahead* of the text
+        the model wrote first. The finality rule reads "text after the last tool
+        call" as the final message, so an inverted trace made narration look
+        like the answer. Asserting only at the brain boundary misses this.
+        """
+        from istota.session.result import _compose_full_result
+
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[
+                        TextContent(text="Let me check the calendar. " * 30),
+                        ToolCallContent(
+                            id="c1",
+                            name="Write",
+                            arguments={"file_path": "out.txt", "content": "hi"},
+                        ),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                AssistantMessage(content=[], stop_reason="end_turn"),
+            ]
+        )
+        result = _brain(provider).execute(_req("what's on today", tmp_path, tools=["Write"]))
+        trace = json.loads(result.execution_trace)
+        kinds = [e["type"] for e in trace]
+        assert kinds == ["text", "tool"], kinds
+
+        class _T:
+            id, source_type = 1, "talk"
+            heartbeat_silent, scheduled_job_id = False, None
+
+        composed = _compose_full_result(result.result_text, trace, task=_T())
+        assert not composed.startswith("Let me check the calendar.")
+        assert "without a final response" in composed
+
+    def test_final_turn_text_still_wins_normally(self, tmp_path):
+        provider = MockProvider(
+            [
+                AssistantMessage(
+                    content=[
+                        TextContent(text="Let me check the calendar."),
+                        ToolCallContent(
+                            id="c1",
+                            name="Write",
+                            arguments={"file_path": "out.txt", "content": "hi"},
+                        ),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                AssistantMessage(
+                    content=[TextContent(text="Your meeting is at 3pm.")],
+                    stop_reason="end_turn",
+                ),
+            ]
+        )
+        result = _brain(provider).execute(_req("what's on today", tmp_path, tools=["Write"]))
+        assert result.result_text == "Your meeting is at 3pm."
 
 
 class TestTimeout:

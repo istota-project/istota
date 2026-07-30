@@ -162,6 +162,60 @@ class TestParseTranscriptEdges:
         # No final answer text → empty result, but a ToolUseEvent was emitted.
         assert any(isinstance(e, ToolUseEvent) for e in events)
 
+    def test_narration_record_is_not_the_fallback_answer(self, tmp_path):
+        """ISSUE-211: a truncated session whose only text is narration has no
+        final answer, and passing that narration off as the reply is the bug.
+
+        Uses the shape the CLI actually writes — one record per content block,
+        so the narration is a text-only record carrying
+        ``stop_reason="tool_use"``. A fixture that puts the text and the
+        tool_use in one record would test a shape the CLI never produces.
+        """
+        p = _write(tmp_path, [
+            _assistant([{"type": "text", "text": "Let me check the calendar."}],
+                       stop_reason="tool_use"),
+            _assistant([{"type": "tool_use", "id": "t1", "name": "Bash",
+                         "input": {"command": "ls"}}],
+                       stop_reason="tool_use", msg_id="msg_1b"),
+        ])
+        events = parse_transcript(p)
+        assert events[-1].text == ""
+
+    def test_merged_text_and_tool_record_also_guarded(self, tmp_path):
+        """Belt and braces for a CLI version that merges the blocks."""
+        p = _write(tmp_path, [
+            _assistant(
+                [
+                    {"type": "text", "text": "Let me check the calendar."},
+                    {"type": "tool_use", "id": "t1", "name": "Bash",
+                     "input": {"command": "ls"}},
+                ],
+                stop_reason="tool_use",
+            ),
+        ])
+        events = parse_transcript(p)
+        assert events[-1].text == ""
+
+    def test_missing_stop_reason_still_eligible_for_fallback(self, tmp_path):
+        """A partially-flushed record carries no stop_reason; it did no tool
+        work, so its text remains the best available last word."""
+        p = _write(tmp_path, [
+            _assistant([{"type": "text", "text": "Partial answer."}],
+                       stop_reason=None),
+        ])
+        events = parse_transcript(p)
+        assert events[-1].text == "Partial answer."
+
+    def test_text_only_turn_without_end_turn_still_falls_back(self, tmp_path):
+        """The degenerate-session fallback survives for a turn that did no tool
+        work — there the text really was the model's last word."""
+        p = _write(tmp_path, [
+            _assistant([{"type": "text", "text": "Partial answer."}],
+                       stop_reason="max_tokens"),
+        ])
+        events = parse_transcript(p)
+        assert events[-1].text == "Partial answer."
+
 
 class TestModelFromTranscript:
     def test_reads_assistant_model(self, tmp_path):

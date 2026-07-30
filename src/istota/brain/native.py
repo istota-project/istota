@@ -206,6 +206,12 @@ _TRUNCATION_MARKERS = {
     "content_filter": "[note: the response was cut short by the model provider's content filter]",
 }
 
+# Stop reasons whose delivery carries a marker saying the answer is incomplete
+# (see _build_result). Only there may the run fall back to the last text-bearing
+# turn when the final turn produced none — everywhere else that would ship
+# mid-flight narration as a clean answer (ISSUE-211).
+_PARTIAL_ANSWER_STOP_REASONS = frozenset({"max_turns", "loop_detected"})
+
 # How a mid-flight steer (`!steer`) is framed when injected as a user turn. The
 # explicit wording tells the model the message is *additive* — a live nudge, not
 # a correction that invalidates work already in progress — so it adjusts course
@@ -726,7 +732,20 @@ class NativeBrain:
         # --- event accumulation -------------------------------------------
         trace: list[dict] = []
         actions: list[str] = []
+        # The agent loop executes a turn's tools *before* it emits that turn's
+        # ``turn_end`` (agent/loop.py: _execute_tool_batch then turn_end), so
+        # appending tool entries as they fire records them ahead of the text the
+        # model wrote first. That inverts document order for every native trace,
+        # which misrepresents the run to anything reading the trace back —
+        # including the finality rule in session/result.py, which reads "text
+        # after the last tool call" as the model's final message. Buffer a
+        # turn's tool entries and flush them after its text at ``turn_end``.
+        pending_tools: list[dict] = []
         last_assistant_text = ""
+        # The final turn's text — the durable answer (ISSUE-211). Distinct from
+        # ``last_assistant_text``, which is the last turn that carried *any*
+        # text and stays the backstop for the abnormal-stop paths below.
+        final_turn_text = ""
         last_error_message = ""
         # The final assistant turn's stop_reason, so a truncated (max_tokens) or
         # filtered (content_filter) answer can be marked visible rather than
@@ -755,7 +774,7 @@ class NativeBrain:
         # way — the last turn's text becomes the result.
 
         async def emit(event: AgentEvent) -> None:
-            nonlocal last_assistant_text, last_error_message
+            nonlocal last_assistant_text, final_turn_text, last_error_message
             if event.type == "message_update":
                 ae = event.assistant_event
                 if isinstance(ae, TextDelta) and ae.text:
@@ -774,7 +793,10 @@ class NativeBrain:
                 inv = _tool_invocation(event.tool_name, event.args)
                 if inv:
                     entry["raw"] = inv
-                trace.append(entry)
+                # Held until this turn's turn_end so the trace keeps document
+                # order (text the model wrote, then the tools it went on to
+                # call). Progress emission below stays live and unbuffered.
+                pending_tools.append(entry)
                 actions.append(desc)
                 await self._emit_progress(
                     req, _tool_use_event(event.tool_name, desc, event.tool_call_id)
@@ -814,9 +836,22 @@ class NativeBrain:
                     if msg.usage.total_tokens > 0 or msg.usage.cost_usd is not None:
                         usage.add(msg.usage, get_model_info(model))
                     text = msg.text.strip()
+                    # The durable answer is the *final* turn's text, not the
+                    # last turn that happened to carry text: a tool-only or
+                    # empty final turn must not promote an earlier turn's
+                    # mid-flight narration to the reply (ISSUE-211). The
+                    # abnormal-stop paths after the loop still fall back to
+                    # last_assistant_text, because there the text is delivered
+                    # with a marker that labels it incomplete.
+                    final_turn_text = msg.text
                     if text:
                         trace.append({"type": "text", "text": text})
                         last_assistant_text = msg.text
+                    # Now the tools this turn went on to call, after its text.
+                    if pending_tools:
+                        trace.extend(pending_tools)
+                        pending_tools.clear()
+                    if text:
                         # Flush the previously-held text (now known not to be
                         # final); hold this one. The last text-bearing turn
                         # stays held → suppressed (its text is the result). The
@@ -827,6 +862,14 @@ class NativeBrain:
                                 req, _text_event(pending_text["value"])
                             )
                         pending_text["value"] = msg.text
+                    elif pending_text["value"] is not None:
+                        # A turn with no text followed the held block, so that
+                        # block is not the answer after all. Release it as
+                        # progress instead of suppressing it into nothing.
+                        await self._emit_progress(
+                            req, _text_event(pending_text["value"])
+                        )
+                        pending_text["value"] = None
 
         # --- compaction + turn-budget nudge via prepare_next_turn ---------
         compaction_state = {"summary": None, "details": None}
@@ -1090,6 +1133,14 @@ class NativeBrain:
             # even if the recovery body raises a non-overflow exception.
             _log_cache_telemetry(usage)
 
+        # A run that ended mid-turn (timeout, abort, an exception past the last
+        # turn_end) can leave a turn's tools buffered. Append them so the trace
+        # records the work, accepting that a torn final turn has no text to sit
+        # in front of them.
+        if pending_tools:
+            trace.extend(pending_tools)
+            pending_tools.clear()
+
         if timed_out:
             timeout_min = req.timeout_seconds // 60
             return BrainResult(
@@ -1110,12 +1161,23 @@ class NativeBrain:
         # nothing) is a real failure, not a silent success: return an informative
         # error so the executor's retry path engages and the empty reply is never
         # delivered or archived as a completed task.
-        result_text = last_assistant_text
+        # The answer is the final turn's text (ISSUE-211). The abnormal-stop
+        # paths are the deliberate exception: a truncation marker, a max_turns
+        # cap or a detected loop all deliver the text *with a marker saying it
+        # is incomplete*, so falling back to the last text the run produced is
+        # honest there and is what ISSUE-187 and NB-15 shipped. Without the
+        # fallback a capped run whose last turn was tool-only would deliver a
+        # bare marker and drop the partial work entirely.
+        result_text = final_turn_text
         marker = (
             _TRUNCATION_MARKERS.get(last_assistant_stop["value"])
             if not final_stop["reason"]
             else None
         )
+        if not result_text.strip() and (
+            marker or final_stop["reason"] in _PARTIAL_ANSWER_STOP_REASONS
+        ):
+            result_text = last_assistant_text
         if marker:
             if result_text.strip():
                 # Non-empty but cut short — keep the partial answer and flag it.
@@ -1345,7 +1407,7 @@ class NativeBrain:
         # backstops are now first-class stop_reasons (see _DOCUMENTED_STOP_REASONS)
         # so they survive normalization instead of collapsing to "completed".
         result_text = text
-        if stop_reason in ("max_turns", "loop_detected"):
+        if stop_reason in _PARTIAL_ANSWER_STOP_REASONS:
             # A backstop stop always carries a visible marker — whether or not
             # the final turn produced text. The common case is non-empty
             # narration ("let me try X next"), which would otherwise be

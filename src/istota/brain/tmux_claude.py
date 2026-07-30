@@ -168,7 +168,9 @@ def parse_transcript(path: Path) -> list[StreamEvent]:
     events: list[StreamEvent] = []
     # Track the text of the last assistant turn that ended the conversation
     # (stop_reason == "end_turn"); that is the final answer. Fall back to the
-    # last assistant text seen if no end_turn turn exists (degenerate session).
+    # last assistant text from a turn that issued *no* tool calls if no
+    # end_turn turn exists (degenerate session) — a turn that went on to call
+    # a tool was narrating, not answering.
     final_answer: str | None = None
     last_text_any: str | None = None
     saw_assistant = False
@@ -186,11 +188,13 @@ def parse_transcript(path: Path) -> list[StreamEvent]:
             continue
 
         turn_text_parts: list[str] = []
+        turn_used_tools = False
         for block in content:
             if not isinstance(block, dict):
                 continue
             btype = block.get("type")
             if btype == "tool_use":
+                turn_used_tools = True
                 block_id = block.get("id", "")
                 if block_id and block_id in seen_tool_ids:
                     continue
@@ -219,8 +223,17 @@ def parse_transcript(path: Path) -> list[StreamEvent]:
 
         if turn_text_parts:
             joined = "\n".join(turn_text_parts)
-            last_text_any = joined
-            if message.get("stop_reason") == "end_turn":
+            stop = message.get("stop_reason")
+            # Narration by construction: the model kept working after writing
+            # this, so it can never stand in as the final answer (ISSUE-211).
+            # The CLI writes one record per content block, so a narration record
+            # carries text alone and is identified by its own
+            # ``stop_reason == "tool_use"`` — ``turn_used_tools`` only catches
+            # the merged shape, which this transcript format doesn't produce.
+            # A missing stop_reason stays eligible (a partially-flushed record).
+            if stop != "tool_use" and not turn_used_tools:
+                last_text_any = joined
+            if stop == "end_turn":
                 final_answer = joined
 
     if final_answer is not None:

@@ -215,9 +215,42 @@ sharing one `_last_substantial_region()` walker; both **replace**
    events exist (Mechanism A wins) and when the recovered region is
    already a substring of `result_text`.
 
+**The finality rule (ISSUE-211)** bounds both mechanisms. The channel
+guidelines promise the model that text written between tool calls streams as
+a progress indicator and is not the saved reply, so a text region followed by
+a `tool` entry is mid-turn narration by construction — the model kept working
+after writing it — and must never become the durable answer. Both mechanisms
+therefore pass `trailing_only=True` to `_last_substantial_region`, which
+slices the trace at the last `tool` entry before walking, so recovery only
+ever sees the model's final message. The one exception is
+`_is_back_reference(result_text)` (the `_TERSE_REFERENCE_RE` set — "see
+above" / "done"): there the model itself says the answer is earlier, which is
+exactly ISSUE-025, so reaching back honours it rather than guessing. Before
+the rule, a `<150`-char genuine answer or an empty result promoted whatever
+narration preceded the last tool call, and Mechanism A additionally glued
+narration onto the answer (its `{"cm_boundary"}`-only delimiter set spans tool
+calls). This deliberately revokes the earlier "a tool is NOT a CM-mode
+delimiter" property; the cost is that a CM-split answer whose post-tool tail is
+under the CM floor now keeps the truncated `result_text` instead of recovering.
+
+`_ensure_final_answer(result_text, trace, task)` is the tail of both paths and
+closes the abnormal-end case: when `result_text` is empty and nothing was
+recovered, it does *not* fall through to narration. Any text after the last
+tool call is adopted outright however short (the size floors exist to protect
+a non-empty `result_text`, and there is none); otherwise it returns
+`_NO_FINAL_ANSWER_NOTICE` — "The turn ended without a final response." — with
+the last mid-turn region appended under a label, so the work stays visible
+without being passed off as the answer. Automated tasks are exempt: a
+briefing body is parsed as JSON and an empty result already flows to that
+module's quiet retry, which prose would break. This is why the executor now
+calls composition on `if success:` rather than `if success and trace:` — a
+successful turn with no trace at all still must not deliver a blank reply.
+
 Every override logs one INFO line
 (`compose_full_result: mechanism=… task_id=… source_type=… original_chars=… recovered_chars=…`)
-so the 500-char floor can be calibrated against real production data.
+so the 500-char floor can be calibrated against real production data. The
+`no_final_answer` path shares the prefix but logs `partial_chars=…` instead of
+the original/recovered pair, so a field-keyed query needs both shapes.
 The legacy Jaccard near-duplicate gluing path is gone; `_text_similarity`
 remains in the source as a dead helper but is no longer called.
 
@@ -259,9 +292,11 @@ Every proxy rejection emits a structured WARNING — `proxy_rejected task_id=…
 | Function | Purpose |
 |---|---|
 | `detect_malformed_result(text, tool_count, ...)` | Validates model output for leaked tool-call XML. Strict mode (Talk): any `</parameter>`, `</invoke>`, `<thinking>` outside code fences is flagged. Lenient mode (other targets): only flags when entire output is syntax fragments (< 20 chars of real content). Malformed results are reclassified as failures and retried. |
-| `_compose_full_result(result_text, execution_trace, task=None)` | Two replace-only mechanisms sharing `_last_substantial_region()`: (A) CM-aware — runs whenever `cm_boundary` events exist, returns last segment ≥ 200 chars; (B) terse-recovery — runs only on non-automated tasks with terse `result_text`, segments by `tool` + `cm_boundary`, returns last region ≥ 500 chars. See "Result composition" section above. Logs every override. |
-| `_last_substantial_region(trace, delimiters, min_chars)` | Shared walker: groups text events into regions split by `delimiters`, returns the joined text of the last region whose length crosses `min_chars`. |
-| `_is_automated_task(task)`, `_is_terse(text)` | Gates for Mechanism B. Automated = source_type in `{scheduled, briefing}` or `heartbeat_silent` or `scheduled_job_id`. Terse = empty, < 150 chars, or matches short-reference regex. |
+| `_compose_full_result(result_text, execution_trace, task=None)` | Two replace-only mechanisms sharing `_last_substantial_region()`: (A) CM-aware — runs whenever `cm_boundary` events exist, returns last segment ≥ 200 chars; (B) terse-recovery — runs only on non-automated tasks with terse `result_text`, segments by `tool` + `cm_boundary`, returns last region ≥ 500 chars. Both bounded by the finality rule; both tail into `_ensure_final_answer`. See "Result composition" section above. Logs every override. |
+| `_last_substantial_region(trace, delimiters, min_chars, *, trailing_only=False)` | Shared walker: groups text events into regions split by `delimiters`, returns the joined text of the last region whose length crosses `min_chars`. `trailing_only` first slices the trace at the last `tool` entry, so only the model's final message is eligible (ISSUE-211). |
+| `_is_automated_task(task)`, `_is_terse(text)` | Gates for Mechanism B. Automated = source_type in `{scheduled, briefing}` or `heartbeat_silent` or `scheduled_job_id`. Terse = empty, < 150 chars, or matches short-reference regex. `_is_automated_task` additionally exempts a task from the `_ensure_final_answer` notice. |
+| `_is_back_reference(text)`, `_ensure_final_answer(result_text, trace, task)` | The ISSUE-211 pair. `_is_back_reference` is the `_TERSE_REFERENCE_RE` match that licenses reaching back past a tool boundary. `_ensure_final_answer` guarantees a completed non-automated turn never delivers an empty reply or a promoted status fragment. |
+| `is_no_final_answer(text)` | Public predicate: is this the composer's synthesized no-final-answer output rather than something the model wrote? Callers that *interpret* a result must check it — the scheduler's confirmation gate (a "should I proceed?" inside quoted mid-turn text is not a question awaiting an answer) and memory indexing (boilerplate from a broken turn has no recall value) both do. |
 
 ## Other Functions
 | Function | Purpose |

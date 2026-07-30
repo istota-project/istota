@@ -264,6 +264,22 @@ class TestConfirmationPattern:
         assert CONFIRMATION_PATTERN.search("i need your confirmation")
         assert CONFIRMATION_PATTERN.search("Reply Yes or No")
 
+    def test_no_final_answer_notice_is_not_a_confirmation(self):
+        """ISSUE-211: the notice embeds mid-turn text the model wrote to
+        itself. "Should I proceed?" in there is not a question awaiting an
+        answer, and parking the task on it would hold it for the whole
+        confirmation timeout with synthesized text as the prompt."""
+        from istota.scheduler import is_no_final_answer
+
+        notice = (
+            "The turn ended without a final response. This is the last text "
+            "it produced before stopping:\n\nShould I proceed with the deletion?"
+        )
+        # The pattern itself still matches — the guard is what gates it.
+        assert CONFIRMATION_PATTERN.search(notice)
+        assert is_no_final_answer(notice) is True
+        assert is_no_final_answer("Should I proceed with the deletion?") is False
+
 
 # ---------------------------------------------------------------------------
 # TestCleanupOldTempFiles
