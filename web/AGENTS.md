@@ -56,6 +56,10 @@ Repeats of the same message coalesce into a count rather than stacking. Pass `ke
 
 Notices clear on navigation — a notice comments on the surface that raised it. The corollary: raise one _after_ a `goto`, not before.
 
+**Copying goes through `copyText`.** `import { copyText } from '$lib/clipboard'` — it writes the text, raises the confirmation, and handles the two failures that otherwise pass for success: `navigator.clipboard` is absent outside a secure context, and a write can be refused. All copies share one notice key, so copying several blocks in a row counts up rather than queueing identical banners. Do not call `navigator.clipboard.writeText` directly.
+
+For copy buttons on rendered markdown, `use:codeCopy={{ html, streaming }}` from `$lib/markdown/codeCopy` puts one on every fenced code block. It injects DOM because the blocks live inside `{@html}`, so it re-scans on every `html` change and is idempotent; pass `streaming` so it holds off until the text settles.
+
 **Out-of-band means it has no natural home on the page.** A background sync failed, a link was copied, an optimistic update rolled back silently. In-band state stays where it is: a failed send belongs on its own message bubble, a validation error under its field, and a page that failed to load in that page's banner where it can stay put and be re-read. Routing those through a notice double-reports the failure and then takes the report away after four seconds. Where a surface has no banner for such a failure, a notice beats silence — but reaching for one there is a sign the surface is missing a banner, not a licence to skip it.
 
 ### Settings pages
@@ -80,6 +84,8 @@ Two placement rules the component depends on. `<HeaderSave />` goes **before** t
 Still their own buttons, because they are per-record forms rather than the page's state: "save this source" / "save this shared block" on briefings settings, and the entity/service modals on money settings. Clearing a stored secret also stays immediate and separately confirmed — a deletion is not an edit awaiting a Save.
 
 **`SettingsField` supplementary text is three-slotted by whether the user must see it.** `hint` is optional guidance and renders in a `HintPopover` behind a "?" beside the label. `warning` and `error` render inline, because a hover popover is discoverable, not seen. A data-integrity notice ("this client is never invoiced automatically") is a `warning`, not a `hint` — do not put anything the user needs to act on behind hover.
+
+**A `SettingsField` whose slot holds a button needs `labelled={false}`.** The component wraps its label text *and* its slot in one `<label>`, and a `<button>` is a labelable element — so it becomes the label's implicit control and clicking the field's caption activates it. That shipped once as a caption reading "Tracking" that stopped background location tracking. `labelled={false}` renders a `<div>` instead. `<label>` stays the default and stays right for the ordinary one-input case, where clicking the caption should focus the input. (`HintPopover` dodges the same hazard by rendering its trigger as `<span role="button">`, but that only protects the "?".)
 
 ## Color
 
