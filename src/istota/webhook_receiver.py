@@ -31,6 +31,10 @@ _user_contexts: dict[str, LocationContext] = {}        # user_id -> ctx
 _places_cache: dict[str, list] = {}                     # user_id -> places
 _lock = threading.Lock()
 
+# mtime of the ingest-reload sentinel as of the last rebuild. See
+# ``_maybe_reload_for_signal``.
+_sentinel_stamp: float = 0.0
+
 # Hysteresis threshold: consecutive pings at new place before opening a visit
 HYSTERESIS_THRESHOLD = 2
 
@@ -70,9 +74,15 @@ def reload_config() -> None:
     reader holding the lock sees a consistent snapshot.
     """
     from . import secrets_store  # noqa: PLC0415
+    from .location import ingest_signal  # noqa: PLC0415
 
-    global _config, _token_map, _user_contexts, _places_cache
+    global _config, _token_map, _user_contexts, _places_cache, _sentinel_stamp
     _config = load_config()
+
+    # Read the sentinel *before* the secrets, not after: a token written
+    # between the two would otherwise be marked as already-loaded and would
+    # not apply until the next write.
+    stamp = ingest_signal.reload_stamp(_config.db_path)
 
     token_map: dict[str, str] = {}
     user_contexts: dict[str, LocationContext] = {}
@@ -104,10 +114,48 @@ def reload_config() -> None:
         _token_map = token_map
         _user_contexts = user_contexts
         _places_cache = places_cache
+        _sentinel_stamp = stamp
 
     logger.info(
         "Loaded location config: %d user(s) with tokens", len(_token_map),
     )
+
+
+def _maybe_reload_for_signal() -> None:
+    """Rebuild the token map if the web process has provisioned a token.
+
+    The two live in different processes, so the web app stamps a sentinel
+    file (see :mod:`istota.location.ingest_signal`) and this runs one
+    ``os.stat`` per ingest request to notice. Without it a token generated
+    in the browser 403s until the receiver is restarted.
+
+    The new stamp is claimed *before* the reload rather than after, so
+    concurrent uvicorn threads produce one rebuild rather than one each. A
+    reload that then fails stays claimed: it means config loading is broken,
+    and re-attempting it on every subsequent ping would rescan every user's
+    DB in a tight loop. SIGHUP and restart remain the way out.
+    """
+    global _sentinel_stamp
+
+    config = _config
+    if config is None:
+        return
+
+    from .location import ingest_signal  # noqa: PLC0415
+
+    stamp = ingest_signal.reload_stamp(config.db_path)
+    if not stamp:
+        return
+    with _lock:
+        if stamp <= _sentinel_stamp:
+            return
+        _sentinel_stamp = stamp
+
+    logger.info("location ingest reload signalled; rebuilding token map")
+    try:
+        reload_config()
+    except Exception:
+        logger.exception("failed to reload location ingest config")
 
 
 @asynccontextmanager
@@ -137,6 +185,10 @@ async def receive_location(
 
     if not auth_token:
         return JSONResponse({"error": "missing token"}, status_code=401)
+
+    # Before the lookup, not after: a token provisioned seconds ago should
+    # work on its first use, which is exactly when someone is watching.
+    _maybe_reload_for_signal()
 
     with _lock:
         user_id = _token_map.get(auth_token)
@@ -243,7 +295,15 @@ def _process_feature(
         wifi=props.get("wifi"),
         place_id=place_id,
         source="overland",
+        client_id=props.get("client_id") or None,
     )
+
+    if ping_id == 0:
+        # Already stored under this client_id — a batch the device sent, and
+        # kept, because our acknowledgement never arrived. Returning here is
+        # the point of the id: running the state machine again would count a
+        # resent point as a second arrival and manufacture a visit.
+        return
 
     if low_accuracy:
         # Don't let a jittery ping move the state machine. The ping keeps its

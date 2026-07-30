@@ -81,3 +81,7 @@ class LocationPing:
     wifi: str | None
     place_id: int | None
     visit_id: int | None
+    # Defaulted so a caller constructing one by hand (and the Garmin path,
+    # which mints none) needs no change. NULL for every ping that predates
+    # the native client.
+    client_id: str | None = None
