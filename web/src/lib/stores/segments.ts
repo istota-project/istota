@@ -53,6 +53,18 @@ export interface SearchResultsData {
   text: string;
 }
 
+/**
+ * The POST body a Retry replays.
+ *
+ * Declared structurally rather than importing `ChatAttachment` from `$lib/api`:
+ * this module is deliberately free of SvelteKit imports so the reducer
+ * unit-tests without a DOM.
+ */
+export interface SendPayload {
+  text: string;
+  attachments: { path: string; name: string }[];
+}
+
 export interface ChatMessage {
   cid: number;
   role: 'user' | 'assistant' | 'system';
@@ -93,6 +105,31 @@ export interface ChatMessage {
   // System rows only: when a !search command produced structured results, the
   // row renders result cards from this instead of its markdown `text`.
   searchResults?: SearchResultsData;
+
+  // ---- Send lifecycle (ISSUE-200) -------------------------------------------
+  // User rows this client originated, only. Absent means settled — which every
+  // row rebuilt from history is, so history construction needs no new field.
+  //
+  // There is deliberately no 'sent' member. The visible confirmation of the
+  // backend's ack is the pending mark *clearing*; a permanent receipt on every
+  // outbound row would be clutter saying something we don't actually know (we
+  // have no read receipts to be consistent with).
+  sendState?: 'sending' | 'failed';
+  // Render gate for the pending mark, opened by a grace timer rather than by
+  // `sendState` itself. The state is true from the moment the row exists; the
+  // mark only earns the screen once the send is slow enough to be worth
+  // reporting. See SEND_PENDING_GRACE_MS.
+  showSending?: boolean;
+  // Why it failed, rendered beside the marker. A sentence rather than a code
+  // because the rate-limit case has to carry its own number.
+  sendError?: string;
+  // Whether Retry can succeed. False for an expired session, where the
+  // affordance would lie.
+  retryable?: boolean;
+  // What a Retry re-POSTs. Kept because the rendered row holds display names
+  // and workspace paths, not the host paths the POST body takes — deriving it
+  // back from the row would silently drop attachments.
+  sendPayload?: SendPayload;
 }
 
 // ---- Helpers ----------------------------------------------------------------

@@ -432,6 +432,68 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('adopts the echo of a send the client gave up on but the server accepted', async () => {
+    // ISSUE-200: the POST is not idempotent and carries no client id, so a
+    // timeout (or a socket dropped after the request was processed) leaves the
+    // row marked failed while the task really is running. Its echo used to
+    // append as a second bubble — the same message shown twice, once reported
+    // as unsent and once being answered.
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+
+    api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'timeout' });
+    await s.send('hello');
+    expect(get(s.messages)[0].sendState).toBe('failed');
+
+    queueEvents(
+      [row(10, 't1', { role: 'user', text: 'hello', task_id: 7, status: 'running' })],
+      10,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const msgs = get(s.messages);
+    expect(msgs.filter((m) => m.role === 'user')).toHaveLength(1);
+    const mine = msgs.find((m) => m.role === 'user')!;
+    expect(mine.sendState).toBeUndefined();
+    expect(mine.sendError).toBeUndefined();
+    expect(mine.taskId).toBe(7);
+    expect(mine.msgId).toBe(10);
+    s.teardown();
+  });
+
+  it('dedups the echo of a retried send into the row it was retried from', async () => {
+    // Reusing the failed row's cid is justified only by this: the dedup keys on
+    // (role, task_id), so stamping the retry's new task id onto the existing
+    // row is what folds the canonical echo into it instead of appending.
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+
+    api.sendChatMessage.mockResolvedValue({ ok: false, status: 0, failure: 'unreachable' });
+    await s.send('hello');
+    const cid = get(s.messages)[0].cid;
+
+    api.sendChatMessage.mockResolvedValue({ ok: true, status: 200, task_id: 55 });
+    await s.retrySend(cid);
+
+    queueEvents(
+      [row(11, 't1', { role: 'user', text: 'hello', task_id: 55, status: 'running' })],
+      11,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const msgs = get(s.messages);
+    expect(msgs.filter((m) => m.role === 'user')).toHaveLength(1);
+    expect(msgs.find((m) => m.role === 'user')!.cid).toBe(cid);
+    expect(msgs.find((m) => m.role === 'user')!.msgId).toBe(11);
+    s.teardown();
+  });
+
   it('does not re-count a buffered row the recovery refresh already counted', async () => {
     // recoverStream buffers frames while it reloads, then drains them. Its own
     // refreshRooms returns server-computed counts that already include a row

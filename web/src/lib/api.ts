@@ -2003,9 +2003,21 @@ export interface ChatHistory {
   oldest_cursor?: { ts: string; id: number } | null;
 }
 
+/**
+ * Why a send didn't land.
+ *
+ * Kept separable rather than flattened into one message string because the
+ * distinction outlives the sentence: an offline outbox (ISSUE-202) holds an
+ * `unreachable` send for later and fails a `rejected` one outright, and `auth`
+ * is the one failure a retry can never resolve.
+ */
+export type SendFailure = 'unreachable' | 'timeout' | 'auth' | 'rate_limit' | 'rejected';
+
 export interface SendResult {
   ok: boolean;
   status: number;
+  // Set only when `ok` is false.
+  failure?: SendFailure;
   retry_after?: number;
   task_id?: number | null;
   inline_result?: string;
@@ -2214,6 +2226,21 @@ export function markRoomRead(id: number): Promise<{ ok: boolean; last_read_messa
   });
 }
 
+/**
+ * How long a send may stay open before we call it dead.
+ *
+ * `fetch` has no timeout of its own, and this caller's state machine blocks on
+ * the result — without a bound, a stalled connection (a mobile handover, a
+ * proxy holding the socket) parks the composer in "sending" for as long as the
+ * OS takes to give up, which can be minutes or never.
+ *
+ * Generously above the slowest legitimate send rather than tight: the endpoint
+ * does real work before it answers (`record_inbound`, plus a Talk mirror that
+ * is itself bounded at ~5s), so a short bound would fail sends that were about
+ * to succeed.
+ */
+export const SEND_TIMEOUT_MS = 30_000;
+
 export async function sendChatMessage(
   roomId: number,
   text: string,
@@ -2222,23 +2249,84 @@ export async function sendChatMessage(
   // carries a random collision suffix, so the name the user picked is only
   // knowable here — the server persists these for the transcript's chips.
   attachmentNames: string[] = [],
+  timeoutMs = SEND_TIMEOUT_MS,
 ): Promise<SendResult> {
-  const resp = await fetch(`${base}/api/chat/rooms/${roomId}/messages`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, attachments, attachment_names: attachmentNames }),
-  });
-  if (resp.status === 401) throw new AuthError();
-  if (resp.status === 429) {
-    const retry = Number(resp.headers.get('Retry-After') || '60');
-    return { ok: false, status: 429, retry_after: retry };
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
+
+  // Serialized outside the try so the catch below can honestly claim every
+  // rejection it sees is the network — otherwise a body that can't be
+  // stringified would be reported to the user as an unreachable server.
+  const body = JSON.stringify({ text, attachments, attachment_names: attachmentNames });
+
+  try {
+    const resp = await fetch(`${base}/api/chat/rooms/${roomId}/messages`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: controller.signal,
+    });
+
+    // Also returned rather than thrown as `AuthError`: only `getMe` in the root
+    // layout catches that, so from here it took the silent path below.
+    if (resp.status === 401) return { ok: false, status: 401, failure: 'auth' };
+    if (resp.status === 429) {
+      // A `Retry-After` may legally be an HTTP-date, and an intermediary
+      // (a CDN, an nginx limiter) is not obliged to send the seconds form —
+      // so an unparseable value must not reach the transcript as "wait NaNs".
+      const parsed = Number(resp.headers.get('Retry-After'));
+      const retry = Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+      return { ok: false, status: 429, failure: 'rate_limit', retry_after: retry };
+    }
+    // Inside the try, and ahead of clearTimeout, so the abort still covers the
+    // body: a proxy that flushes headers and then stalls is the same hang the
+    // bound exists for, and clearing on the headers alone would leave it open.
+    let data: { error?: string } & Record<string, unknown> = {};
+    try {
+      data = await resp.json();
+    } catch (e) {
+      // A body that isn't JSON is an error page — nginx answers its own HTML
+      // for a 502 or an over-cap upload — and the status below already
+      // describes it. An *aborted* read is the stall this bound exists for, so
+      // it has to reach the classifier instead of passing for an empty body:
+      // swallowing it returned `{ok: true}` with no task id, which the caller
+      // reads as an inline command that produced nothing.
+      if (controller.signal.aborted) throw e;
+    }
+    if (!resp.ok) {
+      return {
+        ok: false,
+        status: resp.status,
+        failure: 'rejected',
+        error: data.error || `error ${resp.status}`,
+      };
+    }
+    // `data` spread first: the endpoint's own payload carries a `status`
+    // ("pending"), which would otherwise shadow the numeric HTTP status this
+    // type promises — and that status is now rendered to the user on failure.
+    return { ...data, ok: true, status: resp.status };
+  } catch {
+    // A rejection here is the network, never the server: connection refused,
+    // DNS, a dropped socket, a stalled body, or our own abort. There is no
+    // status to report.
+    //
+    // Returned rather than thrown, unlike every other call in this file. The
+    // caller renders this failure onto the message it belongs to, so it needs
+    // the same shape as a rejection the server did answer — and a throw from
+    // here is what used to escape an un-awaited caller and leave the composer
+    // locked with nothing on screen (ISSUE-200).
+    return { ok: false, status: 0, failure: timedOut ? 'timeout' : 'unreachable' };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    return { ok: false, status: resp.status, error: data.error || `error ${resp.status}` };
-  }
-  return { ok: true, status: resp.status, ...data };
 }
 
 export function getTaskEvents(taskId: number, sinceSeq = 0): Promise<{ events: TaskEventDTO[] }> {

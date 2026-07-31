@@ -8,27 +8,10 @@
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
-// jsdom runs on an opaque origin here, so `window.localStorage` is absent.
-// persisted.ts only needs the getItem/setItem surface — stub it.
-beforeAll(() => {
-  if (typeof globalThis.localStorage === 'undefined') {
-    const data = new Map<string, string>();
-    const stub: Storage = {
-      get length() {
-        return data.size;
-      },
-      clear: () => data.clear(),
-      getItem: (k) => data.get(k) ?? null,
-      key: (i) => [...data.keys()][i] ?? null,
-      removeItem: (k) => void data.delete(k),
-      setItem: (k, v) => void data.set(k, String(v)),
-    };
-    Object.defineProperty(globalThis, 'localStorage', { value: stub, configurable: true });
-  }
-});
+// localStorage is stubbed once for every test file in vitest-setup.ts.
 
 async function load() {
   vi.resetModules();

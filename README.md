@@ -26,7 +26,7 @@ Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file w
 
 | Area | What you get |
 |------|--------------|
-| **Messaging** | Nextcloud Talk (DMs + group rooms with @mentions), always-on web chat with live streaming, file attachments, recorded voice messages and authenticated download links for files a task produces, email (IMAP/SMTP threading), TASKS.md polling, REPL, CLI. Talk and web chat share one room model — continue a conversation on either surface with shared history, and promote a web room to a real Talk conversation. |
+| **Messaging** | Nextcloud Talk (DMs + group rooms with @mentions), always-on web chat with live streaming, file attachments, recorded voice messages, per-room drafts that survive leaving the page, and authenticated download links for files a task produces, email (IMAP/SMTP threading), TASKS.md polling, REPL, CLI. Talk and web chat share one room model — continue a conversation on either surface with shared history, and promote a web room to a real Talk conversation. |
 | **Skills** | ~35 skills the agent loads on demand: calendar, email, web browsing (Dockerized Chrome), git/GitLab/GitHub, beancount accounting, GPS tracking, Karakeep bookmarks, voice transcription, OCR, RSS feeds, health, Google Workspace, and more. A curated standard library, not a plugin marketplace. |
 | **Memory** | Per-user (USER.md) and per-channel memory, nightly-extracted dated memories, hybrid BM25 + vector recall, and a temporal knowledge graph. Optional learned playbooks distilled from successful multi-step tasks. |
 | **Web UI** | Authenticated SvelteKit dashboard (Nextcloud OAuth2): multi-room chat, RSS reader, location/places map, money and health dashboards, and per-user settings. |

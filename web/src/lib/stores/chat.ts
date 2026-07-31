@@ -37,6 +37,7 @@ import {
   type ChatRoom,
   type ChatHistory,
   type ChatView,
+  type SendResult,
 } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
 import { resetCommandCatalogue } from '$lib/components/chat/autocomplete/providers';
@@ -149,6 +150,20 @@ function randomAckVerb(): string {
   return ACK_VERBS[Math.floor(Math.random() * ACK_VERBS.length)];
 }
 
+// How long a send may stay open before its pending mark earns the screen.
+//
+// A send that resolves normally does so in well under 100ms, so an indicator
+// shown unconditionally would flash for a frame on every message — noise that
+// teaches you to ignore the one place a real problem would be reported. Past
+// this, the send is slow enough that saying so is useful, and slow is also the
+// state that precedes a failure.
+const SEND_PENDING_GRACE_MS = 400;
+
+// The 4xx that mean "later", not "no". Everything else in the range is a
+// verdict on the request itself, so a retry of the same payload is futile.
+// (429 arrives classified as `rate_limit` and never reaches this set.)
+const TRANSIENT_4XX = new Set([408, 425, 429]);
+
 // The cross-room aggregate views, in sidebar order. Also the validator for the
 // persisted selection — anything else falls back to room mode.
 const AGGREGATE_VIEWS: ChatView[] = ['all', 'unread', 'starred'];
@@ -214,6 +229,10 @@ export interface ChatSession {
   archiveRoom: (id: number) => Promise<void>;
   deleteRoom: (id: number) => Promise<void>;
   send: (text: string, attachments?: ChatAttachment[]) => Promise<void>;
+  // Re-POST a failed send from its own row (ISSUE-200). Reuses the row rather
+  // than appending a new one, so the canonical echo folds into it. No-op for a
+  // row that didn't fail, or one whose failure a retry can't resolve.
+  retrySend: (cid: number) => Promise<void>;
   cancel: () => Promise<void>;
   confirm: (cid: number, taskId: number) => Promise<void>;
   reject: (cid: number, taskId: number) => Promise<void>;
@@ -682,6 +701,41 @@ function createSession(): ChatSession {
             if (body != null) m.text = body;
           });
         }
+        return;
+      }
+    }
+    // A send we gave up on that the server had in fact accepted. A timeout, or
+    // a socket dropped after the request was processed, leaves the row marked
+    // failed with no task id — and its echo then arrives as a *second* bubble,
+    // so the user sees the same message twice: once reported as unsent, once
+    // being answered. Adopt the echo into the row it belongs to instead.
+    //
+    // Matched on the body, which is what makes it safe to claim a row: the
+    // server rewrites a few sends (an attachment-only descriptor, a stripped
+    // `!model` prefix), and those simply fall through to appending — the same
+    // duplicate as before, rather than a wrong row being silently claimed.
+    if (row.role === 'user' && typeof row.task_id === 'number' && typeof row.text === 'string') {
+      const stranded = cur.find(
+        (m) =>
+          m.role === 'user' &&
+          m.sendState === 'failed' &&
+          m.taskId === undefined &&
+          m.text === row.text,
+      );
+      if (stranded) {
+        updateMsg(stranded.cid, (m) => {
+          m.taskId = row.task_id!;
+          if (typeof row.msg_id === 'number') m.msgId = row.msg_id;
+          m.starred = !!row.starred;
+          m.sendState = undefined;
+          m.sendError = undefined;
+          m.retryable = undefined;
+          m.sendPayload = undefined;
+          m.showSending = undefined;
+        });
+        // The turn is live after all, so pick up its stream the way a freshly
+        // streamed user row would.
+        if (unsettled(row.status)) pickUpStreamedTask(row.task_id, row.status);
         return;
       }
     }
@@ -1604,38 +1658,210 @@ function createSession(): ChatSession {
         // turn comes back from history.
         attachmentPaths: attachments.map((x) => x.workspace_path ?? null),
         createdAt: new Date().toISOString(),
+        sendState: 'sending',
+        // Stashed now rather than reconstructed on failure: the row keeps
+        // display names and workspace paths, and a retry needs the host paths.
+        sendPayload: {
+          text: trimmed,
+          attachments: attachments.map((x) => ({ path: x.path, name: x.name })),
+        },
       },
     ]);
+    await runTurn(roomId, userCid, trimmed, attachments);
+  }
+
+  async function retrySend(cid: number) {
+    // Retry is the first entry into `runTurn` that isn't gated by the
+    // composer's `busy`, and `runTurn` is not re-entrant: it drains the single
+    // `pendingSend` slot on the way in, so retrying during another send would
+    // release that send's echo before its task id was stamped — the dedup in
+    // `appendStreamedRow` would miss, and the room would show two bubbles for
+    // one message and stream one task into two rows. It also resets
+    // `cancelRequested`, discarding a Stop tapped moments earlier.
+    if (get(status) !== 'idle') return;
+    const m = get(messages).find((x) => x.cid === cid);
+    // Only a failed row that a retry could actually resolve. `retryable` is
+    // false for an expired session, where re-POSTing would fail identically.
+    if (!m || m.sendState !== 'failed' || m.retryable === false || !m.sendPayload) return;
+    const roomId = get(activeRoomId);
+    if (!roomId) return;
+    const payload = m.sendPayload;
+    updateMsg(cid, (mm) => {
+      mm.sendState = 'sending';
+      mm.sendError = undefined;
+      mm.retryable = undefined;
+    });
+    // The rendered row's `attachmentPaths` still carry the workspace paths, so
+    // the chips stay live across the retry; only the POST needs the host ones.
+    await runTurn(
+      roomId,
+      cid,
+      payload.text,
+      payload.attachments.map((a) => ({ ...a, size: 0 })),
+    );
+  }
+
+  /**
+   * The shared body of a first send and a retry: append the assistant
+   * placeholder, open the echo buffer, POST, settle.
+   *
+   * Retry re-enters here with the *same* `userCid` deliberately — the echo
+   * dedup in `appendStreamedRow` keys on `(role, task_id)`, so stamping the new
+   * task id onto the existing row is what folds the canonical `messages` row
+   * into it. Appending a fresh row would leave the failed one behind and show
+   * two user bubbles for one message.
+   */
+  async function runTurn(
+    roomId: number,
+    userCid: number,
+    trimmed: string,
+    attachments: ChatAttachment[],
+  ) {
     const phCid = nextCid();
-    messages.update((a) => [
-      ...a,
-      {
-        cid: phCid,
-        role: 'assistant',
-        text: '',
-        segments: [],
-        streaming: true,
-        progress: randomAckVerb(),
-        createdAt: new Date().toISOString(),
-      },
-    ]);
-    status.set('sending');
-    cancelRequested = false;
-
-    // Hold this room's stream frames until the turn's task id is stamped
-    // below — see `pendingSend`. A previous send's buffer can't still be open
-    // (the composer blocks while sending), but drain defensively rather than
-    // dropping rows if it somehow is.
-    drainPendingSend();
-    const sendToken = get(rooms).find((r) => r.id === roomId)?.token;
-    if (sendToken) pendingSend = { token: sendToken, rows: [] };
-
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    // The whole body is guarded, not just the POST: a throw anywhere in here
+    // escaped to an un-awaited caller and left the row stuck on 'sending'
+    // forever — and on a *retry* that is unrecoverable, since `retrySend`'s own
+    // guard only accepts a row whose state is 'failed'.
     try {
+      messages.update((a) => [
+        ...a,
+        {
+          cid: phCid,
+          role: 'assistant',
+          text: '',
+          segments: [],
+          streaming: true,
+          progress: randomAckVerb(),
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+      status.set('sending');
+      cancelRequested = false;
+
+      // The mark's job is "this is taking longer than it should", not "a send
+      // happened". The common send resolves in well under 100ms, and a mark that
+      // appears and vanishes inside one frame is noise that trains you to ignore
+      // it — so the row carries the truthful `sendState` immediately and the
+      // render gate opens only if the POST is still open after the grace.
+      graceTimer = setTimeout(() => {
+        updateMsg(userCid, (m) => {
+          if (m.sendState === 'sending') m.showSending = true;
+        });
+      }, SEND_PENDING_GRACE_MS);
+
+      // Hold this room's stream frames until the turn's task id is stamped
+      // below — see `pendingSend`. No other turn's buffer can be open here:
+      // `send` is gated by the composer's `busy` and `retrySend` by an idle
+      // status, which is what keeps this drain from releasing someone else's
+      // rows before their task id exists.
+      drainPendingSend();
+      const sendToken = get(rooms).find((r) => r.id === roomId)?.token;
+      if (sendToken) pendingSend = { token: sendToken, rows: [] };
+
       await sendTurn(roomId, trimmed, attachments, userCid, phCid);
+    } catch {
+      // `sendChatMessage` classifies rather than throwing, so this is the
+      // unforeseen case. It still must not escape: an un-reset 'sending' left
+      // the composer locked in Stop mode until reload (ISSUE-200).
+      //
+      // Only when the send itself hadn't settled. `settleSend` runs the moment
+      // the backend acks, ahead of everything downstream that could throw — so
+      // a later failure is a problem with the *turn*, and reporting it as a
+      // failed send would delete a placeholder whose task is genuinely running.
+      // Past the ack the turn owns its own status transitions, so this leaves
+      // them alone — forcing 'idle' here would strand a live stream by telling
+      // the composer the room is free.
+      if (get(messages).find((m) => m.cid === userCid)?.sendState === 'sending') {
+        failSend(userCid, phCid, 'Couldn’t send — something went wrong.', true, roomId);
+      }
     } finally {
+      if (graceTimer) clearTimeout(graceTimer);
+      updateMsg(userCid, (m) => {
+        m.showSending = undefined;
+      });
       // Runs after the task id is on both halves of the turn, so the replayed
       // echo dedups instead of duplicating.
       drainPendingSend();
+    }
+  }
+
+  /**
+   * Attribute a send failure to the message that failed.
+   *
+   * The assistant placeholder is *removed* rather than repurposed as the error
+   * surface. Writing "Failed to send" into it is what made a send failure read
+   * as "the reply failed" — the misattribution ISSUE-200 is about. The turn
+   * produced no assistant message, so it has no assistant row.
+   */
+  function failSend(
+    userCid: number,
+    phCid: number,
+    reason: string,
+    retryable: boolean,
+    roomId: number,
+  ) {
+    messages.update((arr) => arr.filter((m) => m.cid !== phCid));
+    updateMsg(userCid, (m) => {
+      m.sendState = 'failed';
+      m.sendError = reason;
+      m.retryable = retryable;
+      m.showSending = undefined;
+    });
+    // Only when this turn's room is still the one on screen. Switching rooms
+    // isn't gated on `busy`, so a send failing after the switch would report
+    // 'idle' about a room that may have a task streaming in it — unlocking the
+    // composer, hiding Stop, and putting the next send into the backend's
+    // per-channel gate. The row updates above no-op on their own (the failed
+    // row left with its room).
+    if (get(activeRoomId) === roomId) status.set('idle');
+  }
+
+  /**
+   * The backend has the message: drop the send lifecycle off the row entirely.
+   *
+   * Absence is the settled state — the same state every row rebuilt from
+   * history is in — so a delivered row is indistinguishable from a reloaded
+   * one, and nothing downstream has to learn a third value.
+   */
+  function settleSend(userCid: number) {
+    updateMsg(userCid, (m) => {
+      m.sendState = undefined;
+      m.showSending = undefined;
+      m.sendError = undefined;
+      m.retryable = undefined;
+      m.sendPayload = undefined;
+    });
+  }
+
+  /** The user-facing sentence for each way a send can fail. */
+  function sendFailureReason(res: SendResult): { reason: string; retryable: boolean } {
+    switch (res.failure) {
+      case 'rate_limit':
+        return {
+          reason: `Rate limit reached — wait ${res.retry_after ?? 60}s and try again.`,
+          retryable: true,
+        };
+      case 'unreachable':
+        return { reason: 'Couldn’t send — the server is unreachable.', retryable: true };
+      case 'timeout':
+        return { reason: 'Couldn’t send — the server didn’t respond.', retryable: true };
+      case 'auth':
+        // No retry: re-POSTing with a dead session fails identically.
+        return { reason: 'Your session expired. Reload to sign in again.', retryable: false };
+      default:
+        return {
+          reason: res.error
+            ? `Couldn’t send — ${res.error}.`
+            : `Couldn’t send — the server returned ${res.status}.`,
+          // A 4xx is a verdict on this request, so re-POSTing it unchanged
+          // fails the same way — an archived room (409), a message over the
+          // length cap (400), a body nginx refused (413). Offering Retry there
+          // is the same lie the `auth` case is carved out to avoid. The two
+          // 4xx that mean "later" keep it, matching the server's own split
+          // (`PERMANENT_STATUS_CODES` in brain/claude_code.py).
+          retryable: !(res.status >= 400 && res.status < 500) || TRANSIENT_4XX.has(res.status),
+        };
     }
   }
 
@@ -1653,22 +1879,14 @@ function createSession(): ChatSession {
       attachments.map((x) => x.name),
     );
     if (!res.ok) {
-      updateMsg(phCid, (m) => {
-        const msg =
-          res.status === 429
-            ? `Rate limit reached — wait ${res.retry_after ?? 60}s and try again.`
-            : res.error || 'Failed to send message.';
-        m.text = msg;
-        // Render the failure as the message's answer segment (the send
-        // never reached the backend, so there's no event stream to build it).
-        m.segments = [{ kind: 'text', id: 'send-error', text: msg, settled: false }];
-        m.error = true;
-        m.streaming = false;
-        m.progress = undefined;
-      });
-      status.set('idle');
+      const { reason, retryable } = sendFailureReason(res);
+      failSend(userCid, phCid, reason, retryable, roomId);
       return;
     }
+    // The backend acked, so the send itself is settled either way below. The
+    // pending mark clearing is the ack's visible form; there is no receipt to
+    // leave behind.
+    settleSend(userCid);
     if (res.task_id == null) {
       // !command ran inline — no task, no stream.
       const cd = res.command_data as SearchResultsData | null | undefined;
@@ -1816,6 +2034,7 @@ function createSession(): ChatSession {
     archiveRoom,
     deleteRoom,
     send,
+    retrySend,
     cancel,
     confirm,
     reject,

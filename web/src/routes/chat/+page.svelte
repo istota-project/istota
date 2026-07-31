@@ -22,6 +22,7 @@
     type PointerSample,
   } from '$lib/components/chat/tapActivation';
   import { getChatSession } from '$lib/stores/chat';
+  import { notifyError } from '$lib/stores/notices';
   import { getMe, type ChatRoom, type ChatView } from '$lib/api';
 
   const session = getChatSession();
@@ -57,6 +58,9 @@
   // resolves (or if it fails).
   let userName = $state('You');
   let botName = $state('Istota');
+  // Who is logged in, for the composer's draft key. Null until /me resolves,
+  // which only delays a draft being restored — see draftKey below.
+  let userId = $state<string | null>(null);
   let creatingRoom = $state(false);
   let newRoomName = $state('');
   let listEl: HTMLDivElement | undefined = $state();
@@ -68,6 +72,14 @@
   let composerH = $state(0);
 
   const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
+  // Where the composer holds unsent text (ISSUE-205). Scoped to the room's
+  // token *and* the logged-in user: the room id is a recycled SQLite rowid, so
+  // a deleted room's draft would land in whichever room takes its id next, and
+  // a shared Talk room has one token across every member, so a bare token
+  // would hand one person's half-written message to another on a browser
+  // profile they take turns using. Null until both are known — the composer
+  // then holds what is typed and carries it in once the key arrives.
+  const draftKey = $derived(userId && activeRoom ? `${userId}:room:${activeRoom.token}` : null);
   const busy = $derived($status === 'sending' || $status === 'streaming');
 
   // The room's standing model default as a header badge — the canonical model
@@ -169,6 +181,9 @@
       .then((me) => {
         if (me.display_name) userName = me.display_name;
         if (me.bot_name) botName = me.bot_name;
+        // `username` is the istota user id — the same value the server keys
+        // admin checks and workspace paths on, not a display handle.
+        userId = me.username || null;
       })
       .catch(() => {});
   });
@@ -427,6 +442,23 @@
     confirmDeleteMessage = true;
   }
 
+  // Re-send a message whose send never landed. Unconfirmed, unlike delete: the
+  // action the user is repeating is the one they already asked for, and the
+  // failed row is the only place that message still exists.
+  //
+  // Offered in the live room only. An aggregate view is a read-only pane with
+  // no composer, so re-sending from one would post into a room the user isn't
+  // looking at.
+  function retryFailedSend(cid: number) {
+    atBottom = true;
+    showJumpToLatest = false;
+    // Caught rather than `void`: the store guards its own body, but a rejection
+    // reaching an un-awaited caller is the shape of the bug this whole change
+    // is about — silence where a failure should have been reported.
+    session.retrySend(cid).catch(() => notifyError('Couldn’t retry that message.'));
+    tick().then(() => pinToBottom());
+  }
+
   // Named only when the room really is Talk-bound: a delete that reaches into
   // Nextcloud Talk is a materially bigger action than one that doesn't, and
   // saying so unconditionally would be a warning about something that isn't
@@ -681,6 +713,8 @@
               onReject={session.reject}
               onToggleStar={session.toggleStar}
               onDelete={askDeleteMessage}
+              onRetry={inViewMode ? undefined : retryFailedSend}
+              retryBusy={busy}
               onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
               onJump={(token, taskId) => session.jumpToTask(token, taskId)}
               aggregate={inViewMode}
@@ -751,12 +785,15 @@
             // lands. The $messages effect covers the landing itself.
             atBottom = true;
             showJumpToLatest = false;
-            void session.send(t, atts);
+            // See retryFailedSend: the store settles its own failures onto the
+            // message row, so this only covers a rejection that escaped it.
+            session.send(t, atts).catch(() => notifyError('Couldn’t send that message.'));
             tick().then(() => pinToBottom());
           }}
           onCancel={() => session.cancel()}
           {busy}
           placeholder="Your message…"
+          {draftKey}
         />
       </div>
     {/if}
