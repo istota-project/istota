@@ -9,13 +9,12 @@ from istota.skills.briefing import (
     _parse_reminders,
     _fetch_market_data,
     _fetch_finviz_market_data,
-    _fetch_random_reminder,
     _fetch_calendar_events,
     _briefing_digest_key,
     load_previous_briefing_digest,
     save_briefing_digest,
 )
-from istota.config import Config, BriefingConfig, NextcloudConfig, ResourceConfig, UserConfig
+from istota.config import Config, NextcloudConfig
 
 
 def test_legacy_generator_removed():
@@ -28,6 +27,12 @@ def test_legacy_generator_removed():
     # (BROWSE_PRESETS); the duplicate HEADLINE_SOURCES map is gone.
     assert not hasattr(briefing_mod, "_fetch_headlines")
     assert not hasattr(briefing_mod, "HEADLINE_SOURCES")
+    # The reminder fetcher outlived the generator by reading the deprecated
+    # `reminders_file` resource, but nothing called it — the briefings module
+    # picks reminders itself (`sources/builtins._pick_reminder`). `_parse_reminders`
+    # is still live; it is what that picker parses with.
+    assert not hasattr(briefing_mod, "_fetch_random_reminder")
+    assert hasattr(briefing_mod, "_parse_reminders")
 
 
 class TestStripHtml:
@@ -198,171 +203,6 @@ class TestFetchMarketData:
         ):
             result = _fetch_market_data(market_config, "morning")
             assert result is None
-
-
-class TestFetchRandomReminder:
-    """Tests for reminder shuffle-queue rotation."""
-
-    def test_returns_reminder_from_queue(self, tmp_path):
-        """Test that reminders are returned from the queue."""
-        db_path = tmp_path / "test.db"
-        from istota.db import init_db
-        init_db(db_path)
-
-        with patch("istota.skills.files.read_text") as mock_read:
-            mock_read.return_value = "- Remember to breathe\n- Stay hydrated"
-            config = Config(
-                db_path=db_path,
-                users={"testuser": UserConfig(
-                    resources=[ResourceConfig(type="reminders_file", path="/path/to/REMINDERS.md")],
-                )}
-            )
-            result = _fetch_random_reminder(config, "testuser")
-            assert result is not None
-            assert result in ("Remember to breathe", "Stay hydrated")
-
-    def test_no_repeats_until_all_shown(self, tmp_path):
-        """Test that all reminders are shown before any repeat."""
-        db_path = tmp_path / "test.db"
-        from istota.db import init_db
-        init_db(db_path)
-
-        with patch("istota.skills.files.read_text") as mock_read:
-            mock_read.return_value = "- One\n- Two\n- Three"
-            config = Config(
-                db_path=db_path,
-                users={"testuser": UserConfig(
-                    resources=[ResourceConfig(type="reminders_file", path="/path/to/REMINDERS.md")],
-                )}
-            )
-
-            # Get all 3 reminders - should be unique
-            seen = []
-            for _ in range(3):
-                result = _fetch_random_reminder(config, "testuser")
-                seen.append(result)
-
-            assert len(set(seen)) == 3  # All unique
-            assert set(seen) == {"One", "Two", "Three"}
-
-    def test_queue_resets_after_exhausted(self, tmp_path):
-        """Test that queue reshuffles after all items shown."""
-        db_path = tmp_path / "test.db"
-        from istota.db import init_db
-        init_db(db_path)
-
-        with patch("istota.skills.files.read_text") as mock_read:
-            mock_read.return_value = "- One\n- Two"
-            config = Config(
-                db_path=db_path,
-                users={"testuser": UserConfig(
-                    resources=[ResourceConfig(type="reminders_file", path="/path/to/REMINDERS.md")],
-                )}
-            )
-
-            # Exhaust the queue (2 items)
-            for _ in range(2):
-                _fetch_random_reminder(config, "testuser")
-
-            # Next call should still work (queue resets)
-            result = _fetch_random_reminder(config, "testuser")
-            assert result in ("One", "Two")
-
-    def test_content_change_resets_queue(self, tmp_path):
-        """Test that changing reminders content resets the queue."""
-        db_path = tmp_path / "test.db"
-        from istota.db import init_db, get_db, get_reminder_state
-        init_db(db_path)
-
-        config = Config(
-            db_path=db_path,
-            users={"testuser": UserConfig(
-                resources=[ResourceConfig(type="reminders_file", path="/path/to/REMINDERS.md")],
-            )}
-        )
-
-        with patch("istota.skills.files.read_text") as mock_read:
-            # First content
-            mock_read.return_value = "- Original"
-            _fetch_random_reminder(config, "testuser")
-
-            with get_db(db_path) as conn:
-                state1 = get_reminder_state(conn, "testuser")
-                hash1 = state1.content_hash
-
-            # Change content
-            mock_read.return_value = "- New content\n- More new"
-            _fetch_random_reminder(config, "testuser")
-
-            with get_db(db_path) as conn:
-                state2 = get_reminder_state(conn, "testuser")
-                hash2 = state2.content_hash
-
-            # Hash should have changed
-            assert hash1 != hash2
-
-    def test_empty_file_returns_none(self, tmp_path):
-        """Test that empty reminders file returns None."""
-        db_path = tmp_path / "test.db"
-        from istota.db import init_db
-        init_db(db_path)
-
-        with patch("istota.skills.files.read_text") as mock_read:
-            mock_read.return_value = ""
-            config = Config(
-                db_path=db_path,
-                users={"testuser": UserConfig(
-                    resources=[ResourceConfig(type="reminders_file", path="/path/to/REMINDERS.md")],
-                )}
-            )
-            result = _fetch_random_reminder(config, "testuser")
-            assert result is None
-
-    def test_no_reminders_resource_returns_none(self):
-        """Test that missing reminders resource returns None."""
-        config = Config(users={"testuser": UserConfig()})
-        result = _fetch_random_reminder(config, "testuser")
-        assert result is None
-
-    def test_no_user_returns_none(self):
-        """Test that unknown user returns None."""
-        config = Config()
-        result = _fetch_random_reminder(config, "unknown")
-        assert result is None
-
-    def test_read_error_returns_none(self, tmp_path):
-        """Test that file read error returns None gracefully."""
-        db_path = tmp_path / "test.db"
-        from istota.db import init_db
-        init_db(db_path)
-
-        with patch("istota.skills.files.read_text", side_effect=FileNotFoundError("not found")):
-            config = Config(
-                db_path=db_path,
-                users={"testuser": UserConfig(
-                    resources=[ResourceConfig(type="reminders_file", path="/nonexistent/file.md")],
-                )}
-            )
-            result = _fetch_random_reminder(config, "testuser")
-            assert result is None
-
-    def test_db_error_falls_back_to_random(self, tmp_path):
-        """Test that DB errors fall back to random selection."""
-        from istota import db
-
-        with patch("istota.skills.files.read_text") as mock_read, \
-             patch.object(db, "get_db") as mock_db:
-            mock_read.return_value = "- Fallback reminder"
-            mock_db.side_effect = Exception("DB error")
-
-            config = Config(
-                db_path=tmp_path / "nonexistent.db",
-                users={"testuser": UserConfig(
-                    resources=[ResourceConfig(type="reminders_file", path="/path/to/REMINDERS.md")],
-                )}
-            )
-            result = _fetch_random_reminder(config, "testuser")
-            assert result == "Fallback reminder"
 
 
 class TestFetchCalendarEvents:

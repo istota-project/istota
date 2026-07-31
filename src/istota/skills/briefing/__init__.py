@@ -6,14 +6,11 @@ Consolidates briefing logic that was previously split across:
 - istota.scheduler (strip_briefing_preamble, strip_markdown)
 """
 
-import hashlib
 import html
 import json
 import logging
-import random
 import re
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import tomli
@@ -491,85 +488,6 @@ def _fetch_finviz_market_data() -> str | None:
     except Exception as e:
         logger.warning("FinViz market data fetch failed: %s", e)
         return None
-
-
-def _fetch_random_reminder(config: Config, user_id: str) -> str | None:
-    """
-    Fetch a reminder using shuffle-queue rotation (no repeats until all shown).
-
-    Each reminder is shown exactly once before any repeats. When all reminders
-    have been cycled through, the queue is reshuffled. If the reminders file
-    content changes, the queue resets.
-
-    Reads the user's ``reminders_file`` resource path (a deprecated override
-    kept for back-compat; the briefings-module path uses a source ``path``
-    instead). Absent, returns None.
-
-    Args:
-        config: Application configuration (used for mount-aware file reading)
-        user_id: The user's ID
-
-    Returns:
-        Next reminder in rotation, or None if not available
-    """
-    from ... import db
-    from ..files import read_text
-
-    user_config = config.users.get(user_id)
-    if not user_config:
-        return None
-
-    # Deprecated override: explicit reminders_file resources only — no
-    # convention default (the briefings-module path owns the location via a
-    # source ``path``; the legacy path reads only an explicit resource).
-    paths = [r.path for r in user_config.resources
-             if r.type == "reminders_file" and r.path]
-    if not paths:
-        return None
-
-    # Collect all reminders and compute content hash
-    all_content = []
-    all_reminders = []
-    for path in paths:
-        try:
-            content = read_text(config, path)
-            all_content.append(content or "")
-            all_reminders.extend(_parse_reminders(content))
-        except Exception as e:
-            logger.warning("Failed to read reminders file %s: %s", path, e)
-
-    if not all_reminders:
-        return None
-
-    # Compute hash of combined content to detect changes
-    content_hash = hashlib.sha256("".join(all_content).encode()).hexdigest()[:16]
-
-    # Get or create queue state
-    try:
-        with db.get_db(config.db_path) as conn:
-            state = db.get_reminder_state(conn, user_id)
-
-            # Check if we need to reset the queue (content changed or queue empty)
-            if state is None or state.content_hash != content_hash or not state.queue:
-                # Create fresh shuffled queue
-                indices = list(range(len(all_reminders)))
-                random.shuffle(indices)
-                queue = indices
-                logger.debug(
-                    "Created new reminder queue for %s: %d items", user_id, len(queue)
-                )
-            else:
-                queue = state.queue
-
-            # Pop the next reminder from the queue
-            next_index = queue.pop(0)
-            db.set_reminder_state(conn, user_id, queue, content_hash)
-            conn.commit()
-
-            return all_reminders[next_index]
-    except Exception as e:
-        logger.warning("Reminder state error, falling back to random: %s", e)
-        return random.choice(all_reminders)
 
 
 def _fetch_calendar_events(

@@ -327,11 +327,14 @@ class ResourceConfig:
     Obsolete credential types (karakeep, monarch, overland, ...) survive only
     in the load-time migration window (``_allow_obsolete=True``) so their
     credentials can be absorbed into the secrets table; calendar /
-    email_folder / notes_folder rows are inert and auto-cleaned, and
-    todo_file / reminders_file survive as deprecated overrides read by the
-    briefing fetchers' workspace-convention fallback. Service credentials
-    live in ``extra`` (read by ``secrets_store``) or the encrypted secrets
-    table, not flat fields.
+    email_folder / notes_folder rows are inert and auto-cleaned. todo_file /
+    reminders_file are inert too but are *not* auto-cleaned: the fetcher that
+    read reminders_file was deleted once the briefings module took over
+    reminder selection, and nothing ever read todo_file. They are parsed and
+    stored so an existing row survives a config load untouched, and removing
+    them is a data migration rather than dead-code cleanup. Service
+    credentials live in ``extra`` (read by ``secrets_store``) or the encrypted
+    secrets table, not flat fields.
     """
     type: str
     path: str = ""

@@ -1707,10 +1707,12 @@ def delete_user_resource(
 # Cleaning them out of user_resources keeps stale rows from leaking into the
 # executor / web UI.
 #
-# todo_file / reminders_file are intentionally NOT here — they survive as
-# deprecated overrides read by the legacy briefing fetchers (the briefings-
-# module path uses a source ``path`` instead). They are never auto-cleaned;
-# an operator removes them when the user has migrated off the legacy path.
+# todo_file / reminders_file are intentionally NOT here, but no longer because
+# anything reads them: the briefings module owns reminder selection via a
+# source ``path``, the fetcher that read reminders_file has been deleted, and
+# todo_file never had a reader at all. They stay out of the auto-clean set
+# because deleting a user's rows is a data migration, not dead-code removal —
+# an operator removes them by hand. Adding them here is the follow-up.
 _OBSOLETE_RESOURCE_TYPES = (
     "feeds", "money", "monarch", "moneyman", "karakeep", "overland",
     "calendar", "email_folder", "notes_folder",

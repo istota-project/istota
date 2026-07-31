@@ -1,12 +1,9 @@
 """Tests for the briefings source resolvers (fail-soft contract)."""
 
 import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 
-import pytest
-
-from istota.briefings.sources import GatheredSource, SourceContext, resolve_source
+from istota.briefings.sources import SourceContext, resolve_source
 from istota.config import BrowserConfig, Config, EmailConfig, UserConfig
 
 
