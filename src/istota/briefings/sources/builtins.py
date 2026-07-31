@@ -24,6 +24,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from istota.briefings.sources import GatheredSource, SourceContext
+from istota.briefings.sources._markdown import flatten_vault_links
 
 
 logger = logging.getLogger(__name__)
@@ -287,6 +288,14 @@ def _extract_todo_items(content: str) -> list[dict]:
     nested breadcrumb: it is what a person means by "the section this item is
     under", and a breadcrumb would prefix every group with the document title.
 
+    Vault note-links are flattened out of the emitted text and section labels
+    (:func:`flatten_vault_links`, ISSUE-215), but only at emission — every
+    parsing decision above is made on the file as written. Sanitising the input
+    instead let a link masquerade as structure: ``- [x](Done.md) ship it`` lost
+    its checkbox shape and came back as a pending todo, and a link whose text
+    ended in a colon could establish the label heading dialect and re-attribute
+    every item below it.
+
     Headings are read in the file's own dialect (:func:`_heading_dialect`), so
     a todo list that marks its sections with ``**NOW**``, ``NOW:`` or a setext
     underline is understood as well as one using ``### NOW``. Items are matched
@@ -309,14 +318,14 @@ def _extract_todo_items(content: str) -> list[dict]:
         checkbox = _CHECKBOX_RE.match(line)
         if checkbox:
             if checkbox.group("mark") == " ":  # unchecked → pending
-                items.append({"text": line, "section": section})
+                items.append({"text": flatten_vault_links(line), "section": section})
             continue  # checked → done, skip
         if _is_item_line(line):
-            items.append({"text": line, "section": section})
+            items.append({"text": flatten_vault_links(line), "section": section})
             continue
         is_heading, label, consumed = _heading_at(lines, idx, dialect)
         if is_heading:
-            section = label
+            section = flatten_vault_links(label) if label else label
             skip = consumed
     return items
 
@@ -405,6 +414,13 @@ def resolve_reminders(config: dict, ctx: SourceContext) -> GatheredSource:
             provenance="(no reminders file at configured path)", ok=False,
         )
     reminder = _pick_reminder(ctx, content)
+    # Flattened *after* the pick, so the shuffle queue stays keyed on the raw
+    # file content — sanitising first would reset every user's queue on
+    # upgrade, and again on any later change to the pass (ISSUE-215). The
+    # emptiness check is re-run on the result: a reminder that was nothing but
+    # a note-link flattens away, and an empty verbatim block would render as a
+    # bare header with no body rather than being omitted as a dead source.
+    reminder = flatten_vault_links(reminder).strip() if reminder else ""
     if not reminder:
         return GatheredSource(
             kind="reminders", title="Reminder",
@@ -465,7 +481,8 @@ def resolve_notes(config: dict, ctx: SourceContext) -> GatheredSource:
             provenance="(no notes file at configured path)", ok=False,
         )
     max_chars = int(ctx.module_config.max_source_chars)
-    text = content.strip()
+    # Flattened before the cap so the budget counts what is emitted (ISSUE-215).
+    text = flatten_vault_links(content).strip()
     if max_chars and len(text) > max_chars:
         text = text[:max_chars] + "\n[...truncated]"
     return GatheredSource(

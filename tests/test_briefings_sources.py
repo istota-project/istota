@@ -971,6 +971,46 @@ class TestTodoFrontmatter:
         gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
         assert [i["text"] for i in gs.items] == ["- a", "- b"]
 
+    def test_vault_links_flattened_in_items_and_section_labels(self, tmp_path):
+        """ISSUE-215: a todo file in the same vault carries the same note-links."""
+        ctx = _ctx(tmp_path)
+        _write_user_file(
+            ctx, "TODO.md",
+            "### [[NOW]]\n"
+            "- reply to [Jane](People/Jane%20Doe.md)\n"
+            "- read [the memo](https://example.com/memo)\n",
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == [
+            "- reply to Jane",
+            "- read [the memo](https://example.com/memo)",
+        ]
+        assert {i["section"] for i in gs.items} == {"NOW"}
+
+    def test_a_link_cannot_masquerade_as_a_checked_checkbox(self, tmp_path):
+        """Parsing reads the file as written; only emitted text is flattened.
+
+        Sanitising the input first turned `- [x](Done.md) ship it` into
+        `- x ship it`, so a done item came back as pending.
+        """
+        ctx = _ctx(tmp_path)
+        _write_user_file(ctx, "TODO.md", "- [x](Done.md) ship it\n- [ ] real one\n")
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["text"] for i in gs.items] == ["- [ ] real one"]
+
+    def test_a_link_cannot_establish_the_label_heading_dialect(self, tmp_path):
+        """`[Project X:](Project%20X.md)` flattens to a `NOW:`-shaped label.
+
+        Detecting the dialect from the flattened text would invent a section
+        and re-attribute every item below it.
+        """
+        ctx = _ctx(tmp_path)
+        _write_user_file(
+            ctx, "TODO.md", "- alpha\n[Project X:](Project%20X.md)\n- beta\n",
+        )
+        gs = resolve_source("todos", {"path": "TODO.md"}, ctx)
+        assert [i["section"] for i in gs.items] == [None, None]
+
 
 class TestTodoSizeCap:
     """``max_source_chars`` applies to todos, dropping whole items.
@@ -1105,6 +1145,68 @@ class TestBuiltinReminders:
         assert gs.ok is True
         assert gs.text in ("Drink water", "Stand up straight")
 
+    def test_vault_note_link_is_flattened(self, tmp_path):
+        """ISSUE-215: the picked reminder reaches synthesis with no dead link."""
+        ctx = _ctx(tmp_path)
+        from istota import db
+        db.init_db(ctx.app_config.db_path)
+        _write_user_file(
+            ctx, "shared/reminders.md",
+            "Know when to move on.\n"
+            "-- Oliver Burkeman, [Eight secrets to a fairly fulfilled life]"
+            "(Eight%20secrets%20to%20a%20fairly%20fulfilled%20life.md)\n",
+        )
+        gs = resolve_source("reminders", {"path": "shared/reminders.md"}, ctx)
+        assert gs.ok is True
+        assert ".md)" not in gs.text
+        assert "-- Oliver Burkeman, Eight secrets to a fairly fulfilled life" in gs.text
+
+    def test_real_link_in_a_reminder_survives(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        from istota import db
+        db.init_db(ctx.app_config.db_path)
+        _write_user_file(
+            ctx, "shared/reminders.md",
+            "Read this.\n-- [The Author](https://example.com/essay)\n",
+        )
+        gs = resolve_source("reminders", {"path": "shared/reminders.md"}, ctx)
+        assert "[The Author](https://example.com/essay)" in gs.text
+
+    def test_reminder_that_flattens_to_nothing_is_not_a_live_source(self, tmp_path):
+        """An empty verbatim block renders a bare header with no body.
+
+        `ok=False` omits the source instead, the same as a missing file.
+        """
+        ctx = _ctx(tmp_path)
+        from istota import db
+        db.init_db(ctx.app_config.db_path)
+        _write_user_file(ctx, "shared/reminders.md", "[[Note|]]\n")
+        gs = resolve_source("reminders", {"path": "shared/reminders.md"}, ctx)
+        # The empty alias falls back to the target, so this one survives.
+        assert gs.ok is True and gs.text == "Note"
+        _write_user_file(ctx, "shared/reminders.md", "![](diagram.png)\n")
+        gs = resolve_source("reminders", {"path": "shared/reminders.md"}, ctx)
+        assert gs.ok is False
+        assert gs.text == ""
+
+    def test_flattening_does_not_reset_the_shuffle_queue(self, tmp_path):
+        """The queue is keyed on the *raw* file content, not the flattened text.
+
+        Flattening before hashing would reset every user's queue once on
+        upgrade, and again on any future change to the sanitiser.
+        """
+        ctx = _ctx(tmp_path)
+        from istota import db
+        db.init_db(ctx.app_config.db_path)
+        content = "One.\n\nTwo, see [A Note](A%20Note.md)\n"
+        _write_user_file(ctx, "shared/reminders.md", content)
+        resolve_source("reminders", {"path": "shared/reminders.md"}, ctx)
+        with db.get_db(ctx.app_config.db_path) as conn:
+            state = db.get_reminder_state(conn, ctx.user_id)
+        import hashlib
+        assert state.content_hash == hashlib.sha256(
+            content.encode()).hexdigest()[:16]
+
 
 class TestBuiltinNotes:
     def test_no_path_returns_not_configured(self, tmp_path):
@@ -1123,6 +1225,30 @@ class TestBuiltinNotes:
         gs = resolve_source("notes", {"path": "istota/notes/agenda.md"}, ctx)
         assert gs.ok is True
         assert "agenda item" in gs.text
+
+    def test_vault_links_are_flattened(self, tmp_path):
+        """ISSUE-215: notes share the reminders exposure — same vault, same links."""
+        ctx = _ctx(tmp_path)
+        _write_user_file(
+            ctx, "NOTES.md",
+            "Follow up on [Q3 planning](Q3%20planning.md) and [[Budget]].\n"
+            "Source: [the report](https://example.com/report)\n",
+        )
+        gs = resolve_source("notes", {"path": "NOTES.md"}, ctx)
+        assert "Follow up on Q3 planning and Budget." in gs.text
+        assert "[the report](https://example.com/report)" in gs.text
+
+    def test_size_cap_measures_the_flattened_text(self, tmp_path):
+        """The budget has to count what is emitted, not the pre-flatten source."""
+        ctx = _ctx(tmp_path)
+        ctx.module_config.max_source_chars = 40
+        _write_user_file(
+            ctx, "NOTES.md",
+            "[short](A%20Very%20Long%20Vault%20Note%20Name%20Indeed.md) tail\n",
+        )
+        gs = resolve_source("notes", {"path": "NOTES.md"}, ctx)
+        assert gs.text == "short tail"
+        assert "truncated" not in gs.text
 
 
 # ---------------------------------------------------------------------------

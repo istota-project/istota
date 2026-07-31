@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Briefings no longer carry dead links from your notes. A reminder, todo or note whose text linked to another note in your vault arrived with that link intact, so the attribution under a quote was a clickable link to nothing in email and web chat. Those links are now flattened to plain text before the briefing is written, since there was nothing at the other end to reach. Real web links, including the article links under news stories, are untouched.
+
 - A web chat message that failed to send no longer disappears. The failure notice and its Retry were destroyed by anything that rebuilt the transcript — switching rooms, or the reconnect that follows the very outage that caused the failure — leaving no trace of what you wrote. The message now stays put through all of it, and the text is also held as a draft until the server confirms it, so a page reload puts it back in the composer rather than losing it.
 - Retrying a message the server had in fact accepted no longer posts it twice. A send that timed out, or whose connection dropped after the server was already handling it, was indistinguishable from one that never arrived; retrying it produced a second copy and a second reply. Each message now carries an identity the server recognises, so a retry resolves to the message already sent.
 - A file attached in web chat can no longer end up in the wrong room. Picking a large file and switching rooms before the upload finished put the file's chip in the new room, where sending would have posted it there.
