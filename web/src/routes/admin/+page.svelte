@@ -7,7 +7,7 @@
     type AdminStatsUser,
     type AdminStatsUserSource,
   } from '$lib/api';
-  import { AppShell, ShellHeader, NoticeBanner } from '$lib/components/ui';
+  import { NoticeBanner } from '$lib/components/ui';
 
   let stats: AdminStats | null = $state(null);
   let loading = $state(true);
@@ -230,441 +230,434 @@
   }
 </script>
 
-<AppShell>
-  {#snippet header()}
-    <ShellHeader title="Admin dashboard">
-      {#snippet tools()}
-        <span class="refresh-note">Auto-refresh 60s</span>
-      {/snippet}
-    </ShellHeader>
-  {/snippet}
+<!-- The AppShell + ShellHeader live in admin/+layout.svelte, shared with the
+     Configuration and Logs sections. This page is the Status section's body. -->
+<div class="settings admin-page">
+  {#if loading && !stats}
+    <div class="center-msg">Loading…</div>
+  {:else if error}
+    <div class="banner error">{error}</div>
+  {:else if stats}
+    {#if stats.runtime?.mode === 'standalone'}
+      <NoticeBanner
+        title="Running in standalone (local single-user) mode"
+        bind:collapsed={standaloneCollapsed}
+      >
+        <p class="standalone-lead">
+          This instance runs the slimmed-down local shape. What that means here:
+        </p>
+        <ul class="standalone-caveats">
+          {#each stats.runtime.caveats as caveat}
+            <li>
+              <span class="caveat-title">{caveat.title}</span>
+              <span class="caveat-detail">{caveat.detail}</span>
+            </li>
+          {/each}
+        </ul>
+      </NoticeBanner>
+    {/if}
 
-  <div class="settings admin-page">
-    {#if loading && !stats}
-      <div class="center-msg">Loading…</div>
-    {:else if error}
-      <div class="banner error">{error}</div>
-    {:else if stats}
-      {#if stats.runtime?.mode === 'standalone'}
-        <NoticeBanner
-          title="Running in standalone (local single-user) mode"
-          bind:collapsed={standaloneCollapsed}
-        >
-          <p class="standalone-lead">
-            This instance runs the slimmed-down local shape. What that means here:
-          </p>
-          <ul class="standalone-caveats">
-            {#each stats.runtime.caveats as caveat}
-              <li>
-                <span class="caveat-title">{caveat.title}</span>
-                <span class="caveat-detail">{caveat.detail}</span>
-              </li>
-            {/each}
-          </ul>
-        </NoticeBanner>
-      {/if}
-
-      <!-- System banner -->
-      <section class="card system-banner card-grid">
-        <div class="banner-cell">
-          <div class="cell-label">Status</div>
-          <div class="cell-value">
-            <span
-              class="dot"
-              class:dot-ok={stats.system.scheduler_healthy && !stats.brain_status?.degraded}
-              class:dot-warn={stats.system.scheduler_healthy && stats.brain_status?.degraded}
-              class:dot-bad={!stats.system.scheduler_healthy}
-            ></span>
-            {#if !stats.system.scheduler_healthy}
-              Stale
-            {:else if stats.brain_status?.degraded}
-              Degraded
-            {:else}
-              Healthy
-            {/if}
-          </div>
-          <div class="cell-sub">
-            {#if stats.system.scheduler_healthy && stats.brain_status?.degraded}
-              {#if stats.brain_status.active}
-                on fallback ({brainLabel(stats.brain_status.active)}) · {brainLabel(
-                  stats.brain_status.primary,
-                )} down
-              {:else}
-                {brainLabel(stats.brain_status.primary)} down · no fallback
-              {/if}
-            {:else}
-              last activity {formatTimestamp(stats.system.last_scheduler_run)}
-            {/if}
-          </div>
-        </div>
-        <div class="banner-cell">
-          <div class="cell-label">Version</div>
-          <div class="cell-value">{stats.system.version}</div>
-          <div class="cell-sub">Python {stats.system.python_version}</div>
-        </div>
-        <div class="banner-cell">
-          <div class="cell-label">Web uptime</div>
-          <div class="cell-value">{formatDuration(stats.system.uptime_seconds)}</div>
-        </div>
-        <div class="banner-cell">
-          <div class="cell-label">Database</div>
-          <div class="cell-value">{formatBytes(stats.system.db_size_bytes)}</div>
-          {#if stats.storage.nextcloud_configured}
-            <div class="cell-sub">mount {stats.storage.nextcloud_mount_healthy ? '✓' : '✗'}</div>
+    <!-- System banner -->
+    <section class="card system-banner card-grid">
+      <div class="banner-cell">
+        <div class="cell-label">Status</div>
+        <div class="cell-value">
+          <span
+            class="dot"
+            class:dot-ok={stats.system.scheduler_healthy && !stats.brain_status?.degraded}
+            class:dot-warn={stats.system.scheduler_healthy && stats.brain_status?.degraded}
+            class:dot-bad={!stats.system.scheduler_healthy}
+          ></span>
+          {#if !stats.system.scheduler_healthy}
+            Stale
+          {:else if stats.brain_status?.degraded}
+            Degraded
+          {:else}
+            Healthy
           {/if}
         </div>
-      </section>
-
-      <!-- Models / brain backend -->
-      {#if stats.models && !stats.models.error}
-        {@const m = stats.models}
-        <section class="card">
-          <header class="section-header">
-            <h2>Models</h2>
-          </header>
-          <dl class="kv model-kv">
-            <dt>Brain</dt>
-            <dd>{brainLabel(m.brain_kind)}</dd>
-            {#if m.endpoint}
-              <dt>Endpoint</dt>
-              <dd class="endpoint">
-                <span class="endpoint-url">{m.endpoint}</span>{#if m.provider}<span
-                    class="endpoint-provider">· {m.provider}</span
-                  >{/if}
-              </dd>
+        <div class="cell-sub">
+          {#if stats.system.scheduler_healthy && stats.brain_status?.degraded}
+            {#if stats.brain_status.active}
+              on fallback ({brainLabel(stats.brain_status.active)}) · {brainLabel(
+                stats.brain_status.primary,
+              )} down
+            {:else}
+              {brainLabel(stats.brain_status.primary)} down · no fallback
             {/if}
-          </dl>
-
-          <dl class="kv model-kv role-kv">
-            <dt>Default</dt>
-            <dd class="model-value">
-              <code>{m.default_model}</code>
-              {#if m.default_effort}<span class="effort-chip">{m.default_effort}</span>{/if}
-            </dd>
-            {#each m.roles as r (r.role)}
-              <dt>{r.role}</dt>
-              <dd class="model-value"><code>{r.resolved}</code></dd>
-            {/each}
-          </dl>
-
-          {#if m.source_type_overrides && Object.keys(m.source_type_overrides).length > 0}
-            <div class="overrides">
-              <div class="cell-label">Source-type routing</div>
-              <dl class="kv model-kv">
-                {#each Object.entries(m.source_type_overrides) as [src, kind] (src)}
-                  <dt>{src}</dt>
-                  <dd>{brainLabel(kind)}</dd>
-                {/each}
-              </dl>
-            </div>
+          {:else}
+            last activity {formatTimestamp(stats.system.last_scheduler_run)}
           {/if}
-        </section>
-      {/if}
-
-      <!-- Users -->
-      <section class="card">
-        <header class="section-header">
-          <h2>Users</h2>
-        </header>
-        <div class="table-scroll">
-          <table class="grid users-grid">
-            <thead>
-              <tr>
-                <th class="col-user">User</th>
-                <th class="num col-total">Total</th>
-                <th class="col-24h">24h activity</th>
-                <th class="num col-failed">Failed</th>
-                <th class="num col-avg">Avg/day</th>
-                <th class="col-active">Last active</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each stats.users as u (u.username)}
-                {@const segments = userSegments(u)}
-                {@const totalSeg = segments.reduce((acc, s) => acc + s.count, 0)}
-                <tr>
-                  <td>
-                    <span class="username">{u.display_name || u.username}</span>
-                    {#if u.is_admin}<span class="admin-badge">admin</span>{/if}
-                  </td>
-                  <td class="num col-total">{formatNumber(u.tasks_total)}</td>
-                  <td class="source-cell">
-                    <div class="source-summary">
-                      <span class="muted">int</span>
-                      <strong>{u.tasks_interactive_24h}</strong>
-                      <span class="sep">·</span>
-                      <span class="muted">auto</span>
-                      <strong>{formatNumber(u.tasks_automated_24h)}</strong>
-                    </div>
-                    {#if totalSeg > 0}
-                      <div class="stack-bar" aria-label="24h source breakdown">
-                        {#each segments as seg (seg.source)}
-                          <span
-                            class="stack-seg"
-                            style="width: {(seg.count / totalSeg) * 100}%; background: {sourceColor(
-                              seg.source,
-                            )};"
-                            title={segmentTooltip(seg)}
-                          ></span>
-                        {/each}
-                      </div>
-                      <div class="source-list">
-                        {#each segments as seg (seg.source)}
-                          <span class="source-pill" title={segmentTooltip(seg)}>
-                            <span
-                              class="dot dot-source"
-                              style="background: {sourceColor(seg.source)};"
-                            ></span>
-                            {seg.source}
-                            {formatNumber(seg.count)}
-                          </span>
-                        {/each}
-                      </div>
-                    {/if}
-                  </td>
-                  <td class="num col-failed">
-                    {#if u.tasks_failed_24h > 0}
-                      <span class="failed-pill">{u.tasks_failed_24h}</span>
-                    {:else}
-                      0
-                    {/if}
-                  </td>
-                  <td class="num col-avg">{u.tasks_avg_per_day}</td>
-                  <td class="col-active">{formatTimestamp(u.last_active)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
         </div>
-      </section>
-
-      <!-- Tasks -->
-      <section class="card">
-        <header class="section-header">
-          <h2>Task activity</h2>
-        </header>
-        <div class="kpi-grid card-grid">
-          <div class="kpi">
-            <div class="kpi-label">Interactive 24h</div>
-            <div class="kpi-value">{formatNumber(stats.tasks.interactive_24h)}</div>
-            <div class="kpi-sub">{stats.tasks.interactive_avg_per_day_30d}/day (30d)</div>
-          </div>
-          <div class="kpi">
-            <div class="kpi-label">Automated 24h</div>
-            <div class="kpi-value muted">{formatNumber(stats.tasks.automated_24h)}</div>
-            <div class="kpi-sub">
-              {formatNumber(stats.tasks.automated_avg_per_day_30d)}/day (30d)
-            </div>
-          </div>
-          <div class="kpi">
-            <div class="kpi-label">Avg duration</div>
-            <div class="kpi-value">{stats.tasks.avg_duration_seconds}s</div>
-          </div>
-          <div class="kpi" class:kpi-warn={stats.tasks.failed_24h > 0}>
-            <div class="kpi-label">Failed 24h</div>
-            <div class="kpi-value">{stats.tasks.failed_24h}</div>
-            <div class="kpi-sub">{(stats.tasks.error_rate_24h * 100).toFixed(2)}% error rate</div>
-          </div>
-          <div class="kpi col-total-kpi">
-            <div class="kpi-label">Total tasks</div>
-            <div class="kpi-value">{formatNumber(stats.tasks.total)}</div>
-          </div>
-        </div>
-        {#if Object.keys(stats.tasks.by_source).length > 0}
-          {@const maxN = Math.max(...Object.values(stats.tasks.by_source))}
-          <div class="source-bars">
-            {#each Object.entries(stats.tasks.by_source).sort((a, b) => b[1] - a[1]) as [src, count] (src)}
-              {@const failed = stats.tasks.failed_by_source_24h?.[src] ?? 0}
-              <div class="source-row">
-                <div class="source-label">
-                  <span class="dot dot-source" style="background: {sourceColor(src)};"></span>
-                  {src}
-                </div>
-                <div class="source-bar">
-                  <div
-                    class="source-fill"
-                    style="width: {(count / maxN) * 100}%; background: {sourceColor(src)};"
-                  ></div>
-                </div>
-                <div class="source-count">
-                  {formatNumber(count)}{#if failed > 0}<span
-                      class="failed-inline"
-                      title="failed in 24h">·{failed} failed</span
-                    >{/if}
-                </div>
-              </div>
-            {/each}
-          </div>
+      </div>
+      <div class="banner-cell">
+        <div class="cell-label">Version</div>
+        <div class="cell-value">{stats.system.version}</div>
+        <div class="cell-sub">Python {stats.system.python_version}</div>
+      </div>
+      <div class="banner-cell">
+        <div class="cell-label">Web uptime</div>
+        <div class="cell-value">{formatDuration(stats.system.uptime_seconds)}</div>
+      </div>
+      <div class="banner-cell">
+        <div class="cell-label">Database</div>
+        <div class="cell-value">{formatBytes(stats.system.db_size_bytes)}</div>
+        {#if stats.storage.nextcloud_configured}
+          <div class="cell-sub">mount {stats.storage.nextcloud_mount_healthy ? '✓' : '✗'}</div>
         {/if}
-      </section>
+      </div>
+    </section>
 
-      <!-- Modules -->
-      {#if Object.keys(stats.modules).length > 0}
-        <section class="card">
-          <header class="section-header">
-            <h2>Modules</h2>
-          </header>
-          <div class="module-grid card-grid">
-            {#each Object.entries(stats.modules) as [name, mod] (name)}
-              <div class="module-card" class:module-warn={moduleErrorCount(mod) > 0}>
-                <div class="module-name">{name}</div>
-                <dl class="module-fields">
-                  {#each Object.entries(mod) as [k, v] (k)}
-                    <dt>{fieldLabel(k)}</dt>
-                    <dd>
-                      {v === null
-                        ? '—'
-                        : TIMESTAMP_KEYS.has(k)
-                          ? formatTimestamp(String(v))
-                          : String(v)}
-                    </dd>
-                  {/each}
-                </dl>
-              </div>
-            {/each}
-          </div>
-        </section>
-      {/if}
-
-      <!-- Scheduler -->
+    <!-- Models / brain backend -->
+    {#if stats.models && !stats.models.error}
+      {@const m = stats.models}
       <section class="card">
         <header class="section-header">
-          <h2>Scheduler</h2>
-          <span class="muted meta"
-            >{stats.scheduler.jobs_active} active · {stats.scheduler.jobs_paused} paused</span
-          >
+          <h2>Models</h2>
         </header>
-        {#if stats.scheduler.jobs.length === 0}
-          <p class="empty">No scheduled jobs.</p>
-        {:else}
-          {@const parts = partitionJobs(stats.scheduler.jobs)}
-          <div class="table-scroll">
-            <table class="grid jobs-grid">
-              <thead>
-                <tr>
-                  <th>Job</th>
-                  <th class="col-cron">Cron</th>
-                  <th class="col-status">Status</th>
-                  <th class="col-lastrun">Last run</th>
-                  <th class="num col-failures"
-                    ><span class="label-full">Failures</span><span class="label-abbr">Fails</span
-                    ></th
-                  >
-                </tr>
-              </thead>
-              <tbody>
-                {#each parts.regular as j (j.id)}
-                  {@const expandable = !!j.last_error}
-                  <tr
-                    class:row-error={j.consecutive_failures > 0}
-                    class:row-clickable={expandable}
-                    onclick={() => expandable && toggleJob(j.id)}
-                  >
-                    <td>
-                      <span class="username">{j.user_id}</span>
-                      <span class="muted">/</span>
-                      <span class="job-name">{j.name}</span>
-                    </td>
-                    <td class="col-cron"><code>{j.cron}</code></td>
-                    <td class="col-status">
-                      <span class="dot" class:dot-ok={j.enabled} class:dot-mute={!j.enabled}></span>
-                      <span class="status-label">{j.enabled ? 'enabled' : 'paused'}</span>
-                    </td>
-                    <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
-                    <td class="num col-failures">{j.consecutive_failures}</td>
-                  </tr>
-                  {#if expandable && expandedJobs[j.id]}
-                    <tr class="error-row">
-                      <td colspan="5"><pre>{j.last_error}</pre></td>
-                    </tr>
-                  {/if}
-                {/each}
-                {#if parts.moduleJobs.length > 0}
-                  {@const summary = moduleJobSummary(parts.moduleJobs)}
-                  <tr
-                    class:row-error={summary.failures > 0}
-                    class="row-clickable module-summary-row"
-                    onclick={() => (modulesExpanded = !modulesExpanded)}
-                  >
-                    <td>
-                      <span class="disclosure">{modulesExpanded ? '▾' : '▸'}</span>
-                      <span class="muted">Module pollers</span>
-                      <span class="badge">{parts.moduleJobs.length}</span>
-                    </td>
-                    <td class="col-cron"><span class="muted">—</span></td>
-                    <td class="col-status"><span class="muted">—</span></td>
-                    <td class="col-lastrun">{formatTimestamp(summary.lastRun)}</td>
-                    <td class="num col-failures">{summary.failures}</td>
-                  </tr>
-                  {#if modulesExpanded}
-                    {#each parts.moduleJobs as j (j.id)}
-                      {@const expandable = !!j.last_error}
-                      <tr
-                        class:row-error={j.consecutive_failures > 0}
-                        class:row-clickable={expandable}
-                        class="module-child-row"
-                        onclick={() => expandable && toggleJob(j.id)}
-                      >
-                        <td>
-                          <span class="username">{j.user_id}</span>
-                          <span class="muted">/</span>
-                          <span class="job-name">{j.name}</span>
-                        </td>
-                        <td class="col-cron"><code>{j.cron}</code></td>
-                        <td class="col-status">
-                          <span class="dot" class:dot-ok={j.enabled} class:dot-mute={!j.enabled}
-                          ></span>
-                          <span class="status-label">{j.enabled ? 'enabled' : 'paused'}</span>
-                        </td>
-                        <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
-                        <td class="num col-failures">{j.consecutive_failures}</td>
-                      </tr>
-                      {#if expandable && expandedJobs[j.id]}
-                        <tr class="error-row">
-                          <td colspan="5"><pre>{j.last_error}</pre></td>
-                        </tr>
-                      {/if}
-                    {/each}
-                  {/if}
-                {/if}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-      </section>
-
-      <!-- Storage -->
-      <section class="card">
-        <header class="section-header">
-          <h2>Storage</h2>
-        </header>
-        <dl class="kv">
-          <dt>Database size</dt>
-          <dd>{formatBytes(stats.storage.db_size_bytes)}</dd>
-          <dt>Backups</dt>
-          <dd>{stats.storage.backups_count}</dd>
-          <dt>Last backup</dt>
-          <dd>{formatTimestamp(stats.storage.last_backup)}</dd>
-          {#if stats.storage.nextcloud_configured}
-            <dt>Nextcloud mount</dt>
-            <dd>
-              <span
-                class="dot"
-                class:dot-ok={stats.storage.nextcloud_mount_healthy}
-                class:dot-bad={!stats.storage.nextcloud_mount_healthy}
-              ></span>
-              {stats.storage.nextcloud_mount_healthy ? 'healthy' : 'unavailable'}
+        <dl class="kv model-kv">
+          <dt>Brain</dt>
+          <dd>{brainLabel(m.brain_kind)}</dd>
+          {#if m.endpoint}
+            <dt>Endpoint</dt>
+            <dd class="endpoint">
+              <span class="endpoint-url">{m.endpoint}</span>{#if m.provider}<span
+                  class="endpoint-provider">· {m.provider}</span
+                >{/if}
             </dd>
           {/if}
         </dl>
-      </section>
 
-      {#if stats.error}
-        <div class="banner error">Partial data: {stats.error}</div>
-      {/if}
+        <dl class="kv model-kv role-kv">
+          <dt>Default</dt>
+          <dd class="model-value">
+            <code>{m.default_model}</code>
+            {#if m.default_effort}<span class="effort-chip">{m.default_effort}</span>{/if}
+          </dd>
+          {#each m.roles as r (r.role)}
+            <dt>{r.role}</dt>
+            <dd class="model-value"><code>{r.resolved}</code></dd>
+          {/each}
+        </dl>
+
+        {#if m.source_type_overrides && Object.keys(m.source_type_overrides).length > 0}
+          <div class="overrides">
+            <div class="cell-label">Source-type routing</div>
+            <dl class="kv model-kv">
+              {#each Object.entries(m.source_type_overrides) as [src, kind] (src)}
+                <dt>{src}</dt>
+                <dd>{brainLabel(kind)}</dd>
+              {/each}
+            </dl>
+          </div>
+        {/if}
+      </section>
     {/if}
-  </div>
-</AppShell>
+
+    <!-- Users -->
+    <section class="card">
+      <header class="section-header">
+        <h2>Users</h2>
+      </header>
+      <div class="table-scroll">
+        <table class="grid users-grid">
+          <thead>
+            <tr>
+              <th class="col-user">User</th>
+              <th class="num col-total">Total</th>
+              <th class="col-24h">24h activity</th>
+              <th class="num col-failed">Failed</th>
+              <th class="num col-avg">Avg/day</th>
+              <th class="col-active">Last active</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each stats.users as u (u.username)}
+              {@const segments = userSegments(u)}
+              {@const totalSeg = segments.reduce((acc, s) => acc + s.count, 0)}
+              <tr>
+                <td>
+                  <span class="username">{u.display_name || u.username}</span>
+                  {#if u.is_admin}<span class="admin-badge">admin</span>{/if}
+                </td>
+                <td class="num col-total">{formatNumber(u.tasks_total)}</td>
+                <td class="source-cell">
+                  <div class="source-summary">
+                    <span class="muted">int</span>
+                    <strong>{u.tasks_interactive_24h}</strong>
+                    <span class="sep">·</span>
+                    <span class="muted">auto</span>
+                    <strong>{formatNumber(u.tasks_automated_24h)}</strong>
+                  </div>
+                  {#if totalSeg > 0}
+                    <div class="stack-bar" aria-label="24h source breakdown">
+                      {#each segments as seg (seg.source)}
+                        <span
+                          class="stack-seg"
+                          style="width: {(seg.count / totalSeg) * 100}%; background: {sourceColor(
+                            seg.source,
+                          )};"
+                          title={segmentTooltip(seg)}
+                        ></span>
+                      {/each}
+                    </div>
+                    <div class="source-list">
+                      {#each segments as seg (seg.source)}
+                        <span class="source-pill" title={segmentTooltip(seg)}>
+                          <span
+                            class="dot dot-source"
+                            style="background: {sourceColor(seg.source)};"
+                          ></span>
+                          {seg.source}
+                          {formatNumber(seg.count)}
+                        </span>
+                      {/each}
+                    </div>
+                  {/if}
+                </td>
+                <td class="num col-failed">
+                  {#if u.tasks_failed_24h > 0}
+                    <span class="failed-pill">{u.tasks_failed_24h}</span>
+                  {:else}
+                    0
+                  {/if}
+                </td>
+                <td class="num col-avg">{u.tasks_avg_per_day}</td>
+                <td class="col-active">{formatTimestamp(u.last_active)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Tasks -->
+    <section class="card">
+      <header class="section-header">
+        <h2>Task activity</h2>
+      </header>
+      <div class="kpi-grid card-grid">
+        <div class="kpi">
+          <div class="kpi-label">Interactive 24h</div>
+          <div class="kpi-value">{formatNumber(stats.tasks.interactive_24h)}</div>
+          <div class="kpi-sub">{stats.tasks.interactive_avg_per_day_30d}/day (30d)</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Automated 24h</div>
+          <div class="kpi-value muted">{formatNumber(stats.tasks.automated_24h)}</div>
+          <div class="kpi-sub">
+            {formatNumber(stats.tasks.automated_avg_per_day_30d)}/day (30d)
+          </div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Avg duration</div>
+          <div class="kpi-value">{stats.tasks.avg_duration_seconds}s</div>
+        </div>
+        <div class="kpi" class:kpi-warn={stats.tasks.failed_24h > 0}>
+          <div class="kpi-label">Failed 24h</div>
+          <div class="kpi-value">{stats.tasks.failed_24h}</div>
+          <div class="kpi-sub">{(stats.tasks.error_rate_24h * 100).toFixed(2)}% error rate</div>
+        </div>
+        <div class="kpi col-total-kpi">
+          <div class="kpi-label">Total tasks</div>
+          <div class="kpi-value">{formatNumber(stats.tasks.total)}</div>
+        </div>
+      </div>
+      {#if Object.keys(stats.tasks.by_source).length > 0}
+        {@const maxN = Math.max(...Object.values(stats.tasks.by_source))}
+        <div class="source-bars">
+          {#each Object.entries(stats.tasks.by_source).sort((a, b) => b[1] - a[1]) as [src, count] (src)}
+            {@const failed = stats.tasks.failed_by_source_24h?.[src] ?? 0}
+            <div class="source-row">
+              <div class="source-label">
+                <span class="dot dot-source" style="background: {sourceColor(src)};"></span>
+                {src}
+              </div>
+              <div class="source-bar">
+                <div
+                  class="source-fill"
+                  style="width: {(count / maxN) * 100}%; background: {sourceColor(src)};"
+                ></div>
+              </div>
+              <div class="source-count">
+                {formatNumber(count)}{#if failed > 0}<span
+                    class="failed-inline"
+                    title="failed in 24h">·{failed} failed</span
+                  >{/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    <!-- Modules -->
+    {#if Object.keys(stats.modules).length > 0}
+      <section class="card">
+        <header class="section-header">
+          <h2>Modules</h2>
+        </header>
+        <div class="module-grid card-grid">
+          {#each Object.entries(stats.modules) as [name, mod] (name)}
+            <div class="module-card" class:module-warn={moduleErrorCount(mod) > 0}>
+              <div class="module-name">{name}</div>
+              <dl class="module-fields">
+                {#each Object.entries(mod) as [k, v] (k)}
+                  <dt>{fieldLabel(k)}</dt>
+                  <dd>
+                    {v === null
+                      ? '—'
+                      : TIMESTAMP_KEYS.has(k)
+                        ? formatTimestamp(String(v))
+                        : String(v)}
+                  </dd>
+                {/each}
+              </dl>
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    <!-- Scheduler -->
+    <section class="card">
+      <header class="section-header">
+        <h2>Scheduler</h2>
+        <span class="muted meta"
+          >{stats.scheduler.jobs_active} active · {stats.scheduler.jobs_paused} paused</span
+        >
+      </header>
+      {#if stats.scheduler.jobs.length === 0}
+        <p class="empty">No scheduled jobs.</p>
+      {:else}
+        {@const parts = partitionJobs(stats.scheduler.jobs)}
+        <div class="table-scroll">
+          <table class="grid jobs-grid">
+            <thead>
+              <tr>
+                <th>Job</th>
+                <th class="col-cron">Cron</th>
+                <th class="col-status">Status</th>
+                <th class="col-lastrun">Last run</th>
+                <th class="num col-failures"
+                  ><span class="label-full">Failures</span><span class="label-abbr">Fails</span></th
+                >
+              </tr>
+            </thead>
+            <tbody>
+              {#each parts.regular as j (j.id)}
+                {@const expandable = !!j.last_error}
+                <tr
+                  class:row-error={j.consecutive_failures > 0}
+                  class:row-clickable={expandable}
+                  onclick={() => expandable && toggleJob(j.id)}
+                >
+                  <td>
+                    <span class="username">{j.user_id}</span>
+                    <span class="muted">/</span>
+                    <span class="job-name">{j.name}</span>
+                  </td>
+                  <td class="col-cron"><code>{j.cron}</code></td>
+                  <td class="col-status">
+                    <span class="dot" class:dot-ok={j.enabled} class:dot-mute={!j.enabled}></span>
+                    <span class="status-label">{j.enabled ? 'enabled' : 'paused'}</span>
+                  </td>
+                  <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
+                  <td class="num col-failures">{j.consecutive_failures}</td>
+                </tr>
+                {#if expandable && expandedJobs[j.id]}
+                  <tr class="error-row">
+                    <td colspan="5"><pre>{j.last_error}</pre></td>
+                  </tr>
+                {/if}
+              {/each}
+              {#if parts.moduleJobs.length > 0}
+                {@const summary = moduleJobSummary(parts.moduleJobs)}
+                <tr
+                  class:row-error={summary.failures > 0}
+                  class="row-clickable module-summary-row"
+                  onclick={() => (modulesExpanded = !modulesExpanded)}
+                >
+                  <td>
+                    <span class="disclosure">{modulesExpanded ? '▾' : '▸'}</span>
+                    <span class="muted">Module pollers</span>
+                    <span class="badge">{parts.moduleJobs.length}</span>
+                  </td>
+                  <td class="col-cron"><span class="muted">—</span></td>
+                  <td class="col-status"><span class="muted">—</span></td>
+                  <td class="col-lastrun">{formatTimestamp(summary.lastRun)}</td>
+                  <td class="num col-failures">{summary.failures}</td>
+                </tr>
+                {#if modulesExpanded}
+                  {#each parts.moduleJobs as j (j.id)}
+                    {@const expandable = !!j.last_error}
+                    <tr
+                      class:row-error={j.consecutive_failures > 0}
+                      class:row-clickable={expandable}
+                      class="module-child-row"
+                      onclick={() => expandable && toggleJob(j.id)}
+                    >
+                      <td>
+                        <span class="username">{j.user_id}</span>
+                        <span class="muted">/</span>
+                        <span class="job-name">{j.name}</span>
+                      </td>
+                      <td class="col-cron"><code>{j.cron}</code></td>
+                      <td class="col-status">
+                        <span class="dot" class:dot-ok={j.enabled} class:dot-mute={!j.enabled}
+                        ></span>
+                        <span class="status-label">{j.enabled ? 'enabled' : 'paused'}</span>
+                      </td>
+                      <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
+                      <td class="num col-failures">{j.consecutive_failures}</td>
+                    </tr>
+                    {#if expandable && expandedJobs[j.id]}
+                      <tr class="error-row">
+                        <td colspan="5"><pre>{j.last_error}</pre></td>
+                      </tr>
+                    {/if}
+                  {/each}
+                {/if}
+              {/if}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </section>
+
+    <!-- Storage -->
+    <section class="card">
+      <header class="section-header">
+        <h2>Storage</h2>
+      </header>
+      <dl class="kv">
+        <dt>Database size</dt>
+        <dd>{formatBytes(stats.storage.db_size_bytes)}</dd>
+        <dt>Backups</dt>
+        <dd>{stats.storage.backups_count}</dd>
+        <dt>Last backup</dt>
+        <dd>{formatTimestamp(stats.storage.last_backup)}</dd>
+        {#if stats.storage.nextcloud_configured}
+          <dt>Nextcloud mount</dt>
+          <dd>
+            <span
+              class="dot"
+              class:dot-ok={stats.storage.nextcloud_mount_healthy}
+              class:dot-bad={!stats.storage.nextcloud_mount_healthy}
+            ></span>
+            {stats.storage.nextcloud_mount_healthy ? 'healthy' : 'unavailable'}
+          </dd>
+        {/if}
+      </dl>
+    </section>
+
+    {#if stats.error}
+      <div class="banner error">Partial data: {stats.error}</div>
+    {/if}
+
+    <p class="refresh-note">Auto-refreshes every 60s.</p>
+  {/if}
+</div>
 
 <style>
   /* Layout primitives (.settings / .card / .grid / .banner / .placeholder /
@@ -675,19 +668,15 @@
     max-width: 1100px;
   }
 
-  /* Header metadata, not content — the one thing the old in-page header row
-	   carried that was worth keeping. Hidden on a phone, where the bar has no
-	   room to spare and the cadence is not something you act on. */
+  /* Page metadata, not content. It sat in the app bar until the admin sidebar
+	   moved that bar into the layout, which is shared with Configuration and
+	   Logs — neither of which auto-refreshes, so the note belongs with the data
+	   it describes rather than with the chrome. */
   .refresh-note {
+    margin-top: var(--space-4);
     font-size: var(--text-xs);
     color: var(--text-dim);
-    white-space: nowrap;
-  }
-
-  @media (max-width: 640px) {
-    .refresh-note {
-      display: none;
-    }
+    text-align: right;
   }
 
   /* Standalone-mode notice content — rendered inside the NoticeBanner slot at

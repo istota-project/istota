@@ -172,6 +172,130 @@ export async function getAdminStats(): Promise<AdminStats> {
   return apiFetch<AdminStats>('/admin/stats');
 }
 
+// ---- Admin logs + configuration (ISSUE-203) ----
+
+export interface AdminLogSource {
+  id: string;
+  label: string;
+  kind: 'file' | 'db';
+  description: string;
+  available: boolean;
+  detail: string;
+  /** Whether this source's timestamps are UTC or the server's local clock.
+   *  Labelled rather than converted — a log line's stamp is what the server
+   *  wrote, and silently shifting it makes it un-greppable against the file. */
+  time_basis: 'utc' | 'server-local';
+  path: string | null;
+  bytes: number;
+  files: number;
+}
+
+export interface AdminLogRecord {
+  /** Opaque and monotonic within a source: a byte position for the file
+   *  source, a row id for the DB source. Never a path. */
+  cursor: string;
+  timestamp: string | null;
+  level: string;
+  logger: string | null;
+  message: string;
+  task_id: number | null;
+  user_id: string | null;
+  source_type: string | null;
+}
+
+export interface AdminLogPage {
+  /** Oldest-first, i.e. reading order. */
+  records: AdminLogRecord[];
+  /** Cursor for the previous (older) page; null once the start is reached. */
+  next_before: string | null;
+  /** Where a live tail should resume from. */
+  tail_cursor: string | null;
+  /** The scan budget was spent before `limit` was filled — distinct from
+   *  "nothing older exists", which is `next_before === null`. */
+  truncated: boolean;
+}
+
+export interface AdminLogTail {
+  records: AdminLogRecord[];
+  cursor: string;
+  /** The source restarted under us (the live file rotated), so the client
+   *  should clear rather than append. */
+  reset: boolean;
+}
+
+export interface AdminLogFilters {
+  level?: string;
+  q?: string;
+  logger?: string;
+  user_id?: string;
+  task_id?: number;
+}
+
+function adminLogParams(filters: AdminLogFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters.level) params.set('level', filters.level);
+  if (filters.q) params.set('q', filters.q);
+  if (filters.logger) params.set('logger', filters.logger);
+  if (filters.user_id) params.set('user_id', filters.user_id);
+  if (filters.task_id !== undefined) params.set('task_id', String(filters.task_id));
+  return params;
+}
+
+export async function getAdminLogSources(): Promise<{ sources: AdminLogSource[] }> {
+  return apiFetch<{ sources: AdminLogSource[] }>('/admin/logs/sources');
+}
+
+export async function getAdminLogPage(
+  sourceId: string,
+  opts: AdminLogFilters & { limit?: number; before?: string } = {},
+): Promise<AdminLogPage> {
+  const params = adminLogParams(opts);
+  if (opts.limit) params.set('limit', String(opts.limit));
+  if (opts.before) params.set('before', opts.before);
+  const qs = params.toString();
+  return apiFetch<AdminLogPage>(`/admin/logs/${encodeURIComponent(sourceId)}${qs ? `?${qs}` : ''}`);
+}
+
+/** URL for the live-tail SSE stream. Built here so the query-param spelling
+ *  lives beside the page fetcher's and the two cannot drift. */
+export function adminLogStreamUrl(
+  sourceId: string,
+  cursor: string,
+  filters: AdminLogFilters = {},
+): string {
+  const params = adminLogParams(filters);
+  params.set('cursor', cursor);
+  return `${base}/api/admin/logs/${encodeURIComponent(sourceId)}/stream?${params.toString()}`;
+}
+
+export interface AdminConfigField {
+  /** Dotted path — `web.oauth2_client_secret`. The address a future editor
+   *  would PUT to, which is why the payload is field-level not a TOML dump. */
+  key: string;
+  name: string;
+  value: unknown;
+  type: string;
+  /** A credential: `value` is always null. `set` says whether it is configured. */
+  secret: boolean;
+  set: boolean;
+}
+
+export interface AdminConfigSection {
+  key: string;
+  label: string;
+  fields: AdminConfigField[];
+}
+
+export interface AdminConfigView {
+  config_path: string | null;
+  editable: boolean;
+  sections: AdminConfigSection[];
+}
+
+export async function getAdminConfig(): Promise<AdminConfigView> {
+  return apiFetch<AdminConfigView>('/admin/config');
+}
+
 export interface FeedCategory {
   id: number;
   title: string;

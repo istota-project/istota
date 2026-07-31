@@ -1808,11 +1808,263 @@ function mockModuleServices(module: string) {
   };
 }
 
+// ---- Admin logs + configuration (ISSUE-203) ----
+
+const mockLogSources = {
+  sources: [
+    {
+      id: 'app',
+      label: 'Application log',
+      kind: 'file',
+      description:
+        'Scheduler, pollers, brain and web output — the rotating file every istota process writes to.',
+      available: true,
+      detail: '3 files in the rotation chain',
+      time_basis: 'server-local',
+      path: '/var/log/istota/istota.log',
+      bytes: 4_812_004,
+      files: 3,
+    },
+    {
+      id: 'tasks',
+      label: 'Task lifecycle',
+      kind: 'db',
+      description:
+        'Per-task lifecycle written by the scheduler — claimed, completed, retrying, failed. Includes truncated task output.',
+      available: true,
+      detail: 'From the task_logs table; pruned with the task retention sweep.',
+      time_basis: 'utc',
+      path: null,
+      bytes: 0,
+      files: 0,
+    },
+  ],
+};
+
+const _MOCK_APP_LOG = [
+  ['2026-07-31T09:14:02', 'INFO', 'istota.scheduler', 'Task claimed by host-01-4411-alice'],
+  ['2026-07-31T09:14:03', 'DEBUG', 'istota.executor', 'skills: eager=7 menu=26'],
+  ['2026-07-31T09:14:29', 'INFO', 'istota.executor', 'native cache hit_rate=0.81'],
+  [
+    '2026-07-31T09:14:31',
+    'WARNING',
+    'istota.brain.tmux_claude',
+    'tmux_brain session=t-9f21 outcome=fallback ready_ms=30012 dialogs=0 retries=2',
+  ],
+  [
+    '2026-07-31T09:14:31',
+    'ERROR',
+    'istota.transport.email',
+    'IMAP poll failed\nTraceback (most recent call last):\n  File "inbound.py", line 210, in poll_emails\nTimeoutError: timed out',
+  ],
+  [
+    '2026-07-31T09:15:00',
+    'INFO',
+    'istota.scheduler',
+    'scheduler_stats threads=14 fds=98 rss_mb=412',
+  ],
+];
+
+function mockLogPage(source: string, params: URLSearchParams) {
+  const limit = Number(params.get('limit') ?? 200);
+  const level = params.get('level') ?? '';
+  const q = (params.get('q') ?? '').toLowerCase();
+  const ORDER = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
+
+  interface MockLogRecord {
+    cursor: string;
+    timestamp: string;
+    level: string;
+    logger: string | null;
+    message: string;
+    task_id: number | null;
+    user_id: string | null;
+    source_type: string | null;
+  }
+
+  let records: MockLogRecord[] =
+    source === 'tasks'
+      ? [
+          {
+            cursor: '1',
+            timestamp: '2026-07-31T09:14:02',
+            level: 'INFO',
+            logger: null,
+            message: 'Task claimed by host-01-4411-alice',
+            task_id: 8821,
+            user_id: 'alice',
+            source_type: 'talk',
+          },
+          {
+            cursor: '2',
+            timestamp: '2026-07-31T09:14:44',
+            level: 'INFO',
+            logger: null,
+            message: 'Task completed successfully',
+            task_id: 8821,
+            user_id: 'alice',
+            source_type: 'talk',
+          },
+          {
+            cursor: '3',
+            timestamp: '2026-07-31T09:16:10',
+            level: 'WARNING',
+            logger: null,
+            message: 'Task failed, will retry in 4 minutes: API Error: 529 Overloaded',
+            task_id: 8822,
+            user_id: 'bob',
+            source_type: 'briefing',
+          },
+        ]
+      : _MOCK_APP_LOG.map(([timestamp, lvl, logger, message], i) => ({
+          cursor: `istota.log:${i * 120}`,
+          timestamp,
+          level: lvl,
+          logger,
+          message,
+          task_id: null,
+          user_id: null,
+          source_type: null,
+        }));
+
+  if (level) {
+    const floor = ORDER.indexOf(level);
+    records = records.filter((r) => ORDER.indexOf(r.level) >= floor);
+  }
+  if (q) {
+    records = records.filter(
+      (r) => r.message.toLowerCase().includes(q) || (r.logger ?? '').toLowerCase().includes(q),
+    );
+  }
+  const loggerPrefix = params.get('logger');
+  if (loggerPrefix) {
+    records = records.filter((r) => (r.logger ?? '').startsWith(loggerPrefix));
+  }
+  const userFilter = params.get('user_id');
+  if (userFilter) {
+    records = records.filter((r) => r.user_id === userFilter);
+  }
+  const taskFilter = params.get('task_id');
+  if (taskFilter) {
+    records = records.filter((r) => String(r.task_id) === taskFilter);
+  }
+
+  return {
+    records: records.slice(-limit),
+    next_before: null,
+    tail_cursor: source === 'tasks' ? '3' : 'istota.log:720',
+    truncated: false,
+  };
+}
+
+function mockAdminConfig() {
+  const f = (
+    key: string,
+    value: unknown,
+    type: string,
+    extra: { secret?: boolean; set?: boolean } = {},
+  ) => ({
+    key,
+    name: key.split('.').pop() as string,
+    value: extra.secret ? null : value,
+    type: extra.secret ? 'secret' : type,
+    secret: extra.secret ?? false,
+    set: extra.set ?? (value !== null && value !== '' && value !== undefined),
+  });
+
+  return {
+    config_path: '/etc/istota/config.toml',
+    editable: false,
+    sections: [
+      {
+        key: 'general',
+        label: 'General',
+        fields: [
+          f('bot_name', 'Istota', 'str'),
+          f('db_path', '/srv/app/istota/data/istota.db', 'path'),
+          f('effort', '', 'str'),
+          f('model', 'claude-opus-4-8', 'str'),
+          f('namespace', 'istota', 'str'),
+          f('users', 2, 'count'),
+        ],
+      },
+      {
+        key: 'nextcloud',
+        label: '[nextcloud]',
+        fields: [
+          f('url', 'https://cloud.example.com', 'str'),
+          f('username', 'istota', 'str'),
+          f('app_password', null, 'secret', { secret: true, set: true }),
+        ],
+      },
+      {
+        key: 'logging',
+        label: '[logging]',
+        fields: [
+          f('level', 'INFO', 'str'),
+          f('output', 'both', 'str'),
+          f('file', '/var/log/istota/istota.log', 'str'),
+          f('rotate', true, 'bool'),
+          f('max_size_mb', 10, 'int'),
+          f('backup_count', 5, 'int'),
+        ],
+      },
+      {
+        key: 'web',
+        label: '[web]',
+        fields: [
+          f('auth', 'nextcloud', 'str'),
+          f('port', 8766, 'int'),
+          f('token_storage', 'encrypted', 'str'),
+          f('oauth2_client_secret', null, 'secret', { secret: true, set: true }),
+          f('session_secret_key', null, 'secret', { secret: true, set: true }),
+        ],
+      },
+      {
+        key: 'brain',
+        label: '[brain]',
+        fields: [
+          f('kind', 'claude_code', 'str'),
+          f('fallback', 'native', 'str'),
+          f('fallback_on_transient', true, 'bool'),
+          f('fallback_cooldown_seconds', 900, 'int'),
+        ],
+      },
+      {
+        key: 'brain.native',
+        label: '[brain.native]',
+        fields: [
+          f('provider', 'openai_compat', 'str'),
+          f('model', 'anthropic/claude-sonnet-4-6', 'str'),
+          f('base_url', 'https://openrouter.ai/api/v1', 'str'),
+          f('api_key', null, 'secret', { secret: true, set: false }),
+        ],
+      },
+    ],
+  };
+}
+
 const handlers: MockHandler[] = [
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   chatHandler,
 
   ({ url }) => (url === '/istota/api/admin/stats' ? mockAdminStats : undefined),
+
+  // Admin logs + configuration (ISSUE-203)
+  ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),
+  ({ url }) => (url === '/istota/api/admin/config' ? mockAdminConfig() : undefined),
+  // The live tail is SSE, which this mock layer cannot serve. Answer with an
+  // empty 200 rather than letting it 404: an EventSource retries a failed
+  // connection forever, so a missing handler turns Follow into a reconnect loop
+  // in mock dev instead of an obviously-inert button.
+  ({ url }) => (/^\/istota\/api\/admin\/logs\/[^/?]+\/stream(\?|$)/.test(url) ? {} : undefined),
+  ({ url }) => {
+    const match = url.match(/^\/istota\/api\/admin\/logs\/([^/?]+)(\?|$)/);
+    if (!match || match[1] === 'sources') return undefined;
+    const source = match[1];
+    const params = new URLSearchParams(url.split('?')[1] ?? '');
+    return mockLogPage(source, params);
+  },
 
   // Settings/secrets (Phase 5)
   (req) => {

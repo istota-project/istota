@@ -28,7 +28,16 @@ from pathlib import Path
 import httpx
 from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
 from authlib.integrations.starlette_client import OAuth
-from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -2409,6 +2418,289 @@ async def admin_task_events(
     """All events for a task — backs the admin in-flight task-detail view."""
     events = await asyncio.to_thread(_load_task_events, task_id, since_seq)
     return {"events": events}
+
+
+# ---- Admin logs (ISSUE-203) ----
+#
+# A read path over operationally sensitive data — the app log carries whatever
+# the daemon logged, and `task_logs` embeds truncated task results, so this sees
+# across users. Three properties carry the safety:
+#
+#   1. Every route is `_require_admin`, which fails closed on a blank
+#      /etc/istota/admins (unlike `Config.is_admin`'s permissive empty rule).
+#   2. A request names a *source id*, never a path. The only place a path is
+#      derived is `admin_logs.resolve_app_log_chain`, which confines every
+#      candidate to the resolved log directory. Traversal is not reachable.
+#   3. Records are returned as JSON data and rendered as text nodes. Nothing in
+#      the pipeline treats log content as markup.
+
+_LOG_PAGE_DEFAULT = 200
+_LOG_PAGE_MAX = 1000
+
+# Deliberately slower than the chat streams' ~200ms: a log tail is read at human
+# pace and each poll is a file stat or an indexed `id >` scan.
+_LOG_STREAM_POLL_SECONDS = 1.0
+# ~15s of silence before a keepalive, so an idle tail behind a proxy with a
+# short read timeout does not look like a dropped connection.
+_LOG_STREAM_KEEPALIVE_TICKS = 15
+
+
+@dataclass(frozen=True)
+class _LogQuery:
+    """Filters shared by the page and stream routes."""
+
+    min_level: str | None = None
+    q: str | None = None
+    logger: str | None = None
+    user_id: str | None = None
+    task_id: int | None = None
+
+
+def _log_query(
+    level: str | None, q: str | None, logger_name: str | None,
+    user_id: str | None, task_id: int | None,
+) -> _LogQuery:
+    from . import admin_logs
+
+    def _clean(value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        return trimmed[:200] or None
+
+    # An unmodelled level is rejected rather than passed through: it means
+    # opposite things on the two sources (the file reader ranks an unknown level
+    # above CRITICAL and would hide everything; the DB reader's IN-list goes
+    # empty and returns *only* unmodelled rows), and neither is an error the
+    # caller could tell from a genuinely empty log.
+    min_level = _clean(level)
+    if min_level is not None:
+        min_level = min_level.upper()
+        if min_level not in admin_logs.LEVELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown level {min_level!r}; expected one of "
+                       f"{', '.join(admin_logs.LEVELS)}",
+            )
+
+    return _LogQuery(
+        min_level=min_level,
+        q=_clean(q),
+        logger=_clean(logger_name),
+        user_id=_clean(user_id),
+        task_id=task_id,
+    )
+
+
+def _require_log_source(source_id: str):
+    """Resolve a source id, or raise. Blocking — call via ``asyncio.to_thread``.
+
+    ``list_sources`` stats the whole rotation chain and iterates the log
+    directory, so this is real filesystem I/O and must not run on the loop.
+    """
+    from . import admin_logs
+
+    source = admin_logs.get_source(_config, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="unknown log source")
+    if not source.available:
+        raise HTTPException(status_code=409, detail=source.detail)
+    return source
+
+
+def _read_log_page(source_id: str, limit: int, before: str | None, query: _LogQuery) -> dict:
+    from . import admin_logs, db
+
+    if source_id == "app":
+        chain = admin_logs.resolve_app_log_chain(_config)
+        page = admin_logs.read_file_page(
+            chain, limit=limit, before=before,
+            min_level=query.min_level, q=query.q, logger=query.logger,
+        )
+        return page.to_dict()
+
+    with db.get_db(_config.db_path) as conn:
+        page = admin_logs.read_task_log_page(
+            conn, limit=limit, before=before,
+            min_level=query.min_level, q=query.q,
+            user_id=query.user_id, task_id=query.task_id,
+        )
+    return page.to_dict()
+
+
+def _validate_log_cursor(source_id: str, cursor: str) -> None:
+    """Raise ``ValueError`` if ``cursor`` is not well-formed for the source.
+
+    Shape only — no read. Used by the stream route, which must reject a bad
+    cursor with a 400 before the response body starts.
+    """
+    from . import admin_logs
+
+    if source_id == "app":
+        chain = admin_logs.resolve_app_log_chain(_config)
+        if not chain:
+            return
+        admin_logs.parse_file_cursor(chain, cursor)
+        if not cursor.startswith(chain[0].name + ":"):
+            raise ValueError("tail cursor must name the live log file")
+        return
+
+    try:
+        if int(cursor) < 0:
+            raise ValueError("malformed log cursor")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("malformed log cursor") from exc
+
+
+def _read_log_tail(source_id: str, cursor: str, query: _LogQuery) -> dict:
+    from . import admin_logs, db
+
+    if source_id == "app":
+        chain = admin_logs.resolve_app_log_chain(_config)
+        tail = admin_logs.read_file_tail(
+            chain, cursor,
+            min_level=query.min_level, q=query.q, logger=query.logger,
+        )
+        return tail.to_dict()
+
+    with db.get_db(_config.db_path) as conn:
+        tail = admin_logs.read_task_log_tail(
+            conn, cursor,
+            min_level=query.min_level, q=query.q,
+            user_id=query.user_id, task_id=query.task_id,
+        )
+    return tail.to_dict()
+
+
+@api_router.get("/admin/logs/sources")
+async def admin_log_sources(_: dict = Depends(_require_admin)):
+    """The readable log sources for this deployment, available or not.
+
+    An unavailable source is listed *with its reason* rather than hidden — "file
+    logging is off" is the answer to "why is there nothing here", and omitting
+    the row leaves the admin to guess.
+    """
+    from . import admin_logs
+
+    sources = await asyncio.to_thread(admin_logs.list_sources, _config)
+    return {"sources": [s.to_dict() for s in sources]}
+
+
+@api_router.get("/admin/logs/{source_id}")
+async def admin_log_page(
+    source_id: str,
+    limit: int = _LOG_PAGE_DEFAULT,
+    before: str | None = None,
+    level: str | None = None,
+    q: str | None = None,
+    logger_name: str | None = Query(None, alias="logger"),
+    user_id: str | None = None,
+    task_id: int | None = None,
+    _: dict = Depends(_require_admin),
+):
+    """A page of records from ``source_id``, oldest-first."""
+    await asyncio.to_thread(_require_log_source, source_id)
+    limit = max(1, min(limit, _LOG_PAGE_MAX))
+    query = _log_query(level, q, logger_name, user_id, task_id)
+    try:
+        return await asyncio.to_thread(_read_log_page, source_id, limit, before, query)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api_router.get("/admin/logs/{source_id}/stream")
+async def admin_log_stream(
+    source_id: str,
+    request: Request,
+    cursor: str,
+    level: str | None = None,
+    q: str | None = None,
+    logger_name: str | None = Query(None, alias="logger"),
+    user_id: str | None = None,
+    task_id: int | None = None,
+    _: dict = Depends(_require_admin),
+):
+    """Live tail of ``source_id`` from ``cursor``.
+
+    Polls the source rather than pushing, for the same reason the task and room
+    streams do: the writer is a different process (the scheduler unit), so there
+    is no in-process bus to subscribe to. Cadence is deliberately slower than the
+    chat streams — a log tail is read at human pace and each poll is a file stat
+    or an indexed `id >` scan.
+
+    The frame carries its cursor *inside* the payload and sends no SSE ``id:``.
+    A log cursor is not an integer for the file source (it is ``name:offset``),
+    and EventSource's ``Last-Event-ID`` resume would otherwise hand back a value
+    the client also has to reconcile with a ``reset``. The client re-opens with
+    the cursor it last saw instead.
+    """
+    await asyncio.to_thread(_require_log_source, source_id)
+    query = _log_query(level, q, logger_name, user_id, task_id)
+
+    # Validate the cursor's *shape* up front: a StreamingResponse body cannot
+    # turn a later exception into a 400, so a malformed cursor must fail before
+    # the response starts rather than as a silently-dead stream. Deliberately a
+    # parse rather than a read — a full read here would duplicate up to a
+    # megabyte of file I/O (or a LIKE scan) whose result is then discarded.
+    try:
+        await asyncio.to_thread(_validate_log_cursor, source_id, cursor)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    async def _generate():
+        current = cursor
+        idle = 0
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                tail = await asyncio.to_thread(_read_log_tail, source_id, current, query)
+            except ValueError:
+                # The live file rotated out from under a cursor naming a file
+                # that has since left the chain. Tell the client to re-seed.
+                yield f"event: reset\ndata: {json.dumps({'reason': 'cursor expired'})}\n\n"
+                return
+            except Exception:  # noqa: BLE001 - a read error must not 500 mid-stream
+                # Named `stream_error`, not `error`: EventSource already has a
+                # built-in `error` event for connection failures, so a frame by
+                # that name lands on the same listener and is indistinguishable
+                # from a dropped socket — the payload would never be seen.
+                logger.exception("admin log stream read failed (source=%s)", source_id)
+                yield (
+                    "event: stream_error\n"
+                    f"data: {json.dumps({'error': 'log read failed'})}\n\n"
+                )
+                return
+
+            current = tail["cursor"] or current
+            if tail["records"] or tail["reset"]:
+                idle = 0
+                yield f"event: records\ndata: {json.dumps(tail)}\n\n"
+            else:
+                idle += 1
+                if idle >= _LOG_STREAM_KEEPALIVE_TICKS:
+                    idle = 0
+                    yield ": ping\n\n"
+            await asyncio.sleep(_LOG_STREAM_POLL_SECONDS)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@api_router.get("/admin/config")
+async def admin_config(_: dict = Depends(_require_admin)):
+    """The loaded config, sectioned and credential-redacted. Read-only.
+
+    Shaped field-by-field (dotted key + type + secret flag) rather than as a
+    TOML dump so the same payload can back an editable form later without the
+    frontend changing shape.
+    """
+    from . import admin_config_view
+
+    return await asyncio.to_thread(admin_config_view.build_config_view, _config)
 
 
 # ---- Web chat surface ----

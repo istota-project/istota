@@ -44,6 +44,10 @@
   border-radius: var(--radius-sm);
   transition: background var(--transition-fast);
   text-align: left;
+  /* A view entry that navigates is an <a> (the admin section nav), so it keeps
+     middle-click and open-in-new-tab. The rest of the rule is button-shaped;
+     this is the one declaration an anchor needs and a button ignores. */
+  text-decoration: none;
 }
 
 .sidebar .view-btn:hover {
