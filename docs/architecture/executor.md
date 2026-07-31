@@ -101,7 +101,11 @@ Result priority: ResultEvent > result file > stderr > fallback error.
 
 ## API retry logic
 
-Transient API errors (status codes 500, 502, 503, 504, 529, 429) are retried inside the brain up to 3 times with a 5 s fixed delay. These retries don't count against task attempts. Pattern: `API Error: (\d{3}) (\{.*\})`. The helpers (`parse_api_error`, `is_transient_api_error`, `API_RETRY_*`, `TRANSIENT_STATUS_CODES`) live in `src/istota/brain/claude_code.py` and are re-exported from `executor.py` for `scheduler.py` and tests.
+Transient API errors are retried inside the brain up to 3 times, and those retries don't count against task attempts. The rule is **every 5xx, plus 408, 425 and 429** (`_status_is_transient`) — enumerating the common codes was itself a bug, since a Cloudflare-fronted provider emits 520–526 and none of those were on the list. `TRANSIENT_STATUS_CODES` survives as documentation of the common cases and is no longer the gate.
+
+Two error shapes are parsed: `API Error: (\d{3}) (\{.*\})` first, then the bodyless `API Error: 529 Overloaded` form the CLI also emits. The delay is the provider's own `Retry-After` where it supplied one (capped at `RETRY_AFTER_MAX_SECONDS`, 60 s), otherwise `API_RETRY_DELAY_SECONDS` (5 s) — a default rather than a floor.
+
+The helpers (`parse_api_error`, `is_transient_api_error`, `is_permanent_api_error`, `api_error_stop_reason`, `is_api_error_banner`, `parse_retry_after`, `API_RETRY_*`) live in `src/istota/brain/claude_code.py`; the first two are re-exported from `executor.py` for `scheduler.py` and tests. Pick the right strictness: `parse_api_error` answers "does this text contain a status code", which is fine for formatting a known failure and wrong for deciding something *is* one — a caller that would discard a completed answer keys on `is_api_error_banner` instead.
 
 ## Output validation
 

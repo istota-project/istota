@@ -24,6 +24,16 @@ The live view streams:
 
 If the SSE stream falls back to polling, the client recovers without flashing an error; a terminally-failed task surfaces a terminal frame instead of hanging on "Working…".
 
+## Message actions
+
+Hovering a message (or tapping it, on a touch screen) reveals a row of actions under it: **copy**, **star**, **delete**.
+
+- **Copy** puts the whole message on the clipboard as its original markdown — headings, lists and fenced code come across ready to paste, and the activity chips and tool traces are left out. It is unavailable while a reply is still being written, since half an answer is not an answer.
+- **Star** marks the message so it shows up in the Starred view. Unlike copy it works mid-reply, because it marks the message rather than its text. A starred message keeps its star visible without hovering.
+- **Delete** asks first, then removes the message for good — from the room, from the aggregate views, and from the conversation the bot remembers. In a room that is also open in Nextcloud Talk the confirmation says so, and the message is removed there too where the server allows it. A turn that is still running can't be deleted until it finishes.
+
+Deletion is not private to you: rooms are shared, so a message you delete is gone for everyone in the room. Anyone with an open tab sees it disappear straight away.
+
 ## Commands and model override
 
 `!commands` and the `!model <alias> <prompt>` prefix work identically in web chat and in Nextcloud Talk — both route through `commands.dispatch(..., surface=...)`. On a stream surface like web the handler result is returned inline (`inline_result`) and rendered as a text card, rather than delivered as a separate push message. The per-user rate limit counts `source_type='web'` rows.
@@ -48,7 +58,9 @@ The per-task stream above only ever covers a task the client itself started. Eve
 
 One connection per open tab carries **every room you are a member of**, so room switching is a client-side filter and background rooms get real content rather than a periodically refetched count. It tails the canonical `messages` store, cursored on `messages.id`: because a turn writes its rows whether or not anyone is watching, a Talk turn that starts and finishes in a fraction of a second is still delivered — timing stops mattering.
 
-Frames are `message` (one history-shaped row plus its room), `gap` (the delta was too large to replay — reload instead), `room` (a rename / model / effort change, or a room appearing or disappearing), and a periodic keepalive comment.
+Frames are `message` (one history-shaped row plus its room), `gap` (the delta was too large to replay — reload instead), `room` (a rename / model / effort change, or a room appearing or disappearing), `message_deleted`, and a periodic keepalive comment.
+
+Deletions need a cursor of their own. The stream is cursored on `messages.id`, and a deleted row is gone — it cannot carry a frame — so removals are recorded in a small ledger with its own monotonic id, and the `message_deleted` frame carries that cursor in its payload rather than as the SSE id. The client passes it back as `since_deletion_id`, on the polling fallback as well as the stream; without it, reconnecting after a delete would quietly bring the message back. Ledger rows are pruned after 30 days.
 
 Recovery is split between the two ends, because neither can see the other's variable: the server decides on **cost** (a row cap and a byte budget — an assistant row carries its full tool trace, so row count alone measures the wrong thing), the client on **age** (past about a minute of silence it has probably missed state the stream does not carry, such as a star toggled elsewhere). Both converge on the same routine — reload the room list and the open room, then adopt the server's cursor.
 
