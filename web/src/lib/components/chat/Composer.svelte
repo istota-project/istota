@@ -1,5 +1,18 @@
+<script module lang="ts">
+  /**
+   * How long the field is left alone before its text is written down.
+   *
+   * Long enough that ordinary typing writes once a phrase rather than once a
+   * letter, short enough that a pause and a tab away lands inside it. Every
+   * departure the component can see — a key change, an unmount, the page going
+   * away — flushes immediately, so this only ever bounds how much a *crash*
+   * could cost.
+   */
+  export const DRAFT_SAVE_DEBOUNCE_MS = 400;
+</script>
+
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import {
     ArrowUp,
     Square,
@@ -26,17 +39,26 @@
     pickedFromFile,
     type Picked,
   } from '$lib/platform/nativePicker';
+  import { readDraft, writeDraft } from '$lib/stores/drafts';
 
   let {
     onSend,
     onCancel,
     busy = false,
     placeholder = 'Message Istota…',
+    draftKey = null,
   }: {
     onSend: (text: string, attachments: ChatAttachment[]) => void;
     onCancel?: () => void;
     busy?: boolean;
     placeholder?: string;
+    /**
+     * Where unsent text is held between visits, or null to hold none. The
+     * caller owns the namespace — the chat page passes `room:<id>`, which is
+     * what makes a draft per-room. Omitting it leaves the composer exactly as
+     * it was: whatever is typed lives and dies with the component.
+     */
+    draftKey?: string | null;
   } = $props();
 
   let text = $state('');
@@ -70,6 +92,90 @@
   // field instead of sharing its row. Driven by the measurement in autoGrow,
   // not a media query, so it tracks content rather than viewport width.
   let multiline = $state(false);
+
+  // ── Drafts ────────────────────────────────────────────────────────────────
+  //
+  // Text that has been typed but not sent survives leaving the room and
+  // leaving the page. It is held under `draftKey`, so switching rooms swaps
+  // the field's contents rather than carrying one room's half-written message
+  // into another — which is what the composer did before, since it is mounted
+  // once and never keyed on the room.
+  //
+  // `activeDraftKey` shadows the prop rather than being read from it: the
+  // outgoing key is what the field's current text has to be written under, and
+  // by the time an effect sees a change the prop is already the incoming one.
+  let activeDraftKey: string | null = null;
+  // Whether a real key has ever been seen. Distinguishes "the room list has
+  // not answered yet" from "the room went away under us", which look identical
+  // from the prop alone and want opposite treatment — see switchDraft.
+  let hasHadDraftKey = false;
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Write the field down now, cancelling any pending debounced write. */
+  function flushDraft() {
+    clearTimeout(saveTimer);
+    saveTimer = undefined;
+    if (activeDraftKey) writeDraft(activeDraftKey, text);
+  }
+
+  function scheduleDraftSave() {
+    if (!activeDraftKey) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushDraft, DRAFT_SAVE_DEBOUNCE_MS);
+  }
+
+  function setText(next: string) {
+    if (next === text) return;
+    text = next;
+    queueMicrotask(autoGrow);
+  }
+
+  function switchDraft(next: string | null) {
+    if (next === activeDraftKey) return;
+    // A pending completion is spliced into the text the engine last saw, so
+    // leaving the popover open across a swap would write the outgoing room's
+    // text back into the incoming one's field.
+    ac.close();
+    // Text typed while no key has *ever* been set belongs to whichever room
+    // lands: the composer is on screen before the room list answers, so the
+    // opening keystrokes of a page load have no room to be attributed to yet.
+    //
+    // A key going null *later* means something else entirely — the room was
+    // deleted, archived, or removed by another client, all of which leave the
+    // view on 'room' with the composer still mounted. Treating that as the
+    // same case is the leak this whole mechanism exists to stop: the departed
+    // room's text would be handed to whichever room is picked next.
+    const carried = hasHadDraftKey ? '' : text;
+    const leavingRoom = activeDraftKey !== null;
+    flushDraft();
+    activeDraftKey = next;
+    if (next) hasHadDraftKey = true;
+    // Attachments are not drafted — they are already uploaded, so the chips
+    // are a view of server-side files rather than the record of them — but
+    // they must not ride along either. Re-picking a file costs a tap; posting
+    // one to the wrong room does not undo.
+    if (leavingRoom) attachments = [];
+    if (!next) {
+      if (leavingRoom) setText('');
+      return;
+    }
+    // A stored draft outranks carried text. The carry exists for a field that
+    // was empty when the page loaded; letting one keystroke typed during that
+    // window replace the draft the user came back for would destroy it, with
+    // no undo and no notice.
+    const stored = readDraft(next);
+    setText(stored || carried);
+    // Carried text has never been written anywhere — the field is its only
+    // copy until this lands.
+    if (carried && !stored) flushDraft();
+  }
+
+  $effect(() => {
+    const next = draftKey ?? null;
+    untrack(() => switchDraft(next));
+  });
+
+  onDestroy(flushDraft);
 
   const recorder = createRecorder({ onComplete: (file) => upload([file]) });
   onDestroy(() => recorder.dispose());
@@ -349,6 +455,10 @@
     onSend(t, attachments);
     text = '';
     attachments = [];
+    // A sent message is no longer a draft. Flushing the emptied field is what
+    // drops it — writeDraft treats blank as "no draft" — so there is one path
+    // rather than a clear that could fall out of step with the write.
+    flushDraft();
     queueMicrotask(autoGrow);
     // A sent message is the end of a turn, and the reply arrives in the third of
     // the screen the keyboard is standing on. Where the keyboard is soft, giving
@@ -410,6 +520,7 @@
   function onInput() {
     autoGrow();
     syncAc();
+    scheduleDraftSave();
   }
 
   // Caret-only moves (no text change) don't fire input; re-evaluate the match
@@ -458,11 +569,26 @@
 </script>
 
 <!-- The wrap point moves with the field's width, so a rotation or a sidebar
-     toggle has to re-evaluate it; nothing else fires while the text is idle. -->
+     toggle has to re-evaluate it; nothing else fires while the text is idle.
+
+     Two flushes beyond the destroy one, which only covers navigating within
+     the app. `pagehide` is a reload, a closed tab or a navigation away — the
+     event a WKWebView delivers where `unload` is not. It does *not* cover the
+     app being sent to the background, which fires `visibilitychange` → hidden
+     and may never fire anything again if iOS then discards the page; that is
+     the last callback there is, and the reason the store's own poller already
+     hangs off it. Without the second one the loss is bounded by 400ms of
+     *idle*, not of typing — continuous typing never reaches a debounce. -->
 <svelte:window
   onresize={autoGrow}
   onpointerdown={onWindowPointerDown}
   onkeydown={onWindowKeydown}
+  onpagehide={flushDraft}
+/>
+<svelte:document
+  onvisibilitychange={() => {
+    if (document.visibilityState === 'hidden') flushDraft();
+  }}
 />
 
 <div

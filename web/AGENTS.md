@@ -230,6 +230,8 @@ Theme and text scale are localStorage-persisted per browser, not profile fields 
 
 The theme is stated in three places that must agree: the token in `app.css`, the `theme-color` meta seeded by that same pre-paint script in `app.html`, and `applyTheme` in `stores/theme.ts`, which keeps the meta current as the user switches. A test asserts all three, so changing the dark surface color in one place fails there rather than shipping a browser chrome that no longer matches the app.
 
+Not everything client-local is a preference. `stores/drafts.ts` — unsent chat composer text, per room — sits beside these and goes through the same `persisted.ts`, but deliberately does **not** take the shape above: nothing is applied to `<html>`, there is no pre-paint branch and no `/settings` control, because a draft is state the user produced rather than a setting they chose. What it does share is the reason for being client-local: it has to be there the instant the composer mounts, before any request could answer, and half-written text is not something to publish to a server. It is also the one thing here that needs collecting — a room that is deleted or never revisited would otherwise hold its draft forever — hence the TTL and entry cap it carries and the preferences do not.
+
 ## Shipping a build
 
 There is **no service worker**. Caching is HTTP headers plus SvelteKit's own version poll, and the server sends two classes: hashed `_app/immutable/` assets are immutable for a year, everything else — the HTML shell, `version.json`, the manifest, the icons — is `no-cache` and revalidates. Sending neither (the previous state) let an installed home-screen app pin the shell indefinitely and then ask for hashed chunks the server had already deleted.
