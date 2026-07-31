@@ -2,6 +2,82 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-31: A failed send that survives the outage that caused it
+
+The three chat changes that landed earlier today left one thing between them: ISSUE-200 made a failed send _visible_ without making it _durable_. The `sendState: 'failed'` row was the only copy of the user's text, and three separate paths destroyed it — the room stream's own reconnect recovery, an ordinary page reload, and the composer dropping the draft the instant Send was pressed. A network outage triggers the first two at once, and it is the same outage that produced the failure. The user watched their message be reported as unsent and then vanish.
+
+**`messages` is a projection, and a failed send is the one row without a server copy.** `loadHistory` and `loadViewPage` both `messages.set` a list built wholly from the response, which is right for every other row. Rather than make them merge, the client-only rows are lifted out and put back: `stopActive` stashes them into a room-keyed map (it is the single "this transcript is about to be replaced" hook — every clear path already calls it), and `carryClientOnlyRows` takes them out again on the next rebuild. Identification needs no heuristic, since a server row always carries a `msgId`. They re-append at the tail because that is where they were: from this client's point of view a failed send is always the newest thing in its room.
+
+**The draft is the second copy, and it is the one that survives a reload.** Nothing in the store does. So the drop moved from submit to the backend ack — `settleSend` already ran at exactly that moment, ahead of everything downstream that can throw — carried to the composer as data rather than a callback, because the composer owns the key and handing it a function to call itself would be circular. Two details that are the whole of it working: `submit` _writes_ the text rather than leaving it, since a fast submit beats the 400ms debounce and would store nothing or a stale prefix; and `flushDraft` holds it through the unsettled window, since every departure the component can see flushes an emptied field and would otherwise drop the very draft this exists to keep.
+
+**The first version of that signal reintroduced the bug the same spec was fixing elsewhere.** It was a bare counter and a single "unsettled send" slot, which is fine right up until two sends are open at once — and they can be, because leaving a room resets the session status to idle and un-gates the composer. Both reviewers built the same probe independently: send in A, switch to B, send in B, ack A. Room B's draft was dropped while its own POST was still open, destroying the only copy of it, and room A's was orphaned. That is Stage 3's cross-turn leak exactly, in a second place. The ack now names the room it belongs to and the composer holds a map keyed by draft key.
+
+**And a second, quieter one.** `submit` stores the sent text under the key so a reload can recover it — which meant leaving the room and coming back _restored the message you had just sent_ into the composer, one Enter from sending it twice; the ack then read that as newly typed and declined to clear it, so it stayed. `switchDraft` now refuses to restore a message still awaiting its ack. Emptiness is a sufficient test in `settleDraft` only because of that rule, which is worth knowing before touching either.
+
+**Retry identity moved to the server.** The adoption heuristic added with ISSUE-200 matched a stranded row on its body, which a retry defeats by re-stamping the task id, and which never worked for a send the server rewrites (an attachment-only descriptor, a stripped `!model` prefix) — its own comment said so. A client-minted `client_msg_id` on the POST removes the duplicate instead of detecting it: `record_inbound` checks it after resolving the room and before creating anything, so a retry of a send we accepted but never got to report resolves to the first turn, with no second task, message row or Talk mirror. The column follows `location_pings.client_id` including its rule that an empty string becomes `NULL` — an empty string is a valid unique key and would collapse a room's whole history onto its first send. The body match stays as the fallback, for rows that predate the key. ISSUE-202's outbox will want it regardless.
+
+**A key scoped to a room, in an app where rooms are shared, is three decisions rather than one.** The lookup returns the sender instead of filtering on it: filtering makes a co-member's reused key miss and then collide on the room-scoped index (a 500), while ignoring the sender hands them a task the authorization check will refuse them — so the second sender gives the key up and sends without idempotency, which is what it is, an optimization. An over-long key is refused rather than truncated, since truncating changes the identity and two keys sharing a prefix would silently merge. And the replay deliberately ignores task status, though the spec said non-terminal: narrowing it means a late replay finds nothing, creates a task, and takes the `UNIQUE` violation on the insert. The gap that stays is `!command`, which runs inside the request and returns before the key is consulted — so the client withholds Retry for any `!` body rather than let a timed-out `!steer` append its note twice.
+
+**Two pieces of per-room state were not scoped to their room.** An upload in flight across a room switch landed its chip in the new room, and sending from there posted the file to the wrong one — `upload()` is async and appends with no notion of where it started, while `switchDraft` clears the list synchronously and cannot see a promise. An epoch counter fixes it in three lines, including the counter decrement: the switch has already reset that to 0, so a stale decrement drives it negative and the composer reports an upload in progress for good. And the `pendingSend` echo buffer is one module-level slot whose drain rested on an invariant — that no other turn's buffer can be open — which `selectRoom` defeats, since `stopActive` resets `status` to `'idle'` without touching it. It now abandons the slot, and `runTurn` drains only the buffer it opened. Review found the third door into an overlapping same-room turn still open: `Cmd/Ctrl+Enter` called `submit` without consulting the send/stop mode, so holding it started a second turn in a room that already had one. The chord is now a no-op while the button says Stop, rather than being repurposed as Stop — a chord that cancels work is not what it looks like it does.
+
+**Both reviewers ran runtime probes and independently proved the same two defects** — the settle signal's missing identity, and `forgetRoom` being undone by the reselect it precedes, whose covering test passed for the wrong reason (it asserted on the rendered array, which room 2's history had already replaced, rather than on the holding map). Four of the fixes were re-verified by reverting each and watching the new test fail.
+
+**Key changes:**
+
+- A failed send survives a room switch, a stream-recovery reload and a step through the aggregate views. Carried into All, which spans every room; left held for Unread and Starred, which are filtered panes it is not a member of. It leaves with its room when that room is deleted or hidden.
+- Draft dropped on the ack, not on submit — so a reload during a failed send restores the text into the composer even when the row itself is gone. Withheld when something has been typed since.
+- `sendChatMessage` shape-checks the parsed error body. `resp.json()` resolves for a body that is the literal `null` or a JSON array, so the inner catch never fired and reading `.error` threw a `TypeError` that escaped: an ordinary 400 was reported to the user as an unreachable server.
+- `readAll` in the draft store applies the TTL, which only `readDraft` did. An expired draft whose text was retyped verbatim hit the already-stored no-op, kept its stale age, and stayed invisible until some unrelated write pruned it.
+- `hasHadDraftKey` resets when a null key clears the field, so text typed _after_ the room went away is carried like the page-load case rather than suppressed for the life of the component.
+- The `@media (hover: hover)` guard extended to the attachment menu and chip-remove rules, which the same commit had left outside it.
+- `web/AGENTS.md`'s send-button rule narrowed: `:disabled` is the one state permitted to name a fill, ordered ahead of the mode rules. The code was right and the rule as written forbade it.
+
+**Files added/modified:**
+
+- `web/src/lib/stores/chat.ts` - `strandedSends` + `carryClientOnlyRows`, turn-scoped `pendingSend`, the room-naming `sendSettled`, the idempotency key
+- `web/src/lib/components/chat/Composer.svelte` - the `sendSettled` prop, `unsettledSends`, `uploadEpoch`, the send-chord mode check
+- `web/src/lib/api.ts` - `client_msg_id` on the send, the parsed-body shape guard
+- `web/src/lib/stores/drafts.ts` - TTL in `readAll`, `dropDraft`
+- `src/istota/db.py` + `schema.sql` + `transport/ingest.py` + `web_app.py` - the column, its partial unique index, the replay check and its sender scoping
+- `tests/test_web_chat.py` - +6; the web test files - +33
+
+## 2026-07-31: The stop button that was blue
+
+ISSUE-201 was filed as a paint-timing desync: the send/stop control rendering in the idle blue while showing the stop glyph. It was not a timing problem. `.icon-btn.send:hover:not(:disabled)` re-declared the idle blue at specificity (0,4,0), one class above `.icon-btn.send.stop` at (0,3,0), so a hovered stop button was blue by the ordinary rules of the cascade — reproducible in desktop Chrome with a mouse. iOS made it look like a stuck animation because Safari synthesizes `:hover` on tap and clears it only when a later tap displaces it, so the tap that starts a turn strands a hover on the button that just flipped to Stop, and it stays there for the whole turn.
+
+The fix is structural rather than a specificity bump, which would have broken again on the first `:active` rule. **A fill that encodes state may be named only by the state's own rule.** Hover on the filled control now sets only `filter: brightness()`, the fill is declared by exactly two rules (one per mode), and the generic `.icon-btn:hover` gained `:not(.send)` — it outranks `.icon-btn.send` as well, which is what the blue re-assertion existed to undo in the first place. Both hover rules moved behind `@media (hover: hover)`, the device half of the guard `Message.svelte` already uses.
+
+No transition on that fill, per alice's call: the fill _is_ the mode rather than a decoration of it, so easing it makes the colour and the glyph state different things for the length of the ease — and a transition is also what invites the compositor promotion that leaves WebKit painting a stale layer.
+
+The tests read the component's own style block rather than computed styles. jsdom applies no CSS, and its cascade walks stylesheets in document order without weighing specificity, so a computed-style assertion would have reported the button red in exactly the state the browser painted it blue.
+
+**Files added/modified:**
+
+- `web/src/lib/components/chat/Composer.svelte` - the two mode rules, the `:not(.send)` exclusion, the hover guard
+- `web/src/lib/components/chat/Composer.sendButton.svelte.test.ts` - a small CSS parser and the invariant pinned against it
+- `web/AGENTS.md` - the rule stated where a future control will look for it
+
+## 2026-07-31: Reporting a failed send on the message that failed
+
+The composer appends the user turn and an assistant placeholder optimistically, then POSTs — so a message had exactly one appearance whether or not it ever reached the backend. Worse, the one failure that _was_ handled (an HTTP error response) was written into the **assistant** placeholder, so "your message never left" presented as "the assistant errored replying".
+
+The failure ISSUE-200 actually reports took a path with no handling at all. `fetch` **rejects** rather than resolving when the server is unreachable, so the throw escaped an un-awaited caller, `status` was never reset off `'sending'`, and the composer stayed locked in Stop mode until reload. An expired session did the same, and there was no timeout at all — `fetch` has none, and a stalled connection parked the composer for as long as the OS took to give up.
+
+`sendChatMessage` classifies instead of throwing, the user row carries a `sendState` lifecycle, and `failSend` **removes** the placeholder rather than repurposing it: the turn produced no assistant message, so it has no assistant row. Absence of `sendState` is the settled state, with deliberately no `'sent'` member — every row rebuilt from history is settled by construction, and the ack's visible form is the pending mark clearing rather than a receipt we have no read-receipt semantics to back.
+
+**The pending mark is withheld for a 400ms grace.** A send resolves well inside it, and an indicator that flashes for a frame on every message is noise that teaches you to ignore the one place a real problem would be reported.
+
+**Retry reuses the failed row's `cid`**, because `appendStreamedRow` dedups on `(role, task_id)`: stamping the retry's task id onto the existing row is what folds the canonical echo into it, where a fresh row would leave the failed one behind and show two bubbles for one message. It needs the original attachments stashed on the row, since the rendered row holds display names and workspace paths rather than the host paths the POST takes. It is gated on an idle status because `runTurn` is not re-entrant, and `send` was gated by the composer's `busy` while Retry was the first entry that wasn't.
+
+Retry is offered only where it can work. An expired session and any other 4xx that is a verdict on the request (409 archived, 400 over-cap, 413) get the report without the button, mirroring the server's own transient/permanent split — the same reasoning that governs the star's `starrable` gate. An affordance that cannot succeed is worse than none.
+
+**Files added/modified:**
+
+- `web/src/lib/api.ts` - `SendFailure`, the classified `SendResult`, `SEND_TIMEOUT_MS`
+- `web/src/lib/stores/chat.ts` - `sendState`, `failSend` / `settleSend`, `retrySend`, the stranded-row adoption
+- `web/src/lib/components/chat/Message.svelte` + `+page.svelte` - the marks and the Retry affordance
+- `web/src/lib/stores/chat.send.test.ts`, `sendChatMessage.test.ts`, `Message.sendstate.svelte.test.ts` - the lifecycle
+
 ## 2026-07-31: Composer drafts, and a key that took three tries
 
 ISSUE-205: type a message in web chat, go and look at something in another section, come back to an empty field. Held in one `localStorage` map rather than round-tripped through the server — a draft has to be there the instant the composer mounts, before any request could answer, and text nobody has decided to send is the one thing that should not reach a server.
@@ -33,9 +109,9 @@ The iOS app needed nothing of its own. The issue assumed native storage; its com
 
 **Files added/modified:**
 
-- `web/src/lib/stores/drafts.ts` + `drafts.test.ts` - the store, 18 tests
+- `web/src/lib/stores/drafts.ts` + `drafts.test.ts` - the store, 17 tests
 - `web/src/lib/components/chat/Composer.svelte` - `draftKey`, `switchDraft`, flush points
-- `web/src/lib/components/chat/Composer.svelte.test.ts` - +13, four confirmed to fail against the pre-fix logic
+- `web/src/lib/components/chat/Composer.svelte.test.ts` - +14, four confirmed to fail against the pre-fix logic
 - `web/src/routes/chat/+page.svelte` - supplies `<user>:room:<token>`
 - `web/vitest-setup.ts` + `theme.test.ts` + `fontSize.test.ts` - one localStorage stub instead of two
 - `AGENTS.md`, `web/AGENTS.md` - the key rationale and the client-local-but-not-a-preference distinction
