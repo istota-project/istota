@@ -847,29 +847,64 @@
     width: 1.25em;
     height: 1.25em;
   }
-  .icon-btn:hover:not(:disabled) {
-    background: var(--surface-badge);
-    color: var(--accent-hover);
+  /* Guarded, because iOS Safari synthesizes :hover on tap and leaves it applied
+     until a later tap displaces it — an unguarded hover fill is worn by the last
+     control the finger touched, for as long as it stays untouched.
+
+     This is the device half of the guard the message row uses, without its
+     gesture half (`.msg:not(.touch)`): a touchscreen laptop reports hover, so a
+     tap there still strands one. The send button carries the pair anyway, since
+     its guarded rule sets only `filter` and cannot contradict the mode. What
+     could still strand is the grey fill on the plus and mic — cosmetic, and it
+     would take plumbing a touch flag through this component to close. */
+  @media (hover: hover) {
+    /* `:not(.send)` is load-bearing, not tidiness: this rule outranks
+       `.icon-btn.send` by a class, so without the exclusion it would grey out
+       the filled control on hover — which is why a `.send:hover` rule used to
+       sit below re-asserting the blue, and that re-assertion is what painted
+       the *stop* button blue. See the fill note below. */
+    .icon-btn:not(.send):hover:not(:disabled) {
+      background: var(--surface-badge);
+      color: var(--accent-hover);
+    }
+    /* The filled control brightens instead. A state may adjust the fill but
+       never name it, so no state can disagree with the mode. */
+    .icon-btn.send:hover:not(:disabled) {
+      filter: brightness(1.12);
+    }
   }
   .icon-btn:disabled {
     opacity: 0.4;
     cursor: default;
   }
-  /* The send affordance is the one filled control in the bar. */
+  /* The send affordance is the one filled control in the bar, and its fill is
+     its mode: blue means this sends, red means this stops. Exactly two rules
+     below set that fill — the two modes — and nothing else may, at any
+     specificity. A `:hover` rule that re-declared the blue used to outrank
+     `.stop` by one class and paint the running task's stop button blue under
+     the stop glyph, which on iOS was not a flicker but the resting state for
+     the whole turn.
+
+     No transition either. The fill is the mode rather than a decoration of it,
+     so easing it means the colour and the glyph state different things for the
+     length of the ease — and a transition is also what invites the compositor
+     promotion that leaves WebKit painting a stale layer. Just flip it. */
   .icon-btn.send {
     background: var(--accent-blue);
     color: var(--on-accent-fg);
-  }
-  .icon-btn.send:hover:not(:disabled) {
-    background: var(--accent-blue);
-    color: var(--on-accent-fg);
-    filter: brightness(1.12);
+    transition: none;
   }
   .icon-btn.send:disabled {
     background: var(--surface-badge);
     color: var(--text-muted);
     opacity: 1;
   }
+  /* Last of the fill rules on purpose: it ties with the :disabled rule above on
+     specificity, so order is what decides them. Unreachable today — the stop
+     mode is never disabled — but if that changes, a disabled stop renders as an
+     enabled one rather than dropping to grey, which is the lesser wrong of the
+     two: a grey button under a stop glyph is the state this control is not
+     allowed to be in. Give it its own `.stop:disabled` rule before disabling it. */
   .icon-btn.send.stop {
     background: var(--status-danger-fg);
     color: var(--on-accent-fg);
