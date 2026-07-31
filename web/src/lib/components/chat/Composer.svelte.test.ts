@@ -29,7 +29,8 @@ import {
   pickDocuments,
 } from '$lib/platform/nativePicker';
 import { resetCommandCatalogue } from './autocomplete/providers';
-import Composer from './Composer.svelte';
+import { readDraft, writeDraft, DRAFT_STORAGE_KEY } from '$lib/stores/drafts';
+import Composer, { DRAFT_SAVE_DEBOUNCE_MS } from './Composer.svelte';
 
 const upload = uploadChatAttachment as ReturnType<typeof vi.fn>;
 const chatConfig = chatConfigOnce as ReturnType<typeof vi.fn>;
@@ -713,5 +714,189 @@ describe('Composer voice message', () => {
     await tick();
     expect(upload).not.toHaveBeenCalled();
     expect(btn(container, 'Record voice message')).toBeTruthy();
+  });
+});
+
+describe('Composer drafts', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('restores the draft held under its key', async () => {
+    writeDraft('room:3', 'half a thought');
+    const { textarea } = mount({ draftKey: 'room:3' });
+    await tick();
+    expect(textarea.value).toBe('half a thought');
+    // Restored text is sendable straight away — no keystroke needed first.
+    expect(btn(document.body, 'Send')!.disabled).toBe(false);
+  });
+
+  it('survives leaving the page and coming back', async () => {
+    // The reported symptom, end to end: type, go and look at another section,
+    // come back. Client-side navigation destroys the whole chat page, so the
+    // round trip is an unmount and a fresh mount rather than anything subtler.
+    const first = mount({ draftKey: 'room:3' });
+    await type(first.textarea, 'back in a moment');
+    first.unmount();
+
+    const { textarea } = mount({ draftKey: 'room:3' });
+    await tick();
+    expect(textarea.value).toBe('back in a moment');
+  });
+
+  it('holds what was typed when it unmounts', async () => {
+    const { textarea, unmount } = mount({ draftKey: 'room:3' });
+    await type(textarea, 'mid-sentence');
+    unmount();
+    expect(readDraft('room:3')).toBe('mid-sentence');
+  });
+
+  it('holds what was typed once the debounce elapses', async () => {
+    vi.useFakeTimers();
+    try {
+      const { textarea } = mount({ draftKey: 'room:3' });
+      await type(textarea, 'still typing');
+      expect(readDraft('room:3')).toBe('');
+      vi.advanceTimersByTime(DRAFT_SAVE_DEBOUNCE_MS);
+      expect(readDraft('room:3')).toBe('still typing');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('persists nothing without a key', async () => {
+    const { textarea, unmount } = mount();
+    await type(textarea, 'no room to attribute this to');
+    unmount();
+    expect(localStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+  });
+
+  it('swaps drafts when the key changes, without leaking one into the other', async () => {
+    writeDraft('room:9', 'for B');
+    const { textarea, rerender } = mount({ draftKey: 'room:3' });
+    await type(textarea, 'for A');
+
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+    expect(textarea.value).toBe('for B');
+    expect(readDraft('room:3')).toBe('for A');
+
+    await rerender({ draftKey: 'room:3' });
+    await tick();
+    expect(textarea.value).toBe('for A');
+  });
+
+  it('empties the field for a room that has no draft', async () => {
+    const { textarea, rerender } = mount({ draftKey: 'room:3' });
+    await type(textarea, 'for A');
+
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+    expect(textarea.value).toBe('');
+  });
+
+  it('carries text typed before a room resolved into that room', async () => {
+    // The composer renders while the room list is still in flight, so the key
+    // arrives after the first keystroke could. There is no earlier room to
+    // attribute the text to, so it belongs to the one that lands.
+    const { textarea, rerender } = mount({ draftKey: null });
+    await type(textarea, 'typed during the load');
+
+    await rerender({ draftKey: 'room:3' });
+    await tick();
+    expect(textarea.value).toBe('typed during the load');
+    expect(readDraft('room:3')).toBe('typed during the load');
+  });
+
+  it('never lets a keystroke during the load replace the room own draft', async () => {
+    // The destructive half of the case above. The field is empty and unkeyed
+    // for two round trips on the way back to /chat, so a returning user sees
+    // no draft, types, and the draft they came back for would be overwritten
+    // by that keystroke — with no undo and no notice.
+    writeDraft('room:3', 'what they came back for');
+    const { textarea, rerender } = mount({ draftKey: null });
+    await type(textarea, 'x');
+
+    await rerender({ draftKey: 'room:3' });
+    await tick();
+    expect(textarea.value).toBe('what they came back for');
+    expect(readDraft('room:3')).toBe('what they came back for');
+  });
+
+  it('clears the field when the room goes away under it', async () => {
+    // Deleting or archiving the open room drops the key while leaving the view
+    // on 'room', so the composer stays mounted. Leaving the departed room's
+    // text in the field is how it reaches the next room.
+    const { textarea, rerender } = mount({ draftKey: 'room:3' });
+    await type(textarea, 'for A');
+
+    await rerender({ draftKey: null });
+    await tick();
+    expect(textarea.value).toBe('');
+    expect(readDraft('room:3')).toBe('for A');
+  });
+
+  it('does not carry a departed room text into the next room', async () => {
+    // The leak the whole mechanism exists to stop, by the route that does not
+    // pass through a room-to-room switch: delete the open room, pick another.
+    writeDraft('room:9', 'B own draft');
+    const { textarea, rerender } = mount({ draftKey: 'room:3' });
+    await type(textarea, 'PRIVATE to room 3');
+
+    await rerender({ draftKey: null });
+    await tick();
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+
+    expect(textarea.value).toBe('B own draft');
+    expect(readDraft('room:9')).toBe('B own draft');
+  });
+
+  it('does not carry attachments into the next room', async () => {
+    // Not drafted, but they must not ride along either: re-picking a file
+    // costs a tap, posting one to the wrong room does not undo.
+    upload.mockResolvedValue({ path: 'inbox/secret.txt', name: 'secret.txt', size: 4 });
+    const { container, rerender } = mount({ draftKey: 'room:3' });
+    const input = picker(container, 'file');
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'secret.txt')] });
+    await fireEvent.change(input);
+    await tick();
+    expect(container.querySelectorAll('.attach-chip')).toHaveLength(1);
+
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+    expect(container.querySelectorAll('.attach-chip')).toHaveLength(0);
+  });
+
+  it('holds what was typed when the app is backgrounded', async () => {
+    // A backgrounded iOS app fires visibilitychange and may never fire
+    // anything again; pagehide does not cover it and the destroy flush is
+    // never reached.
+    const { textarea } = mount({ draftKey: 'room:3' });
+    await type(textarea, 'still typing');
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    });
+    await fireEvent(document, new Event('visibilitychange'));
+    expect(readDraft('room:3')).toBe('still typing');
+  });
+
+  it('drops the draft once the message is sent', async () => {
+    // Seeded rather than typed: a typed draft is still behind its debounce at
+    // the moment of the click, so the assertion would hold with the flush on
+    // send deleted — it would be passing on the precondition.
+    writeDraft('room:3', 'going out');
+    const onSend = vi.fn();
+    const { textarea, unmount } = mount({ draftKey: 'room:3', onSend });
+    await tick();
+    expect(textarea.value).toBe('going out');
+
+    await fireEvent.click(btn(document.body, 'Send')!);
+    expect(onSend).toHaveBeenCalled();
+    expect(readDraft('room:3')).toBe('');
+    // And the unmount flush must not write the now-empty field back as a draft.
+    unmount();
+    expect(readDraft('room:3')).toBe('');
   });
 });

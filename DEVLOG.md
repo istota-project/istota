@@ -2,6 +2,44 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-31: Composer drafts, and a key that took three tries
+
+ISSUE-205: type a message in web chat, go and look at something in another section, come back to an empty field. Held in one `localStorage` map rather than round-tripped through the server — a draft has to be there the instant the composer mounts, before any request could answer, and text nobody has decided to send is the one thing that should not reach a server.
+
+**The report understated the bug.** The composer is mounted once and is never keyed on the room, so a draft did not merely vanish on a tab switch — it also _followed you into the next room_. Both halves are the same missing thing, and `switchDraft` closes them together: it writes the outgoing room's text down before restoring the incoming one's.
+
+**The key took three attempts, and the first two were defensible.** Keying on the room id looked right: it is the frontend's room handle, and `UNIQUE(user_id, token)` gives a shared Talk room one row per member, so an id separates two people where a token would not — a shared token would hand one person's half-written message to the other on a browser profile they take turns using. That reasoning was even written into the docstring. It is wrong, because `schema.sql` declares `id INTEGER PRIMARY KEY` **without** `AUTOINCREMENT`: SQLite hands a freed rowid straight back out, so a deleted room's draft would be inherited by whichever room took its id next — including another user's. The answer is both halves, `<user>:room:<token>`: the token because it is never recycled, the user prefix because it restores the separation the id was picked for. Neither is redundant, which is why it took two wrong answers to find.
+
+**Two null-key cases that look identical from the prop and want opposite treatment.** The composer renders before the room list answers, so the opening keystrokes of a page load have no room to attribute them to; carrying them into whichever room lands is right. But a key going null _later_ means the room was deleted or archived under us — `deleteRoom`, `archiveRoom` and a `remove` room frame all null `activeRoomId` while leaving the view on `room`, so the composer stays mounted holding the departed room's text — and carrying there is exactly the leak. The first implementation gated the carry on "the previous key was null" and so did both. It is now a one-shot "has ever had a key" flag, with the field cleared when a key goes null.
+
+**The carry also has to lose.** It won over a stored draft at first, which meant one keystroke during the load window destroyed the draft the user came back for, silently and with no undo. The field is empty and unkeyed for two round trips on the way into `/chat`, which is precisely when someone types. Stored outranks carried now.
+
+Both of those were found by review probes against the running component, not by reading — each was a two-line rule whose failure needed a specific sequence of prop changes to see.
+
+**Flush points are the whole design.** The debounce (400ms) only ever bounds what a _crash_ could cost, because every departure the component can see flushes immediately: a key change, unmount, `pagehide`, and `visibilitychange` → hidden. The last one is not redundant with `pagehide` — a backgrounded iOS app gets only `visibilitychange` and may then be discarded with nothing further fired. Without it the exposure is 400ms of _idle_ rather than of typing, and continuous typing never reaches a debounce at all.
+
+**Bounds, because nothing else collects a draft.** A 30-day TTL (checked on read as well as on write, so an expired draft is never restored) and a 50-entry cap. A room that is deleted or never revisited would otherwise hold its text forever. Writing an unchanged draft is a no-op, so merely _visiting_ a room neither re-serializes the map nor pushes its age out — without that the TTL would measure time since you last looked rather than time since you last typed.
+
+Attachments are not drafted — an uploaded file is already server-side, so the chips are a view of it rather than the record — but they are cleared on a room switch, because re-picking a file costs a tap while posting one to the wrong room does not undo.
+
+The iOS app needed nothing of its own. The issue assumed native storage; its composer _is_ this composer, inside a WKWebView on the deployment URL.
+
+**Key changes:**
+
+- Drafts are client-local, like the theme and text-scale preferences and for the same reason — but deliberately not shaped like them: no pre-paint branch, no `<html>` attribute, no settings control, because a draft is state the user produced rather than a setting they chose. It is also the only one that needs collecting.
+- `Composer.svelte` takes a `draftKey`; absent, the component is byte-for-byte what it was.
+- The localStorage stub two test files were each carrying moved into `vitest-setup.ts`. Worth confirming rather than assuming it was inert — a probe showed `localStorage` genuinely absent under this jsdom config, so the stub is load-bearing.
+- A `Number.isFinite` guard on the stored age that nothing can currently reach: JSON writes `NaN`/`Infinity` as `null` and refuses to parse either literal. Kept because it states the property the module relies on, with the comment saying plainly that it is not a live hazard.
+
+**Files added/modified:**
+
+- `web/src/lib/stores/drafts.ts` + `drafts.test.ts` - the store, 18 tests
+- `web/src/lib/components/chat/Composer.svelte` - `draftKey`, `switchDraft`, flush points
+- `web/src/lib/components/chat/Composer.svelte.test.ts` - +13, four confirmed to fail against the pre-fix logic
+- `web/src/routes/chat/+page.svelte` - supplies `<user>:room:<token>`
+- `web/vitest-setup.ts` + `theme.test.ts` + `fontSize.test.ts` - one localStorage stub instead of two
+- `AGENTS.md`, `web/AGENTS.md` - the key rationale and the client-local-but-not-a-preference distinction
+
 ## 2026-07-30: Copying a chat message, and three workarounds that were one design mistake
 
 The copy half of ISSUE-210 (per-message copy and delete in web chat). Copy shipped on its own because it needs no backend at all; delete needs the soft-versus-hard call, a decision about what happens to the paired turn's LLM context, and a new frame kind on the room stream — the cursor there is `messages.id`, strictly ascending, so a deletion is invisible to every connected client by construction. None of that blocks copy.

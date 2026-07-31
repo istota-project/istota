@@ -58,6 +58,9 @@
   // resolves (or if it fails).
   let userName = $state('You');
   let botName = $state('Istota');
+  // Who is logged in, for the composer's draft key. Null until /me resolves,
+  // which only delays a draft being restored — see draftKey below.
+  let userId = $state<string | null>(null);
   let creatingRoom = $state(false);
   let newRoomName = $state('');
   let listEl: HTMLDivElement | undefined = $state();
@@ -69,6 +72,14 @@
   let composerH = $state(0);
 
   const activeRoom = $derived($rooms.find((r) => r.id === $activeRoomId) ?? null);
+  // Where the composer holds unsent text (ISSUE-205). Scoped to the room's
+  // token *and* the logged-in user: the room id is a recycled SQLite rowid, so
+  // a deleted room's draft would land in whichever room takes its id next, and
+  // a shared Talk room has one token across every member, so a bare token
+  // would hand one person's half-written message to another on a browser
+  // profile they take turns using. Null until both are known — the composer
+  // then holds what is typed and carries it in once the key arrives.
+  const draftKey = $derived(userId && activeRoom ? `${userId}:room:${activeRoom.token}` : null);
   const busy = $derived($status === 'sending' || $status === 'streaming');
 
   // The room's standing model default as a header badge — the canonical model
@@ -170,6 +181,9 @@
       .then((me) => {
         if (me.display_name) userName = me.display_name;
         if (me.bot_name) botName = me.bot_name;
+        // `username` is the istota user id — the same value the server keys
+        // admin checks and workspace paths on, not a display handle.
+        userId = me.username || null;
       })
       .catch(() => {});
   });
@@ -779,6 +793,7 @@
           onCancel={() => session.cancel()}
           {busy}
           placeholder="Your message…"
+          {draftKey}
         />
       </div>
     {/if}
