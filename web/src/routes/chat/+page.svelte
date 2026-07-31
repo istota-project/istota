@@ -22,6 +22,7 @@
     type PointerSample,
   } from '$lib/components/chat/tapActivation';
   import { getChatSession } from '$lib/stores/chat';
+  import { notifyError } from '$lib/stores/notices';
   import { getMe, type ChatRoom, type ChatView } from '$lib/api';
 
   const session = getChatSession();
@@ -427,6 +428,23 @@
     confirmDeleteMessage = true;
   }
 
+  // Re-send a message whose send never landed. Unconfirmed, unlike delete: the
+  // action the user is repeating is the one they already asked for, and the
+  // failed row is the only place that message still exists.
+  //
+  // Offered in the live room only. An aggregate view is a read-only pane with
+  // no composer, so re-sending from one would post into a room the user isn't
+  // looking at.
+  function retryFailedSend(cid: number) {
+    atBottom = true;
+    showJumpToLatest = false;
+    // Caught rather than `void`: the store guards its own body, but a rejection
+    // reaching an un-awaited caller is the shape of the bug this whole change
+    // is about — silence where a failure should have been reported.
+    session.retrySend(cid).catch(() => notifyError('Couldn’t retry that message.'));
+    tick().then(() => pinToBottom());
+  }
+
   // Named only when the room really is Talk-bound: a delete that reaches into
   // Nextcloud Talk is a materially bigger action than one that doesn't, and
   // saying so unconditionally would be a warning about something that isn't
@@ -681,6 +699,8 @@
               onReject={session.reject}
               onToggleStar={session.toggleStar}
               onDelete={askDeleteMessage}
+              onRetry={inViewMode ? undefined : retryFailedSend}
+              retryBusy={busy}
               onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
               onJump={(token, taskId) => session.jumpToTask(token, taskId)}
               aggregate={inViewMode}
@@ -751,7 +771,9 @@
             // lands. The $messages effect covers the landing itself.
             atBottom = true;
             showJumpToLatest = false;
-            void session.send(t, atts);
+            // See retryFailedSend: the store settles its own failures onto the
+            // message row, so this only covers a rejection that escaped it.
+            session.send(t, atts).catch(() => notifyError('Couldn’t send that message.'));
             tick().then(() => pinToBottom());
           }}
           onCancel={() => session.cancel()}

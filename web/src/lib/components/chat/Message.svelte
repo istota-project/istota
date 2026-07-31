@@ -5,6 +5,7 @@
   import { renderMarkdown } from '$lib/markdown';
   import type { ChatMessage } from '$lib/stores/chat';
   import { messageCopyText, renderGroups } from '$lib/stores/segments';
+  import { Button } from '$lib/components/ui';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
   import SearchResults from './SearchResults.svelte';
@@ -18,6 +19,8 @@
     onReject,
     onToggleStar,
     onDelete,
+    onRetry,
+    retryBusy = false,
     onRoomClick,
     onJump,
     aggregate = false,
@@ -38,6 +41,13 @@
     // Delete a durable message. The handler owns the confirmation — this
     // component only offers the affordance. Absent → no delete affordance.
     onDelete?: (cid: number) => void;
+    // Re-send a message whose send failed. Absent → the failure is reported
+    // without an offer to retry it (read-only surfaces, aggregate views).
+    onRetry?: (cid: number) => void;
+    // True while the room has a turn in flight. Retry is refused then (the
+    // store's `runTurn` is not re-entrant), so the button says so rather than
+    // silently doing nothing.
+    retryBusy?: boolean;
     // Aggregate views: click the message's room label to jump into that room.
     // Only rendered when both the handler and message.roomName are present.
     onRoomClick?: (token: string) => void;
@@ -147,9 +157,23 @@
   // do to a whole turn. Same condition as the bar's, so they can't disagree
   // about whether the turn is starrable.
   const showRowStar = $derived(starrable);
+  // ---- Send lifecycle (ISSUE-200) -------------------------------------------
+  // A send that failed reports on the message that failed, not on an assistant
+  // placeholder standing in for a reply that was never attempted.
+  const sendFailed = $derived(message.sendState === 'failed');
+  // Truthful state is set the moment the row exists; the store's grace timer
+  // opens `showSending` only once the send is slow enough to be worth saying.
+  const sendPending = $derived(message.sendState === 'sending' && !!message.showSending);
+  // `retryable` is false where a retry would fail identically (an expired
+  // session), and an offer that cannot work is worse than no offer.
+  const showRetry = $derived(sendFailed && message.retryable !== false && !!onRetry);
+
   // The row is in the layout whenever any of the three could be there, so
-  // revealing it never reflows the transcript under the pointer.
-  const hasRowActions = $derived(showCopy || showRowStar || showDelete);
+  // revealing it never reflows the transcript under the pointer. Withheld
+  // entirely from a failed send: all three act on a durable turn, and this one
+  // never became one — star and delete have no `msgId` to work with, and a lone
+  // copy button would compete with the Retry that is the actual next move.
+  const hasRowActions = $derived((showCopy || showRowStar || showDelete) && !sendFailed);
 </script>
 
 <!-- Turn-level actions, left-aligned under the message body. In the flow
@@ -351,6 +375,30 @@
                 <span class="attachment">📎 {name}</span>
               {/if}
             {/each}
+          </div>
+        {/if}
+        <!-- The send's own state, on the message it belongs to. A failure here
+             used to be written into the assistant placeholder, which read as
+             "the reply failed" rather than "your message never left". -->
+        {#if sendPending}
+          <div class="progress send-pending">
+            <span class="dot"></span>
+            <span class="status-text">Sending…</span>
+          </div>
+        {:else if sendFailed}
+          <div class="send-failed">
+            <span class="send-failed-text">{message.sendError || 'Couldn’t send.'}</span>
+            {#if showRetry}
+              <Button
+                variant="subtle"
+                size="sm"
+                disabled={retryBusy}
+                title={retryBusy ? 'Wait for the current turn to finish' : undefined}
+                onclick={() => onRetry?.(message.cid)}
+              >
+                Retry
+              </Button>
+            {/if}
           </div>
         {/if}
       {:else}
@@ -846,6 +894,25 @@
   .msg.error .body,
   .cmd-output.error {
     color: var(--status-danger-fg);
+  }
+
+  /* Send lifecycle on the user's own row (ISSUE-200). Both marks sit under the
+	   message body, where the turn-action row would be — the send has to settle
+	   before that row has anything to act on. */
+  .send-pending {
+    margin-top: var(--space-1);
+  }
+  .send-failed {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--status-danger-fg);
+  }
+  .send-failed-text {
+    min-width: 0;
   }
 
   /* Command (!…) output: a left-aligned block set apart from the conversation
