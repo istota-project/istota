@@ -134,6 +134,8 @@ describe('chat store — attachment chips', () => {
       'read this',
       ['/inbox/note-a1b2c3d4.txt'],
       ['note.txt'],
+      undefined, // the default timeout
+      expect.any(String), // the idempotency key
     );
   });
 

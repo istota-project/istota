@@ -117,6 +117,7 @@ def record_inbound(
     apply_room_default: bool = True,
     priority: int = 5,
     external_id: str | None = None,
+    client_msg_id: str | None = None,
 ) -> tuple[str, int | None]:
     """Resolve → echo-check → store user message → create task.
 
@@ -125,6 +126,12 @@ def record_inbound(
     v1 Talk+web pair, where Talk self-filters bot posts by author and web is
     never polled inbound). `room_token` is the canonical conversation token the
     task was created under.
+
+    `client_msg_id` is the sender's own identity for this message (web chat
+    mints one per send and reuses it on retry). When a stored turn already
+    carries it, that turn's task is returned and nothing new is created — a
+    client that could not tell "never arrived" from "answer lost" gets one turn
+    rather than two.
     """
     source_type = source_type or surface
 
@@ -197,6 +204,30 @@ def record_inbound(
             if effort is None:
                 effort = existing.effort
 
+        # 2b. Idempotent replay. Checked after the room is resolved (the key is
+        #     scoped to a room, so the same key in two rooms is two messages)
+        #     and before the task is created, so a retry adds nothing.
+        if client_msg_id:
+            prior = db.find_send_by_client_msg_id(conn, room_token, client_msg_id)
+            if prior is not None:
+                prior_task, prior_sender = prior
+                if prior_sender == user_id:
+                    logger.info(
+                        "Replaying prior task for client_msg_id (room=%s task=%s)",
+                        room_token, prior_task,
+                    )
+                    return room_token, prior_task
+                # A co-member of this shared room got there first with the same
+                # key. It is an optimization, not a requirement, so this send
+                # gives it up rather than colliding on the room-scoped unique
+                # index — or being handed somebody else's task, which the
+                # caller is not authorized to read anyway.
+                logger.warning(
+                    "client_msg_id already used by another sender in room=%s; "
+                    "storing this message without one", room_token,
+                )
+                client_msg_id = None
+
     # 3. Create the task.
     task_id = db.create_task(
         conn,
@@ -242,6 +273,7 @@ def record_inbound(
                 attachment_paths=workspace_attachment_paths(
                     config, user_id, attachments,
                 ),
+                client_msg_id=client_msg_id,
             )
 
     return room_token, task_id

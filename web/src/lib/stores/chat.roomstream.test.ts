@@ -494,6 +494,86 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('does not release one turn’s echo buffer from another turn', async () => {
+    // The buffer used to be a single module-level slot drained unconditionally
+    // on the way into `runTurn`, on the stated grounds that no other turn's
+    // could be open — an invariant `selectRoom` defeats, since `stopActive`
+    // resets `status` to 'idle' without touching the slot. Room 2's send then
+    // released room 1's held echo before room 1's task id existed, and room 2
+    // showed two bubbles for one message, both bound to its task.
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+
+    let releaseOne: (v: any) => void = () => {};
+    let releaseTwo: (v: any) => void = () => {};
+    api.sendChatMessage.mockReturnValueOnce(
+      new Promise((res) => {
+        releaseOne = res;
+      }),
+    );
+    const first = s.send('from room one');
+
+    await s.selectRoom(2);
+    api.sendChatMessage.mockReturnValueOnce(
+      new Promise((res) => {
+        releaseTwo = res;
+      }),
+    );
+    // Deliberately not awaited: room 2's POST has to still be open when room
+    // 1's resolves, which is the whole window the buffer covers.
+    const second = s.send('from room two');
+
+    queueEvents(
+      [row(20, 't2', { role: 'user', text: 'from room two', task_id: 99, status: 'running' })],
+      20,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+
+    releaseOne({ ok: true, status: 200, task_id: 7 });
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+
+    releaseTwo({ ok: true, status: 200, task_id: 99 });
+    await second;
+    await vi.advanceTimersByTimeAsync(0);
+
+    const users = get(s.messages).filter((m) => m.role === 'user');
+    expect(users).toHaveLength(1);
+    expect(users[0].taskId).toBe(99);
+    s.teardown();
+  });
+
+  it('abandons the echo buffer when the room is switched away from', async () => {
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+
+    let release: (v: any) => void = () => {};
+    api.sendChatMessage.mockReturnValue(
+      new Promise((res) => {
+        release = res;
+      }),
+    );
+    const sending = s.send('hello');
+    await s.selectRoom(2);
+
+    // Room 1's frame arrives with nothing holding it, so it takes the ordinary
+    // background path — the badge — rather than being buffered for a room the
+    // user has left and a transcript that has since been rebuilt.
+    queueEvents([row(30, 't1')], 30);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(get(s.rooms).find((r) => r.id === 1)?.unread_count).toBe(1);
+
+    release({ ok: true, status: 200, task_id: 7 });
+    await sending;
+    s.teardown();
+  });
+
   it('does not re-count a buffered row the recovery refresh already counted', async () => {
     // recoverStream buffers frames while it reloads, then drains them. Its own
     // refreshRooms returns server-computed counts that already include a row

@@ -49,7 +49,7 @@ type DraftMap = Record<string, Draft>;
  * straight into a textarea's value, and a hand-edited or half-written payload
  * should cost one draft rather than the field.
  */
-function readAll(): DraftMap {
+function readAll(now = Date.now()): DraftMap {
   const raw = loadSetting<unknown>(DRAFT_STORAGE_KEY, null);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const out: DraftMap = {};
@@ -63,6 +63,13 @@ function readAll(): DraftMap {
     // false, so such an entry reads back yet can never be re-stored, and an
     // Infinity age outlives the TTL and sorts to the front of the cap forever.
     if (!draft || typeof draft.text !== 'string' || !Number.isFinite(draft.at)) continue;
+    // Expiry is applied here so every caller shares one notion of what is
+    // stored. `readDraft` filtered on the way out and this did not, so an
+    // expired entry whose text the user retyped verbatim hit the
+    // already-stored no-op in `writeDraft`: the stale `at` survived, the read
+    // kept returning nothing, and the draft only came back to life when some
+    // unrelated write pruned it away.
+    if (now - (draft.at as number) >= DRAFT_TTL_MS) continue;
     out[key] = { text: draft.text, at: draft.at as number };
   }
   return out;
@@ -82,9 +89,21 @@ function prune(map: DraftMap, now: number): DraftMap {
  * is never restored even when nothing has written since it aged out.
  */
 export function readDraft(key: string): string {
-  const draft = readAll()[key];
-  if (!draft || Date.now() - draft.at >= DRAFT_TTL_MS) return '';
-  return draft.text;
+  return readAll()[key]?.text ?? '';
+}
+
+/**
+ * Remove one entry outright.
+ *
+ * Same effect as writing a blank, and named separately because the intent
+ * differs: this is the room going away, not the field being emptied. The
+ * blank-write path is how the composer clears a draft it still owns.
+ */
+export function dropDraft(key: string): void {
+  const map = readAll();
+  if (!(key in map)) return;
+  delete map[key];
+  saveSetting(DRAFT_STORAGE_KEY, prune(map, Date.now()));
 }
 
 /**
@@ -104,8 +123,8 @@ export function readDraft(key: string): string {
  * you last touched it, and a draft you never edit again would never age out.
  */
 export function writeDraft(key: string, text: string): void {
-  const map = readAll();
   const now = Date.now();
+  const map = readAll(now);
   if (text.trim() === '') {
     if (!(key in map)) return;
     delete map[key];

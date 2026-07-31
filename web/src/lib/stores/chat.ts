@@ -228,6 +228,17 @@ export interface ChatSession {
   promoteRoom: (id: number) => Promise<void>;
   archiveRoom: (id: number) => Promise<void>;
   deleteRoom: (id: number) => Promise<void>;
+  // The last send the backend acked: a monotonic counter plus the room it
+  // belongs to. The composer holds the submitted text as a draft until this
+  // fires — a failed row does not survive a reload and the stored draft does —
+  // so it needs the ack as a signal, and it owns the key the draft is stored
+  // under, which is why the room travels rather than the key.
+  //
+  // The room is what makes it safe. Two sends can be open at once (a room
+  // switch resets `status` to 'idle', which un-gates the composer), and a bare
+  // counter would let whichever acked first settle the other's draft — the
+  // cross-turn leak Stage 3 removed from `pendingSend`, reintroduced here.
+  sendSettled: Writable<{ n: number; token: string | null }>;
   send: (text: string, attachments?: ChatAttachment[]) => Promise<void>;
   // Re-POST a failed send from its own row (ISSUE-200). Reuses the row rather
   // than appending a new one, so the canonical echo folds into it. No-op for a
@@ -347,6 +358,72 @@ function createSession(): ChatSession {
   // flicker, and EventSource reconnects on ordinary blips often enough that
   // forcing a reload each time would be constant churn on a flaky network.
   const ROOM_STREAM_STALE_MS = 60000;
+  const sendSettled = writable<{ n: number; token: string | null }>({ n: 0, token: null });
+
+  // ---- Client-only rows -----------------------------------------------------
+  //
+  // A send the server never took exists nowhere but here. `messages` is
+  // otherwise a projection of server history — `loadHistory` and `loadViewPage`
+  // both rebuild it wholesale from the response — so a room switch, a
+  // stream-recovery reload or a step into an aggregate view dropped the one
+  // copy of the user's text along with the Retry that was its only way back.
+  // A network outage triggers the reload and the failure at once, so the user
+  // watched their message be reported as unsent and then vanish.
+  //
+  // Rows sit in this map only while they are off screen; a rebuild takes them
+  // back out. Keyed by room, so a row is re-appended to the transcript it
+  // belongs to and nowhere else.
+  const strandedSends = new Map<string, ChatMessage[]>();
+
+  // Client-only without ambiguity: a server row always carries a `msgId`.
+  const isStranded = (m: ChatMessage) => m.sendState === 'failed' && m.msgId === undefined;
+
+  /** Move whatever client-only rows are on screen into the holding map. */
+  function stashStrandedSends() {
+    for (const m of get(messages)) {
+      if (!isStranded(m) || !m.roomToken) continue;
+      const held = strandedSends.get(m.roomToken) ?? [];
+      if (!held.some((x) => x.cid === m.cid)) held.push(m);
+      strandedSends.set(m.roomToken, held);
+    }
+  }
+
+  /**
+   * `next`, with a room's client-only rows re-appended at the tail.
+   *
+   * The tail is where they were: a failed send is always the newest thing in
+   * the room from this client's point of view, and its `createdAt` is later
+   * than anything the server can return for that room.
+   *
+   * `token` names the room being rebuilt, or null for the All view, which
+   * spans every room. Held rows are taken *out* of the map — they are back on
+   * screen, and `stashStrandedSends` puts them away again on the way out.
+   */
+  function carryClientOnlyRows(
+    prev: ChatMessage[],
+    next: ChatMessage[],
+    token: string | null,
+  ): ChatMessage[] {
+    const carried: ChatMessage[] = [];
+    const seen = new Set(next.map((m) => m.cid));
+    const take = (m: ChatMessage) => {
+      if (!isStranded(m) || seen.has(m.cid)) return;
+      if (token !== null && m.roomToken !== token) return;
+      seen.add(m.cid);
+      carried.push(m);
+    };
+    for (const m of prev) take(m);
+    if (token === null) {
+      for (const [key, held] of strandedSends) {
+        held.forEach(take);
+        strandedSends.delete(key);
+      }
+    } else {
+      (strandedSends.get(token) ?? []).forEach(take);
+      strandedSends.delete(token);
+    }
+    return carried.length ? [...next, ...carried] : next;
+  }
 
   // Clone a segment (and its tool) so a keyed {#each} sees a fresh reference.
   // text/thinking are flat; only a tool segment has a nested object to clone.
@@ -557,6 +634,17 @@ function createSession(): ChatSession {
     status.set('idle');
     activeTaskId.set(null);
     cancelRequested = false;
+    // The single "this transcript is about to be replaced" hook — every caller
+    // (selectRoom, selectView, teardown) clears `messages` right after this, so
+    // rows that exist only on the client have to be put away here or they are
+    // gone before the rebuild that would carry them ever runs.
+    stashStrandedSends();
+    // The echo buffer belongs to the turn that opened it, and this call has
+    // just released the gates (`status` back to 'idle') that were supposed to
+    // keep another turn from draining it. Abandoned rather than drained: those
+    // frames are for a room the user has left, and `loadHistory` rebuilds that
+    // room's transcript from the server on the way back in.
+    pendingSend = null;
   }
 
   // Set a single room's unread badge locally (optimistic clears + merge).
@@ -810,7 +898,16 @@ function createSession(): ChatSession {
 
   // Replay the frames held for the duration of a send, now that the turn's
   // task id is on screen and the ordinary dedup can recognise our own echo.
-  function drainPendingSend() {
+  //
+  // `expected` is the buffer the caller opened. A turn drains only its own:
+  // the slot is one module-level reference, and a room switch between two
+  // sends leaves whatever was open in it, so an unqualified drain releases
+  // another turn's frames before that turn's task id has been stamped — which
+  // is precisely the duplicate the buffer exists to prevent.
+  type PendingSend = { token: string; rows: ChatRoomEvent[] };
+
+  function drainPendingSend(expected?: PendingSend) {
+    if (expected && pendingSend !== expected) return;
     const held = pendingSend;
     pendingSend = null;
     if (!held) return;
@@ -834,6 +931,7 @@ function createSession(): ChatSession {
     if (frame.action === 'remove') {
       const id = frame.id;
       if (typeof id !== 'number') return;
+      forgetRoom(id);
       rooms.update((rs) => rs.filter((r) => r.id !== id));
       if (get(activeRoomId) === id) {
         const remaining = get(rooms);
@@ -1188,6 +1286,13 @@ function createSession(): ChatSession {
 
   async function loadHistory(roomId: number, timeoutMs = 0) {
     const hist = await getRoomMessages(roomId, { timeoutMs });
+    // A reload of the room already on screen (a stream recovery) still has its
+    // client-only rows in `messages`; one reached via a room switch has them in
+    // the holding map. Stashing first puts both cases in one place, so the
+    // carry below is the only thing that has to know where they came from.
+    const prev = get(messages);
+    stashStrandedSends();
+    const roomToken = get(rooms).find((r) => r.id === roomId)?.token ?? null;
     // taskId → cid for assistant placeholders, so an in-flight task's stream
     // binds to the message the server already laid out in order.
     const cidByTask = new Map<number, number>();
@@ -1204,7 +1309,10 @@ function createSession(): ChatSession {
       }
       return cm;
     });
-    messages.set(msgs);
+    // `null` means every room to `carryClientOnlyRows`, which is right for the
+    // All view and wrong here — a room missing from `$rooms` would inherit
+    // every other room's held rows. Carry nothing rather than everything.
+    messages.set(roomToken ? carryClientOnlyRows(prev, msgs, roomToken) : msgs);
     // Seed paging state from the first-load response.
     oldestCursor = hist.oldest_cursor ?? null;
     hasMore.set(!!hist.has_more);
@@ -1245,7 +1353,14 @@ function createSession(): ChatSession {
       const hist = await getChatMessagesView(v);
       // Switched away mid-fetch — drop the page.
       if (get(view) !== v) return;
-      messages.set(hist.messages.map(buildHistoryMessage));
+      const prev = get(messages);
+      stashStrandedSends();
+      const next = hist.messages.map(buildHistoryMessage);
+      // Only All spans every room, so only All can honestly show a failed send
+      // from one. Unread and Starred are filtered panes a client-only row is
+      // not a member of, so their rebuilds leave the held rows where they are —
+      // the room's own transcript still gets them back.
+      messages.set(v === 'all' ? carryClientOnlyRows(prev, next, null) : next);
       oldestCursor = hist.oldest_cursor ?? null;
       hasMore.set(!!hist.has_more);
     } catch {
@@ -1535,8 +1650,26 @@ function createSession(): ChatSession {
     }
   }
 
+  // A room the user has just deleted or hidden takes its unsent messages with
+  // it: they were only ever going to be re-sent into that room, and holding
+  // them would leak an entry nothing can reach — or, for a hidden Talk room
+  // that the user's next message un-hides, resurrect them under a token that
+  // has come back.
+  //
+  // Clearing the map is not enough on its own. The departed room's transcript
+  // is still in `messages` at this point (`deleteRoom` reselects a neighbour,
+  // and `selectRoom` clears `messages` only *after* `stopActive`), so the
+  // reselect's own stash would put every one of these rows straight back.
+  function forgetRoom(id: number) {
+    const token = get(rooms).find((r) => r.id === id)?.token;
+    if (!token) return;
+    strandedSends.delete(token);
+    messages.update((arr) => arr.filter((m) => !(isStranded(m) && m.roomToken === token)));
+  }
+
   async function archiveRoom(id: number) {
     await updateChatRoom(id, { archived: true });
+    forgetRoom(id);
     rooms.update((r) => r.filter((x) => x.id !== id));
     if (get(activeRoomId) === id) {
       const remaining = get(rooms);
@@ -1561,6 +1694,7 @@ function createSession(): ChatSession {
     }
     // On success (or a 404 already-gone) drop it from the list, mirroring
     // archiveRoom's fall-through when the active room disappears.
+    forgetRoom(id);
     rooms.update((r) => r.filter((x) => x.id !== id));
     if (get(activeRoomId) === id) {
       const remaining = get(rooms);
@@ -1644,6 +1778,11 @@ function createSession(): ChatSession {
     if (!roomId || (!trimmed && attachments.length === 0)) return;
 
     const userCid = nextCid();
+    // Which room this row belongs to, stamped now rather than waiting for the
+    // echo: a send that fails has no echo, and the row has to be re-appendable
+    // to its own transcript (and only its own) after a rebuild.
+    const roomToken = get(rooms).find((r) => r.id === roomId)?.token;
+    const idempotencyKey = newIdempotencyKey();
     messages.update((a) => [
       ...a,
       {
@@ -1652,6 +1791,7 @@ function createSession(): ChatSession {
         text: trimmed,
         segments: [],
         streaming: false,
+        roomToken,
         attachments: attachments.map((x) => x.name),
         // The upload already told us where each file is reachable, so a chip
         // is a working link the moment it appears rather than only after the
@@ -1661,22 +1801,34 @@ function createSession(): ChatSession {
         sendState: 'sending',
         // Stashed now rather than reconstructed on failure: the row keeps
         // display names and workspace paths, and a retry needs the host paths.
-        sendPayload: {
-          text: trimmed,
-          attachments: attachments.map((x) => ({ path: x.path, name: x.name })),
-        },
+        sendPayload: { text: trimmed, attachments, idempotencyKey },
       },
     ]);
-    await runTurn(roomId, userCid, trimmed, attachments);
+    await runTurn(roomId, userCid, trimmed, attachments, idempotencyKey);
+  }
+
+  /**
+   * A per-message identity the server dedups on, or undefined when the browser
+   * cannot mint one.
+   *
+   * Undefined is a working send, not a failure: the endpoint treats a missing
+   * key exactly as it did before the field existed. `crypto.randomUUID` is in
+   * every target browser but is a secure-context API, and a send is not the
+   * place to find out this page is not one.
+   */
+  function newIdempotencyKey(): string | undefined {
+    try {
+      return crypto.randomUUID();
+    } catch {
+      return undefined;
+    }
   }
 
   async function retrySend(cid: number) {
     // Retry is the first entry into `runTurn` that isn't gated by the
-    // composer's `busy`, and `runTurn` is not re-entrant: it drains the single
+    // composer's `busy`, and `runTurn` is still not re-entrant: it drains the
     // `pendingSend` slot on the way in, so retrying during another send would
-    // release that send's echo before its task id was stamped — the dedup in
-    // `appendStreamedRow` would miss, and the room would show two bubbles for
-    // one message and stream one task into two rows. It also resets
+    // release that send's echo before its task id was stamped. It also resets
     // `cancelRequested`, discarding a Stop tapped moments earlier.
     if (get(status) !== 'idle') return;
     const m = get(messages).find((x) => x.cid === cid);
@@ -1693,12 +1845,12 @@ function createSession(): ChatSession {
     });
     // The rendered row's `attachmentPaths` still carry the workspace paths, so
     // the chips stay live across the retry; only the POST needs the host ones.
-    await runTurn(
-      roomId,
-      cid,
-      payload.text,
-      payload.attachments.map((a) => ({ ...a, size: 0 })),
-    );
+    //
+    // The *original* key rides along rather than a fresh one: that is the whole
+    // point of it. A send the server accepted and then failed to report (a
+    // client timeout, a dropped socket) is recognised and answered with the
+    // first task, so no second task and no second bubble exist to reconcile.
+    await runTurn(roomId, cid, payload.text, payload.attachments, payload.idempotencyKey);
   }
 
   /**
@@ -1716,9 +1868,12 @@ function createSession(): ChatSession {
     userCid: number,
     trimmed: string,
     attachments: ChatAttachment[],
+    idempotencyKey?: string,
   ) {
     const phCid = nextCid();
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    // This turn's echo buffer, held locally so the drain below can name it.
+    let mine: PendingSend | null = null;
     // The whole body is guarded, not just the POST: a throw anywhere in here
     // escaped to an un-awaited caller and left the row stuck on 'sending'
     // forever — and on a *retry* that is unrecoverable, since `retrySend`'s own
@@ -1751,15 +1906,24 @@ function createSession(): ChatSession {
       }, SEND_PENDING_GRACE_MS);
 
       // Hold this room's stream frames until the turn's task id is stamped
-      // below — see `pendingSend`. No other turn's buffer can be open here:
-      // `send` is gated by the composer's `busy` and `retrySend` by an idle
-      // status, which is what keeps this drain from releasing someone else's
-      // rows before their task id exists.
+      // below — see `pendingSend`.
+      //
+      // The slot is empty by the time any turn reaches here, and the drain is
+      // a safety net rather than a step: a turn's own `finally` clears it, a
+      // room switch abandons it in `stopActive`, and the three ways to start a
+      // turn are all gated against overlapping in the *same* room (the send
+      // button is in Stop mode, `submit` refuses the keyboard chord while
+      // busy, `retrySend` requires an idle status). What it must never do is
+      // release a *live* turn's buffer, whose task id is not stamped yet —
+      // that is the duplicate the buffer exists to prevent.
       drainPendingSend();
       const sendToken = get(rooms).find((r) => r.id === roomId)?.token;
-      if (sendToken) pendingSend = { token: sendToken, rows: [] };
+      if (sendToken) {
+        mine = { token: sendToken, rows: [] };
+        pendingSend = mine;
+      }
 
-      await sendTurn(roomId, trimmed, attachments, userCid, phCid);
+      await sendTurn(roomId, trimmed, attachments, userCid, phCid, idempotencyKey);
     } catch {
       // `sendChatMessage` classifies rather than throwing, so this is the
       // unforeseen case. It still must not escape: an un-reset 'sending' left
@@ -1781,8 +1945,10 @@ function createSession(): ChatSession {
         m.showSending = undefined;
       });
       // Runs after the task id is on both halves of the turn, so the replayed
-      // echo dedups instead of duplicating.
-      drainPendingSend();
+      // echo dedups instead of duplicating. Only this turn's buffer: a room
+      // switch (or a later send) may have abandoned or replaced the slot, and
+      // draining that one would release frames whose turn has no id yet.
+      if (mine) drainPendingSend(mine);
     }
   }
 
@@ -1824,7 +1990,7 @@ function createSession(): ChatSession {
    * history is in — so a delivered row is indistinguishable from a reloaded
    * one, and nothing downstream has to learn a third value.
    */
-  function settleSend(userCid: number) {
+  function settleSend(userCid: number, roomId: number) {
     updateMsg(userCid, (m) => {
       m.sendState = undefined;
       m.showSending = undefined;
@@ -1832,6 +1998,12 @@ function createSession(): ChatSession {
       m.retryable = undefined;
       m.sendPayload = undefined;
     });
+    // The composer has been holding this message as a draft since it was
+    // submitted — the stored draft is the only copy that survives a reload, so
+    // it is dropped on the ack rather than on submit. This is the ack, and it
+    // names the room so a second send open at the same time keeps its own.
+    const token = get(rooms).find((r) => r.id === roomId)?.token ?? null;
+    sendSettled.update((s) => ({ n: s.n + 1, token }));
   }
 
   /** The user-facing sentence for each way a send can fail. */
@@ -1871,22 +2043,32 @@ function createSession(): ChatSession {
     attachments: ChatAttachment[],
     userCid: number,
     phCid: number,
+    idempotencyKey?: string,
   ) {
     const res = await sendChatMessage(
       roomId,
       trimmed,
       attachments.map((x) => x.path),
       attachments.map((x) => x.name),
+      undefined,
+      idempotencyKey,
     );
     if (!res.ok) {
       const { reason, retryable } = sendFailureReason(res);
-      failSend(userCid, phCid, reason, retryable, roomId);
+      // A `!command` runs inside the request rather than becoming a task, so
+      // it returns before the endpoint ever consults the idempotency key — and
+      // a timeout cannot distinguish "never arrived" from "ran, answer lost".
+      // `!steer` appends a note per call and `!retry` creates a task per call,
+      // so Retry is withheld for every command rather than guessing which are
+      // safe to repeat. Same rule as the permanent 4xx above: an affordance
+      // that would do the wrong thing is worse than none.
+      failSend(userCid, phCid, reason, retryable && !trimmed.startsWith('!'), roomId);
       return;
     }
     // The backend acked, so the send itself is settled either way below. The
     // pending mark clearing is the ack's visible form; there is no receipt to
     // leave behind.
-    settleSend(userCid);
+    settleSend(userCid, roomId);
     if (res.task_id == null) {
       // !command ran inline — no task, no stream.
       const cd = res.command_data as SearchResultsData | null | undefined;
@@ -2033,6 +2215,7 @@ function createSession(): ChatSession {
     promoteRoom,
     archiveRoom,
     deleteRoom,
+    sendSettled,
     send,
     retrySend,
     cancel,

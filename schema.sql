@@ -735,9 +735,21 @@ CREATE TABLE IF NOT EXISTS messages (
     -- retention deletes. A null entry = not servable (another user's file, or
     -- one outside a workspace) → the chip stays inert.
     attachment_paths TEXT,
+    -- Client-minted identity for a send, carried by every attempt at it, so a
+    -- retry of a request the server accepted but never got to report resolves
+    -- to the first turn instead of creating a second. Web only; NULL for every
+    -- other surface and for any client predating it. An empty string is
+    -- coerced to NULL on the way in — it is a valid unique key, and would
+    -- collapse a room's whole history onto its first send.
+    client_msg_id TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);
+-- Partial, so the rows carrying no key are unconstrained. Keyed on different
+-- columns from idx_messages_ext below, so the two never interact.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_msg
+    ON messages (room_token, client_msg_id)
+    WHERE client_msg_id IS NOT NULL;
 -- One user row + one assistant row per turn share a task_id; the partial index
 -- enforces that and excludes system rows (task_id IS NULL). Keyed on
 -- (room_token, role, task_id) — NOT origin_surface — so it actually backstops

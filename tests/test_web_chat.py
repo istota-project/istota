@@ -670,6 +670,150 @@ class TestChatMessagesApi:
         assert task.output_target == "room"
         assert task.conversation_token == room["token"]
 
+    async def _send(self, client, cookies, room_id: int, **payload):
+        return await client.post(
+            f"/istota/api/chat/rooms/{room_id}/messages",
+            json=payload, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+    async def test_repeat_client_msg_id_replays_the_first_task(self, chat_client):
+        """A retry of a send we accepted but never got to report resolves to the
+        turn it already created, rather than a second one."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        first = await self._send(
+            chat_client, cookies, room["id"], text="hello", client_msg_id="k-1",
+        )
+        second = await self._send(
+            chat_client, cookies, room["id"], text="hello", client_msg_id="k-1",
+        )
+        assert first.status_code == second.status_code == 200
+        assert second.json()["task_id"] == first.json()["task_id"]
+
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            rows = c.execute(
+                "SELECT id FROM messages WHERE room_token = ? AND role = 'user'",
+                (room["token"],),
+            ).fetchall()
+            tasks = c.execute(
+                "SELECT id FROM tasks WHERE conversation_token = ?",
+                (room["token"],),
+            ).fetchall()
+        assert len(rows) == 1
+        assert len(tasks) == 1
+
+    async def test_empty_client_msg_id_is_stored_as_null(self, chat_client):
+        """An empty string is a valid unique key, so left as-is it would
+        collapse a room's whole history onto its first send."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        first = await self._send(chat_client, cookies, room["id"], text="one", client_msg_id="")
+        second = await self._send(chat_client, cookies, room["id"], text="two", client_msg_id="")
+        assert first.json()["task_id"] != second.json()["task_id"]
+
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            stored = [
+                r["client_msg_id"] for r in c.execute(
+                    "SELECT client_msg_id FROM messages WHERE room_token = ? "
+                    "AND role = 'user'",
+                    (room["token"],),
+                ).fetchall()
+            ]
+        assert stored == [None, None]
+
+    async def test_same_client_msg_id_in_two_rooms_is_two_messages(self, chat_client):
+        """The key is scoped to a room, so it cannot claim another room's turn."""
+        cookies = await _login(chat_client, "alice")
+        first_room = await self._room(chat_client, cookies)
+        other = (await chat_client.post(
+            "/istota/api/chat/rooms", json={"name": "second"}, cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )).json()
+
+        a = await self._send(chat_client, cookies, first_room["id"], text="hi", client_msg_id="k")
+        b = await self._send(chat_client, cookies, other["id"], text="hi", client_msg_id="k")
+        assert a.json()["task_id"] != b.json()["task_id"]
+
+    async def test_another_members_key_does_not_swallow_the_message(self, chat_client):
+        """Rooms are shared and the key is arbitrary client text, so a
+        co-member reusing one must not have their message dropped — nor be
+        handed a task they aren't authorized to read."""
+        import istota.web_app as mod
+        from istota import db as _db
+
+        alice = await _login(chat_client, "alice")
+        room = await self._room(chat_client, alice)
+        first = await self._send(chat_client, alice, room["id"], text="mine", client_msg_id="k")
+
+        # Bob shares the room. He is not the sender of the stored turn.
+        with db.get_db(mod._config.db_path) as c:
+            _db.add_room_member(c, room["token"], "bob")
+            _db.ensure_web_chat_handle(c, "bob", room["token"], "shared")
+        bob = await _login(chat_client, "bob")
+        bob_room = next(
+            r for r in (await chat_client.get(
+                "/istota/api/chat/rooms", cookies=bob,
+            )).json()["rooms"] if r["token"] == room["token"]
+        )
+        second = await self._send(
+            chat_client, bob, bob_room["id"], text="also mine", client_msg_id="k",
+        )
+
+        assert second.status_code == 200
+        assert second.json()["task_id"] != first.json()["task_id"]
+        # Bob's send lands as its own turn; it simply gives up the key rather
+        # than colliding on the room-scoped unique index.
+        with db.get_db(mod._config.db_path) as c:
+            bodies = [
+                r["body"] for r in c.execute(
+                    "SELECT body FROM messages WHERE room_token = ? AND role = 'user' "
+                    "ORDER BY id",
+                    (room["token"],),
+                ).fetchall()
+            ]
+        assert bodies == ["mine", "also mine"]
+
+    async def test_over_long_client_msg_id_is_ignored_not_truncated(self, chat_client):
+        """Truncating would change the identity, so two keys sharing a 64-char
+        prefix would resolve to one another and the second message would be
+        silently lost."""
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        a = await self._send(
+            chat_client, cookies, room["id"], text="one", client_msg_id="x" * 70 + "A",
+        )
+        b = await self._send(
+            chat_client, cookies, room["id"], text="two", client_msg_id="x" * 70 + "B",
+        )
+        assert a.json()["task_id"] != b.json()["task_id"]
+
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            stored = [
+                r["client_msg_id"] for r in c.execute(
+                    "SELECT client_msg_id FROM messages WHERE room_token = ? "
+                    "AND role = 'user' ORDER BY id",
+                    (room["token"],),
+                ).fetchall()
+            ]
+        assert stored == [None, None]
+
+    async def test_send_without_a_client_msg_id_stores_none(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        await self._send(chat_client, cookies, room["id"], text="no key here")
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            row = c.execute(
+                "SELECT client_msg_id FROM messages WHERE room_token = ? "
+                "AND role = 'user'",
+                (room["token"],),
+            ).fetchone()
+        assert row["client_msg_id"] is None
+
     async def test_empty_text_rejected(self, chat_client):
         cookies = await _login(chat_client, "alice")
         room = await self._room(chat_client, cookies)

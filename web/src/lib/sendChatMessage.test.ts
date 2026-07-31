@@ -154,4 +154,47 @@ describe('sendChatMessage', () => {
     expect(res.failure).toBe('rejected');
     expect(res.status).toBe(502);
   });
+
+  // `resp.json()` resolves — it does not throw — for a body that is the
+  // literal `null` or a JSON array, so the parse guard never fired and reading
+  // `.error` off the result threw a TypeError that escaped to the outer catch.
+  // An ordinary 400 was then reported to the user as an unreachable server.
+  it.each([
+    ['the literal null', null],
+    ['a JSON array', [{ error: 'nope' }]],
+  ])('classifies a 400 whose body is %s as a rejection', async (_label, body) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => mockResponse(400, body)),
+    );
+    const res = await sendChatMessage(1, 'hello');
+    expect(res.failure).toBe('rejected');
+    expect(res.status).toBe(400);
+    expect(res.error).toBe('error 400');
+  });
+
+  /** A fetch stub that records the JSON body it was handed. */
+  function captureBody() {
+    const sent: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        sent.push(JSON.parse(String(init.body)));
+        return mockResponse(200, { task_id: 7 });
+      }),
+    );
+    return sent;
+  }
+
+  it('carries an idempotency key in the body when one is supplied', async () => {
+    const sent = captureBody();
+    await sendChatMessage(1, 'hello', [], [], undefined, 'abc-123');
+    expect(sent[0]).toMatchObject({ client_msg_id: 'abc-123' });
+  });
+
+  it('omits the field entirely when there is no key', async () => {
+    const sent = captureBody();
+    await sendChatMessage(1, 'hello');
+    expect(sent[0]).not.toHaveProperty('client_msg_id');
+  });
 });

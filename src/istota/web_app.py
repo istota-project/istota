@@ -3589,6 +3589,7 @@ def _chat_create_web_task(
     effort: str | None = None,
     apply_room_default: bool = True,
     attachment_names: list[str] | None = None,
+    client_msg_id: str | None = None,
 ) -> tuple[str, int]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)`` or
     ``("rate_limited", window_seconds)``."""
@@ -3617,6 +3618,7 @@ def _chat_create_web_task(
             attachments=attachments or None, model=model, effort=effort,
             apply_room_default=apply_room_default,
             attachment_names=attachment_names or None,
+            client_msg_id=client_msg_id,
         )
     return ("ok", task_id)
 
@@ -3828,6 +3830,12 @@ async def _mirror_web_turn_as_user(
                 (b.surface_ref for b in bindings if b.surface == "talk"), None,
             )
             if talk_ref is None:
+                return None, None
+            # A retry carrying the same `client_msg_id` resolves to the turn
+            # the first attempt created, and that attempt already mirrored it.
+            # The stamp is the record of that, so it is also the guard: without
+            # it a client-side timeout would put the message in Talk twice.
+            if db.user_turn_has_external_id(conn, task_id, "talk"):
                 return None, None
             row = conn.execute(
                 "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
@@ -4402,6 +4410,21 @@ async def chat_send_message(
         [str(n)[:_MAX_ATTACHMENT_NAME_CHARS] for n in raw_names]
         if isinstance(raw_names, list) else []
     )
+    # The client's own identity for this message, carried by every attempt at
+    # it, so a retry of a send we accepted but never got to report resolves to
+    # the first turn. Opaque, so it is bounded rather than validated — but the
+    # bound *rejects* rather than truncating: truncating changes the identity,
+    # so two distinct keys sharing a prefix would silently resolve to one
+    # another's task and the second message would be swallowed. Anything that
+    # is not a non-empty string within the bound is treated as absent, which is
+    # exactly the pre-feature behaviour.
+    raw_client_id = data.get("client_msg_id")
+    client_msg_id = (
+        raw_client_id
+        if isinstance(raw_client_id, str)
+        and 0 < len(raw_client_id) <= _MAX_CLIENT_MSG_ID_CHARS
+        else None
+    )
 
     # An attachment-only send is a real message — a voice memo recorded in the
     # composer is the whole message, with nothing typed alongside it. The
@@ -4461,7 +4484,7 @@ async def chat_send_message(
     outcome, value = await asyncio.to_thread(
         _chat_create_web_task, username, room.token, text, attachments,
         model_override, effort_override, not model_prefix_used,
-        attachment_names,
+        attachment_names, client_msg_id,
     )
     if outcome == "rate_limited":
         return JSONResponse(
@@ -4558,6 +4581,10 @@ _ATTACHMENT_STEM_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # A chip label is display-only, so it's bounded rather than sanitized (the
 # renderer escapes it); this just keeps a client from persisting an essay.
 _MAX_ATTACHMENT_NAME_CHARS = 200
+# The idempotency key is opaque to us — a UUID today — so it is bounded rather
+# than validated. Long enough for any sane identity scheme, short enough that
+# it cannot be used as storage.
+_MAX_CLIENT_MSG_ID_CHARS = 64
 
 
 def _attachment_stem(filename: str, limit: int = 48) -> str:

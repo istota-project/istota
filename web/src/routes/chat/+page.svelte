@@ -23,6 +23,7 @@
   } from '$lib/components/chat/tapActivation';
   import { getChatSession } from '$lib/stores/chat';
   import { notifyError } from '$lib/stores/notices';
+  import { dropDraft } from '$lib/stores/drafts';
   import { getMe, type ChatRoom, type ChatView } from '$lib/api';
 
   const session = getChatSession();
@@ -36,6 +37,7 @@
     loadingOlder,
     view,
     scrollTarget,
+    sendSettled,
   } = session;
 
   // Cross-room views: the transcript pane renders either the active room
@@ -80,6 +82,14 @@
   // profile they take turns using. Null until both are known — the composer
   // then holds what is typed and carries it in once the key arrives.
   const draftKey = $derived(userId && activeRoom ? `${userId}:room:${activeRoom.token}` : null);
+  // The store acks a send by room; the composer settles a draft by key. The
+  // page owns the key's shape, so the translation belongs here — and it must
+  // use the *acked* room rather than the open one, since a send can land after
+  // the user has moved on and would otherwise settle the wrong room's draft.
+  const settleSignal = $derived({
+    n: $sendSettled.n,
+    key: userId && $sendSettled.token ? `${userId}:room:${$sendSettled.token}` : null,
+  });
   const busy = $derived($status === 'sending' || $status === 'streaming');
 
   // The room's standing model default as a header badge — the canonical model
@@ -492,11 +502,21 @@
     settingsRoom = null;
   }
 
+  // Both the hard delete and the Talk-room hide arrive here.
   async function deleteRoom() {
     if (!settingsRoom) return;
     const id = settingsRoom.id;
+    const token = settingsRoom.token;
     settingsRoom = null;
     await session.deleteRoom(id);
+    // A room that is gone from the list can never be typed into again, and
+    // nothing else collects its draft short of the 30-day TTL. Dropped after
+    // the delete rather than before, so a refused delete keeps the text.
+    //
+    // The composer flushes on its way out of a room, but it is switched away
+    // by the store's own reselect *during* the await above — so by now the
+    // stored draft is already the final one and this is the last word on it.
+    if (userId) dropDraft(`${userId}:room:${token}`);
   }
 
   async function promoteRoom() {
@@ -794,6 +814,7 @@
           {busy}
           placeholder="Your message…"
           {draftKey}
+          sendSettled={settleSignal}
         />
       </div>
     {/if}

@@ -47,6 +47,7 @@
     busy = false,
     placeholder = 'Message Istota…',
     draftKey = null,
+    sendSettled = { n: 0, key: null },
   }: {
     onSend: (text: string, attachments: ChatAttachment[]) => void;
     onCancel?: () => void;
@@ -54,11 +55,29 @@
     placeholder?: string;
     /**
      * Where unsent text is held between visits, or null to hold none. The
-     * caller owns the namespace — the chat page passes `room:<id>`, which is
-     * what makes a draft per-room. Omitting it leaves the composer exactly as
-     * it was: whatever is typed lives and dies with the component.
+     * caller owns the namespace — the chat page passes
+     * `` `${userId}:room:${token}` ``, which is what makes a draft per-room
+     * and per-person; the module header explains why both halves are in it.
+     * Omitting the prop leaves the composer exactly as it was: whatever is
+     * typed lives and dies with the component.
      */
     draftKey?: string | null;
+    /**
+     * The last send the backend acked: a counter that only ever increases,
+     * and the draft key it belongs to.
+     *
+     * The draft is dropped on the ack rather than on submit, because until
+     * then the stored draft is the only copy of that text which survives a
+     * reload — the failed row does not. The signal comes in as data rather
+     * than a callback because the composer is the one that acts on it: handing
+     * it a function to call itself would be circular.
+     *
+     * The key travels with the counter because two sends can be open at once
+     * — switching rooms un-gates the composer — and a bare counter would let
+     * whichever acked first drop the other's draft while its own send was
+     * still in flight, destroying the only copy of it.
+     */
+    sendSettled?: { n: number; key: string | null };
   } = $props();
 
   let text = $state('');
@@ -76,6 +95,12 @@
   let uploading = $state(0);
   let dragOver = $state(false);
   let uploadError = $state('');
+  // Bumped whenever the composer changes room. `upload` is async and appends
+  // to `attachments` with no notion of where it started, while `switchDraft`
+  // clears them synchronously and cannot see a promise in flight — so a large
+  // file picked in one room and resolved after a switch put its chip in the
+  // new room, and sending from there posted it to the wrong one.
+  let uploadEpoch = 0;
   // What the server will accept, or null until /chat/config answers. See
   // refusalReason for why null means "ask the server" rather than a default.
   let limits = $state<{ maxBytes: number; maxMb: number; extensions: string[] } | null>(null);
@@ -110,13 +135,67 @@
   // from the prop alone and want opposite treatment — see switchDraft.
   let hasHadDraftKey = false;
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  // Messages handed to `onSend` whose backend ack has not arrived, by draft
+  // key. Until an ack lands, that key's emptied field is not a cleared draft —
+  // the text went to the server and the stored copy is what a reload would
+  // restore if it never got there.
+  //
+  // A map rather than one slot because two sends can be open at once: leaving
+  // a room resets the session's status to idle, which un-gates the composer,
+  // so a second room's send can start while the first's POST is still open.
+  // With a single slot the second submit overwrote the first, and the first
+  // ack then dropped the second room's draft while its send was still in
+  // flight — destroying the only copy of it.
+  //
+  // Entries live for the component's lifetime, so a send that never lands
+  // holds its key until reload. That is the point: the failed row carries the
+  // message with a Retry for as long as the session lasts, and after a reload
+  // there is no map and `readDraft` restores the text.
+  const unsettledSends = new Map<string, string>();
 
   /** Write the field down now, cancelling any pending debounced write. */
   function flushDraft() {
     clearTimeout(saveTimer);
     saveTimer = undefined;
-    if (activeDraftKey) writeDraft(activeDraftKey, text);
+    if (!activeDraftKey) return;
+    // Hold the submitted text through the ack. Every departure flushes — a
+    // room switch, an unmount, `pagehide` — so without this the draft the
+    // whole mechanism exists to keep would be dropped by the reload itself.
+    if (unsettledSends.has(activeDraftKey) && !text.trim()) return;
+    writeDraft(activeDraftKey, text);
   }
+
+  /**
+   * The backend has the message under `key`: it is no longer a draft.
+   *
+   * Withheld when something has been typed since, which is a live draft again
+   * and nothing to do with the message that just landed.
+   */
+  function settleDraft(key: string | null) {
+    if (!key) return;
+    const sent = unsettledSends.get(key);
+    if (sent === undefined) return;
+    unsettledSends.delete(key);
+    // The field is the live copy only while its own room is on screen; an ack
+    // landing after a switch has to judge by what is stored instead. Emptiness
+    // is a sufficient test for the on-screen case only because `switchDraft`
+    // refuses to restore a message that is still in flight — otherwise coming
+    // back to the room would look exactly like having typed it again.
+    const typedSince = key === activeDraftKey ? !!text.trim() : readDraft(key) !== sent;
+    if (!typedSince) writeDraft(key, '');
+  }
+
+  // The count at mount, deliberately: only a *change* is an ack, and a
+  // remounted composer must not settle a draft on the count it inherits.
+  let seenSettle = untrack(() => sendSettled.n);
+  $effect(() => {
+    const { n, key } = sendSettled;
+    untrack(() => {
+      if (n === seenSettle) return;
+      seenSettle = n;
+      settleDraft(key);
+    });
+  });
 
   function scheduleDraftSave() {
     if (!activeDraftKey) return;
@@ -154,20 +233,46 @@
     // are a view of server-side files rather than the record of them — but
     // they must not ride along either. Re-picking a file costs a tap; posting
     // one to the wrong room does not undo.
-    if (leavingRoom) attachments = [];
+    //
+    // An upload still in flight cannot be reached by clearing the list, so the
+    // epoch is bumped alongside it: `upload` compares on the way out and drops
+    // a result whose room has since changed. The counter and the error are
+    // reset with it, both being the state of an upload that is no longer this
+    // room's business.
+    if (leavingRoom) {
+      uploadEpoch++;
+      attachments = [];
+      uploading = 0;
+      uploadError = '';
+    }
     if (!next) {
-      if (leavingRoom) setText('');
+      if (leavingRoom) {
+        setText('');
+        // The field has been cleared of the departed room's text, so what is
+        // typed from here belongs to whichever room lands next — the same case
+        // as the opening keystrokes of a page load. Without the reset the
+        // one-shot flag would suppress that carry forever.
+        hasHadDraftKey = false;
+      }
       return;
     }
     // A stored draft outranks carried text. The carry exists for a field that
     // was empty when the page loaded; letting one keystroke typed during that
     // window replace the draft the user came back for would destroy it, with
     // no undo and no notice.
+    //
+    // A message still waiting on its ack is not a draft to restore, though it
+    // is stored under this key: `submit` writes it there so a reload can
+    // recover it if the send never lands. Putting it back in the field would
+    // show a message the user has already sent as unsent text, one Enter away
+    // from being sent twice — and the ack would then read it as newly typed
+    // and decline to clear it, so it would stay there.
     const stored = readDraft(next);
-    setText(stored || carried);
+    const restorable = unsettledSends.get(next) === stored ? '' : stored;
+    setText(restorable || carried);
     // Carried text has never been written anywhere — the field is its only
     // copy until this lands.
-    if (carried && !stored) flushDraft();
+    if (carried && !restorable) flushDraft();
   }
 
   $effect(() => {
@@ -424,9 +529,16 @@
    * chip list have one shape to deal with.
    */
   async function upload(files: FileList | File[] | Picked[]) {
+    // The room this batch belongs to. Every write below is guarded on it still
+    // being the current one — including the counter, which `switchDraft` has
+    // already reset to 0, so a stale decrement would drive it negative and
+    // leave the composer permanently reporting an upload in progress.
+    const epoch = uploadEpoch;
+    const stale = () => epoch !== uploadEpoch;
     uploadError = '';
     const items = Array.from(files).map((f) => (f instanceof File ? pickedFromFile(f) : f));
     for (const file of items) {
+      if (stale()) return;
       const refusal = refusalReason(file);
       if (refusal) {
         // Keep going: one file being too big is no reason to drop the others.
@@ -436,11 +548,14 @@
       uploading++;
       try {
         const att = await uploadChatAttachment(file);
-        attachments = [...attachments, att];
+        // The file did reach the server and is now orphaned there — the same
+        // outcome as closing the tab mid-upload, which the inbox already
+        // tolerates. Better than a chip in a room the file was not picked in.
+        if (!stale()) attachments = [...attachments, att];
       } catch (e) {
-        uploadError = e instanceof Error ? e.message : 'upload failed';
+        if (!stale()) uploadError = e instanceof Error ? e.message : 'upload failed';
       } finally {
-        uploading--;
+        if (!stale()) uploading--;
       }
     }
   }
@@ -455,10 +570,20 @@
     onSend(t, attachments);
     text = '';
     attachments = [];
-    // A sent message is no longer a draft. Flushing the emptied field is what
-    // drops it — writeDraft treats blank as "no draft" — so there is one path
-    // rather than a clear that could fall out of step with the write.
-    flushDraft();
+    // The draft is *not* dropped here. Until the backend acks, the stored
+    // draft is the only copy of this text that survives a reload — the failed
+    // row does not — so the drop waits for `settleDraft`.
+    //
+    // Written rather than merely left alone: a submit inside the debounce
+    // window would otherwise leave nothing stored at all, or a stale prefix of
+    // what was sent. Cancelling the timer first stops that write landing after
+    // this one and clearing it back out.
+    if (activeDraftKey) {
+      clearTimeout(saveTimer);
+      saveTimer = undefined;
+      writeDraft(activeDraftKey, t);
+      unsettledSends.set(activeDraftKey, t);
+    }
     queueMicrotask(autoGrow);
     // A sent message is the end of a turn, and the reply arrives in the third of
     // the screen the keyboard is standing on. Where the keyboard is soft, giving
@@ -543,7 +668,14 @@
     // the row and stay put".
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      submit();
+      // Only when the button would have sent. The chord was the one path into
+      // a send that did not consult the mode, so holding it started a second
+      // turn in a room that already had one — and two overlapping turns share
+      // one echo buffer, whose drain then releases the first turn's frames
+      // before its task id exists. Silently doing nothing rather than being
+      // repurposed as Stop: a chord that cancels work is not what it looks
+      // like it does.
+      if (!showStop) submit();
       return;
     }
     // The engine consumes Arrow/Tab/Enter/Escape only while the popover is
@@ -1073,8 +1205,13 @@
     white-space: nowrap;
     cursor: pointer;
   }
-  .attach-menu-item:hover {
-    background: var(--surface-raised);
+  /* Guarded for the same reason the icon buttons above are: iOS synthesizes a
+     hover on tap and leaves it applied, so an unguarded rule lights the row
+     that was last touched and keeps it lit. */
+  @media (hover: hover) {
+    .attach-menu-item:hover {
+      background: var(--surface-raised);
+    }
   }
 
   .attach-row {
@@ -1108,8 +1245,10 @@
     cursor: pointer;
     padding: 0;
   }
-  .attach-x:hover {
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .attach-x:hover {
+      color: var(--text-primary);
+    }
   }
   /* Upload / recorder failures. Chip-shaped like the attachment row above it:
 	   floating over the transcript, bare colored text had no backdrop of its own

@@ -124,6 +124,14 @@ afterEach(() => {
     configurable: true,
     value: undefined,
   });
+  // The backgrounding test redefines this and cannot restore it itself without
+  // the assertion coming first. Left alone it stayed 'hidden' for every test
+  // after it in the file — a leak nothing would report until something started
+  // depending on the value.
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => 'visible',
+  });
   fakeScrollHeight = 20;
   narrowScrollHeight = null;
 });
@@ -882,21 +890,223 @@ describe('Composer drafts', () => {
     expect(readDraft('room:3')).toBe('still typing');
   });
 
-  it('drops the draft once the message is sent', async () => {
-    // Seeded rather than typed: a typed draft is still behind its debounce at
-    // the moment of the click, so the assertion would hold with the flush on
-    // send deleted — it would be passing on the precondition.
-    writeDraft('room:3', 'going out');
-    const onSend = vi.fn();
-    const { textarea, unmount } = mount({ draftKey: 'room:3', onSend });
+  it('has a visible document again, so the test above cannot leak', () => {
+    expect(document.visibilityState).toBe('visible');
+  });
+
+  it('settles only the room the ack names, leaving another send in flight alone', async () => {
+    // Two sends can be open at once — leaving a room resets the session's
+    // status to idle, which un-gates the composer — and a settle signal with
+    // no message identity let whichever acked first drop the other's draft
+    // while its own POST was still open, destroying the only copy of it.
+    const { textarea, rerender } = mount({ draftKey: 'room:3', sendSettled: { n: 0, key: null } });
+    await type(textarea, 'message for three');
+    await fireEvent.click(btn(document.body, 'Send')!);
+
+    await rerender({ draftKey: 'room:9' });
     await tick();
-    expect(textarea.value).toBe('going out');
+    await type(textarea, 'message for nine');
+    await fireEvent.click(btn(document.body, 'Send')!);
+
+    // Room 3's POST was slower, so its ack lands second — with room 9 on screen.
+    await rerender({ sendSettled: { n: 1, key: 'room:3' } });
+    await tick();
+
+    expect(readDraft('room:3')).toBe('');
+    expect(readDraft('room:9')).toBe('message for nine');
+  });
+
+  it('does not put an unacked message back in the field on returning to its room', async () => {
+    // `submit` stores the text under the key so a reload can recover it, which
+    // made coming back to the room show a message the user had already sent as
+    // unsent text — one Enter from sending it twice — and the ack then read
+    // that as newly typed and declined to clear it, so it stayed.
+    const { textarea, rerender } = mount({ draftKey: 'room:3', sendSettled: { n: 0, key: null } });
+    await type(textarea, 'already gone');
+    await fireEvent.click(btn(document.body, 'Send')!);
+
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+    await rerender({ draftKey: 'room:3' });
+    await tick();
+    expect(textarea.value).toBe('');
+
+    await rerender({ sendSettled: { n: 1, key: 'room:3' } });
+    await tick();
+    expect(readDraft('room:3')).toBe('');
+  });
+
+  it('refuses the send chord while a turn is running', async () => {
+    // The chord was the one entry into a send that did not consult the mode,
+    // so holding it started a second turn in a room that already had one —
+    // and two overlapping turns share one echo buffer.
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend, busy: true, onCancel: () => {} });
+    await type(textarea, 'let me in');
+    await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('still sends on the chord when the button would have sent', async () => {
+    const onSend = vi.fn();
+    const { textarea } = mount({ onSend, busy: false, onCancel: () => {} });
+    await type(textarea, 'go');
+    await fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+    expect(onSend).toHaveBeenCalledWith('go', []);
+  });
+
+  it('holds the draft through the send and drops it on the ack', async () => {
+    // The drop waits for the backend, because until then the stored draft is
+    // the only copy of this text that survives a reload — the failed row does
+    // not. Dropping it on submit is what made an outage take the message away
+    // as well as report it unsent.
+    const onSend = vi.fn();
+    const { textarea, rerender } = mount({
+      draftKey: 'room:3',
+      onSend,
+      sendSettled: { n: 0, key: null },
+    });
+    await type(textarea, 'going out');
 
     await fireEvent.click(btn(document.body, 'Send')!);
     expect(onSend).toHaveBeenCalled();
+    expect(textarea.value).toBe('');
+    expect(readDraft('room:3')).toBe('going out');
+
+    await rerender({ sendSettled: { n: 1, key: 'room:3' } });
+    await tick();
     expect(readDraft('room:3')).toBe('');
-    // And the unmount flush must not write the now-empty field back as a draft.
+  });
+
+  it('holds the draft through a send that never lands', async () => {
+    // No ack, so no drop: the text is still recoverable after a reload, which
+    // is the one thing that outlives the failed row in the transcript.
+    const { textarea, unmount } = mount({ draftKey: 'room:3', sendSettled: { n: 0, key: null } });
+    await type(textarea, 'never arrived');
+    await fireEvent.click(btn(document.body, 'Send')!);
+
+    // Every departure flushes the field, and the field is empty now — so this
+    // is also the assertion that the flush knows to leave the draft alone.
     unmount();
-    expect(readDraft('room:3')).toBe('');
+    expect(readDraft('room:3')).toBe('never arrived');
+  });
+
+  it('leaves a draft typed after the send alone when the ack lands', async () => {
+    const { textarea, rerender, unmount } = mount({
+      draftKey: 'room:3',
+      sendSettled: { n: 0, key: null },
+    });
+    await type(textarea, 'first message');
+    await fireEvent.click(btn(document.body, 'Send')!);
+    await type(textarea, 'second, still being written');
+
+    await rerender({ sendSettled: { n: 1, key: 'room:3' } });
+    await tick();
+
+    // The ack settles the message that was sent, not the one being typed: the
+    // field keeps it, and the draft is not cleared out from under it.
+    expect(textarea.value).toBe('second, still being written');
+    expect(readDraft('room:3')).not.toBe('');
+    // The new text is still behind its debounce, so flush it the way leaving
+    // the page would and check what lands.
+    unmount();
+    expect(readDraft('room:3')).toBe('second, still being written');
+  });
+
+  it('carries text typed after the room went away into the next room', async () => {
+    // The field was cleared of the departed room's text, so what follows is
+    // unattributed in exactly the way the page-load case is. A one-shot flag
+    // used to suppress this carry for the life of the component.
+    const { textarea, rerender } = mount({ draftKey: 'room:3' });
+    await type(textarea, 'PRIVATE to room 3');
+
+    await rerender({ draftKey: null });
+    await tick();
+    expect(textarea.value).toBe('');
+
+    await type(textarea, 'typed with nowhere to go');
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+
+    expect(textarea.value).toBe('typed with nowhere to go');
+    expect(readDraft('room:9')).toBe('typed with nowhere to go');
+    // And the departed room's own text stayed where it was.
+    expect(readDraft('room:3')).toBe('PRIVATE to room 3');
+  });
+});
+
+describe('Composer uploads across a room switch', () => {
+  it('drops a chip whose upload resolved after the room changed', async () => {
+    // `upload` is async and appends with no notion of where it started, while
+    // the room switch clears the list synchronously and cannot see a promise
+    // in flight — so a large file picked in one room landed its chip in the
+    // next, and sending from there posted it to the wrong room.
+    let release: (v: unknown) => void = () => {};
+    upload.mockReturnValue(
+      new Promise((res) => {
+        release = res;
+      }),
+    );
+    const { container, rerender } = mount({ draftKey: 'room:3' });
+    const input = picker(container, 'file');
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'big.bin')] });
+    await fireEvent.change(input);
+    await tick();
+
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+
+    release({ path: 'inbox/big.bin', name: 'big.bin', size: 4 });
+    await tick();
+    await tick();
+
+    expect(container.querySelectorAll('.attach-chip')).toHaveLength(0);
+  });
+
+  it('does not leave the upload counter stuck after a stale resolve', async () => {
+    // The switch resets the counter to 0, so a stale decrement would drive it
+    // negative and the composer would report an upload in progress for good.
+    let release: (v: unknown) => void = () => {};
+    upload.mockReturnValue(
+      new Promise((res) => {
+        release = res;
+      }),
+    );
+    const { container, rerender } = mount({ draftKey: 'room:3' });
+    const input = picker(container, 'file');
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'big.bin')] });
+    await fireEvent.change(input);
+    await tick();
+    expect(container.querySelector('.uploading')).not.toBeNull();
+
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+    release({ path: 'inbox/big.bin', name: 'big.bin', size: 4 });
+    await tick();
+    await tick();
+
+    expect(container.querySelector('.uploading')).toBeNull();
+  });
+
+  it('does not show a stale upload error in the room that inherited the composer', async () => {
+    let reject: (e: unknown) => void = () => {};
+    upload.mockReturnValue(
+      new Promise((_res, rej) => {
+        reject = rej;
+      }),
+    );
+    const { container, rerender } = mount({ draftKey: 'room:3' });
+    const input = picker(container, 'file');
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'big.bin')] });
+    await fireEvent.change(input);
+    await tick();
+
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+    reject(new Error('upload blew up'));
+    await tick();
+    await tick();
+
+    expect(container.textContent).not.toContain('upload blew up');
   });
 });

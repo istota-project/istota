@@ -91,6 +91,15 @@ function parseRules(text: string, atRules: string[] = []): Rule[] {
   return rules;
 }
 
+/**
+ * The interaction states, and deliberately not `:disabled`.
+ *
+ * A disabled send button has to be grey, and `.icon-btn.send:disabled` is the
+ * one state rule allowed to say so — it is not an interaction the mode can
+ * disagree with, it is the absence of one. The alternative would be a
+ * `:disabled` variant of each mode rule, doubling the count the rule below
+ * exists to hold at two. `web/AGENTS.md` carries the same carve-out.
+ */
 const STATE_PSEUDO = /:(hover|active|focus|focus-visible|focus-within)\b/;
 
 /**
@@ -143,7 +152,7 @@ describe('send/stop control styling', () => {
     expect(fillOf('.icon-btn.send')).not.toBe(fillOf('.icon-btn.send.stop'));
   });
 
-  it('lets nothing but the mode decide the send button fill', () => {
+  it('lets nothing but the mode and :disabled decide the send button fill', () => {
     // The defect: `.icon-btn.send:hover:not(:disabled)` re-declared the blue
     // fill at a higher specificity than `.icon-btn.send.stop`, so hovering the
     // stop button painted it blue under the stop glyph. On iOS that is not a
@@ -180,8 +189,13 @@ describe('send/stop control styling', () => {
   it('gates every composer hover rule on the device having a pointer', () => {
     // iOS synthesizes :hover on tap and leaves it applied, so an unguarded
     // hover rule is worn by the last control the finger touched.
+    //
+    // Every hover rule in the file, not only the ones on `.icon-btn`: the
+    // attachment menu row and the chip's remove button were written outside
+    // the guard and nothing reported it, since `lint:design` has no rule for
+    // this. `web/AGENTS.md` states the invariant for the whole component.
     const unguarded = parseRules(css)
-      .filter((r) => r.selector.includes('.icon-btn') && r.selector.includes(':hover'))
+      .filter((r) => r.selector.includes(':hover'))
       .filter((r) => !r.atRules.some((a) => /hover\s*:\s*hover/.test(a)));
     expect(unguarded.map((r) => r.selector)).toEqual([]);
   });

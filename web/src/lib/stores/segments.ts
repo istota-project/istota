@@ -60,9 +60,40 @@ export interface SearchResultsData {
  * this module is deliberately free of SvelteKit imports so the reducer
  * unit-tests without a DOM.
  */
+/**
+ * An uploaded attachment, exactly as `api.ts`'s `ChatAttachment`.
+ *
+ * Restated structurally rather than imported: this module is deliberately free
+ * of SvelteKit-dependent imports (see the header), and `api.ts` reaches for
+ * `$app/paths`.
+ */
+export interface SendAttachment {
+  path: string;
+  name: string;
+  size: number;
+  workspace_path?: string | null;
+}
+
 export interface SendPayload {
   text: string;
-  attachments: { path: string; name: string }[];
+  /**
+   * The whole attachment, not the `{path, name}` projection the POST needs.
+   * A retry re-enters the same code path a first send takes, so it has to hand
+   * over the same shape — fabricating the missing fields (`size: 0`) put a
+   * value through the composer's size check that was not the file's.
+   */
+  attachments: SendAttachment[];
+  /**
+   * Client-minted identity for this message, carried by every attempt at it.
+   *
+   * A retry of a send the server had in fact accepted (a client-side timeout,
+   * a socket dropped after the request was processed) would otherwise create a
+   * second task and a second bubble. The server recognises the key and hands
+   * back the first task instead, so the duplicate never exists — which is the
+   * thing the body-match adoption in `appendStreamedRow` can only detect, and
+   * only for a body the server did not rewrite.
+   */
+  idempotencyKey?: string;
 }
 
 export interface ChatMessage {

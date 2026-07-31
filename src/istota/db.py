@@ -631,12 +631,22 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # paths, so the display names live on the message row too — and, for
         # the ones that sit in the sender's own workspace, the path the chip
         # links at.
-        for _col in ("attachments", "attachment_paths"):
+        for _col in ("attachments", "attachment_paths", "client_msg_id"):
             try:
                 conn.execute(f"ALTER TABLE messages ADD COLUMN {_col} TEXT")
             except sqlite3.OperationalError:
                 pass  # Column already exists
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id)")
+        # A retry of a send the client gave up on but the server accepted must
+        # resolve to the first turn rather than a second one. Partial, so the
+        # rows that carry no key (every surface but web, and any web client
+        # predating it) are unconstrained. Distinct columns from idx_messages_ext,
+        # so the two do not interact.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_msg "
+            "ON messages (room_token, client_msg_id) "
+            "WHERE client_msg_id IS NOT NULL"
+        )
         # Correct an existing deploy's looser index in place. The original keyed
         # on (room_token, origin_surface, role, task_id); drop it so the tighter
         # (room_token, role, task_id) form below replaces it (CREATE IF NOT
@@ -3120,13 +3130,14 @@ def add_message(
     external_ids: dict | None = None,
     attachments: list[str] | None = None,
     attachment_paths: list[str | None] | None = None,
+    client_msg_id: str | None = None,
 ) -> int:
     """Append a message to a room's canonical transcript. Returns the new id."""
     row = conn.execute(
         "INSERT INTO messages "
         "(room_token, role, body, title, task_id, origin_surface, external_ids, "
-        " attachments, attachment_paths) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        " attachments, attachment_paths, client_msg_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -3137,9 +3148,42 @@ def add_message(
             json.dumps(external_ids) if external_ids else None,
             json.dumps(attachments) if attachments else None,
             json.dumps(attachment_paths) if attachment_paths else None,
+            # An empty string is a perfectly valid unique key, so it would
+            # collapse a room's entire history onto whichever send stored it
+            # first. Same rule as `location_pings.client_id`.
+            client_msg_id or None,
         ),
     ).fetchone()
     return int(row["id"])
+
+
+def find_send_by_client_msg_id(
+    conn: sqlite3.Connection, room_token: str, client_msg_id: str
+) -> tuple[int, str] | None:
+    """``(task_id, sender)`` for a stored send under this key in this room, or None.
+
+    What makes a retry of an accepted-but-unreported send idempotent: the
+    client cannot tell a request that never arrived from one whose answer was
+    lost, so it re-sends, and this is how the second POST resolves to the first
+    turn rather than a duplicate of it.
+
+    The sender comes back with it rather than being filtered on, because a room
+    is shared and the key is arbitrary client-supplied text. Filtering would
+    make a co-member's reused key miss the lookup and then collide on the
+    room-scoped unique index; returning it lets the caller tell "my own retry"
+    from "somebody else's key" and degrade rather than fail. The index stays
+    room-scoped — it is the storage invariant, not the resolution rule.
+    """
+    if not client_msg_id:
+        return None
+    row = conn.execute(
+        "SELECT m.task_id, t.user_id FROM messages m "
+        "JOIN tasks t ON t.id = m.task_id "
+        "WHERE m.room_token = ? AND m.client_msg_id = ? "
+        "LIMIT 1",
+        (room_token, client_msg_id),
+    ).fetchone()
+    return (int(row["task_id"]), row["user_id"]) if row else None
 
 
 def get_messages(

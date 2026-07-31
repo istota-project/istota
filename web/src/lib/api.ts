@@ -2250,6 +2250,11 @@ export async function sendChatMessage(
   // knowable here — the server persists these for the transcript's chips.
   attachmentNames: string[] = [],
   timeoutMs = SEND_TIMEOUT_MS,
+  // Client-minted identity for this message, carried by every attempt at it.
+  // The server answers a repeat with the task the first attempt created, which
+  // is what makes a retry of a send it silently accepted produce one turn
+  // rather than two. Optional: omitted, the endpoint behaves as it always did.
+  idempotencyKey?: string,
 ): Promise<SendResult> {
   const controller = new AbortController();
   let timedOut = false;
@@ -2264,7 +2269,12 @@ export async function sendChatMessage(
   // Serialized outside the try so the catch below can honestly claim every
   // rejection it sees is the network — otherwise a body that can't be
   // stringified would be reported to the user as an unreachable server.
-  const body = JSON.stringify({ text, attachments, attachment_names: attachmentNames });
+  const body = JSON.stringify({
+    text,
+    attachments,
+    attachment_names: attachmentNames,
+    ...(idempotencyKey ? { client_msg_id: idempotencyKey } : {}),
+  });
 
   try {
     const resp = await fetch(`${base}/api/chat/rooms/${roomId}/messages`, {
@@ -2291,7 +2301,13 @@ export async function sendChatMessage(
     // bound exists for, and clearing on the headers alone would leave it open.
     let data: { error?: string } & Record<string, unknown> = {};
     try {
-      data = await resp.json();
+      const parsed = await resp.json();
+      // Shape-checked rather than assigned. `resp.json()` resolves to `null`
+      // for a body that is the literal `null` and to an array for a JSON list,
+      // neither of which throws — so the inner catch never fired and reading
+      // `data.error` below threw a TypeError that escaped to the outer catch,
+      // where a plain 400 was reported to the user as an unreachable server.
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) data = parsed;
     } catch (e) {
       // A body that isn't JSON is an error page — nginx answers its own HTML
       // for a 502 or an over-cap upload — and the status below already

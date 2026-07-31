@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { readDraft, writeDraft, DRAFT_TTL_MS, MAX_DRAFTS, DRAFT_STORAGE_KEY } from './drafts';
+import {
+  readDraft,
+  writeDraft,
+  dropDraft,
+  DRAFT_TTL_MS,
+  MAX_DRAFTS,
+  DRAFT_STORAGE_KEY,
+} from './drafts';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -150,5 +157,30 @@ describe('drafts', () => {
     localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ 'room:3': { text: 'x', at: NaN } }));
     expect(stored()['room:3'].at).toBeNull();
     expect(readDraft('room:3')).toBe('');
+  });
+
+  it('stores an expired draft afresh when its text is retyped verbatim', () => {
+    // The read filtered on expiry and the write did not, so the retyped text
+    // matched the stale entry, hit the already-stored no-op, and the draft
+    // stayed invisible until some unrelated write happened to prune it.
+    writeDraft('room:3', 'the same words');
+    vi.setSystemTime(Date.now() + DRAFT_TTL_MS + 1);
+    writeDraft('room:3', 'the same words');
+    expect(readDraft('room:3')).toBe('the same words');
+  });
+
+  it('dropDraft removes one entry and leaves the others', () => {
+    writeDraft('room:3', 'for A');
+    writeDraft('room:9', 'for B');
+    dropDraft('room:3');
+    expect(readDraft('room:3')).toBe('');
+    expect(readDraft('room:9')).toBe('for B');
+  });
+
+  it('dropDraft does not touch storage for a key that has none', () => {
+    writeDraft('room:9', 'for B');
+    const before = localStorage.getItem(DRAFT_STORAGE_KEY);
+    dropDraft('room:404');
+    expect(localStorage.getItem(DRAFT_STORAGE_KEY)).toBe(before);
   });
 });
