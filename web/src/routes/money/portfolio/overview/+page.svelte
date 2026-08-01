@@ -10,8 +10,7 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { NoticeBanner, Select } from '$lib/components/ui';
-  import PortfolioUpload from '../PortfolioUpload.svelte';
+  import { Button, NoticeBanner, Select } from '$lib/components/ui';
 
   Chart.register(DoughnutController, ArcElement, Tooltip, Legend);
 
@@ -164,7 +163,9 @@
     <p class="empty">
       No portfolio snapshots yet. Import a Fidelity Portfolio Positions CSV to get started.
     </p>
-    <PortfolioUpload onImported={() => load(owner)} />
+    <div>
+      <Button variant="primary" href="{base}/money/portfolio/import">Import a snapshot</Button>
+    </div>
   </div>
 {:else}
   <div class="money-toolbar">
@@ -186,7 +187,7 @@
   </div>
 
   {#if unclassified.length > 0}
-    <div class="money-notice-bar">
+    <div class="money-notice-bar spaced">
       <NoticeBanner variant="info" title="Unclassified symbols">
         {unclassified.join(', ')} — classify them in
         <a href="{base}/money/settings">Money settings</a> to complete the allocation charts.
@@ -236,7 +237,7 @@
     </div>
 
     <div class="micro-label holdings-label">Holdings</div>
-    <div class="money-table-header">
+    <div class="money-table-header holdings-header">
       <span class="col-symbol">Symbol</span>
       <span class="col-desc">Description</span>
       <span class="col-class">Class</span>
@@ -247,7 +248,7 @@
     </div>
     <div class="holdings-table">
       {#each summary.holdings as holding (holding.symbol)}
-        <div class="money-table-row">
+        <div class="money-table-row holdings-row">
           <span class="col-symbol symbol">
             {#if holding.symbol === 'CASH'}
               {holding.symbol}
@@ -282,10 +283,6 @@
         </div>
       {/each}
     </div>
-
-    <div class="upload-wrap">
-      <PortfolioUpload onImported={() => load(owner)} />
-    </div>
   </div>
 {/if}
 
@@ -308,9 +305,17 @@
     gap: var(--space-3);
   }
 
+  /* The notice sits directly on the summary cards without this. */
+  .money-notice-bar.spaced {
+    padding-bottom: var(--space-3);
+  }
+
+  /* minmax(0, 1fr) everywhere a chart can live: a bare 1fr track's min size is
+     the canvas's rendered width, so the grid could grow with the viewport but
+     never shrink back. */
   .summary-cards {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: var(--space-3);
     padding: 0 var(--space-3) var(--space-3);
   }
@@ -346,7 +351,7 @@
 
   .donut-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: var(--space-3);
     padding: 0 var(--space-3) var(--space-4);
   }
@@ -355,6 +360,7 @@
     background: var(--surface-card);
     border-radius: var(--radius-card);
     padding: var(--space-3);
+    min-width: 0;
   }
 
   .donut-canvas {
@@ -416,26 +422,48 @@
     width: 4.5rem;
   }
 
-  .upload-wrap {
-    padding: var(--space-4) var(--space-3) 0;
-    max-width: 640px;
-  }
-
   @media (max-width: 860px) {
     .donut-grid {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
   }
 
   @media (max-width: 640px) {
     .summary-cards {
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     .col-class,
     .col-qty,
     .col-gain {
       display: none;
+    }
+
+    /* Tighter rows on a phone: hairline vertical rhythm (the money tree-row
+       figure), narrower gaps and columns, smaller type — the description
+       column gets the width back and more rows fit a screen. */
+    .holdings-header,
+    .holdings-row {
+      gap: var(--space-2);
+      /* design-lint-allow: sub---space-1 hairline row rhythm, off the ramp on
+         purpose (same figure the money tree rows use) */
+      padding: 0.2rem var(--space-2);
+      font-size: var(--text-xs);
+    }
+
+    .holdings-header .col-symbol,
+    .holdings-row .col-symbol {
+      width: 3.5rem;
+    }
+
+    .holdings-header .col-value,
+    .holdings-row .col-value {
+      width: 5.5rem;
+    }
+
+    .holdings-header .col-gainpct,
+    .holdings-row .col-gainpct {
+      width: 3.5rem;
     }
   }
 </style>

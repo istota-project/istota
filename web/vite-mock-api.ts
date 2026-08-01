@@ -6719,6 +6719,11 @@ const handlers: MockHandler[] = [
       const params = new URLSearchParams(query ?? '');
 
       if (path === '/import' && method === 'POST') {
+        // Mirror the server's explicit-source validation (importer registry).
+        const source = params.get('source');
+        if (source && source !== 'fidelity-positions-csv' && source !== 'fina-history-csv') {
+          return { __status: 400, status: 'error', error: `Unknown import source: ${source}` };
+        }
         if (params.get('dry_run')) {
           return {
             status: 'ok',
@@ -6746,7 +6751,7 @@ const handlers: MockHandler[] = [
           exported_at: new Date().toISOString().slice(0, 19),
           exported_at_estimated: false,
           imported_at: new Date().toISOString(),
-          source: 'fidelity-positions-csv',
+          source: source ?? 'fidelity-positions-csv',
           source_file: 'upload.csv',
           positions: template ? template.positions.map((p) => ({ ...p })) : [],
         };

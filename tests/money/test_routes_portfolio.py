@@ -108,6 +108,23 @@ class TestImportRoute:
         assert resp.status_code == 400
         assert resp.json()["status"] == "error"
 
+    def test_explicit_source(self, client):
+        resp = _upload(client, CSV_2025, source="fidelity-positions-csv")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_explicit_source_mismatched_file_400(self, client):
+        # A fina file declared as a Fidelity export must error, not fall back
+        # to detection — the picker's declared intent wins.
+        resp = _upload(client, CSV_FINA, source="fidelity-positions-csv")
+        assert resp.status_code == 400
+        assert "Fidelity" in resp.json()["error"]
+
+    def test_unknown_source_400(self, client):
+        resp = _upload(client, CSV_2025, source="nope")
+        assert resp.status_code == 400
+        assert "Unknown import source" in resp.json()["error"]
+
 
 class TestReadRoutes:
     def test_snapshots_and_detail(self, client):

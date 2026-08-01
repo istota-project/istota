@@ -26,9 +26,9 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { Badge, ConfirmDialog, KebabMenu, Modal, Select } from '$lib/components/ui';
+  import { base } from '$app/paths';
+  import { Badge, Button, ConfirmDialog, KebabMenu, Modal, Select } from '$lib/components/ui';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
-  import PortfolioUpload from '../PortfolioUpload.svelte';
 
   Chart.register(
     BarController,
@@ -312,7 +312,9 @@
 {:else if snapshots.length === 0}
   <div class="portfolio-empty">
     <p class="empty">No snapshots yet — import a positions CSV to start the history.</p>
-    <PortfolioUpload onImported={() => load(groupBy, symbol)} />
+    <div>
+      <Button variant="primary" href="{base}/money/portfolio/import">Import a snapshot</Button>
+    </div>
   </div>
 {:else}
   <div class="money-toolbar">
@@ -338,7 +340,7 @@
 
   <div class="history-body">
     <div class="chart-container">
-      <canvas bind:this={chartCanvas}></canvas>
+      <div class="chart-canvas"><canvas bind:this={chartCanvas}></canvas></div>
     </div>
 
     <div class="micro-label snapshots-label">Snapshots</div>
@@ -366,10 +368,6 @@
           <KebabMenu items={snapshotMenu(snapshot)} ariaLabel="Snapshot actions" />
         </div>
       {/each}
-    </div>
-
-    <div class="upload-wrap">
-      <PortfolioUpload onImported={() => load(groupBy, symbol)} />
     </div>
   </div>
 {/if}
@@ -479,6 +477,16 @@
     background: var(--surface-card);
     border-radius: var(--radius-card);
     margin: 0 var(--space-3) var(--space-4);
+    min-width: 0;
+  }
+
+  /* Chart.js sizes the canvas from its parent, and needs that parent
+     relatively positioned and dedicated to the canvas to follow a viewport
+     shrink — without it the chart grows but never comes back down. */
+  .chart-canvas {
+    position: relative;
+    height: 100%;
+    min-width: 0;
   }
 
   .snapshots-label {
@@ -508,11 +516,6 @@
 
   .col-total {
     width: 8rem;
-  }
-
-  .upload-wrap {
-    padding: var(--space-4) var(--space-3) 0;
-    max-width: 640px;
   }
 
   .diff-list {

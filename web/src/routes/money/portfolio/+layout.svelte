@@ -20,6 +20,11 @@
       label: 'History',
       active: isActive('/money/portfolio/history'),
     },
+    {
+      href: `${base}/money/portfolio/import`,
+      label: 'Import',
+      active: isActive('/money/portfolio/import'),
+    },
   ]);
 </script>
 

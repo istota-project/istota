@@ -190,14 +190,40 @@
   /* Now a placement wrapper around `HeaderNav` rather than a nav of its own:
      the sub-sections used to hand-roll their links here, byte-for-byte what
      `NavLink` already renders, and so never got the mobile collapse the app
-     bar has had. What is left is the part HeaderNav can't own — a hang that
-     lands the first chip's TEXT on the section's 0.75rem content inset, which
-     would misalign the app bar's own nav (it follows a title there). */
+     bar has had. */
   :global(.money-section-nav) {
     display: flex;
     gap: var(--chip-gap);
     min-width: 0;
-    margin-inline-start: calc(-1 * var(--chip-padding-x));
+  }
+
+  /* Bordered pills need daylight between their boxes; HeaderNav's own
+     chip-gap is sized for the app bar's borderless text chips and reads as
+     touching here. */
+  :global(.money-section-nav .nav-links) {
+    gap: var(--space-2);
+  }
+
+  /* In a body section header every link is a visible pill: deselected ones
+     carry the Select trigger's own dress (card fill, 1px default border,
+     raised on hover), so the pill BOXES sit on the section's 0.75rem inset
+     in line with the content below — which retires the borderless-chip hang
+     this wrapper used to carry. Deliberately not in NavLink: in the app bar
+     the nav follows a title and the deselected links stay bare text. The
+     active rule only re-states the component's fill so the border applies at
+     equal-or-better specificity everywhere. */
+  :global(.money-section-nav .nav-link) {
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+  }
+
+  :global(.money-section-nav .nav-link:hover) {
+    background: var(--surface-raised);
+  }
+
+  :global(.money-section-nav .nav-link.active) {
+    background: var(--surface-raised);
+    border-color: var(--border-default);
   }
 
   :global(.money-section-tools) {
@@ -444,13 +470,6 @@
     :global(.money-section-header) {
       padding: var(--space-2) var(--space-3);
       flex-wrap: wrap;
-    }
-
-    /* The links collapse to a bordered Select at this width, and a hang sized
-       for a borderless chip would push that pill's box out past the inset —
-       the same correction HeaderNav makes for itself in the app bar. */
-    :global(.money-section-nav) {
-      margin-inline-start: 0;
     }
 
     /* HeaderNav gives its collapsed Select a leading margin to clear the gap

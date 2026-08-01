@@ -98,5 +98,7 @@
 
   .notice-body {
     margin-top: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
   }
 </style>

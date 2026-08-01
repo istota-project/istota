@@ -871,11 +871,13 @@ export interface PortfolioSymbolHistory {
 
 export async function importPortfolioFile(
   file: File,
-  opts?: { dryRun?: boolean; replace?: number },
+  opts?: { dryRun?: boolean; replace?: number; force?: boolean; source?: string },
 ): Promise<PortfolioImportResult> {
   const params = new URLSearchParams();
   if (opts?.dryRun) params.set('dry_run', '1');
   if (opts?.replace != null) params.set('replace', String(opts.replace));
+  if (opts?.force) params.set('force', '1');
+  if (opts?.source) params.set('source', opts.source);
   const qs = params.toString();
   const form = new FormData();
   form.append('file', file);

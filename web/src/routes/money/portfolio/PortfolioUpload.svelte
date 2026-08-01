@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import FileDropZone from '$lib/components/health/FileDropZone.svelte';
   import { Button, Modal } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
@@ -6,10 +7,14 @@
 
   interface Props {
     /** Runs after any import that changed data (ok / replace / force). */
-    onImported: () => void;
+    onImported?: () => void;
+    /** The empty-state prose inside the drop zone; defaults to the Fidelity copy. */
+    prompt?: Snippet;
+    /** Importer-registry source name; absent = server-side auto-detect. */
+    source?: string;
   }
 
-  let { onImported }: Props = $props();
+  let { onImported, prompt, source }: Props = $props();
 
   let file: File | null = $state(null);
   let importing = $state(false);
@@ -27,7 +32,7 @@
   async function runImport(picked: File, opts?: { replace?: number; force?: boolean }) {
     importing = true;
     try {
-      const result = await importPortfolioFile(picked, opts);
+      const result = await importPortfolioFile(picked, { ...opts, source });
       if (result.status === 'date_collision' && result.existing) {
         collision = { existing: result.existing, file: picked };
         return;
@@ -43,7 +48,7 @@
         notifyInfo(warning, { key: 'portfolio:import-warning' });
       }
       file = null;
-      onImported();
+      onImported?.();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && e.payload?.status === 'duplicate') {
         notifyInfo('Already imported — this file matches an existing snapshot', {
@@ -83,6 +88,8 @@
 <FileDropZone bind:file accept=".csv,text/csv">
   {#if importing}
     Importing…
+  {:else if prompt}
+    {@render prompt()}
   {:else}
     Drop a Fidelity Portfolio Positions CSV here, or pick a file.
     <span class="hint">Re-importing the same file is safe — duplicates are skipped.</span>

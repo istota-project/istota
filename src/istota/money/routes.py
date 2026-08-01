@@ -2243,16 +2243,20 @@ async def api_portfolio_import(
     dry_run: int = 0,
     replace: int | None = None,
     force: int = 0,
+    source: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
     """Import a positions CSV (Fidelity export or fina history file).
 
-    ``?dry_run=1`` returns the parse preview without writing. A duplicate
-    (same content hash) is a 409 naming the existing snapshot. A same-day
-    snapshot with different content returns ``{"status": "date_collision"}``
-    unless ``?replace=<old_id>`` (delete the old one first) or ``?force=1``
-    (keep both) is passed.
+    ``?source=<name>`` names an importer-registry source explicitly (the web
+    picker's declared intent — a mismatched file errors rather than falling
+    back to detection); absent, the format is auto-detected. ``?dry_run=1``
+    returns the parse preview without writing. A duplicate (same content
+    hash) is a 409 naming the existing snapshot. A same-day snapshot with
+    different content returns ``{"status": "date_collision"}`` unless
+    ``?replace=<old_id>`` (delete the old one first) or ``?force=1`` (keep
+    both) is passed.
     """
     import tempfile
 
@@ -2269,7 +2273,7 @@ async def api_portfolio_import(
         tmp_path = Path(tmp.name)
     try:
         try:
-            snapshots = parse_positions_file(tmp_path)
+            snapshots = parse_positions_file(tmp_path, source or None)
         except PositionParseError as exc:
             return _error(str(exc), 400)
 
