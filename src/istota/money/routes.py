@@ -1125,6 +1125,7 @@ async def api_tax_estimate(
         w2_months=saved.get("w2_months", 12),
         income_months=months,
         config=config,
+        state=config.state,
     )
     return {"status": "ok", **result.__dict__}
 
@@ -1209,6 +1210,7 @@ async def api_tax_estimate_recalculate(
         w2_months=w2_months,
         income_months=months,
         config=config,
+        state=config.state,
     )
     return {"status": "ok", **result.__dict__}
 

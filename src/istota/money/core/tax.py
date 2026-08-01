@@ -14,6 +14,7 @@ indexed* (they do not change each January) or are pure calculation policy.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -65,6 +66,26 @@ FED_CUMULATIVE_PCT: dict[int, float] = {1: 0.25, 2: 0.50, 3: 0.75, 4: 1.00}
 # (NOT even calendar quarters of 3/6/9/12 months — those over-state the Q2/Q3
 # periods and under-project mid-year income.)
 ANNUALIZATION_PERIOD_END_MONTH: dict[int, int] = {1: 3, 2: 5, 3: 8, 4: 12}
+
+
+@dataclass(frozen=True)
+class StateTaxResult:
+    """A state's computed tax, or the reason there isn't one.
+
+    ``reason`` is one of ``no_state`` (none selected), ``no_income_tax`` (one of
+    the nine states that levies none), ``no_brackets`` (selectable but we ship
+    no data and the user has entered no override) or ``unknown_state``. The UI
+    renders a different thing for each; collapsing them to a zero renders the
+    wrong thing for all four.
+    """
+
+    available: bool = False
+    reason: str = ""
+    name: str = ""
+    taxable_income: float = 0.0
+    standard_deduction: float = 0.0
+    personal_exemption: float = 0.0
+    tax: float = 0.0
 
 
 # =============================================================================
@@ -129,6 +150,37 @@ def state_rates(state: str, year: int) -> YearRates | None:
     if not state:
         return None
     return load_tax_rates().state_year(state, year)
+
+
+def _provenance(rates: YearRates | None, *, overridden: bool) -> dict:
+    """The citation block the UI renders beside a set of figures.
+
+    A plain dict rather than a dataclass so the estimate stays JSON-serializable
+    by spreading ``__dict__`` into the API response. ``rates`` of None with
+    ``overridden`` True is the ordinary case for a state we ship no data for:
+    the user's own numbers are in use and there is no source to name.
+    """
+    if rates is None:
+        return {
+            "year": None,
+            "requested_year": None,
+            "is_fallback": False,
+            "is_stale": False,
+            "overridden": overridden,
+            "source": "",
+            "source_url": "",
+            "verified_on": "",
+        }
+    return {
+        "year": rates.year,
+        "requested_year": rates.requested_year,
+        "is_fallback": rates.is_fallback,
+        "is_stale": rates.is_stale,
+        "overridden": overridden,
+        "source": rates.source,
+        "source_url": rates.source_url,
+        "verified_on": rates.verified_on,
+    }
 
 
 def installment_schedule(state: str) -> tuple[float, float, float, float]:
@@ -220,32 +272,84 @@ def compute_federal_tax(
     return taxable, std_ded, tax
 
 
-def compute_ca_tax(
-    agi: float, filing_status: str, year: int,
-    config: TaxConfig | None = None,
-) -> tuple[float, float, float]:
-    """Compute California state income tax.
+def state_starting_income(
+    starts_from: str,
+    *,
+    federal_agi: float,
+    federal_taxable_income: float,
+    gross_compensation: float,
+) -> float:
+    """Which federal figure a state's tax starts from.
 
-    Returns (taxable_income, standard_deduction, tax).
+    The one conformity knob — enough to express "this state starts from federal
+    AGI and allows neither the SE nor the QBI deduction", without building a
+    conformity engine. Benefit recapture, exemption phase-outs and per-state
+    credits are not modeled and are named in the disclaimer.
 
-    ``agi`` is federal AGI, which already carries the above-the-line half-SE
-    deduction — California conforms to it. What California does *not* allow is
-    the QBI deduction, which is why the caller passes AGI here rather than
-    federal taxable income. (This docstring used to say CA allowed neither,
-    which contradicted both this implementation and the mock API's.)
+    An unrecognised value falls back to federal AGI rather than raising: a data
+    file naming a starting point this build does not know about should produce
+    the common-case answer, not a broken page.
     """
-    rates = state_rates("CA", year)
-    if config and config.ca_standard_deduction is not None:
-        std_ded = config.ca_standard_deduction
+    if starts_from == "federal_taxable_income":
+        return federal_taxable_income
+    if starts_from == "gross_compensation":
+        return gross_compensation
+    return federal_agi
+
+
+def compute_state_tax(
+    starting_income: float,
+    state: str,
+    filing_status: str,
+    year: int,
+    config: TaxConfig | None = None,
+) -> StateTaxResult:
+    """Compute a state's income tax, or say why it could not be computed.
+
+    ``starting_income`` is whatever :func:`state_starting_income` resolved for
+    this state's ``starts_from`` — for California, federal AGI, which already
+    carries the above-the-line half-SE deduction. California does not allow the
+    QBI deduction, which is why AGI rather than federal taxable income is the
+    right basis for it.
+
+    Returning "unavailable with a reason" rather than a zero is the point: a
+    zero is a computed result, and a user in Texas should not be looking at a
+    state tax row at all, while a user in New York mid-setup needs to be told
+    their brackets are missing rather than shown a zero liability.
+    """
+    code = (state or "").upper()
+    if not code:
+        return StateTaxResult(reason="no_state")
+
+    jurisdiction = load_tax_rates().jurisdiction(code)
+    if jurisdiction is None:
+        return StateTaxResult(reason="unknown_state")
+    if not jurisdiction.taxes_income:
+        # Checked ahead of any override: an override corrects a rate, it does
+        # not license inventing a liability in a state that levies none.
+        return StateTaxResult(reason="no_income_tax", name=jurisdiction.name)
+
+    rates = state_rates(code, year)
+    override_brackets = config.state_brackets if config else None
+    brackets = _resolve_brackets(override_brackets, rates, filing_status)
+    if not brackets:
+        return StateTaxResult(reason="no_brackets", name=jurisdiction.name)
+
+    if config and config.state_standard_deduction is not None:
+        std_ded = config.state_standard_deduction
     else:
         std_ded = rates.standard_deduction(filing_status) if rates else 0
-    taxable = max(0, agi - std_ded)
+    exemption = rates.personal_exemption(filing_status) if rates else 0
 
-    brackets = _resolve_brackets(
-        config.ca_brackets if config else None, rates, filing_status,
+    taxable = max(0, starting_income - std_ded - exemption)
+    return StateTaxResult(
+        available=True,
+        name=jurisdiction.name,
+        taxable_income=taxable,
+        standard_deduction=std_ded,
+        personal_exemption=exemption,
+        tax=apply_brackets(taxable, brackets),
     )
-    tax = apply_brackets(taxable, brackets)
-    return taxable, std_ded, tax
 
 
 def annualization_months(
@@ -304,6 +408,7 @@ def estimate_quarterly_tax(
     w2_months: int = 12,
     income_months: int | None = None,
     config: TaxConfig | None = None,
+    state: str = "",
 ) -> QuarterlyTaxEstimate:
     """Compute estimated quarterly tax payment.
 
@@ -392,17 +497,32 @@ def estimate_quarterly_tax(
     )
     federal_total_liability = fed_tax + se_tax + additional_medicare
 
-    # CA state: same AGI (half SE is above-the-line for CA too), no QBI
-    ca_agi = federal_agi
-    ca_taxable, ca_std_ded, ca_tax = compute_ca_tax(
-        ca_agi, filing_status, tax_year, config=config,
+    # State. `starts_from` picks which federal figure the state's tax is based
+    # on; California takes AGI, which already carries the half-SE deduction.
+    state_code = (state or (config.state if config else "") or "").upper()
+    meta = load_tax_rates().state_meta(state_code) if state_code else None
+    starts_from = meta.starts_from if meta else "federal_agi"
+    state_agi = state_starting_income(
+        starts_from,
+        federal_agi=federal_agi,
+        federal_taxable_income=fed_taxable,
+        gross_compensation=se_annualized + w2_annualized,
     )
+    state_result = compute_state_tax(
+        state_agi, state_code, filing_status, tax_year, config=config,
+    )
+    state_tax = state_result.tax
+    # A state we cannot compute contributes no AGI figure either — rendering
+    # one beside an unavailable liability reads as a partial answer.
+    if not state_result.available:
+        state_agi = 0.0
 
     quarters_remaining = max(1, 5 - current_quarter)
 
-    # Cumulative fraction due by each quarter. Indexed 1-4 to match the payment
-    # quarter, and per-state — California's is the unusual one.
-    state_cumulative = installment_schedule("CA")
+    # Cumulative fraction due by each quarter, indexed 1-4 to match the payment
+    # quarter. Per-state: California's 30/40/0/30 used to be applied to every
+    # state's amounts, so anywhere else got California's payment timing.
+    state_cumulative = installment_schedule(state_code)
 
     if method == "safe_harbor":
         # For AGI > $150K, safe harbor requires 110% of prior year tax
@@ -422,12 +542,12 @@ def estimate_quarterly_tax(
         )
         state_net_due = max(
             0,
-            ca_tax - state_withholding_annual - state_estimated_paid,
+            state_tax - state_withholding_annual - state_estimated_paid,
         )
         fed_total_required = max(0, federal_total_liability - fed_withholding_annual)
         fed_cumulative_due = fed_total_required * FED_CUMULATIVE_PCT[current_quarter]
         fed_quarterly = round(max(0, fed_cumulative_due - federal_estimated_paid), 2)
-        state_total_required = max(0, ca_tax - state_withholding_annual)
+        state_total_required = max(0, state_tax - state_withholding_annual)
         state_cumulative_due = state_total_required * state_cumulative[current_quarter - 1]
         state_quarterly = round(max(0, state_cumulative_due - state_estimated_paid), 2)
 
@@ -450,21 +570,34 @@ def estimate_quarterly_tax(
         federal_taxable_income=fed_taxable,
         federal_tax=fed_tax,
         qbi_deduction=qbi_deduction,
-        ca_agi=ca_agi,
-        ca_standard_deduction=ca_std_ded,
-        ca_taxable_income=ca_taxable,
-        ca_tax=ca_tax,
+        state_agi=state_agi,
+        state_standard_deduction=state_result.standard_deduction,
+        state_taxable_income=state_result.taxable_income,
+        state_tax=state_tax,
         federal_withholding=fed_withholding_annual,
         state_withholding=state_withholding_annual,
         federal_estimated_paid=federal_estimated_paid,
         state_estimated_paid=state_estimated_paid,
         federal_total_liability=federal_total_liability,
-        state_total_liability=ca_tax,
+        state_total_liability=state_tax,
         federal_net_due=federal_net_due,
         state_net_due=state_net_due,
         federal_quarterly_amount=fed_quarterly,
         state_quarterly_amount=state_quarterly,
         quarters_remaining=quarters_remaining,
+        state=state_code,
+        state_name=state_result.name,
+        state_available=state_result.available,
+        state_unavailable_reason=state_result.reason,
+        federal_rates=_provenance(fed_rates, overridden=bool(
+            config and (config.federal_brackets or
+                        config.federal_standard_deduction is not None)
+        )),
+        state_rates=None if not state_code else _provenance(
+            state_rates(state_code, tax_year),
+            overridden=bool(config and (config.state_brackets or
+                                        config.state_standard_deduction is not None)),
+        ),
     )
 
 
@@ -489,6 +622,7 @@ def parse_tax_config(config_path: Path) -> TaxConfig:
     return TaxConfig(
         filing_status=tax.get("filing_status", "mfj"),
         tax_year=tax.get("tax_year", 2026),
+        state=(tax.get("state") or "").upper(),
         w2_income=w2.get("income", 0),
         w2_federal_withholding=w2.get("federal_withholding", 0),
         w2_state_withholding=w2.get("state_withholding", 0),
@@ -500,9 +634,9 @@ def parse_tax_config(config_path: Path) -> TaxConfig:
         prior_year_federal_tax=safe_harbor.get("prior_year_federal_tax", 0),
         prior_year_state_tax=safe_harbor.get("prior_year_state_tax", 0),
         federal_brackets=rates.get("federal_brackets"),
-        ca_brackets=rates.get("ca_brackets"),
+        state_brackets=rates.get("state_brackets"),
         federal_standard_deduction=rates.get("federal_standard_deduction"),
-        ca_standard_deduction=rates.get("ca_standard_deduction"),
+        state_standard_deduction=rates.get("state_standard_deduction"),
         ss_wage_base=rates.get("ss_wage_base"),
         ss_rate=rates.get("ss_rate"),
         medicare_rate=rates.get("medicare_rate"),

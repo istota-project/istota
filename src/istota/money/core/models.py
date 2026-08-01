@@ -209,6 +209,12 @@ class TaxConfig:
     """Configuration for estimated quarterly tax calculations."""
     filing_status: str = "mfj"  # "mfj" | "single"
     tax_year: int = 2026
+    # Two-letter state code, or "" for no state tax. "" is a real choice — the
+    # nine states with no broad-based income tax, or a user who does not want a
+    # state estimate — and the taxes page drops the state column entirely for
+    # it rather than showing zeros. The default is "" so a fresh user picks
+    # their own state rather than inheriting California.
+    state: str = ""
     # W-2 defaults (YTD values, editable in UI)
     w2_income: float = 0
     w2_federal_withholding: float = 0
@@ -224,11 +230,15 @@ class TaxConfig:
     # Safe harbor: prior year total tax
     prior_year_federal_tax: float = 0
     prior_year_state_tax: float = 0
-    # Tax rates and brackets (year-specific, loaded from config)
+    # Rate overrides for the configured (tax_year, state, filing_status).
+    # None means "use the bundled data"; these are user corrections, not the
+    # shipped values. Resolution order per field is override, then bundled,
+    # then absent — and absent is a real state the caller must report rather
+    # than compute a zero liability from.
     federal_brackets: list[list[float]] | None = None
-    ca_brackets: list[list[float]] | None = None
+    state_brackets: list[list[float]] | None = None
     federal_standard_deduction: float | None = None
-    ca_standard_deduction: float | None = None
+    state_standard_deduction: float | None = None
     ss_wage_base: float | None = None
     ss_rate: float | None = None
     medicare_rate: float | None = None
@@ -259,11 +269,14 @@ class QuarterlyTaxEstimate:
     federal_taxable_income: float
     federal_tax: float
     qbi_deduction: float
-    # State (CA)
-    ca_agi: float
-    ca_standard_deduction: float
-    ca_taxable_income: float
-    ca_tax: float
+    # State. The payment-side fields below (state_withholding,
+    # state_estimated_paid, state_quarterly_amount) were always neutral, which
+    # is what made the ca_-prefixed half of the pair incoherent rather than
+    # merely dated.
+    state_agi: float
+    state_standard_deduction: float
+    state_taxable_income: float
+    state_tax: float
     # Credits / payments
     federal_withholding: float
     state_withholding: float
@@ -277,3 +290,18 @@ class QuarterlyTaxEstimate:
     federal_quarterly_amount: float
     state_quarterly_amount: float
     quarters_remaining: int
+    # Jurisdiction. `state_available` False with a reason is distinct from a
+    # zero liability: no state selected, a state that levies no income tax, and
+    # a state we ship no brackets for all produce no state figures, and the
+    # page must say which rather than render zeros.
+    state: str = ""
+    state_name: str = ""
+    state_available: bool = False
+    state_unavailable_reason: str = ""
+    # Provenance for the rates actually used, as plain dicts so the whole
+    # estimate stays JSON-serializable by spreading `__dict__`. Keys: year,
+    # requested_year, is_fallback, is_stale, overridden, source, source_url,
+    # verified_on. `is_fallback` is what makes the old silent year fallback
+    # visible; `state_rates` is None when there is no state to have rates.
+    federal_rates: dict = field(default_factory=dict)
+    state_rates: dict | None = None

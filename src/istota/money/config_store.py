@@ -112,6 +112,10 @@ CREATE TABLE IF NOT EXISTS tax_account_patterns (
     PRIMARY KEY(kind, pattern)
 );
 
+-- Payroll scalars are genuinely federal, year-keyed and status-agnostic, so
+-- they stay here. The four bracket/deduction columns are legacy: they are read
+-- once by `migrate_tax_schedules` and never again. Dropping them would be a
+-- data migration for no gain.
 CREATE TABLE IF NOT EXISTS tax_year_rates (
     tax_year                       INTEGER PRIMARY KEY,
     ss_wage_base                   REAL,
@@ -122,6 +126,20 @@ CREATE TABLE IF NOT EXISTS tax_year_rates (
     ca_standard_deduction          REAL,
     federal_brackets_json          TEXT,
     ca_brackets_json               TEXT
+);
+
+-- Brackets and deductions with the dimensions they actually have. The legacy
+-- columns above are keyed on the year alone, so a stored bracket override was
+-- filing-status-agnostic while the shipped values it overrode are keyed
+-- (year, filing_status) — an override entered while filing jointly silently
+-- continued to apply after switching to single.
+CREATE TABLE IF NOT EXISTS tax_schedules (
+    tax_year           INTEGER NOT NULL,
+    jurisdiction       TEXT NOT NULL,   -- 'federal' or a two-letter state code
+    filing_status      TEXT NOT NULL,   -- 'mfj' | 'single'
+    brackets_json      TEXT,
+    standard_deduction REAL,
+    PRIMARY KEY (tax_year, jurisdiction, filing_status)
 );
 
 CREATE TABLE IF NOT EXISTS monarch_settings (
@@ -1225,9 +1243,16 @@ def delete_service(db_path: Path | str, key: str) -> bool:
 # =============================================================================
 
 
+FILING_STATUSES = ("mfj", "single")
+
+# The reserved jurisdiction key for federal rates, alongside the two-letter
+# state codes. Kept distinct from a state code so one table carries both.
+FEDERAL_JURISDICTION = "federal"
+
 _TAX_SCALAR_KEYS = (
     "filing_status",
     "tax_year",
+    "state",
     "w2.income",
     "w2.federal_withholding",
     "w2.state_withholding",
@@ -1255,6 +1280,7 @@ def tax_config_from_toml_dict(data: dict) -> TaxConfig:
     return TaxConfig(
         filing_status=tax.get("filing_status", "mfj"),
         tax_year=tax.get("tax_year", 2026),
+        state=(tax.get("state") or "").upper(),
         w2_income=w2.get("income", 0),
         w2_federal_withholding=w2.get("federal_withholding", 0),
         w2_state_withholding=w2.get("state_withholding", 0),
@@ -1266,9 +1292,9 @@ def tax_config_from_toml_dict(data: dict) -> TaxConfig:
         prior_year_federal_tax=safe_harbor.get("prior_year_federal_tax", 0),
         prior_year_state_tax=safe_harbor.get("prior_year_state_tax", 0),
         federal_brackets=rates.get("federal_brackets"),
-        ca_brackets=rates.get("ca_brackets"),
+        state_brackets=rates.get("state_brackets"),
         federal_standard_deduction=rates.get("federal_standard_deduction"),
-        ca_standard_deduction=rates.get("ca_standard_deduction"),
+        state_standard_deduction=rates.get("state_standard_deduction"),
         ss_wage_base=rates.get("ss_wage_base"),
         ss_rate=rates.get("ss_rate"),
         medicare_rate=rates.get("medicare_rate"),
@@ -1282,6 +1308,8 @@ def tax_to_toml_dict(cfg: TaxConfig) -> dict:
         "filing_status": cfg.filing_status,
         "tax_year": cfg.tax_year,
     }
+    if cfg.state:
+        tax["state"] = cfg.state
     w2: dict[str, Any] = {}
     if cfg.w2_income:
         w2["income"] = cfg.w2_income
@@ -1330,12 +1358,12 @@ def tax_to_toml_dict(cfg: TaxConfig) -> dict:
         rates["se_taxable_fraction"] = cfg.se_taxable_fraction
     if cfg.federal_standard_deduction is not None:
         rates["federal_standard_deduction"] = cfg.federal_standard_deduction
-    if cfg.ca_standard_deduction is not None:
-        rates["ca_standard_deduction"] = cfg.ca_standard_deduction
+    if cfg.state_standard_deduction is not None:
+        rates["state_standard_deduction"] = cfg.state_standard_deduction
     if cfg.federal_brackets is not None:
         rates["federal_brackets"] = [list(b) for b in cfg.federal_brackets]
-    if cfg.ca_brackets is not None:
-        rates["ca_brackets"] = [list(b) for b in cfg.ca_brackets]
+    if cfg.state_brackets is not None:
+        rates["state_brackets"] = [list(b) for b in cfg.state_brackets]
     if rates:
         tax["rates"] = rates
 
@@ -1354,9 +1382,19 @@ def load_tax(db_path: Path | str) -> TaxConfig:
             patterns.setdefault(row["kind"], []).append(row["pattern"])
 
         tax_year = int(scalars.get("tax_year", 2026))
+        filing_status = scalars.get("filing_status", "mfj")
+        state = (scalars.get("state") or "").upper()
         rate_row = conn.execute(
             "SELECT * FROM tax_year_rates WHERE tax_year = ?", (tax_year,),
         ).fetchone()
+        # Overrides are scoped to (year, jurisdiction, filing_status), so
+        # switching filing status stops carrying the other status's numbers.
+        fed_schedule = _fetch_schedule(
+            conn, tax_year, FEDERAL_JURISDICTION, filing_status,
+        )
+        state_schedule = (
+            _fetch_schedule(conn, tax_year, state, filing_status) if state else None
+        )
 
     # When the DB has no patterns, return empty lists rather than baking in
     # the heuristic defaults (`["Income:ScheduleC"]` etc). Otherwise a
@@ -1366,10 +1404,6 @@ def load_tax(db_path: Path | str) -> TaxConfig:
     se_income = patterns.get("se_income") or []
     se_expense = patterns.get("se_expense") or []
 
-    fed_brackets = None
-    ca_brackets = None
-    fed_std_ded = None
-    ca_std_ded = None
     ss_wage_base = None
     ss_rate = None
     medicare_rate = None
@@ -1379,16 +1413,16 @@ def load_tax(db_path: Path | str) -> TaxConfig:
         ss_rate = rate_row["ss_rate"]
         medicare_rate = rate_row["medicare_rate"]
         se_taxable_fraction = rate_row["se_taxable_fraction"]
-        fed_std_ded = rate_row["federal_standard_deduction"]
-        ca_std_ded = rate_row["ca_standard_deduction"]
-        if rate_row["federal_brackets_json"]:
-            fed_brackets = json.loads(rate_row["federal_brackets_json"])
-        if rate_row["ca_brackets_json"]:
-            ca_brackets = json.loads(rate_row["ca_brackets_json"])
+
+    fed_brackets = fed_schedule["brackets"] if fed_schedule else None
+    fed_std_ded = fed_schedule["standard_deduction"] if fed_schedule else None
+    state_brackets = state_schedule["brackets"] if state_schedule else None
+    state_std_ded = state_schedule["standard_deduction"] if state_schedule else None
 
     return TaxConfig(
-        filing_status=scalars.get("filing_status", "mfj"),
+        filing_status=filing_status,
         tax_year=tax_year,
+        state=state,
         w2_income=scalars.get("w2.income", 0),
         w2_federal_withholding=scalars.get("w2.federal_withholding", 0),
         w2_state_withholding=scalars.get("w2.state_withholding", 0),
@@ -1400,9 +1434,9 @@ def load_tax(db_path: Path | str) -> TaxConfig:
         prior_year_federal_tax=scalars.get("safe_harbor.prior_year_federal_tax", 0),
         prior_year_state_tax=scalars.get("safe_harbor.prior_year_state_tax", 0),
         federal_brackets=fed_brackets,
-        ca_brackets=ca_brackets,
+        state_brackets=state_brackets,
         federal_standard_deduction=fed_std_ded,
-        ca_standard_deduction=ca_std_ded,
+        state_standard_deduction=state_std_ded,
         ss_wage_base=ss_wage_base,
         ss_rate=ss_rate,
         medicare_rate=medicare_rate,
@@ -1445,12 +1479,235 @@ def save_tax(
                 ("se_expense", p),
             )
 
+        # Payroll scalars stay year-keyed; brackets and deductions go to the
+        # (year, jurisdiction, filing_status) table.
         if any(v is not None for v in (
             cfg.ss_wage_base, cfg.ss_rate, cfg.medicare_rate,
-            cfg.se_taxable_fraction, cfg.federal_standard_deduction,
-            cfg.ca_standard_deduction, cfg.federal_brackets, cfg.ca_brackets,
+            cfg.se_taxable_fraction,
         )):
             _upsert_year_rates(conn, cfg.tax_year, cfg)
+
+        _write_schedule(
+            conn, cfg.tax_year, FEDERAL_JURISDICTION, cfg.filing_status,
+            cfg.federal_brackets, cfg.federal_standard_deduction,
+        )
+        if cfg.state:
+            _write_schedule(
+                conn, cfg.tax_year, cfg.state.upper(), cfg.filing_status,
+                cfg.state_brackets, cfg.state_standard_deduction,
+            )
+
+
+# =============================================================================
+# Tax schedules — brackets and deductions per (year, jurisdiction, status)
+# =============================================================================
+
+
+def _validate_jurisdiction(jurisdiction: str) -> str:
+    """Normalize and check a jurisdiction key: 'federal' or a real state code."""
+    from istota.money.core.tax_data import load_tax_rates
+
+    if not jurisdiction:
+        raise ValueError("jurisdiction is required")
+    if jurisdiction.lower() == FEDERAL_JURISDICTION:
+        return FEDERAL_JURISDICTION
+    code = jurisdiction.upper()
+    if load_tax_rates().jurisdiction(code) is None:
+        raise ValueError(f"unknown jurisdiction: {jurisdiction}")
+    return code
+
+
+def _validate_filing_status(filing_status: str) -> str:
+    if filing_status not in FILING_STATUSES:
+        raise ValueError(
+            f"unknown filing status: {filing_status} "
+            f"(expected one of {', '.join(FILING_STATUSES)})"
+        )
+    return filing_status
+
+
+def _fetch_schedule(
+    conn: sqlite3.Connection, year: int, jurisdiction: str, filing_status: str,
+) -> dict | None:
+    row = conn.execute(
+        "SELECT brackets_json, standard_deduction FROM tax_schedules "
+        "WHERE tax_year = ? AND jurisdiction = ? AND filing_status = ?",
+        (year, jurisdiction, filing_status),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "brackets": json.loads(row["brackets_json"]) if row["brackets_json"] else None,
+        "standard_deduction": row["standard_deduction"],
+    }
+
+
+def _write_schedule(
+    conn: sqlite3.Connection,
+    year: int,
+    jurisdiction: str,
+    filing_status: str,
+    brackets: list | None,
+    standard_deduction: float | None,
+) -> None:
+    """Upsert one schedule row, or delete it when both fields are cleared.
+
+    Deleting rather than storing a row of NULLs is what makes "revert to
+    bundled" work: resolution order is override, then bundled, and a NULL row
+    is still an override row.
+    """
+    if brackets is None and standard_deduction is None:
+        conn.execute(
+            "DELETE FROM tax_schedules "
+            "WHERE tax_year = ? AND jurisdiction = ? AND filing_status = ?",
+            (year, jurisdiction, filing_status),
+        )
+        return
+    conn.execute(
+        """
+        INSERT INTO tax_schedules(
+            tax_year, jurisdiction, filing_status, brackets_json, standard_deduction
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(tax_year, jurisdiction, filing_status) DO UPDATE SET
+            brackets_json = excluded.brackets_json,
+            standard_deduction = excluded.standard_deduction
+        """,
+        (
+            year, jurisdiction, filing_status,
+            json.dumps([list(b) for b in brackets]) if brackets is not None else None,
+            standard_deduction,
+        ),
+    )
+
+
+def list_tax_schedules(db_path: Path | str) -> list[dict]:
+    """Every stored bracket/deduction override, newest year first."""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM tax_schedules "
+            "ORDER BY tax_year DESC, jurisdiction, filing_status"
+        ).fetchall()
+    return [
+        {
+            "tax_year": row["tax_year"],
+            "jurisdiction": row["jurisdiction"],
+            "filing_status": row["filing_status"],
+            "standard_deduction": row["standard_deduction"],
+            "brackets": (
+                json.loads(row["brackets_json"]) if row["brackets_json"] else None
+            ),
+        }
+        for row in rows
+    ]
+
+
+def get_tax_schedule(
+    db_path: Path | str, year: int, jurisdiction: str, filing_status: str,
+) -> dict | None:
+    init_db(db_path)
+    jurisdiction = _validate_jurisdiction(jurisdiction)
+    filing_status = _validate_filing_status(filing_status)
+    with _connect(db_path) as conn:
+        return _fetch_schedule(conn, year, jurisdiction, filing_status)
+
+
+def upsert_tax_schedule(
+    db_path: Path | str,
+    year: int,
+    jurisdiction: str,
+    filing_status: str,
+    *,
+    brackets: list | None = None,
+    standard_deduction: float | None = None,
+) -> str:
+    """Merge fields into one schedule row. Returns 'created'/'updated'/'noop'.
+
+    Merge rather than replace: the two fields are edited independently in the
+    UI, so passing only one must not blank the other.
+    """
+    init_db(db_path)
+    jurisdiction = _validate_jurisdiction(jurisdiction)
+    filing_status = _validate_filing_status(filing_status)
+    with _connect(db_path) as conn:
+        existing = _fetch_schedule(conn, year, jurisdiction, filing_status)
+        merged_brackets = brackets if brackets is not None else (
+            existing["brackets"] if existing else None
+        )
+        merged_std = standard_deduction if standard_deduction is not None else (
+            existing["standard_deduction"] if existing else None
+        )
+        _write_schedule(
+            conn, year, jurisdiction, filing_status, merged_brackets, merged_std,
+        )
+        if existing is None:
+            return "created" if (merged_brackets is not None
+                                 or merged_std is not None) else "noop"
+        changed = (
+            merged_brackets != existing["brackets"]
+            or merged_std != existing["standard_deduction"]
+        )
+        return "updated" if changed else "noop"
+
+
+def delete_tax_schedule(
+    db_path: Path | str, year: int, jurisdiction: str, filing_status: str,
+) -> bool:
+    """Drop an override, reverting that field set to the bundled values."""
+    init_db(db_path)
+    jurisdiction = _validate_jurisdiction(jurisdiction)
+    filing_status = _validate_filing_status(filing_status)
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM tax_schedules "
+            "WHERE tax_year = ? AND jurisdiction = ? AND filing_status = ?",
+            (year, jurisdiction, filing_status),
+        )
+        return cur.rowcount > 0
+
+
+_TAX_SCHEDULES_MIGRATION_MARKER = "tax_schedules_migrated_v1"
+
+
+def migrate_tax_schedules(db_path: Path | str) -> int:
+    """Fold the legacy year-keyed bracket columns into ``tax_schedules``.
+
+    One-time and markered. The legacy rows never recorded a filing status, so
+    they are filed under the *configured* one — the honest reading of data that
+    never had the dimension. ``INSERT OR IGNORE`` on top of the marker means a
+    re-run cannot clobber an edit the user made after the first pass.
+
+    Returns the number of rows written.
+    """
+    init_db(db_path)
+    if get_meta(db_path, _TAX_SCHEDULES_MIGRATION_MARKER):
+        return 0
+
+    with _connect(db_path) as conn:
+        status = _kv_all(conn, "tax_settings").get("filing_status", "mfj")
+        if status not in FILING_STATUSES:
+            status = "mfj"
+        written = 0
+        for row in conn.execute("SELECT * FROM tax_year_rates").fetchall():
+            year = row["tax_year"]
+            legacy = (
+                (FEDERAL_JURISDICTION,
+                 row["federal_brackets_json"], row["federal_standard_deduction"]),
+                ("CA", row["ca_brackets_json"], row["ca_standard_deduction"]),
+            )
+            for jurisdiction, brackets_json, std_ded in legacy:
+                if not brackets_json and std_ded is None:
+                    continue
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO tax_schedules("
+                    "  tax_year, jurisdiction, filing_status,"
+                    "  brackets_json, standard_deduction"
+                    ") VALUES (?, ?, ?, ?, ?)",
+                    (year, jurisdiction, status, brackets_json, std_ded),
+                )
+                written += cur.rowcount
+    set_meta(db_path, _TAX_SCHEDULES_MIGRATION_MARKER, "1")
+    return written
 
 
 def _tax_scalar(cfg: TaxConfig, key: str) -> Any:
@@ -1458,6 +1715,8 @@ def _tax_scalar(cfg: TaxConfig, key: str) -> Any:
         return cfg.filing_status
     if key == "tax_year":
         return cfg.tax_year
+    if key == "state":
+        return cfg.state
     if key == "w2.income":
         return cfg.w2_income
     if key == "w2.federal_withholding":
@@ -1480,34 +1739,25 @@ def _tax_scalar(cfg: TaxConfig, key: str) -> Any:
 def _upsert_year_rates(
     conn: sqlite3.Connection, year: int, cfg: TaxConfig,
 ) -> None:
-    fed_brackets_json = (
-        json.dumps([list(b) for b in cfg.federal_brackets])
-        if cfg.federal_brackets is not None else None
-    )
-    ca_brackets_json = (
-        json.dumps([list(b) for b in cfg.ca_brackets])
-        if cfg.ca_brackets is not None else None
-    )
+    """Write the payroll scalars for a year.
+
+    Deliberately does not touch the legacy bracket/deduction columns — those
+    are read once by `migrate_tax_schedules` and never written again, since
+    they lack the filing-status dimension the values actually have.
+    """
     conn.execute(
         """
         INSERT INTO tax_year_rates(
-            tax_year, ss_wage_base, ss_rate, medicare_rate, se_taxable_fraction,
-            federal_standard_deduction, ca_standard_deduction,
-            federal_brackets_json, ca_brackets_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tax_year, ss_wage_base, ss_rate, medicare_rate, se_taxable_fraction
+        ) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(tax_year) DO UPDATE SET
             ss_wage_base = excluded.ss_wage_base,
             ss_rate = excluded.ss_rate,
             medicare_rate = excluded.medicare_rate,
-            se_taxable_fraction = excluded.se_taxable_fraction,
-            federal_standard_deduction = excluded.federal_standard_deduction,
-            ca_standard_deduction = excluded.ca_standard_deduction,
-            federal_brackets_json = excluded.federal_brackets_json,
-            ca_brackets_json = excluded.ca_brackets_json
+            se_taxable_fraction = excluded.se_taxable_fraction
         """,
         (year, cfg.ss_wage_base, cfg.ss_rate, cfg.medicare_rate,
-         cfg.se_taxable_fraction, cfg.federal_standard_deduction,
-         cfg.ca_standard_deduction, fed_brackets_json, ca_brackets_json),
+         cfg.se_taxable_fraction),
     )
 
 

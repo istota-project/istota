@@ -435,7 +435,7 @@ _INVOICING_CLIENT_INVOICING_KEYS = {
 _INVOICING_SERVICE_KEYS = {"display_name", "rate", "type", "income_account"}
 
 _TAX_TOP_KEYS = {
-    "filing_status", "tax_year",
+    "filing_status", "tax_year", "state",
     "w2", "options", "accounts", "estimated_payments", "safe_harbor", "rates",
 }
 _TAX_W2_KEYS = {"income", "federal_withholding", "state_withholding"}
@@ -445,8 +445,8 @@ _TAX_ACCOUNTS_KEYS = {"se_income", "se_expenses"}
 _TAX_SAFE_HARBOR_KEYS = {"prior_year_federal_tax", "prior_year_state_tax"}
 _TAX_RATES_KEYS = {
     "ss_wage_base", "ss_rate", "medicare_rate", "se_taxable_fraction",
-    "federal_standard_deduction", "ca_standard_deduction",
-    "federal_brackets", "ca_brackets",
+    "federal_standard_deduction", "state_standard_deduction",
+    "federal_brackets", "state_brackets",
 }
 
 _MONARCH_TOP_KEYS = {"sync", "accounts", "categories", "tags", "profiles",
@@ -613,8 +613,8 @@ def _compute_section_diff(
         cfg_new = config_store.tax_config_from_toml_dict(data)
         out.append(("updated", f"tax_year={cfg_new.tax_year} filing_status={cfg_new.filing_status}"))
         if any(v is not None for v in (
-            cfg_new.federal_brackets, cfg_new.ca_brackets,
-            cfg_new.federal_standard_deduction, cfg_new.ca_standard_deduction,
+            cfg_new.federal_brackets, cfg_new.state_brackets,
+            cfg_new.federal_standard_deduction, cfg_new.state_standard_deduction,
             cfg_new.ss_wage_base, cfg_new.ss_rate,
         )):
             out.append(("updated", f"year_rates year={cfg_new.tax_year}"))
@@ -781,9 +781,9 @@ def _merge_tax(db_path, data: dict):
         "medicare_rate": "medicare_rate",
         "se_taxable_fraction": "se_taxable_fraction",
         "federal_standard_deduction": "federal_standard_deduction",
-        "ca_standard_deduction": "ca_standard_deduction",
+        "state_standard_deduction": "state_standard_deduction",
         "federal_brackets": "federal_brackets",
-        "ca_brackets": "ca_brackets",
+        "state_brackets": "state_brackets",
     }
     for toml_key, attr in rate_field_map.items():
         if toml_key in rates:
@@ -1099,6 +1099,10 @@ def _add_tax(sub) -> None:
     setp.add_argument("--user", "-u", required=True)
     setp.add_argument("--filing-status", choices=("mfj", "single"))
     setp.add_argument("--tax-year", type=int)
+    setp.add_argument(
+        "--state",
+        help='Two-letter state code, or "" for no state tax',
+    )
     setp.add_argument("--w2-income", type=float)
     setp.add_argument("--w2-federal-withholding", type=float)
     setp.add_argument("--w2-state-withholding", type=float)
@@ -1119,10 +1123,6 @@ def _add_tax(sub) -> None:
     rset.add_argument("--ss-rate", type=float)
     rset.add_argument("--medicare-rate", type=float)
     rset.add_argument("--se-taxable-fraction", type=float)
-    rset.add_argument("--federal-standard-deduction", type=float)
-    rset.add_argument("--ca-standard-deduction", type=float)
-    rset.add_argument("--federal-brackets-json")
-    rset.add_argument("--ca-brackets-json")
     rrm = rs.add_parser("remove", help="Delete a year row")
     rrm.add_argument("--user", "-u", required=True)
     rrm.add_argument("--year", type=int, required=True)
@@ -1141,6 +1141,34 @@ def _add_tax(sub) -> None:
     prm.add_argument("--pattern", required=True)
     ps.add_parser("list").add_argument("--user", "-u", required=True)
 
+    # Brackets and standard deductions, keyed on the three dimensions they
+    # actually have. `rates` keeps the payroll scalars, which are genuinely
+    # federal, year-keyed and status-agnostic.
+    sched = s.add_parser(
+        "schedule", help="Manage bracket / standard-deduction overrides",
+    )
+    ss_ = sched.add_subparsers(dest="schedule_action", required=True)
+    sset = ss_.add_parser("set", help="Upsert a bracket/deduction override")
+    sset.add_argument("--user", "-u", required=True)
+    sset.add_argument("--year", type=int, required=True)
+    sset.add_argument(
+        "--jurisdiction", required=True,
+        help="'federal' or a two-letter state code",
+    )
+    sset.add_argument("--filing-status", required=True, choices=("mfj", "single"))
+    sset.add_argument("--standard-deduction", type=float)
+    sset.add_argument(
+        "--brackets-json",
+        help='JSON array of [threshold, rate] pairs, e.g. \'[[0,0.04],[100000,0.06]]\'',
+    )
+    srm = ss_.add_parser("remove", help="Drop an override, reverting to bundled")
+    srm.add_argument("--user", "-u", required=True)
+    srm.add_argument("--year", type=int, required=True)
+    srm.add_argument("--jurisdiction", required=True)
+    srm.add_argument("--filing-status", required=True, choices=("mfj", "single"))
+    sls = ss_.add_parser("list", help="List stored overrides")
+    sls.add_argument("--user", "-u", required=True)
+
 
 def _tax_dispatch(args, istota_config) -> int:
     a = args.tax_action
@@ -1148,9 +1176,45 @@ def _tax_dispatch(args, istota_config) -> int:
         return _tax_set(args, istota_config)
     if a == "rates":
         return _tax_rates_dispatch(args, istota_config)
+    if a == "schedule":
+        return _tax_schedule_dispatch(args, istota_config)
     if a == "pattern":
         return _tax_pattern_dispatch(args, istota_config)
     return _print_error(f"unknown tax action: {a}")
+
+
+def _tax_schedule_dispatch(args, istota_config) -> int:
+    sa = args.schedule_action
+    ctx = _load_user_ctx(istota_config, args.user)
+    if sa == "list":
+        for row in config_store.list_tax_schedules(ctx.db_path):
+            print(json.dumps(row, indent=2, ensure_ascii=False))
+        return 0
+
+    label = (
+        f"schedule year={args.year} jurisdiction={args.jurisdiction} "
+        f"filing_status={args.filing_status}"
+    )
+    try:
+        if sa == "remove":
+            ok = config_store.delete_tax_schedule(
+                ctx.db_path, args.year, args.jurisdiction, args.filing_status,
+            )
+            _print_state("removed" if ok else "noop", label)
+            return 0
+        brackets = (
+            json.loads(args.brackets_json) if args.brackets_json else None
+        )
+        state = config_store.upsert_tax_schedule(
+            ctx.db_path, args.year, args.jurisdiction, args.filing_status,
+            brackets=brackets, standard_deduction=args.standard_deduction,
+        )
+    except ValueError as exc:
+        return _print_error(str(exc))
+    except json.JSONDecodeError as exc:
+        return _print_error(f"--brackets-json is not valid JSON: {exc}")
+    _print_state(state, label)
+    return 0
 
 
 def _tax_set(args, istota_config) -> int:
@@ -1161,6 +1225,10 @@ def _tax_set(args, istota_config) -> int:
         cfg.filing_status = args.filing_status
     if args.tax_year is not None:
         cfg.tax_year = args.tax_year
+    if args.state is not None:
+        # "" is a real choice (no state tax), so `is not None` rather than a
+        # truthiness check — otherwise the state could never be cleared.
+        cfg.state = args.state.upper()
     if args.w2_income is not None:
         cfg.w2_income = args.w2_income
     if args.w2_federal_withholding is not None:
@@ -1190,6 +1258,7 @@ def _tax_snapshot(cfg) -> dict:
     return {
         "filing_status": cfg.filing_status,
         "tax_year": cfg.tax_year,
+        "state": cfg.state,
         "w2_income": cfg.w2_income,
         "w2_federal_withholding": cfg.w2_federal_withholding,
         "w2_state_withholding": cfg.w2_state_withholding,
@@ -1213,16 +1282,13 @@ def _tax_rates_dispatch(args, istota_config) -> int:
         _print_state("noop" if not ok else "removed", f"year_rates year={args.year}")
         return 0
     # set
+    # Payroll scalars only. Brackets and standard deductions moved to
+    # `tax schedule`, which carries the filing-status dimension they have.
     fields: dict[str, Any] = {}
-    for k in ("ss_wage_base", "ss_rate", "medicare_rate", "se_taxable_fraction",
-              "federal_standard_deduction", "ca_standard_deduction"):
+    for k in ("ss_wage_base", "ss_rate", "medicare_rate", "se_taxable_fraction"):
         v = getattr(args, k, None)
         if v is not None:
             fields[k] = v
-    if args.federal_brackets_json:
-        fields["federal_brackets"] = json.loads(args.federal_brackets_json)
-    if args.ca_brackets_json:
-        fields["ca_brackets"] = json.loads(args.ca_brackets_json)
     state = config_store.upsert_tax_year_rates(ctx.db_path, args.year, **fields)
     _print_state(state, f"year_rates year={args.year}")
     return 0

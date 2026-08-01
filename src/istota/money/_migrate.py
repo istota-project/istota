@@ -173,8 +173,8 @@ def _import_tax(db_path: Path, data: dict) -> dict:
         "tax_year": cfg.tax_year,
         "patterns": len(cfg.se_income_accounts) + len(cfg.se_expense_accounts),
         "year_rates": 1 if any(v is not None for v in (
-            cfg.federal_brackets, cfg.ca_brackets,
-            cfg.federal_standard_deduction, cfg.ca_standard_deduction,
+            cfg.federal_brackets, cfg.state_brackets,
+            cfg.federal_standard_deduction, cfg.state_standard_deduction,
             cfg.ss_wage_base, cfg.ss_rate,
         )) else 0,
     }
@@ -545,6 +545,9 @@ def ensure_initialised(ctx: UserContext) -> None:
         ctx.db_path = db_path
 
     migrate_legacy_workspace_config(ctx)
+    # Fold the legacy year-keyed bracket columns into the status-keyed table.
+    # Markered, so this is a no-op after the first run.
+    config_store.migrate_tax_schedules(db_path)
     seed_default_ledger(ctx)
     backfill_transaction_ids(ctx)
     backfill_work_entry_ids(ctx)

@@ -340,12 +340,12 @@
           <div class="breakdown-row">
             <span class="breakdown-label">AGI</span>
             <span class="breakdown-val">{fmtDollar(data.federal_agi)}</span>
-            <span class="breakdown-val">{fmtDollar(data.ca_agi)}</span>
+            <span class="breakdown-val">{fmtDollar(data.state_agi)}</span>
           </div>
           <div class="breakdown-row">
             <span class="breakdown-label">Standard deduction</span>
             <span class="breakdown-val">{fmtDollar(data.federal_standard_deduction)}</span>
-            <span class="breakdown-val">{fmtDollar(data.ca_standard_deduction)}</span>
+            <span class="breakdown-val">{fmtDollar(data.state_standard_deduction)}</span>
           </div>
           {#if data.qbi_deduction > 0}
             <div class="breakdown-row">
@@ -357,12 +357,12 @@
           <div class="breakdown-row">
             <span class="breakdown-label">Taxable income</span>
             <span class="breakdown-val">{fmtDollar(data.federal_taxable_income)}</span>
-            <span class="breakdown-val">{fmtDollar(data.ca_taxable_income)}</span>
+            <span class="breakdown-val">{fmtDollar(data.state_taxable_income)}</span>
           </div>
           <div class="breakdown-row">
             <span class="breakdown-label">Income tax</span>
             <span class="breakdown-val">{fmtDollar(data.federal_tax)}</span>
-            <span class="breakdown-val">{fmtDollar(data.ca_tax)}</span>
+            <span class="breakdown-val">{fmtDollar(data.state_tax)}</span>
           </div>
           <div class="breakdown-row highlight">
             <span class="breakdown-label">Total liability</span>
@@ -385,8 +385,8 @@
                 income under Section 199A)
               {/if}. Federal income tax is computed using progressive {data.tax_year} MFJ brackets (10%
               through 37%). Federal total liability includes both income tax and SE tax. CA uses its own
-              brackets and a lower standard deduction ({fmtDollar(data.ca_standard_deduction)}); QBI
-              and half-SE do not apply to CA taxable income calculation beyond AGI.
+              brackets and a lower standard deduction ({fmtDollar(data.state_standard_deduction)});
+              QBI and half-SE do not apply to CA taxable income calculation beyond AGI.
             </p>
           </details>
 

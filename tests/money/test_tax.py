@@ -8,7 +8,7 @@ import pytest
 from istota.money.core.tax import (
     annualization_months,
     apply_brackets,
-    compute_ca_tax,
+    compute_state_tax,
     compute_federal_tax,
     federal_rates,
     compute_se_tax,
@@ -207,7 +207,12 @@ class TestYearSpecificFederalRates:
         assert federal_rates(2031).year == 2026
 
 
-class TestComputeCaTax:
+class TestComputeStateTax:
+    """California, the one graduated state we bundle."""
+
+    def _ca(self, income, status="mfj", year=2025):
+        return compute_state_tax(income, "CA", status, year)
+
     def test_mfj_basic(self):
         # AGI = $150,000, MFJ
         # CA 2025 MFJ standard deduction = 10,726
@@ -219,16 +224,16 @@ class TestComputeCaTax:
         # 80,158-111,340 @ 6% = 1,870.92
         # 111,340-139,274 @ 8% = 2,234.72
         # Total = 6,081.72
-        taxable, std_ded, tax = compute_ca_tax(150_000, "mfj", 2025)
-        assert std_ded == 10_726
-        assert taxable == 139_274
-        assert round(tax, 2) == 6081.72
+        r = self._ca(150_000)
+        assert r.available is True
+        assert r.standard_deduction == 10_726
+        assert r.taxable_income == 139_274
+        assert round(r.tax, 2) == 6081.72
 
     def test_single_basic(self):
         # AGI = $80,000, single
         # CA 2025 single standard deduction = 5,363
         # Taxable = 74,637
-        # CA single brackets 2025:
         # 0-10,714 @ 1% = 107.14
         # 10,714-25,399 @ 2% = 293.70
         # 25,399-40,084 @ 4% = 587.40
@@ -236,37 +241,28 @@ class TestComputeCaTax:
         # 55,670-70,349 @ 8% = 1,174.32
         # 70,349-74,637 @ 9.3% = 398.78
         # Total = 3,496.50
-        taxable, std_ded, tax = compute_ca_tax(80_000, "single", 2025)
-        assert std_ded == 5_363
-        assert taxable == 74_637
-        assert round(tax, 2) == 3496.50
+        r = self._ca(80_000, "single")
+        assert r.standard_deduction == 5_363
+        assert r.taxable_income == 74_637
+        assert round(r.tax, 2) == 3496.50
 
     def test_income_below_standard_deduction(self):
-        taxable, std_ded, tax = compute_ca_tax(5_000, "mfj", 2025)
-        assert taxable == 0
-        assert tax == 0
+        r = self._ca(5_000)
+        assert r.taxable_income == 0
+        assert r.tax == 0
 
     def test_single_high_income_12_3_bracket(self):
-        # Verify the 12.3% bracket kicks in at $721,314 for single, not $1M
-        # AGI = $800,000, single
-        # Taxable = 800,000 - 5,363 = 794,637
-        # ... brackets up to 11.3% at $432,787
-        # $432,787 - $721,314 @ 11.3% = 32,603.55
-        # $721,314 - $794,637 @ 12.3% = 9,018.73
-        # Total should include the 12.3% bracket income
-        _, _, tax_800k = compute_ca_tax(800_000, "single", 2025)
-        # Compare with $730,000 (just above 12.3% threshold)
-        _, _, tax_730k = compute_ca_tax(730_000, "single", 2025)
-        # Marginal rate between $730K and $800K should be 12.3%
+        # The 12.3% bracket kicks in at $721,314 for single, not $1M.
+        tax_800k = self._ca(800_000, "single").tax
+        tax_730k = self._ca(730_000, "single").tax
         marginal = (tax_800k - tax_730k) / (800_000 - 730_000)
         assert abs(marginal - 0.123) < 0.001
 
     def test_mfj_above_1m_mhs(self):
-        # Verify 1% MHS applies above $1M for MFJ
-        # Income just below and above $1M: marginal rate should jump by 1%
-        _, _, tax_below = compute_ca_tax(1_010_000, "mfj", 2025)
-        _, _, tax_above = compute_ca_tax(1_020_000, "mfj", 2025)
-        # Between $1M and $1.44M for MFJ, rate is 12.3% (11.3% + 1% MHS)
+        # The 1% Mental Health Services surcharge applies above $1M for MFJ, so
+        # between $1M and $1.44M the marginal rate is 12.3% (11.3% + 1%).
+        tax_below = self._ca(1_010_000).tax
+        tax_above = self._ca(1_020_000).tax
         marginal = (tax_above - tax_below) / 10_000
         assert abs(marginal - 0.123) < 0.001
 
@@ -356,6 +352,7 @@ class TestEstimateQuarterlyTax:
             tax_year=2025,
             method="annualized",
             current_quarter=1,
+            state="CA",
         )
         assert result.tax_year == 2025
         assert result.quarter == 1
@@ -373,7 +370,7 @@ class TestEstimateQuarterlyTax:
         # Total liability includes income tax + SE tax + additional Medicare
         assert result.federal_total_liability == result.federal_tax + result.se_tax + result.additional_medicare_tax
         assert result.federal_total_liability > 0
-        assert result.ca_tax > 0
+        assert result.state_tax > 0
         # Withholding is annualized too: 4500 * 4 = 18000
         assert result.federal_withholding == 18_000
         assert result.state_withholding == 7_200
@@ -427,6 +424,7 @@ class TestEstimateQuarterlyTax:
             prior_year_federal_tax=40_000,
             prior_year_state_tax=12_000,
             current_quarter=1,
+            state="CA",
         )
         assert result.method == "safe_harbor"
         # AGI is well above $150K, so 110% multiplier applies
@@ -566,9 +564,10 @@ class TestEstimateQuarterlyTax:
             tax_year=2025,
             method="annualized",
             current_quarter=1,
+            state="CA",
         )
         q1 = estimate_quarterly_tax(**base_kwargs)
-        # State total required = ca_tax - state_withholding (both 0 withholding here)
+        # State total required = state tax - state_withholding (both 0 withholding here)
         state_total = q1.state_total_liability
         assert state_total > 0
         # Q1 = 30% of total

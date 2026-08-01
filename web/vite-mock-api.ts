@@ -6963,15 +6963,16 @@ const handlers: MockHandler[] = [
   // payload, because every number this page shows is derived from the six
   // inputs beside them — a fixture would let the inputs move while nothing
   // below them changed, which is the one thing the page is for. Ported:
-  // `apply_brackets`, `compute_se_tax`, `compute_federal_tax`, `compute_ca_tax`,
+  // `apply_brackets`, `compute_se_tax`, `compute_federal_tax`, `compute_state_tax`,
   // `annualization_months`, `_project_full_year`, `payment_quarter_from_date`
   // and `estimate_quarterly_tax`, including both the annualized and safe-harbor
-  // branches and the two installment schedules (federal's flat 25%, CA's
-  // 30/40/0/30).
+  // branches and the per-state installment schedule (federal's flat 25%,
+  // California's 30/40/0/30).
   //
-  // The bracket tables are copied from that module and are dev data, not a
-  // second source of truth: when the real ones are updated for a new year these
-  // go stale, and the page still exercises correctly against them.
+  // The rate tables are NOT copied. They are read from the same
+  // `data/tax_rates.json` the Python module loads, the way the health mocks
+  // already read `biomarker_refs.json` — so a bracket cannot be current in one
+  // language and stale in the other. Only the arithmetic is a port.
   (() => {
     const PATH = '/istota/api/money/tax/estimate';
 
@@ -6981,70 +6982,80 @@ const handlers: MockHandler[] = [
 
     type Bracket = [threshold: number, rate: number];
 
-    const FEDERAL_BRACKETS: Record<string, Bracket[]> = {
-      mfj: [
-        [0, 0.1],
-        [23_850, 0.12],
-        [96_950, 0.22],
-        [206_700, 0.24],
-        [394_600, 0.32],
-        [501_050, 0.35],
-        [751_600, 0.37],
-      ],
-      single: [
-        [0, 0.1],
-        [11_925, 0.12],
-        [48_475, 0.22],
-        [103_350, 0.24],
-        [197_300, 0.32],
-        [250_525, 0.35],
-        [626_350, 0.37],
-      ],
-    };
+    // Read from the bundled data rather than re-keyed here. The taxes page is
+    // the one surface whose numbers a user sends to a government, and a mock
+    // holding its own copy is how a bracket comes to be current in Python and
+    // stale in TypeScript.
+    const TAX_RATES: any = (() => {
+      try {
+        const path = resolve(__mockDir, '../src/istota/money/data/tax_rates.json');
+        return JSON.parse(readFileSync(path, 'utf-8'));
+      } catch {
+        return { jurisdictions: [], federal: {}, states: {} };
+      }
+    })();
 
-    // Includes the 1% mental-health surcharge folded into the top two bands.
-    const CA_BRACKETS: Record<string, Bracket[]> = {
-      mfj: [
-        [0, 0.01],
-        [21_428, 0.02],
-        [50_798, 0.04],
-        [80_158, 0.06],
-        [111_340, 0.08],
-        [140_698, 0.093],
-        [721_314, 0.103],
-        [865_574, 0.113],
-        [1_000_000, 0.123],
-        [1_442_628, 0.133],
-      ],
-      single: [
-        [0, 0.01],
-        [10_714, 0.02],
-        [25_399, 0.04],
-        [40_084, 0.06],
-        [55_670, 0.08],
-        [70_349, 0.093],
-        [360_657, 0.103],
-        [432_787, 0.113],
-        [721_314, 0.123],
-        [1_000_000, 0.133],
-      ],
-    };
+    /** Newest bundled year at or before `year`, else the oldest — mirrors `_resolve_year`. */
+    function resolveYear(block: Record<string, any>, year: number): string | null {
+      const available = Object.keys(block)
+        .map(Number)
+        .sort((a, b) => a - b);
+      if (!available.length) return null;
+      const atOrBefore = available.filter((y) => y <= year);
+      return String(atOrBefore.length ? Math.max(...atOrBefore) : Math.min(...available));
+    }
 
-    const FEDERAL_STANDARD_DEDUCTION: Record<string, number> = { mfj: 30_000, single: 15_000 };
-    const CA_STANDARD_DEDUCTION: Record<string, number> = { mfj: 10_726, single: 5_363 };
-    const ADDITIONAL_MEDICARE_THRESHOLD: Record<string, number> = { mfj: 250_000, single: 200_000 };
-    const QBI_THRESHOLD: Record<string, number> = { mfj: 394_600, single: 197_300 };
-    const QBI_PHASEOUT_RANGE: Record<string, number> = { mfj: 100_000, single: 50_000 };
+    function federalYear(year: number): any {
+      const key = resolveYear(TAX_RATES.federal ?? {}, year);
+      return key === null ? null : { ...TAX_RATES.federal[key], __year: Number(key) };
+    }
 
-    const SS_WAGE_BASE = 176_100;
-    const SS_RATE = 0.124;
-    const MEDICARE_RATE = 0.029;
-    const SE_TAXABLE_FRACTION = 0.9235;
-    const ADDITIONAL_MEDICARE_RATE = 0.009;
+    function stateYear(code: string, year: number): any {
+      const st = (TAX_RATES.states ?? {})[code];
+      if (!st) return null;
+      const key = resolveYear(st.years ?? {}, year);
+      return key === null ? null : { ...st.years[key], __year: Number(key) };
+    }
+
+    function jurisdictionOf(code: string): any {
+      return (TAX_RATES.jurisdictions ?? []).find((j: any) => j.code === code) ?? null;
+    }
+
+    function provenance(block: any, requestedYear: number, overridden: boolean) {
+      if (!block) {
+        return {
+          year: null,
+          requested_year: null,
+          is_fallback: false,
+          is_stale: false,
+          overridden,
+          source: '',
+          source_url: '',
+          verified_on: '',
+        };
+      }
+      const verified = block.verified_on ?? '';
+      return {
+        year: block.__year,
+        requested_year: requestedYear,
+        is_fallback: block.__year !== requestedYear,
+        is_stale: !verified || verified < `${requestedYear}-01-01`,
+        overridden,
+        source: block.source ?? '',
+        source_url: block.source_url ?? '',
+        verified_on: verified,
+      };
+    }
+
+    const DEFAULT_INSTALLMENT: number[] = [0.25, 0.5, 0.75, 1.0];
+    function installmentSchedule(code: string): number[] {
+      return (TAX_RATES.states ?? {})[code]?.installment_schedule ?? DEFAULT_INSTALLMENT;
+    }
+
+    // Statutory rather than indexed, so these stay here — the Python module
+    // keeps them as constants for the same reason.
     const SAFE_HARBOR_AGI_THRESHOLD = 150_000;
-
     const FED_CUMULATIVE_PCT: Record<number, number> = { 1: 0.25, 2: 0.5, 3: 0.75, 4: 1.0 };
-    const CA_CUMULATIVE_PCT: Record<number, number> = { 1: 0.3, 2: 0.7, 3: 0.7, 4: 1.0 };
     const ANNUALIZATION_PERIOD_END_MONTH: Record<number, number> = { 1: 3, 2: 5, 3: 8, 4: 12 };
 
     function applyBrackets(taxableIncome: number, brackets: Bracket[]): number {
@@ -7063,11 +7074,11 @@ const handlers: MockHandler[] = [
       return tax;
     }
 
-    function computeSeTax(seNetIncome: number): { seTax: number; halfSe: number } {
+    function computeSeTax(seNetIncome: number, payroll: any): { seTax: number; halfSe: number } {
       if (seNetIncome <= 0) return { seTax: 0, halfSe: 0 };
-      const taxableSe = seNetIncome * SE_TAXABLE_FRACTION;
-      const ssTax = Math.min(taxableSe, SS_WAGE_BASE) * SS_RATE;
-      const medicareTax = taxableSe * MEDICARE_RATE;
+      const taxableSe = seNetIncome * payroll.se_taxable_fraction;
+      const ssTax = Math.min(taxableSe, payroll.ss_wage_base) * payroll.ss_rate;
+      const medicareTax = taxableSe * payroll.medicare_rate;
       const seTax = ssTax + medicareTax;
       return { seTax, halfSe: seTax / 2 };
     }
@@ -7128,6 +7139,9 @@ const handlers: MockHandler[] = [
     const config = {
       tax_year: TAX_YEAR,
       filing_status: 'mfj',
+      // Flip to '' to exercise the no-state-tax rendering, or to a state we
+      // ship no brackets for (e.g. 'NY') to exercise the missing-brackets one.
+      state: 'CA',
       enable_qbi_deduction: true,
       prior_year_federal_tax: 62_000,
       prior_year_state_tax: 18_000,
@@ -7156,7 +7170,18 @@ const handlers: MockHandler[] = [
       months: number;
     }) {
       const filingStatus = config.filing_status;
+      const stateCode = (config.state ?? '').toUpperCase();
       const months = Math.max(1, opts.months);
+
+      const fedBlock = federalYear(config.tax_year);
+      const fedStatus = fedBlock?.filing_status?.[filingStatus] ?? {};
+      const payroll = fedBlock?.payroll ?? {
+        ss_wage_base: 0,
+        ss_rate: 0.124,
+        medicare_rate: 0.029,
+        se_taxable_fraction: 0.9235,
+        additional_medicare_rate: 0.009,
+      };
 
       const seAnnualized = Math.max(opts.seIncomeYtd, opts.seIncomeYtd * (12 / months));
       const w2Annualized = projectFullYear(opts.w2Income, months, opts.w2Months);
@@ -7171,22 +7196,22 @@ const handlers: MockHandler[] = [
         opts.w2Months,
       );
 
-      const { seTax, halfSe } = computeSeTax(seAnnualized);
+      const { seTax, halfSe } = computeSeTax(seAnnualized, payroll);
       const federalAgi = seAnnualized + w2Annualized - halfSe;
 
-      const seTaxableForMedicare = seAnnualized * SE_TAXABLE_FRACTION;
-      const amtThreshold = ADDITIONAL_MEDICARE_THRESHOLD[filingStatus] ?? 200_000;
+      const seTaxableForMedicare = seAnnualized * payroll.se_taxable_fraction;
+      const amtThreshold = fedStatus.additional_medicare_threshold ?? 200_000;
       const additionalMedicare =
-        Math.max(0, w2Annualized + seTaxableForMedicare - amtThreshold) * ADDITIONAL_MEDICARE_RATE;
+        Math.max(0, w2Annualized + seTaxableForMedicare - amtThreshold) *
+        payroll.additional_medicare_rate;
 
-      const fedStdDed = FEDERAL_STANDARD_DEDUCTION[filingStatus] ?? 0;
-      const caStdDed = CA_STANDARD_DEDUCTION[filingStatus] ?? 0;
+      const fedStdDed = fedStatus.standard_deduction ?? 0;
 
       let qbiDeduction = 0;
       if (config.enable_qbi_deduction && seAnnualized > 0) {
         qbiDeduction = seAnnualized * 0.2;
-        const threshold = QBI_THRESHOLD[filingStatus] ?? 0;
-        const phaseout = QBI_PHASEOUT_RANGE[filingStatus] ?? 50_000;
+        const threshold = fedStatus.qbi_threshold ?? 0;
+        const phaseout = fedStatus.qbi_phaseout_range ?? 50_000;
         if (threshold > 0 && federalAgi > threshold) {
           if (federalAgi >= threshold + phaseout) qbiDeduction = 0;
           else qbiDeduction *= 1 - (federalAgi - threshold) / phaseout;
@@ -7196,14 +7221,40 @@ const handlers: MockHandler[] = [
       }
 
       const fedTaxable = Math.max(0, federalAgi - fedStdDed - qbiDeduction);
-      const fedTax = applyBrackets(fedTaxable, FEDERAL_BRACKETS[filingStatus] ?? []);
+      const fedTax = applyBrackets(fedTaxable, fedStatus.brackets ?? []);
       const federalTotalLiability = fedTax + seTax + additionalMedicare;
 
-      // CA allows the above-the-line half-SE deduction but neither QBI nor SE
-      // tax, so it shares the AGI and nothing else.
-      const caAgi = federalAgi;
-      const caTaxable = Math.max(0, caAgi - caStdDed);
-      const caTax = applyBrackets(caTaxable, CA_BRACKETS[filingStatus] ?? []);
+      // State. California conforms to federal AGI, which already carries the
+      // above-the-line half-SE deduction; it does not allow QBI. `starts_from`
+      // in the data file is what says so.
+      const jurisdiction = stateCode ? jurisdictionOf(stateCode) : null;
+      const stateBlock = stateCode ? stateYear(stateCode, config.tax_year) : null;
+      const stateStatus = stateBlock?.filing_status?.[filingStatus] ?? {};
+      const stateBrackets: Bracket[] = stateStatus.brackets ?? [];
+
+      let stateReason = '';
+      if (!stateCode) stateReason = 'no_state';
+      else if (!jurisdiction) stateReason = 'unknown_state';
+      else if (!jurisdiction.taxes_income) stateReason = 'no_income_tax';
+      else if (!stateBrackets.length) stateReason = 'no_brackets';
+      const stateAvailable = stateReason === '';
+
+      const startsFrom = (TAX_RATES.states ?? {})[stateCode]?.starts_from ?? 'federal_agi';
+      const startingIncome =
+        startsFrom === 'federal_taxable_income'
+          ? Math.max(0, federalAgi - fedStdDed - qbiDeduction)
+          : startsFrom === 'gross_compensation'
+            ? seAnnualized + w2Annualized
+            : federalAgi;
+
+      const stateStdDed = stateAvailable ? (stateStatus.standard_deduction ?? 0) : 0;
+      const stateExemption = stateAvailable ? (stateStatus.personal_exemption ?? 0) : 0;
+      const stateTaxable = stateAvailable
+        ? Math.max(0, startingIncome - stateStdDed - stateExemption)
+        : 0;
+      const stateTax = stateAvailable ? applyBrackets(stateTaxable, stateBrackets) : 0;
+      const stateAgi = stateAvailable ? startingIncome : 0;
+      const stateCumulative = installmentSchedule(stateCode);
 
       let federalNetDue: number;
       let stateNetDue: number;
@@ -7218,14 +7269,14 @@ const handlers: MockHandler[] = [
           Math.max(0, federalNetDue * FED_CUMULATIVE_PCT[opts.quarter] - opts.federalEstimatedPaid),
         );
         stateQuarterly = round2(
-          Math.max(0, stateNetDue * CA_CUMULATIVE_PCT[opts.quarter] - opts.stateEstimatedPaid),
+          Math.max(0, stateNetDue * stateCumulative[opts.quarter - 1] - opts.stateEstimatedPaid),
         );
       } else {
         federalNetDue = Math.max(
           0,
           federalTotalLiability - fedWithholdingAnnual - opts.federalEstimatedPaid,
         );
-        stateNetDue = Math.max(0, caTax - stateWithholdingAnnual - opts.stateEstimatedPaid);
+        stateNetDue = Math.max(0, stateTax - stateWithholdingAnnual - opts.stateEstimatedPaid);
         const fedTotalRequired = Math.max(0, federalTotalLiability - fedWithholdingAnnual);
         fedQuarterly = round2(
           Math.max(
@@ -7233,11 +7284,11 @@ const handlers: MockHandler[] = [
             fedTotalRequired * FED_CUMULATIVE_PCT[opts.quarter] - opts.federalEstimatedPaid,
           ),
         );
-        const stateTotalRequired = Math.max(0, caTax - stateWithholdingAnnual);
+        const stateTotalRequired = Math.max(0, stateTax - stateWithholdingAnnual);
         stateQuarterly = round2(
           Math.max(
             0,
-            stateTotalRequired * CA_CUMULATIVE_PCT[opts.quarter] - opts.stateEstimatedPaid,
+            stateTotalRequired * stateCumulative[opts.quarter - 1] - opts.stateEstimatedPaid,
           ),
         );
       }
@@ -7262,21 +7313,27 @@ const handlers: MockHandler[] = [
         federal_taxable_income: fedTaxable,
         federal_tax: fedTax,
         qbi_deduction: qbiDeduction,
-        ca_agi: caAgi,
-        ca_standard_deduction: caStdDed,
-        ca_taxable_income: caTaxable,
-        ca_tax: caTax,
+        state_agi: stateAgi,
+        state_standard_deduction: stateStdDed,
+        state_taxable_income: stateTaxable,
+        state_tax: stateTax,
         federal_withholding: fedWithholdingAnnual,
         state_withholding: stateWithholdingAnnual,
         federal_estimated_paid: opts.federalEstimatedPaid,
         state_estimated_paid: opts.stateEstimatedPaid,
         federal_total_liability: federalTotalLiability,
-        state_total_liability: caTax,
+        state_total_liability: stateTax,
         federal_net_due: federalNetDue,
         state_net_due: stateNetDue,
         federal_quarterly_amount: fedQuarterly,
         state_quarterly_amount: stateQuarterly,
         quarters_remaining: Math.max(1, 5 - opts.quarter),
+        state: stateCode,
+        state_name: jurisdiction?.name ?? '',
+        state_available: stateAvailable,
+        state_unavailable_reason: stateReason,
+        federal_rates: provenance(fedBlock, config.tax_year, false),
+        state_rates: stateCode ? provenance(stateBlock, config.tax_year, false) : null,
       };
     }
 

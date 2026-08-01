@@ -673,10 +673,10 @@ export interface TaxEstimateResponse {
   federal_taxable_income: number;
   federal_tax: number;
   qbi_deduction: number;
-  ca_agi: number;
-  ca_standard_deduction: number;
-  ca_taxable_income: number;
-  ca_tax: number;
+  state_agi: number;
+  state_standard_deduction: number;
+  state_taxable_income: number;
+  state_tax: number;
   federal_withholding: number;
   state_withholding: number;
   federal_estimated_paid: number;
@@ -688,6 +688,32 @@ export interface TaxEstimateResponse {
   federal_quarterly_amount: number;
   state_quarterly_amount: number;
   quarters_remaining: number;
+  /** Two-letter code, or '' for no state tax. */
+  state: string;
+  state_name: string;
+  /**
+   * False with a reason is distinct from a zero liability: no state selected,
+   * a state that levies no income tax, and a state we ship no brackets for all
+   * produce no figures, and the page says which rather than rendering zeros.
+   */
+  state_available: boolean;
+  state_unavailable_reason: '' | 'no_state' | 'no_income_tax' | 'no_brackets' | 'unknown_state';
+  federal_rates: RateProvenance;
+  /** Null when there is no state to have rates. */
+  state_rates: RateProvenance | null;
+}
+
+/** Where a set of figures came from, and whether it can be trusted for the year. */
+export interface RateProvenance {
+  /** The year actually used — differs from `requested_year` on a fallback. */
+  year: number | null;
+  requested_year: number | null;
+  is_fallback: boolean;
+  is_stale: boolean;
+  overridden: boolean;
+  source: string;
+  source_url: string;
+  verified_on: string;
 }
 
 export interface TaxEstimateInputs {

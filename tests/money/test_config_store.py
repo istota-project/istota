@@ -92,6 +92,7 @@ TAX_TOML = """\
 [tax]
 filing_status = "mfj"
 tax_year = 2026
+state = "CA"
 
 [tax.w2]
 income = 80000
@@ -119,9 +120,9 @@ ss_rate = 0.124
 medicare_rate = 0.029
 se_taxable_fraction = 0.9235
 federal_standard_deduction = 30000
-ca_standard_deduction = 10726
+state_standard_deduction = 10726
 federal_brackets = [[0, 0.1], [23850, 0.12], [96950, 0.22]]
-ca_brackets = [[0, 0.01], [21428, 0.02]]
+state_brackets = [[0, 0.01], [21428, 0.02]]
 """
 
 
@@ -306,7 +307,8 @@ class TestTaxRoundTrip:
         ]
         assert loaded.prior_year_federal_tax == 25000
         assert loaded.federal_standard_deduction == 30000.0
-        assert loaded.ca_standard_deduction == 10726.0
+        assert loaded.state == "CA"
+        assert loaded.state_standard_deduction == 10726.0
         assert loaded.federal_brackets == [[0, 0.1], [23850, 0.12], [96950, 0.22]]
         assert loaded.ss_wage_base == 176100
 

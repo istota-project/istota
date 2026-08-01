@@ -143,18 +143,53 @@ class TestTax:
         assert "STATE: noop" in out
 
     def test_tax_rates_set(self, patched_loader):
+        """`rates` carries the payroll scalars, which really are year-keyed."""
         rc, out, _ = _run([
             "money", "tax", "rates", "set", "--user", "u1", "--year", "2026",
-            "--federal-standard-deduction", "30000",
-            "--ca-standard-deduction", "10726",
-            "--ss-wage-base", "176100",
+            "--ss-wage-base", "184500",
             "--ss-rate", "0.124",
-            "--federal-brackets-json", "[[0, 0.1], [23850, 0.12]]",
         ])
         assert "STATE: created" in out
         rates = config_store.list_tax_year_rates(patched_loader.db_path)
         assert rates[0]["tax_year"] == 2026
-        assert rates[0]["federal_brackets"] == [[0, 0.1], [23850, 0.12]]
+        assert rates[0]["ss_wage_base"] == 184500
+
+    def test_tax_schedule_set_and_remove(self, patched_loader):
+        """Brackets and deductions are keyed on year + jurisdiction + status."""
+        rc, out, _ = _run([
+            "money", "tax", "schedule", "set", "--user", "u1", "--year", "2026",
+            "--jurisdiction", "CA", "--filing-status", "mfj",
+            "--standard-deduction", "10726",
+            "--brackets-json", "[[0, 0.01], [21428, 0.02]]",
+        ])
+        assert "STATE: created" in out
+        rows = config_store.list_tax_schedules(patched_loader.db_path)
+        assert rows[0]["jurisdiction"] == "CA"
+        assert rows[0]["filing_status"] == "mfj"
+        assert rows[0]["brackets"] == [[0, 0.01], [21428, 0.02]]
+
+        rc, out, _ = _run([
+            "money", "tax", "schedule", "remove", "--user", "u1",
+            "--year", "2026", "--jurisdiction", "CA", "--filing-status", "mfj",
+        ])
+        assert "STATE: removed" in out
+        assert config_store.list_tax_schedules(patched_loader.db_path) == []
+
+    def test_tax_schedule_rejects_unknown_jurisdiction(self, patched_loader):
+        rc, _, err = _run([
+            "money", "tax", "schedule", "set", "--user", "u1", "--year", "2026",
+            "--jurisdiction", "Narnia", "--filing-status", "mfj",
+            "--standard-deduction", "1",
+        ])
+        assert rc == 2
+        assert "unknown jurisdiction" in err
+
+    def test_tax_set_state(self, patched_loader):
+        rc, out, _ = _run([
+            "money", "tax", "set", "--user", "u1", "--state", "ny",
+        ])
+        assert "STATE: updated" in out
+        assert config_store.load_tax(patched_loader.db_path).state == "NY"
 
     def test_tax_pattern_add_remove(self, patched_loader):
         rc, out, _ = _run([
