@@ -524,6 +524,13 @@ istota_briefing_newsletter_max_links: 20
 # [health] max_document_bytes.
 istota_health_max_document_bytes: 26214400 # 25 MiB
 
+# Whether the portfolio module may look up ticker metadata from a third-party
+# quote API when classifying newly imported symbols. The request carries the
+# symbol (private financial data) and runs outside the sandbox's CONNECT
+# allowlist. Off falls back to offline description heuristics, which need no
+# network. Maps to [money] autoclass_lookup.
+istota_money_autoclass_lookup: true
+
 # rclone remote name for Nextcloud
 istota_rclone_remote: "nextcloud"
 

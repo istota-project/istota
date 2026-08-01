@@ -1014,6 +1014,18 @@ repos_dir = "/srv/repos"
         assert cfg.developer.github_token == ""
 
 
+class TestMoneyModuleConfig:
+    def test_lookup_defaults_on(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("[nextcloud]\nurl = 'https://nc.example.com'\n")
+        assert load_config(config_file).money.autoclass_lookup is True
+
+    def test_operator_can_switch_the_lookup_off(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("[money]\nautoclass_lookup = false\n")
+        assert load_config(config_file).money.autoclass_lookup is False
+
+
 class TestSiteConfig:
     def test_defaults(self):
         sc = SiteConfig()

@@ -304,6 +304,24 @@ Beyond the archive/lookback/char caps documented in AGENTS.md:
 the destination, so the cap bounds prompt size without dropping content. Ansible
 `istota_briefing_newsletter_max_links`.
 
+### `MoneyModuleConfig` (`[money]`)
+
+```
+autoclass_lookup: bool = True
+```
+Gates the portfolio module's ticker-metadata lookup — the primary tier of
+`portfolio_autoclass`, which sends every newly imported symbol to a
+third-party quote API. Held symbols are private financial data and the call
+runs in the unsandboxed daemon/web process, outside the CONNECT allowlist, so
+`[security.network]` cannot restrain it (contrast `[brain.native.web_fetch]`,
+which ships its own knobs for exactly this class of automatic egress). Default
+on — the classification is the feature. Off keeps the offline description
+heuristics, which need no network at all, and surfaces as
+`lookups_available: false` in the import/backfill response. Threaded to both
+consumers through `money.cli.UserContext.autoclass_lookup`, set by
+`_loader.resolve_for_user`, so the web routes and the CLI honour one switch.
+Ansible `istota_money_autoclass_lookup`.
+
 ### `BriefingConfig`
 ```
 name: str                    cron: str                   conversation_token: str = ""
@@ -429,6 +447,7 @@ memory_search: MemorySearchConfig   playbooks: PlaybooksConfig
 sleep_cycle: SleepCycleConfig
 channel_sleep_cycle: ChannelSleepCycleConfig
 developer: DeveloperConfig          site: SiteConfig
+health: HealthModuleConfig          money: MoneyModuleConfig
 location: LocationReceiverConfig
 models: ModelsConfig                experimental: ExperimentalConfig
 users: dict[str, UserConfig] = {}

@@ -4,6 +4,7 @@
   import { Badge, Button, ConfirmDialog, Input, KebabMenu, Select } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import {
+    ApiError,
     autoClassifyPortfolio,
     deletePortfolioClassification,
     getPortfolioClassifications,
@@ -167,21 +168,35 @@
         notifySuccess(`Auto-classified ${result.classified.map((c) => c.symbol).join(', ')}`, {
           key: 'portfolio:classification',
         });
-      } else {
+      } else if (result.unresolved.length === 0) {
+        // Only "nothing to do" when there is genuinely nothing left —
+        // otherwise it contradicts the "could not classify" notice below.
         notifyInfo('Nothing to classify — every symbol already resolves', {
           key: 'portfolio:classification',
         });
       }
       if (result.unresolved.length > 0) {
-        notifyInfo(`Could not classify: ${result.unresolved.join(', ')}`, {
+        const why =
+          result.lookups_available === false
+            ? ' (ticker lookup unavailable — heuristics only)'
+            : '';
+        notifyInfo(`Could not classify: ${result.unresolved.join(', ')}${why}`, {
           key: 'portfolio:unclassified',
         });
       }
       await load();
     } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'Auto-classify failed', {
-        key: 'portfolio:classification',
-      });
+      // A run already in flight is an expected outcome of the per-user
+      // lock, not a failure — reporting it in red would be wrong.
+      if (e instanceof ApiError && e.status === 409) {
+        notifyInfo('Auto-classification is already running', {
+          key: 'portfolio:classification',
+        });
+      } else {
+        notifyError(e instanceof Error ? e.message : 'Auto-classify failed', {
+          key: 'portfolio:classification',
+        });
+      }
     } finally {
       autoBusy = false;
     }
@@ -217,8 +232,8 @@
   {:else}
     <p class="card-hint">
       New symbols classify themselves on import (ticker lookup, marked <em>auto</em>); edit a row to
-      override — your edit always wins. Auto-classify fills in anything still unclassified.
-      Classifications reclassify all history at read time.
+      override — your edit always wins, and an automatic guess never replaces one. Auto-classify
+      fills in anything still unclassified. Classifications reclassify all history at read time.
     </p>
 
     <div class="cls-form add-form control-row">

@@ -281,3 +281,47 @@ class TestAutoClassification:
         assert result.exit_code == 0
         assert payload["classified"] == []
         assert payload["unresolved"] == []
+
+    def test_import_survives_a_classification_failure(
+        self, runner, obj, tmp_path, monkeypatch,
+    ):
+        """The route wraps classification fail-soft; the CLI's equivalent
+        block was bare, so the same outage failed an import that had already
+        committed."""
+        from istota.money import portfolio_autoclass
+
+        def boom(conn, snapshots, **kwargs):
+            raise RuntimeError("classification exploded")
+
+        monkeypatch.setattr(
+            portfolio_autoclass, "auto_classify_snapshots", boom,
+        )
+        variant = tmp_path / "variant.csv"
+        text = CSV_2025.read_text(encoding="utf-8-sig")
+        variant.write_text(text.replace("VGIT", "ZZZQ"), encoding="utf-8")
+        result, payload = _invoke(runner, obj, ["portfolio", "import", str(variant)])
+        assert result.exit_code == 0
+        assert payload["status"] == "ok"
+        assert "ZZZQ" in payload["unclassified_symbols"]
+        assert payload["auto_classified"] == []
+
+    def test_operator_gate_skips_the_third_party_lookup(
+        self, runner, obj, tmp_path, monkeypatch,
+    ):
+        from istota.money import portfolio_autoclass
+
+        calls = []
+        monkeypatch.setattr(
+            portfolio_autoclass, "fetch_symbol_info",
+            lambda s, **kw: calls.append(s) or {"quoteType": "EQUITY"},
+        )
+        obj.autoclass_lookup = False
+        variant = tmp_path / "variant.csv"
+        text = CSV_2025.read_text(encoding="utf-8-sig")
+        variant.write_text(text.replace("VGIT", "ZZZQ"), encoding="utf-8")
+        _invoke(runner, obj, ["portfolio", "import", str(variant)])
+        assert calls == []
+        result, payload = _invoke(runner, obj, ["portfolio", "autoclass"])
+        assert result.exit_code == 0
+        assert calls == []
+        assert payload["lookups_available"] is False

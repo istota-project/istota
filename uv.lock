@@ -1393,6 +1393,7 @@ money = [
     { name = "click" },
     { name = "tomli-w" },
     { name = "weasyprint" },
+    { name = "yfinance" },
 ]
 transcribe = [
     { name = "pytesseract" },
@@ -1474,6 +1475,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.20.0" },
     { name = "weasyprint", marker = "extra == 'money'", specifier = ">=62.0" },
     { name = "yfinance", marker = "extra == 'markets'", specifier = ">=0.2.0" },
+    { name = "yfinance", marker = "extra == 'money'", specifier = ">=0.2.0" },
 ]
 provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-search", "whisper", "location", "web", "money", "feeds", "garmin", "docs", "local", "all"]
 

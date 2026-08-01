@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -29,6 +30,10 @@ class UserContext:
     monarch_config_path: Path | None = None
     tax_config_path: Path | None = None
     db_path: Path | None = None
+    # Operator gate on the third-party ticker-metadata lookup ([money]
+    # autoclass_lookup). Resolved from istota config at context-build time,
+    # so both the web routes and the CLI honour one switch.
+    autoclass_lookup: bool = True
 
 
 class Context:
@@ -47,6 +52,7 @@ class Context:
         self.api_key: str | None = None
         self.users: dict[str, UserContext] = {}
         self.active_user: str | None = None
+        self.autoclass_lookup: bool = True
 
     @property
     def has_single_user(self) -> bool:
@@ -68,6 +74,7 @@ class Context:
         self.monarch_config_path = uctx.monarch_config_path
         self.tax_config_path = uctx.tax_config_path
         self.db_path = uctx.db_path
+        self.autoclass_lookup = uctx.autoclass_lookup
 
     def for_user(self, user_key: str) -> Context:
         """Return a shallow copy with the given user activated.
@@ -116,6 +123,16 @@ def _require_db(ctx: Context):
     if not conn:
         raise click.ClickException("No database configured")
     return conn
+
+
+def _autoclass_lookup_enabled(ctx: Context) -> bool:
+    """Whether this run may send tickers to the third-party metadata API.
+
+    Held symbols are private financial data and the lookup runs outside the
+    sandbox's CONNECT allowlist, so the operator gets a switch. Default on —
+    an absent attribute (a hand-built Context in a test) reads as on.
+    """
+    return bool(getattr(ctx, "autoclass_lookup", True))
 
 
 def _require_active_user(ctx: Context) -> None:
@@ -1299,16 +1316,26 @@ def portfolio_import(ctx, file, source_name, dry_run, replace_id):
             for s in snapshots
         ]
         # Auto-classify new symbols (ticker lookup, then description
-        # heuristics); fail-soft — anything unresolved stays reported.
-        for s, r in zip(snapshots, results):
-            if r["status"] != "ok":
-                continue
-            if r.get("unclassified_symbols"):
-                auto = portfolio_autoclass.auto_classify_snapshot(conn, s)
-                r["auto_classified"] = auto["classified"]
-                r["unclassified_symbols"] = auto["unresolved"]
-            else:
-                r["auto_classified"] = []
+        # heuristics). One pass across every snapshot the file produced, so
+        # the lookup budget is spent once per import rather than once per
+        # export date. Fail-soft — a lookup outage leaves symbols reported in
+        # unclassified_symbols and never fails an import that has committed.
+        for r in results:
+            if r["status"] == "ok":
+                r.setdefault("auto_classified", [])
+        if any(
+            r["status"] == "ok" and r.get("unclassified_symbols") for r in results
+        ):
+            try:
+                auto = portfolio_autoclass.auto_classify_snapshots(
+                    conn, snapshots,
+                    allow_lookups=_autoclass_lookup_enabled(ctx),
+                )
+                portfolio_autoclass.apply_auto_results(results, auto)
+            except Exception:
+                logging.getLogger("istota.money.cli").warning(
+                    "portfolio auto-classification failed", exc_info=True,
+                )
     finally:
         conn.close()
 
@@ -1319,6 +1346,9 @@ def portfolio_import(ctx, file, source_name, dry_run, replace_id):
             "status": "ok",
             "imported": sum(1 for r in results if r["status"] == "ok"),
             "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
+            # Hoisted: anything living only inside a per-snapshot result is
+            # invisible to a caller reading the top level.
+            **portfolio_autoclass.summarize_auto_results(results),
             "results": results,
         })
 
@@ -1515,7 +1545,9 @@ def portfolio_autoclass_cmd(ctx):
     conn = _require_db(ctx)
     try:
         candidates = portfolio_autoclass.candidates_from_positions(conn)
-        result = portfolio_autoclass.auto_classify_symbols(conn, candidates)
+        result = portfolio_autoclass.auto_classify_symbols(
+            conn, candidates, allow_lookups=_autoclass_lookup_enabled(ctx),
+        )
     finally:
         conn.close()
     _output({"status": "ok", **result})

@@ -164,6 +164,33 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     seed_classifications(conn)
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _alter_once(conn: sqlite3.Connection, table: str, column: str, sql: str) -> None:
+    """Run a one-time ALTER, tolerating a concurrent connection winning it.
+
+    ``ensure_schema`` runs on every money web request, scheduler cron and
+    skill invocation, so the first post-upgrade moment is routinely several
+    connections at once. Check-then-ALTER lets both see the column absent and
+    the loser raise ``duplicate column name`` — a schema error, so
+    ``busy_timeout`` does not help — surfacing as a one-off 500 or failed
+    task. Re-check on the way out so the loser exits having done its job.
+    """
+    cols = _table_columns(conn, table)
+    # A missing table also yields no rows from PRAGMA table_info, which would
+    # read as "column absent" and point the ALTER at nothing.
+    if not cols or column in cols:
+        return
+    try:
+        conn.execute(sql)
+        conn.commit()
+    except sqlite3.OperationalError:
+        if column not in _table_columns(conn, table):
+            raise
+
+
 def _migrate_owner_to_group(conn: sqlite3.Connection) -> None:
     """Rename the original ``owner`` column to ``account_group``.
 
@@ -171,12 +198,18 @@ def _migrate_owner_to_group(conn: sqlite3.Connection) -> None:
     (an owner is one way to group accounts). CREATE IF NOT EXISTS leaves an
     existing table on the old column, so rename in place; values carry over.
     """
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(portfolio_accounts)")}
+    cols = _table_columns(conn, "portfolio_accounts")
     if "owner" in cols and "account_group" not in cols:
-        conn.execute(
-            "ALTER TABLE portfolio_accounts RENAME COLUMN owner TO account_group"
-        )
-        conn.commit()
+        try:
+            conn.execute(
+                "ALTER TABLE portfolio_accounts "
+                "RENAME COLUMN owner TO account_group"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Another connection renamed it first (see _alter_once).
+            if "account_group" not in _table_columns(conn, "portfolio_accounts"):
+                raise
 
 
 def _migrate_classification_source(conn: sqlite3.Connection) -> None:
@@ -185,13 +218,11 @@ def _migrate_classification_source(conn: sqlite3.Connection) -> None:
     Existing rows keep the '' default — a mix of seed and hand edits we can't
     tell apart after the fact; only rows written from here on carry provenance.
     """
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(portfolio_classifications)")}
-    if "source" not in cols:
-        conn.execute(
-            "ALTER TABLE portfolio_classifications "
-            "ADD COLUMN source TEXT NOT NULL DEFAULT ''"
-        )
-        conn.commit()
+    _alter_once(
+        conn, "portfolio_classifications", "source",
+        "ALTER TABLE portfolio_classifications "
+        "ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+    )
 
 
 def seed_classifications(conn: sqlite3.Connection) -> int:
@@ -906,6 +937,17 @@ def list_classifications(conn: sqlite3.Connection) -> list[SymbolClassification]
     ]
 
 
+def _validated_classification(
+    symbol: str, asset_class: str, sub_class: str, geography: str,
+) -> tuple[str, str, str, str]:
+    norm = normalize_symbol(symbol)
+    if not norm:
+        raise ValueError("symbol normalizes to empty")
+    if not asset_class.strip():
+        raise ValueError("asset_class is required")
+    return (norm, asset_class.strip(), sub_class.strip(), geography.strip())
+
+
 def set_classification(
     conn: sqlite3.Connection,
     symbol: str,
@@ -915,21 +957,55 @@ def set_classification(
     geography: str = "",
     source: str = "user",
 ) -> str:
-    """Upsert a classification; returns the normalized symbol key."""
-    norm = normalize_symbol(symbol)
-    if not norm:
-        raise ValueError("symbol normalizes to empty")
-    if not asset_class.strip():
-        raise ValueError("asset_class is required")
+    """Upsert a classification; returns the normalized symbol key.
+
+    The write path for a *deliberate* classification (the web PUT, the CLI's
+    ``classify``, the seed). An automatic one goes through
+    :func:`insert_classification_if_absent` instead, which is the only way to
+    learn whether the write landed.
+    """
+    norm, asset_class, sub_class, geography = _validated_classification(
+        symbol, asset_class, sub_class, geography,
+    )
     conn.execute(
         "INSERT OR REPLACE INTO portfolio_classifications "
         "(symbol_norm, asset_class, sub_class, geography, source, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (norm, asset_class.strip(), sub_class.strip(), geography.strip(),
-         source, _iso_now()),
+        (norm, asset_class, sub_class, geography, source, _iso_now()),
     )
     conn.commit()
     return norm
+
+
+def insert_classification_if_absent(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    asset_class: str,
+    sub_class: str = "",
+    geography: str = "",
+    source: str = "auto",
+) -> bool:
+    """Write a classification only if the symbol has none; True if it landed.
+
+    The write path for automatic classification. A guess must never replace
+    what the user said — including a deliberate ``Unclassified``, which is an
+    offered value on every surface — and a read-then-write gate cannot promise
+    that, because the network lookup sits between the read and the write.
+    ``INSERT OR IGNORE`` makes it structural: the row's own primary key
+    decides, inside the same statement.
+    """
+    norm, asset_class, sub_class, geography = _validated_classification(
+        symbol, asset_class, sub_class, geography,
+    )
+    cursor = conn.execute(
+        "INSERT OR IGNORE INTO portfolio_classifications "
+        "(symbol_norm, asset_class, sub_class, geography, source, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (norm, asset_class, sub_class, geography, source, _iso_now()),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
 
 
 def delete_classification(conn: sqlite3.Connection, symbol: str) -> bool:

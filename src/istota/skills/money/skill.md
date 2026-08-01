@@ -206,10 +206,13 @@ istota-skill money portfolio delete-snapshot ID --confirmed
 Import only files the user supplied or named. An import auto-classifies new
 symbols itself (`auto_classified` in the response); anything left in
 `unclassified_symbols` resisted both the ticker lookup and the description
-heuristics — run `portfolio autoclass` later (the lookup may have been
-unreachable) or offer to classify those few by hand rather than leaving chart
-slices as "Unclassified". A user's explicit `classify` always wins: auto rows
-never overwrite it. Deleting a snapshot is destructive: confirm with the user
+heuristics — run `portfolio autoclass` later (whose own response carries
+`lookups_available: false` when the ticker lookup is unavailable or the
+operator has it switched off) or offer to classify those few by hand rather
+than leaving chart slices as "Unclassified". A user's explicit `classify`
+always wins: an auto write is an insert-if-absent, so it cannot replace an
+existing row whatever its value — including one deliberately set to
+"Unclassified". Deleting a snapshot is destructive: confirm with the user
 first.
 
 ## BQL query examples

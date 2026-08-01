@@ -994,6 +994,11 @@ export async function autoClassifyPortfolio(): Promise<{
   status: string;
   classified: PortfolioAutoClassified[];
   unresolved: string[];
+  // False when the ticker-metadata tier could not be used at all — the
+  // optional dependency is missing, the operator turned the lookup off, or
+  // every attempt failed. Distinguishes "we tried and could not tell" from
+  // "we never asked", which is otherwise invisible from the outside.
+  lookups_available?: boolean;
 }> {
   return apiFetch('/portfolio/classifications/auto', { method: 'POST' });
 }

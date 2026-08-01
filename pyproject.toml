@@ -65,6 +65,11 @@ money = [
     # Used by the vendored Monarch client (money/_vendor/monarch_client.py)
     # to talk to api.monarch.com over HTTP with cookie-based auth.
     "aiohttp>=3.10",
+    # Ticker metadata for portfolio auto-classification. Also in `markets`;
+    # listed here because the portfolio module advertises ticker lookup as
+    # its primary classification tier, and a `istota[local,money]` install
+    # without it has that tier permanently dead.
+    "yfinance>=0.2.0",
 ]
 feeds = [
     "feedparser>=6.0.0",

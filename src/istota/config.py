@@ -918,6 +918,21 @@ class HealthModuleConfig:
 
 
 @dataclass
+class MoneyModuleConfig:
+    """Module-level config for the money module (``[money]``).
+
+    ``autoclass_lookup`` gates the portfolio module's ticker-metadata lookup,
+    which sends every newly imported symbol to a third-party quote API. Held
+    symbols are private financial data and the call runs in the unsandboxed
+    daemon/web process — outside the CONNECT allowlist, so
+    ``[security.network]`` cannot restrain it. Default on (the classification
+    it buys is the feature); off keeps the offline description heuristics,
+    which need no network at all.
+    """
+    autoclass_lookup: bool = True
+
+
+@dataclass
 class ModelsConfig:
     """Operator-controlled model alias registry (``[models.aliases]``).
 
@@ -971,6 +986,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
     health: HealthModuleConfig = field(default_factory=HealthModuleConfig)
+    money: MoneyModuleConfig = field(default_factory=MoneyModuleConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
@@ -2083,6 +2099,13 @@ def load_config(config_path: Path | None = None) -> Config:
             )
             max_doc = default_max_doc
         config.health = HealthModuleConfig(max_document_bytes=max_doc)
+
+    if "money" in data:
+        config.money = MoneyModuleConfig(
+            autoclass_lookup=bool(
+                data["money"].get("autoclass_lookup", True)
+            ),
+        )
 
     if "logging" in data:
         log = data["logging"]

@@ -324,6 +324,84 @@ class TestClassifications:
         assert by_symbol["ZZZT"].asset_class == "Stocks"
         conn.close()
 
+    def test_concurrent_migration_does_not_raise(self, tmp_path, monkeypatch):
+        """ensure_schema runs on every money web request, scheduler cron and
+        skill invocation, so the first post-upgrade moment is routinely
+        several connections at once. Check-then-ALTER let both see the column
+        absent, and the loser raised `duplicate column name` — a schema
+        error, so busy_timeout does not help.
+
+        The interleave is forced rather than raced: both connections read the
+        columns before either ALTERs, which is the loser's exact sequence.
+        """
+        db = tmp_path / "money.db"
+        setup = sqlite3.connect(str(db))
+        setup.executescript(
+            """
+            CREATE TABLE portfolio_classifications (
+                symbol_norm TEXT PRIMARY KEY,
+                asset_class TEXT NOT NULL,
+                sub_class TEXT NOT NULL DEFAULT '',
+                geography TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        setup.commit()
+        setup.close()
+
+        winner = sqlite3.connect(str(db))
+        loser = sqlite3.connect(str(db))
+        real_columns = portfolio._table_columns
+        pre_alter = real_columns(loser, "portfolio_classifications")
+        assert "source" not in pre_alter
+        calls = {"n": 0}
+
+        def staged(conn, table):
+            # First read is the gate (taken before the winner ALTERed);
+            # the second is the guard's re-check, which sees reality.
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return set(pre_alter)
+            return real_columns(conn, table)
+
+        try:
+            portfolio._migrate_classification_source(winner)
+            monkeypatch.setattr(portfolio, "_table_columns", staged)
+            portfolio._migrate_classification_source(loser)
+            assert calls["n"] == 2, "the guard must re-check, not swallow blindly"
+            cols = real_columns(loser, "portfolio_classifications")
+            assert "source" in cols
+        finally:
+            winner.close()
+            loser.close()
+
+    def test_migration_reraises_a_real_alter_failure(self, tmp_path, monkeypatch):
+        """The guard tolerates losing the race, not an ALTER that genuinely
+        failed — otherwise a broken migration is silent."""
+        db = tmp_path / "money.db"
+        conn = sqlite3.connect(str(db))
+        conn.executescript("CREATE TABLE t (a TEXT);")
+        conn.commit()
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                portfolio._alter_once(
+                    conn, "t", "b",
+                    "ALTER TABLE t ADD COLUMN b TEXT UNIQUE",
+                )
+        finally:
+            conn.close()
+
+    def test_migration_skips_a_missing_table(self, tmp_path):
+        """PRAGMA table_info on a missing table returns no rows, which reads
+        as "column absent" and would point the ALTER at nothing."""
+        conn = sqlite3.connect(str(tmp_path / "empty.db"))
+        try:
+            portfolio._migrate_classification_source(conn)
+            portfolio._migrate_owner_to_group(conn)
+        finally:
+            conn.close()
+
 
 class TestSummaryAndExclusion:
     def _seed(self, conn):

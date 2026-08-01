@@ -43,6 +43,29 @@ from istota import db
 from istota.config import Config, UserConfig
 
 
+@pytest.fixture(autouse=True)
+def _no_network_symbol_lookups(monkeypatch):
+    """Portfolio auto-classification's default fetch is a live yfinance
+    lookup, and an import triggers it — so any test that reaches a portfolio
+    import would otherwise hit the network. Root-level rather than scoped to
+    ``tests/money/``, since the import path is reachable from the web-route
+    and skill tests too. Tests exercising the lookup path inject their own
+    fetch; ``TestFetchSymbolInfo`` captures the real function at import time.
+    """
+    try:
+        from istota.money import portfolio_autoclass
+    except Exception:
+        # Money extra absent, or its import chain unhappy. Broad on purpose:
+        # this fixture is purely defensive and runs before every test in the
+        # suite, so anything it raises fails thousands of unrelated tests
+        # with a traceback pointing at the wrong place.
+        return
+
+    monkeypatch.setattr(
+        portfolio_autoclass, "fetch_symbol_info", lambda symbol, **kwargs: None
+    )
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """Initialize a real SQLite database using schema.sql and return its path."""
