@@ -57,15 +57,18 @@
 </div>
 
 <style>
-  /* Auto margins center the card block in the section body's flex column —
-     both axes while it fits, an ordinary scroll once it doesn't. */
+  /* Centered horizontally, top-aligned vertically: the card is the first thing
+     on the tab, so it starts under the section header like the other two tabs'
+     content rather than floating at the middle of the pane and moving down as
+     the window grows. Inline-only auto margins — `margin: auto` in this flex
+     column would center it on both axes. */
   .import-body {
     padding: var(--space-4) var(--space-3);
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
     width: min(640px, 100%);
-    margin: auto;
+    margin-inline: auto;
   }
 
   .import-card {

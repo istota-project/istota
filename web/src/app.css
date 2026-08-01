@@ -200,6 +200,19 @@
   /* Gap between sibling chips/nav-links in a flex row. */
   --chip-gap: 0.1rem;
 
+  /* How wide a dashboard's content column is allowed to get before it stops
+	   growing and centres instead. A cap rather than a preference: a stat grid
+	   or a holdings table stretched across a 34" monitor puts the label at one
+	   edge and its value at the other, and the eye has to travel the whole row.
+	   See `.content-frame`.
+
+	   Deliberately `px` while nearly everything else here is `rem`: this bounds
+	   the *screen* a layout may claim, not the type inside it, so it should not
+	   move when the text-scale preference does — at 120% a rem-based cap would
+	   widen the column at exactly the setting a user picked to make lines
+	   easier to follow. */
+  --content-max: 1280px;
+
   /* Chat row metrics: the message row's horizontal padding, the avatar column
 	   it opens with, the avatar inside that column, and the gap from that column to
 	   the message text. Tokens rather than literals in Message.svelte so the gutter
@@ -502,6 +515,26 @@
   outline-offset: var(--focus-ring-offset);
 }
 
+/* Text fields are the exception to the rule above. A browser treats a focused
+   text input as focus-visible however it was focused, so unlike a button they
+   draw the ring on a plain mouse click too — which reads as an error state
+   rather than a focus hint. They keep a caret and their own focus styling, so
+   the ring is dropped for them alone. Checkboxes, radios and the
+   input-as-button types are left out: they have no caret, and nothing but the
+   ring would show that they are focused. */
+input:not(
+    [type='checkbox'],
+    [type='radio'],
+    [type='button'],
+    [type='submit'],
+    [type='reset'],
+    [type='file']
+  ):focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+
 /* iOS Safari gives date/time inputs a native control with an intrinsic content
    width that ignores `width`/`max-width` while the platform appearance is on —
    so a field sized to its container on desktop overflows the card on an iPhone.
@@ -638,6 +671,42 @@ input[type='week']::-webkit-date-and-time-value {
   --control-height-sm: var(--control-height-lg);
   --control-height-md: var(--control-height-lg);
   --control-radius: var(--radius-sm);
+}
+
+/* The wide-dashboard content column. A module whose pages are grids, charts
+   and wide tables — health, money's portfolio — marks the box its content
+   lives in with this, and the column stops growing at `--content-max` and
+   centres in whatever pane it was given.
+
+   Health carried this geometry privately as `.health-frame`, which is what
+   made it worth extracting: portfolio wanted the same column and the only way
+   to get it was to write the four declarations out a second time, at which
+   point the two caps drift the way the four record-table implementations did
+   before the money shell.
+
+   Deliberately geometry only, no padding — the inset a module wants differs
+   (health pads the frame itself; the money pages pad their own sections, and
+   baking a value in here would land on top of theirs). Spacing stays at the
+   call site, the same division `.micro-label` draws.
+
+   It caps *content*, not chrome. A bar above the content — the app bar, a
+   money section header — stays full-bleed and keeps spanning the pane, the
+   way health's app bar already does over its framed column.
+
+   The flex column matters as much as the cap: a page's whole-pane state
+   (`.center-msg`) centres itself with `flex: 1`, which needs an unbroken chain
+   of growing flex columns up to `.shell-main`. `flex: 1 0 auto` — basis auto
+   and no shrink — so content taller than the pane still extends the scroll
+   area rather than being pinned to it. */
+.content-frame {
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
+  box-sizing: border-box;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
 }
 
 /* Brings a raw <input>/<select> into the row — the components resolve the

@@ -85,14 +85,22 @@
     cursor: default;
   }
 
+  /* The banner's two type sizes are the component's, not the caller's: a title
+     at --text-base over a body at --text-sm. Both were raw literals (0.9rem /
+     0.85rem), which is what let a caller "match" the banner by writing its own
+     approximation of them — the admin standalone notice sized its whole slot in
+     0.9/0.85 and so rendered a step larger than every other banner in the app.
+     Keep them tokens, and keep them here. */
   .notice-title {
     font-weight: 600;
-    font-size: 0.9rem;
+    font-size: var(--text-base);
   }
 
   .notice-toggle {
     opacity: 0.6;
-    font-size: 0.85rem;
+    /* Same size as the title: the caret shares its flex row, so a step down
+       would set the header's line box from the glyph rather than the text. */
+    font-size: var(--text-base);
     flex-shrink: 0;
   }
 
@@ -100,5 +108,16 @@
     margin-top: var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-secondary);
+  }
+
+  /* Slot content inherits the body size. A caller styling its own headings and
+     labels inside the slot restates weight and colour, never size — the whole
+     point of the banner being one component is that its body is one size. */
+  .notice-body :global(p) {
+    margin: 0 0 var(--space-2);
+  }
+
+  .notice-body :global(p:last-child) {
+    margin-bottom: 0;
   }
 </style>

@@ -4,6 +4,8 @@
   import { onMount } from 'svelte';
 
   onMount(() => {
-    goto(`${base}/money/settings`, { replaceState: true });
+    // Entities and services live under Invoicing since the settings page grew
+    // sections; this stub is the old business-settings route.
+    goto(`${base}/money/settings/invoicing`, { replaceState: true });
   });
 </script>

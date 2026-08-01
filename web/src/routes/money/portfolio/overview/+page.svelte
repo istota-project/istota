@@ -293,8 +293,14 @@
     padding: 0 0 var(--space-4);
   }
 
-  /* The notice sits directly on the summary cards without this. */
+  /* This notice follows the toolbar instead of opening the pane, which is the
+     case the shell's top padding is for — there it clears the section header
+     (work and clients both lead with theirs). Here the toolbar's own bottom
+     padding already leaves the gap, so the shell's doubles it; the space
+     belongs under the notice, where it would otherwise sit directly on the
+     summary cards. */
   .money-notice-bar.spaced {
+    padding-top: 0;
     padding-bottom: var(--space-3);
   }
 

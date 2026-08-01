@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { getTaxEstimate, recalculateTaxEstimate, type TaxEstimateResponse } from '$lib/money/api';
+  import {
+    ApiError,
+    getTaxEstimate,
+    recalculateTaxEstimate,
+    type TaxEstimateResponse,
+  } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
 
   let data = $state<TaxEstimateResponse | null>(null);
@@ -26,14 +31,28 @@
       // Populate editable fields from response
       method = resp.method;
       w2Income = resp.w2_income;
-      const annualizeFactor = resp.w2_months / (resp.quarter * 3); // same as backend
+      // The withholding fields are year-to-date inputs, but the response
+      // carries them annualized, so they have to be un-projected to get back
+      // what the user typed. The backend projects from `annualization_months`
+      // (3/5/8/12) to `w2_months` capped at 12 — *not* from `quarter * 3`,
+      // which only coincides in Q1 and inflated the field every other quarter.
+      // It also never projects below the YTD amount, so a factor under 1 means
+      // the response already is the YTD figure.
+      const annualizeFactor = Math.max(1, Math.min(resp.w2_months, 12) / resp.annualization_months);
       w2FedWithholding = resp.federal_withholding / annualizeFactor;
       w2StateWithholding = resp.state_withholding / annualizeFactor;
       fedEstimatedPaid = resp.federal_estimated_paid;
       stateEstimatedPaid = resp.state_estimated_paid;
       w2Months = resp.w2_months;
     } catch (e) {
-      if (e instanceof Error) error = e.message;
+      // A missing tax config is a 404, which is the state the empty message
+      // below describes rather than a failure to report — without this the
+      // page showed a bare "API error: 404" and its own empty state was
+      // unreachable markup.
+      if (e instanceof ApiError && e.status === 404) {
+        data = null;
+        error = '';
+      } else if (e instanceof Error) error = e.message;
       else error = 'Failed to load tax estimate';
     } finally {
       loading = false;
@@ -424,7 +443,7 @@
   /* A growing column so the whole-pane states (`.center-msg`) center in the
 	   section body rather than sitting against the top edge. */
   .tax-content {
-    padding: var(--space-2);
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     flex: 1 0 auto;
@@ -433,7 +452,7 @@
   .tax-layout {
     display: grid;
     grid-template-columns: 280px 1fr;
-    gap: var(--space-6);
+    gap: var(--space-3);
     align-items: start;
   }
 

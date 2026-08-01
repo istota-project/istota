@@ -151,10 +151,6 @@
 {/snippet}
 
 <style>
-  .report-content {
-    padding: var(--space-2) var(--space-3);
-  }
-
   .section-total {
     margin-left: auto;
     font-weight: 600;

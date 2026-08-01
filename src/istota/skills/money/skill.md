@@ -1,7 +1,7 @@
 ---
 name: money
-triggers: [accounting, ledger, beancount, invoice, invoicing, expense, transaction, balance, tax, wash sale, bookkeeping, finances, billing, receivable, work log, work entry, monarch, sync-monarch, money, moneyman]
-description: Accounting operations (ledger, invoicing, transactions, work log) — runs in-process via the vendored money package
+triggers: [accounting, ledger, beancount, invoice, invoicing, expense, transaction, balance, tax, wash sale, bookkeeping, finances, billing, receivable, work log, work entry, monarch, sync-monarch, money, moneyman, portfolio, positions, holdings, allocation, asset class, brokerage]
+description: Accounting operations (ledger, invoicing, transactions, work log, investment portfolio) — runs in-process via the vendored money package
 cli: true
 env: [{"var":"MONEY_USER","from":"user_id"},{"var":"MONARCH_SESSION_ID","from":"secret","service":"monarch","key":"session_id","sensitive":true,"fallback_var":"MONARCH_SESSION_ID"},{"var":"MONARCH_CSRFTOKEN","from":"secret","service":"monarch","key":"csrftoken","sensitive":true,"fallback_var":"MONARCH_CSRFTOKEN"}]
 ---
@@ -63,7 +63,7 @@ istota-skill money run-scheduled [--dry-run] [--skip-monarch]
 
 All output is JSON with `status: ok|error`.
 
-**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/void/create`) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`) are safe to parallelize.
+**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/void/create`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
 
 ## Adding transactions
 
@@ -165,15 +165,16 @@ Positions" CSV exports (any format revision) or fina's history file. Snapshots,
 not transactions — nothing here touches the beancount ledgers.
 
 ```bash
-# Import a positions CSV the user supplied (auto-detects the format).
-# Re-importing the identical file is a safe no-op (content-hash dedup).
-istota-skill money portfolio import /path/to/Portfolio_Positions.csv [--dry-run] [--replace SNAPSHOT_ID]
+# Import a positions CSV the user supplied. The format is auto-detected;
+# --source forces a parser when detection fails.
+istota-skill money portfolio import /path/to/Portfolio_Positions.csv \
+    [--source fidelity-positions-csv|fina-history-csv] [--dry-run] [--replace SNAPSHOT_ID]
 
 # List imported snapshots (newest first, totals exclude excluded accounts)
 istota-skill money portfolio snapshots
 
-# Current state: total value, allocation by asset class / account / group /
-# geography, aggregated holdings with P&L
+# Current state: total value, allocation by asset class / account / account
+# type / group / geography, aggregated holdings with P&L
 istota-skill money portfolio summary [--snapshot ID] [--group Alice]
 
 # Value over time, optionally stacked
@@ -185,13 +186,12 @@ istota-skill money portfolio diff OLDER_ID NEWER_ID
 # One symbol's quantity/price/value across snapshots
 istota-skill money portfolio symbol VTI
 
-# Account registry: group labels (an owner, a purpose — any grouping), types,
-# and the excluded flag (excluded accounts stay imported but drop out of every
-# summary and chart)
+# Account registry — run it bare to read the rows and their ids, which every
+# mutating flag below takes
 istota-skill money portfolio accounts [--set-group ID GROUP] [--set-type ID TYPE] [--exclude ID] [--include ID]
 
-# Symbol classifications (drive the asset-class charts; retroactive — a
-# classification edit reclassifies all history at read time)
+# Symbol classifications: list what's on file, set one, remove one
+istota-skill money portfolio classifications
 istota-skill money portfolio classify GOOG --asset-class Stocks [--sub-class Technology] [--geography US]
 istota-skill money portfolio unclassify GOOG
 
@@ -203,17 +203,59 @@ istota-skill money portfolio autoclass
 istota-skill money portfolio delete-snapshot ID --confirmed
 ```
 
-Import only files the user supplied or named. An import auto-classifies new
-symbols itself (`auto_classified` in the response); anything left in
-`unclassified_symbols` resisted both the ticker lookup and the description
-heuristics — run `portfolio autoclass` later (whose own response carries
-`lookups_available: false` when the ticker lookup is unavailable or the
-operator has it switched off) or offer to classify those few by hand rather
-than leaving chart slices as "Unclassified". A user's explicit `classify`
-always wins: an auto write is an insert-if-absent, so it cannot replace an
-existing row whatever its value — including one deliberately set to
-"Unclassified". Deleting a snapshot is destructive: confirm with the user
-first.
+**Answering a question about the portfolio.** `summary` covers most of them: it
+returns `total_value` plus `by_asset_class`, `by_account`, `by_account_type`,
+`by_group` and `by_geography` — each a list of `{key, value, pct}` sorted by
+value — and `holdings`, with per-symbol quantity, cost basis, `gain` and
+`gain_pct`. Reach for `history` for "how has it changed", `diff` for "what moved
+between these two dates", and `symbol` for one ticker. Symbols are normalized
+(`SPAXX**` → `SPAXX`), so either spelling works.
+
+**Account groups are free-form.** A group is any label — an owner, a household
+member, a purpose — not a fixed set. Every account flag takes the numeric
+account **id**, never the account name, so run `accounts` bare first to read the
+ids. `account_type` is guessed once from the account name when the account is
+first seen and is the user's thereafter: a wrong guess stays wrong until
+`--set-type` fixes it.
+
+**Excluding an account hides it from every total.** `--exclude ID` keeps the
+account and its positions imported but drops them from every summary, chart,
+history point and snapshot total; `--include ID` reverses it. That is the right
+tool for an account that isn't really part of the portfolio — someone else's
+money, a pass-through cash account — rather than deleting snapshots.
+
+**Classifications are retroactive.** `classify` writes one row per symbol and
+nothing is stamped onto the stored positions, so classifying a symbol today
+reclassifies every past snapshot the next time it is read. 30 common symbols
+ship pre-classified; `classifications` lists what is on file, seeded rows
+included. Cash and options are recognized automatically and need no row.
+`--asset-class` is required; `--sub-class` and `--geography` are free text and
+default to empty. Anything unrecognized reports as `Unclassified` — when
+`summary` shows an `Unclassified` slice, or `import` returns
+`unclassified_symbols`, offer to classify those symbols rather than leaving the
+slice as is.
+
+**New symbols classify themselves on import.** An import returns
+`auto_classified` beside `unclassified_symbols`; what is left in the latter
+resisted both the ticker lookup and the offline description heuristics. Run
+`portfolio autoclass` later to retry those — its response carries
+`lookups_available: false` when the ticker lookup is unavailable or the operator
+has it switched off — or offer to classify the few by hand. A user's explicit
+`classify` always wins: an automatic write is an insert-if-absent, so it cannot
+replace an existing row whatever its value, including one deliberately set to
+"Unclassified".
+
+**Importing is safe to repeat.** Re-importing an identical file is a no-op that
+returns `status: "duplicate"` with the existing snapshot id — a success, not an
+error. `--dry-run` parses and previews without touching the database. A fina
+history file holds many dates and imports as several snapshots, returning
+`{"imported": N, "duplicates": M, "results": [...]}` rather than a single
+result. Use `--replace ID` for a same-day re-export whose contents changed;
+parsing happens before the delete, so a file that fails to parse leaves the old
+snapshot intact.
+
+Import only files the user supplied or named. Deleting a snapshot is
+irreversible: confirm with the user first.
 
 ## BQL query examples
 

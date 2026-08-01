@@ -58,27 +58,20 @@
     </ShellHeader>
   {/snippet}
 
-  <div class="health-frame">
+  <div class="content-frame health-frame">
     {@render children()}
   </div>
 </AppShell>
 
 <style>
-  /* A growing flex column, not a plain block: a page's whole-pane state
-	   (`.center-msg`) centers itself with `flex: 1`, which needs an unbroken
-	   chain of them up to `.shell-main`. Page content keeps its natural height
-	   either way — a block child of a column flex container lays out the same.
-	   `flex-basis: auto` and no shrink, so a page taller than the pane still
-	   extends the scroll area rather than being pinned to it. */
+  /* The column geometry — the cap, the centring and the growing flex column —
+	   comes from `.content-frame` (app.css), which health shares with money's
+	   portfolio. What is left here is health's own inset and the module shell
+	   below it. The class stays on a real element in this file rather than
+	   moving into a component, because the `:global()` rules under it are
+	   pruned the moment Svelte can no longer see their subject in the markup. */
   .health-frame {
-    max-width: 1280px;
-    margin: 0 auto;
     padding: var(--space-4);
-    width: 100%;
-    box-sizing: border-box;
-    display: flex;
-    flex-direction: column;
-    flex: 1 0 auto;
   }
 
   /* Shared card surface for every health page — the module's counterpart to

@@ -363,6 +363,12 @@ class TestCommandDispatch:
         main(["portfolio", "unclassify", "GOOG"])
         assert captured[-1] == ["portfolio", "unclassify", "GOOG"]
 
+    def test_portfolio_classifications(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "classifications"])
+        assert captured[-1] == ["portfolio", "classifications"]
+
 
 class TestExecutorIntegration:
     """The in-process skill needs neither an API-key proxy var nor a network host."""

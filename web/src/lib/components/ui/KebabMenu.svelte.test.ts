@@ -3,14 +3,16 @@ import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import KebabMenu from './KebabMenu.svelte';
 import type { KebabItem } from './KebabMenu.svelte';
 
-// An open bits-ui menu holds a body scroll lock whose reset runs after unmount;
-// if the test ends with the menu open that reset can land after jsdom has torn
-// down `document` and surfaces as an unhandled error. Close it first.
-afterEach(async () => {
-  await fireEvent.keyDown(document.body, { key: 'Escape' });
+// Auto-cleanup is off (vitest runs without `globals`, so testing-library never
+// sees a global `afterEach` to register with), hence the explicit unmount.
+//
+// The deferred body-scroll-lock reset that unmount schedules is drained once,
+// before teardown, in vitest-setup.ts — it is not this component's problem, and
+// every file that opens a bits-ui overlay has it. This hook used to try to
+// handle it here by flushing a 0ms timer, which could never work: the reset is
+// scheduled 24ms out, so the flush returned long before it and the flake stayed.
+afterEach(() => {
   cleanup();
-  // Let the unmount effects flush while `document` is still alive.
-  await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
 // bits-ui opens its floating content on pointerdown, which jsdom only partly

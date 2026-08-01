@@ -51,6 +51,8 @@
   const chartedSymbol = $derived(page.url.searchParams.get('symbol') ?? '');
 </script>
 
+<!-- Full-bleed, and deliberately not framed with the body below it: the bar is
+     section chrome spanning the pane, the frame caps the content inside it. -->
 <div class="money-section-header portfolio-header">
   <!-- Field tier for the collapsed Select below 768px — same reasoning as the
        business section header. Inert on the wide layout. -->
@@ -82,6 +84,12 @@
   {/if}
 </div>
 
+<!-- The frame sits *inside* the scroller, not on it, so the scrollbar stays at
+     the pane's edge where every other money section puts it. Portfolio is the
+     one money section framed this way: its pages are charts and stat grids
+     rather than the full-bleed record tables the other tabs render. -->
 <div class="money-section-body">
-  {@render children()}
+  <div class="content-frame">
+    {@render children()}
+  </div>
 </div>

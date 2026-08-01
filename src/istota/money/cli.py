@@ -1507,6 +1507,26 @@ def portfolio_accounts(ctx, set_group, set_type, exclude_id, include_id):
         conn.close()
 
 
+@portfolio_group.command("classifications")
+@pass_ctx
+def portfolio_classifications(ctx):
+    """List explicit symbol classifications (the seeded map plus user edits)."""
+    from dataclasses import asdict
+
+    from istota.money import portfolio
+
+    conn = _require_db(ctx)
+    try:
+        _output({
+            "status": "ok",
+            "classifications": [
+                asdict(c) for c in portfolio.list_classifications(conn)
+            ],
+        })
+    finally:
+        conn.close()
+
+
 @portfolio_group.command("classify")
 @click.argument("symbol")
 @click.option("--asset-class", "asset_class", required=True)

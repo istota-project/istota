@@ -681,11 +681,13 @@
 
   /* Standalone-mode notice content — rendered inside the NoticeBanner slot at
      the top of the page. The banner chrome (border, toggle, title) lives in the
-     NoticeBanner component; only the caveat list is styled here. */
+     NoticeBanner component, and so does the body type size: this slot used to
+     restate 0.9rem/0.85rem here, which put the one banner a reader meets on a
+     fresh local install a step above every other banner in the app. Nothing
+     here sets a font-size — only the list's own layout, weight and dimming. */
   .standalone-lead {
     margin: 0 0 var(--space-2);
     opacity: 0.85;
-    font-size: 0.9rem;
   }
 
   .standalone-caveats {
@@ -705,12 +707,10 @@
 
   .caveat-title {
     font-weight: 600;
-    font-size: 0.9rem;
   }
 
   .caveat-detail {
     opacity: 0.8;
-    font-size: 0.85rem;
   }
 
   /* `.settings .card` (from settings.css) sets `display: flex; flex-direction:
