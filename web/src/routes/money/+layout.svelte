@@ -342,6 +342,15 @@
     font-weight: 500;
   }
 
+  /* One row rhythm for every money record table, at both breakpoints. The
+     block padding is deliberately NOT tightened on a phone: a list row is a
+     touch target (most of them expand, and all of them carry a kebab), and the
+     two portfolio tables that did tighten it were the only ones that did — so
+     the same table read at two different heights depending on which tab you
+     were on. A page that needs to fit more columns on a narrow screen narrows
+     its gap, its type and its columns; the vertical rhythm is the shell's.
+     `--tree` below is the one other rhythm, and it is a different kind of
+     thing rather than the same thing smaller. */
   :global(.money-table-row) {
     display: flex;
     align-items: baseline;
@@ -460,6 +469,17 @@
   :global(.money-kebab-spacer) {
     width: 1.1rem;
     flex-shrink: 0;
+  }
+
+  /* Every other cell in a row is text and wants the row's baseline; the kebab
+     is an icon control with no text of its own, so its baseline is the bottom
+     edge of the 15px glyph box — which `baseline` then lines up with the text
+     baseline and leaves the icon hanging a few pixels above the row's optical
+     centre. Set here rather than on KebabMenu itself: a card header that lets
+     its title wrap pins its kebab to the top on purpose (health's
+     DocumentCard), and `align-self` would outrank that. */
+  :global(.money-table-row .ui-kebab-trigger) {
+    align-self: center;
   }
 
   :global(.money-table-empty) {

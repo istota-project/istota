@@ -65,6 +65,11 @@
   let diff: PortfolioDiff | null = $state(null);
   let diffOpen = $state(false);
 
+  function qty(value: number | null): string {
+    if (value == null) return '—';
+    return value.toLocaleString(undefined, { maximumFractionDigits: 3 });
+  }
+
   function usd(value: number | null, fractionDigits = 0): string {
     if (value == null) return '—';
     const sign = value < 0 ? '-' : '';
@@ -300,6 +305,22 @@
     if (!snap) return '';
     return `Are you sure you want to delete the snapshot from ${snap.exported_at.slice(0, 10)} (${snap.position_count} positions)? This permanently removes it and its positions.`;
   });
+
+  const diffEmpty = $derived.by(() => {
+    if (!diff) return true;
+    return diff.opened.length === 0 && diff.closed.length === 0 && diff.changed.length === 0;
+  });
+
+  // Which two snapshots the dialog is showing. The diff carries only ids, and a
+  // full-screen dialog that doesn't say what it is comparing is a wall of rows.
+  const diffSubtitle = $derived.by(() => {
+    if (!diff) return '';
+    const stamp = (id: number) => {
+      const snap = snapshots.find((s) => s.id === id);
+      return snap ? snap.exported_at.slice(0, 16).replace('T', ' ') : `#${id}`;
+    };
+    return `${stamp(diff.older_id)} → ${stamp(diff.newer_id)}`;
+  });
 </script>
 
 {#if loading}
@@ -338,14 +359,17 @@
     </div>
 
     <div class="micro-label snapshots-label">Snapshots</div>
-    <div class="money-table-header">
-      <span class="col-date">Exported</span>
-      <span class="col-source">Source file</span>
-      <span class="money-amount col-positions">Positions</span>
-      <span class="money-amount col-total">Total value</span>
-      <span class="money-kebab-spacer"></span>
-    </div>
-    <div class="snapshot-table">
+    <!-- Header inside the .money-table scroller (the work/invoices shape), so
+         the labels travel with the columns they name if the row has to scroll,
+         and the section fits the viewport instead of pushing the page wide. -->
+    <div class="money-table">
+      <div class="money-table-header">
+        <span class="col-date">Exported</span>
+        <span class="col-source">Source file</span>
+        <span class="money-amount col-positions">Positions</span>
+        <span class="money-amount col-total">Total value</span>
+        <span class="money-kebab-spacer"></span>
+      </div>
       {#each snapshots as snapshot (snapshot.id)}
         <div class="money-table-row">
           <span class="col-date">
@@ -376,58 +400,94 @@
   onCancel={() => (confirmDeleteId = null)}
 />
 
+<!-- A diff is a list, not a form: it takes the screen it can get, and the
+     money record-table shell so its rows read like every other money table.
+     The Modal's own max-width/max-height cap these to the safe box. -->
 <Modal
   open={diffOpen}
   title="Changes since previous snapshot"
+  description={diffSubtitle}
   onOpenChange={(open) => {
     if (!open) diffOpen = false;
   }}
-  width="520px"
+  width="100vw"
+  height="100dvh"
 >
   {#if diff}
-    {#if diff.opened.length === 0 && diff.closed.length === 0 && diff.changed.length === 0}
-      <p class="empty small">No position changes between these snapshots.</p>
-    {/if}
-    {#if diff.opened.length > 0}
-      <div class="micro-label">Opened</div>
-      <ul class="diff-list">
-        {#each diff.opened as entry (entry.account_name + entry.symbol)}
-          <li>
-            <span class="diff-symbol">{entry.symbol}</span>
-            <span class="diff-account">{entry.account_name}</span>
-            <span class="diff-amount">{usd(entry.value, 2)}</span>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-    {#if diff.closed.length > 0}
-      <div class="micro-label">Closed</div>
-      <ul class="diff-list">
-        {#each diff.closed as entry (entry.account_name + entry.symbol)}
-          <li>
-            <span class="diff-symbol">{entry.symbol}</span>
-            <span class="diff-account">{entry.account_name}</span>
-            <span class="diff-amount">{usd(entry.value, 2)}</span>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-    {#if diff.changed.length > 0}
-      <div class="micro-label">Changed</div>
-      <ul class="diff-list">
-        {#each diff.changed as entry (entry.account_name + entry.symbol)}
-          <li>
-            <span class="diff-symbol">{entry.symbol}</span>
-            <span class="diff-account">{entry.account_name}</span>
-            <span class="diff-amount">
-              {usd(entry.value_from, 2)} → {usd(entry.value_to, 2)}
-              {#if entry.quantity_from !== entry.quantity_to}
-                ({entry.quantity_from} → {entry.quantity_to})
-              {/if}
-            </span>
-          </li>
-        {/each}
-      </ul>
+    {#if diffEmpty}
+      <p class="empty">No position changes between these snapshots.</p>
+    {:else}
+      {#each [{ key: 'opened', label: 'Opened', rows: diff.opened }, { key: 'closed', label: 'Closed', rows: diff.closed }] as section (section.key)}
+        {#if section.rows.length > 0}
+          <section class="diff-section">
+            <div class="micro-label diff-heading">
+              {section.label}
+              <span class="diff-count">{section.rows.length}</span>
+            </div>
+            <div class="money-table diff-table">
+              <div class="money-table-header">
+                <span class="diff-col-symbol">Symbol</span>
+                <span class="diff-col-account">Account</span>
+                <span class="money-amount diff-col-qty">Qty</span>
+                <span class="money-amount diff-col-value">Value</span>
+              </div>
+              {#each section.rows as entry (entry.account_name + entry.symbol)}
+                <div class="money-table-row">
+                  <span class="diff-col-symbol diff-symbol">{entry.symbol}</span>
+                  <span class="diff-col-account">{entry.account_name}</span>
+                  <span class="money-amount diff-col-qty">{qty(entry.quantity)}</span>
+                  <span class="money-amount diff-col-value">{usd(entry.value, 2)}</span>
+                </div>
+              {/each}
+            </div>
+          </section>
+        {/if}
+      {/each}
+      {#if diff.changed.length > 0}
+        <section class="diff-section">
+          <div class="micro-label diff-heading">
+            Changed
+            <span class="diff-count">{diff.changed.length}</span>
+          </div>
+          <div class="money-table diff-table">
+            <div class="money-table-header">
+              <span class="diff-col-symbol">Symbol</span>
+              <span class="diff-col-account">Account</span>
+              <span class="money-amount diff-col-qty">Qty</span>
+              <span class="money-amount diff-col-value">Value</span>
+              <span class="money-amount diff-col-change">Change</span>
+            </div>
+            {#each diff.changed as entry (entry.account_name + entry.symbol)}
+              {@const delta = entry.value_to - entry.value_from}
+              <div class="money-table-row">
+                <span class="diff-col-symbol diff-symbol">{entry.symbol}</span>
+                <span class="diff-col-account">{entry.account_name}</span>
+                <span class="money-amount diff-col-qty">
+                  {#if entry.quantity_from === entry.quantity_to}
+                    {qty(entry.quantity_to)}
+                  {:else}
+                    <span class="diff-was">{qty(entry.quantity_from)}</span>
+                    <span class="diff-arrow">→</span>
+                    {qty(entry.quantity_to)}
+                  {/if}
+                </span>
+                <span class="money-amount diff-col-value">
+                  <span class="diff-was">{usd(entry.value_from, 2)}</span>
+                  <span class="diff-arrow">→</span>
+                  {usd(entry.value_to, 2)}
+                </span>
+                <span
+                  class="money-amount diff-col-change"
+                  class:positive={delta > 0}
+                  class:negative={delta < 0}
+                >
+                  {delta > 0 ? '+' : ''}{usd(delta, 2)}
+                </span>
+              </div>
+            {/each}
+          </div>
+        </section>
+      {/if}
     {/if}
   {/if}
 </Modal>
@@ -512,29 +572,47 @@
     width: 8rem;
   }
 
-  .diff-list {
-    list-style: none;
-    margin: 0 0 var(--space-3);
-    padding: 0;
-    font-size: var(--text-sm);
+  .diff-section {
+    margin-bottom: var(--space-4);
   }
 
-  .diff-list li {
+  .diff-section:last-child {
+    margin-bottom: 0;
+  }
+
+  /* The shell's rows carry their own inline padding, which inside the dialog's
+     own padding would indent every column a notch past the title. They drop it
+     and sit on the dialog's edge instead: the row's hover fill is
+     --surface-card, which is the panel's own colour in here, so there is no
+     fill for the inset to protect — and pulling the table out with a negative
+     margin instead left the body 0.75rem horizontally scrollable. */
+  .diff-table .money-table-header,
+  .diff-table .money-table-row {
+    padding-inline: 0;
+  }
+
+  .diff-heading {
     display: flex;
     align-items: baseline;
     gap: var(--space-2);
-    /* design-lint-allow: sub---space-1 hairline row rhythm, off the ramp on
-       purpose (same figure the money tree rows use) */
-    padding: 0.15rem 0;
+    padding: 0 0 var(--space-1);
+  }
+
+  .diff-count {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
 
   .diff-symbol {
     font-weight: 600;
-    width: 4.5rem;
+  }
+
+  .diff-col-symbol {
+    width: 5rem;
     flex-shrink: 0;
   }
 
-  .diff-account {
+  .diff-col-account {
     flex: 1;
     min-width: 0;
     color: var(--text-muted);
@@ -543,9 +621,30 @@
     white-space: nowrap;
   }
 
-  .diff-amount {
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
+  .diff-col-qty {
+    width: 10rem;
+  }
+
+  .diff-col-value {
+    width: 14rem;
+  }
+
+  .diff-col-change {
+    width: 8rem;
+  }
+
+  /* The previous value, kept quiet: the row is about what it became. */
+  .diff-was,
+  .diff-arrow {
+    color: var(--text-dim);
+  }
+
+  .positive {
+    color: var(--money-income);
+  }
+
+  .negative {
+    color: var(--money-expense);
   }
 
   @media (max-width: 640px) {
@@ -555,6 +654,86 @@
 
     .chart-container {
       height: 200px;
+    }
+
+    /* Narrower gaps and type on a phone, so the snapshot columns fit a 390px
+       screen rather than leaving half the row — Total value included — behind
+       the fold. Horizontal only: the padding is deliberately left alone in
+       both axes. The shell fixes every element on the page to the same 0.75rem
+       inline edge, and it owns the row rhythm — this table used to tighten the
+       block padding to a hairline, which put it at a different row height from
+       every non-portfolio money table on the same phone. */
+    .money-table-header,
+    .money-table-row {
+      gap: var(--space-2);
+      font-size: var(--text-xs);
+    }
+
+    /* The source column is what absorbs the leftover width on the wide layout,
+       and it is hidden here, so the date column takes that job over: the row
+       still spans the table and the kebab still sits on its right edge, rather
+       than the row shrinking to its content and stranding the actions
+       mid-table. */
+    .col-date {
+      flex: 1;
+      min-width: 0;
+      /* Date and time fit; the rare "est." badge wraps under them rather than
+         overflowing a fixed-width column onto the count beside it. */
+      flex-wrap: wrap;
+    }
+
+    .col-positions {
+      width: 3.5rem;
+    }
+
+    .col-total {
+      width: 6rem;
+    }
+
+    /* The diff dialog is the width of the phone, so the cells that exist to
+       show a transition give that up: the previous value and its arrow go, the
+       cell keeps the value it became, and the Change column still says by how
+       much. Qty goes with them — value and delta are the reading. */
+    .diff-was,
+    .diff-arrow,
+    .diff-col-qty {
+      display: none;
+    }
+
+    /* Four columns do not fit a phone, and the account is not the one to drop:
+       a snapshot holds the same symbol in several accounts, so without it two
+       VTI rows are indistinguishable. It wraps to its own line under the
+       symbol instead, and the symbol takes over as the flexible column so the
+       numbers still land on the table's right edge. */
+    .diff-table .money-table-row {
+      flex-wrap: wrap;
+      row-gap: 0;
+    }
+
+    .diff-col-symbol {
+      flex: 1;
+      width: auto;
+    }
+
+    .diff-col-account {
+      flex: 1 1 100%;
+      order: 9;
+      font-size: var(--text-2xs);
+      color: var(--text-dim);
+    }
+
+    /* No longer a column of its own, so it has no label — the symbol column
+       label stands for the pair. */
+    .diff-table .money-table-header .diff-col-account {
+      display: none;
+    }
+
+    .diff-col-value {
+      width: 6rem;
+    }
+
+    .diff-col-change {
+      width: 5.5rem;
     }
   }
 </style>

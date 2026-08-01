@@ -374,7 +374,7 @@
           <Collapsible.Content>
             <div class="breakdown-list">
               {#each sortedIncome as [account, amount]}
-                <div class="breakdown-row">
+                <div class="money-table-row money-table-row--tree">
                   <button
                     class="breakdown-name"
                     type="button"
@@ -404,7 +404,7 @@
           <Collapsible.Content>
             <div class="breakdown-list">
               {#each sortedExpenses as [account, amount]}
-                <div class="breakdown-row">
+                <div class="money-table-row money-table-row--tree">
                   <button
                     class="breakdown-name"
                     type="button"
@@ -510,20 +510,11 @@
     padding: var(--space-1) 0 var(--space-2);
   }
 
-  .breakdown-row {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-1);
-    padding: var(--space-1) var(--space-3);
-    font-size: var(--text-sm);
-    border-radius: var(--radius-sm);
-    transition: background var(--transition-fast);
-  }
-
-  .breakdown-row:hover {
-    background: var(--surface-card);
-  }
-
+  /* The per-account rows are `.money-table-row--tree` from the money layout,
+     the same shell the balance-sheet and income-statement trees use. They had
+     been a private copy of it that differed in exactly one value — a 0.25rem
+     block padding against the tree's 0.2rem — so the three reports sat at two
+     row heights. Only the columns are styled here. */
   .breakdown-name {
     flex: 1;
     min-width: 0;

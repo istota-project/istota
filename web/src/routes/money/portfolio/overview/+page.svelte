@@ -427,15 +427,15 @@
       display: none;
     }
 
-    /* Tighter rows on a phone: hairline vertical rhythm (the money tree-row
-       figure), narrower gaps and columns, smaller type — the description
-       column gets the width back and more rows fit a screen. */
+    /* Narrower gaps and columns and smaller type on a phone, so the
+       description column gets the width back. Horizontal only: the inline
+       padding stays the shell's, which fixes every element on the page to the
+       same 0.75rem edge, and the block padding stays the shell's too — this
+       table used to tighten it to a hairline and so sat at a different row
+       height from work, invoices and transactions on the same phone. */
     .holdings-header,
     .holdings-row {
       gap: var(--space-2);
-      /* design-lint-allow: sub---space-1 hairline row rhythm, off the ramp on
-         purpose (same figure the money tree rows use) */
-      padding: 0.2rem var(--space-2);
       font-size: var(--text-xs);
     }
 

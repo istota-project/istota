@@ -10,6 +10,13 @@
     children: Snippet;
     footer?: Snippet;
     width?: string;
+    /**
+     * Panel height. `auto` (the default) sizes to the content, capped by the
+     * viewport. A dialog whose content is a list rather than a form wants the
+     * height it can have — pass `100dvh` and the panel's own max-height caps
+     * it to the safe box.
+     */
+    height?: string;
   }
 
   let {
@@ -20,13 +27,17 @@
     children,
     footer,
     width = '420px',
+    height = 'auto',
   }: Props = $props();
 </script>
 
 <Dialog.Root bind:open {onOpenChange}>
   <Dialog.Portal>
     <Dialog.Overlay class="ui-modal-overlay" />
-    <Dialog.Content class="ui-modal-content" style="--modal-width: {width}">
+    <Dialog.Content
+      class="ui-modal-content"
+      style="--modal-width: {width}; --modal-height: {height}"
+    >
       <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
       {#if description}
         <Dialog.Description class="ui-modal-description">{description}</Dialog.Description>
@@ -56,6 +67,12 @@
     border-radius: var(--radius-card);
     padding: var(--space-4);
     width: var(--modal-width, 420px);
+    height: var(--modal-height, auto);
+    /* Column so the body is the part that scrolls: the title (and the footer,
+       which holds the actions) stay put instead of scrolling away from a long
+       list. Inert at auto height, where the body never has to shrink. */
+    display: flex;
+    flex-direction: column;
     /* The panel is pinned to the viewport centre rather than laid out inside a
 		   padded backdrop, so it can't use .overlay-safe — the insets come off its
 		   caps instead. Subtracting both ends of each axis keeps a full-height modal
@@ -78,6 +95,12 @@
     color: var(--text-muted);
     margin: 0 0 var(--space-3);
   }
+  /* min-height: 0 or the body refuses to shrink below its content and the
+     panel overflows its own max-height instead of scrolling here. */
+  :global(.ui-modal-body) {
+    min-height: 0;
+    overflow: auto;
+  }
   :global(.ui-modal-footer) {
     display: flex;
     justify-content: flex-end;
@@ -85,5 +108,6 @@
     margin-top: var(--space-4);
     padding-top: var(--space-3);
     border-top: 1px solid var(--border-subtle);
+    flex-shrink: 0;
   }
 </style>
