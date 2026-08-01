@@ -59,8 +59,15 @@
   </div>
 </div>
 
-<div class="money-section-body report-frame">
-  {@render children()}
+<!-- The frame goes inside the scroller, so the scrollbar stays at the pane's
+     edge; the header above stays full-bleed, like portfolio's. `.report-frame`
+     rides on the same element as the cap, mirroring `content-frame
+     health-frame` — its rules are whole-selector `:global()`, so they match
+     from wherever it sits. -->
+<div class="money-section-body">
+  <div class="content-frame report-frame">
+    {@render children()}
+  </div>
 </div>
 
 <style>
@@ -69,6 +76,21 @@
      rules live with the rest of the `.money-*` shell in routes/money/+layout,
      which is where that shell is defined and the only place the design lint
      allows those globals to be written. */
+
+  /* The report page's own inset, which all three declared identically as
+     `.cashflow-page` / `.report-content` — the same rule under two names, so
+     retuning it meant finding three copies and the top edge could drift a step
+     on one page without anything saying so. It belongs to the shell for the
+     same reason `.section-header` below does.
+
+     The block padding is a step up from the `--space-2` those copies carried:
+     at that value the first section header sat almost against the section
+     bar above it, which reads as the report being clipped rather than as it
+     starting. Inline is unchanged at `--space-3`, the edge the whole money
+     section is fixed to. */
+  .report-frame {
+    padding: var(--space-4) var(--space-3);
+  }
 
   /* The three report pages each declared these — .section-toggle three times
      byte-for-byte as a :global() rule, which leaks app-wide, so whichever

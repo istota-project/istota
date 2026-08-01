@@ -25,6 +25,26 @@ const portfolioLayout = readFileSync(
   join(process.cwd(), 'src/routes/money/portfolio/+layout.svelte'),
   'utf8',
 );
+const reportsLayout = readFileSync(
+  join(process.cwd(), 'src/routes/money/reports/+layout.svelte'),
+  'utf8',
+);
+
+/** Every layout that adopts the column, so a new one is added in one place. */
+const adopters = [
+  ['health/+layout.svelte', healthLayout],
+  ['money/portfolio/+layout.svelte', portfolioLayout],
+  ['money/reports/+layout.svelte', reportsLayout],
+] as const;
+
+/**
+ * Markup with comments blanked out. These layouts explain in prose *why* the
+ * header is not framed, so a naive text scan finds `content-frame` in the
+ * sentence saying it should not be there and reports the opposite of the
+ * truth. Blanked rather than deleted, so offsets still line up.
+ */
+const markupOnly = (source: string): string =>
+  source.replace(/<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
 
 /** The `:root` block — the token roster, excluding the theme and media blocks. */
 const rootBlock = appCss.slice(appCss.indexOf(':root {'), appCss.indexOf('*,\n*::before'));
@@ -54,10 +74,7 @@ describe('--content-max', () => {
     // the two drifting apart, which is invisible until you put the two pages
     // side by side on a wide monitor.
     const raw = tokenValue(rootBlock, '--content-max') ?? '';
-    for (const [name, source] of [
-      ['health/+layout.svelte', healthLayout],
-      ['money/portfolio/+layout.svelte', portfolioLayout],
-    ] as const) {
+    for (const [name, source] of adopters) {
       expect(source, `${name} restates the cap instead of reading --content-max`).not.toContain(
         raw,
       );
@@ -101,15 +118,28 @@ describe('adopters', () => {
     expect(healthLayout).toContain('class="content-frame health-frame"');
   });
 
-  it('portfolio frames the section body but not the section header', () => {
-    // The bar is section chrome and spans the pane; the frame caps the content
-    // inside it, the way health's app bar already sits over its framed column.
-    const header = portfolioLayout.indexOf('money-section-header');
-    const bodyAt = portfolioLayout.indexOf('money-section-body');
-    const frameAt = portfolioLayout.indexOf('class="content-frame"');
+  // The bar is section chrome and spans the pane; the frame caps the content
+  // inside it, the way health's app bar already sits over its framed column.
+  // Both money sections are shaped the same way, so the check is one loop —
+  // framing the header instead puts the nav 0.75rem left of every column
+  // beneath it, because a padded bar's auto margins absorb its padding along
+  // with the rest of the free space.
+  for (const [name, source] of [
+    ['portfolio', portfolioLayout],
+    ['reports', reportsLayout],
+  ] as const) {
+    it(`money/${name} frames the section body but not the section header`, () => {
+      const markup = markupOnly(source);
+      const header = markup.indexOf('money-section-header');
+      const bodyAt = markup.indexOf('money-section-body');
+      const frameAt = markup.indexOf('content-frame', bodyAt);
 
-    expect(header).toBeGreaterThan(-1);
-    expect(frameAt).toBeGreaterThan(bodyAt);
-    expect(portfolioLayout.slice(header, bodyAt)).not.toContain('content-frame');
-  });
+      expect(header).toBeGreaterThan(-1);
+      expect(bodyAt).toBeGreaterThan(-1);
+      // The frame is *inside* the scroller, so the scrollbar stays at the
+      // pane's edge where every other money section puts it.
+      expect(frameAt).toBeGreaterThan(bodyAt);
+      expect(markup.slice(header, bodyAt)).not.toContain('content-frame');
+    });
+  }
 });

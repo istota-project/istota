@@ -67,12 +67,14 @@
       label: 'Reports',
       active: isActive('/reports'),
     },
-    { href: `${moneyBase}/taxes`, label: 'Taxes', active: isActive('/taxes') },
+    // Beside Reports rather than after Taxes: the two are the analysis views
+    // and now share a framed content column, so they read as a pair.
     {
       href: `${moneyBase}/portfolio/overview`,
       label: 'Portfolio',
       active: isActive('/portfolio'),
     },
+    { href: `${moneyBase}/taxes`, label: 'Taxes', active: isActive('/taxes') },
     // Lands on Work — the daily-action tab, and upstream of invoices.
     { href: `${moneyBase}/business/work`, label: 'Business', active: isActive('/business') },
   ]);

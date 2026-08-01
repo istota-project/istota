@@ -429,10 +429,6 @@
 {/if}
 
 <style>
-  .cashflow-page {
-    padding: var(--space-2) var(--space-3);
-  }
-
   .chart-container {
     height: 280px;
     padding: var(--space-3);

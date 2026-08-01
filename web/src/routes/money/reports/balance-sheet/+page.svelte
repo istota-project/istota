@@ -185,10 +185,6 @@
 {/snippet}
 
 <style>
-  .report-content {
-    padding: var(--space-2) var(--space-3);
-  }
-
   .net-worth-banner {
     display: flex;
     align-items: baseline;
