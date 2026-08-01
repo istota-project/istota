@@ -29,6 +29,7 @@ class ImportSource:
     name: str
     source_type: str  # "csv" or "api"
     detect: Callable[[Path], bool] | None = None
+    kind: str = "transactions"  # "transactions" | "positions"
 
 
 IMPORT_SOURCES: dict[str, ImportSource] = {}
@@ -39,6 +40,8 @@ def register_source(source: ImportSource) -> None:
 
 
 def _register_builtin_sources() -> None:
+    from .fidelity_positions import detect_fidelity_positions_csv
+    from .fina_history import detect_fina_history_csv
     from .monarch_csv import detect_monarch_csv
 
     register_source(ImportSource(
@@ -50,6 +53,18 @@ def _register_builtin_sources() -> None:
         name="monarch-api",
         source_type="api",
         detect=None,
+    ))
+    register_source(ImportSource(
+        name="fidelity-positions-csv",
+        source_type="csv",
+        detect=detect_fidelity_positions_csv,
+        kind="positions",
+    ))
+    register_source(ImportSource(
+        name="fina-history-csv",
+        source_type="csv",
+        detect=detect_fina_history_csv,
+        kind="positions",
     ))
 
 

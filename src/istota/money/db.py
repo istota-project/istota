@@ -90,6 +90,10 @@ def init_db(db_path: Path | str) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         _migrate_monarch_synced_columns(conn)
+        # Portfolio schema family (runtime import: portfolio pulls in the
+        # importers package, which must not load at db-module import time).
+        from istota.money import portfolio
+        portfolio.ensure_schema(conn)
 
 
 def _migrate_monarch_synced_columns(conn: sqlite3.Connection) -> None:

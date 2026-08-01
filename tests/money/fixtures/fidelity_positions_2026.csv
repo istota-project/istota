@@ -1,0 +1,14 @@
+Account number,Account name,Symbol,Description,Quantity,Last price,Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent,Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total,Average cost basis,Type
+X11111111,Taxable Brokerage,SPAXX**,HELD IN MONEY MARKET,,,,$500.25,,,,,1.00%,,,Cash,
+X11111111,Taxable Brokerage,VTI,VANGUARD TOTAL STK MKT ETF,10,$300.00,+$2.00,$3000.00,+$20.00,+0.67%,+$500.00,+20.00%,6.00%,$2500.00,$250.00,Margin,
+X11111111,Taxable Brokerage,VXUS,VANGUARD TOTAL INTL STOCK,20,$84.59,-$0.18,$1691.80,-$3.60,-0.22%,-$110.80,-6.15%,3.40%,$1802.60,$90.13,Margin,
+X22222222,Active Trading (IBKR),GOOG,Alphabet Inc,4,$357.89,--,$1431.56,--,--,--,--,23.31%,$1462.69,--,,
+X22222222,Active Trading (IBKR),**,,--,--,--,$849.00,--,,--,--,13.84%,--,--,,
+X22222222,Active Trading (IBKR),,BABA 18SEP26 120 C,2,$2.685,--,$537.00,--,--,--,--,0.87%,$430.90,--,,
+,,,CORN 21AUG26 22 C,4,$0.0038,--,$1.52,--,--,--,--,0.00%,$402.79,--,,
+X22222222,Active Trading (IBKR),,Pending activity,,,,($120.50),,,,,,,,,
+X33333333,Reserve,FZDXX,FIDELITY MMKT PREMIUM CLASS,1000.37,$1.00,$0.00,$1000.37,--,--,--,--,100.00%,--,--,Cash,
+
+"The data and information in this spreadsheet is provided to you solely for your use and is not for distribution."
+
+"Date exported Aug-01-2026 2:04 p.m ET"

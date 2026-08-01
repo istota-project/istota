@@ -1,0 +1,8 @@
+Account Number,Account Name,Symbol,Description,Quantity,Last Price,Last Price Change,Current Value,Today's Gain/Loss Dollar,Today's Gain/Loss Percent,Total Gain/Loss Dollar,Total Gain/Loss Percent,Percent Of Account,Cost Basis Total,Average Cost Basis,Type,Asset Class,Sub Asset Class,Geography,Import Date,Owner
+X99990000,Taxable Brokerage,VTI,VANGUARD INDEX FDS TOTAL STK,250.0,260.0,-$11.00,65000.0,900.0,0.0144,900.0,0.0144,0.6169,64100.0,$256.40,Margin,Stocks,Total Market,US,2025-04-10 19:24:00,Alice
+X99990000,Taxable Brokerage,SPAXX**,HELD IN MONEY MARKET,,,,7000.0,,,,,0.0075,,,Cash,Cash & Equivalents,Money Market,US,2025-04-10 19:24:00,Alice
+X88880000,Joint Brokerage,VTI,VANGUARD INDEX FDS TOTAL STK,200.0,260.0,-$11.00,52000.0,,,,,0.31,51000.0,$255.00,Cash,Stocks,Total Market,US,2025-04-10 19:24:00,Bob
+X99990000,Taxable Brokerage,VTI,VANGUARD INDEX FDS TOTAL STK,250.0,265.0,$5.00,66250.0,1250.0,0.01,2150.0,0.0245,0.62,64100.0,$256.40,Margin,Stocks,Total Market,US,2025-04-11 12:30:00,Alice
+X99990000,Taxable Brokerage,SPAXX**,HELD IN MONEY MARKET,,,,7000.0,,,,,0.0075,,,Cash,Cash & Equivalents,Money Market,US,2025-04-11 12:30:00,Alice
+X99990000,Taxable Brokerage,VTI,VANGUARD INDEX FDS TOTAL STK,300.0,270.0,$5.00,81000.0,1500.0,0.0192,3000.0,0.039,0.65,78000.0,$260.00,Margin,Stocks,Total Market,US,2025-05-01 09:00:00,Alice
+X99990000,Taxable Brokerage,SPAXX**,HELD IN MONEY MARKET,,,,5000.0,,,,,0.004,,,Cash,Cash & Equivalents,Money Market,US,2025-05-01 09:00:00,Alice

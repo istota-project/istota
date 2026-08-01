@@ -1,0 +1,55 @@
+﻿Account Number,Account Name,Symbol,Description,Quantity,Last Price,Last Price Change,Current Value,Today's Gain/Loss Dollar,Today's Gain/Loss Percent,Total Gain/Loss Dollar,Total Gain/Loss Percent,Percent Of Account,Cost Basis Total,Average Cost Basis,Type
+X11110000,Digital Assets,USD***,US DOLLARS,,,,$0.00 ,,,,,--,,,Cash
+X11110000,Core Portfolio,SPAXX**,HELD IN MONEY MARKET,,,,$800.00 ,,,,,0.73%,,,Cash
+X11110000,Core Portfolio,VGIT,VANGUARD SCOTTSDALE FDS INTER TERM TREAS,500,$60.00 ,($0.30),"$30,000.00 ",($150.00),-0.50%,($200.00),-0.66%,27.08%,"$30,200.00 ",$60.40 ,Margin
+X11110000,Core Portfolio,VOO,VANGUARD INDEX FUNDS S&P 500 ETF USD,40,$500.00 ,$40.00 ,"$20,000.00 ","$1,600.00 ",8.70%,$700.00 ,3.63%,19.60%,"$19,300.00 ",$482.50 ,Margin
+X11110000,Core Portfolio,VUG,VANGUARD INDEX FDS VANGUARD GROWTH ETF FORMERLY VANGUARD INDEX TR VIPERS,50,$360.00 ,$36.00 ,"$18,000.00 ","$1,800.00 ",11.11%,"$1,200.00 ",7.14%,19.48%,"$16,800.00 ",$336.00 ,Margin
+X11110000,Core Portfolio,PDBC,INVESCO ACTVELY MNGD ETC FD TR OPTIMUM YIELD,1000,$12.50 ,$0.50 ,"$12,500.00 ",$500.00 ,4.17%,($600.00),-4.58%,12.08%,"$13,100.00 ",$13.10 ,Margin
+X11110000,Core Portfolio,TIP,ISHARES TIPS BOND ETF,100,$110.00 ,$0.20 ,"$11,000.00 ",$20.00 ,0.18%,($180.00),-1.61%,9.58%,"$11,180.00 ",$111.80 ,Cash
+X11110000,Core Portfolio,VGK,VANGUARD INTL EQUITY INDEX FDS FTSE EUROPE ETF,60,$67.00 ,$4.50 ,"$4,020.00 ",$270.00 ,7.20%,($180.00),-4.29%,3.75%,"$4,200.00 ",$70.00 ,Margin
+X11110000,Core Portfolio,VWO,VANGUARD INTL EQUITY INDEX FDS FTSE EMR MKT ETF,90,$42.00 ,$2.50 ,"$3,780.00 ",$225.00 ,6.33%,($240.00),-5.97%,3.53%,"$4,020.00 ",$44.67 ,Margin
+X11110000,Core Portfolio,VEA,VANGUARD DEVELOPED MARKETS INDEX FUND ETF,80,$49.00 ,$3.40 ,"$3,920.00 ",$272.00 ,7.46%,($80.00),-2.00%,3.63%,"$4,000.00 ",$50.00 ,Margin
+X11110000,Core Portfolio,IAU,ISHARES GOLD TR ISHARES NEW ISIN #US0000000000 SEDOL #B000000,10,$58.00 ,$2.00 ,$580.00 ,$20.00 ,3.57%,$55.00 ,10.48%,0.53%,$525.00 ,$52.50 ,Margin
+X11110000 Total,Core Portfolio,,,,,,"$104,600.00 ",,,,,,,,
+X11110000,Roth IRA A,SPAXX**,HELD IN MONEY MARKET,,,,$8.00 ,,,,,0.02%,,,Cash
+X11110000,Roth IRA A,VTI,VANGUARD INDEX FDS VANGUARD TOTAL STK MKT ETF,100.500,$260.00 ,$24.00 ,"$26,130.00 ","$2,412.00 ",10.17%,"$2,130.00 ",8.87%,60.23%,"$24,000.00 ",$238.81 ,Cash
+X11110000,Roth IRA A,TMF,DIREXION SHS ETF TR DAILY 20+ YEAR T,150,$40.00 ,$0.75 ,"$6,000.00 ",$112.50 ,1.91%,($750.00),-11.11%,12.44%,"$6,750.00 ",$45.00 ,Cash
+X11110000,Roth IRA A,VXUS,VANGUARD TOTAL INTERNATIONAL STOCK INDEX FUND,110,$60.00 ,$4.00 ,"$6,600.00 ",$440.00 ,7.14%,($300.00),-4.35%,12.91%,"$6,900.00 ",$62.73 ,Cash
+X11110000,Roth IRA A,UPRO,PROSHARES ULTRAPRO S&P500,100.250,$65.00 ,$14.00 ,"$6,516.25 ","$1,403.50 ",27.45%,"$1,100.00 ",20.30%,14.32%,"$5,416.25 ",$54.03 ,Cash
+X11110000,Roth IRA A,Pending Activity,,,,$40.00 ,,,,,,,,,
+X11110000,Reserve,SPAXX**,HELD IN MONEY MARKET,,,,"$60,000.00 ",,,,,100.00%,,,Cash
+X11110000,Spending,CORE**,FDIC-INSURED DEPOSIT SWEEP,,,,"$2,800.00 ",,,,,100.00%,,,Cash
+X11110000,Tax Reserve,CORE**,FDIC-INSURED DEPOSIT SWEEP,,,,"$8,600.00 ",,,,,100.00%,,,Cash
+X11110000,Joint Brokerage,VTI,VANGUARD INDEX FDS VANGUARD TOTAL STK MKT ETF,200,$260.00 ,$24.00 ,"$52,000.00 ","$4,800.00 ",10.17%,"$3,000.00 ",6.12%,31.27%,"$49,000.00 ",$245.00 ,Cash
+X11110000,Joint Brokerage,FZDXX,FIDELITY MMKT PREMIUM CLASS,150000.00,$1.00 ,$0.00 ,"$150,000.00 ",--,--,--,--,98.14%,--,--,Cash
+X11110000,Joint Brokerage,Pending Activity,,,,"($40,000.00)",,,,,,,,,
+X11110000,Roth IRA B,SPAXX**,HELD IN MONEY MARKET,,,,$340.00 ,,,,,1.27%,,,Cash
+X11110000,Roth IRA B,VTI,VANGUARD INDEX FDS VANGUARD TOTAL STK MKT ETF,70.250,$260.00 ,$24.00 ,"$18,265.00 ","$1,686.00 ",10.17%,$800.00 ,4.58%,72.44%,"$17,465.00 ",$248.61 ,Cash
+X11110000,Roth IRA B,VXUS,VANGUARD TOTAL INTERNATIONAL STOCK INDEX FUND,120,$60.00 ,$4.00 ,"$7,200.00 ",$480.00 ,7.14%,($320.00),-4.26%,26.30%,"$7,520.00 ",$62.67 ,Cash
+X11110000,Joint Cash,CORE**,FDIC-INSURED DEPOSIT SWEEP,,,,"$7,800.00 ",,,,,100.00%,,,Cash
+X11110000,Travel Fund,SPAXX**,HELD IN MONEY MARKET,,,,$70.00 ,,,,,100.00%,,,Cash
+X11110000,Active Trading (IBKR),SGOV,iShares 0-3 Month Treasury Bond ETF,100.250,$100.00 ,$0.02 ,"$10,025.00 ",$2.00 ,0.02%,--,--,21.90%,"$10,035.00 ",--,
+X11110000,Active Trading (IBKR),RIVN,Rivian Automotive Inc,300,$12.00 ,$1.00 ,"$3,600.00 ",$300.00 ,9.09%,--,--,6.39%,"$7,000.00 ",--,
+X11110000,Active Trading (IBKR),EWG,iShares MSCI Germany ETF,200,$36.00 ,$3.00 ,"$7,200.00 ",$600.00 ,9.09%,--,--,13.12%,"$6,700.00 ",--,
+X11110000,Active Trading (IBKR),NVDA,NVIDIA Corp,50,$96.00 ,--,"$4,800.00 ",--,--,--,--,8.72%,"$5,000.00 ",--,
+X11110000,Active Trading (IBKR),TSLA,Tesla Inc,20,$220.00 ,--,"$4,400.00 ",--,--,--,--,8.03%,"$4,650.00 ",--,
+X11110000,Active Trading (IBKR),TQQQ,ProShares UltraPro QQQ,100,$39.00 ,--,"$3,900.00 ",--,--,--,--,7.04%,"$4,350.00 ",--,
+X11110000,Active Trading (IBKR),AAPL,Apple Inc,25,$172.00 ,--,"$4,300.00 ",--,--,--,--,7.80%,"$4,300.00 ",--,
+X11110000,Active Trading (IBKR),CCIR,Cohen Circle Acquisition Corp I,375,$11.00 ,$0.03 ,"$4,125.00 ",$11.25 ,0.27%,--,--,7.49%,"$4,150.00 ",--,
+X11110000,Active Trading (IBKR),EWZ,Ishares Msci Brazil ETF,116,$25.00 ,$1.25 ,"$2,900.00 ",$145.00 ,5.26%,--,--,5.19%,"$2,970.00 ",--,
+X11110000,Active Trading (IBKR),PPLT,abrdn Physical Platinum Shares ETF,23,$85.00 ,$1.00 ,"$1,955.00 ",$23.00 ,1.19%,--,--,3.54%,"$2,080.00 ",--,
+X11110000,Active Trading (IBKR),CLBR,Colombier Acquisition Corp II,100,$10.75 ,$0.10 ,"$1,075.00 ",$10.00 ,0.94%,--,--,1.95%,"$1,085.00 ",--,
+,,,MU 18JUL25 120 C,1,$0.30 ,--,$30.00 ,--,--,--,--,0.06%,$500.00 ,--,
+,,,FXY 20JUN25 68 C,8,$0.75 ,--,$600.00 ,--,--,--,--,1.08%,$430.00 ,--,
+,,,HON 20JUN25 240 C,2,$0.75 ,--,$150.00 ,--,--,--,--,0.27%,$420.00 ,--,
+,,,XYZ 17APR25 70 C,2,$0.03 ,--,$6.00 ,--,--,--,--,0.01%,$360.00 ,--,
+X11110000,Active Trading (IBKR),**,,--,--,--,"$4,000.00 ",--,,--,--,7.39%,--,--,
+X11110000,Charting (Schwab),**,,--,--,--,$500.00 ,--,,--,--,--,--,--,
+,,,,,,,,,,,,,,,
+"The data and information in this spreadsheet is provided to you solely for your use and is not for distribution. It is provided for informational purposes only, and is not intended to provide advice, nor should it be construed as an offer to sell, a solicitation of an offer to buy or a recommendation for any security. Data shown is based on information known as of the date it was exported and is subject to change.",,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,
+"Brokerage services are provided by an example brokerage. Custody and other services are provided by an example custodian. Both are members SIPC.",,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,
+"Example accounts and custody and trading of assets in such accounts are provided by an example trust company.",,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,
+Date downloaded Apr-09-2025 6:30 p.m ET,,,,,,,,,,,,,,,
