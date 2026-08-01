@@ -513,7 +513,14 @@ input[type='month'],
 input[type='week'] {
   -webkit-appearance: none;
   appearance: none;
-  min-width: 0;
+  /* An unset value renders nothing at all on iOS — there is no `mm/dd/yyyy`
+     hint the way desktop has one — so with the native control gone the box
+     collapses horizontally exactly as the pseudo-element below collapses it
+     vertically, and an empty field reads as a blank sliver rather than a date
+     you can tap. Floor it at a date's width, capped at the container so the
+     overflow this block exists to fix cannot come back: a floor written as a
+     bare length would reintroduce it on the narrowest cards. */
+  min-width: min(100%, 8em);
   max-width: 100%;
 }
 

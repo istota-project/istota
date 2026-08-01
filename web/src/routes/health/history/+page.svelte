@@ -566,10 +566,11 @@
     font-size: var(--text-xs);
     padding: 0.2rem var(--space-2);
     border-radius: var(--radius-sm);
-    /* iOS renders a date input at its intrinsic width, which is wider than a
-		   phone once two of them sit on one row. */
-    min-width: 0;
-    max-width: 100%;
+    /* Sizing is app.css's job: it drops the native appearance (which is what
+       made these overflow a phone row) and floors the width so an unset date
+       still renders as a field. Restating `min-width: 0` here outranked that
+       floor and collapsed both filters to blank slivers on iOS, which is the
+       whole reason this rule is now only paint. */
   }
   .date-inputs input[type='date']::-webkit-calendar-picker-indicator {
     filter: invert(0.7);
