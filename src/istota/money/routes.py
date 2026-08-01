@@ -22,6 +22,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from istota.money._loader import UserNotFoundError, resolve_for_user
 from istota.money.cli import UserContext
+from istota.money.config_store import FILING_STATUSES
+from istota.money.core.tax_data import load_tax_rates
 
 logger = logging.getLogger(__name__)
 
@@ -1790,6 +1792,7 @@ async def api_config_tax(user_ctx: UserContext = Depends(get_user_config)):
         "tax": {
             "filing_status": cfg.filing_status,
             "tax_year": cfg.tax_year,
+            "state": cfg.state,
             "w2_income": cfg.w2_income,
             "w2_federal_withholding": cfg.w2_federal_withholding,
             "w2_state_withholding": cfg.w2_state_withholding,
@@ -1811,7 +1814,7 @@ async def api_config_tax_put(
     body = await request.json()
     cfg = config_store.load_tax(user_ctx.db_path)
     allowed = {
-        "filing_status", "tax_year",
+        "filing_status", "tax_year", "state",
         "w2_income", "w2_federal_withholding", "w2_state_withholding",
         "federal_estimated_paid", "state_estimated_paid",
         "enable_qbi_deduction",
@@ -1822,10 +1825,292 @@ async def api_config_tax_put(
         return JSONResponse(
             {"status": "error", "error": f"unknown keys: {sorted(bad)}"}, 400,
         )
+    if "state" in body:
+        # "" is a real choice (no state tax), so it is validated as a value
+        # rather than skipped as falsy — but a typo'd code must not be stored,
+        # since nothing downstream would ever resolve it.
+        raw = (body["state"] or "")
+        if not isinstance(body["state"], (str, type(None))):
+            return JSONResponse(
+                {"status": "error", "error": "state must be a string"}, 400,
+            )
+        code = raw.strip().upper()
+        if code and load_tax_rates().jurisdiction(code) is None:
+            return JSONResponse(
+                {"status": "error", "error": f"unknown state: {code}"}, 400,
+            )
+        body = {**body, "state": code}
+    if "filing_status" in body and body["filing_status"] not in FILING_STATUSES:
+        return JSONResponse(
+            {"status": "error",
+             "error": f"unknown filing status: {body['filing_status']}"}, 400,
+        )
     for k, v in body.items():
         setattr(cfg, k, v)
     config_store.save_tax(user_ctx.db_path, cfg, replace_collections=False)
     return {"status": "ok"}
+
+
+@router.get("/config/tax/jurisdictions")
+async def api_config_tax_jurisdictions():
+    """The selectable states, whether each taxes income, and what we ship.
+
+    ``has_bundled_data`` drives the "you will need to enter brackets" hint on
+    the settings page, so a user is told before they pick rather than after.
+    """
+    rates = load_tax_rates()
+    bundled = set(rates.bundled_state_codes())
+    return {
+        "status": "ok",
+        "jurisdictions": [
+            {
+                "code": j.code,
+                "name": j.name,
+                "taxes_income": j.taxes_income,
+                "has_bundled_data": j.code in bundled,
+                "note": j.note,
+            }
+            for j in rates.jurisdictions
+        ],
+    }
+
+
+def _resolved_field(value, *, overridden: bool) -> dict:
+    """One rate field plus whether it is the user's number or the shipped one."""
+    return {"value": value, "overridden": overridden}
+
+
+@router.get("/config/tax/resolved")
+async def api_config_tax_resolved(
+    year: int | None = None,
+    filing_status: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    """The rates actually in use, per field, with provenance.
+
+    ``year`` and ``filing_status`` default to the configured ones but are
+    overridable, because the settings page edits a year the user is not
+    currently filing for.
+    """
+    from istota.money import config_store
+    from istota.money.core import tax_data
+
+    cfg = config_store.load_tax(user_ctx.db_path)
+    tax_year = year or cfg.tax_year
+    status = filing_status or cfg.filing_status
+    if status not in FILING_STATUSES:
+        return JSONResponse(
+            {"status": "error", "error": f"unknown filing status: {status}"}, 400,
+        )
+
+    rates = load_tax_rates()
+    fed_rates = rates.federal_year(tax_year)
+    fed_override = config_store.get_tax_schedule(
+        user_ctx.db_path, tax_year, config_store.FEDERAL_JURISDICTION, status,
+    ) or {}
+
+    def _pick(override_key: str, bundled):
+        got = fed_override.get(override_key)
+        return _resolved_field(
+            got if got is not None else bundled, overridden=got is not None,
+        )
+
+    federal = {
+        "standard_deduction": _pick(
+            "standard_deduction",
+            fed_rates.standard_deduction(status) if fed_rates else None,
+        ),
+        "brackets": _pick(
+            "brackets",
+            [list(b) for b in fed_rates.brackets(status)] if fed_rates else [],
+        ),
+        "provenance": _provenance_dict(fed_rates, tax_year),
+    }
+
+    # Payroll scalars are year-keyed and status-agnostic, so they come from the
+    # legacy year table rather than a schedule row.
+    year_rows = {
+        r["tax_year"]: r
+        for r in config_store.list_tax_year_rates(user_ctx.db_path)
+    }
+    payroll_override = year_rows.get(tax_year) or {}
+    bundled_payroll = fed_rates.payroll if fed_rates else None
+    payroll = {}
+    for key, bundled_value in (
+        ("ss_wage_base", bundled_payroll.ss_wage_base if bundled_payroll else None),
+        ("ss_rate", bundled_payroll.ss_rate if bundled_payroll else None),
+        ("medicare_rate", bundled_payroll.medicare_rate if bundled_payroll else None),
+        ("se_taxable_fraction",
+         bundled_payroll.se_taxable_fraction if bundled_payroll else None),
+    ):
+        got = payroll_override.get(key)
+        payroll[key] = _resolved_field(
+            got if got is not None else bundled_value, overridden=got is not None,
+        )
+
+    state_block = None
+    if cfg.state:
+        state_block = _resolved_state_block(
+            user_ctx.db_path, rates, cfg.state, tax_year, status,
+        )
+
+    return {
+        "status": "ok",
+        "tax_year": tax_year,
+        "filing_status": status,
+        "federal": federal,
+        "payroll": payroll,
+        "state": state_block,
+    }
+
+
+def _provenance_dict(rates, requested_year: int) -> dict:
+    from istota.money.core.tax import _provenance
+    return _provenance(rates, overridden=False)
+
+
+def _resolved_state_block(db_path, rates, code: str, tax_year: int, status: str) -> dict:
+    """The state half of the resolved-rates payload.
+
+    Carries ``available`` plus a reason for the same purpose the estimate does:
+    "no brackets yet" and "this state levies none" want different UI, and
+    neither is a zero.
+    """
+    from istota.money import config_store
+
+    jurisdiction = rates.jurisdiction(code)
+    bundled = rates.state_year(code, tax_year)
+    override = config_store.get_tax_schedule(db_path, tax_year, code, status) or {}
+
+    ov_brackets = override.get("brackets")
+    ov_std = override.get("standard_deduction")
+    brackets = ov_brackets if ov_brackets is not None else (
+        [list(b) for b in bundled.brackets(status)] if bundled else []
+    )
+    std_ded = ov_std if ov_std is not None else (
+        bundled.standard_deduction(status) if bundled else None
+    )
+
+    reason = ""
+    if jurisdiction is None:
+        reason = "unknown_state"
+    elif not jurisdiction.taxes_income:
+        reason = "no_income_tax"
+    elif not brackets:
+        reason = "no_brackets"
+
+    meta = rates.state_meta(code)
+    return {
+        "code": code,
+        "name": jurisdiction.name if jurisdiction else "",
+        "taxes_income": bool(jurisdiction and jurisdiction.taxes_income),
+        "available": reason == "",
+        "reason": reason,
+        "starts_from": meta.starts_from if meta else "federal_agi",
+        "installment_schedule": list(meta.installment_schedule) if meta else None,
+        "standard_deduction": _resolved_field(std_ded, overridden=ov_std is not None),
+        "brackets": _resolved_field(brackets, overridden=ov_brackets is not None),
+        "provenance": _provenance_dict(bundled, tax_year),
+    }
+
+
+def _validate_brackets(raw) -> str | None:
+    """Reject a bracket table that would misbehave inside ``apply_brackets``.
+
+    That function indexes ``b[0]``/``b[1]`` and walks the pairs in order, so a
+    ragged pair fails mid-estimate and an unsorted table computes a plausible
+    but wrong figure. Both are worth refusing at the boundary instead.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        return "brackets must be a non-empty array of [threshold, rate] pairs"
+    last = None
+    for pair in raw:
+        if (not isinstance(pair, list) or len(pair) != 2
+                or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                       for v in pair)):
+            return f"malformed bracket: {pair!r} (expected [threshold, rate])"
+        threshold, rate = pair
+        if threshold < 0:
+            return f"bracket threshold must not be negative: {threshold}"
+        if not 0 <= rate <= 1:
+            return f"bracket rate must be a fraction between 0 and 1: {rate}"
+        if last is not None and threshold <= last:
+            return "bracket thresholds must ascend and not repeat"
+        last = threshold
+    return None
+
+
+@router.get("/config/tax/schedules")
+async def api_config_tax_schedules(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import config_store
+    return {
+        "status": "ok",
+        "schedules": config_store.list_tax_schedules(user_ctx.db_path),
+    }
+
+
+@router.put("/config/tax/schedules/{year}/{jurisdiction}/{filing_status}")
+async def api_config_tax_schedules_put(
+    year: int, jurisdiction: str, filing_status: str, request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    from istota.money import config_store
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"status": "error", "error": "body must be an object"}, 400,
+        )
+    allowed = {"brackets", "standard_deduction"}
+    bad = set(body) - allowed
+    if bad:
+        return JSONResponse(
+            {"status": "error", "error": f"unknown keys: {sorted(bad)}"}, 400,
+        )
+    if "brackets" in body:
+        problem = _validate_brackets(body["brackets"])
+        if problem:
+            return JSONResponse({"status": "error", "error": problem}, 400)
+    std_ded = body.get("standard_deduction", config_store.UNSET)
+    if std_ded is not None and not isinstance(std_ded, config_store._Unset):
+        if isinstance(std_ded, bool) or not isinstance(std_ded, (int, float)):
+            return JSONResponse(
+                {"status": "error", "error": "standard_deduction must be a number"},
+                400,
+            )
+        if std_ded < 0:
+            return JSONResponse(
+                {"status": "error",
+                 "error": "standard_deduction must not be negative"}, 400,
+            )
+    try:
+        state = config_store.upsert_tax_schedule(
+            user_ctx.db_path, year, jurisdiction, filing_status,
+            brackets=body.get("brackets", config_store.UNSET),
+            standard_deduction=std_ded,
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok", "state": state}
+
+
+@router.delete("/config/tax/schedules/{year}/{jurisdiction}/{filing_status}")
+async def api_config_tax_schedules_delete(
+    year: int, jurisdiction: str, filing_status: str,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Drop an override, reverting those fields to the bundled values."""
+    from istota.money import config_store
+    try:
+        removed = config_store.delete_tax_schedule(
+            user_ctx.db_path, year, jurisdiction, filing_status,
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, 400)
+    return {"status": "ok", "removed": removed}
 
 
 @router.get("/config/tax/years")

@@ -1012,3 +1012,142 @@ export async function deletePortfolioClassification(symbol: string): Promise<{ s
 }
 
 export { AuthError, ApiError };
+
+// =============================================================================
+// Tax configuration
+// =============================================================================
+
+export interface TaxSettings {
+  filing_status: 'mfj' | 'single';
+  tax_year: number;
+  /** Two-letter code, or '' for no state tax. */
+  state: string;
+  w2_income: number;
+  w2_federal_withholding: number;
+  w2_state_withholding: number;
+  federal_estimated_paid: number;
+  state_estimated_paid: number;
+  enable_qbi_deduction: boolean;
+  prior_year_federal_tax: number;
+  prior_year_state_tax: number;
+}
+
+export interface TaxJurisdiction {
+  code: string;
+  name: string;
+  /** False for the nine states with no broad-based income tax. */
+  taxes_income: boolean;
+  /** False means selectable but override-driven — say so before they pick. */
+  has_bundled_data: boolean;
+  note: string;
+}
+
+/** One rate field, plus whether it is the user's number or the shipped one. */
+export interface ResolvedField<T> {
+  value: T;
+  overridden: boolean;
+}
+
+export interface ResolvedStateRates {
+  code: string;
+  name: string;
+  taxes_income: boolean;
+  available: boolean;
+  reason: '' | 'no_income_tax' | 'no_brackets' | 'unknown_state';
+  starts_from: string;
+  installment_schedule: number[] | null;
+  standard_deduction: ResolvedField<number | null>;
+  brackets: ResolvedField<number[][]>;
+  provenance: RateProvenance;
+}
+
+export interface ResolvedRates {
+  status: string;
+  tax_year: number;
+  filing_status: string;
+  federal: {
+    standard_deduction: ResolvedField<number | null>;
+    brackets: ResolvedField<number[][]>;
+    provenance: RateProvenance;
+  };
+  payroll: Record<string, ResolvedField<number | null>>;
+  /** Null when no state is selected. */
+  state: ResolvedStateRates | null;
+}
+
+export interface TaxSchedule {
+  tax_year: number;
+  jurisdiction: string;
+  filing_status: string;
+  brackets: number[][] | null;
+  standard_deduction: number | null;
+}
+
+export async function getTaxSettings(): Promise<TaxSettings> {
+  const resp = await apiFetch<{ tax: TaxSettings }>('/config/tax');
+  return resp.tax;
+}
+
+export async function updateTaxSettings(patch: Partial<TaxSettings>): Promise<void> {
+  await apiFetch('/config/tax', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function getTaxJurisdictions(): Promise<TaxJurisdiction[]> {
+  const resp = await apiFetch<{ jurisdictions: TaxJurisdiction[] }>('/config/tax/jurisdictions');
+  return resp.jurisdictions;
+}
+
+export async function getResolvedTaxRates(opts?: {
+  year?: number;
+  filingStatus?: string;
+}): Promise<ResolvedRates> {
+  const params = new URLSearchParams();
+  if (opts?.year) params.set('year', String(opts.year));
+  if (opts?.filingStatus) params.set('filing_status', opts.filingStatus);
+  const qs = params.toString();
+  return apiFetch<ResolvedRates>(`/config/tax/resolved${qs ? '?' + qs : ''}`);
+}
+
+/**
+ * Upsert one override.
+ *
+ * An omitted key leaves that field alone; an explicit `null` reverts it to the
+ * bundled value. `null` cannot mean both, which is why the two are distinct.
+ */
+export async function putTaxSchedule(
+  year: number,
+  jurisdiction: string,
+  filingStatus: string,
+  patch: { brackets?: number[][] | null; standard_deduction?: number | null },
+): Promise<void> {
+  await apiFetch(`/config/tax/schedules/${year}/${jurisdiction}/${filingStatus}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteTaxSchedule(
+  year: number,
+  jurisdiction: string,
+  filingStatus: string,
+): Promise<void> {
+  await apiFetch(`/config/tax/schedules/${year}/${jurisdiction}/${filingStatus}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function putTaxYearRates(
+  year: number,
+  patch: Record<string, number | null>,
+): Promise<void> {
+  await apiFetch(`/config/tax/years/${year}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}

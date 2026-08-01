@@ -1249,6 +1249,22 @@ FILING_STATUSES = ("mfj", "single")
 # state codes. Kept distinct from a state code so one table carries both.
 FEDERAL_JURISDICTION = "federal"
 
+
+class _Unset:
+    """Sentinel distinguishing "leave this field alone" from "clear it".
+
+    The two fields of a schedule are edited independently, so a caller passing
+    only one must not blank the other — but an explicit ``None`` has to mean
+    revert-to-bundled, which is the per-field revert the settings editor needs.
+    ``None`` cannot carry both meanings.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "UNSET"
+
+
+UNSET = _Unset()
+
 _TAX_SCALAR_KEYS = (
     "filing_status",
     "tax_year",
@@ -1618,25 +1634,27 @@ def upsert_tax_schedule(
     jurisdiction: str,
     filing_status: str,
     *,
-    brackets: list | None = None,
-    standard_deduction: float | None = None,
+    brackets: list | None | _Unset = UNSET,
+    standard_deduction: float | None | _Unset = UNSET,
 ) -> str:
     """Merge fields into one schedule row. Returns 'created'/'updated'/'noop'.
 
     Merge rather than replace: the two fields are edited independently in the
-    UI, so passing only one must not blank the other.
+    UI, so passing only one must not blank the other. Passing an explicit
+    ``None`` *does* blank it — that is the per-field revert to the bundled
+    value, which is why the default is :data:`UNSET` rather than ``None``.
     """
     init_db(db_path)
     jurisdiction = _validate_jurisdiction(jurisdiction)
     filing_status = _validate_filing_status(filing_status)
     with _connect(db_path) as conn:
         existing = _fetch_schedule(conn, year, jurisdiction, filing_status)
-        merged_brackets = brackets if brackets is not None else (
+        merged_brackets = (
             existing["brackets"] if existing else None
-        )
-        merged_std = standard_deduction if standard_deduction is not None else (
+        ) if isinstance(brackets, _Unset) else brackets
+        merged_std = (
             existing["standard_deduction"] if existing else None
-        )
+        ) if isinstance(standard_deduction, _Unset) else standard_deduction
         _write_schedule(
             conn, year, jurisdiction, filing_status, merged_brackets, merged_std,
         )

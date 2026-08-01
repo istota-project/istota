@@ -6975,6 +6975,7 @@ const handlers: MockHandler[] = [
   // language and stale in the other. Only the arithmetic is a port.
   (() => {
     const PATH = '/istota/api/money/tax/estimate';
+    const CONFIG_PATH = '/istota/api/money/config/tax';
 
     // Set to true to exercise the "no tax configuration found" empty state,
     // which the real API signals with a 404 (`_load_tax_config` returning None).
@@ -7345,7 +7346,308 @@ const handlers: MockHandler[] = [
       return monthly === undefined ? 0 : monthly * MONTHS;
     }
 
+    // --- Tax config (mutable, shared with the estimate above) -------------
+    // In the same closure deliberately: picking a state on the settings page
+    // has to move the estimate, which is the whole thing the settings page is
+    // for. Two closures would give two disconnected `config` objects.
+
+    const schedules: Array<{
+      tax_year: number;
+      jurisdiction: string;
+      filing_status: string;
+      brackets: Bracket[] | null;
+      standard_deduction: number | null;
+    }> = [];
+    const yearRates: Record<number, Record<string, number>> = {};
+
+    function findSchedule(year: number, jurisdiction: string, status: string) {
+      return schedules.find(
+        (r) => r.tax_year === year && r.jurisdiction === jurisdiction && r.filing_status === status,
+      );
+    }
+
+    function field(value: unknown, overridden: boolean) {
+      return { value, overridden };
+    }
+
+    function resolvedPayload(year: number, status: string) {
+      const fedBlock = federalYear(year);
+      const fedStatus = fedBlock?.filing_status?.[status] ?? {};
+      const fedOverride = findSchedule(year, 'federal', status);
+
+      const payrollOverride = yearRates[year] ?? {};
+      const bundledPayroll = fedBlock?.payroll ?? {};
+      const payroll: Record<string, unknown> = {};
+      for (const key of ['ss_wage_base', 'ss_rate', 'medicare_rate', 'se_taxable_fraction']) {
+        const got = payrollOverride[key];
+        payroll[key] = field(got ?? bundledPayroll[key] ?? null, got !== undefined);
+      }
+
+      const code = (config.state ?? '').toUpperCase();
+      let statePayload: unknown = null;
+      if (code) {
+        const jur = jurisdictionOf(code);
+        const bundled = stateYear(code, year);
+        const bundledStatus = bundled?.filing_status?.[status] ?? {};
+        const override = findSchedule(year, code, status);
+        const brackets = override?.brackets ?? bundledStatus.brackets ?? [];
+        const stdDed = override?.standard_deduction ?? bundledStatus.standard_deduction ?? null;
+        let reason = '';
+        if (!jur) reason = 'unknown_state';
+        else if (!jur.taxes_income) reason = 'no_income_tax';
+        else if (!brackets.length) reason = 'no_brackets';
+        statePayload = {
+          code,
+          name: jur?.name ?? '',
+          taxes_income: !!jur?.taxes_income,
+          available: reason === '',
+          reason,
+          starts_from: (TAX_RATES.states ?? {})[code]?.starts_from ?? 'federal_agi',
+          installment_schedule: installmentSchedule(code),
+          standard_deduction: field(stdDed, override?.standard_deduction != null),
+          brackets: field(brackets, override?.brackets != null),
+          provenance: provenance(bundled, year, false),
+        };
+      }
+
+      return {
+        status: 'ok',
+        tax_year: year,
+        filing_status: status,
+        federal: {
+          standard_deduction: field(
+            fedOverride?.standard_deduction ?? fedStatus.standard_deduction ?? null,
+            fedOverride?.standard_deduction != null,
+          ),
+          brackets: field(
+            fedOverride?.brackets ?? fedStatus.brackets ?? [],
+            fedOverride?.brackets != null,
+          ),
+          provenance: provenance(fedBlock, year, false),
+        },
+        payroll,
+        state: statePayload,
+      };
+    }
+
+    /** Mirrors the route's bracket validation, so the 400 class is exercised in dev. */
+    function bracketProblem(raw: unknown): string | null {
+      if (raw === null) return null;
+      if (!Array.isArray(raw) || !raw.length) {
+        return 'brackets must be a non-empty array of [threshold, rate] pairs';
+      }
+      let last: number | null = null;
+      for (const pair of raw as any[]) {
+        if (
+          !Array.isArray(pair) ||
+          pair.length !== 2 ||
+          pair.some((v) => typeof v !== 'number' || !Number.isFinite(v))
+        ) {
+          return `malformed bracket: ${JSON.stringify(pair)} (expected [threshold, rate])`;
+        }
+        const [threshold, rate] = pair as [number, number];
+        if (threshold < 0) return `bracket threshold must not be negative: ${threshold}`;
+        if (rate < 0 || rate > 1) {
+          return `bracket rate must be a fraction between 0 and 1: ${rate}`;
+        }
+        if (last !== null && threshold <= last) {
+          return 'bracket thresholds must ascend and not repeat';
+        }
+        last = threshold;
+      }
+      return null;
+    }
+
+    function handleConfig(url: string, method: string, body: any): unknown | undefined {
+      const path = url.split('?')[0];
+      const params = new URLSearchParams(url.split('?')[1] ?? '');
+
+      if (path === `${CONFIG_PATH}/jurisdictions` && method === 'GET') {
+        const bundled = new Set(Object.keys(TAX_RATES.states ?? {}));
+        return {
+          status: 'ok',
+          jurisdictions: (TAX_RATES.jurisdictions ?? []).map((j: any) => ({
+            code: j.code,
+            name: j.name,
+            taxes_income: j.taxes_income,
+            has_bundled_data: bundled.has(j.code),
+            note: j.note ?? '',
+          })),
+        };
+      }
+
+      if (path === `${CONFIG_PATH}/resolved` && method === 'GET') {
+        const year = Number(params.get('year')) || config.tax_year;
+        const status = params.get('filing_status') ?? config.filing_status;
+        if (status !== 'mfj' && status !== 'single') {
+          return { __status: 400, status: 'error', error: `unknown filing status: ${status}` };
+        }
+        return resolvedPayload(year, status);
+      }
+
+      if (path === `${CONFIG_PATH}/schedules` && method === 'GET') {
+        return { status: 'ok', schedules: [...schedules] };
+      }
+
+      const scheduleMatch = path.match(
+        /^\/istota\/api\/money\/config\/tax\/schedules\/(\d+)\/([^/]+)\/([^/]+)$/,
+      );
+      if (scheduleMatch) {
+        const year = Number(scheduleMatch[1]);
+        const jurisdiction =
+          scheduleMatch[2].toLowerCase() === 'federal' ? 'federal' : scheduleMatch[2].toUpperCase();
+        const status = scheduleMatch[3];
+        if (status !== 'mfj' && status !== 'single') {
+          return { __status: 400, status: 'error', error: `unknown filing status: ${status}` };
+        }
+        if (jurisdiction !== 'federal' && !jurisdictionOf(jurisdiction)) {
+          return { __status: 400, status: 'error', error: `unknown jurisdiction: ${jurisdiction}` };
+        }
+        const idx = schedules.findIndex(
+          (r) =>
+            r.tax_year === year && r.jurisdiction === jurisdiction && r.filing_status === status,
+        );
+        if (method === 'DELETE') {
+          if (idx >= 0) schedules.splice(idx, 1);
+          return { status: 'ok', removed: idx >= 0 };
+        }
+        if (method === 'PUT') {
+          const allowed = new Set(['brackets', 'standard_deduction']);
+          const bad = Object.keys(body ?? {}).filter((k) => !allowed.has(k));
+          if (bad.length) {
+            return { __status: 400, status: 'error', error: `unknown keys: ${bad.sort()}` };
+          }
+          if ('brackets' in (body ?? {})) {
+            const problem = bracketProblem(body.brackets);
+            if (problem) return { __status: 400, status: 'error', error: problem };
+          }
+          const std = body?.standard_deduction;
+          if (std !== undefined && std !== null) {
+            if (typeof std !== 'number' || !Number.isFinite(std)) {
+              return {
+                __status: 400,
+                status: 'error',
+                error: 'standard_deduction must be a number',
+              };
+            }
+            if (std < 0) {
+              return {
+                __status: 400,
+                status: 'error',
+                error: 'standard_deduction must not be negative',
+              };
+            }
+          }
+          const existing = idx >= 0 ? schedules[idx] : null;
+          const brackets =
+            'brackets' in (body ?? {}) ? body.brackets : (existing?.brackets ?? null);
+          const standardDeduction =
+            'standard_deduction' in (body ?? {})
+              ? (body.standard_deduction ?? null)
+              : (existing?.standard_deduction ?? null);
+          if (brackets === null && standardDeduction === null) {
+            if (idx >= 0) schedules.splice(idx, 1);
+            return { status: 'ok', state: existing ? 'updated' : 'noop' };
+          }
+          const row = {
+            tax_year: year,
+            jurisdiction,
+            filing_status: status,
+            brackets,
+            standard_deduction: standardDeduction,
+          };
+          if (idx >= 0) schedules[idx] = row;
+          else schedules.push(row);
+          return { status: 'ok', state: existing ? 'updated' : 'created' };
+        }
+      }
+
+      const yearMatch = path.match(/^\/istota\/api\/money\/config\/tax\/years\/(\d+)$/);
+      if (yearMatch && method === 'PUT') {
+        const year = Number(yearMatch[1]);
+        yearRates[year] = { ...(yearRates[year] ?? {}), ...(body ?? {}) };
+        return { status: 'ok', state: 'updated' };
+      }
+      if (yearMatch && method === 'DELETE') {
+        const removed = yearRates[Number(yearMatch[1])] !== undefined;
+        delete yearRates[Number(yearMatch[1])];
+        return { status: 'ok', removed };
+      }
+      if (path === `${CONFIG_PATH}/years` && method === 'GET') {
+        return {
+          status: 'ok',
+          years: Object.entries(yearRates).map(([y, v]) => ({ tax_year: Number(y), ...v })),
+        };
+      }
+
+      if (path === CONFIG_PATH && method === 'GET') {
+        return {
+          status: 'ok',
+          tax: {
+            filing_status: config.filing_status,
+            tax_year: config.tax_year,
+            state: config.state,
+            w2_income: config.w2_income,
+            w2_federal_withholding: config.w2_federal_withholding,
+            w2_state_withholding: config.w2_state_withholding,
+            federal_estimated_paid: config.federal_estimated_paid,
+            state_estimated_paid: config.state_estimated_paid,
+            enable_qbi_deduction: config.enable_qbi_deduction,
+            prior_year_federal_tax: config.prior_year_federal_tax,
+            prior_year_state_tax: config.prior_year_state_tax,
+          },
+        };
+      }
+
+      if (path === CONFIG_PATH && method === 'PUT') {
+        const allowed = new Set([
+          'filing_status',
+          'tax_year',
+          'state',
+          'w2_income',
+          'w2_federal_withholding',
+          'w2_state_withholding',
+          'federal_estimated_paid',
+          'state_estimated_paid',
+          'enable_qbi_deduction',
+          'prior_year_federal_tax',
+          'prior_year_state_tax',
+        ]);
+        const bad = Object.keys(body ?? {}).filter((k) => !allowed.has(k));
+        if (bad.length) {
+          return { __status: 400, status: 'error', error: `unknown keys: ${bad.sort()}` };
+        }
+        if ('state' in (body ?? {})) {
+          const code = String(body.state ?? '')
+            .trim()
+            .toUpperCase();
+          if (code && !jurisdictionOf(code)) {
+            return { __status: 400, status: 'error', error: `unknown state: ${code}` };
+          }
+          config.state = code;
+        }
+        if ('filing_status' in (body ?? {})) {
+          if (body.filing_status !== 'mfj' && body.filing_status !== 'single') {
+            return {
+              __status: 400,
+              status: 'error',
+              error: `unknown filing status: ${body.filing_status}`,
+            };
+          }
+          config.filing_status = body.filing_status;
+        }
+        for (const [k, v] of Object.entries(body ?? {})) {
+          if (k === 'state' || k === 'filing_status') continue;
+          (config as any)[k] = v;
+        }
+        return { status: 'ok' };
+      }
+
+      return undefined;
+    }
+
     return ({ url, method, body }) => {
+      if (url.startsWith(CONFIG_PATH)) return handleConfig(url, method, body);
       if (!url.startsWith(PATH)) return undefined;
       if (NO_TAX_CONFIG) return { __status: 404, error: 'no tax config' };
 

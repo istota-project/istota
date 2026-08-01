@@ -1202,12 +1202,19 @@ def _tax_schedule_dispatch(args, istota_config) -> int:
             )
             _print_state("removed" if ok else "noop", label)
             return 0
+        # An absent flag leaves the field alone; `--brackets-json null` (or
+        # `remove`) is how you revert one to the bundled value.
         brackets = (
-            json.loads(args.brackets_json) if args.brackets_json else None
+            json.loads(args.brackets_json)
+            if args.brackets_json is not None else config_store.UNSET
+        )
+        std_ded = (
+            args.standard_deduction
+            if args.standard_deduction is not None else config_store.UNSET
         )
         state = config_store.upsert_tax_schedule(
             ctx.db_path, args.year, args.jurisdiction, args.filing_status,
-            brackets=brackets, standard_deduction=args.standard_deduction,
+            brackets=brackets, standard_deduction=std_ded,
         )
     except ValueError as exc:
         return _print_error(str(exc))
