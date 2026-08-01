@@ -194,9 +194,36 @@ istota money config  <show|import|export|diff> ...
 istota money client  <add|update|remove|list> ...
 istota money company <add|update|remove|list> ...
 istota money service <add|update|remove|list> ...
-istota money tax     <set|rates|pattern> ...
+istota money tax     <set|rates|schedule|pattern> ...
 istota money monarch <profile|account-map> ...
 ```
+
+`tax set` takes `--state CA` (or `--state ""` for no state tax) alongside the
+filing status and year.
+
+`tax rates` carries the payroll scalars, which really are year-keyed and the
+same for every filing status:
+
+```bash
+istota money tax rates set -u USER --year 2026 --ss-wage-base 184500
+```
+
+Brackets and standard deductions moved to `tax schedule`, keyed on the three
+dimensions they actually have. The old `--ca-brackets-json` /
+`--ca-standard-deduction` flags on `tax rates` are gone; they were
+filing-status-agnostic, so an override entered while filing jointly silently
+continued to apply after switching to single.
+
+```bash
+istota money tax schedule set -u USER --year 2026 --jurisdiction NY \
+    --filing-status mfj --standard-deduction 16050 \
+    --brackets-json '[[0, 0.04], [100000, 0.06]]'
+istota money tax schedule remove -u USER --year 2026 --jurisdiction NY --filing-status mfj
+istota money tax schedule list -u USER
+```
+
+`remove` reverts to the bundled figures. An omitted flag on `set` leaves that
+field alone rather than clearing it.
 
 ### Interactive REPL
 

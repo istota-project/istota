@@ -204,6 +204,29 @@ Import only files the user supplied or named. The import response lists
 slices as "Unclassified". Deleting a snapshot is destructive: confirm with the
 user first.
 
+## Estimated taxes
+
+The quarterly estimate lives on the web page at `/money/taxes`, and its rates
+are managed at `/money/settings/taxes`. There is no skill subcommand for it.
+
+If the user asks about it, three things are worth knowing:
+
+- **Rates are bundled data with a citation, not fetched.** Each year names the
+  document it came from and the date it was last verified. If a figure looks
+  wrong, the answer is to check it against that authority and override it in
+  settings — not to look it up online and assert a number.
+- **The page says when its figures are stale.** If it is showing one year's
+  rates for another year, it says so in a banner and in the footnote under the
+  breakdown. Read those before doubting the arithmetic.
+- **It is an estimate and not tax advice.** Local taxes, credits, AMT,
+  itemized deductions and several 2025-onward federal deductions are not
+  modelled; the disclaimer on the page lists them. Do not tell the user what
+  they owe, or reassure them a figure is correct. Point them at the page, its
+  provenance footnote, and the authority it cites.
+
+Never invent a bracket, rate or deduction from memory to "help" — that is the
+exact failure the provenance fields exist to prevent.
+
 ## BQL query examples
 
 ```sql
