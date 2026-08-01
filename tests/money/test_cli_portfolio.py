@@ -240,3 +240,28 @@ class TestAccountsAndClassify:
     def test_unclassify_missing_errors(self, runner, seeded):
         result, payload = _invoke(runner, seeded, ["portfolio", "unclassify", "NOPE"])
         assert result.exit_code == 1
+
+    def test_classifications_lists_seeded_rows(self, runner, seeded):
+        _, payload = _invoke(runner, seeded, ["portfolio", "classifications"])
+        assert payload["status"] == "ok"
+        rows = {c["symbol_norm"]: c for c in payload["classifications"]}
+        # The bundled seed map is installed once per DB by ensure_schema, so the
+        # catalogue is queryable before the user has classified anything.
+        assert rows["VTI"]["asset_class"] == "Stocks"
+        assert rows["VTI"]["geography"] == "US"
+        assert "GOOG" not in rows
+
+    def test_classifications_reflects_classify_and_unclassify(self, runner, seeded):
+        _invoke(
+            runner, seeded,
+            ["portfolio", "classify", "GOOG", "--asset-class", "Stocks",
+             "--sub-class", "Technology", "--geography", "US"],
+        )
+        _, payload = _invoke(runner, seeded, ["portfolio", "classifications"])
+        row = next(c for c in payload["classifications"] if c["symbol_norm"] == "GOOG")
+        assert row["sub_class"] == "Technology"
+        assert row["updated_at"]
+
+        _invoke(runner, seeded, ["portfolio", "unclassify", "GOOG"])
+        _, payload = _invoke(runner, seeded, ["portfolio", "classifications"])
+        assert "GOOG" not in {c["symbol_norm"] for c in payload["classifications"]}
