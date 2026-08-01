@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS portfolio_classifications (
     asset_class TEXT NOT NULL,
     sub_class TEXT NOT NULL DEFAULT '',
     geography TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
 """
@@ -128,6 +129,7 @@ class SymbolClassification:
     asset_class: str
     sub_class: str
     geography: str
+    source: str  # 'seed' | 'auto' | 'user' | '' (pre-provenance row)
     updated_at: str
 
 
@@ -158,6 +160,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     """
     conn.executescript(PORTFOLIO_SCHEMA)
     _migrate_owner_to_group(conn)
+    _migrate_classification_source(conn)
     seed_classifications(conn)
 
 
@@ -172,6 +175,21 @@ def _migrate_owner_to_group(conn: sqlite3.Connection) -> None:
     if "owner" in cols and "account_group" not in cols:
         conn.execute(
             "ALTER TABLE portfolio_accounts RENAME COLUMN owner TO account_group"
+        )
+        conn.commit()
+
+
+def _migrate_classification_source(conn: sqlite3.Connection) -> None:
+    """Add the ``source`` provenance column to a pre-provenance table.
+
+    Existing rows keep the '' default — a mix of seed and hand edits we can't
+    tell apart after the fact; only rows written from here on carry provenance.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(portfolio_classifications)")}
+    if "source" not in cols:
+        conn.execute(
+            "ALTER TABLE portfolio_classifications "
+            "ADD COLUMN source TEXT NOT NULL DEFAULT ''"
         )
         conn.commit()
 
@@ -194,8 +212,8 @@ def seed_classifications(conn: sqlite3.Connection) -> int:
     for symbol, cls in data.items():
         conn.execute(
             "INSERT OR IGNORE INTO portfolio_classifications "
-            "(symbol_norm, asset_class, sub_class, geography, updated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "(symbol_norm, asset_class, sub_class, geography, source, updated_at) "
+            "VALUES (?, ?, ?, ?, 'seed', ?)",
             (
                 normalize_symbol(symbol),
                 cls.get("asset_class", UNCLASSIFIED),
@@ -876,13 +894,13 @@ def update_account(
 
 def list_classifications(conn: sqlite3.Connection) -> list[SymbolClassification]:
     rows = conn.execute(
-        "SELECT symbol_norm, asset_class, sub_class, geography, updated_at "
+        "SELECT symbol_norm, asset_class, sub_class, geography, source, updated_at "
         "FROM portfolio_classifications ORDER BY symbol_norm"
     ).fetchall()
     return [
         SymbolClassification(
             symbol_norm=r[0], asset_class=r[1], sub_class=r[2],
-            geography=r[3], updated_at=r[4],
+            geography=r[3], source=r[4], updated_at=r[5],
         )
         for r in rows
     ]
@@ -895,6 +913,7 @@ def set_classification(
     asset_class: str,
     sub_class: str = "",
     geography: str = "",
+    source: str = "user",
 ) -> str:
     """Upsert a classification; returns the normalized symbol key."""
     norm = normalize_symbol(symbol)
@@ -904,9 +923,10 @@ def set_classification(
         raise ValueError("asset_class is required")
     conn.execute(
         "INSERT OR REPLACE INTO portfolio_classifications "
-        "(symbol_norm, asset_class, sub_class, geography, updated_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (norm, asset_class.strip(), sub_class.strip(), geography.strip(), _iso_now()),
+        "(symbol_norm, asset_class, sub_class, geography, source, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (norm, asset_class.strip(), sub_class.strip(), geography.strip(),
+         source, _iso_now()),
     )
     conn.commit()
     return norm

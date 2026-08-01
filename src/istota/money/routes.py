@@ -9,6 +9,7 @@ fed by the istota config attached to ``request.app.state.istota_config``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -2330,6 +2331,26 @@ async def api_portfolio_import(
             ]
         finally:
             conn.close()
+
+        # Auto-classify new symbols after the import commits. Off the event
+        # loop (ticker lookups are network I/O), on its own connection
+        # (sqlite conns are thread-bound), and fail-soft — a lookup outage
+        # leaves symbols in unclassified_symbols, never fails the import.
+        if any(
+            r["status"] == "ok" and r.get("unclassified_symbols")
+            for r in results
+        ):
+            try:
+                await asyncio.to_thread(
+                    _auto_classify_imported, user_ctx, snapshots, results
+                )
+            except Exception:
+                logger.warning(
+                    "portfolio auto-classification failed", exc_info=True
+                )
+        for r in results:
+            if r["status"] == "ok":
+                r.setdefault("auto_classified", [])
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -2532,12 +2553,29 @@ async def api_portfolio_account_patch(
         conn.close()
 
 
+def _auto_classify_imported(user_ctx, snapshots, results) -> None:
+    """Runs in a worker thread: mutates each ok result's classification keys."""
+    from istota.money import portfolio_autoclass
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        for parsed, result in zip(snapshots, results):
+            if result["status"] != "ok" or not result.get("unclassified_symbols"):
+                continue
+            auto = portfolio_autoclass.auto_classify_snapshot(conn, parsed)
+            result["auto_classified"] = auto["classified"]
+            result["unclassified_symbols"] = auto["unresolved"]
+    finally:
+        conn.close()
+
+
 def _classification_to_dict(cls) -> dict:
     return {
         "symbol": cls.symbol_norm,
         "asset_class": cls.asset_class,
         "sub_class": cls.sub_class,
         "geography": cls.geography,
+        "source": cls.source,
         "updated_at": cls.updated_at,
     }
 
@@ -2557,6 +2595,27 @@ async def api_portfolio_classifications(user_ctx: UserContext = Depends(get_user
         }
     finally:
         conn.close()
+
+
+@router.post("/portfolio/classifications/auto")
+async def api_portfolio_classifications_auto(
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Auto-classify every imported symbol that still resolves to
+    Unclassified (the backfill behind the settings-page button)."""
+    from istota.money import portfolio_autoclass
+
+    def run() -> dict:
+        conn = _portfolio_conn(user_ctx)
+        try:
+            candidates = portfolio_autoclass.candidates_from_positions(conn)
+            return portfolio_autoclass.auto_classify_symbols(conn, candidates)
+        finally:
+            conn.close()
+
+    result = await asyncio.to_thread(run)
+    return {"status": "ok", **result}
 
 
 @router.put("/portfolio/classifications/{symbol}")

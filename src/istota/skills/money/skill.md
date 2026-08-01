@@ -195,14 +195,22 @@ istota-skill money portfolio accounts [--set-group ID GROUP] [--set-type ID TYPE
 istota-skill money portfolio classify GOOG --asset-class Stocks [--sub-class Technology] [--geography US]
 istota-skill money portfolio unclassify GOOG
 
+# Auto-classify everything still unclassified (public ticker metadata lookup,
+# then description heuristics; never overwrites an existing classification)
+istota-skill money portfolio autoclass
+
 # Hard-delete a snapshot (irreversible; requires the flag)
 istota-skill money portfolio delete-snapshot ID --confirmed
 ```
 
-Import only files the user supplied or named. The import response lists
-`unclassified_symbols` — offer to classify them rather than leaving chart
-slices as "Unclassified". Deleting a snapshot is destructive: confirm with the
-user first.
+Import only files the user supplied or named. An import auto-classifies new
+symbols itself (`auto_classified` in the response); anything left in
+`unclassified_symbols` resisted both the ticker lookup and the description
+heuristics — run `portfolio autoclass` later (the lookup may have been
+unreachable) or offer to classify those few by hand rather than leaving chart
+slices as "Unclassified". A user's explicit `classify` always wins: auto rows
+never overwrite it. Deleting a snapshot is destructive: confirm with the user
+first.
 
 ## BQL query examples
 

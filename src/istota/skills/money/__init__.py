@@ -436,6 +436,10 @@ def cmd_portfolio_unclassify(args):
     _output(_run(["portfolio", "unclassify", args.symbol]))
 
 
+def cmd_portfolio_autoclass(args):
+    _output(_run(["portfolio", "autoclass"]))
+
+
 # ---------------------------------------------------------------------------
 # CLI parser
 # ---------------------------------------------------------------------------
@@ -641,6 +645,11 @@ def build_parser():
     p_pf_uncls = pf_sub.add_parser("unclassify", help="Remove a symbol classification")
     p_pf_uncls.add_argument("symbol", help="Ticker symbol")
 
+    pf_sub.add_parser(
+        "autoclass",
+        help="Auto-classify unclassified symbols (ticker lookup + heuristics)",
+    )
+
     return parser
 
 
@@ -702,6 +711,7 @@ def main(argv=None):
             "accounts": cmd_portfolio_accounts,
             "classify": cmd_portfolio_classify,
             "unclassify": cmd_portfolio_unclassify,
+            "autoclass": cmd_portfolio_autoclass,
         }
         fn = portfolio_commands.get(getattr(args, "portfolio_command", None))
         if fn:

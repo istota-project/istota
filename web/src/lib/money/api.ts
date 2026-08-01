@@ -803,7 +803,17 @@ export interface PortfolioClassification {
   asset_class: string;
   sub_class: string;
   geography: string;
+  /** 'seed' | 'auto' | 'user' | '' (row predating provenance). */
+  source: string;
   updated_at: string;
+}
+
+export interface PortfolioAutoClassified {
+  symbol: string;
+  asset_class: string;
+  sub_class: string;
+  geography: string;
+  method: 'lookup' | 'heuristic';
 }
 
 export interface PortfolioImportResult {
@@ -815,6 +825,7 @@ export interface PortfolioImportResult {
   total_value?: number;
   new_accounts?: string[];
   unclassified_symbols?: string[];
+  auto_classified?: PortfolioAutoClassified[];
   warnings?: string[];
   source_file?: string;
   dry_run?: boolean;
@@ -977,6 +988,14 @@ export async function putPortfolioClassification(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields),
   });
+}
+
+export async function autoClassifyPortfolio(): Promise<{
+  status: string;
+  classified: PortfolioAutoClassified[];
+  unresolved: string[];
+}> {
+  return apiFetch('/portfolio/classifications/auto', { method: 'POST' });
 }
 
 export async function deletePortfolioClassification(symbol: string): Promise<{ status: string }> {

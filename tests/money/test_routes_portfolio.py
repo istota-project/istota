@@ -286,3 +286,91 @@ class TestEnsureInitialisedCreatesPortfolioSchema:
             assert portfolio.list_classifications(conn)
         finally:
             conn.close()
+
+
+class TestAutoClassification:
+    def _variant(self, tmp_path, replacements):
+        text = CSV_2025.read_text(encoding="utf-8-sig")
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        p = tmp_path / "variant.csv"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_import_heuristic_classifies_new_fund(self, client, tmp_path):
+        # VGIT -> ZZZQ keeps its TREAS description, so the offline
+        # heuristic classifies it with no lookup (conftest disables fetch).
+        variant = self._variant(tmp_path, {"VGIT": "ZZZQ"})
+        body = _upload(client, variant).json()
+        assert body["status"] == "ok"
+        classified = {c["symbol"]: c for c in body["auto_classified"]}
+        assert classified["ZZZQ"]["asset_class"] == "Fixed Income"
+        assert classified["ZZZQ"]["method"] == "heuristic"
+        assert "ZZZQ" not in body["unclassified_symbols"]
+        rows = client.get("/api/money/portfolio/classifications").json()
+        row = next(c for c in rows["classifications"] if c["symbol"] == "ZZZQ")
+        assert row["source"] == "auto"
+
+    def test_import_lookup_classifies_equity(self, client, tmp_path, monkeypatch):
+        from istota.money import portfolio_autoclass
+
+        monkeypatch.setattr(
+            portfolio_autoclass, "fetch_symbol_info",
+            lambda s: {"quoteType": "EQUITY", "sector": "Energy",
+                       "country": "United States"},
+        )
+        variant = self._variant(tmp_path, {
+            "VGIT": "ZZZQ",
+            "VANGUARD SCOTTSDALE FDS INTER TERM TREAS": "OPAQUE HOLDINGS CO",
+        })
+        body = _upload(client, variant).json()
+        classified = {c["symbol"]: c for c in body["auto_classified"]}
+        assert classified["ZZZQ"]["method"] == "lookup"
+        assert classified["ZZZQ"]["sub_class"] == "Energy"
+
+    def test_import_unresolved_stays_unclassified(self, client, tmp_path):
+        variant = self._variant(tmp_path, {
+            "VGIT": "ZZZQ",
+            "VANGUARD SCOTTSDALE FDS INTER TERM TREAS": "OPAQUE HOLDINGS CO",
+        })
+        body = _upload(client, variant).json()
+        assert "ZZZQ" in body["unclassified_symbols"]
+        assert body["auto_classified"] == []
+
+    def test_backfill_endpoint(self, client, tmp_path, monkeypatch):
+        from istota.money import portfolio_autoclass
+
+        variant = self._variant(tmp_path, {
+            "VGIT": "ZZZQ",
+            "VANGUARD SCOTTSDALE FDS INTER TERM TREAS": "OPAQUE HOLDINGS CO",
+        })
+        _upload(client, variant)
+        monkeypatch.setattr(
+            portfolio_autoclass, "fetch_symbol_info",
+            lambda s: {"quoteType": "EQUITY", "sector": "Energy",
+                       "country": "Germany"},
+        )
+        resp = client.post("/api/money/portfolio/classifications/auto")
+        assert resp.status_code == 200
+        body = resp.json()
+        classified = {c["symbol"]: c for c in body["classified"]}
+        assert classified["ZZZQ"]["geography"] == "Germany"
+        rows = client.get("/api/money/portfolio/classifications").json()
+        row = next(c for c in rows["classifications"] if c["symbol"] == "ZZZQ")
+        assert row["source"] == "auto"
+
+    def test_backfill_endpoint_empty_portfolio(self, client):
+        resp = client.post("/api/money/portfolio/classifications/auto")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["classified"] == []
+        assert body["unresolved"] == []
+
+    def test_classifications_carry_source(self, client):
+        rows = client.get("/api/money/portfolio/classifications").json()
+        assert all(c["source"] == "seed" for c in rows["classifications"])
+        resp = client.put(
+            "/api/money/portfolio/classifications/zzzt",
+            json={"asset_class": "Stocks"},
+        )
+        assert resp.json()["classification"]["source"] == "user"

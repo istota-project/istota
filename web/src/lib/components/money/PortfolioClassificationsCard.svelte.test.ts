@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import PortfolioClassificationsCard from './PortfolioClassificationsCard.svelte';
 import {
+  autoClassifyPortfolio,
   getPortfolioClassifications,
   putPortfolioClassification,
   deletePortfolioClassification,
@@ -9,6 +10,7 @@ import {
 import type { PortfolioClassification } from '$lib/money/api';
 
 vi.mock('$lib/money/api', () => ({
+  autoClassifyPortfolio: vi.fn(),
   getPortfolioClassifications: vi.fn(),
   putPortfolioClassification: vi.fn(),
   deletePortfolioClassification: vi.fn(),
@@ -18,11 +20,13 @@ vi.mock('$lib/money/api', () => ({
 // environment and surface as post-teardown errors in whichever file runs next.
 vi.mock('$lib/stores/notices', () => ({
   notifyError: vi.fn(),
+  notifyInfo: vi.fn(),
   notifySuccess: vi.fn(),
 }));
 
 const mockedGet = vi.mocked(getPortfolioClassifications);
 const mockedPut = vi.mocked(putPortfolioClassification);
+const mockedAuto = vi.mocked(autoClassifyPortfolio);
 vi.mocked(deletePortfolioClassification);
 
 function cls(overrides: Partial<PortfolioClassification> = {}): PortfolioClassification {
@@ -31,6 +35,7 @@ function cls(overrides: Partial<PortfolioClassification> = {}): PortfolioClassif
     asset_class: 'Stocks',
     sub_class: 'Total Market',
     geography: 'US',
+    source: 'seed',
     updated_at: '2026-07-01T00:00:00Z',
     ...overrides,
   };
@@ -114,5 +119,37 @@ describe('PortfolioClassificationsCard', () => {
     expect(classTriggers.some((t) => t.textContent?.includes('Stocks'))).toBe(true);
     expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+  });
+
+  it('badges auto-classified rows but not seeded or user rows', async () => {
+    await mount([
+      cls({ symbol: 'VTI', source: 'seed' }),
+      cls({ symbol: 'ZZZQ', source: 'auto' }),
+      cls({ symbol: 'GOOG', source: 'user' }),
+    ]);
+    // the card hint also says "auto" in prose, so scope to the badge
+    expect(screen.getAllByText('auto', { selector: '.badge' })).toHaveLength(1);
+  });
+
+  it('runs the auto-classify card action and reloads the list', async () => {
+    await mount([cls()]);
+    mockedAuto.mockResolvedValue({
+      status: 'ok',
+      classified: [
+        {
+          symbol: 'ZZZQ',
+          asset_class: 'Stocks',
+          sub_class: 'Technology',
+          geography: 'US',
+          method: 'lookup',
+        },
+      ],
+      unresolved: [],
+    });
+    mockedGet.mockClear();
+    await fireEvent.click(screen.getByRole('button', { name: 'Auto-classify' }));
+    expect(mockedAuto).toHaveBeenCalledOnce();
+    // The list reloads so the new row and its badge appear.
+    expect(mockedGet).toHaveBeenCalled();
   });
 });

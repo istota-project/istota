@@ -1288,6 +1288,8 @@ def portfolio_import(ctx, file, source_name, dry_run, replace_id):
         })
         return
 
+    from istota.money import portfolio_autoclass
+
     conn = _require_db(ctx)
     try:
         if replace_id is not None:
@@ -1296,6 +1298,17 @@ def portfolio_import(ctx, file, source_name, dry_run, replace_id):
             portfolio.insert_snapshot(conn, s, source_file=Path(file).name)
             for s in snapshots
         ]
+        # Auto-classify new symbols (ticker lookup, then description
+        # heuristics); fail-soft — anything unresolved stays reported.
+        for s, r in zip(snapshots, results):
+            if r["status"] != "ok":
+                continue
+            if r.get("unclassified_symbols"):
+                auto = portfolio_autoclass.auto_classify_snapshot(conn, s)
+                r["auto_classified"] = auto["classified"]
+                r["unclassified_symbols"] = auto["unresolved"]
+            else:
+                r["auto_classified"] = []
     finally:
         conn.close()
 
@@ -1487,6 +1500,25 @@ def portfolio_classify(ctx, symbol, asset_class, sub_class, geography):
         _output({"status": "ok", "symbol": norm})
     finally:
         conn.close()
+
+
+@portfolio_group.command("autoclass")
+@pass_ctx
+def portfolio_autoclass_cmd(ctx):
+    """Auto-classify every imported symbol that resolves to Unclassified.
+
+    Ticker metadata lookup first, offline description heuristics second;
+    writes source='auto' rows and never touches an existing classification.
+    """
+    from istota.money import portfolio_autoclass
+
+    conn = _require_db(ctx)
+    try:
+        candidates = portfolio_autoclass.candidates_from_positions(conn)
+        result = portfolio_autoclass.auto_classify_symbols(conn, candidates)
+    finally:
+        conn.close()
+    _output({"status": "ok", **result})
 
 
 @portfolio_group.command("unclassify")

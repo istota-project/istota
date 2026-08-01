@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SettingsCard } from '$lib/components/settings';
-  import { Button, ConfirmDialog, Input, KebabMenu, Select } from '$lib/components/ui';
-  import { notifyError, notifySuccess } from '$lib/stores/notices';
+  import { Badge, Button, ConfirmDialog, Input, KebabMenu, Select } from '$lib/components/ui';
+  import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import {
+    autoClassifyPortfolio,
     deletePortfolioClassification,
     getPortfolioClassifications,
     putPortfolioClassification,
@@ -41,6 +42,7 @@
   let editBusy = $state(false);
 
   let confirmDelete: string | null = $state(null);
+  let autoBusy = $state(false);
 
   const classOptions = $derived(
     toOptions(assetClassOptions(classifications.map((c) => c.asset_class))),
@@ -154,6 +156,37 @@
     }
   }
 
+  // Ticker metadata lookup + description heuristics, server-side; fills in
+  // every imported symbol still resolving to Unclassified and never touches
+  // an existing row. Rows it writes carry the "auto" badge.
+  async function autoClassify() {
+    autoBusy = true;
+    try {
+      const result = await autoClassifyPortfolio();
+      if (result.classified.length > 0) {
+        notifySuccess(`Auto-classified ${result.classified.map((c) => c.symbol).join(', ')}`, {
+          key: 'portfolio:classification',
+        });
+      } else {
+        notifyInfo('Nothing to classify — every symbol already resolves', {
+          key: 'portfolio:classification',
+        });
+      }
+      if (result.unresolved.length > 0) {
+        notifyInfo(`Could not classify: ${result.unresolved.join(', ')}`, {
+          key: 'portfolio:unclassified',
+        });
+      }
+      await load();
+    } catch (e) {
+      notifyError(e instanceof Error ? e.message : 'Auto-classify failed', {
+        key: 'portfolio:classification',
+      });
+    } finally {
+      autoBusy = false;
+    }
+  }
+
   function detailOf(cls: PortfolioClassification): string {
     return [cls.sub_class, cls.geography].filter(Boolean).join(' · ');
   }
@@ -167,12 +200,25 @@
 </script>
 
 <SettingsCard title="Symbol classifications ({classifications.length})">
+  {#snippet actions()}
+    <Button
+      variant="pill"
+      size="sm"
+      disabled={autoBusy}
+      loading={autoBusy}
+      loadingLabel="Classifying…"
+      onclick={autoClassify}
+    >
+      Auto-classify
+    </Button>
+  {/snippet}
   {#if loadError}
     <div class="banner error">{loadError}</div>
   {:else}
     <p class="card-hint">
-      Classifications drive the allocation charts and reclassify all history at read time.
-      Unclassified symbols fall back to the built-in cash and options rules.
+      New symbols classify themselves on import (ticker lookup, marked <em>auto</em>); edit a row to
+      override — your edit always wins. Auto-classify fills in anything still unclassified.
+      Classifications reclassify all history at read time.
     </p>
 
     <div class="cls-form add-form control-row">
@@ -295,6 +341,9 @@
                       >{' · ' + detailOf(cls)}</span
                     >{/if}</span
                 >
+                {#if cls.source === 'auto'}
+                  <Badge variant="info">auto</Badge>
+                {/if}
                 <KebabMenu items={menu(cls)} ariaLabel="Actions for {cls.symbol}" />
               </div>
             {/if}

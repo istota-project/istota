@@ -283,6 +283,47 @@ class TestClassifications:
         portfolio.set_classification(conn, "FDRXX", asset_class="Fixed Income")
         assert portfolio.resolve_classification(conn, "FDRXX", "GOVT MONEY MARKET", "", "position")[0] == "Fixed Income"
 
+    def test_seed_rows_carry_seed_source(self, conn):
+        by_symbol = {c.symbol_norm: c for c in portfolio.list_classifications(conn)}
+        assert by_symbol["VTI"].source == "seed"
+
+    def test_set_classification_defaults_to_user_source(self, conn):
+        portfolio.set_classification(conn, "ZZZT", asset_class="Stocks")
+        by_symbol = {c.symbol_norm: c for c in portfolio.list_classifications(conn)}
+        assert by_symbol["ZZZT"].source == "user"
+
+    def test_set_classification_accepts_explicit_source(self, conn):
+        portfolio.set_classification(
+            conn, "ZZZT", asset_class="Stocks", source="auto"
+        )
+        by_symbol = {c.symbol_norm: c for c in portfolio.list_classifications(conn)}
+        assert by_symbol["ZZZT"].source == "auto"
+
+    def test_source_column_migrates_in_place(self, tmp_path):
+        """A DB created before the source column gets it via ALTER; existing
+        rows read back with the empty-string default."""
+        db = tmp_path / "money.db"
+        conn = sqlite3.connect(str(db))
+        conn.executescript(
+            """
+            CREATE TABLE portfolio_classifications (
+                symbol_norm TEXT PRIMARY KEY,
+                asset_class TEXT NOT NULL,
+                sub_class TEXT NOT NULL DEFAULT '',
+                geography TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO portfolio_classifications VALUES
+                ('ZZZT', 'Stocks', 'Large Cap', 'US', '2026-01-01T00:00:00');
+            """
+        )
+        conn.commit()
+        portfolio.ensure_schema(conn)
+        by_symbol = {c.symbol_norm: c for c in portfolio.list_classifications(conn)}
+        assert by_symbol["ZZZT"].source == ""
+        assert by_symbol["ZZZT"].asset_class == "Stocks"
+        conn.close()
+
 
 class TestSummaryAndExclusion:
     def _seed(self, conn):
