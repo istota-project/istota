@@ -6,11 +6,22 @@
   import { Collapsible } from 'bits-ui';
   import { getLedgers, checkLedger, AuthError } from '$lib/money/api';
   import { selectedLedger, availableLedgers } from '$lib/money/stores/ledger';
-  import { AppShell, ShellHeader, HeaderNav, Select, Chip } from '$lib/components/ui';
+  import {
+    AppShell,
+    ShellHeader,
+    HeaderNav,
+    Select,
+    Chip,
+    Sidebar,
+    SidebarToggle,
+  } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
+  import { MONEY_SETTINGS_SECTIONS } from '$lib/money/settingsSections';
   import { Cog } from 'lucide-svelte';
 
   let { children } = $props();
+
+  let settingsSidebarOpen = $state(false);
 
   let loading = $state(true);
   let error = $state('');
@@ -90,6 +101,14 @@
     if (onSettings) goto(`${moneyBase}/accounts`);
     else goto(`${moneyBase}/settings`);
   }
+
+  // `/money/settings` is a prefix of every settings sub-route, so the index
+  // section matches exactly rather than by prefix — otherwise Connections stays
+  // lit on every section.
+  function settingsSectionActive(href: string): boolean {
+    const path = page.url.pathname.replace(/\/$/, '');
+    return path === `${moneyBase}/settings${href}`.replace(/\/$/, '');
+  }
 </script>
 
 {#if loading}
@@ -105,7 +124,22 @@
        the one section that scrolls in .shell-main directly. -->
   <AppShell insetBottom={onSettings}>
     {#snippet header()}
-      <ShellHeader title="Money">
+      <ShellHeader
+        title="Money"
+        onTitleClick={onSettings ? () => (settingsSidebarOpen = !settingsSidebarOpen) : undefined}
+        titleActionLabel={onSettings ? 'open settings sections' : undefined}
+      >
+        <!-- Only on settings: that is the one money section with a sidebar, and
+             the toggle drives it. Every other section navigates from the nav. -->
+        {#snippet leading()}
+          {#if onSettings}
+            <SidebarToggle
+              open={settingsSidebarOpen}
+              label="Settings sections"
+              onclick={() => (settingsSidebarOpen = !settingsSidebarOpen)}
+            />
+          {/if}
+        {/snippet}
         {#snippet nav()}
           <HeaderNav items={navItems} ariaLabel="Money section" />
         {/snippet}
@@ -136,6 +170,38 @@
           </Chip>
         {/snippet}
       </ShellHeader>
+    {/snippet}
+
+    <!-- Rendered by the module layout rather than by `settings/+layout.svelte`,
+         because a `Sidebar` has to be a sibling of `.shell-main` to be a column
+         beside it — from inside the settings layout it would be a block
+         scrolling within the pane. The section list is imported so the two
+         cannot disagree about it. -->
+    {#snippet sidebar()}
+      {#if onSettings}
+        <Sidebar
+          title="Settings"
+          open={settingsSidebarOpen}
+          onClose={() => (settingsSidebarOpen = false)}
+        >
+          <div class="views">
+            {#each MONEY_SETTINGS_SECTIONS as section (section.href)}
+              {@const Icon = section.icon}
+              {@const active = settingsSectionActive(section.href)}
+              <a
+                class="view-btn"
+                class:active
+                href="{moneyBase}/settings{section.href}"
+                aria-current={active ? 'page' : undefined}
+                onclick={() => (settingsSidebarOpen = false)}
+              >
+                <Icon size={14} />
+                <span class="view-name">{section.label}</span>
+              </a>
+            {/each}
+          </div>
+        </Sidebar>
+      {/if}
     {/snippet}
 
     {#snippet extras()}
