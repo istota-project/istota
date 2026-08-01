@@ -1,4 +1,4 @@
-import { Plug, Receipt, PieChart } from 'lucide-svelte';
+import { Plug, Receipt, PieChart, Landmark } from 'lucide-svelte';
 import type { ComponentType } from 'svelte';
 
 /**
@@ -22,4 +22,5 @@ export const MONEY_SETTINGS_SECTIONS: MoneySettingsSection[] = [
   { href: '', label: 'Connections', icon: Plug },
   { href: '/invoicing', label: 'Invoicing', icon: Receipt },
   { href: '/portfolio', label: 'Portfolio', icon: PieChart },
+  { href: '/taxes', label: 'Taxes', icon: Landmark },
 ];
