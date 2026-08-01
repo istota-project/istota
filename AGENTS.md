@@ -242,6 +242,10 @@ Surfaces: a FastAPI router at `/istota/api/health/*`, SvelteKit pages under `/he
 
 Full reference — the full schema, conditions-across-encounters (`diagnosis_encounters` many-to-many), the documents store (dedup, orphan sweep, MIME allowlist, containment rules, agent access), CSV import/export, and the per-page UI inventory — in `.claude/rules/health.md`.
 
+### Money portfolio
+
+Point-in-time investment portfolio tracking inside the money module (`src/istota/money/portfolio.py`): Fidelity Portfolio Positions CSV exports (and fina's history file, the migration source) import as **snapshots** into the per-user `money.db` via the importer registry's `kind="positions"` axis, with content-hash dedup so re-imports are safe. Account registry + symbol classifications are per-user data (auto-populated on import, edited on `/money/settings`); classification resolves at read time so edits retroactively reclassify history. Surfaces: the **Portfolio** money web tab (Overview | History — allocation charts, holdings, value over time, snapshot diffs, upload), `istota money portfolio …`, and `istota-skill money portfolio …`. Snapshots never touch the beancount ledgers. Details in `.claude/rules/skills.md` under the `money` skill.
+
 ### Web UI
 
 **Building or changing frontend code? Read `web/AGENTS.md` first** — the component inventory, color tokens, page skeletons, and the `npm run lint:design` check live there. Rationale and the non-obvious invariants live in `.claude/rules/web-ui.md`.
