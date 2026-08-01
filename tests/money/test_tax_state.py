@@ -435,3 +435,101 @@ class TestSchedulesFeedTheEstimate:
             db, 2026, "federal", "mfj", standard_deduction=88_888,
         )
         assert config_store.load_tax(db).federal_standard_deduction is None
+
+
+class TestSaveTaxDoesNotDestroyOverrides:
+    """`save_tax` persists scalar edits; it must never clear a schedule row.
+
+    Its TaxConfig may have been loaded under a different state or filing status,
+    in which case the schedule fields are None because they were never *read* —
+    not because the user cleared them. Treating that None as "clear" made
+    turning a state on delete the override that state already had.
+    """
+
+    def test_enabling_a_state_keeps_its_existing_override(self, db):
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2025))
+        config_store.upsert_tax_schedule(
+            db, 2025, "CA", "mfj",
+            brackets=[[0, 0.011]], standard_deduction=10_800,
+        )
+        # Loaded with state unset, so state_* come back None.
+        cfg = config_store.load_tax(db)
+        assert cfg.state_standard_deduction is None
+        cfg.state = "CA"
+        config_store.save_tax(db, cfg)
+
+        reloaded = config_store.load_tax(db)
+        assert reloaded.state == "CA"
+        assert reloaded.state_standard_deduction == 10_800
+        assert reloaded.state_brackets == [[0, 0.011]]
+
+    def test_switching_filing_status_keeps_the_other_status_override(self, db):
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2025,
+                                            state="CA"))
+        config_store.upsert_tax_schedule(
+            db, 2025, "CA", "mfj", standard_deduction=10_800,
+        )
+        cfg = config_store.load_tax(db)
+        cfg.filing_status = "single"
+        config_store.save_tax(db, cfg)
+
+        assert config_store.get_tax_schedule(db, 2025, "CA", "mfj") == {
+            "brackets": None, "standard_deduction": 10_800,
+        }
+
+    def test_switching_year_keeps_the_other_years_override(self, db):
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2025))
+        config_store.upsert_tax_schedule(
+            db, 2025, "federal", "mfj", standard_deduction=31_000,
+        )
+        cfg = config_store.load_tax(db)
+        cfg.tax_year = 2026
+        config_store.save_tax(db, cfg)
+
+        assert config_store.get_tax_schedule(db, 2025, "federal", "mfj") == {
+            "brackets": None, "standard_deduction": 31_000,
+        }
+
+    def test_setting_one_field_does_not_clear_the_other(self, db):
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2025,
+                                            state="CA"))
+        config_store.upsert_tax_schedule(
+            db, 2025, "CA", "mfj",
+            brackets=[[0, 0.011]], standard_deduction=10_800,
+        )
+        cfg = config_store.load_tax(db)
+        cfg.state_brackets = None          # not read / not edited
+        cfg.state_standard_deduction = 99  # the actual edit
+        config_store.save_tax(db, cfg)
+
+        assert config_store.get_tax_schedule(db, 2025, "CA", "mfj") == {
+            "brackets": [[0, 0.011]], "standard_deduction": 99,
+        }
+
+    def test_a_migrated_override_survives_being_switched_on(self, db):
+        """The end-to-end path the bug was found on."""
+        import json
+        import sqlite3
+
+        config_store.init_db(db)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "INSERT INTO tax_settings(key, value) VALUES ('filing_status', 'mfj')"
+            )
+            conn.execute(
+                "INSERT INTO tax_settings(key, value) VALUES ('tax_year', '2025')"
+            )
+            conn.execute(
+                "INSERT INTO tax_year_rates(tax_year, ca_standard_deduction,"
+                " ca_brackets_json) VALUES (2025, 10800, ?)",
+                (json.dumps([[0, 0.011]]),),
+            )
+        config_store.migrate_tax_schedules(db)
+
+        cfg = config_store.load_tax(db)
+        cfg.state = "CA"
+        config_store.save_tax(db, cfg)
+
+        reloaded = config_store.load_tax(db)
+        assert reloaded.state_standard_deduction == 10_800
+        assert reloaded.state_brackets == [[0, 0.011]]

@@ -1503,12 +1503,12 @@ def save_tax(
         )):
             _upsert_year_rates(conn, cfg.tax_year, cfg)
 
-        _write_schedule(
+        _merge_schedule(
             conn, cfg.tax_year, FEDERAL_JURISDICTION, cfg.filing_status,
             cfg.federal_brackets, cfg.federal_standard_deduction,
         )
         if cfg.state:
-            _write_schedule(
+            _merge_schedule(
                 conn, cfg.tax_year, cfg.state.upper(), cfg.filing_status,
                 cfg.state_brackets, cfg.state_standard_deduction,
             )
@@ -1593,6 +1593,39 @@ def _write_schedule(
             json.dumps([list(b) for b in brackets]) if brackets is not None else None,
             standard_deduction,
         ),
+    )
+
+
+def _merge_schedule(
+    conn: sqlite3.Connection,
+    year: int,
+    jurisdiction: str,
+    filing_status: str,
+    brackets: list | None,
+    standard_deduction: float | None,
+) -> None:
+    """Set whichever schedule fields are present; never clear one that is None.
+
+    :func:`save_tax` is how a dozen callers across the CLI and the API persist
+    an unrelated *scalar* edit, and the ``TaxConfig`` it is handed may have been
+    loaded under a different year, state or filing status — in which case the
+    schedule fields are None because they were never **read**, not because the
+    user cleared them.
+
+    Treating that None as "clear" was destructive: loading a config with no
+    state selected, setting ``state = "CA"`` and saving deleted whatever
+    California override the user (or the legacy migration) had already put
+    there. Clearing an override is :func:`delete_tax_schedule`'s job, which is
+    what the settings page's per-field revert calls.
+    """
+    if brackets is None and standard_deduction is None:
+        return
+    existing = _fetch_schedule(conn, year, jurisdiction, filing_status) or {}
+    _write_schedule(
+        conn, year, jurisdiction, filing_status,
+        brackets if brackets is not None else existing.get("brackets"),
+        standard_deduction if standard_deduction is not None
+        else existing.get("standard_deduction"),
     )
 
 
