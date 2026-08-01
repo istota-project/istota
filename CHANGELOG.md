@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tapping a text field on a phone no longer zooms the page in. Opening room settings, or any dialog or form in the app, blew the field up to the full width and pushed the rest of the layout off-screen, and iOS did not reliably zoom back out afterwards. Fields and dropdowns are now large enough on touch that it no longer triggers, so the app stays put and pinch-zoom still works when you want it.
+
 - Briefings no longer carry dead links from your notes. A reminder, todo or note whose text linked to another note in your vault arrived with that link intact, so the attribution under a quote was a clickable link to nothing in email and web chat. Those links are now flattened to plain text before the briefing is written, since there was nothing at the other end to reach. Real web links, including the article links under news stories, are untouched.
 
 - Pasting something large into the web chat composer no longer stops drafts being saved everywhere. One oversized unsent message filled the space all drafts share, after which nothing was kept in any room and nothing said so. A very long draft is now held up to a generous limit and loses only its tail, and the store as a whole is bounded, so an unsent paste can no longer take every other room's draft down with it.

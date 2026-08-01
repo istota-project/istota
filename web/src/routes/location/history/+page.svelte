@@ -400,6 +400,12 @@
   .date-inputs {
     display: flex;
     align-items: center;
+    /* A date input renders at a font-driven intrinsic width on iOS, and the
+       touch floor in app.css lifts it to 16px — so two of them plus their
+       labels no longer fit one phone row. Wrap rather than squeeze, matching
+       the same row on /health/history. */
+    flex-wrap: wrap;
+    min-width: 0;
     gap: var(--space-2);
   }
 

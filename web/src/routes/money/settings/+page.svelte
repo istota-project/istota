@@ -798,6 +798,10 @@
 
   .login-form input {
     font: inherit;
+    /* Names the token rather than inheriting the label's computed size: the
+       iOS zoom floor in app.css redefines the type tokens on the control, so
+       an inherited size arrives already under the line and zooms. */
+    font-size: var(--text-sm);
     padding: var(--space-2) var(--space-2);
     border-radius: var(--radius-sm);
     border: 1px solid var(--border-default);

@@ -515,6 +515,76 @@ input[type='week']::-webkit-date-and-time-value {
   min-height: 1.2em;
 }
 
+/* iOS zooms the page whenever a focused input, select or textarea computes
+   under 16px, and then does not cleanly zoom back out — so opening any dialog
+   with a field in it left the app scaled up with that field filling the width.
+   Every control here renders at a small type token (--text-sm is 12-14px
+   depending on the text-scale preference), so this fired on every form in the
+   app rather than on any one of them.
+
+   The floor is the fix rather than a locked viewport: `maximum-scale=1` would
+   end the zoom by ending pinch-zoom, and only inside the installed app at that.
+
+   Two rules, because a control's size arrives two ways. The type tokens are
+   redefined *on the control itself* — custom properties inherit, so whichever
+   `font-size: var(--text-sm)` rule a component wins with resolves against
+   these, and no component needs editing (nor can one quietly opt out by
+   out-specifying a global rule). `max()` rather than a flat 16px, so the large
+   text-scale preference is never scaled back *down*. Every token below the line
+   is listed whether or not a control names one today — touchZoom.test.ts fails
+   if a new one is added without a floor. Checkboxes, radios and the two
+   types that render no text (`range`, `color`) are excluded: some platforms
+   size the box from the font.
+
+   The second rule is the fallback for a control that declares no `font-size` at
+   all, since the UA font is ~13px and also under the line. A control naming a
+   token is already handled above, and one taking its size from a wrapper via
+   `font: inherit` is reached by neither — that is a call-site bug, and
+   touchZoom.test.ts is the net for it. It is wrapped in
+   `:where()` to make it weightless: the `:not()` chain above scores higher than
+   almost every component rule, so left unwrapped this would stop being a
+   fallback and start clamping a control that asks for something larger. It
+   names --text-sm, which on the control is already floored.
+
+   The one control this does not reach is the chat composer's textarea, whose
+   size is inherited from the pill around it (every internal metric there is
+   em-relative to that one font-size). It carries its own guard — see the
+   viewport swap in Composer.svelte. */
+@media (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+  select,
+  textarea {
+    --text-2xs: max(0.55rem, 16px);
+    --text-xs: max(0.7rem, 16px);
+    --text-sm: max(0.75rem, 16px);
+    --text-base: max(0.85rem, 16px);
+  }
+
+  :where(
+    input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
+    select,
+    textarea
+  ) {
+    font-size: var(--text-sm);
+  }
+
+  /* The full-width Select trigger is a <button>, so it never zoomed and needs
+     no floor of its own — but it is the settings-form sibling of a text input,
+     and Select.svelte pins its line-height for the express purpose of matching
+     input height ("~4px shorter than the inputs it sits beside in forms").
+     Floating the inputs up without it puts the two back out of step, which is
+     visible wherever a form stacks a field over a dropdown. Same mechanism, so
+     its own `font-size: var(--text-sm)` resolves floored.
+
+     Deliberately only the `--full` variant. The compact `sm`/`md` triggers sit
+     in dense toolbars beside Chips and Buttons, which are actions rather than
+     fields and stay at their own size — see the shared-height note in
+     web/AGENTS.md. */
+  .ui-select-trigger--full {
+    --text-sm: max(0.75rem, 16px);
+  }
+}
+
 /* Scrollbars are left entirely to the platform. Do NOT add `::-webkit-scrollbar`
    rules (or `scrollbar-width`/`scrollbar-color`) to a scroll container: styling
    one at all opts that element out of the OS overlay scrollbar, so instead of a

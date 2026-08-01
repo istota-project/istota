@@ -2,6 +2,40 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-31: Every form in the app zoomed the phone, and the fix is a token redefined on the control
+
+ISSUE-219, reported against the room settings dialog and true of every form in the app. iOS zooms the page whenever a focused `input`/`select`/`textarea` computes under 16px, and then does not reliably zoom back out — so a field ended up filling the viewport with the layout pushed off-screen. Nothing about room settings caused it: the whole type scale a control can name sits under the line, `--text-sm` being 12px at the unscaled root, so the trigger was every field the app has.
+
+**The fix is a floor, and the interesting part is where it is applied.** The obvious spelling — a global `input, select, textarea { font-size }` — loses: a component's scoped `.input.svelte-hash` rule outranks a bare element selector, so the controls that already state a size would keep it and the rule would only reach the ones that state none. Editing the four shared primitives instead would miss every raw `<input>` in a dialog. So the block redefines the **type tokens on the control element itself**. Custom properties inherit and are resolved per element, so whichever `font-size: var(--text-sm)` rule wins inside a component now resolves against a floored value, at any specificity, with no component edited and no way for one to opt out by out-specifying it. `max()` rather than a flat 16px, so a larger text-scale preference is never scaled back down.
+
+**The fallback beneath it is wrapped in `:where()` on purpose.** A control that declares no `font-size` at all reads no token — the UA font is ~13px, also under the line — so the block needs a plain declaration too. The exclusion chain that keeps checkboxes and radios out (`:not([type='checkbox'])` and three more) scores (0,4,1), which outranks nearly every component rule in the tree, so left unwrapped that fallback would stop being a fallback and start clamping any control that legitimately wants to be larger. Zero specificity is the whole point: it catches what states nothing and loses to everything else.
+
+**The viewport lock was the alternative and was not taken.** `maximum-scale=1, user-scalable=no` ends the zoom by ending pinch-zoom, which is a real accessibility cost, and it only bites inside the installed app rather than in a browser tab. The composer already carries a narrow version of it — a focus-time swap of the meta tag — and that stays, because it is the one control the floor cannot reach.
+
+**What the floor cannot reach is a size that is inherited rather than named.** An inherited value loses to an author declaration of any weight, so a control taking its size from a wrapper reads no token and lands wherever the wrapper is. There were exactly two in the tree. The chat composer's textarea is `font: inherit` under a pill that owns the font-size, with every internal metric em-relative to it, so it keeps its own guard and is the single entry in the test's exemption list. `money/settings`' login inputs inherited from a `<label>` at `--text-sm` and were simply a call-site bug, corrected to name the token.
+
+**The full-width `Select` trigger was floored too, though it never zoomed.** It renders a `<button>`, so WebKit was never going to zoom for it — but `Select.svelte` pins its `line-height` for the express purpose of not sitting "~4px shorter than the inputs it sits beside in forms", and lifting only the inputs put that pair straight back out of step on the screen the issue was filed against. Same mechanism, same base value, so the two land together. Deliberately only the `--full` variant: the compact `sm`/`md` triggers live in dense toolbars beside chips and buttons, which are actions rather than fields.
+
+**Three corrections to the issue's own diagnosis.** It names `Select.svelte`'s three `--text-sm` declarations as zoom sources; that component is bits-ui backed and its trigger is a button, so it never zoomed and the fix reaches it for the unrelated reason above. It reads the room-token field as `--text-xs`; `.field input[type='text']` outranks `.token-row .token`, so both fields in that dialog were at `--text-sm`. And it missed the inherited-size case entirely, which is the only one no token-level fix could have covered.
+
+**Deliberately not done.** `Button`, `Chip` and the compact `Select` triggers are not floored, so a toolbar mixing a text input with them sits taller than its buttons on a phone and the shared-`--control-height-*` invariant does not hold there; scaling the whole control system for touch is a design change rather than a bug fix, and it is now written down in `web/AGENTS.md` beside the rule it qualifies. Below the floor the app's own text-size preference stops moving control text — all three settings resolve to exactly 16px — while the `rem` padding around it still grows, which inverts the root-scaling model for controls; accepted, because the platform sets the number. `any-pointer: coarse` was considered for an iPad with a trackpad attached, and rejected because it also matches a touchscreen laptop and would give away the compact desktop density the issue asked to keep.
+
+**The review earned its keep on the test rather than the fix.** The first version of the guard could not match `:global(input)`, which is this codebase's dominant idiom for sizing a control from a wrapper and is how `ui/Field.svelte` sizes most of the app's inputs — so the single highest-traffic rule it existed to protect was invisible to it. Mulder proved it by mutating that rule to `font-size: 11px` and watching all eleven tests still pass. One character in a character class fixed it. Two other assertions passed for the wrong reason: the `:where()` check was reading a line break rather than a selector, and the selector coverage checks were both looking at the first rule in the block, never the fallback.
+
+**Key changes:**
+
+- A `@media (pointer: coarse)` block in `app.css` redefining `--text-2xs`/`--text-xs`/`--text-sm`/`--text-base` on controls as `max(<base>, 16px)`, plus a `:where()`-wrapped `font-size` fallback and a matching floor on the full-width `Select` trigger.
+- `money/settings`' login inputs name the token instead of inheriting from their label.
+- `/location/history`'s date row wraps and can shrink, matching the same row on `/health/history` — two native date inputs render at a font-driven intrinsic width, which the floor widens.
+- `touchZoom.test.ts` asserts the floor against the `:root` values (so the two copies cannot drift), that every `--text-*` length is evaluated rather than skipped when unparseable, and that no stylesheet — `.svelte` or `.css` — sizes an element-selected control outside the tokens. Exemptions are keyed on file *and* selector, so one cannot blanket a control added later.
+
+**Files added/modified:**
+
+- `web/src/app.css` - the floor, the fallback, the `Select` trigger
+- `web/src/lib/styles/touchZoom.test.ts` - new, 14 tests
+- `web/src/routes/money/settings/+page.svelte`, `web/src/routes/location/history/+page.svelte` - the two call sites
+- `web/AGENTS.md`, `.claude/rules/web-ui.md` - the sizing rule, and the shared-height invariant it qualifies on touch
+
 ## 2026-07-31: One paste, every room's draft; and a geofence clipped at 90 knots
 
 Two unrelated fixes, ISSUE-216 and ISSUE-217, both frontend-only.
