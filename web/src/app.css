@@ -515,6 +515,26 @@
   outline-offset: var(--focus-ring-offset);
 }
 
+/* Text fields are the exception to the rule above. A browser treats a focused
+   text input as focus-visible however it was focused, so unlike a button they
+   draw the ring on a plain mouse click too — which reads as an error state
+   rather than a focus hint. They keep a caret and their own focus styling, so
+   the ring is dropped for them alone. Checkboxes, radios and the
+   input-as-button types are left out: they have no caret, and nothing but the
+   ring would show that they are focused. */
+input:not(
+    [type='checkbox'],
+    [type='radio'],
+    [type='button'],
+    [type='submit'],
+    [type='reset'],
+    [type='file']
+  ):focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+
 /* iOS Safari gives date/time inputs a native control with an intrinsic content
    width that ignores `width`/`max-width` while the platform appearance is on —
    so a field sized to its container on desktop overflows the card on an iPhone.
