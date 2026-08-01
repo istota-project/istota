@@ -193,6 +193,20 @@ class TaxRates:
         """States we ship rate data for. Every other state is override-driven."""
         return sorted(self._raw.get("states", {}))
 
+    def omitted_states(self) -> dict[str, str]:
+        """States deliberately left unbundled, mapped to why.
+
+        Absent data is fine; absent data that looks like an oversight is not.
+        These are states whose rate is known but whose base, deduction or
+        exemption could not be verified for the year — shipping the rate alone
+        would produce a confident wrong number.
+        """
+        return {
+            code: reason
+            for code, reason in (self._raw.get("omitted_states") or {}).items()
+            if not code.startswith("_")
+        }
+
     def state_meta(self, code: str) -> StateMeta | None:
         block = self._raw.get("states", {}).get((code or "").upper())
         if block is None:

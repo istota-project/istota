@@ -175,7 +175,7 @@ class TestResolvedRates:
             f"{API}/config/tax/resolved?year=2025&filing_status=single"
         ).json()
         assert body["federal"]["standard_deduction"]["value"] == 15_000
-        assert body["state"]["standard_deduction"]["value"] == 5_363
+        assert body["state"]["standard_deduction"]["value"] == 5_706
 
     def test_bad_filing_status_rejected(self, client):
         assert client.get(

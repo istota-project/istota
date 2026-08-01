@@ -6,13 +6,13 @@
     "Every year block carries `source`, `source_url` and `verified_on`. Those are",
     "not decoration: the UI shows them, and `verified_on` older than the start of",
     "the tax year being computed raises a staleness warning. Do NOT copy a year",
-    "block forward and leave its provenance pointing at the older document — that",
+    "block forward and leave its provenance pointing at the older document \u2014 that",
     "is exactly how the 2026 rows came to be 2025 law wearing a 2026 label, with",
     "nothing in the interface able to say so.",
     "",
     "`brackets` are [threshold, rate] pairs, ascending, first threshold 0. Income",
     "between one threshold and the next is taxed at that pair's rate. A flat-rate",
-    "state is a one-bracket table — states move between flat and graduated (Ohio",
+    "state is a one-bracket table \u2014 states move between flat and graduated (Ohio",
     "did in 2026), and modelling `flat` separately would need a migration each",
     "time one converted.",
     "",
@@ -24,46 +24,152 @@
     "`starts_from` is the one conformity knob. See STARTING_POINTS in tax_data.py.",
     "Benefit recapture, exemption phase-outs and per-state credits are not modeled."
   ],
-
   "starting_points": {
     "federal_agi": "Federal AGI, which already carries the above-the-line half-SE deduction. The state's own standard deduction is then subtracted.",
     "federal_taxable_income": "Federal AGI less the FEDERAL standard deduction and QBI deduction. A state on this basis normally sets its own standard_deduction to 0.",
     "gross_compensation": "Gross wage and self-employment income with no above-the-line deductions at all. Pennsylvania's basis."
   },
-
   "jurisdictions": [
-    { "code": "AL", "name": "Alabama", "taxes_income": true },
-    { "code": "AK", "name": "Alaska", "taxes_income": false },
-    { "code": "AZ", "name": "Arizona", "taxes_income": true },
-    { "code": "AR", "name": "Arkansas", "taxes_income": true },
-    { "code": "CA", "name": "California", "taxes_income": true },
-    { "code": "CO", "name": "Colorado", "taxes_income": true },
-    { "code": "CT", "name": "Connecticut", "taxes_income": true },
-    { "code": "DE", "name": "Delaware", "taxes_income": true },
-    { "code": "DC", "name": "District of Columbia", "taxes_income": true },
+    {
+      "code": "AL",
+      "name": "Alabama",
+      "taxes_income": true
+    },
+    {
+      "code": "AK",
+      "name": "Alaska",
+      "taxes_income": false
+    },
+    {
+      "code": "AZ",
+      "name": "Arizona",
+      "taxes_income": true
+    },
+    {
+      "code": "AR",
+      "name": "Arkansas",
+      "taxes_income": true
+    },
+    {
+      "code": "CA",
+      "name": "California",
+      "taxes_income": true
+    },
+    {
+      "code": "CO",
+      "name": "Colorado",
+      "taxes_income": true
+    },
+    {
+      "code": "CT",
+      "name": "Connecticut",
+      "taxes_income": true
+    },
+    {
+      "code": "DE",
+      "name": "Delaware",
+      "taxes_income": true
+    },
+    {
+      "code": "DC",
+      "name": "District of Columbia",
+      "taxes_income": true
+    },
     {
       "code": "FL",
       "name": "Florida",
       "taxes_income": false
     },
-    { "code": "GA", "name": "Georgia", "taxes_income": true },
-    { "code": "HI", "name": "Hawaii", "taxes_income": true },
-    { "code": "ID", "name": "Idaho", "taxes_income": true },
-    { "code": "IL", "name": "Illinois", "taxes_income": true },
-    { "code": "IN", "name": "Indiana", "taxes_income": true },
-    { "code": "IA", "name": "Iowa", "taxes_income": true },
-    { "code": "KS", "name": "Kansas", "taxes_income": true },
-    { "code": "KY", "name": "Kentucky", "taxes_income": true },
-    { "code": "LA", "name": "Louisiana", "taxes_income": true },
-    { "code": "ME", "name": "Maine", "taxes_income": true },
-    { "code": "MD", "name": "Maryland", "taxes_income": true },
-    { "code": "MA", "name": "Massachusetts", "taxes_income": true },
-    { "code": "MI", "name": "Michigan", "taxes_income": true },
-    { "code": "MN", "name": "Minnesota", "taxes_income": true },
-    { "code": "MS", "name": "Mississippi", "taxes_income": true },
-    { "code": "MO", "name": "Missouri", "taxes_income": true },
-    { "code": "MT", "name": "Montana", "taxes_income": true },
-    { "code": "NE", "name": "Nebraska", "taxes_income": true },
+    {
+      "code": "GA",
+      "name": "Georgia",
+      "taxes_income": true
+    },
+    {
+      "code": "HI",
+      "name": "Hawaii",
+      "taxes_income": true
+    },
+    {
+      "code": "ID",
+      "name": "Idaho",
+      "taxes_income": true
+    },
+    {
+      "code": "IL",
+      "name": "Illinois",
+      "taxes_income": true
+    },
+    {
+      "code": "IN",
+      "name": "Indiana",
+      "taxes_income": true
+    },
+    {
+      "code": "IA",
+      "name": "Iowa",
+      "taxes_income": true
+    },
+    {
+      "code": "KS",
+      "name": "Kansas",
+      "taxes_income": true
+    },
+    {
+      "code": "KY",
+      "name": "Kentucky",
+      "taxes_income": true
+    },
+    {
+      "code": "LA",
+      "name": "Louisiana",
+      "taxes_income": true
+    },
+    {
+      "code": "ME",
+      "name": "Maine",
+      "taxes_income": true
+    },
+    {
+      "code": "MD",
+      "name": "Maryland",
+      "taxes_income": true
+    },
+    {
+      "code": "MA",
+      "name": "Massachusetts",
+      "taxes_income": true
+    },
+    {
+      "code": "MI",
+      "name": "Michigan",
+      "taxes_income": true
+    },
+    {
+      "code": "MN",
+      "name": "Minnesota",
+      "taxes_income": true
+    },
+    {
+      "code": "MS",
+      "name": "Mississippi",
+      "taxes_income": true
+    },
+    {
+      "code": "MO",
+      "name": "Missouri",
+      "taxes_income": true
+    },
+    {
+      "code": "MT",
+      "name": "Montana",
+      "taxes_income": true
+    },
+    {
+      "code": "NE",
+      "name": "Nebraska",
+      "taxes_income": true
+    },
     {
       "code": "NV",
       "name": "Nevada",
@@ -73,19 +179,63 @@
       "code": "NH",
       "name": "New Hampshire",
       "taxes_income": false,
-      "note": "The interest-and-dividends tax was repealed effective 2025. New Hampshire has never taxed wage or self-employment income, so for this estimator it is a no-tax state. Do not 'fix' this to true."
+      "note": "The interest-and-dividends tax was repealed for periods beginning after 31 December 2024; tax year 2024 was the last it applied. New Hampshire has never taxed wage or self-employment income, so for this estimator it is a no-tax state. Do not 'fix' this to true."
     },
-    { "code": "NJ", "name": "New Jersey", "taxes_income": true },
-    { "code": "NM", "name": "New Mexico", "taxes_income": true },
-    { "code": "NY", "name": "New York", "taxes_income": true },
-    { "code": "NC", "name": "North Carolina", "taxes_income": true },
-    { "code": "ND", "name": "North Dakota", "taxes_income": true },
-    { "code": "OH", "name": "Ohio", "taxes_income": true },
-    { "code": "OK", "name": "Oklahoma", "taxes_income": true },
-    { "code": "OR", "name": "Oregon", "taxes_income": true },
-    { "code": "PA", "name": "Pennsylvania", "taxes_income": true },
-    { "code": "RI", "name": "Rhode Island", "taxes_income": true },
-    { "code": "SC", "name": "South Carolina", "taxes_income": true },
+    {
+      "code": "NJ",
+      "name": "New Jersey",
+      "taxes_income": true
+    },
+    {
+      "code": "NM",
+      "name": "New Mexico",
+      "taxes_income": true
+    },
+    {
+      "code": "NY",
+      "name": "New York",
+      "taxes_income": true
+    },
+    {
+      "code": "NC",
+      "name": "North Carolina",
+      "taxes_income": true
+    },
+    {
+      "code": "ND",
+      "name": "North Dakota",
+      "taxes_income": true
+    },
+    {
+      "code": "OH",
+      "name": "Ohio",
+      "taxes_income": true
+    },
+    {
+      "code": "OK",
+      "name": "Oklahoma",
+      "taxes_income": true
+    },
+    {
+      "code": "OR",
+      "name": "Oregon",
+      "taxes_income": true
+    },
+    {
+      "code": "PA",
+      "name": "Pennsylvania",
+      "taxes_income": true
+    },
+    {
+      "code": "RI",
+      "name": "Rhode Island",
+      "taxes_income": true
+    },
+    {
+      "code": "SC",
+      "name": "South Carolina",
+      "taxes_income": true
+    },
     {
       "code": "SD",
       "name": "South Dakota",
@@ -101,24 +251,43 @@
       "name": "Texas",
       "taxes_income": false
     },
-    { "code": "UT", "name": "Utah", "taxes_income": true },
-    { "code": "VT", "name": "Vermont", "taxes_income": true },
-    { "code": "VA", "name": "Virginia", "taxes_income": true },
+    {
+      "code": "UT",
+      "name": "Utah",
+      "taxes_income": true
+    },
+    {
+      "code": "VT",
+      "name": "Vermont",
+      "taxes_income": true
+    },
+    {
+      "code": "VA",
+      "name": "Virginia",
+      "taxes_income": true
+    },
     {
       "code": "WA",
       "name": "Washington",
       "taxes_income": false,
-      "note": "Washington taxes long-term capital gains only. It levies no tax on wage or self-employment income, so for this estimator it is a no-tax state. Do not 'fix' this to true."
+      "note": "Washington taxes long-term capital gains only. It levies no tax on wage or self-employment income, so for this estimator it is a no-tax state. Do not 'fix' this to true. Note SB 6346 (signed 30 March 2026) imposes a 9.9% tax on income above a 1000000 deduction effective 1 January 2028 \u2014 a genuinely broad base, under legal challenge. Revisit this flag for tax year 2028, not before."
     },
-    { "code": "WV", "name": "West Virginia", "taxes_income": true },
-    { "code": "WI", "name": "Wisconsin", "taxes_income": true },
+    {
+      "code": "WV",
+      "name": "West Virginia",
+      "taxes_income": true
+    },
+    {
+      "code": "WI",
+      "name": "Wisconsin",
+      "taxes_income": true
+    },
     {
       "code": "WY",
       "name": "Wyoming",
       "taxes_income": false
     }
   ],
-
   "federal": {
     "2025": {
       "source": "IRS Rev. Proc. 2024-40",
@@ -129,13 +298,34 @@
         "mfj": {
           "standard_deduction": 30000,
           "brackets": [
-            [0, 0.1],
-            [23850, 0.12],
-            [96950, 0.22],
-            [206700, 0.24],
-            [394600, 0.32],
-            [501050, 0.35],
-            [751600, 0.37]
+            [
+              0,
+              0.1
+            ],
+            [
+              23850,
+              0.12
+            ],
+            [
+              96950,
+              0.22
+            ],
+            [
+              206700,
+              0.24
+            ],
+            [
+              394600,
+              0.32
+            ],
+            [
+              501050,
+              0.35
+            ],
+            [
+              751600,
+              0.37
+            ]
           ],
           "qbi_threshold": 394600,
           "qbi_phaseout_range": 100000,
@@ -144,13 +334,34 @@
         "single": {
           "standard_deduction": 15000,
           "brackets": [
-            [0, 0.1],
-            [11925, 0.12],
-            [48475, 0.22],
-            [103350, 0.24],
-            [197300, 0.32],
-            [250525, 0.35],
-            [626350, 0.37]
+            [
+              0,
+              0.1
+            ],
+            [
+              11925,
+              0.12
+            ],
+            [
+              48475,
+              0.22
+            ],
+            [
+              103350,
+              0.24
+            ],
+            [
+              197300,
+              0.32
+            ],
+            [
+              250525,
+              0.35
+            ],
+            [
+              626350,
+              0.37
+            ]
           ],
           "qbi_threshold": 197300,
           "qbi_phaseout_range": 50000,
@@ -169,18 +380,39 @@
       "source": "IRS Rev. Proc. 2025-32",
       "source_url": "https://www.irs.gov/pub/irs-drop/rp-25-32.pdf",
       "verified_on": "2026-08-01",
-      "notes": "Brackets from Rev. Proc. 2025-32 section 4.01 tables 1 and 3; standard deduction from .14; QBI threshold and phase-in range from .26 (OBBBA section 70105 widened the phase-in range to 150000/75000 from 100000/50000 — a structural change, not an indexation). Social Security wage base 184500 from the SSA 2026 COLA fact sheet.",
+      "notes": "Brackets from Rev. Proc. 2025-32 section 4.01 tables 1 and 3; standard deduction from .14; QBI threshold and phase-in range from .26 (OBBBA section 70105 widened the phase-in range to 150000/75000 from 100000/50000 \u2014 a structural change, not an indexation). Social Security wage base 184500 from the SSA 2026 COLA fact sheet.",
       "filing_status": {
         "mfj": {
           "standard_deduction": 32200,
           "brackets": [
-            [0, 0.1],
-            [24800, 0.12],
-            [100800, 0.22],
-            [211400, 0.24],
-            [403550, 0.32],
-            [512450, 0.35],
-            [768700, 0.37]
+            [
+              0,
+              0.1
+            ],
+            [
+              24800,
+              0.12
+            ],
+            [
+              100800,
+              0.22
+            ],
+            [
+              211400,
+              0.24
+            ],
+            [
+              403550,
+              0.32
+            ],
+            [
+              512450,
+              0.35
+            ],
+            [
+              768700,
+              0.37
+            ]
           ],
           "qbi_threshold": 403500,
           "qbi_phaseout_range": 150000,
@@ -189,13 +421,34 @@
         "single": {
           "standard_deduction": 16100,
           "brackets": [
-            [0, 0.1],
-            [12400, 0.12],
-            [50400, 0.22],
-            [105700, 0.24],
-            [201775, 0.32],
-            [256225, 0.35],
-            [640600, 0.37]
+            [
+              0,
+              0.1
+            ],
+            [
+              12400,
+              0.12
+            ],
+            [
+              50400,
+              0.22
+            ],
+            [
+              105700,
+              0.24
+            ],
+            [
+              201775,
+              0.32
+            ],
+            [
+              256225,
+              0.35
+            ],
+            [
+              640600,
+              0.37
+            ]
           ],
           "qbi_threshold": 201750,
           "qbi_phaseout_range": 75000,
@@ -211,52 +464,440 @@
       }
     }
   },
-
   "states": {
     "CA": {
       "starts_from": "federal_agi",
-      "installment_schedule": [0.3, 0.7, 0.7, 1.0],
+      "installment_schedule": [
+        0.3,
+        0.7,
+        0.7,
+        1.0
+      ],
       "installment_note": "California's estimated-tax installments are 30/40/0/30 per quarter rather than the federal equal quarters, so nothing is due with the September payment.",
       "years": {
         "2025": {
           "source": "California Franchise Tax Board, 2025 California Tax Rate Schedules",
-          "source_url": "https://www.ftb.ca.gov/forms/2025/2025-california-tax-rate-schedules.html",
+          "source_url": "https://www.ftb.ca.gov/forms/2025/2025-540-tax-rate-schedules.pdf",
           "verified_on": "2026-08-01",
-          "notes": "The top two bands fold in the 1% Mental Health Services Tax on income over 1000000, so the marginal rate reads 12.3% then 13.3%. MFJ thresholds are exactly twice the single thresholds.",
+          "notes": "Schedules X and Y, transcribed from the FTB PDF. Standard deduction from the 2026 Form 540-ES line 2b, which is where the FTB states the 2025 amounts. The top bands fold in the 1% Behavioral Health Services Tax (previously Mental Health Services Tax, R&TC 17043) on income over 1000000 \u2014 a fixed threshold, identical for every filing status, never indexed, so joint filers get no doubling and it is NOT twice the single figure like every other band. 2026 is deliberately absent: the FTB indexes on the June-to-June CCPI and publishes in the autumn, and its own 2026 Form 540-ES tells you to use the 2025 tax table.",
           "filing_status": {
             "mfj": {
-              "standard_deduction": 10726,
+              "standard_deduction": 11412,
               "brackets": [
-                [0, 0.01],
-                [21428, 0.02],
-                [50798, 0.04],
-                [80158, 0.06],
-                [111340, 0.08],
-                [140698, 0.093],
-                [721314, 0.103],
-                [865574, 0.113],
-                [1000000, 0.123],
-                [1442628, 0.133]
+                [
+                  0,
+                  0.01
+                ],
+                [
+                  22158,
+                  0.02
+                ],
+                [
+                  52528,
+                  0.04
+                ],
+                [
+                  82904,
+                  0.06
+                ],
+                [
+                  115084,
+                  0.08
+                ],
+                [
+                  145448,
+                  0.093
+                ],
+                [
+                  742958,
+                  0.103
+                ],
+                [
+                  891542,
+                  0.113
+                ],
+                [
+                  1000000,
+                  0.123
+                ],
+                [
+                  1485906,
+                  0.133
+                ]
               ]
             },
             "single": {
-              "standard_deduction": 5363,
+              "standard_deduction": 5706,
               "brackets": [
-                [0, 0.01],
-                [10714, 0.02],
-                [25399, 0.04],
-                [40084, 0.06],
-                [55670, 0.08],
-                [70349, 0.093],
-                [360657, 0.103],
-                [432787, 0.113],
-                [721314, 0.123],
-                [1000000, 0.133]
+                [
+                  0,
+                  0.01
+                ],
+                [
+                  11079,
+                  0.02
+                ],
+                [
+                  26264,
+                  0.04
+                ],
+                [
+                  41452,
+                  0.06
+                ],
+                [
+                  57542,
+                  0.08
+                ],
+                [
+                  72724,
+                  0.093
+                ],
+                [
+                  371479,
+                  0.103
+                ],
+                [
+                  445771,
+                  0.113
+                ],
+                [
+                  742953,
+                  0.123
+                ],
+                [
+                  1000000,
+                  0.133
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    "CO": {
+      "starts_from": "federal_taxable_income",
+      "years": {
+        "2026": {
+          "source": "Colorado Department of Revenue, Individual Income Tax Guide",
+          "source_url": "https://tax.colorado.gov/individual-income-tax-guide",
+          "verified_on": "2026-08-01",
+          "notes": "Applied to federal taxable income after Colorado additions and subtractions, so there is no separate state standard deduction \u2014 the federal one is already inside the base. The rate is a per-year lookup, not a constant: the TABOR mechanism (SB24-228) temporarily cut it to 4.25% for 2024. Legislative Council's June 2026 forecast expects no trigger for 2026 or 2027.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.044
+                ]
+              ]
+            },
+            "single": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.044
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    "GA": {
+      "starts_from": "federal_agi",
+      "years": {
+        "2026": {
+          "source": "Georgia HB 463 (2026), per the Office of the Governor and the GA DOR Employer's Withholding Tax Guide 2026",
+          "source_url": "https://gov.georgia.gov/press-releases/2026-05-11/gov-kemp-signs-legislation-lowering-taxes-and-supporting-economic-growth",
+          "verified_on": "2026-08-01",
+          "notes": "HB 463 cut the rate from 5.19% to 4.99% retroactive to 1 January 2026, after most secondary comparison tables were compiled \u2014 a table published early in 2026 will say 5.19%. Withholding split mid-year but the annual return rate is 4.99% for all of 2026. Further cuts to a 3.99% floor are revenue-trigger contingent.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 30000,
+              "brackets": [
+                [
+                  0,
+                  0.0499
+                ]
+              ]
+            },
+            "single": {
+              "standard_deduction": 15000,
+              "brackets": [
+                [
+                  0,
+                  0.0499
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    "IA": {
+      "starts_from": "federal_taxable_income",
+      "years": {
+        "2026": {
+          "source": "Iowa Department of Revenue, 2026 IA 1040ES",
+          "source_url": "https://revenue.iowa.gov/media/2725/download",
+          "verified_on": "2026-08-01",
+          "notes": "The 2026 estimated-tax worksheet runs federal taxable income -> Iowa modifications -> Iowa taxable income x 3.8%. Do NOT use the deduction amounts in the 2026 withholding formula: that form warns they are a withholding construct, not a standard deduction. The $40/$80 personal credits are not modeled. A stale IDR page still describes HF 2317's 3.9% for 2026; SF 2442 superseded it.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.038
+                ]
+              ]
+            },
+            "single": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.038
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    "IL": {
+      "starts_from": "federal_agi",
+      "years": {
+        "2026": {
+          "source": "Illinois DOR Informational Bulletin FY 2026-15; 35 ILCS 5/203",
+          "source_url": "https://tax.illinois.gov/research/publications/bulletins/fy-2026-15.html",
+          "verified_on": "2026-08-01",
+          "notes": "Base income is federal AGI as modified. No standard deduction; a personal exemption of 2925 per person instead. Not modeled: the additional 1000 for 65+ or blind, and the hard cliff that removes the exemption entirely above 500000 AGI joint / 250000 otherwise.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.0495
+                ]
+              ],
+              "personal_exemption": 5850
+            },
+            "single": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.0495
+                ]
+              ],
+              "personal_exemption": 2925
+            }
+          }
+        }
+      }
+    },
+    "IN": {
+      "starts_from": "federal_agi",
+      "years": {
+        "2026": {
+          "source": "Indiana DOR Departmental Notice #1, effective 1 January 2026",
+          "source_url": "https://www.in.gov/dor/files/dn01.pdf",
+          "verified_on": "2026-08-01",
+          "notes": "No standard deduction; a 1000 per-person exemption instead. NOT modeled: Indiana county income taxes, which apply on top of the state rate \u2014 an Indiana filer's real rate is never just this one. Dependent and 65+/blind exemptions are also not modeled.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.0295
+                ]
+              ],
+              "personal_exemption": 2000
+            },
+            "single": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.0295
+                ]
+              ],
+              "personal_exemption": 1000
+            }
+          }
+        }
+      }
+    },
+    "KY": {
+      "starts_from": "federal_agi",
+      "years": {
+        "2026": {
+          "source": "Kentucky DOR, 2026 Standard Deduction announcement and 2026 Withholding Formula",
+          "source_url": "https://revenue.ky.gov/News/Pages/Kentucky-DOR-Announces-2026-Standard-Deduction.aspx",
+          "verified_on": "2026-08-01",
+          "notes": "HB 1 (2025) cut the rate from 4.0% to 3.5%. The standard deduction is the same figure for both filing statuses. No personal exemption \u2014 KRS 141.019(2)(g) denies the IRC 151 deduction; only small credits remain. The DOR's own income-tax landing page still says 4%; it is stale. The trigger for a 2027 cut was not met.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 3360,
+              "brackets": [
+                [
+                  0,
+                  0.035
+                ]
+              ]
+            },
+            "single": {
+              "standard_deduction": 3360,
+              "brackets": [
+                [
+                  0,
+                  0.035
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    "LA": {
+      "starts_from": "federal_agi",
+      "years": {
+        "2026": {
+          "source": "Louisiana Department of Revenue, Form IT-540ESi (2026)",
+          "source_url": "https://dam.ldr.la.gov/taxforms/IT540ESi-2026.pdf",
+          "verified_on": "2026-08-01",
+          "notes": "Act 11 (2025). The form starts from estimated federal AGI. The deduction is CPI-indexed from 1 January 2026 and the form labels these amounts 'estimated'. No personal exemption \u2014 it was folded into the deduction and the dependent/blind/65+ exemptions were repealed. The old rate trigger has itself been repealed.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 25750,
+              "brackets": [
+                [
+                  0,
+                  0.03
+                ]
+              ]
+            },
+            "single": {
+              "standard_deduction": 12875,
+              "brackets": [
+                [
+                  0,
+                  0.03
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    "MI": {
+      "starts_from": "federal_agi",
+      "years": {
+        "2026": {
+          "source": "Michigan Form 446 (Rev. 02-26), 2026 Withholding Guide; MCL 206.30",
+          "source_url": "https://www.michigan.gov/taxes/-/media/Project/Websites/taxes/Forms/SUW/TY2026/446_Withholding-Guide_2026.pdf",
+          "verified_on": "2026-08-01",
+          "notes": "MCL 206.30 defines taxable income as federal AGI subject to adjustments, less the personal exemption. The 5900 per-person figure is quoted in Form 446; the 11800 joint figure is 2x that and is derived rather than quoted. Treasury re-determines the rate each April under MCL 206.51(1)(c); on 15 April 2026 no reduction was triggered. Special and disabled-veteran exemptions are not modeled.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.0425
+                ]
+              ],
+              "personal_exemption": 11800
+            },
+            "single": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.0425
+                ]
+              ],
+              "personal_exemption": 5900
+            }
+          }
+        }
+      }
+    },
+    "NC": {
+      "starts_from": "federal_agi",
+      "years": {
+        "2026": {
+          "source": "N.C.G.S. 105-153.7 and 105-153.4(a); NCDOR Tax Rate Schedules",
+          "source_url": "https://www.ncleg.gov/EnactedLegislation/Statutes/HTML/BySection/Chapter_105/GS_105-153.7.html",
+          "verified_on": "2026-08-01",
+          "notes": "The statute reads 'After 2025 - 3.99%' with no scheduled step-down; every further cut is revenue-trigger driven, floor 2.49%. Widely misreported as scheduled. No personal exemption; the child deduction is not modeled.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 25500,
+              "brackets": [
+                [
+                  0,
+                  0.0399
+                ]
+              ]
+            },
+            "single": {
+              "standard_deduction": 12750,
+              "brackets": [
+                [
+                  0,
+                  0.0399
+                ]
+              ]
+            }
+          }
+        }
+      }
+    },
+    "PA": {
+      "starts_from": "gross_compensation",
+      "years": {
+        "2026": {
+          "source": "Pennsylvania DoR, REV-413(I) 2026 Instructions for Estimating PA Personal Income Tax",
+          "source_url": "https://www.pa.gov/content/dam/copapwp-pagov/en/revenue/documents/formsandpublications/formsforindividuals/pit/documents/2026/2026_rev-413i.pdf",
+          "verified_on": "2026-08-01",
+          "notes": "Neither federal AGI nor federal taxable income: Pennsylvania taxes eight classes of income under its own rules and 'does not exempt or exclude from income, or allow a deduction for, any personal expenses, federal itemized deductions, or federal standard deductions'. There is no standard deduction and no personal exemption, which is why both are zero here rather than absent. A loss in one class cannot offset another. The Tax Forgiveness credit (Schedule SP) is not modeled.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.0307
+                ]
+              ]
+            },
+            "single": {
+              "standard_deduction": 0,
+              "brackets": [
+                [
+                  0,
+                  0.0307
+                ]
               ]
             }
           }
         }
       }
     }
+  },
+  "omitted_states": {
+    "_readme": "Flat-rate states deliberately NOT bundled, with the reason. Absent data is fine; absent data that looks like an oversight is not, and half-verified data is worse than either because it looks authoritative. Each of these is selectable and override-driven. Removing an entry here means the state has been verified and moved into `states` above.",
+    "AZ": "Rate is 2.5%, but the 2026 standard deduction has not been published by AZDOR (it tracks the federal amount and indexes annually). Shipping the 2025 figure under a 2026 label is the defect this module exists to prevent.",
+    "ID": "Rate is 5.3% per the July 2026 withholding tables, but Idaho's own rate schedule page still shows only 2025, and no 2026 standard deduction or personal exemption amount has been published.",
+    "MS": "Neither a single rate nor a federal base: 0% on the first 10000 then 4%, and Form 80-105 builds Mississippi gross income from its own enumerated items rather than from federal AGI or taxable income. The 0% band is expressible as a two-bracket table; the base is not.",
+    "OH": "2.75% applies only to nonbusiness income over 26050, and Ohio taxes BUSINESS income separately after the Business Income Deduction \u2014 which is precisely the self-employment income this estimator is about, so a single rate would be wrong for the main case. The exemption tiers also disagree across sources.",
+    "UT": "Rate is 4.45% (S.B. 60, retroactive to 1 January 2026; the Tax Commission's own rate page still says 4.5%). Utah has no standard deduction \u2014 a phase-out Taxpayer Tax Credit instead \u2014 and the 2026 credit thresholds and per-dependent exemption are unpublished, so the rate alone would materially overstate the tax."
   }
 }

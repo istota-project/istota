@@ -272,3 +272,140 @@ class TestStateMetadata:
         rates = tax_data.load_tax_rates()
         no_tax = {j.code for j in rates.jurisdictions if not j.taxes_income}
         assert no_tax.isdisjoint(rates.bundled_state_codes())
+
+
+class TestCalifornia2025:
+    """Anchors from the FTB's 2025 California Tax Rate Schedules.
+
+    The figures previously shipped as "CA 2025" were nothing of the kind — the
+    single standard deduction was $5,363 (a 2023 amount) and the 9.3% band
+    started at $70,349 against the real $72,724. The same defect as the federal
+    2026 rows, in the state table, and equally invisible.
+    """
+
+    @pytest.fixture
+    def ca(self):
+        return tax_data.load_tax_rates().state_year("CA", 2025)
+
+    def test_standard_deduction(self, ca):
+        assert ca.standard_deduction("single") == 5_706
+        assert ca.standard_deduction("mfj") == 11_412
+
+    def test_single_band_thresholds(self, ca):
+        thresholds = [b[0] for b in ca.brackets("single")]
+        assert thresholds[:9] == [
+            0, 11_079, 26_264, 41_452, 57_542, 72_724, 371_479, 445_771, 742_953,
+        ]
+
+    def test_mfj_thresholds_are_twice_the_single_ones(self, ca):
+        # True of every FTB band, and the cheapest internal check on a
+        # transcription slip.
+        single = [b[0] for b in ca.brackets("single")]
+        mfj = [b[0] for b in ca.brackets("mfj")]
+        for s, m in zip(single, mfj):
+            if s in (0, 1_000_000) or m == 1_000_000:
+                continue  # the surcharge band is a fixed amount, not doubled
+            assert m == s * 2, (s, m)
+
+    def test_behavioral_health_surcharge_folds_into_the_top_bands(self, ca):
+        # A flat 1% above $1,000,000, the same figure for every filing status —
+        # it has never been indexed and joint filers get no doubling.
+        assert ca.brackets("single")[-1] == (1_000_000, 0.133)
+        assert ca.brackets("mfj")[-1] == (1_485_906, 0.133)
+        assert (1_000_000, 0.123) in ca.brackets("mfj")
+
+    def test_2026_is_deliberately_absent(self):
+        # The FTB indexes on the June-to-June CCPI and publishes in the autumn;
+        # its own 2026 Form 540-ES tells you to use the 2025 tax table. Shipping
+        # a "2026" copy of 2025 is the exact defect this module exists to stop,
+        # so the year is left out and the resolver reports the substitution.
+        rates = tax_data.load_tax_rates()
+        assert 2026 not in rates.state_years("CA")
+        res = rates.state_year("CA", 2026)
+        assert res.year == 2025
+        assert res.is_fallback is True
+
+
+class TestFlatStates:
+    """A flat state is a one-bracket table, but it is not one number.
+
+    The rate is one decision; the base it applies to is a second, and several
+    carry an exemption on top. That is what makes `starts_from` load-bearing
+    rather than a California-shaped afterthought.
+    """
+
+    @pytest.fixture
+    def rates(self):
+        return tax_data.load_tax_rates()
+
+    def test_pennsylvania_taxes_gross_compensation_with_no_relief(self, rates):
+        meta = rates.state_meta("PA")
+        assert meta.starts_from == "gross_compensation"
+        year = rates.state_year("PA", 2026)
+        assert year.brackets("single") == [(0, 0.0307)]
+        assert year.standard_deduction("single") == 0
+        assert year.personal_exemption("single") == 0
+
+    def test_colorado_starts_from_federal_taxable_income(self, rates):
+        assert rates.state_meta("CO").starts_from == "federal_taxable_income"
+        assert rates.state_year("CO", 2026).brackets("mfj") == [(0, 0.0440)]
+
+    def test_iowa_also_starts_from_federal_taxable_income(self, rates):
+        # Iowa moved to this base for 2026; treating it as AGI-based overstates
+        # the tax by the whole federal standard deduction.
+        assert rates.state_meta("IA").starts_from == "federal_taxable_income"
+        assert rates.state_year("IA", 2026).brackets("mfj") == [(0, 0.038)]
+
+    def test_exemption_states_carry_an_exemption_and_no_deduction(self, rates):
+        for code, single, mfj in (("IL", 2_925, 5_850), ("IN", 1_000, 2_000),
+                                  ("MI", 5_900, 11_800)):
+            year = rates.state_year(code, 2026)
+            assert rates.state_meta(code).starts_from == "federal_agi", code
+            assert year.standard_deduction("single") == 0, code
+            assert year.personal_exemption("single") == single, code
+            assert year.personal_exemption("mfj") == mfj, code
+
+    def test_deduction_states_carry_a_deduction_and_no_exemption(self, rates):
+        for code, single, mfj in (
+            ("GA", 15_000, 30_000),
+            ("KY", 3_360, 3_360),
+            ("LA", 12_875, 25_750),
+            ("NC", 12_750, 25_500),
+        ):
+            year = rates.state_year(code, 2026)
+            assert year.standard_deduction("single") == single, code
+            assert year.standard_deduction("mfj") == mfj, code
+            assert year.personal_exemption("single") == 0, code
+
+    def test_georgia_carries_the_2026_cut_not_the_superseded_rate(self, rates):
+        # HB 463 cut 5.19% -> 4.99% retroactive to 1 Jan 2026, after the
+        # comparison tables most secondary sources were compiled from.
+        assert rates.state_year("GA", 2026).brackets("single") == [(0, 0.0499)]
+
+    def test_every_flat_state_is_a_single_bracket_at_zero(self, rates):
+        flat = ("CO", "GA", "IA", "IL", "IN", "KY", "LA", "MI", "NC", "PA")
+        for code in flat:
+            for status in ("mfj", "single"):
+                brackets = rates.state_year(code, 2026).brackets(status)
+                assert len(brackets) == 1, (code, status)
+                assert brackets[0][0] == 0, (code, status)
+
+    def test_flat_states_use_the_federal_installment_schedule(self, rates):
+        # Only California's is unusual. Applying its 30/40/0/30 to everywhere
+        # else was the bug; this is the assertion that keeps it closed.
+        for code in ("CO", "GA", "IA", "IL", "IN", "KY", "LA", "MI", "NC", "PA"):
+            assert rates.state_meta(code).installment_schedule == (
+                0.25, 0.50, 0.75, 1.00
+            ), code
+
+    def test_omitted_states_are_recorded_with_a_reason(self, rates):
+        # Absent data is fine; absent data that looks like an oversight is not.
+        omitted = rates.omitted_states()
+        assert set(omitted) == {"AZ", "ID", "MS", "OH", "UT"}
+        for code, reason in omitted.items():
+            assert reason, code
+
+    def test_omitted_states_ship_no_rate_data(self, rates):
+        for code in rates.omitted_states():
+            assert code not in rates.bundled_state_codes()
+            assert rates.state_year(code, 2026) is None

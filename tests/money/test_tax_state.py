@@ -48,8 +48,8 @@ class TestComputeStateTax:
     def test_california_computes(self):
         res = compute_state_tax(150_000, "CA", "mfj", 2025)
         assert res.available is True
-        assert res.standard_deduction == 10_726
-        assert res.taxable_income == 150_000 - 10_726
+        assert res.standard_deduction == 11_412
+        assert res.taxable_income == 150_000 - 11_412
         assert res.tax > 0
 
     def test_california_is_case_insensitive(self):

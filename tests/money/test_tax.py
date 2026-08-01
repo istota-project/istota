@@ -215,36 +215,36 @@ class TestComputeStateTax:
 
     def test_mfj_basic(self):
         # AGI = $150,000, MFJ
-        # CA 2025 MFJ standard deduction = 10,726
-        # Taxable = 139,274
-        # CA MFJ brackets 2025:
-        # 0-21,428 @ 1% = 214.28
-        # 21,428-50,798 @ 2% = 587.40
-        # 50,798-80,158 @ 4% = 1,174.40
-        # 80,158-111,340 @ 6% = 1,870.92
-        # 111,340-139,274 @ 8% = 2,234.72
-        # Total = 6,081.72
+        # CA 2025 MFJ standard deduction = 11,412
+        # Taxable = 138,588
+        # CA MFJ brackets 2025 (FTB Schedule Y):
+        # 0-22,158 @ 1% = 221.58
+        # 22,158-52,528 @ 2% = 607.40
+        # 52,528-82,904 @ 4% = 1,215.04
+        # 82,904-115,084 @ 6% = 1,930.80
+        # 115,084-138,588 @ 8% = 1,880.32
+        # Total = 5,855.14
         r = self._ca(150_000)
         assert r.available is True
-        assert r.standard_deduction == 10_726
-        assert r.taxable_income == 139_274
-        assert round(r.tax, 2) == 6081.72
+        assert r.standard_deduction == 11_412
+        assert r.taxable_income == 138_588
+        assert round(r.tax, 2) == 5855.14
 
     def test_single_basic(self):
         # AGI = $80,000, single
-        # CA 2025 single standard deduction = 5,363
-        # Taxable = 74,637
-        # 0-10,714 @ 1% = 107.14
-        # 10,714-25,399 @ 2% = 293.70
-        # 25,399-40,084 @ 4% = 587.40
-        # 40,084-55,670 @ 6% = 935.16
-        # 55,670-70,349 @ 8% = 1,174.32
-        # 70,349-74,637 @ 9.3% = 398.78
-        # Total = 3,496.50
+        # CA 2025 single standard deduction = 5,706
+        # Taxable = 74,294
+        # 0-11,079 @ 1% = 110.79
+        # 11,079-26,264 @ 2% = 303.70
+        # 26,264-41,452 @ 4% = 607.52
+        # 41,452-57,542 @ 6% = 965.40
+        # 57,542-72,724 @ 8% = 1,214.56
+        # 72,724-74,294 @ 9.3% = 146.01
+        # Total = 3,347.98
         r = self._ca(80_000, "single")
-        assert r.standard_deduction == 5_363
-        assert r.taxable_income == 74_637
-        assert round(r.tax, 2) == 3496.50
+        assert r.standard_deduction == 5_706
+        assert r.taxable_income == 74_294
+        assert round(r.tax, 2) == 3347.98
 
     def test_income_below_standard_deduction(self):
         r = self._ca(5_000)
@@ -252,19 +252,21 @@ class TestComputeStateTax:
         assert r.tax == 0
 
     def test_single_high_income_12_3_bracket(self):
-        # The 12.3% bracket kicks in at $721,314 for single, not $1M.
-        tax_800k = self._ca(800_000, "single").tax
-        tax_730k = self._ca(730_000, "single").tax
-        marginal = (tax_800k - tax_730k) / (800_000 - 730_000)
+        # The 12.3% band starts at $742,953 of taxable income for single, well
+        # below the $1M surcharge threshold — the two are unrelated.
+        marginal = (self._ca(850_000, "single").tax - self._ca(800_000, "single").tax) / 50_000
         assert abs(marginal - 0.123) < 0.001
 
-    def test_mfj_above_1m_mhs(self):
-        # The 1% Mental Health Services surcharge applies above $1M for MFJ, so
-        # between $1M and $1.44M the marginal rate is 12.3% (11.3% + 1%).
-        tax_below = self._ca(1_010_000).tax
-        tax_above = self._ca(1_020_000).tax
-        marginal = (tax_above - tax_below) / 10_000
+    def test_mfj_above_1m_behavioral_health_surcharge(self):
+        # The 1% Behavioral Health Services surcharge applies above $1M of
+        # taxable income, so the 11.3% band reads 12.3% there.
+        marginal = (self._ca(1_060_000).tax - self._ca(1_020_000).tax) / 40_000
         assert abs(marginal - 0.123) < 0.001
+
+    def test_mfj_top_band_carries_the_surcharge_too(self):
+        # Above $1,485,906 it is 12.3% + 1% = 13.3%.
+        marginal = (self._ca(1_550_000).tax - self._ca(1_500_000).tax) / 50_000
+        assert abs(marginal - 0.133) < 0.001
 
 
 class TestAdditionalMedicareTax:
