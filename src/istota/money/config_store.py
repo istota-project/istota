@@ -1465,8 +1465,25 @@ def save_tax(
     cfg: TaxConfig,
     *,
     replace_collections: bool = True,
+    write_schedules: bool = False,
 ) -> None:
-    """Save :class:`TaxConfig` to the DB."""
+    """Save :class:`TaxConfig` to the DB.
+
+    ``write_schedules`` is off by default, and that default is load-bearing.
+    Bracket and standard-deduction overrides are keyed on
+    ``(tax_year, jurisdiction, filing_status)``, but a ``TaxConfig`` carries
+    only one set of them with no record of which coordinates they were read
+    under — so a load-modify-save that changes the year, the state or the
+    filing status would file the *old* coordinates' values under the new ones.
+    That is the very defect the status dimension was added to fix: an override
+    entered while filing jointly reappearing after switching to single.
+
+    Every load-modify-save caller (``PUT /config/tax``, ``istota money tax
+    set``) therefore leaves it off and edits overrides through
+    :func:`upsert_tax_schedule` / :func:`delete_tax_schedule`, which name their
+    coordinates explicitly. Only the importers pass True, where the values
+    genuinely are the user's own rates for the config's own year and status.
+    """
     init_db(db_path)
     with _connect(db_path) as conn:
         for key in _TAX_SCALAR_KEYS:
@@ -1503,15 +1520,16 @@ def save_tax(
         )):
             _upsert_year_rates(conn, cfg.tax_year, cfg)
 
-        _merge_schedule(
-            conn, cfg.tax_year, FEDERAL_JURISDICTION, cfg.filing_status,
-            cfg.federal_brackets, cfg.federal_standard_deduction,
-        )
-        if cfg.state:
+        if write_schedules:
             _merge_schedule(
-                conn, cfg.tax_year, cfg.state.upper(), cfg.filing_status,
-                cfg.state_brackets, cfg.state_standard_deduction,
+                conn, cfg.tax_year, FEDERAL_JURISDICTION, cfg.filing_status,
+                cfg.federal_brackets, cfg.federal_standard_deduction,
             )
+            if cfg.state:
+                _merge_schedule(
+                    conn, cfg.tax_year, cfg.state.upper(), cfg.filing_status,
+                    cfg.state_brackets, cfg.state_standard_deduction,
+                )
 
 
 # =============================================================================

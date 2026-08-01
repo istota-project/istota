@@ -463,7 +463,13 @@ class TestSaveTaxDoesNotDestroyOverrides:
         assert reloaded.state_standard_deduction == 10_800
         assert reloaded.state_brackets == [[0, 0.011]]
 
-    def test_switching_filing_status_keeps_the_other_status_override(self, db):
+    def test_switching_filing_status_neither_clears_nor_copies(self, db):
+        """The spec's latent defect, in both directions.
+
+        The old year-keyed table let an override entered while filing jointly
+        carry over to single. A load-modify-save must not recreate that by
+        writing the loaded mfj values under the newly-selected status.
+        """
         config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2025,
                                             state="CA"))
         config_store.upsert_tax_schedule(
@@ -476,8 +482,9 @@ class TestSaveTaxDoesNotDestroyOverrides:
         assert config_store.get_tax_schedule(db, 2025, "CA", "mfj") == {
             "brackets": None, "standard_deduction": 10_800,
         }
+        assert config_store.get_tax_schedule(db, 2025, "CA", "single") is None
 
-    def test_switching_year_keeps_the_other_years_override(self, db):
+    def test_switching_year_neither_clears_nor_copies(self, db):
         config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2025))
         config_store.upsert_tax_schedule(
             db, 2025, "federal", "mfj", standard_deduction=31_000,
@@ -489,6 +496,37 @@ class TestSaveTaxDoesNotDestroyOverrides:
         assert config_store.get_tax_schedule(db, 2025, "federal", "mfj") == {
             "brackets": None, "standard_deduction": 31_000,
         }
+        assert config_store.get_tax_schedule(db, 2026, "federal", "mfj") is None
+
+    def test_switching_state_does_not_copy_onto_the_new_state(self, db):
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2025,
+                                            state="CA"))
+        config_store.upsert_tax_schedule(
+            db, 2025, "CA", "mfj", standard_deduction=10_800,
+        )
+        cfg = config_store.load_tax(db)
+        cfg.state = "NY"
+        config_store.save_tax(db, cfg)
+
+        assert config_store.get_tax_schedule(db, 2025, "NY", "mfj") is None
+        assert config_store.get_tax_schedule(db, 2025, "CA", "mfj") == {
+            "brackets": None, "standard_deduction": 10_800,
+        }
+
+    def test_an_importer_may_write_schedules_explicitly(self, db):
+        """The TOML import path genuinely does carry the user's own rates."""
+        cfg = TaxConfig(
+            filing_status="mfj", tax_year=2025, state="CA",
+            federal_standard_deduction=31_000,
+            state_brackets=[[0, 0.011]],
+        )
+        config_store.save_tax(db, cfg, write_schedules=True)
+        assert config_store.get_tax_schedule(db, 2025, "federal", "mfj") == {
+            "brackets": None, "standard_deduction": 31_000,
+        }
+        assert config_store.get_tax_schedule(db, 2025, "CA", "mfj") == {
+            "brackets": [[0, 0.011]], "standard_deduction": None,
+        }
 
     def test_setting_one_field_does_not_clear_the_other(self, db):
         config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2025,
@@ -497,11 +535,12 @@ class TestSaveTaxDoesNotDestroyOverrides:
             db, 2025, "CA", "mfj",
             brackets=[[0, 0.011]], standard_deduction=10_800,
         )
-        cfg = config_store.load_tax(db)
-        cfg.state_brackets = None          # not read / not edited
-        cfg.state_standard_deduction = 99  # the actual edit
-        config_store.save_tax(db, cfg)
-
+        config_store.save_tax(
+            db,
+            TaxConfig(filing_status="mfj", tax_year=2025, state="CA",
+                      state_standard_deduction=99),
+            write_schedules=True,
+        )
         assert config_store.get_tax_schedule(db, 2025, "CA", "mfj") == {
             "brackets": [[0, 0.011]], "standard_deduction": 99,
         }

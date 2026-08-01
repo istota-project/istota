@@ -685,10 +685,12 @@ def _apply_section_import(ctx, section: str, data: dict, replace: bool) -> None:
     elif section == "tax":
         if replace:
             cfg = config_store.tax_config_from_toml_dict(data)
-            config_store.save_tax(ctx.db_path, cfg, replace_collections=True)
+            config_store.save_tax(ctx.db_path, cfg, replace_collections=True,
+                                  write_schedules=True)
         else:
             cfg = _merge_tax(ctx.db_path, data)
-            config_store.save_tax(ctx.db_path, cfg, replace_collections=False)
+            config_store.save_tax(ctx.db_path, cfg, replace_collections=False,
+                                  write_schedules=True)
     elif section == "monarch":
         if replace:
             cfg = config_store.monarch_config_from_toml_dict(data)

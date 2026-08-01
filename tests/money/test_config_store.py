@@ -294,7 +294,9 @@ class TestTaxRoundTrip:
         data = tomli.loads(TAX_TOML)
         cfg = cs.tax_config_from_toml_dict(data)
         db_path = tmp_path / "money.db"
-        cs.save_tax(db_path, cfg)
+        # The TOML importer's path: these rates really are the user's own, for
+        # this config's own year and filing status.
+        cs.save_tax(db_path, cfg, write_schedules=True)
         loaded = cs.load_tax(db_path)
 
         assert loaded.filing_status == "mfj"
@@ -318,7 +320,7 @@ class TestTaxRoundTrip:
         out = cs.tax_to_toml_dict(cfg)
         cfg2 = cs.tax_config_from_toml_dict(out)
         db_path = tmp_path / "money.db"
-        cs.save_tax(db_path, cfg2)
+        cs.save_tax(db_path, cfg2, write_schedules=True)
         roundtripped = cs.load_tax(db_path)
         out2 = cs.tax_to_toml_dict(roundtripped)
         assert out == out2

@@ -168,7 +168,10 @@ def _import_invoicing(db_path: Path, data: dict) -> dict:
 
 def _import_tax(db_path: Path, data: dict) -> dict:
     cfg = config_store.tax_config_from_toml_dict(data)
-    config_store.save_tax(db_path, cfg, replace_collections=True)
+    # Legacy TOML import: these really are the user's own rates for
+    # this config's own year and filing status.
+    config_store.save_tax(db_path, cfg, replace_collections=True,
+                          write_schedules=True)
     return {
         "tax_year": cfg.tax_year,
         "patterns": len(cfg.se_income_accounts) + len(cfg.se_expense_accounts),
