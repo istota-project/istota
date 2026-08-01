@@ -1,8 +1,15 @@
 """Estimated quarterly tax calculator.
 
-Pure calculation module for federal and CA state estimated tax payments.
-No network calls, no external APIs. Bracket data is embedded as versioned
-constants, updated annually.
+Pure calculation module for federal and state estimated tax payments. No network
+calls, no external APIs.
+
+Rate data is **not** in this file. It lives in ``data/tax_rates.json`` behind
+:mod:`istota.money.core.tax_data`, where each year carries the document it was
+transcribed from and the date it was last verified. It used to be module-level
+dicts here, and the 2026 rows were byte-for-byte copies of 2025 — so the page
+produced 2026 estimates from 2025 law with nothing in the interface able to say
+so. The constants that remain below are the ones that are *statutory rather than
+indexed* (they do not change each January) or are pure calculation policy.
 """
 
 from __future__ import annotations
@@ -16,157 +23,40 @@ except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
 from istota.money.core.models import QuarterlyTaxEstimate, TaxConfig
+from istota.money.core.tax_data import (
+    DEFAULT_INSTALLMENT_SCHEDULE,
+    YearRates,
+    load_tax_rates,
+)
 
 
 # =============================================================================
-# Tax bracket data
+# Statutory / policy constants
+#
+# Everything that gets indexed for inflation — brackets, standard deductions,
+# the wage base, QBI thresholds — lives in data/tax_rates.json. These are the
+# figures that do not.
 # =============================================================================
 
-# Federal brackets: (threshold, rate) tuples per (year, filing_status)
-FEDERAL_BRACKETS: dict[tuple[int, str], list[tuple[float, float]]] = {
-    (2025, "mfj"): [
-        (0, 0.10),
-        (23_850, 0.12),
-        (96_950, 0.22),
-        (206_700, 0.24),
-        (394_600, 0.32),
-        (501_050, 0.35),
-        (751_600, 0.37),
-    ],
-    (2025, "single"): [
-        (0, 0.10),
-        (11_925, 0.12),
-        (48_475, 0.22),
-        (103_350, 0.24),
-        (197_300, 0.32),
-        (250_525, 0.35),
-        (626_350, 0.37),
-    ],
-    (2026, "mfj"): [
-        (0, 0.10),
-        (23_850, 0.12),
-        (96_950, 0.22),
-        (206_700, 0.24),
-        (394_600, 0.32),
-        (501_050, 0.35),
-        (751_600, 0.37),
-    ],
-    (2026, "single"): [
-        (0, 0.10),
-        (11_925, 0.12),
-        (48_475, 0.22),
-        (103_350, 0.24),
-        (197_300, 0.32),
-        (250_525, 0.35),
-        (626_350, 0.37),
-    ],
-}
-
-# CA state brackets (includes mental health surcharge at $1M+)
-CA_BRACKETS: dict[tuple[int, str], list[tuple[float, float]]] = {
-    (2025, "mfj"): [
-        (0, 0.01),
-        (21_428, 0.02),
-        (50_798, 0.04),
-        (80_158, 0.06),
-        (111_340, 0.08),
-        (140_698, 0.093),
-        (721_314, 0.103),
-        (865_574, 0.113),
-        (1_000_000, 0.123),  # 11.3% + 1% mental health surcharge
-        (1_442_628, 0.133),  # 12.3% + 1% mental health surcharge
-    ],
-    (2025, "single"): [
-        (0, 0.01),
-        (10_714, 0.02),
-        (25_399, 0.04),
-        (40_084, 0.06),
-        (55_670, 0.08),
-        (70_349, 0.093),
-        (360_657, 0.103),
-        (432_787, 0.113),
-        (721_314, 0.123),
-        (1_000_000, 0.133),  # 12.3% + 1% mental health surcharge
-    ],
-    (2026, "mfj"): [
-        (0, 0.01),
-        (21_428, 0.02),
-        (50_798, 0.04),
-        (80_158, 0.06),
-        (111_340, 0.08),
-        (140_698, 0.093),
-        (721_314, 0.103),
-        (865_574, 0.113),
-        (1_000_000, 0.123),  # 11.3% + 1% mental health surcharge
-        (1_442_628, 0.133),  # 12.3% + 1% mental health surcharge
-    ],
-    (2026, "single"): [
-        (0, 0.01),
-        (10_714, 0.02),
-        (25_399, 0.04),
-        (40_084, 0.06),
-        (55_670, 0.08),
-        (70_349, 0.093),
-        (360_657, 0.103),
-        (432_787, 0.113),
-        (721_314, 0.123),
-        (1_000_000, 0.133),  # 12.3% + 1% mental health surcharge
-    ],
-}
-
-FEDERAL_STANDARD_DEDUCTION: dict[tuple[int, str], float] = {
-    (2025, "mfj"): 30_000,
-    (2025, "single"): 15_000,
-    (2026, "mfj"): 30_000,
-    (2026, "single"): 15_000,
-}
-
-CA_STANDARD_DEDUCTION: dict[tuple[int, str], float] = {
-    (2025, "mfj"): 10_726,
-    (2025, "single"): 5_363,
-    (2026, "mfj"): 10_726,
-    (2026, "single"): 5_363,
-}
-
-SS_WAGE_BASE: dict[int, float] = {
-    2025: 176_100,
-    2026: 176_100,  # placeholder, update when announced
-}
-
+# FICA rates. Statutory, unchanged since 1990. Used only as a fallback when a
+# resolved year carries no payroll block.
 SS_RATE = 0.124
 MEDICARE_RATE = 0.029
 SE_TAXABLE_FRACTION = 0.9235
 
+# Additional Medicare Tax (§ 3101(b)(2)). Statutory and explicitly NOT indexed —
+# the thresholds have been $250k/$200k since 2013.
 ADDITIONAL_MEDICARE_RATE = 0.009
 ADDITIONAL_MEDICARE_THRESHOLD: dict[str, float] = {
     "mfj": 250_000,
     "single": 200_000,
 }
 
-# QBI (Section 199A) income thresholds and phase-out ranges.
-# Above the threshold, QBI deduction phases out over the range.
-# For sole props with no W-2 employees, it reaches $0 at the top of the range.
-QBI_THRESHOLD: dict[tuple[int, str], float] = {
-    (2025, "mfj"): 394_600,
-    (2025, "single"): 197_300,
-    (2026, "mfj"): 394_600,
-    (2026, "single"): 197_300,
-}
-QBI_PHASEOUT_RANGE: dict[str, float] = {
-    "mfj": 100_000,
-    "single": 50_000,
-}
-
-# Safe harbor: AGI threshold above which 110% of prior year tax is required
+# Safe harbor: AGI threshold above which 110% of prior year tax is required.
 SAFE_HARBOR_AGI_THRESHOLD = 150_000
 
 # Federal estimated tax installment schedule: equal 25% quarters.
 FED_CUMULATIVE_PCT: dict[int, float] = {1: 0.25, 2: 0.50, 3: 0.75, 4: 1.00}
-
-# CA estimated tax installment schedule (differs from federal's equal 25% quarters).
-# Payment quarters: Q1=Apr 15, Q2=Jun 15, Q3=Sep 15, Q4=Jan 15.
-CA_INSTALLMENT_PCT: dict[int, float] = {1: 0.30, 2: 0.40, 3: 0.00, 4: 0.30}
-CA_CUMULATIVE_PCT: dict[int, float] = {1: 0.30, 2: 0.70, 3: 0.70, 4: 1.00}
 
 # IRS annualized-income installment method (Form 2210 Schedule AI / 1040-ES).
 # Each payment quarter annualizes income earned through the end of its period.
@@ -209,21 +99,47 @@ def apply_brackets(
 
 def _resolve_brackets(
     config_brackets: list[list[float]] | None,
-    fallback: dict[tuple[int, str], list[tuple[float, float]]],
-    year: int,
+    year_rates: YearRates | None,
     filing_status: str,
 ) -> list[tuple[float, float]]:
-    """Return brackets from config if set, otherwise from hardcoded fallback."""
+    """Brackets from the user's override if set, otherwise the bundled data.
+
+    An empty list is a real answer — a state with neither an override nor
+    bundled data has no brackets, and the caller must report that rather than
+    compute a zero liability from an empty table.
+    """
     if config_brackets:
         return [(b[0], b[1]) for b in config_brackets]
-    key = (year, filing_status)
-    if key in fallback:
-        return fallback[key]
-    # Fall back to latest year available for this filing status
-    candidates = [y for y, fs in fallback if fs == filing_status]
-    if candidates:
-        return fallback[(max(candidates), filing_status)]
-    return []
+    if year_rates is None:
+        return []
+    return year_rates.brackets(filing_status)
+
+
+def federal_rates(year: int) -> YearRates | None:
+    """The bundled federal rates for ``year``, carrying the year actually used."""
+    return load_tax_rates().federal_year(year)
+
+
+def state_rates(state: str, year: int) -> YearRates | None:
+    """The bundled rates for ``state``, or None when we ship none for it.
+
+    None covers three distinct cases the caller must keep distinct: an unset
+    state, a no-tax state, and a state that is selectable but override-driven.
+    """
+    if not state:
+        return None
+    return load_tax_rates().state_year(state, year)
+
+
+def installment_schedule(state: str) -> tuple[float, float, float, float]:
+    """Cumulative fraction of the year's state liability due by each quarter.
+
+    Defaults to the federal equal quarters. California's 30/40/0/30 split used
+    to be applied unconditionally to every state's amounts, so any other state
+    would have been given California's payment timing.
+    """
+    meta = load_tax_rates().state_meta(state) if state else None
+    return meta.installment_schedule if meta else DEFAULT_INSTALLMENT_SCHEDULE
 
 
 def compute_se_tax(
@@ -240,11 +156,33 @@ def compute_se_tax(
     if se_net_income <= 0:
         return 0.0, 0.0
 
-    se_frac = (config.se_taxable_fraction if config and config.se_taxable_fraction else SE_TAXABLE_FRACTION)
-    ss_rate = (config.ss_rate if config and config.ss_rate else SS_RATE)
-    med_rate = (config.medicare_rate if config and config.medicare_rate else MEDICARE_RATE)
+    fed = federal_rates(year)
+    payroll = fed.payroll if fed else None
+
+    def _rate(override: float | None, bundled: float | None, statutory: float) -> float:
+        # Override wins, then the resolved year's payroll block, then the
+        # statutory constant. `or` rather than `is not None` throughout: a zero
+        # rate is indistinguishable from "unset" everywhere else in this config,
+        # and a genuine 0% FICA rate is not a case worth modelling.
+        return (override or 0) or (bundled or 0) or statutory
+
+    se_frac = _rate(
+        config.se_taxable_fraction if config else None,
+        payroll.se_taxable_fraction if payroll else None,
+        SE_TAXABLE_FRACTION,
+    )
+    ss_rate = _rate(
+        config.ss_rate if config else None,
+        payroll.ss_rate if payroll else None,
+        SS_RATE,
+    )
+    med_rate = _rate(
+        config.medicare_rate if config else None,
+        payroll.medicare_rate if payroll else None,
+        MEDICARE_RATE,
+    )
     wage_base = (config.ss_wage_base if config and config.ss_wage_base
-                 else SS_WAGE_BASE.get(year, SS_WAGE_BASE[max(SS_WAGE_BASE)]))
+                 else (payroll.ss_wage_base if payroll else 0))
 
     taxable_se = se_net_income * se_frac
     ss_income = min(taxable_se, wage_base)
@@ -268,20 +206,15 @@ def compute_federal_tax(
     AGI should already reflect above-the-line deductions (half SE tax, etc.).
     Returns (taxable_income, standard_deduction, tax).
     """
+    rates = federal_rates(year)
     if config and config.federal_standard_deduction is not None:
         std_ded = config.federal_standard_deduction
     else:
-        std_ded = FEDERAL_STANDARD_DEDUCTION.get(
-            (year, filing_status),
-            FEDERAL_STANDARD_DEDUCTION.get(
-                (max(y for y, _ in FEDERAL_STANDARD_DEDUCTION), filing_status), 0
-            ),
-        )
+        std_ded = rates.standard_deduction(filing_status) if rates else 0
     taxable = max(0, agi - std_ded - qbi_deduction)
 
     brackets = _resolve_brackets(
-        config.federal_brackets if config else None,
-        FEDERAL_BRACKETS, year, filing_status,
+        config.federal_brackets if config else None, rates, filing_status,
     )
     tax = apply_brackets(taxable, brackets)
     return taxable, std_ded, tax
@@ -294,22 +227,22 @@ def compute_ca_tax(
     """Compute California state income tax.
 
     Returns (taxable_income, standard_deduction, tax).
-    CA does not allow SE or QBI deductions from state taxable income.
+
+    ``agi`` is federal AGI, which already carries the above-the-line half-SE
+    deduction — California conforms to it. What California does *not* allow is
+    the QBI deduction, which is why the caller passes AGI here rather than
+    federal taxable income. (This docstring used to say CA allowed neither,
+    which contradicted both this implementation and the mock API's.)
     """
+    rates = state_rates("CA", year)
     if config and config.ca_standard_deduction is not None:
         std_ded = config.ca_standard_deduction
     else:
-        std_ded = CA_STANDARD_DEDUCTION.get(
-            (year, filing_status),
-            CA_STANDARD_DEDUCTION.get(
-                (max(y for y, _ in CA_STANDARD_DEDUCTION), filing_status), 0
-            ),
-        )
+        std_ded = rates.standard_deduction(filing_status) if rates else 0
     taxable = max(0, agi - std_ded)
 
     brackets = _resolve_brackets(
-        config.ca_brackets if config else None,
-        CA_BRACKETS, year, filing_status,
+        config.ca_brackets if config else None, rates, filing_status,
     )
     tax = apply_brackets(taxable, brackets)
     return taxable, std_ded, tax
@@ -413,11 +346,20 @@ def estimate_quarterly_tax(
 
     # Additional Medicare Tax: 0.9% on combined earned income above threshold.
     # Applies to total wages + SE earnings (after 92.35% factor).
+    fed_rates = federal_rates(tax_year)
     se_frac = (config.se_taxable_fraction if config and config.se_taxable_fraction
-               else SE_TAXABLE_FRACTION)
+               else (fed_rates.payroll.se_taxable_fraction
+                     if fed_rates and fed_rates.payroll else 0) or SE_TAXABLE_FRACTION)
     se_taxable_for_medicare = se_annualized * se_frac
-    amt_threshold = ADDITIONAL_MEDICARE_THRESHOLD.get(filing_status, 200_000)
-    additional_medicare = max(0, (w2_annualized + se_taxable_for_medicare) - amt_threshold) * ADDITIONAL_MEDICARE_RATE
+    amt_threshold = (
+        (fed_rates.additional_medicare_threshold(filing_status) if fed_rates else 0)
+        or ADDITIONAL_MEDICARE_THRESHOLD.get(filing_status, 200_000)
+    )
+    amt_rate = (
+        (fed_rates.payroll.additional_medicare_rate
+         if fed_rates and fed_rates.payroll else 0) or ADDITIONAL_MEDICARE_RATE
+    )
+    additional_medicare = max(0, (w2_annualized + se_taxable_for_medicare) - amt_threshold) * amt_rate
 
     # QBI deduction: 20% of qualified business income, with caps and phase-out.
     # First pass: get standard deduction for the taxable income cap.
@@ -429,8 +371,12 @@ def estimate_quarterly_tax(
         qbi_deduction = se_annualized * 0.20
         # Phase-out above income thresholds. For sole props with no W-2
         # employees, QBI deduction reaches $0 above the phase-out range.
-        threshold = QBI_THRESHOLD.get((tax_year, filing_status), 0)
-        phaseout = QBI_PHASEOUT_RANGE.get(filing_status, 50_000)
+        # The phase-out range is year-keyed, not a per-status constant: OBBBA
+        # widened it from 100k/50k to 150k/75k for 2026. That is a structural
+        # change, and hardcoding the old range would have quietly zeroed the
+        # deduction for incomes that now still qualify for part of it.
+        threshold = fed_rates.qbi_threshold(filing_status) if fed_rates else 0
+        phaseout = (fed_rates.qbi_phaseout_range(filing_status) if fed_rates else 0) or 50_000
         if threshold > 0 and federal_agi > threshold:
             if federal_agi >= threshold + phaseout:
                 qbi_deduction = 0.0
@@ -454,6 +400,10 @@ def estimate_quarterly_tax(
 
     quarters_remaining = max(1, 5 - current_quarter)
 
+    # Cumulative fraction due by each quarter. Indexed 1-4 to match the payment
+    # quarter, and per-state — California's is the unusual one.
+    state_cumulative = installment_schedule("CA")
+
     if method == "safe_harbor":
         # For AGI > $150K, safe harbor requires 110% of prior year tax
         safe_harbor_mult = 1.10 if federal_agi > SAFE_HARBOR_AGI_THRESHOLD else 1.00
@@ -463,7 +413,7 @@ def estimate_quarterly_tax(
         state_net_due = max(0, state_target - state_withholding_annual)
         fed_cumulative_due = federal_net_due * FED_CUMULATIVE_PCT[current_quarter]
         fed_quarterly = round(max(0, fed_cumulative_due - federal_estimated_paid), 2)
-        state_cumulative_due = state_net_due * CA_CUMULATIVE_PCT[current_quarter]
+        state_cumulative_due = state_net_due * state_cumulative[current_quarter - 1]
         state_quarterly = round(max(0, state_cumulative_due - state_estimated_paid), 2)
     else:
         federal_net_due = max(
@@ -478,7 +428,7 @@ def estimate_quarterly_tax(
         fed_cumulative_due = fed_total_required * FED_CUMULATIVE_PCT[current_quarter]
         fed_quarterly = round(max(0, fed_cumulative_due - federal_estimated_paid), 2)
         state_total_required = max(0, ca_tax - state_withholding_annual)
-        state_cumulative_due = state_total_required * CA_CUMULATIVE_PCT[current_quarter]
+        state_cumulative_due = state_total_required * state_cumulative[current_quarter - 1]
         state_quarterly = round(max(0, state_cumulative_due - state_estimated_paid), 2)
 
     return QuarterlyTaxEstimate(

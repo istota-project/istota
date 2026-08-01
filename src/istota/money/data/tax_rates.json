@@ -1,0 +1,262 @@
+{
+  "schema_version": 1,
+  "_readme": [
+    "Bundled tax rate data. Updating a year is a reviewed one-file change.",
+    "",
+    "Every year block carries `source`, `source_url` and `verified_on`. Those are",
+    "not decoration: the UI shows them, and `verified_on` older than the start of",
+    "the tax year being computed raises a staleness warning. Do NOT copy a year",
+    "block forward and leave its provenance pointing at the older document — that",
+    "is exactly how the 2026 rows came to be 2025 law wearing a 2026 label, with",
+    "nothing in the interface able to say so.",
+    "",
+    "`brackets` are [threshold, rate] pairs, ascending, first threshold 0. Income",
+    "between one threshold and the next is taxed at that pair's rate. A flat-rate",
+    "state is a one-bracket table — states move between flat and graduated (Ohio",
+    "did in 2026), and modelling `flat` separately would need a migration each",
+    "time one converted.",
+    "",
+    "`installment_schedule` is CUMULATIVE, not per-quarter: the fraction of the",
+    "year's liability due by the end of each payment quarter. Federal is the",
+    "default [0.25, 0.50, 0.75, 1.00]; California's 30/40/0/30 per-quarter split",
+    "is [0.30, 0.70, 0.70, 1.00] here.",
+    "",
+    "`starts_from` is the one conformity knob. See STARTING_POINTS in tax_data.py.",
+    "Benefit recapture, exemption phase-outs and per-state credits are not modeled."
+  ],
+
+  "starting_points": {
+    "federal_agi": "Federal AGI, which already carries the above-the-line half-SE deduction. The state's own standard deduction is then subtracted.",
+    "federal_taxable_income": "Federal AGI less the FEDERAL standard deduction and QBI deduction. A state on this basis normally sets its own standard_deduction to 0.",
+    "gross_compensation": "Gross wage and self-employment income with no above-the-line deductions at all. Pennsylvania's basis."
+  },
+
+  "jurisdictions": [
+    { "code": "AL", "name": "Alabama", "taxes_income": true },
+    { "code": "AK", "name": "Alaska", "taxes_income": false },
+    { "code": "AZ", "name": "Arizona", "taxes_income": true },
+    { "code": "AR", "name": "Arkansas", "taxes_income": true },
+    { "code": "CA", "name": "California", "taxes_income": true },
+    { "code": "CO", "name": "Colorado", "taxes_income": true },
+    { "code": "CT", "name": "Connecticut", "taxes_income": true },
+    { "code": "DE", "name": "Delaware", "taxes_income": true },
+    { "code": "DC", "name": "District of Columbia", "taxes_income": true },
+    {
+      "code": "FL",
+      "name": "Florida",
+      "taxes_income": false
+    },
+    { "code": "GA", "name": "Georgia", "taxes_income": true },
+    { "code": "HI", "name": "Hawaii", "taxes_income": true },
+    { "code": "ID", "name": "Idaho", "taxes_income": true },
+    { "code": "IL", "name": "Illinois", "taxes_income": true },
+    { "code": "IN", "name": "Indiana", "taxes_income": true },
+    { "code": "IA", "name": "Iowa", "taxes_income": true },
+    { "code": "KS", "name": "Kansas", "taxes_income": true },
+    { "code": "KY", "name": "Kentucky", "taxes_income": true },
+    { "code": "LA", "name": "Louisiana", "taxes_income": true },
+    { "code": "ME", "name": "Maine", "taxes_income": true },
+    { "code": "MD", "name": "Maryland", "taxes_income": true },
+    { "code": "MA", "name": "Massachusetts", "taxes_income": true },
+    { "code": "MI", "name": "Michigan", "taxes_income": true },
+    { "code": "MN", "name": "Minnesota", "taxes_income": true },
+    { "code": "MS", "name": "Mississippi", "taxes_income": true },
+    { "code": "MO", "name": "Missouri", "taxes_income": true },
+    { "code": "MT", "name": "Montana", "taxes_income": true },
+    { "code": "NE", "name": "Nebraska", "taxes_income": true },
+    {
+      "code": "NV",
+      "name": "Nevada",
+      "taxes_income": false
+    },
+    {
+      "code": "NH",
+      "name": "New Hampshire",
+      "taxes_income": false,
+      "note": "The interest-and-dividends tax was repealed effective 2025. New Hampshire has never taxed wage or self-employment income, so for this estimator it is a no-tax state. Do not 'fix' this to true."
+    },
+    { "code": "NJ", "name": "New Jersey", "taxes_income": true },
+    { "code": "NM", "name": "New Mexico", "taxes_income": true },
+    { "code": "NY", "name": "New York", "taxes_income": true },
+    { "code": "NC", "name": "North Carolina", "taxes_income": true },
+    { "code": "ND", "name": "North Dakota", "taxes_income": true },
+    { "code": "OH", "name": "Ohio", "taxes_income": true },
+    { "code": "OK", "name": "Oklahoma", "taxes_income": true },
+    { "code": "OR", "name": "Oregon", "taxes_income": true },
+    { "code": "PA", "name": "Pennsylvania", "taxes_income": true },
+    { "code": "RI", "name": "Rhode Island", "taxes_income": true },
+    { "code": "SC", "name": "South Carolina", "taxes_income": true },
+    {
+      "code": "SD",
+      "name": "South Dakota",
+      "taxes_income": false
+    },
+    {
+      "code": "TN",
+      "name": "Tennessee",
+      "taxes_income": false
+    },
+    {
+      "code": "TX",
+      "name": "Texas",
+      "taxes_income": false
+    },
+    { "code": "UT", "name": "Utah", "taxes_income": true },
+    { "code": "VT", "name": "Vermont", "taxes_income": true },
+    { "code": "VA", "name": "Virginia", "taxes_income": true },
+    {
+      "code": "WA",
+      "name": "Washington",
+      "taxes_income": false,
+      "note": "Washington taxes long-term capital gains only. It levies no tax on wage or self-employment income, so for this estimator it is a no-tax state. Do not 'fix' this to true."
+    },
+    { "code": "WV", "name": "West Virginia", "taxes_income": true },
+    { "code": "WI", "name": "Wisconsin", "taxes_income": true },
+    {
+      "code": "WY",
+      "name": "Wyoming",
+      "taxes_income": false
+    }
+  ],
+
+  "federal": {
+    "2025": {
+      "source": "IRS Rev. Proc. 2024-40",
+      "source_url": "https://www.irs.gov/pub/irs-drop/rp-24-40.pdf",
+      "verified_on": "2026-08-01",
+      "notes": "Brackets, standard deduction and QBI transcribed from Rev. Proc. 2024-40 sections .01, .15 and .27. Social Security wage base from SSA.",
+      "filing_status": {
+        "mfj": {
+          "standard_deduction": 30000,
+          "brackets": [
+            [0, 0.1],
+            [23850, 0.12],
+            [96950, 0.22],
+            [206700, 0.24],
+            [394600, 0.32],
+            [501050, 0.35],
+            [751600, 0.37]
+          ],
+          "qbi_threshold": 394600,
+          "qbi_phaseout_range": 100000,
+          "additional_medicare_threshold": 250000
+        },
+        "single": {
+          "standard_deduction": 15000,
+          "brackets": [
+            [0, 0.1],
+            [11925, 0.12],
+            [48475, 0.22],
+            [103350, 0.24],
+            [197300, 0.32],
+            [250525, 0.35],
+            [626350, 0.37]
+          ],
+          "qbi_threshold": 197300,
+          "qbi_phaseout_range": 50000,
+          "additional_medicare_threshold": 200000
+        }
+      },
+      "payroll": {
+        "ss_wage_base": 176100,
+        "ss_rate": 0.124,
+        "medicare_rate": 0.029,
+        "se_taxable_fraction": 0.9235,
+        "additional_medicare_rate": 0.009
+      }
+    },
+    "2026": {
+      "source": "IRS Rev. Proc. 2025-32",
+      "source_url": "https://www.irs.gov/pub/irs-drop/rp-25-32.pdf",
+      "verified_on": "2026-08-01",
+      "notes": "Brackets from Rev. Proc. 2025-32 section 4.01 tables 1 and 3; standard deduction from .14; QBI threshold and phase-in range from .26 (OBBBA section 70105 widened the phase-in range to 150000/75000 from 100000/50000 — a structural change, not an indexation). Social Security wage base 184500 from the SSA 2026 COLA fact sheet.",
+      "filing_status": {
+        "mfj": {
+          "standard_deduction": 32200,
+          "brackets": [
+            [0, 0.1],
+            [24800, 0.12],
+            [100800, 0.22],
+            [211400, 0.24],
+            [403550, 0.32],
+            [512450, 0.35],
+            [768700, 0.37]
+          ],
+          "qbi_threshold": 403500,
+          "qbi_phaseout_range": 150000,
+          "additional_medicare_threshold": 250000
+        },
+        "single": {
+          "standard_deduction": 16100,
+          "brackets": [
+            [0, 0.1],
+            [12400, 0.12],
+            [50400, 0.22],
+            [105700, 0.24],
+            [201775, 0.32],
+            [256225, 0.35],
+            [640600, 0.37]
+          ],
+          "qbi_threshold": 201750,
+          "qbi_phaseout_range": 75000,
+          "additional_medicare_threshold": 200000
+        }
+      },
+      "payroll": {
+        "ss_wage_base": 184500,
+        "ss_rate": 0.124,
+        "medicare_rate": 0.029,
+        "se_taxable_fraction": 0.9235,
+        "additional_medicare_rate": 0.009
+      }
+    }
+  },
+
+  "states": {
+    "CA": {
+      "starts_from": "federal_agi",
+      "installment_schedule": [0.3, 0.7, 0.7, 1.0],
+      "installment_note": "California's estimated-tax installments are 30/40/0/30 per quarter rather than the federal equal quarters, so nothing is due with the September payment.",
+      "years": {
+        "2025": {
+          "source": "California Franchise Tax Board, 2025 California Tax Rate Schedules",
+          "source_url": "https://www.ftb.ca.gov/forms/2025/2025-california-tax-rate-schedules.html",
+          "verified_on": "2026-08-01",
+          "notes": "The top two bands fold in the 1% Mental Health Services Tax on income over 1000000, so the marginal rate reads 12.3% then 13.3%. MFJ thresholds are exactly twice the single thresholds.",
+          "filing_status": {
+            "mfj": {
+              "standard_deduction": 10726,
+              "brackets": [
+                [0, 0.01],
+                [21428, 0.02],
+                [50798, 0.04],
+                [80158, 0.06],
+                [111340, 0.08],
+                [140698, 0.093],
+                [721314, 0.103],
+                [865574, 0.113],
+                [1000000, 0.123],
+                [1442628, 0.133]
+              ]
+            },
+            "single": {
+              "standard_deduction": 5363,
+              "brackets": [
+                [0, 0.01],
+                [10714, 0.02],
+                [25399, 0.04],
+                [40084, 0.06],
+                [55670, 0.08],
+                [70349, 0.093],
+                [360657, 0.103],
+                [432787, 0.113],
+                [721314, 0.123],
+                [1000000, 0.133]
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

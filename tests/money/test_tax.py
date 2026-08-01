@@ -10,6 +10,7 @@ from istota.money.core.tax import (
     apply_brackets,
     compute_ca_tax,
     compute_federal_tax,
+    federal_rates,
     compute_se_tax,
     estimate_quarterly_tax,
     parse_tax_config,
@@ -91,8 +92,8 @@ class TestApplyBrackets:
         # 23,850-96,950 @ 12% = 8,772
         # 96,950-200,000 = 103,050 @ 22% = 22,671
         # Total = 33,828
-        from istota.money.core.tax import FEDERAL_BRACKETS
-        brackets = FEDERAL_BRACKETS[(2025, "mfj")]
+        from istota.money.core.tax import federal_rates
+        brackets = federal_rates(2025).brackets("mfj")
         assert round(apply_brackets(200_000, brackets), 2) == 33828.00
 
 
@@ -151,6 +152,59 @@ class TestComputeFederalTax:
         assert std_ded == 15_000
         assert taxable == 65_000
         assert round(tax, 2) == 9214.00
+
+
+class TestYearSpecificFederalRates:
+    """The live defect: 2026 estimates were computed from 2025 law.
+
+    The 2026 rate rows were byte-for-byte copies of the 2025 rows, so every
+    figure below was silently the previous year's. These pin the years apart at
+    the level a user actually reaches — the computation, not the data file.
+    """
+
+    def test_2026_uses_its_own_standard_deduction(self):
+        _, std_2025, _ = compute_federal_tax(300_000, "mfj", 2025)
+        _, std_2026, _ = compute_federal_tax(300_000, "mfj", 2026)
+        assert std_2025 == 30_000
+        assert std_2026 == 32_200
+
+    def test_2026_uses_its_own_brackets(self):
+        # Same AGI, different years: the 2026 bands are wider, so the tax is
+        # lower. Equal figures would mean the copy is back.
+        _, _, tax_2025 = compute_federal_tax(300_000, "mfj", 2025)
+        _, _, tax_2026 = compute_federal_tax(300_000, "mfj", 2026)
+        assert tax_2026 < tax_2025
+
+    def test_2026_uses_its_own_social_security_wage_base(self):
+        # Above the wage base in both years, so the SS portion is capped at it
+        # and the difference is exactly the extra 8,400 of base at 12.4%.
+        se_2025, _ = compute_se_tax(400_000, year=2025)
+        se_2026, _ = compute_se_tax(400_000, year=2026)
+        assert round(se_2026 - se_2025, 2) == round((184_500 - 176_100) * 0.124, 2)
+
+    def test_qbi_phaseout_range_widened_for_2026(self):
+        # OBBBA widened the MFJ phase-in range to 150k. An AGI 120k above the
+        # threshold is fully phased out under the old 100k range and only
+        # partly phased out under the new one.
+        agi = 403_500 + 120_000
+        common = dict(
+            se_income_ytd=agi, w2_income=0, w2_federal_withholding=0,
+            w2_state_withholding=0, federal_estimated_paid=0,
+            state_estimated_paid=0, filing_status="mfj", enable_qbi=True,
+            current_quarter=4, income_months=12,
+        )
+        r2026 = estimate_quarterly_tax(tax_year=2026, **common)
+        assert r2026.qbi_deduction > 0
+
+    def test_unknown_future_year_falls_back_rather_than_zeroing(self):
+        # Nothing is bundled for 2031, so it resolves to the newest year. The
+        # figures are wrong, but the estimate is computable and the resolver
+        # reports the substitution rather than staying silent about it.
+        _, std, tax = compute_federal_tax(300_000, "mfj", 2031)
+        assert std == 32_200
+        assert tax > 0
+        assert federal_rates(2031).is_fallback is True
+        assert federal_rates(2031).year == 2026
 
 
 class TestComputeCaTax:
