@@ -443,11 +443,16 @@
     padding: var(--space-2) var(--space-3);
   }
 
+  /* Block padding only. An inline inset here would sit *inside* the frame's,
+     putting the cards a step in from the chart card above them — the whole
+     page reads as one column of cards, and the report convention is that a
+     card's box sits on the frame edge while only text steps in (the
+     .section-header below, balance-sheet's net-worth banner). */
   .summary-cards {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
+    padding-block: var(--space-2);
     margin-bottom: var(--space-3);
   }
 
@@ -487,9 +492,10 @@
     color: var(--money-expense);
   }
 
-  .breakdowns {
-    padding: 0 var(--space-3);
-  }
+  /* `.breakdowns` is a bare grouping element: its `.section-header` rows carry
+     their own inline padding from the report shell, exactly as income-statement's
+     do, so an inset here only pushed them a step deeper than the same rows on
+     the sibling reports. */
 
   .caret {
     font-size: 0.5rem;
