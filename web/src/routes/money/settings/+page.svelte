@@ -29,6 +29,8 @@
   } from '$lib/components/ui';
   import EntityForm from '$lib/components/money/EntityForm.svelte';
   import ServiceForm from '$lib/components/money/ServiceForm.svelte';
+  import PortfolioAccountsCard from '$lib/components/money/PortfolioAccountsCard.svelte';
+  import PortfolioClassificationsCard from '$lib/components/money/PortfolioClassificationsCard.svelte';
 
   let loading = $state(true);
   let error = $state('');
@@ -597,6 +599,9 @@
         </div>
       {/if}
     </SettingsCard>
+
+    <PortfolioAccountsCard />
+    <PortfolioClassificationsCard />
   {/if}
 </SettingsLayout>
 

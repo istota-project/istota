@@ -68,6 +68,11 @@
       active: isActive('/reports'),
     },
     { href: `${moneyBase}/taxes`, label: 'Taxes', active: isActive('/taxes') },
+    {
+      href: `${moneyBase}/portfolio/overview`,
+      label: 'Portfolio',
+      active: isActive('/portfolio'),
+    },
     // Lands on Work — the daily-action tab, and upstream of invoices.
     { href: `${moneyBase}/business/work`, label: 'Business', active: isActive('/business') },
   ]);
@@ -75,6 +80,9 @@
   const ledgerOptions = $derived($availableLedgers.map((l) => ({ value: l, label: l })));
 
   const onSettings = $derived(page.url.pathname.startsWith(`${moneyBase}/settings`));
+  // Portfolio is snapshot-backed, not ledger-scoped, so the picker is inert
+  // there for the same reason it is on settings.
+  const onPortfolio = $derived(page.url.pathname.startsWith(`${moneyBase}/portfolio`));
 
   function toggleSettings() {
     if (onSettings) goto(`${moneyBase}/accounts`);
@@ -102,7 +110,7 @@
         {#snippet tools()}
           <!-- Not on settings: nothing there is scoped to a ledger, so the
 				     picker is inert and only crowds the bar beside the Save button. -->
-          {#if !onSettings && $availableLedgers.length > 1}
+          {#if !onSettings && !onPortfolio && $availableLedgers.length > 1}
             <Select
               value={$selectedLedger}
               options={ledgerOptions}
