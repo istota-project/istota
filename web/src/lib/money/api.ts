@@ -747,7 +747,7 @@ export interface PortfolioGroupSlice {
 
 export interface PortfolioAccountSlice extends PortfolioGroupSlice {
   account_id: number;
-  owner: string;
+  group: string;
   account_type: string;
 }
 
@@ -774,7 +774,7 @@ export interface PortfolioSummary {
   by_asset_class: PortfolioGroupSlice[];
   by_account: PortfolioAccountSlice[];
   by_account_type: PortfolioGroupSlice[];
-  by_owner: PortfolioGroupSlice[];
+  by_group: PortfolioGroupSlice[];
   by_geography: PortfolioGroupSlice[];
   holdings: PortfolioHolding[];
 }
@@ -791,7 +791,7 @@ export interface PortfolioAccount {
   id: number;
   account_name: string;
   account_number: string;
-  owner: string;
+  group: string;
   account_type: string;
   excluded: boolean;
   first_seen_at: string;
@@ -896,10 +896,10 @@ export async function getPortfolioSnapshots(): Promise<{
 
 export async function getPortfolioSnapshotSummary(
   id: number,
-  opts?: { owner?: string },
+  opts?: { group?: string },
 ): Promise<{ status: string; summary: PortfolioSummary }> {
   const params = new URLSearchParams();
-  if (opts?.owner) params.set('owner', opts.owner);
+  if (opts?.group) params.set('group', opts.group);
   const qs = params.toString();
   return apiFetch(`/portfolio/snapshots/${id}${qs ? '?' + qs : ''}`);
 }
@@ -911,21 +911,21 @@ export async function deletePortfolioSnapshot(
 }
 
 export async function getPortfolioSummary(opts?: {
-  owner?: string;
+  group?: string;
 }): Promise<{ status: string; summary: PortfolioSummary | null }> {
   const params = new URLSearchParams();
-  if (opts?.owner) params.set('owner', opts.owner);
+  if (opts?.group) params.set('group', opts.group);
   const qs = params.toString();
   return apiFetch(`/portfolio/summary${qs ? '?' + qs : ''}`);
 }
 
 export async function getPortfolioHistory(opts?: {
-  groupBy?: 'total' | 'owner' | 'account_type' | 'asset_class';
-  owner?: string;
+  groupBy?: 'total' | 'group' | 'account_type' | 'asset_class';
+  group?: string;
 }): Promise<{ status: string; group_by: string; series: PortfolioHistoryPoint[] }> {
   const params = new URLSearchParams();
   if (opts?.groupBy) params.set('group_by', opts.groupBy);
-  if (opts?.owner) params.set('owner', opts.owner);
+  if (opts?.group) params.set('group', opts.group);
   const qs = params.toString();
   return apiFetch(`/portfolio/history${qs ? '?' + qs : ''}`);
 }
@@ -952,7 +952,7 @@ export async function getPortfolioAccounts(): Promise<{
 
 export async function patchPortfolioAccount(
   id: number,
-  fields: { owner?: string; account_type?: string; excluded?: boolean },
+  fields: { group?: string; account_type?: string; excluded?: boolean },
 ): Promise<{ status: string; account: PortfolioAccount }> {
   return apiFetch(`/portfolio/accounts/${id}`, {
     method: 'PATCH',

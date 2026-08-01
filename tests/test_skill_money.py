@@ -303,14 +303,14 @@ class TestCommandDispatch:
         args = captured[-1]
         assert "--replace" in args and "3" in args
 
-    def test_portfolio_summary_with_owner(self, captured):
+    def test_portfolio_summary_with_group(self, captured):
         from istota.skills.money import main
 
-        main(["portfolio", "summary", "--snapshot", "5", "--owner", "Alice"])
+        main(["portfolio", "summary", "--snapshot", "5", "--group", "Alice"])
         args = captured[-1]
         assert args[:2] == ["portfolio", "summary"]
         assert "--snapshot" in args and "5" in args
-        assert "--owner" in args and "Alice" in args
+        assert "--group" in args and "Alice" in args
 
     def test_portfolio_history_grouped(self, captured):
         from istota.skills.money import main
@@ -338,10 +338,10 @@ class TestCommandDispatch:
     def test_portfolio_accounts_mutations(self, captured):
         from istota.skills.money import main
 
-        main(["portfolio", "accounts", "--set-owner", "3", "Alice"])
+        main(["portfolio", "accounts", "--set-group", "3", "Alice"])
         args = captured[-1]
         assert args[:2] == ["portfolio", "accounts"]
-        assert "--set-owner" in args and "3" in args and "Alice" in args
+        assert "--set-group" in args and "3" in args and "Alice" in args
         main(["portfolio", "accounts", "--exclude", "4"])
         args = captured[-1]
         assert "--exclude" in args and "4" in args

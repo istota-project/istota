@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state';
+  import { goto } from '$app/navigation';
   import { untrack } from 'svelte';
   import {
     Chart,
@@ -27,8 +28,9 @@
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
   import { base } from '$app/paths';
-  import { Badge, Button, ConfirmDialog, KebabMenu, Modal, Select } from '$lib/components/ui';
+  import { Badge, Button, ConfirmDialog, KebabMenu, Modal } from '$lib/components/ui';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
+  import { portfolioGroupBy, type PortfolioGroupBy } from '$lib/money/stores/portfolio';
 
   Chart.register(
     BarController,
@@ -42,15 +44,17 @@
     Legend,
   );
 
-  type GroupBy = 'total' | 'owner' | 'account_type' | 'asset_class';
-
   let loading = $state(true);
   let error = $state('');
   let series: PortfolioHistoryPoint[] = $state([]);
   let snapshots: PortfolioSnapshotRow[] = $state([]);
-  let groupBy: GroupBy = $state('total');
+  // The group-by Select lives in the section header (portfolio layout),
+  // shared via the store.
+  const groupBy = $derived($portfolioGroupBy);
   // Deep link from a holdings row: /history?symbol=VTI charts that symbol.
-  let symbol = $state(page.url.searchParams.get('symbol') ?? '');
+  // URL-derived (not copied into state) so the layout sees the same value
+  // and can drop the group-by control while a symbol is charted.
+  const symbol = $derived(page.url.searchParams.get('symbol') ?? '');
   let symbolPoints: { exported_at: string; value: number | null; quantity: number | null }[] =
     $state([]);
 
@@ -60,13 +64,6 @@
   let confirmDeleteId: number | null = $state(null);
   let diff: PortfolioDiff | null = $state(null);
   let diffOpen = $state(false);
-
-  const groupOptions = [
-    { value: 'total', label: 'Total' },
-    { value: 'owner', label: 'By owner' },
-    { value: 'account_type', label: 'By account type' },
-    { value: 'asset_class', label: 'By asset class' },
-  ];
 
   function usd(value: number | null, fractionDigits = 0): string {
     if (value == null) return '—';
@@ -81,7 +78,7 @@
     );
   }
 
-  async function load(currentGroupBy: GroupBy, currentSymbol: string) {
+  async function load(currentGroupBy: PortfolioGroupBy, currentSymbol: string) {
     error = '';
     try {
       if (currentSymbol) {
@@ -321,16 +318,13 @@
     <div class="toolbar-left control-row">
       {#if symbol}
         <span class="symbol-title">{symbol}</span>
-        <button type="button" class="clear-symbol" onclick={() => (symbol = '')}>
+        <button
+          type="button"
+          class="clear-symbol"
+          onclick={() => goto(`${base}/money/portfolio/history`)}
+        >
           ← All holdings
         </button>
-      {:else}
-        <Select
-          value={groupBy}
-          options={groupOptions}
-          onValueChange={(v) => (groupBy = v as GroupBy)}
-          ariaLabel="Group history by"
-        />
       {/if}
     </div>
     <span class="money-result-count">

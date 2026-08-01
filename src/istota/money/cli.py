@@ -1325,9 +1325,9 @@ def portfolio_snapshots(ctx):
 
 @portfolio_group.command("summary")
 @click.option("--snapshot", "snapshot_id", type=int, help="Snapshot id (default: latest)")
-@click.option("--owner", "-o", help="Filter by account owner")
+@click.option("--group", "-g", help="Filter by account group")
 @pass_ctx
-def portfolio_summary(ctx, snapshot_id, owner):
+def portfolio_summary(ctx, snapshot_id, group):
     """Current-state summary: totals, allocation, aggregated holdings."""
     from istota.money import portfolio
 
@@ -1339,7 +1339,7 @@ def portfolio_summary(ctx, snapshot_id, owner):
                 _output({"status": "error", "error": "No snapshots imported yet"})
                 return
             snapshot_id = snaps[0]["id"]
-        summary = portfolio.snapshot_summary(conn, snapshot_id, owner=owner)
+        summary = portfolio.snapshot_summary(conn, snapshot_id, group=group)
         if summary is None:
             _output({"status": "error", "error": f"No snapshot with id {snapshot_id}"})
             return
@@ -1350,17 +1350,17 @@ def portfolio_summary(ctx, snapshot_id, owner):
 
 @portfolio_group.command("history")
 @click.option("--group-by", "group_by",
-              type=click.Choice(["total", "owner", "account_type", "asset_class"]),
+              type=click.Choice(["total", "group", "account_type", "asset_class"]),
               default="total", help="Stack the series by this dimension")
-@click.option("--owner", "-o", help="Filter by account owner")
+@click.option("--group", "-g", help="Filter by account group")
 @pass_ctx
-def portfolio_history(ctx, group_by, owner):
+def portfolio_history(ctx, group_by, group):
     """Per-snapshot value totals over time."""
     from istota.money import portfolio
 
     conn = _require_db(ctx)
     try:
-        result = portfolio.history_series(conn, group_by=group_by, owner=owner)
+        result = portfolio.history_series(conn, group_by=group_by, group=group)
         _output({"status": "ok", **result})
     finally:
         conn.close()
@@ -1424,8 +1424,8 @@ def portfolio_delete_snapshot(ctx, snapshot_id, confirmed):
 
 
 @portfolio_group.command("accounts")
-@click.option("--set-owner", "set_owner", type=(int, str), default=None,
-              help="Set an account's owner label: ID OWNER")
+@click.option("--set-group", "set_group", type=(int, str), default=None,
+              help="Set an account's group label: ID GROUP (an owner, a purpose — any grouping)")
 @click.option("--set-type", "set_type", type=(int, str), default=None,
               help="Set an account's type: ID TYPE (retirement/trading/cash/taxable or free text)")
 @click.option("--exclude", "exclude_id", type=int, default=None,
@@ -1433,15 +1433,15 @@ def portfolio_delete_snapshot(ctx, snapshot_id, confirmed):
 @click.option("--include", "include_id", type=int, default=None,
               help="Re-include a previously excluded account")
 @pass_ctx
-def portfolio_accounts(ctx, set_owner, set_type, exclude_id, include_id):
+def portfolio_accounts(ctx, set_group, set_type, exclude_id, include_id):
     """List the account registry, or update one row via the options."""
     from dataclasses import asdict
 
     from istota.money import portfolio
 
     mutations: list[tuple[int, dict]] = []
-    if set_owner:
-        mutations.append((set_owner[0], {"owner": set_owner[1]}))
+    if set_group:
+        mutations.append((set_group[0], {"group": set_group[1]}))
     if set_type:
         mutations.append((set_type[0], {"account_type": set_type[1]}))
     if exclude_id is not None:

@@ -507,6 +507,15 @@
       margin-left: 0;
     }
 
+    /* Portfolio wants the same one-line pairing but in markup order: the
+       collapsed section nav leads and the tab's single compact Select sits
+       beside it, so no `order` swap — and left-aligned, so the auto margin
+       that right-aligns the tools on the wide layout comes off. */
+    :global(.portfolio-header .money-section-tools) {
+      width: auto;
+      margin-left: 0;
+    }
+
     :global(.money-section-tools .money-control-input) {
       flex: 1 1 auto;
       min-width: 0;

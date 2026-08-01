@@ -45,7 +45,7 @@ class ParsedSnapshot:
     rows: list[PositionRow]
     source: str                  # registry source name
     warnings: list[str]          # non-fatal parse notes surfaced to the caller
-    owner_hints: dict[str, str] = field(default_factory=dict)  # account_name -> owner
+    group_hints: dict[str, str] = field(default_factory=dict)  # account_name -> group label
 
 
 _CASH_SYMBOL_PREFIXES = ("SPAXX", "FZDXX", "CORE", "USD")

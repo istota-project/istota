@@ -51,7 +51,7 @@
   <p class="import-footnote">
     Imported snapshots appear on the
     <a href="{base}/money/portfolio/overview">Overview</a> and
-    <a href="{base}/money/portfolio/history">History</a> tabs. Account owners and symbol
+    <a href="{base}/money/portfolio/history">History</a> tabs. Account groups and symbol
     classifications are edited in <a href="{base}/money/settings">Money settings</a>.
   </p>
 </div>

@@ -197,11 +197,11 @@ class TestAccountRoutes:
         acct = next(a for a in accounts if a["account_name"] == "Taxable Brokerage")
         resp = client.patch(
             f"/api/money/portfolio/accounts/{acct['id']}",
-            json={"owner": "Alice", "account_type": "brokerage", "excluded": True},
+            json={"group": "Alice", "account_type": "brokerage", "excluded": True},
         )
         assert resp.status_code == 200
         updated = resp.json()["account"]
-        assert updated["owner"] == "Alice"
+        assert updated["group"] == "Alice"
         assert updated["account_type"] == "brokerage"
         assert updated["excluded"] is True
 
@@ -224,7 +224,7 @@ class TestAccountRoutes:
         assert resp.status_code == 400
 
     def test_patch_missing_404(self, client):
-        resp = client.patch("/api/money/portfolio/accounts/99", json={"owner": "X"})
+        resp = client.patch("/api/money/portfolio/accounts/99", json={"group": "X"})
         assert resp.status_code == 404
 
 

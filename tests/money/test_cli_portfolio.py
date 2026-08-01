@@ -114,13 +114,13 @@ class TestReads:
         assert payload["status"] == "ok"
         assert payload["summary"]["exported_at"].startswith("2025-05-01")
 
-    def test_summary_owner_filter(self, runner, seeded):
+    def test_summary_group_filter(self, runner, seeded):
         # Bob's account appears only in the oldest fixture snapshot.
         _, snaps = _invoke(runner, seeded, ["portfolio", "snapshots"])
         oldest = snaps["snapshots"][-1]["id"]
         _, payload = _invoke(
             runner, seeded,
-            ["portfolio", "summary", "--snapshot", str(oldest), "--owner", "Bob"],
+            ["portfolio", "summary", "--snapshot", str(oldest), "--group", "Bob"],
         )
         assert payload["summary"]["total_value"] == pytest.approx(52000.0)
 
@@ -189,12 +189,12 @@ class TestAccountsAndClassify:
         assert "Taxable Brokerage" in names
         assert "Active Trading (IBKR)" in names
 
-    def test_set_owner_and_type(self, runner, seeded):
+    def test_set_group_and_type(self, runner, seeded):
         _, payload = _invoke(runner, seeded, ["portfolio", "accounts"])
         acct = next(a for a in payload["accounts"] if a["account_name"] == "Taxable Brokerage")
         _, updated = _invoke(
             runner, seeded,
-            ["portfolio", "accounts", "--set-owner", str(acct["id"]), "Alice"],
+            ["portfolio", "accounts", "--set-group", str(acct["id"]), "Alice"],
         )
         assert updated["status"] == "ok"
         _, updated = _invoke(
@@ -203,7 +203,7 @@ class TestAccountsAndClassify:
         )
         _, payload = _invoke(runner, seeded, ["portfolio", "accounts"])
         acct = next(a for a in payload["accounts"] if a["account_name"] == "Taxable Brokerage")
-        assert acct["owner"] == "Alice"
+        assert acct["group"] == "Alice"
         assert acct["account_type"] == "brokerage"
 
     def test_exclude_include(self, runner, seeded):

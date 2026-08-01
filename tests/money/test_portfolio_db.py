@@ -75,6 +75,36 @@ class TestSchema:
             "schema_meta",
         } <= tables
 
+    def test_owner_column_migrates_to_account_group(self, tmp_path):
+        """A DB created before the rename carries ``owner``; ensure_schema
+        renames it in place and the stored labels survive."""
+        db = sqlite3.connect(str(tmp_path / "money.db"))
+        db.execute(
+            "CREATE TABLE portfolio_accounts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "account_name TEXT NOT NULL UNIQUE, "
+            "account_number TEXT NOT NULL DEFAULT '', "
+            "owner TEXT NOT NULL DEFAULT '', "
+            "account_type TEXT NOT NULL DEFAULT '', "
+            "excluded INTEGER NOT NULL DEFAULT 0, "
+            "first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO portfolio_accounts "
+            "(account_name, owner, first_seen_at, last_seen_at) "
+            "VALUES ('Taxable Brokerage', 'Alice', '2026-01-01', '2026-01-01')"
+        )
+        db.commit()
+        portfolio.ensure_schema(db)
+        cols = {r[1] for r in db.execute("PRAGMA table_info(portfolio_accounts)")}
+        assert "account_group" in cols
+        assert "owner" not in cols
+        accounts = portfolio.list_accounts(db)
+        assert accounts[0].group == "Alice"
+        # Idempotent on a second run.
+        portfolio.ensure_schema(db)
+        db.close()
+
     def test_init_db_creates_portfolio_tables(self, tmp_path):
         from istota.money.db import get_db, init_db
 
@@ -170,7 +200,7 @@ class TestAccountRegistry:
         assert accounts["Active Trading (IBKR)"].account_type == "trading"
         assert accounts["SK Tax"].account_type == "cash"
         assert accounts["Joint Brokerage"].account_type == "taxable"
-        assert all(a.owner == "" for a in accounts.values())
+        assert all(a.group == "" for a in accounts.values())
         assert all(a.excluded is False for a in accounts.values())
 
     def test_never_reguessed_and_last_seen_advances(self, conn):
@@ -178,7 +208,7 @@ class TestAccountRegistry:
             conn, make_snapshot([make_row(account_name="Roth IRA A")])
         )
         (acct,) = portfolio.list_accounts(conn)
-        portfolio.update_account(conn, acct.id, account_type="custom-type", owner="Alice")
+        portfolio.update_account(conn, acct.id, account_type="custom-type", group="Alice")
         conn.execute(
             "UPDATE portfolio_accounts SET last_seen_at = '2000-01-01T00:00:00'"
         )
@@ -188,32 +218,32 @@ class TestAccountRegistry:
         )
         (acct2,) = portfolio.list_accounts(conn)
         assert acct2.account_type == "custom-type"
-        assert acct2.owner == "Alice"
+        assert acct2.group == "Alice"
         assert acct2.last_seen_at > "2000-01-01"
 
-    def test_owner_hints_fill_blank_only(self, conn):
+    def test_group_hints_fill_blank_only(self, conn):
         portfolio.insert_snapshot(
             conn,
             make_snapshot(
                 [make_row(account_name="Taxable Brokerage")],
-                owner_hints={"Taxable Brokerage": "Alice"},
+                group_hints={"Taxable Brokerage": "Alice"},
             ),
         )
         (acct,) = portfolio.list_accounts(conn)
-        assert acct.owner == "Alice"
-        portfolio.update_account(conn, acct.id, owner="Somebody Else")
+        assert acct.group == "Alice"
+        portfolio.update_account(conn, acct.id, group="Somebody Else")
         portfolio.insert_snapshot(
             conn,
             make_snapshot(
                 [make_row(account_name="Taxable Brokerage", quantity=1.0)],
-                owner_hints={"Taxable Brokerage": "Alice"},
+                group_hints={"Taxable Brokerage": "Alice"},
             ),
         )
         (acct2,) = portfolio.list_accounts(conn)
-        assert acct2.owner == "Somebody Else"
+        assert acct2.group == "Somebody Else"
 
     def test_update_account_validates_id(self, conn):
-        assert portfolio.update_account(conn, 999, owner="X") is False
+        assert portfolio.update_account(conn, 999, group="X") is False
 
 
 class TestClassifications:
@@ -265,7 +295,7 @@ class TestSummaryAndExclusion:
                 make_row(account_name="SK Tax", symbol="CORE**", row_type="cash",
                          value=3000.0, cost_basis=None, quantity=None),
                 make_row(account_name="Joint Brokerage", symbol="VTI", value=2000.0, cost_basis=1500.0),
-            ], owner_hints={"Taxable Brokerage": "Alice", "SK Tax": "Alice",
+            ], group_hints={"Taxable Brokerage": "Alice", "SK Tax": "Alice",
                             "Joint Brokerage": "Bob"}),
         )
 
@@ -276,9 +306,9 @@ class TestSummaryAndExclusion:
         by_class = {g["key"]: g["value"] for g in summary["by_asset_class"]}
         assert by_class["Stocks"] == 8000.0
         assert by_class["Cash & Equivalents"] == 4000.0
-        by_owner = {g["key"]: g["value"] for g in summary["by_owner"]}
-        assert by_owner["Alice"] == 10000.0
-        assert by_owner["Bob"] == 2000.0
+        by_group = {g["key"]: g["value"] for g in summary["by_group"]}
+        assert by_group["Alice"] == 10000.0
+        assert by_group["Bob"] == 2000.0
 
     def test_holdings_aggregate_and_cash_collapse(self, conn):
         result = self._seed(conn)
@@ -308,9 +338,9 @@ class TestSummaryAndExclusion:
         raw = conn.execute("SELECT total_value FROM portfolio_snapshots").fetchone()[0]
         assert raw == 12000.0
 
-    def test_owner_filter(self, conn):
+    def test_group_filter(self, conn):
         result = self._seed(conn)
-        summary = portfolio.snapshot_summary(conn, result["snapshot_id"], owner="Bob")
+        summary = portfolio.snapshot_summary(conn, result["snapshot_id"], group="Bob")
         assert summary["total_value"] == 2000.0
 
     def test_pending_rows_count_in_totals(self, conn):
@@ -483,5 +513,5 @@ class TestFixtureRoundTrip:
         again = [portfolio.insert_snapshot(conn, s) for s in snapshots]
         assert [r["status"] for r in again] == ["duplicate"] * 3
         accounts = {a.account_name: a for a in portfolio.list_accounts(conn)}
-        assert accounts["Taxable Brokerage"].owner == "Alice"
-        assert accounts["Joint Brokerage"].owner == "Bob"
+        assert accounts["Taxable Brokerage"].group == "Alice"
+        assert accounts["Joint Brokerage"].group == "Bob"

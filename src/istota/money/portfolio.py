@@ -33,7 +33,7 @@ _SEED_SENTINEL = "portfolio_classifications_seeded_at"
 UNCLASSIFIED = "Unclassified"
 CASH_CLASS = "Cash & Equivalents"
 
-HISTORY_GROUP_BYS = ("total", "owner", "account_type", "asset_class")
+HISTORY_GROUP_BYS = ("total", "group", "account_type", "asset_class")
 
 # schema_meta is shared with config_store; CREATE IF NOT EXISTS keeps whichever
 # family initialises first authoritative. The positions FK cascade clause is
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS portfolio_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_name TEXT NOT NULL UNIQUE,
     account_number TEXT NOT NULL DEFAULT '',
-    owner TEXT NOT NULL DEFAULT '',
+    account_group TEXT NOT NULL DEFAULT '',
     account_type TEXT NOT NULL DEFAULT '',
     excluded INTEGER NOT NULL DEFAULT 0,
     first_seen_at TEXT NOT NULL,
@@ -115,7 +115,7 @@ class PortfolioAccount:
     id: int
     account_name: str
     account_number: str
-    owner: str
+    group: str
     account_type: str
     excluded: bool
     first_seen_at: str
@@ -157,7 +157,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     Called from ``db.init_db`` so every connection path gets the tables.
     """
     conn.executescript(PORTFOLIO_SCHEMA)
+    _migrate_owner_to_group(conn)
     seed_classifications(conn)
+
+
+def _migrate_owner_to_group(conn: sqlite3.Connection) -> None:
+    """Rename the original ``owner`` column to ``account_group``.
+
+    The registry label started as "owner" but a group is the general concept
+    (an owner is one way to group accounts). CREATE IF NOT EXISTS leaves an
+    existing table on the old column, so rename in place; values carry over.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(portfolio_accounts)")}
+    if "owner" in cols and "account_group" not in cols:
+        conn.execute(
+            "ALTER TABLE portfolio_accounts RENAME COLUMN owner TO account_group"
+        )
+        conn.commit()
 
 
 def seed_classifications(conn: sqlite3.Connection) -> int:
@@ -235,16 +251,16 @@ def _upsert_account(
     conn: sqlite3.Connection,
     account_name: str,
     account_number: str,
-    owner_hint: str,
+    group_hint: str,
     now: str,
 ) -> tuple[int, bool]:
     """Returns (account_id, created)."""
     row = conn.execute(
-        "SELECT id, account_number, owner FROM portfolio_accounts WHERE account_name = ?",
+        "SELECT id, account_number, account_group FROM portfolio_accounts WHERE account_name = ?",
         (account_name,),
     ).fetchone()
     if row is not None:
-        account_id, stored_number, stored_owner = row[0], row[1], row[2]
+        account_id, stored_number, stored_group = row[0], row[1], row[2]
         conn.execute(
             "UPDATE portfolio_accounts SET last_seen_at = ? WHERE id = ?",
             (now, account_id),
@@ -254,20 +270,20 @@ def _upsert_account(
                 "UPDATE portfolio_accounts SET account_number = ? WHERE id = ?",
                 (account_number, account_id),
             )
-        if not stored_owner and owner_hint:
+        if not stored_group and group_hint:
             conn.execute(
-                "UPDATE portfolio_accounts SET owner = ? WHERE id = ?",
-                (owner_hint, account_id),
+                "UPDATE portfolio_accounts SET account_group = ? WHERE id = ?",
+                (group_hint, account_id),
             )
         return account_id, False
     cursor = conn.execute(
         "INSERT INTO portfolio_accounts "
-        "(account_name, account_number, owner, account_type, excluded, first_seen_at, last_seen_at) "
+        "(account_name, account_number, account_group, account_type, excluded, first_seen_at, last_seen_at) "
         "VALUES (?, ?, ?, ?, 0, ?, ?)",
         (
             account_name,
             account_number,
-            owner_hint,
+            group_hint,
             guess_account_type(account_name),
             now,
             now,
@@ -299,7 +315,7 @@ def insert_snapshot(
         for row in parsed.rows:
             if row.account_name in account_ids:
                 continue
-            hint = parsed.owner_hints.get(row.account_name, "")
+            hint = parsed.group_hints.get(row.account_name, "")
             account_id, created = _upsert_account(
                 conn, row.account_name, row.account_number, hint, now
             )
@@ -517,7 +533,7 @@ def _load_positions(
     conn: sqlite3.Connection,
     snapshot_id: int,
     *,
-    owner: str | None = None,
+    group: str | None = None,
     account_id: int | None = None,
 ) -> list[dict]:
     """Positions for one snapshot joined with their accounts; excluded
@@ -525,14 +541,14 @@ def _load_positions(
     sql = (
         "SELECT p.row_type, p.symbol, p.symbol_norm, p.description, p.quantity, "
         "p.price, p.value, p.cost_basis, p.security_type, "
-        "a.id, a.account_name, a.owner, a.account_type "
+        "a.id, a.account_name, a.account_group, a.account_type "
         "FROM portfolio_positions p JOIN portfolio_accounts a ON a.id = p.account_id "
         "WHERE p.snapshot_id = ? AND a.excluded = 0"
     )
     params: list = [snapshot_id]
-    if owner is not None:
-        sql += " AND a.owner = ?"
-        params.append(owner)
+    if group is not None:
+        sql += " AND a.account_group = ?"
+        params.append(group)
     if account_id is not None:
         sql += " AND a.id = ?"
         params.append(account_id)
@@ -542,7 +558,7 @@ def _load_positions(
             "row_type": r[0], "symbol": r[1], "symbol_norm": r[2],
             "description": r[3], "quantity": r[4], "price": r[5],
             "value": r[6], "cost_basis": r[7], "security_type": r[8],
-            "account_id": r[9], "account_name": r[10], "owner": r[11],
+            "account_id": r[9], "account_name": r[10], "group": r[11],
             "account_type": r[12],
         }
         for r in rows
@@ -574,13 +590,13 @@ def snapshot_summary(
     conn: sqlite3.Connection,
     snapshot_id: int,
     *,
-    owner: str | None = None,
+    group: str | None = None,
     account_id: int | None = None,
 ) -> dict | None:
     snapshot = get_snapshot(conn, snapshot_id)
     if snapshot is None:
         return None
-    positions = _load_positions(conn, snapshot_id, owner=owner, account_id=account_id)
+    positions = _load_positions(conn, snapshot_id, group=group, account_id=account_id)
     cls_map = _classification_map(conn)
 
     def classify(pos: dict) -> tuple[str, str, str]:
@@ -596,7 +612,7 @@ def snapshot_summary(
         entry = by_account_rows.setdefault(pos["account_id"], {
             "key": pos["account_name"],
             "account_id": pos["account_id"],
-            "owner": pos["owner"],
+            "group": pos["group"],
             "account_type": pos["account_type"],
             "value": 0.0,
         })
@@ -668,7 +684,7 @@ def snapshot_summary(
         "by_asset_class": _group_sums(positions, lambda p: classify(p)[0]),
         "by_account": by_account,
         "by_account_type": _group_sums(positions, lambda p: p["account_type"] or "unspecified"),
-        "by_owner": _group_sums(positions, lambda p: p["owner"] or "Unassigned"),
+        "by_group": _group_sums(positions, lambda p: p["group"] or "Ungrouped"),
         "by_geography": _group_sums(positions, lambda p: classify(p)[2]),
         "holdings": holdings_list,
     }
@@ -678,7 +694,7 @@ def history_series(
     conn: sqlite3.Connection,
     *,
     group_by: str = "total",
-    owner: str | None = None,
+    group: str | None = None,
 ) -> dict:
     if group_by not in HISTORY_GROUP_BYS:
         raise ValueError(f"group_by must be one of {HISTORY_GROUP_BYS}")
@@ -689,7 +705,7 @@ def history_series(
     cls_map = _classification_map(conn)
     series = []
     for snap_id, exported_at, estimated in snapshots:
-        positions = _load_positions(conn, snap_id, owner=owner)
+        positions = _load_positions(conn, snap_id, group=group)
         total = round(sum(p["value"] for p in positions if p["value"] is not None), 2)
         point = {
             "snapshot_id": snap_id,
@@ -698,8 +714,8 @@ def history_series(
             "total": total,
         }
         if group_by != "total":
-            if group_by == "owner":
-                label_fn = lambda p: p["owner"] or "Unassigned"  # noqa: E731
+            if group_by == "group":
+                label_fn = lambda p: p["group"] or "Ungrouped"  # noqa: E731
             elif group_by == "account_type":
                 label_fn = lambda p: p["account_type"] or "unspecified"  # noqa: E731
             else:
@@ -809,12 +825,12 @@ def snapshot_diff(conn: sqlite3.Connection, older_id: int, newer_id: int) -> dic
 
 def list_accounts(conn: sqlite3.Connection) -> list[PortfolioAccount]:
     rows = conn.execute(
-        "SELECT id, account_name, account_number, owner, account_type, excluded, "
+        "SELECT id, account_name, account_number, account_group, account_type, excluded, "
         "first_seen_at, last_seen_at FROM portfolio_accounts ORDER BY account_name"
     ).fetchall()
     return [
         PortfolioAccount(
-            id=r[0], account_name=r[1], account_number=r[2], owner=r[3],
+            id=r[0], account_name=r[1], account_number=r[2], group=r[3],
             account_type=r[4], excluded=bool(r[5]),
             first_seen_at=r[6], last_seen_at=r[7],
         )
@@ -833,15 +849,15 @@ def update_account(
     conn: sqlite3.Connection,
     account_id: int,
     *,
-    owner: str | None = None,
+    group: str | None = None,
     account_type: str | None = None,
     excluded: bool | None = None,
 ) -> bool:
     sets = []
     params: list = []
-    if owner is not None:
-        sets.append("owner = ?")
-        params.append(owner)
+    if group is not None:
+        sets.append("account_group = ?")
+        params.append(group)
     if account_type is not None:
         sets.append("account_type = ?")
         params.append(account_type)

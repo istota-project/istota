@@ -6429,7 +6429,7 @@ const handlers: MockHandler[] = [
         id: 1,
         account_name: 'Taxable Brokerage',
         account_number: 'X111',
-        owner: 'Alice',
+        group: 'Alice',
         account_type: 'taxable',
         excluded: false,
         first_seen_at: '2026-01-05T09:00:00Z',
@@ -6439,7 +6439,7 @@ const handlers: MockHandler[] = [
         id: 2,
         account_name: 'Roth IRA A',
         account_number: 'X222',
-        owner: 'Alice',
+        group: 'Alice',
         account_type: 'retirement',
         excluded: false,
         first_seen_at: '2026-01-05T09:00:00Z',
@@ -6449,7 +6449,7 @@ const handlers: MockHandler[] = [
         id: 3,
         account_name: 'Active Trading (IBKR)',
         account_number: 'X333',
-        owner: 'Alice',
+        group: 'Alice',
         account_type: 'trading',
         excluded: false,
         first_seen_at: '2026-02-10T09:00:00Z',
@@ -6459,7 +6459,7 @@ const handlers: MockHandler[] = [
         id: 4,
         account_name: 'Joint Brokerage',
         account_number: 'X444',
-        owner: 'Bob',
+        group: 'Bob',
         account_type: 'taxable',
         excluded: false,
         first_seen_at: '2026-01-05T09:00:00Z',
@@ -6469,7 +6469,7 @@ const handlers: MockHandler[] = [
         id: 5,
         account_name: 'SK Tax',
         account_number: 'X555',
-        owner: 'Alice',
+        group: 'Alice',
         account_type: 'cash',
         excluded: true,
         first_seen_at: '2026-01-05T09:00:00Z',
@@ -6620,11 +6620,11 @@ const handlers: MockHandler[] = [
       return { asset_class: 'Unclassified', sub_class: 'Unclassified', geography: 'Unclassified' };
     }
 
-    function visiblePositions(snap: MockSnapshot, owner?: string | null) {
+    function visiblePositions(snap: MockSnapshot, group?: string | null) {
       return snap.positions.filter((p) => {
         const acct = accountFor(p.account);
         if (!acct || acct.excluded) return false;
-        if (owner && acct.owner !== owner) return false;
+        if (group && acct.group !== group) return false;
         return true;
       });
     }
@@ -6642,8 +6642,8 @@ const handlers: MockHandler[] = [
         }));
     }
 
-    function summaryOf(snap: MockSnapshot, owner?: string | null) {
-      const rows = visiblePositions(snap, owner);
+    function summaryOf(snap: MockSnapshot, group?: string | null) {
+      const rows = visiblePositions(snap, group);
       const total = rows.reduce((a, p) => a + p.value, 0);
       const holdings = new Map<string, any>();
       for (const p of rows) {
@@ -6679,7 +6679,7 @@ const handlers: MockHandler[] = [
         .sort((a, b) => b.value - a.value);
       const byAccount = groupSums(rows, (p) => p.account).map((g) => {
         const acct = accountFor(g.key)!;
-        return { ...g, account_id: acct.id, owner: acct.owner, account_type: acct.account_type };
+        return { ...g, account_id: acct.id, group: acct.group, account_type: acct.account_type };
       });
       return {
         snapshot_id: snap.id,
@@ -6693,7 +6693,7 @@ const handlers: MockHandler[] = [
           rows,
           (p) => accountFor(p.account)?.account_type || 'unspecified',
         ),
-        by_owner: groupSums(rows, (p) => accountFor(p.account)?.owner || 'Unassigned'),
+        by_group: groupSums(rows, (p) => accountFor(p.account)?.group || 'Ungrouped'),
         by_geography: groupSums(rows, (p) => classify(p).geography),
         holdings: holdingsList,
       };
@@ -6784,7 +6784,7 @@ const handlers: MockHandler[] = [
         const snap = snapshots.find((s) => s.id === Number(snapMatch[1]));
         if (method === 'GET') {
           if (!snap) return { __status: 404, status: 'error', error: 'no such snapshot' };
-          return { status: 'ok', summary: summaryOf(snap, params.get('owner')) };
+          return { status: 'ok', summary: summaryOf(snap, params.get('group')) };
         }
         if (method === 'DELETE') {
           if (!snap) return { __status: 404, status: 'error', error: 'no such snapshot' };
@@ -6796,16 +6796,16 @@ const handlers: MockHandler[] = [
       if (path === '/summary' && method === 'GET') {
         if (snapshots.length === 0) return { status: 'ok', summary: null };
         const latest = [...snapshots].sort((a, b) => (a.exported_at < b.exported_at ? 1 : -1))[0];
-        return { status: 'ok', summary: summaryOf(latest, params.get('owner')) };
+        return { status: 'ok', summary: summaryOf(latest, params.get('group')) };
       }
 
       if (path === '/history' && method === 'GET') {
         const groupBy = params.get('group_by') ?? 'total';
-        const owner = params.get('owner');
+        const group = params.get('group');
         const series = [...snapshots]
           .sort((a, b) => (a.exported_at > b.exported_at ? 1 : -1))
           .map((snap) => {
-            const rows = visiblePositions(snap, owner);
+            const rows = visiblePositions(snap, group);
             const point: any = {
               snapshot_id: snap.id,
               exported_at: snap.exported_at,
@@ -6814,8 +6814,8 @@ const handlers: MockHandler[] = [
             };
             if (groupBy !== 'total') {
               const labelFn =
-                groupBy === 'owner'
-                  ? (p: MockPosition) => accountFor(p.account)?.owner || 'Unassigned'
+                groupBy === 'group'
+                  ? (p: MockPosition) => accountFor(p.account)?.group || 'Ungrouped'
                   : groupBy === 'account_type'
                     ? (p: MockPosition) => accountFor(p.account)?.account_type || 'unspecified'
                     : (p: MockPosition) => classify(p).asset_class;
@@ -6910,7 +6910,7 @@ const handlers: MockHandler[] = [
       if (acctMatch && method === 'PATCH') {
         const acct = accounts.find((a) => a.id === Number(acctMatch[1]));
         if (!acct) return { __status: 404, status: 'error', error: 'no such account' };
-        const allowed = ['owner', 'account_type', 'excluded'];
+        const allowed = ['group', 'account_type', 'excluded'];
         const unknown = Object.keys(body ?? {}).filter((k) => !allowed.includes(k));
         if (unknown.length)
           return { __status: 400, status: 'error', error: `unknown fields: ${unknown.join(', ')}` };

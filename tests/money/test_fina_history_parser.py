@@ -63,12 +63,12 @@ class TestParse:
         assert spaxx.row_type == "cash"
         assert spaxx.value == 7000.0
 
-    def test_owner_hints(self, snapshots):
-        assert snapshots[0].owner_hints == {
+    def test_group_hints(self, snapshots):
+        assert snapshots[0].group_hints == {
             "Taxable Brokerage": "Alice",
             "Joint Brokerage": "Bob",
         }
-        assert snapshots[2].owner_hints == {"Taxable Brokerage": "Alice"}
+        assert snapshots[2].group_hints == {"Taxable Brokerage": "Alice"}
 
     def test_classification_columns_ignored(self, snapshots):
         # PositionRow carries no classification fields; stored values must not

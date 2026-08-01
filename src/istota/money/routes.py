@@ -2367,14 +2367,14 @@ async def api_portfolio_snapshots(user_ctx: UserContext = Depends(get_user_confi
 @router.get("/portfolio/snapshots/{snapshot_id}")
 async def api_portfolio_snapshot_detail(
     snapshot_id: int,
-    owner: str | None = None,
+    group: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
 ):
     from istota.money import portfolio
 
     conn = _portfolio_conn(user_ctx)
     try:
-        summary = portfolio.snapshot_summary(conn, snapshot_id, owner=owner)
+        summary = portfolio.snapshot_summary(conn, snapshot_id, group=group)
         if summary is None:
             return _error(f"no snapshot with id {snapshot_id}", 404)
         return {"status": "ok", "summary": summary}
@@ -2401,7 +2401,7 @@ async def api_portfolio_snapshot_delete(
 
 @router.get("/portfolio/summary")
 async def api_portfolio_summary(
-    owner: str | None = None,
+    group: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
 ):
     """Summary of the latest snapshot; ``summary: null`` when nothing imported."""
@@ -2412,7 +2412,7 @@ async def api_portfolio_summary(
         snapshots = portfolio.list_snapshots(conn)
         if not snapshots:
             return {"status": "ok", "summary": None}
-        summary = portfolio.snapshot_summary(conn, snapshots[0]["id"], owner=owner)
+        summary = portfolio.snapshot_summary(conn, snapshots[0]["id"], group=group)
         return {"status": "ok", "summary": summary}
     finally:
         conn.close()
@@ -2421,7 +2421,7 @@ async def api_portfolio_summary(
 @router.get("/portfolio/history")
 async def api_portfolio_history(
     group_by: str = "total",
-    owner: str | None = None,
+    group: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
 ):
     from istota.money import portfolio
@@ -2429,7 +2429,7 @@ async def api_portfolio_history(
     conn = _portfolio_conn(user_ctx)
     try:
         try:
-            result = portfolio.history_series(conn, group_by=group_by, owner=owner)
+            result = portfolio.history_series(conn, group_by=group_by, group=group)
         except ValueError as exc:
             return _error(str(exc), 400)
         return {"status": "ok", **result}
@@ -2504,11 +2504,11 @@ async def api_portfolio_account_patch(
         return _bad_body()
     if not isinstance(body, dict):
         return _bad_body()
-    allowed = {"owner", "account_type", "excluded"}
+    allowed = {"group", "account_type", "excluded"}
     unknown = set(body) - allowed
     if unknown:
         return _error(f"unknown fields: {', '.join(sorted(unknown))}", 400)
-    for key in ("owner", "account_type"):
+    for key in ("group", "account_type"):
         if key in body:
             if not isinstance(body[key], str) or _CONTROL_CHARS_RE.search(body[key]):
                 return _error(f"{key} must be a plain string", 400)
@@ -2521,7 +2521,7 @@ async def api_portfolio_account_patch(
     try:
         ok = portfolio.update_account(
             conn, account_id,
-            owner=body.get("owner"),
+            group=body.get("group"),
             account_type=body.get("account_type"),
             excluded=body.get("excluded"),
         )

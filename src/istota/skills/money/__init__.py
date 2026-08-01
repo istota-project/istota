@@ -381,8 +381,8 @@ def cmd_portfolio_summary(args):
     cli_args = ["portfolio", "summary"]
     if args.snapshot is not None:
         cli_args += ["--snapshot", str(args.snapshot)]
-    if args.owner:
-        cli_args += ["--owner", args.owner]
+    if args.group:
+        cli_args += ["--group", args.group]
     _output(_run(cli_args))
 
 
@@ -390,8 +390,8 @@ def cmd_portfolio_history(args):
     cli_args = ["portfolio", "history"]
     if args.group_by:
         cli_args += ["--group-by", args.group_by]
-    if args.owner:
-        cli_args += ["--owner", args.owner]
+    if args.group:
+        cli_args += ["--group", args.group]
     _output(_run(cli_args))
 
 
@@ -412,8 +412,8 @@ def cmd_portfolio_delete_snapshot(args):
 
 def cmd_portfolio_accounts(args):
     cli_args = ["portfolio", "accounts"]
-    if args.set_owner:
-        cli_args += ["--set-owner", str(args.set_owner[0]), args.set_owner[1]]
+    if args.set_group:
+        cli_args += ["--set-group", str(args.set_group[0]), args.set_group[1]]
     if args.set_type:
         cli_args += ["--set-type", str(args.set_type[0]), args.set_type[1]]
     if args.exclude is not None:
@@ -602,15 +602,15 @@ def build_parser():
 
     p_pf_sum = pf_sub.add_parser("summary", help="Current-state portfolio summary")
     p_pf_sum.add_argument("--snapshot", type=int, help="Snapshot id (default latest)")
-    p_pf_sum.add_argument("--owner", "-o", help="Filter by account owner")
+    p_pf_sum.add_argument("--group", "-g", help="Filter by account group")
 
     p_pf_hist = pf_sub.add_parser("history", help="Value over time")
     p_pf_hist.add_argument(
         "--group-by", dest="group_by",
-        choices=["total", "owner", "account_type", "asset_class"],
+        choices=["total", "group", "account_type", "asset_class"],
         help="Stack the series by this dimension",
     )
-    p_pf_hist.add_argument("--owner", "-o", help="Filter by account owner")
+    p_pf_hist.add_argument("--group", "-g", help="Filter by account group")
 
     p_pf_diff = pf_sub.add_parser("diff", help="Diff two snapshots")
     p_pf_diff.add_argument("older", type=int, help="Older snapshot id")
@@ -625,8 +625,8 @@ def build_parser():
                           help="Required: this is irreversible")
 
     p_pf_acc = pf_sub.add_parser("accounts", help="Account registry (list/update)")
-    p_pf_acc.add_argument("--set-owner", nargs=2, metavar=("ID", "OWNER"),
-                          help="Set an account's owner label")
+    p_pf_acc.add_argument("--set-group", nargs=2, metavar=("ID", "GROUP"),
+                          help="Set an account's group label (an owner, a purpose — any grouping)")
     p_pf_acc.add_argument("--set-type", nargs=2, metavar=("ID", "TYPE"),
                           help="Set an account's type")
     p_pf_acc.add_argument("--exclude", type=int, help="Exclude account from summaries")

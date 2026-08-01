@@ -172,12 +172,12 @@ istota-skill money portfolio import /path/to/Portfolio_Positions.csv [--dry-run]
 # List imported snapshots (newest first, totals exclude excluded accounts)
 istota-skill money portfolio snapshots
 
-# Current state: total value, allocation by asset class / account / owner /
+# Current state: total value, allocation by asset class / account / group /
 # geography, aggregated holdings with P&L
-istota-skill money portfolio summary [--snapshot ID] [--owner Alice]
+istota-skill money portfolio summary [--snapshot ID] [--group Alice]
 
 # Value over time, optionally stacked
-istota-skill money portfolio history [--group-by total|owner|account_type|asset_class] [--owner O]
+istota-skill money portfolio history [--group-by total|group|account_type|asset_class] [--group G]
 
 # What changed between two snapshots (opened / closed / changed positions)
 istota-skill money portfolio diff OLDER_ID NEWER_ID
@@ -185,9 +185,10 @@ istota-skill money portfolio diff OLDER_ID NEWER_ID
 # One symbol's quantity/price/value across snapshots
 istota-skill money portfolio symbol VTI
 
-# Account registry: owner labels, types, and the excluded flag
-# (excluded accounts stay imported but drop out of every summary and chart)
-istota-skill money portfolio accounts [--set-owner ID OWNER] [--set-type ID TYPE] [--exclude ID] [--include ID]
+# Account registry: group labels (an owner, a purpose — any grouping), types,
+# and the excluded flag (excluded accounts stay imported but drop out of every
+# summary and chart)
+istota-skill money portfolio accounts [--set-group ID GROUP] [--set-type ID TYPE] [--exclude ID] [--include ID]
 
 # Symbol classifications (drive the asset-class charts; retroactive — a
 # classification edit reclassifies all history at read time)

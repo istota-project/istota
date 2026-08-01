@@ -9,8 +9,8 @@ Change`` were stored as raw ``$``-strings.
 Rows group by ``Import Date`` into one snapshot each. The stored
 classification columns are ignored — classifications are live data in istota
 (a read-time join), and fina's values came from the same hardcoded map the
-bundled seed ports. The ``Owner`` column rides along as ``owner_hints`` so
-the migration can prefill the account registry.
+bundled seed ports. The ``Owner`` column rides along as ``group_hints`` so
+the migration can prefill the account registry's group labels.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def parse_fina_history_csv(file_path: Path) -> list[ParsedSnapshot]:
             )
 
         groups: dict[str, list[PositionRow]] = {}
-        owner_hints: dict[str, dict[str, str]] = {}
+        group_hints: dict[str, dict[str, str]] = {}
         warnings: dict[str, list[str]] = {}
         for fields in reader:
             if not fields or not any(f.strip() for f in fields):
@@ -128,7 +128,7 @@ def parse_fina_history_csv(file_path: Path) -> list[ParsedSnapshot]:
             )
             groups.setdefault(import_date, []).append(row)
             if owner and account_name:
-                owner_hints.setdefault(import_date, {})[account_name] = owner
+                group_hints.setdefault(import_date, {})[account_name] = owner
 
     if not groups:
         raise PositionParseError("No position rows found in file")
@@ -148,7 +148,7 @@ def parse_fina_history_csv(file_path: Path) -> list[ParsedSnapshot]:
             rows=groups[import_date],
             source=SOURCE_NAME,
             warnings=warnings.get(import_date, []),
-            owner_hints=owner_hints.get(import_date, {}),
+            group_hints=group_hints.get(import_date, {}),
         ))
 
     if not snapshots:

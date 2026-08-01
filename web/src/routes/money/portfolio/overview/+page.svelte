@@ -10,37 +10,36 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { Button, NoticeBanner, Select } from '$lib/components/ui';
+  import { Button, NoticeBanner } from '$lib/components/ui';
+  import { portfolioGroup, portfolioKnownGroups } from '$lib/money/stores/portfolio';
 
   Chart.register(DoughnutController, ArcElement, Tooltip, Legend);
 
   let loading = $state(true);
   let error = $state('');
   let summary = $state<PortfolioSummary | null>(null);
-  let owner = $state('');
-
-  // The filtered view narrows by_owner to one slice, so the option list is
-  // pinned from the unfiltered load and only extended, never shrunk.
-  let knownOwners: string[] = $state([]);
+  // The group filter Select lives in the section header (rendered by the
+  // portfolio layout); this page feeds it the known groups and reads the
+  // chosen value back. The filtered view narrows by_group to one slice, so
+  // the option list is pinned from the unfiltered load and only extended,
+  // never shrunk.
   $effect(() => {
-    if (!owner && summary) {
-      knownOwners = (summary.by_owner ?? []).map((g) => g.key).filter((k) => k !== 'Unassigned');
+    if (!$portfolioGroup && summary) {
+      portfolioKnownGroups.set(
+        (summary.by_group ?? []).map((g) => g.key).filter((k) => k !== 'Ungrouped'),
+      );
     }
   });
-  const pinnedOwnerOptions = $derived([
-    { value: '', label: 'All owners' },
-    ...knownOwners.map((k) => ({ value: k, label: k })),
-  ]);
 
   const unclassified = $derived(
     (summary?.holdings ?? []).filter((h) => h.asset_class === 'Unclassified').map((h) => h.symbol),
   );
 
-  async function load(forOwner: string) {
+  async function load(forGroup: string) {
     loading = summary === null;
     error = '';
     try {
-      const resp = await getPortfolioSummary(forOwner ? { owner: forOwner } : undefined);
+      const resp = await getPortfolioSummary(forGroup ? { group: forGroup } : undefined);
       summary = resp.summary;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load portfolio';
@@ -50,8 +49,8 @@
   }
 
   $effect(() => {
-    const o = owner;
-    untrack(() => void load(o));
+    const g = $portfolioGroup;
+    untrack(() => void load(g));
   });
 
   function usd(value: number | null, fractionDigits = 0): string {
@@ -169,21 +168,12 @@
   </div>
 {:else}
   <div class="money-toolbar">
-    <div class="toolbar-left control-row">
-      {#if pinnedOwnerOptions.length > 2}
-        <Select
-          value={owner}
-          options={pinnedOwnerOptions}
-          onValueChange={(v) => (owner = v)}
-          ariaLabel="Owner filter"
-        />
-      {/if}
-      <span class="money-result-count">
-        As of {summary.exported_at.slice(0, 10)}
-        {#if summary.exported_at_estimated}(estimated date){/if}
-        · {summary.position_count} positions
-      </span>
-    </div>
+    <!-- Lone child of a space-between toolbar, so it needs the push right. -->
+    <span class="money-result-count as-of">
+      As of {summary.exported_at.slice(0, 10)}
+      {#if summary.exported_at_estimated}(estimated date){/if}
+      · {summary.position_count} positions
+    </span>
   </div>
 
   {#if unclassified.length > 0}
@@ -287,6 +277,10 @@
 {/if}
 
 <style>
+  .as-of {
+    margin-left: auto;
+  }
+
   .portfolio-empty {
     padding: var(--space-6) var(--space-3);
     display: flex;
@@ -297,12 +291,6 @@
 
   .portfolio-body {
     padding: 0 0 var(--space-4);
-  }
-
-  .toolbar-left {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
   }
 
   /* The notice sits directly on the summary cards without this. */
