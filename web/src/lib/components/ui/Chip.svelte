@@ -23,7 +23,7 @@
     align-items: center;
     padding: 0.15rem var(--chip-padding-x);
     border: none;
-    border-radius: var(--radius-pill);
+    border-radius: var(--control-radius);
     font-size: var(--text-sm);
     font-family: inherit;
     line-height: 1.2;

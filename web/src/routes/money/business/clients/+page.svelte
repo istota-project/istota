@@ -182,7 +182,7 @@
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left below. -->
   {#if !loading}
-    <div class="money-toolbar">
+    <div class="money-toolbar control-row">
       <span class="money-result-count">
         {clients.length}
         {clients.length === 1 ? 'client' : 'clients'}

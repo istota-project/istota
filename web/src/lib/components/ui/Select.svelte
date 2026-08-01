@@ -82,7 +82,7 @@
     background: var(--surface-card);
     color: var(--text-primary);
     border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
+    border-radius: var(--control-radius);
     padding: 0.15rem var(--space-2);
     font: inherit;
     font-size: var(--text-xs);
@@ -122,10 +122,13 @@
     border-radius: var(--radius-sm);
     padding: var(--space-1) var(--space-2);
     font-size: var(--text-sm);
-    /* Match native text-input height: inputs inherit line-height 1.5, but the
-		   base trigger pins 1.2, which left the full-width trigger ~4px shorter
-		   than the inputs it sits beside in forms. */
-    line-height: 1.5;
+    /* No line-height of its own: it keeps the base trigger's 1.2, which is now
+       also what the text inputs beside it carry. This used to pin 1.5 to chase
+       an input whose leading came from `font: inherit` — matching by padding
+       out to the taller of the two is what made both overshoot the field tier
+       once iOS floored the input's text. They now share a font size, a padding
+       and a min-height, so the boxes come out identical with nothing here
+       compensating for anything. */
   }
   :global(.ui-select-trigger--full .ui-select-label) {
     max-width: none;

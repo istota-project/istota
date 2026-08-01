@@ -100,7 +100,7 @@
     font: inherit;
     font-size: var(--text-sm);
     line-height: 1.2;
-    border-radius: var(--radius-pill);
+    border-radius: var(--control-radius);
     cursor: pointer;
     transition: all var(--transition-fast);
     user-select: none;

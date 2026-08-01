@@ -82,7 +82,10 @@
       <p>Credentials are never sent to the browser. A secret shows only whether it is set.</p>
     </NoticeBanner>
 
-    <div class="config-toolbar">
+    <!-- One input and no sibling control, so nothing here needs levelling —
+         the scope is for the field appearance, which has to match the logs
+         toolbar two clicks away rather than sit a size below it. -->
+    <div class="config-toolbar control-row">
       <Input bind:value={filter} placeholder="Filter settings…" aria-label="Filter settings" />
       {#if filter.trim()}
         <span class="match-count">{matchCount} matching</span>

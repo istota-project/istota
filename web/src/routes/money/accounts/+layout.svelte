@@ -16,7 +16,7 @@
 </script>
 
 <div class="money-section-header">
-  <div class="money-section-tools">
+  <div class="money-section-tools control-row">
     <Select
       value={selectedYearValue}
       options={yearOptions}

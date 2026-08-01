@@ -110,7 +110,7 @@
       {$selectedAccount} <span class="clear">&times;</span>
     </button>
   {/if}
-  <div class="money-section-tools">
+  <div class="money-section-tools control-row">
     <!-- The one placement that isn't a ShellHeader leading slot: the accounts
 		     drawer belongs to this sub-route, but the app bar is owned by the money
 		     layout above it. Leading position of this toolbar is the closest
@@ -204,6 +204,21 @@
     color: var(--text-dim);
     font-size: var(--text-sm);
     line-height: 1;
+  }
+
+  /* The chip precedes the toolbar in the DOM because on a wide screen it sits
+     at the section's leading edge, with the tools pushed right by their own
+     auto margin — one row, reading left to right. Below 768px the header wraps
+     and the tools take the full width, so that same DOM order put the chip on
+     the line *above* the controls it qualifies: the account filter appeared
+     before there was any visible filter bar for it to belong to. Ordering it
+     after leaves the toolbar where it always is — the first thing under the
+     section nav — and hangs the chip beneath it. `order` rather than moving
+     the markup, so the wide layout and the tab order are both untouched. */
+  @media (max-width: 768px) {
+    .active-filter {
+      order: 1;
+    }
   }
 
   .txn-body {

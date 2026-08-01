@@ -179,6 +179,19 @@
 	   row with these. */
   --control-height-sm: 1.2rem;
   --control-height-md: 1.4rem;
+  /* The field tier — a body form or toolbar, where a text input shares a row
+	   with buttons and selects. Bigger than the two above because it has to be:
+	   the app bar never holds a text input, so its chrome can stay compact,
+	   while a row containing one is sized by that input. Only far enough above
+	   `md` to clear that input and read as the other tier — the row is chrome
+	   around a table, not the subject of the page. See .control-row. */
+  --control-height-lg: 1.75rem;
+
+  /* The corner a control resolves. The root value is the app-bar shape, so a
+	   component adopting this channel changes nothing outside a .control-row;
+	   there the field tier squares it off to match the input beside it. Text
+	   inputs are not on this channel — an input is always the field shape. */
+  --control-radius: var(--radius-pill);
 
   /* Chip / pill horizontal padding — referenced by Chip + NavLink so a parent
 	   container can use `margin-inline-start: calc(-1 * var(--chip-padding-x))`
@@ -583,6 +596,57 @@ input[type='week']::-webkit-date-and-time-value {
   .ui-select-trigger--full {
     --text-sm: max(0.75rem, 16px);
   }
+
+  /* The field tier has to rise with the floor above, or the row it exists to
+	   even out lands back where it started: the input grows to fit 16px text
+	   while the Button and Select beside it keep a height set in rem.
+
+	   32px is what clears a 16px-floored input plus its padding at every text
+	   scale — the small scale is the tight one, since the text stops shrinking
+	   at the floor while the rem tier keeps going. Deliberately not the 44px
+	   touch minimum: the job here is keeping the row level, and reaching a
+	   target size is what the out-of-flow ::before overlays are for (see the
+	   touch-target note in web/AGENTS.md) rather than a reason to grow every
+	   field. `max()` so a raised browser base size still wins. */
+  :root {
+    --control-height-lg: max(1.75rem, 32px);
+  }
+}
+
+/* The field tier's scope. A body form or toolbar — anywhere a text input
+   shares a row with buttons and selects — marks its container with this, and
+   every control inside resolves the taller, squarer box.
+
+   Inherited custom properties rather than a size prop per call site, which is
+   the same mechanism as the touch floor above and buys the same two things: a
+   container gets the whole row right without 13 call sites being found and
+   edited, and a control cannot quietly opt out by out-specifying a rule.
+   Both compact tiers collapse onto the field height, not just `md` — a row
+   routinely mixes a default Button (md) with a Select, whose default is `sm`.
+
+   Deliberately tokens only, no layout: the containers that take this class
+   already own their own flex arrangement, so adding it can never move
+   anything sideways. */
+.control-row {
+  --control-height-sm: var(--control-height-lg);
+  --control-height-md: var(--control-height-lg);
+  --control-radius: var(--radius-sm);
+}
+
+/* Brings a raw <input>/<select> into the row — the components resolve the
+   channel themselves, but a page's own hand-rolled control does not.
+   `:where()` keeps it weightless so a call site's own rules still win.
+
+   The line-height is what keeps the input's *natural* height under the tier at
+   every text scale; the box then comes from min-height, and a single-line
+   input centres its value in it. Textareas are excluded from both: a
+   multi-line control is sized by its rows, and does not belong in a row of
+   inline controls anyway. */
+.control-row
+  :where(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color'])),
+.control-row :where(select) {
+  min-height: var(--control-height-md);
+  line-height: 1.2;
 }
 
 /* Scrollbars are left entirely to the platform. Do NOT add `::-webkit-scrollbar`

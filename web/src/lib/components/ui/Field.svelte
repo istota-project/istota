@@ -67,9 +67,16 @@
   caller passes in — a bare <input>, a Select, a SecretField. Input/TextArea
   bring their own identical appearance so they also work on their own.
 -->
+<!--
+  `control-row` is the field tier's global scope (app.css). Composed here
+  rather than restated, so a form row and a body toolbar are sized by one
+  definition — including the touch floor, which is what keeps this field level
+  with a `fullWidth` Select under it once iOS floors the input's text at 16px.
+  It sets tokens and no layout, so it cannot disturb the arrangement below.
+-->
 <svelte:element
   this={labelled ? 'label' : 'div'}
-  class="field"
+  class="field control-row"
   class:field-wide={wide}
   class:checkbox
 >
@@ -116,6 +123,17 @@
     max-width: 24rem;
     min-width: 0;
     box-sizing: border-box;
+  }
+
+  /* `font: inherit` above is a shorthand and carries the body's 1.5 leading
+     with it, at a specificity no weightless rule can correct — so an input
+     here grew past the field tier it sits in the moment iOS floored its text
+     at 16px. Pinned beside the shorthand rather than centrally for that
+     reason. Textareas keep the inherited leading: they are sized by their
+     rows and read as prose. */
+  .field :global(input:not([type='checkbox'])),
+  .field :global(select) {
+    line-height: 1.2;
   }
 
   .field :global(textarea) {

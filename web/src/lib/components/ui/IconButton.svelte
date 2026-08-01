@@ -86,12 +86,19 @@
     cursor: not-allowed;
   }
 
+  /* Both heights are inert at their own tier — the glyph and its padding
+     already come to about this much — and are here so an icon action lines up
+     with the text input beside it inside a `.control-row`, which raises both
+     tiers. The corner is already the field shape, so it stays off the
+     --control-radius channel. */
   .icon-btn-sm {
+    min-height: var(--control-height-sm);
     padding: 0.15rem var(--space-2);
     border-radius: var(--radius-sm);
   }
 
   .icon-btn-md {
+    min-height: var(--control-height-md);
     padding: var(--space-1);
     border-radius: var(--radius-sm);
   }

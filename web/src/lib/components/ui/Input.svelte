@@ -51,9 +51,27 @@
     color: var(--text-primary);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
-    padding: var(--space-2) var(--space-2);
+    /* Vertical padding is half the horizontal: the box is set by min-height
+       below and the value centres in it, so a taller pad only inflates the
+       control. This is also what Field's descendant rules have always given a
+       bare <input>, which left an <Input> in a form sitting taller than the
+       plain one beside it. */
+    padding: var(--space-1) var(--space-2);
     font: inherit;
     font-size: var(--text-sm);
+    /* `font: inherit` is a shorthand, so it also pulls in the body's 1.5
+       leading — which is what made the box taller than the tier it sits in
+       once iOS floored the text at 16px, and it out-specifies any weightless
+       rule trying to correct that from outside. Pinned here, next to the
+       shorthand that would otherwise win. The value centres in the box that
+       min-height gives it, so the leading is not what should set the height. */
+    line-height: 1.2;
+    /* Inert on its own — the text and padding already exceed this — but it is
+       how the input joins a `.control-row`, where the container raises both
+       compact tiers to the field height and every control in the row settles
+       on the same number. Not on the --control-radius channel: a text input is
+       always the field shape, in a row or out of one. */
+    min-height: var(--control-height-md);
   }
 
   .ui-input:disabled {
@@ -77,5 +95,8 @@
     padding: 0;
     border: none;
     background: none;
+    /* A checkbox has an intrinsic box, so the field-tier height would stretch
+       the hit area into a tall empty strip beside its label. */
+    min-height: 0;
   }
 </style>

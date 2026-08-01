@@ -170,7 +170,7 @@
        cannot happen now, because the table is not on screen while loading —
        bar and table arrive together. -->
   {#if !loading}
-    <div class="money-toolbar">
+    <div class="money-toolbar control-row">
       <span class="money-result-count"
         >{invoiceCount} invoices ({outstandingCount} outstanding)</span
       >

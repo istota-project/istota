@@ -187,31 +187,17 @@
     flex-shrink: 0;
   }
 
+  /* Now a placement wrapper around `HeaderNav` rather than a nav of its own:
+     the sub-sections used to hand-roll their links here, byte-for-byte what
+     `NavLink` already renders, and so never got the mobile collapse the app
+     bar has had. What is left is the part HeaderNav can't own — a hang that
+     lands the first chip's TEXT on the section's 0.75rem content inset, which
+     would misalign the app bar's own nav (it follows a title there). */
   :global(.money-section-nav) {
     display: flex;
     gap: var(--chip-gap);
-    /* Hang: chip TEXT aligns with the section heading text above. */
+    min-width: 0;
     margin-inline-start: calc(-1 * var(--chip-padding-x));
-  }
-
-  :global(.money-section-nav a) {
-    display: inline-flex;
-    align-items: center;
-    font-size: var(--text-sm);
-    line-height: 1.2;
-    color: var(--text-muted);
-    text-decoration: none;
-    padding: 0.15rem var(--space-2);
-    border-radius: var(--radius-pill);
-    transition: all var(--transition-fast);
-  }
-
-  :global(.money-section-nav a:hover) {
-    color: var(--text-primary);
-  }
-  :global(.money-section-nav a.active) {
-    background: var(--surface-raised);
-    color: var(--text-primary);
   }
 
   :global(.money-section-tools) {
@@ -221,13 +207,19 @@
     gap: var(--space-2);
   }
 
+  /* The section filter box. Sits in a `.control-row`, so its corner and height
+     come from the tier the container sets rather than from here — that is what
+     keeps it level with the Select beside it once iOS floors its text at 16px.
+     Everything left is what makes it this control rather than a bare Input:
+     the card fill it needs against the section header, and a width floor so a
+     placeholder that long has somewhere to go. */
   :global(.money-control-input) {
     background: var(--surface-card);
     color: var(--text-primary);
     border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
+    border-radius: var(--control-radius);
     padding: 0.2rem var(--space-2);
-    font-size: var(--text-xs);
+    font-size: var(--text-sm);
     font-family: inherit;
     min-width: 12rem;
   }
@@ -257,17 +249,18 @@
      page lined up. The shell lives here; a page only styles its own columns
      (widths, alignment) and any page-specific rows underneath. */
 
-  /* min-height reserves the height of a Button/Select row (0.4rem padding +
-     a 1.4rem md button) whether or not this toolbar has filters in it. Without
-     it a bar holding only the result count sits ~6px shorter than one with
-     controls, so the count and the table under it land at a different height
-     on each tab. */
+  /* min-height reserves the height of a control row whether or not this
+     toolbar has filters in it. Without it a bar holding only the result count
+     sits shorter than one with controls, so the count and the table under it
+     land at a different height on each tab. Derived from the tier rather than
+     written out, so it still holds once the field height is floored on touch —
+     a literal would have left the count-only bars behind on a phone. */
   :global(.money-toolbar) {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    min-height: 2.2rem;
+    min-height: calc(var(--control-height-lg) + var(--space-4));
     padding: var(--space-2) var(--space-3);
     flex-shrink: 0;
     flex-wrap: wrap;
@@ -453,9 +446,46 @@
       flex-wrap: wrap;
     }
 
+    /* The links collapse to a bordered Select at this width, and a hang sized
+       for a borderless chip would push that pill's box out past the inset —
+       the same correction HeaderNav makes for itself in the app bar. */
+    :global(.money-section-nav) {
+      margin-inline-start: 0;
+    }
+
+    /* HeaderNav gives its collapsed Select a leading margin to clear the gap
+       ShellHeader narrows at this width so its title lands on the wordmark
+       inset. A section header sets its own gap and has no title before the
+       nav, so that correction is wrong here — it pushed the dropdown 0.5rem
+       past the 0.75rem inset the content below it starts at. */
+    :global(.money-section-nav .nav-select) {
+      margin-inline-start: 0;
+    }
+
     :global(.money-section-tools) {
       width: 100%;
       flex-wrap: nowrap;
+    }
+
+    /* Reports opts its header out of that full-width tools row: its only tool
+       is a compact year Select, so the filter and the collapsed section nav fit
+       one line — and the year reads as qualifying whichever report is showing,
+       so it takes the leading position and the nav is ordered after it. The
+       auto margin goes with the stretch, or the pair would sit pinned to the
+       right edge while the report below them starts at the left inset.
+
+       `order` rather than reordered markup: the wide layout wants the opposite
+       arrangement (links leading, tools pushed right), and the tab order should
+       follow the markup at both widths. Keyed on a modifier the reports layout
+       puts on its header, and written here because this is where the
+       `.money-*` shell is defined. */
+    :global(.reports-header .money-section-nav) {
+      order: 1;
+    }
+
+    :global(.reports-header .money-section-tools) {
+      width: auto;
+      margin-left: 0;
     }
 
     :global(.money-section-tools .money-control-input) {
