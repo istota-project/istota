@@ -45,7 +45,6 @@ def _blocked_by_references(scan_fn, ctx, key: str) -> int | None:
     agent reaching for ``istota money service remove`` must not be able to
     unbill a client's work in a way the browser refuses to.
     """
-    from istota.money import config_refs
 
     scan = scan_fn(ctx.db_path, ctx.data_dir, key)
     if scan.scan_failed is not None:
@@ -123,6 +122,7 @@ _OPERATIONAL_COMMANDS = {
     "users": "List users visible to the money CLI",
     "invoice": "Invoice management (generate/list/paid/create/void)",
     "work": "Work-entry tracking (list/add/update/remove)",
+    "portfolio": "Portfolio positions (import/snapshots/summary/history/diff/accounts/classify)",
 }
 
 

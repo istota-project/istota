@@ -1,6 +1,5 @@
 """Tests for the money skill (in-process facade over the vendored money package)."""
 
-import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -286,6 +285,77 @@ class TestCommandDispatch:
 
         with pytest.raises(SystemExit):
             main(["nonexistent-command"])
+
+    def test_portfolio_import(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "import", "/tmp/pos.csv", "--source",
+              "fidelity-positions-csv", "--dry-run"])
+        args = captured[-1]
+        assert args[:3] == ["portfolio", "import", "/tmp/pos.csv"]
+        assert "--source" in args and "fidelity-positions-csv" in args
+        assert "--dry-run" in args
+
+    def test_portfolio_import_replace(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "import", "/tmp/pos.csv", "--replace", "3"])
+        args = captured[-1]
+        assert "--replace" in args and "3" in args
+
+    def test_portfolio_summary_with_owner(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "summary", "--snapshot", "5", "--owner", "Alice"])
+        args = captured[-1]
+        assert args[:2] == ["portfolio", "summary"]
+        assert "--snapshot" in args and "5" in args
+        assert "--owner" in args and "Alice" in args
+
+    def test_portfolio_history_grouped(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "history", "--group-by", "asset_class"])
+        args = captured[-1]
+        assert "--group-by" in args and "asset_class" in args
+
+    def test_portfolio_diff_and_symbol(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "diff", "1", "2"])
+        assert captured[-1] == ["portfolio", "diff", "1", "2"]
+        main(["portfolio", "symbol", "VTI"])
+        assert captured[-1] == ["portfolio", "symbol", "VTI"]
+
+    def test_portfolio_delete_snapshot_confirmed(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "delete-snapshot", "7", "--confirmed"])
+        args = captured[-1]
+        assert args[:3] == ["portfolio", "delete-snapshot", "7"]
+        assert "--confirmed" in args
+
+    def test_portfolio_accounts_mutations(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "accounts", "--set-owner", "3", "Alice"])
+        args = captured[-1]
+        assert args[:2] == ["portfolio", "accounts"]
+        assert "--set-owner" in args and "3" in args and "Alice" in args
+        main(["portfolio", "accounts", "--exclude", "4"])
+        args = captured[-1]
+        assert "--exclude" in args and "4" in args
+
+    def test_portfolio_classify(self, captured):
+        from istota.skills.money import main
+
+        main(["portfolio", "classify", "GOOG", "--asset-class", "Stocks",
+              "--sub-class", "Technology", "--geography", "US"])
+        args = captured[-1]
+        assert args[:3] == ["portfolio", "classify", "GOOG"]
+        assert "--asset-class" in args and "Stocks" in args
+        main(["portfolio", "unclassify", "GOOG"])
+        assert captured[-1] == ["portfolio", "unclassify", "GOOG"]
 
 
 class TestExecutorIntegration:

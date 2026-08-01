@@ -358,6 +358,85 @@ def cmd_work_remove(args):
 
 
 # ---------------------------------------------------------------------------
+# Portfolio commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_portfolio_import(args):
+    cli_args = ["portfolio", "import", args.file]
+    if args.source:
+        cli_args += ["--source", args.source]
+    if args.dry_run:
+        cli_args.append("--dry-run")
+    if args.replace is not None:
+        cli_args += ["--replace", str(args.replace)]
+    _output(_run(cli_args))
+
+
+def cmd_portfolio_snapshots(args):  # noqa: ARG001
+    _output(_run(["portfolio", "snapshots"]))
+
+
+def cmd_portfolio_summary(args):
+    cli_args = ["portfolio", "summary"]
+    if args.snapshot is not None:
+        cli_args += ["--snapshot", str(args.snapshot)]
+    if args.owner:
+        cli_args += ["--owner", args.owner]
+    _output(_run(cli_args))
+
+
+def cmd_portfolio_history(args):
+    cli_args = ["portfolio", "history"]
+    if args.group_by:
+        cli_args += ["--group-by", args.group_by]
+    if args.owner:
+        cli_args += ["--owner", args.owner]
+    _output(_run(cli_args))
+
+
+def cmd_portfolio_diff(args):
+    _output(_run(["portfolio", "diff", str(args.older), str(args.newer)]))
+
+
+def cmd_portfolio_symbol(args):
+    _output(_run(["portfolio", "symbol", args.symbol]))
+
+
+def cmd_portfolio_delete_snapshot(args):
+    cli_args = ["portfolio", "delete-snapshot", str(args.snapshot_id)]
+    if args.confirmed:
+        cli_args.append("--confirmed")
+    _output(_run(cli_args))
+
+
+def cmd_portfolio_accounts(args):
+    cli_args = ["portfolio", "accounts"]
+    if args.set_owner:
+        cli_args += ["--set-owner", str(args.set_owner[0]), args.set_owner[1]]
+    if args.set_type:
+        cli_args += ["--set-type", str(args.set_type[0]), args.set_type[1]]
+    if args.exclude is not None:
+        cli_args += ["--exclude", str(args.exclude)]
+    if args.include is not None:
+        cli_args += ["--include", str(args.include)]
+    _output(_run(cli_args))
+
+
+def cmd_portfolio_classify(args):
+    cli_args = ["portfolio", "classify", args.symbol, "--asset-class", args.asset_class]
+    if args.sub_class:
+        cli_args += ["--sub-class", args.sub_class]
+    if args.geography:
+        cli_args += ["--geography", args.geography]
+    _output(_run(cli_args))
+
+
+def cmd_portfolio_unclassify(args):
+    _output(_run(["portfolio", "unclassify", args.symbol]))
+
+
+# ---------------------------------------------------------------------------
 # CLI parser
 # ---------------------------------------------------------------------------
 
@@ -509,6 +588,59 @@ def build_parser():
     p_wr = work_sub.add_parser("remove", help="Remove work entry")
     p_wr.add_argument("entry_id", type=int, help="Entry ID")
 
+    # --- Portfolio commands (nested subparser) ---
+    p_pf = sub.add_parser("portfolio", help="Portfolio positions snapshots")
+    pf_sub = p_pf.add_subparsers(dest="portfolio_command")
+
+    p_pf_imp = pf_sub.add_parser("import", help="Import a positions CSV")
+    p_pf_imp.add_argument("file", help="CSV file path")
+    p_pf_imp.add_argument("--source", "-s", help="Import source name (auto-detected)")
+    p_pf_imp.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    p_pf_imp.add_argument("--replace", type=int, help="Delete this snapshot id first")
+
+    pf_sub.add_parser("snapshots", help="List imported snapshots")
+
+    p_pf_sum = pf_sub.add_parser("summary", help="Current-state portfolio summary")
+    p_pf_sum.add_argument("--snapshot", type=int, help="Snapshot id (default latest)")
+    p_pf_sum.add_argument("--owner", "-o", help="Filter by account owner")
+
+    p_pf_hist = pf_sub.add_parser("history", help="Value over time")
+    p_pf_hist.add_argument(
+        "--group-by", dest="group_by",
+        choices=["total", "owner", "account_type", "asset_class"],
+        help="Stack the series by this dimension",
+    )
+    p_pf_hist.add_argument("--owner", "-o", help="Filter by account owner")
+
+    p_pf_diff = pf_sub.add_parser("diff", help="Diff two snapshots")
+    p_pf_diff.add_argument("older", type=int, help="Older snapshot id")
+    p_pf_diff.add_argument("newer", type=int, help="Newer snapshot id")
+
+    p_pf_sym = pf_sub.add_parser("symbol", help="One symbol's history")
+    p_pf_sym.add_argument("symbol", help="Ticker symbol")
+
+    p_pf_del = pf_sub.add_parser("delete-snapshot", help="Hard-delete a snapshot")
+    p_pf_del.add_argument("snapshot_id", type=int, help="Snapshot id")
+    p_pf_del.add_argument("--confirmed", action="store_true",
+                          help="Required: this is irreversible")
+
+    p_pf_acc = pf_sub.add_parser("accounts", help="Account registry (list/update)")
+    p_pf_acc.add_argument("--set-owner", nargs=2, metavar=("ID", "OWNER"),
+                          help="Set an account's owner label")
+    p_pf_acc.add_argument("--set-type", nargs=2, metavar=("ID", "TYPE"),
+                          help="Set an account's type")
+    p_pf_acc.add_argument("--exclude", type=int, help="Exclude account from summaries")
+    p_pf_acc.add_argument("--include", type=int, help="Re-include account")
+
+    p_pf_cls = pf_sub.add_parser("classify", help="Set a symbol classification")
+    p_pf_cls.add_argument("symbol", help="Ticker symbol")
+    p_pf_cls.add_argument("--asset-class", dest="asset_class", required=True)
+    p_pf_cls.add_argument("--sub-class", dest="sub_class", help="Sub asset class")
+    p_pf_cls.add_argument("--geography", help="Geography label")
+
+    p_pf_uncls = pf_sub.add_parser("unclassify", help="Remove a symbol classification")
+    p_pf_uncls.add_argument("symbol", help="Ticker symbol")
+
     return parser
 
 
@@ -558,6 +690,24 @@ def main(argv=None):
             fn(args)
         else:
             parser.parse_args(["work", "--help"])
+    elif args.command == "portfolio":
+        portfolio_commands = {
+            "import": cmd_portfolio_import,
+            "snapshots": cmd_portfolio_snapshots,
+            "summary": cmd_portfolio_summary,
+            "history": cmd_portfolio_history,
+            "diff": cmd_portfolio_diff,
+            "symbol": cmd_portfolio_symbol,
+            "delete-snapshot": cmd_portfolio_delete_snapshot,
+            "accounts": cmd_portfolio_accounts,
+            "classify": cmd_portfolio_classify,
+            "unclassify": cmd_portfolio_unclassify,
+        }
+        fn = portfolio_commands.get(getattr(args, "portfolio_command", None))
+        if fn:
+            fn(args)
+        else:
+            parser.parse_args(["portfolio", "--help"])
     else:
         fn = commands.get(args.command)
         if fn:

@@ -158,6 +158,51 @@ proposing a change:
   clients and services by key, and clients reference entities by key. To change
   one, create the new record, repoint what refers to it, then delete the old.
 
+## Portfolio commands (positions snapshots)
+
+Point-in-time investment portfolio state, imported from Fidelity "Portfolio
+Positions" CSV exports (any format revision) or fina's history file. Snapshots,
+not transactions — nothing here touches the beancount ledgers.
+
+```bash
+# Import a positions CSV the user supplied (auto-detects the format).
+# Re-importing the identical file is a safe no-op (content-hash dedup).
+istota-skill money portfolio import /path/to/Portfolio_Positions.csv [--dry-run] [--replace SNAPSHOT_ID]
+
+# List imported snapshots (newest first, totals exclude excluded accounts)
+istota-skill money portfolio snapshots
+
+# Current state: total value, allocation by asset class / account / owner /
+# geography, aggregated holdings with P&L
+istota-skill money portfolio summary [--snapshot ID] [--owner Alice]
+
+# Value over time, optionally stacked
+istota-skill money portfolio history [--group-by total|owner|account_type|asset_class] [--owner O]
+
+# What changed between two snapshots (opened / closed / changed positions)
+istota-skill money portfolio diff OLDER_ID NEWER_ID
+
+# One symbol's quantity/price/value across snapshots
+istota-skill money portfolio symbol VTI
+
+# Account registry: owner labels, types, and the excluded flag
+# (excluded accounts stay imported but drop out of every summary and chart)
+istota-skill money portfolio accounts [--set-owner ID OWNER] [--set-type ID TYPE] [--exclude ID] [--include ID]
+
+# Symbol classifications (drive the asset-class charts; retroactive — a
+# classification edit reclassifies all history at read time)
+istota-skill money portfolio classify GOOG --asset-class Stocks [--sub-class Technology] [--geography US]
+istota-skill money portfolio unclassify GOOG
+
+# Hard-delete a snapshot (irreversible; requires the flag)
+istota-skill money portfolio delete-snapshot ID --confirmed
+```
+
+Import only files the user supplied or named. The import response lists
+`unclassified_symbols` — offer to classify them rather than leaving chart
+slices as "Unclassified". Deleting a snapshot is destructive: confirm with the
+user first.
+
 ## BQL query examples
 
 ```sql

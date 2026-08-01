@@ -1238,5 +1238,276 @@ def run_scheduled(ctx, dry_run, skip_monarch):
         db_conn.close()
 
 
+# =============================================================================
+# Portfolio commands (positions snapshots)
+# =============================================================================
+
+
+@cli.group("portfolio")
+def portfolio_group():
+    """Portfolio positions snapshots (Fidelity CSV imports)."""
+
+
+@portfolio_group.command("import")
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--source", "-s", "source_name",
+              help="Import source name (auto-detected when omitted)")
+@click.option("--dry-run", is_flag=True, help="Parse and preview without writing")
+@click.option("--replace", "replace_id", type=int,
+              help="Delete this snapshot id before importing (same-day replace)")
+@pass_ctx
+def portfolio_import(ctx, file, source_name, dry_run, replace_id):
+    """Import a positions CSV (Fidelity export or fina history file)."""
+    from istota.money import portfolio
+    from istota.money.core.importers import parse_positions_file
+    from istota.money.core.importers.positions_base import PositionParseError
+
+    try:
+        snapshots = parse_positions_file(Path(file), source_name)
+    except PositionParseError as exc:
+        _output({"status": "error", "error": str(exc)})
+        return
+
+    if dry_run:
+        _output({
+            "status": "ok",
+            "dry_run": True,
+            "snapshots": [
+                {
+                    "exported_at": s.exported_at.isoformat(),
+                    "exported_at_estimated": s.exported_at_estimated,
+                    "source": s.source,
+                    "position_count": len(s.rows),
+                    "total_value": round(
+                        sum(r.value for r in s.rows if r.value is not None), 2
+                    ),
+                    "warnings": s.warnings,
+                }
+                for s in snapshots
+            ],
+        })
+        return
+
+    conn = _require_db(ctx)
+    try:
+        if replace_id is not None:
+            portfolio.delete_snapshot(conn, replace_id)
+        results = [
+            portfolio.insert_snapshot(conn, s, source_file=Path(file).name)
+            for s in snapshots
+        ]
+    finally:
+        conn.close()
+
+    if len(results) == 1:
+        _output(results[0])
+    else:
+        _output({
+            "status": "ok",
+            "imported": sum(1 for r in results if r["status"] == "ok"),
+            "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
+            "results": results,
+        })
+
+
+@portfolio_group.command("snapshots")
+@pass_ctx
+def portfolio_snapshots(ctx):
+    """List imported snapshots (read-time totals over non-excluded accounts)."""
+    from istota.money import portfolio
+
+    conn = _require_db(ctx)
+    try:
+        _output({"status": "ok", "snapshots": portfolio.list_snapshots(conn)})
+    finally:
+        conn.close()
+
+
+@portfolio_group.command("summary")
+@click.option("--snapshot", "snapshot_id", type=int, help="Snapshot id (default: latest)")
+@click.option("--owner", "-o", help="Filter by account owner")
+@pass_ctx
+def portfolio_summary(ctx, snapshot_id, owner):
+    """Current-state summary: totals, allocation, aggregated holdings."""
+    from istota.money import portfolio
+
+    conn = _require_db(ctx)
+    try:
+        if snapshot_id is None:
+            snaps = portfolio.list_snapshots(conn)
+            if not snaps:
+                _output({"status": "error", "error": "No snapshots imported yet"})
+                return
+            snapshot_id = snaps[0]["id"]
+        summary = portfolio.snapshot_summary(conn, snapshot_id, owner=owner)
+        if summary is None:
+            _output({"status": "error", "error": f"No snapshot with id {snapshot_id}"})
+            return
+        _output({"status": "ok", "summary": summary})
+    finally:
+        conn.close()
+
+
+@portfolio_group.command("history")
+@click.option("--group-by", "group_by",
+              type=click.Choice(["total", "owner", "account_type", "asset_class"]),
+              default="total", help="Stack the series by this dimension")
+@click.option("--owner", "-o", help="Filter by account owner")
+@pass_ctx
+def portfolio_history(ctx, group_by, owner):
+    """Per-snapshot value totals over time."""
+    from istota.money import portfolio
+
+    conn = _require_db(ctx)
+    try:
+        result = portfolio.history_series(conn, group_by=group_by, owner=owner)
+        _output({"status": "ok", **result})
+    finally:
+        conn.close()
+
+
+@portfolio_group.command("diff")
+@click.argument("older", type=int)
+@click.argument("newer", type=int)
+@pass_ctx
+def portfolio_diff(ctx, older, newer):
+    """Positions opened/closed/changed between two snapshots."""
+    from istota.money import portfolio
+
+    conn = _require_db(ctx)
+    try:
+        diff = portfolio.snapshot_diff(conn, older, newer)
+        if diff is None:
+            _output({"status": "error", "error": "One or both snapshot ids not found"})
+            return
+        _output({"status": "ok", "diff": diff})
+    finally:
+        conn.close()
+
+
+@portfolio_group.command("symbol")
+@click.argument("symbol")
+@pass_ctx
+def portfolio_symbol(ctx, symbol):
+    """Quantity/price/value per snapshot for one symbol."""
+    from istota.money import portfolio
+
+    conn = _require_db(ctx)
+    try:
+        _output({"status": "ok", "history": portfolio.symbol_history(conn, symbol)})
+    finally:
+        conn.close()
+
+
+@portfolio_group.command("delete-snapshot")
+@click.argument("snapshot_id", type=int)
+@click.option("--confirmed", is_flag=True, help="Required: this is a hard delete")
+@pass_ctx
+def portfolio_delete_snapshot(ctx, snapshot_id, confirmed):
+    """Hard-delete one snapshot and its position rows."""
+    from istota.money import portfolio
+
+    if not confirmed:
+        _output({
+            "status": "error",
+            "error": "Deleting a snapshot is irreversible; re-run with --confirmed",
+        })
+        return
+    conn = _require_db(ctx)
+    try:
+        if portfolio.delete_snapshot(conn, snapshot_id):
+            _output({"status": "ok", "deleted": snapshot_id})
+        else:
+            _output({"status": "error", "error": f"No snapshot with id {snapshot_id}"})
+    finally:
+        conn.close()
+
+
+@portfolio_group.command("accounts")
+@click.option("--set-owner", "set_owner", type=(int, str), default=None,
+              help="Set an account's owner label: ID OWNER")
+@click.option("--set-type", "set_type", type=(int, str), default=None,
+              help="Set an account's type: ID TYPE (retirement/trading/cash/taxable or free text)")
+@click.option("--exclude", "exclude_id", type=int, default=None,
+              help="Exclude an account from all summaries and charts")
+@click.option("--include", "include_id", type=int, default=None,
+              help="Re-include a previously excluded account")
+@pass_ctx
+def portfolio_accounts(ctx, set_owner, set_type, exclude_id, include_id):
+    """List the account registry, or update one row via the options."""
+    from dataclasses import asdict
+
+    from istota.money import portfolio
+
+    mutations: list[tuple[int, dict]] = []
+    if set_owner:
+        mutations.append((set_owner[0], {"owner": set_owner[1]}))
+    if set_type:
+        mutations.append((set_type[0], {"account_type": set_type[1]}))
+    if exclude_id is not None:
+        mutations.append((exclude_id, {"excluded": True}))
+    if include_id is not None:
+        mutations.append((include_id, {"excluded": False}))
+
+    conn = _require_db(ctx)
+    try:
+        for account_id, kwargs in mutations:
+            if not portfolio.update_account(conn, account_id, **kwargs):
+                _output({"status": "error", "error": f"No account with id {account_id}"})
+                return
+        _output({
+            "status": "ok",
+            "updated": bool(mutations),
+            "accounts": [asdict(a) for a in portfolio.list_accounts(conn)],
+        })
+    finally:
+        conn.close()
+
+
+@portfolio_group.command("classify")
+@click.argument("symbol")
+@click.option("--asset-class", "asset_class", required=True)
+@click.option("--sub-class", "sub_class", default="")
+@click.option("--geography", default="")
+@pass_ctx
+def portfolio_classify(ctx, symbol, asset_class, sub_class, geography):
+    """Set a symbol's classification (applies to all history at read time)."""
+    from istota.money import portfolio
+
+    conn = _require_db(ctx)
+    try:
+        try:
+            norm = portfolio.set_classification(
+                conn, symbol,
+                asset_class=asset_class, sub_class=sub_class, geography=geography,
+            )
+        except ValueError as exc:
+            _output({"status": "error", "error": str(exc)})
+            return
+        _output({"status": "ok", "symbol": norm})
+    finally:
+        conn.close()
+
+
+@portfolio_group.command("unclassify")
+@click.argument("symbol")
+@pass_ctx
+def portfolio_unclassify(ctx, symbol):
+    """Remove a symbol's explicit classification (fallback rules apply again)."""
+    from istota.money import portfolio
+
+    conn = _require_db(ctx)
+    try:
+        if portfolio.delete_classification(conn, symbol):
+            _output({"status": "ok", "symbol": portfolio.normalize_symbol(symbol)})
+        else:
+            _output({
+                "status": "error",
+                "error": f"No classification for {portfolio.normalize_symbol(symbol)}",
+            })
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     cli()

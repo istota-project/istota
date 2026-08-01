@@ -82,6 +82,40 @@ def detect_source(file_path: Path) -> str | None:
     return None
 
 
+def parse_positions_file(file_path: Path, source_name: str | None = None):
+    """Detect + parse a positions-kind file into ``list[ParsedSnapshot]``.
+
+    Raises :class:`PositionParseError` (never a stack trace to the user) on
+    an unknown/undetectable source or a transactions-kind match.
+    """
+    from .fidelity_positions import parse_fidelity_positions_csv
+    from .fina_history import parse_fina_history_csv
+    from .positions_base import PositionParseError
+
+    parsers = {
+        "fidelity-positions-csv": parse_fidelity_positions_csv,
+        "fina-history-csv": parse_fina_history_csv,
+    }
+    if source_name is None:
+        source_name = detect_source(file_path)
+        if source_name is None:
+            tried = sorted(
+                name for name, src in IMPORT_SOURCES.items() if src.detect is not None
+            )
+            raise PositionParseError(
+                f"Could not detect the file format (tried: {', '.join(tried)})"
+            )
+    source = IMPORT_SOURCES.get(source_name)
+    if source is None:
+        raise PositionParseError(f"Unknown import source: {source_name}")
+    if source.kind != "positions":
+        raise PositionParseError(
+            f"{source_name} is a transactions source — use `import-csv` for "
+            "transaction files"
+        )
+    return parsers[source_name](file_path)
+
+
 def import_transactions(
     ledger_path: Path,
     transactions: list[NormalizedTransaction],

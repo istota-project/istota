@@ -420,6 +420,39 @@ class TestImporterRegistry:
         assert detect_source(FIXTURES / "fidelity_positions_2026.csv") == "fidelity-positions-csv"
         assert detect_source(FIXTURES / "fina_history_small.csv") == "fina-history-csv"
 
+    def test_parse_positions_file_auto_detects(self):
+        from istota.money.core.importers import parse_positions_file
+
+        snapshots = parse_positions_file(FIXTURES / "fidelity_positions_2025.csv")
+        assert len(snapshots) == 1
+        snapshots = parse_positions_file(FIXTURES / "fina_history_small.csv")
+        assert len(snapshots) == 3
+
+    def test_parse_positions_file_rejects_transactions_source(self):
+        from istota.money.core.importers import parse_positions_file
+        from istota.money.core.importers.positions_base import PositionParseError
+
+        with pytest.raises(PositionParseError, match="import-csv"):
+            parse_positions_file(
+                FIXTURES / "fidelity_positions_2025.csv", "monarch-csv"
+            )
+
+    def test_parse_positions_file_unknown_source(self, tmp_path):
+        from istota.money.core.importers import parse_positions_file
+        from istota.money.core.importers.positions_base import PositionParseError
+
+        with pytest.raises(PositionParseError, match="Unknown"):
+            parse_positions_file(FIXTURES / "fidelity_positions_2025.csv", "nope")
+
+    def test_parse_positions_file_undetectable(self, tmp_path):
+        from istota.money.core.importers import parse_positions_file
+        from istota.money.core.importers.positions_base import PositionParseError
+
+        bogus = tmp_path / "bogus.csv"
+        bogus.write_text("a,b,c\n1,2,3\n")
+        with pytest.raises(PositionParseError, match="detect"):
+            parse_positions_file(bogus)
+
 
 class TestFixtureRoundTrip:
     """End-to-end: parse the real fixtures and store them."""
