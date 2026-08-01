@@ -305,3 +305,11 @@ class QuarterlyTaxEstimate:
     # visible; `state_rates` is None when there is no state to have rates.
     federal_rates: dict = field(default_factory=dict)
     state_rates: dict | None = None
+    # The payroll figures actually used, so the page's explainers can quote
+    # them instead of carrying their own copy — the SE-tax panel used to name
+    # "$176,100" inline, which went stale the moment the wage base moved.
+    ss_wage_base: float = 0.0
+    se_taxable_fraction: float = 0.0
+    # Cumulative fraction of the state liability due by each quarter, so the
+    # explainer can describe the schedule in force rather than California's.
+    state_installment_schedule: list = field(default_factory=list)

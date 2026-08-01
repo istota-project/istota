@@ -6,6 +6,9 @@
     type TaxEstimateResponse,
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
+  import { base } from '$app/paths';
+  import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
+  import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
 
   let data = $state<TaxEstimateResponse | null>(null);
   let loading = $state(true);
@@ -111,7 +114,9 @@
     data ? data.federal_quarterly_amount + data.state_quarterly_amount : 0,
   );
 
-  let seTaxableBase = $derived(data ? data.se_income_annualized * 0.9235 : 0);
+  let seTaxableBase = $derived(
+    data ? data.se_income_annualized * (data.se_taxable_fraction || 0.9235) : 0,
+  );
   let seEffectiveRate = $derived(
     data && data.se_income_annualized > 0
       ? (data.federal_total_liability +
@@ -128,6 +133,38 @@
       ? (data.federal_total_liability + data.state_total_liability) / totalGrossIncome
       : 0,
   );
+
+  // Whether to render the state column, cards and rows at all. Not a zero: a
+  // zero is a computed result, and a user in Texas — or one who has not picked
+  // a state — should not be looking at a state tax row.
+  let showState = $derived(!!data && data.state_available);
+
+  // The state is selected but produced no figures. Distinct from "no state",
+  // which shows nothing, because this one is actionable.
+  let stateNotice = $derived.by(() => {
+    if (!data || !data.state || data.state_available) return '';
+    if (data.state_unavailable_reason === 'no_income_tax') {
+      return `${data.state_name} levies no individual income tax, so this estimate is federal only.`;
+    }
+    if (data.state_unavailable_reason === 'no_brackets') {
+      return `No tax brackets for ${data.state_name || data.state} for ${data.tax_year}. This estimate is federal only until you enter them in settings.`;
+    }
+    return `${data.state} is not a state we recognise, so this estimate is federal only.`;
+  });
+
+  let stateColumnLabel = $derived(data && data.state ? `State (${data.state})` : 'State');
+
+  // The schedule in force, described rather than assumed. California's
+  // 30/40/0/30 used to be stated here as though it were everyone's.
+  let installmentDescription = $derived.by(() => {
+    const schedule = data?.state_installment_schedule ?? [];
+    if (schedule.length !== 4) return '';
+    const equal = schedule.every((v, i) => Math.abs(v - (i + 1) * 0.25) < 0.0001);
+    if (equal)
+      return `${data?.state_name || 'State'} installments are 25% each quarter, like federal.`;
+    const perQuarter = schedule.map((v, i) => Math.round((v - (i ? schedule[i - 1] : 0)) * 100));
+    return `${data?.state_name || 'State'} uses a ${perQuarter.join('/')} schedule (Apr/Jun/Sep/Jan) rather than equal quarters.`;
+  });
 </script>
 
 <div class="tax-content">
@@ -137,12 +174,21 @@
     <div class="error-msg">{error}</div>
   {:else if !data}
     <div class="empty">
-      No tax configuration found. Add a <code>TAX.md</code> (or legacy <code>tax.toml</code>) to
-      your money workspace config.
+      No tax configuration found. Set your filing status, year and state in
+      <a href="{base}/money/settings/taxes">money settings</a>.
     </div>
   {:else}
     {#if error}
       <div class="error-msg">{error}</div>
+    {/if}
+
+    {#if stateNotice}
+      <div class="banner info state-notice">
+        {stateNotice}
+        {#if data.state_unavailable_reason === 'no_brackets'}
+          <a href="{base}/money/settings/taxes">Add them</a>
+        {/if}
+      </div>
     {/if}
 
     <div class="tax-layout">
@@ -244,10 +290,12 @@
             <span class="card-label">Federal due</span>
             <span class="card-amount">{fmtDollar(data.federal_quarterly_amount)}</span>
           </div>
-          <div class="summary-card">
-            <span class="card-label">State due</span>
-            <span class="card-amount">{fmtDollar(data.state_quarterly_amount)}</span>
-          </div>
+          {#if showState}
+            <div class="summary-card">
+              <span class="card-label">{data.state_name || 'State'} due</span>
+              <span class="card-amount">{fmtDollar(data.state_quarterly_amount)}</span>
+            </div>
+          {/if}
           <div class="summary-card total">
             <span class="card-label">Total due this quarter</span>
             <span class="card-amount">{fmtDollar(totalQuarterly)}</span>
@@ -258,24 +306,26 @@
           <div class="breakdown-header">
             <span class="breakdown-label"></span>
             <span class="breakdown-val">Federal</span>
-            <span class="breakdown-val">State (CA)</span>
+            {#if showState}<span class="breakdown-val">{stateColumnLabel}</span>{/if}
           </div>
 
           <div class="breakdown-group-label">Income</div>
           <div class="breakdown-row">
             <span class="breakdown-label">SE income (YTD)</span>
             <span class="breakdown-val">{fmtDollar(data.se_income_ytd)}</span>
-            <span class="breakdown-val"></span>
+            {#if showState}<span class="breakdown-val"></span>{/if}
           </div>
           <div class="breakdown-row">
             <span class="breakdown-label">SE income (annualized)</span>
             <span class="breakdown-val">{fmtDollar(data.se_income_annualized)}</span>
-            <span class="breakdown-val">{fmtDollar(data.se_income_annualized)}</span>
+            {#if showState}<span class="breakdown-val">{fmtDollar(data.se_income_annualized)}</span
+              >{/if}
           </div>
           <div class="breakdown-row">
             <span class="breakdown-label">W-2 income (annualized)</span>
             <span class="breakdown-val">{fmtDollar(data.w2_income_annualized)}</span>
-            <span class="breakdown-val">{fmtDollar(data.w2_income_annualized)}</span>
+            {#if showState}<span class="breakdown-val">{fmtDollar(data.w2_income_annualized)}</span
+              >{/if}
           </div>
           <details class="info-panel">
             <summary>How income is annualized</summary>
@@ -303,28 +353,30 @@
           <div class="breakdown-row">
             <span class="breakdown-label">SE tax</span>
             <span class="breakdown-val">{fmtDollar(data.se_tax)}</span>
-            <span class="breakdown-val dim">n/a</span>
+            {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
           </div>
           <div class="breakdown-row">
             <span class="breakdown-label">Half SE deduction</span>
             <span class="breakdown-val">{fmtDollar(data.half_se_deduction)}</span>
-            <span class="breakdown-val dim">n/a</span>
+            {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
           </div>
           {#if data.additional_medicare_tax > 0}
             <div class="breakdown-row">
               <span class="breakdown-label">Additional Medicare tax (0.9%)</span>
               <span class="breakdown-val">{fmtDollar(data.additional_medicare_tax)}</span>
-              <span class="breakdown-val dim">n/a</span>
+              {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
             </div>
           {/if}
           <details class="info-panel">
             <summary>How SE tax works</summary>
             <p>
-              SE tax is 15.3% (12.4% Social Security + 2.9% Medicare) on 92.35% of net SE income.
-              The taxable base is {fmtDollar(seTaxableBase)}.
-              {#if seTaxableBase > 176100}
-                Social Security applies only up to the wage base ($176,100); income above that pays
-                only the 2.9% Medicare rate.
+              SE tax is 15.3% (12.4% Social Security + 2.9% Medicare) on {fmtPct(
+                data.se_taxable_fraction,
+              )} of net SE income. The taxable base is {fmtDollar(seTaxableBase)}.
+              {#if data.ss_wage_base > 0 && seTaxableBase > data.ss_wage_base}
+                Social Security applies only up to the {data.tax_year} wage base ({fmtDollar(
+                  data.ss_wage_base,
+                )}); income above that pays only the 2.9% Medicare rate.
               {/if}
               SE tax is computed on the SE person's income alone; the spouse's W-2 wages do not affect
               the SS cap. Half of SE tax ({fmtDollar(data.half_se_deduction)}) is an above-the-line
@@ -340,34 +392,38 @@
           <div class="breakdown-row">
             <span class="breakdown-label">AGI</span>
             <span class="breakdown-val">{fmtDollar(data.federal_agi)}</span>
-            <span class="breakdown-val">{fmtDollar(data.state_agi)}</span>
+            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_agi)}</span>{/if}
           </div>
           <div class="breakdown-row">
             <span class="breakdown-label">Standard deduction</span>
             <span class="breakdown-val">{fmtDollar(data.federal_standard_deduction)}</span>
-            <span class="breakdown-val">{fmtDollar(data.state_standard_deduction)}</span>
+            {#if showState}<span class="breakdown-val"
+                >{fmtDollar(data.state_standard_deduction)}</span
+              >{/if}
           </div>
           {#if data.qbi_deduction > 0}
             <div class="breakdown-row">
               <span class="breakdown-label">QBI deduction</span>
               <span class="breakdown-val">{fmtDollar(data.qbi_deduction)}</span>
-              <span class="breakdown-val dim">n/a</span>
+              {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
             </div>
           {/if}
           <div class="breakdown-row">
             <span class="breakdown-label">Taxable income</span>
             <span class="breakdown-val">{fmtDollar(data.federal_taxable_income)}</span>
-            <span class="breakdown-val">{fmtDollar(data.state_taxable_income)}</span>
+            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_taxable_income)}</span
+              >{/if}
           </div>
           <div class="breakdown-row">
             <span class="breakdown-label">Income tax</span>
             <span class="breakdown-val">{fmtDollar(data.federal_tax)}</span>
-            <span class="breakdown-val">{fmtDollar(data.state_tax)}</span>
+            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_tax)}</span>{/if}
           </div>
           <div class="breakdown-row highlight">
             <span class="breakdown-label">Total liability</span>
             <span class="breakdown-val">{fmtDollar(data.federal_total_liability)}</span>
-            <span class="breakdown-val">{fmtDollar(data.state_total_liability)}</span>
+            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_total_liability)}</span
+              >{/if}
           </div>
           <div class="breakdown-row">
             <span class="breakdown-label">Effective tax rate</span>
@@ -383,10 +439,14 @@
               {#if data.qbi_deduction > 0}
                 - QBI deduction ({fmtDollar(data.qbi_deduction)}, which is 20% of qualified business
                 income under Section 199A)
-              {/if}. Federal income tax is computed using progressive {data.tax_year} MFJ brackets (10%
-              through 37%). Federal total liability includes both income tax and SE tax. CA uses its own
-              brackets and a lower standard deduction ({fmtDollar(data.state_standard_deduction)});
-              QBI and half-SE do not apply to CA taxable income calculation beyond AGI.
+              {/if}. Federal income tax is computed using the progressive {data.tax_year}
+              {data.filing_status.toUpperCase()} brackets. Federal total liability includes both income
+              tax and SE tax.
+              {#if showState}
+                {data.state_name} uses its own brackets and a standard deduction of {fmtDollar(
+                  data.state_standard_deduction,
+                )}; the QBI deduction does not reduce its taxable income.
+              {/if}
             </p>
           </details>
 
@@ -394,31 +454,35 @@
           <div class="breakdown-row">
             <span class="breakdown-label">Withholding (annualized)</span>
             <span class="breakdown-val">{fmtDollar(data.federal_withholding)}</span>
-            <span class="breakdown-val">{fmtDollar(data.state_withholding)}</span>
+            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_withholding)}</span
+              >{/if}
           </div>
           <div class="breakdown-row">
             <span class="breakdown-label">Estimated payments made</span>
             <span class="breakdown-val">{fmtDollar(data.federal_estimated_paid)}</span>
-            <span class="breakdown-val">{fmtDollar(data.state_estimated_paid)}</span>
+            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_estimated_paid)}</span
+              >{/if}
           </div>
           <div class="breakdown-row highlight">
             <span class="breakdown-label">Net due</span>
             <span class="breakdown-val">{fmtDollar(data.federal_net_due)}</span>
-            <span class="breakdown-val">{fmtDollar(data.state_net_due)}</span>
+            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_net_due)}</span>{/if}
           </div>
           <div class="breakdown-row result">
             <span class="breakdown-label">Due this quarter (Q{data.quarter})</span>
             <span class="breakdown-val">{fmtDollar(data.federal_quarterly_amount)}</span>
-            <span class="breakdown-val">{fmtDollar(data.state_quarterly_amount)}</span>
+            {#if showState}<span class="breakdown-val"
+                >{fmtDollar(data.state_quarterly_amount)}</span
+              >{/if}
           </div>
           <details class="info-panel">
             <summary>How the quarterly amount is determined</summary>
             <p>
               {#if method === 'annualized'}
                 Net due = total annual liability - annualized withholding - estimated payments
-                already made. Federal installments are 25% each quarter. CA uses a 30/40/0/30
-                schedule (Apr/Jun/Sep/Jan). As W-2 withholding and income data are updated each
-                quarter, the per-quarter amount self-corrects.
+                already made. Federal installments are 25% each quarter.
+                {#if showState}{installmentDescription}{/if} As W-2 withholding and income data are updated
+                each quarter, the per-quarter amount self-corrects.
               {:else}
                 Safe harbor uses last year's total tax divided by 4 as each quarterly payment.
                 Withholding is subtracted first. This avoids underpayment penalties regardless of
@@ -434,6 +498,25 @@
             {/if}
           </details>
         </div>
+
+        <div class="provenance-footnote">
+          <p class="micro-label">Where these rates come from</p>
+          <div class="prov-block">
+            <span class="prov-label">Federal</span>
+            <RateProvenanceLine provenance={data.federal_rates} taxYear={data.tax_year} />
+          </div>
+          {#if data.state_rates && data.state}
+            <div class="prov-block">
+              <span class="prov-label">{data.state_name || data.state}</span>
+              <RateProvenanceLine provenance={data.state_rates} taxYear={data.tax_year} />
+            </div>
+          {/if}
+          <p class="settings-link">
+            <a href="{base}/money/settings/taxes">Override any of these in settings</a>
+          </p>
+        </div>
+
+        <TaxDisclaimer />
       </section>
     </div>
   {/if}
@@ -688,11 +771,38 @@
     line-height: 1.5;
   }
 
-  .empty code {
-    background: var(--surface-raised);
-    padding: 0.1rem var(--space-1);
-    border-radius: var(--radius-sm);
-    font-size: var(--text-sm);
+  .state-notice {
+    margin-bottom: var(--space-3);
+  }
+
+  .provenance-footnote {
+    margin-top: var(--space-3);
+    margin-bottom: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .prov-block {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .prov-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .settings-link {
+    margin: 0;
+    font-size: var(--text-xs);
+  }
+
+  .settings-link a,
+  .empty a,
+  .state-notice a {
+    color: var(--link);
   }
 
   /* 640px, the app's narrow breakpoint, rather than a one-off 720px. */

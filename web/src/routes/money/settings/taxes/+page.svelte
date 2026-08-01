@@ -98,7 +98,14 @@
   /** Re-read the resolved rates for a (year, status) the user has not saved yet. */
   async function reloadResolved() {
     try {
-      resolved = await getResolvedTaxRates({ year: taxYear, filingStatus: filingStatus });
+      resolved = await getResolvedTaxRates({
+        year: taxYear,
+        filingStatus,
+        // Passed explicitly, including '' — the preview has to follow the
+        // pick, or the form shows the previous state's brackets under the new
+        // state's name.
+        state: stateCode,
+      });
     } catch {
       // Non-fatal: the form keeps the figures it already has, and the Save is
       // still what decides. A failed preview should not block an edit.

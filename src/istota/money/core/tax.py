@@ -445,6 +445,12 @@ def estimate_quarterly_tax(
     # income is the spouse's, not the SE person's. The SE person's own W-2
     # wages (if any) would need a separate input.
     se_tax, half_se = compute_se_tax(se_annualized, config=config, year=tax_year)
+    _fed_payroll = (federal_rates(tax_year) or None)
+    resolved_wage_base = (
+        (config.ss_wage_base if config and config.ss_wage_base else 0)
+        or (_fed_payroll.payroll.ss_wage_base
+            if _fed_payroll and _fed_payroll.payroll else 0)
+    )
 
     # AGI: gross income minus above-the-line deductions (half SE is above-the-line)
     federal_agi = se_annualized + w2_annualized - half_se
@@ -585,6 +591,9 @@ def estimate_quarterly_tax(
         federal_quarterly_amount=fed_quarterly,
         state_quarterly_amount=state_quarterly,
         quarters_remaining=quarters_remaining,
+        ss_wage_base=resolved_wage_base,
+        se_taxable_fraction=se_frac,
+        state_installment_schedule=list(state_cumulative),
         state=state_code,
         state_name=state_result.name,
         state_available=state_result.available,

@@ -7329,6 +7329,9 @@ const handlers: MockHandler[] = [
         federal_quarterly_amount: fedQuarterly,
         state_quarterly_amount: stateQuarterly,
         quarters_remaining: Math.max(1, 5 - opts.quarter),
+        ss_wage_base: payroll.ss_wage_base,
+        se_taxable_fraction: payroll.se_taxable_fraction,
+        state_installment_schedule: stateCumulative,
         state: stateCode,
         state_name: jurisdiction?.name ?? '',
         state_available: stateAvailable,
@@ -7370,7 +7373,7 @@ const handlers: MockHandler[] = [
       return { value, overridden };
     }
 
-    function resolvedPayload(year: number, status: string) {
+    function resolvedPayload(year: number, status: string, stateOverride?: string | null) {
       const fedBlock = federalYear(year);
       const fedStatus = fedBlock?.filing_status?.[status] ?? {};
       const fedOverride = findSchedule(year, 'federal', status);
@@ -7383,7 +7386,7 @@ const handlers: MockHandler[] = [
         payroll[key] = field(got ?? bundledPayroll[key] ?? null, got !== undefined);
       }
 
-      const code = (config.state ?? '').toUpperCase();
+      const code = (stateOverride ?? config.state ?? '').toUpperCase();
       let statePayload: unknown = null;
       if (code) {
         const jur = jurisdictionOf(code);
@@ -7482,7 +7485,7 @@ const handlers: MockHandler[] = [
         if (status !== 'mfj' && status !== 'single') {
           return { __status: 400, status: 'error', error: `unknown filing status: ${status}` };
         }
-        return resolvedPayload(year, status);
+        return resolvedPayload(year, status, params.get('state'));
       }
 
       if (path === `${CONFIG_PATH}/schedules` && method === 'GET') {

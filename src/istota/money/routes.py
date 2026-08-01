@@ -1884,13 +1884,16 @@ def _resolved_field(value, *, overridden: bool) -> dict:
 async def api_config_tax_resolved(
     year: int | None = None,
     filing_status: str | None = None,
+    state: str | None = None,
     user_ctx: UserContext = Depends(get_user_config),
 ):
     """The rates actually in use, per field, with provenance.
 
-    ``year`` and ``filing_status`` default to the configured ones but are
-    overridable, because the settings page edits a year the user is not
-    currently filing for.
+    All three selectors default to the configured values but are overridable,
+    because the settings page previews an edit before it is saved — a year the
+    user is not currently filing for, or a state they have just picked from the
+    dropdown. Without the override the form shows the previous state's brackets
+    beside the new state's name, which reads as a bug.
     """
     from istota.money import config_store
     from istota.money.core import tax_data
@@ -1948,10 +1951,13 @@ async def api_config_tax_resolved(
             got if got is not None else bundled_value, overridden=got is not None,
         )
 
+    # `state` of "" is a real selection (no state tax) and must not fall back
+    # to the configured one, so this keys on None rather than falsiness.
+    state_code = cfg.state if state is None else state.strip().upper()
     state_block = None
-    if cfg.state:
+    if state_code:
         state_block = _resolved_state_block(
-            user_ctx.db_path, rates, cfg.state, tax_year, status,
+            user_ctx.db_path, rates, state_code, tax_year, status,
         )
 
     return {

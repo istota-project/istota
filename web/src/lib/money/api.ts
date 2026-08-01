@@ -688,6 +688,15 @@ export interface TaxEstimateResponse {
   federal_quarterly_amount: number;
   state_quarterly_amount: number;
   quarters_remaining: number;
+  /**
+   * The payroll figures actually used. Carried so the page's explainers quote
+   * the resolved values rather than holding their own copy — the SE-tax panel
+   * used to name '$176,100' inline and went stale the moment it moved.
+   */
+  ss_wage_base: number;
+  se_taxable_fraction: number;
+  /** Cumulative fraction of the state liability due by each quarter. */
+  state_installment_schedule: number[];
   /** Two-letter code, or '' for no state tax. */
   state: string;
   state_name: string;
@@ -1104,10 +1113,13 @@ export async function getTaxJurisdictions(): Promise<TaxJurisdiction[]> {
 export async function getResolvedTaxRates(opts?: {
   year?: number;
   filingStatus?: string;
+  /** '' is a real selection (no state tax); omit the key to use the saved one. */
+  state?: string;
 }): Promise<ResolvedRates> {
   const params = new URLSearchParams();
   if (opts?.year) params.set('year', String(opts.year));
   if (opts?.filingStatus) params.set('filing_status', opts.filingStatus);
+  if (opts?.state !== undefined) params.set('state', opts.state);
   const qs = params.toString();
   return apiFetch<ResolvedRates>(`/config/tax/resolved${qs ? '?' + qs : ''}`);
 }

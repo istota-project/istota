@@ -298,3 +298,28 @@ class TestOverridesReachTheEstimate:
         after = client.get(f"{API}/tax/estimate").json()
         assert before["federal_standard_deduction"] == 32_200
         assert after["federal_standard_deduction"] == 100_000
+
+
+class TestResolvedStateOverride:
+    """The settings page previews a state before it is saved."""
+
+    def test_state_is_overridable_by_query(self, client):
+        client.put(f"{API}/config/tax", json={"tax_year": 2026, "state": "CA"})
+        body = client.get(f"{API}/config/tax/resolved?state=PA").json()
+        assert body["state"]["code"] == "PA"
+        assert body["state"]["starts_from"] == "gross_compensation"
+        assert body["state"]["brackets"]["value"] == [[0, 0.0307]]
+
+    def test_empty_state_query_means_no_state_not_the_saved_one(self, client):
+        # "" is a real selection. Keying on falsiness would fall back to the
+        # configured state and show California under "No state income tax".
+        client.put(f"{API}/config/tax", json={"tax_year": 2026, "state": "CA"})
+        assert client.get(f"{API}/config/tax/resolved?state=").json()["state"] is None
+
+    def test_omitting_state_uses_the_configured_one(self, client):
+        client.put(f"{API}/config/tax", json={"tax_year": 2026, "state": "CA"})
+        assert client.get(f"{API}/config/tax/resolved").json()["state"]["code"] == "CA"
+
+    def test_state_query_is_normalized(self, client):
+        body = client.get(f"{API}/config/tax/resolved?state=co").json()
+        assert body["state"]["code"] == "CO"
