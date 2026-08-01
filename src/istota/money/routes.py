@@ -2242,6 +2242,7 @@ async def api_portfolio_import(
     file: UploadFile = FastAPIFile(...),
     dry_run: int = 0,
     replace: int | None = None,
+    force: int = 0,
     user_ctx: UserContext = Depends(get_user_config),
     _csrf: None = Depends(verify_origin),
 ):
@@ -2250,7 +2251,8 @@ async def api_portfolio_import(
     ``?dry_run=1`` returns the parse preview without writing. A duplicate
     (same content hash) is a 409 naming the existing snapshot. A same-day
     snapshot with different content returns ``{"status": "date_collision"}``
-    unless ``?replace=<old_id>`` is passed.
+    unless ``?replace=<old_id>`` (delete the old one first) or ``?force=1``
+    (keep both) is passed.
     """
     import tempfile
 
@@ -2296,7 +2298,7 @@ async def api_portfolio_import(
         try:
             if replace is not None:
                 portfolio.delete_snapshot(conn, replace)
-            elif len(snapshots) == 1:
+            elif len(snapshots) == 1 and not force:
                 # Same-calendar-date collision check (single-export flow only —
                 # a fina-history migration legitimately spans many dates).
                 snap = snapshots[0]

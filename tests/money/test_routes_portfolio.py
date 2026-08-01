@@ -85,6 +85,16 @@ class TestImportRoute:
         snaps = client.get("/api/money/portfolio/snapshots").json()["snapshots"]
         assert len(snaps) == 1
 
+    def test_same_date_force_keeps_both(self, client, tmp_path):
+        _upload(client, CSV_2025)
+        variant = tmp_path / "variant.csv"
+        text = CSV_2025.read_text(encoding="utf-8-sig")
+        variant.write_text(text.replace("502", "503"), encoding="utf-8")
+        resp = _upload(client, variant, force=1)
+        assert resp.json()["status"] == "ok"
+        snaps = client.get("/api/money/portfolio/snapshots").json()["snapshots"]
+        assert len(snaps) == 2
+
     def test_fina_history_bulk(self, client):
         resp = _upload(client, CSV_FINA)
         assert resp.status_code == 200
