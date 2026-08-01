@@ -2,6 +2,44 @@
 
 > Istota was forked from a private project (Zorg) in February 2026. Entries before the fork reference the original name.
 
+## 2026-07-31: One paste, every room's draft; and a geofence clipped at 90 knots
+
+Two unrelated fixes, ISSUE-216 and ISSUE-217, both frontend-only.
+
+**Every draft shares one storage entry, so the size of one is everyone's problem.** `chat.drafts` is a single JSON map and every write serializes the whole thing, so one entry past the origin's quota makes the write fail for the map rather than for that entry — and `persisted.ts` swallows the exception, which is right for a preference and wrong for text the user produced. Paste something large without sending it and no draft in any room is saved again, silently. The entry's own header comment asserted the map was "a few hundred bytes at the sizes involved"; nothing enforced it, and a paste is the ordinary way past.
+
+The issue proposed a per-draft truncating cap, which is necessary and not sufficient: fifty capped drafts still add up past a 5 MB quota counted in UTF-16 code units, so the failure class survives at a narrower width. There are now two bounds — one per draft (64 KB) and one for the map (256 KB) — and the second is the reason the first can be relied on, since it makes the map's size a function of nothing but itself. The per-draft bound is applied **on read as well as on write**, so a map written before the caps existed is healed the first time it is read rather than carried back into a write at full size; without that, a single legacy entry over the whole-map budget would have been unstorable forever.
+
+**`prune` had to learn which entry the current write is about.** Eviction orders by age, ties resolve to insertion order, and two writes in the same millisecond tie — so the entry a caller just wrote could be the one evicted, which is the single outcome no caller can work around. The covering test advanced the clock between writes and so passed either way; Scully caught that by reverting the parameter and watching all 29 tests stay green.
+
+**And the cap broke the send-durability machinery that landed the same day.** `submit` stores the sent text and separately records it to recognise again when the ack arrives — `settleDraft` compares stored against recorded to decide whether something was typed since, and `switchDraft` compares them to refuse restoring a message still in flight. Clamping made those two copies different lengths, so both comparisons missed: the draft was never cleared, and coming back to the room put an already-sent message back in the field as unsent text, one Enter from being sent twice. That is the exact hazard the previous day's entry documents `switchDraft` as existing to prevent, reintroduced from underneath it. `writeDraft` now returns what it actually stored and the composer records that, which makes the invariant structural rather than a rule to remember. Reachable today only above the server's own `max_prompt_chars`, which is why the cap is deliberately set well above it.
+
+**The second fix: a track crossing a geofence at speed was drawn as a data gap.** `gapKind` treated any place transition over 200 m as an unsampled gap — a rule that exists for the "ray", the phone waking mid-trip after sleeping through a departure. A night training flight threading over the saved place LAX at ~48 m/s clipped its 750 m radius for three pings on each pass, so both passes rendered dashed, and the trip list split one flight into fragments. The pings are continuous 11-second breadcrumbs; nothing was missing.
+
+The issue named `stripIsolatedPlacePings` as the natural home, and the fix is in `gapKind` instead. That pass nulls a ping's `place` to suppress the rule, which for a three-ping run means erasing the geofence from the filtered array that other consumers read; `gapKind` is where the decision is actually made, and gating it there needs no mutation. Worth recording, since the entry says otherwise.
+
+**"Both endpoints were moving" is a proxy, and Mulder found where it leaks.** It admits any edge under the five-minute dwell floor, so a train losing signal in a tunnel for four minutes and re-appearing 6 km later — never at rest, genuinely unsampled — would have been drawn as up to 42 km of invented solid track. The suppression now also requires the edge to be a _sampled step_ (60 seconds), which is the property actually being claimed. The other leak runs the opposite way: iOS reports −1 for "speed unavailable" while a fix is reacquiring, which the receiver stores as null and which happens exactly at a geofence boundary, and imported Garmin tracks often carry no speed at all. Where one endpoint is silent and the other is unambiguously moving, the edge's own implied speed stands in — it cannot rescue the ray, whose implied speed over a minute of silence is low and which the sampled-step test has already excluded. A track with no speed data anywhere keeps the original behaviour.
+
+**Deliberately not done.** `saveSetting` still swallows a refusal, so a quota failure originating elsewhere on the origin is still silent — the issue floated surfacing it and the caps address the cause rather than the reporting; a notice on a debounced write would fire while the user still holds the full text, and the honest moment to report is not obvious. A walking pass-through still dashes: the motion floor is ~18 km/h, and lowering it far enough to cover a pedestrian would start suppressing real departures. There is a test pinning that as a limit rather than leaving it to be rediscovered.
+
+**Key changes:**
+
+- Per-draft and whole-map size caps in the draft store, the first enforced on read as well as write. Eviction is oldest-first, as the entry cap already was, so a fifth large paste costs the oldest room's draft rather than the write.
+- `writeDraft` returns the stored text; the composer records that rather than what it passed.
+- `clampDraftText` backs off a dangling high surrogate, so a truncated draft stops rather than ending in a replacement character.
+- The place-crossing gap rule is gated on the edge being a sampled step whose endpoints were both moving, with the implied speed standing in for a single silent endpoint.
+- `FLIGHT_ENDPOINT_REST_MS` renamed `ENDPOINT_REST_MS` — it now gates two unrelated rules, and tuning flight detection should not silently change how tracks render through geofences.
+- The quota test spied on `Storage.prototype`, which `vitest-setup.ts` does not use: it installs a plain object, so the spy patched nothing and the assertion passed against any implementation. It also modelled a draft too large to store at all, where nothing is stored and the next room's write succeeds — not the reported failure. Both corrected, and the test now reproduces the cross-room symptom.
+
+**Files added/modified:**
+
+- `web/src/lib/stores/drafts.ts` - the two caps, `clampDraftText`, `prune`'s `keep`, the `writeDraft` return
+- `web/src/lib/components/chat/Composer.svelte` - record what was stored
+- `web/src/lib/location-path.ts` - `crossedPlaceInMotion`, the sampled-step bound, the constant rename
+- `web/src/lib/location-path.test.ts` - new, 13 tests over the issue's verbatim ping fixture
+- `web/src/lib/stores/drafts.test.ts` - +10; `Composer.svelte.test.ts` - +2
+- `.claude/rules/web-chat.md`, `web/AGENTS.md` - the draft store's bounds were documented as the TTL and entry cap only
+
 ## 2026-07-31: A failed send that survives the outage that caused it
 
 The three chat changes that landed earlier today left one thing between them: ISSUE-200 made a failed send _visible_ without making it _durable_. The `sendState: 'failed'` row was the only copy of the user's text, and three separate paths destroyed it — the room stream's own reconnect recovery, an ordinary page reload, and the composer dropping the draft the instant Send was pressed. A network outage triggers the first two at once, and it is the same outage that produced the failure. The user watched their message be reported as unsent and then vanish.

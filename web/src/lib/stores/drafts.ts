@@ -9,7 +9,16 @@
  *
  * Everything lives under one storage key as a map, rather than a key per room.
  * That makes pruning a local decision rather than a scan of the whole origin's
- * storage, and the whole map is a few hundred bytes at the sizes involved.
+ * storage. It also means every write serializes the whole map, so the map's
+ * size is a shared resource: one entry large enough to exceed the origin's
+ * quota makes the write fail for every room at once, and `saveSetting` swallows
+ * that — so nothing is saved and nothing is reported. A paste is the ordinary
+ * way past it. The two size bounds below exist so the draft store can no longer
+ * be the cause of that: the per-draft bound is applied on read as well as on
+ * write, so a map written before they existed cannot re-introduce it, and the
+ * whole-map bound is applied on write, where the map is assembled. Neither
+ * makes a refusal impossible — the quota belongs to the origin, not to this
+ * key, and a refusal from anywhere else is still swallowed.
  *
  * Keys are opaque strings; the chat page builds its own as
  * `<user>:room:<token>`. Both halves earn their place. The **token** rather
@@ -39,8 +48,58 @@ export const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** Second bound, on count rather than age, for a very busy month. */
 export const MAX_DRAFTS = 50;
 
+/**
+ * How much of one draft is kept.
+ *
+ * Around ten thousand words — far past anything anyone types into a chat
+ * composer, and reached only by pasting. An oversized draft therefore costs its
+ * own tail rather than the map, which is the whole point: the alternative is a
+ * write that fails for every room and says nothing.
+ *
+ * Deliberately well above `[web.chat] max_prompt_chars`, the server's own
+ * ceiling on a send (32,000 by default). The draft is the durability copy of a
+ * submitted message, so as long as the cap sits above what the server would
+ * accept, truncation can only ever reach text that could not have been sent.
+ * Raising that setting past this figure would change that.
+ */
+export const MAX_DRAFT_CHARS = 64 * 1024;
+
+/**
+ * How much the map holds in total, across every room.
+ *
+ * The per-draft cap alone does not bound the map: `MAX_DRAFTS` large drafts
+ * would still add up past a browser's quota, which is counted in UTF-16 code
+ * units and shared with everything else on the origin. This is deliberately a
+ * small fraction of the ~5 MB browsers offer, since a draft store has no claim
+ * on the rest of it.
+ *
+ * Counted in characters of draft text, not in the code units the serialized
+ * payload costs — JSON escaping inflates that by a small constant factor,
+ * around 2x for the newline-dense text a paste usually is. The headroom above
+ * absorbs it; the figure is not a byte budget and should not be read as one.
+ *
+ * Must stay at or above `MAX_DRAFT_CHARS`, or a single capped draft could not
+ * fit and the newest-always-kept guarantee below would not hold.
+ */
+export const MAX_DRAFTS_CHARS = 256 * 1024;
+
 type Draft = { text: string; at: number };
 type DraftMap = Record<string, Draft>;
+
+/**
+ * `text` cut to `MAX_DRAFT_CHARS`, without splitting a surrogate pair.
+ *
+ * A pair split down the middle leaves a lone high surrogate, which survives
+ * JSON intact and then renders as a replacement character — so a truncated
+ * draft would come back with a visible artifact on the end rather than simply
+ * stopping. Backing off one unit costs the emoji and nothing else.
+ */
+function clampDraftText(text: string): string {
+  if (text.length <= MAX_DRAFT_CHARS) return text;
+  const cut = text.charCodeAt(MAX_DRAFT_CHARS - 1);
+  const end = cut >= 0xd800 && cut <= 0xdbff ? MAX_DRAFT_CHARS - 1 : MAX_DRAFT_CHARS;
+  return text.slice(0, end);
+}
 
 /**
  * The stored map, with anything that is not draft-shaped dropped.
@@ -70,16 +129,44 @@ function readAll(now = Date.now()): DraftMap {
     // kept returning nothing, and the draft only came back to life when some
     // unrelated write pruned it away.
     if (now - (draft.at as number) >= DRAFT_TTL_MS) continue;
-    out[key] = { text: draft.text, at: draft.at as number };
+    // Clamped on the way in, not only on the way out, so an entry written
+    // before the cap existed is capped the first time it is read and can never
+    // be carried back into a write at full size. That cuts such an entry down
+    // as a side effect of a write in some other room, which is data loss and
+    // not only hygiene — accepted because an entry that size could not have
+    // been stored under the bug this replaces, and because the alternative is
+    // carrying it forward as the thing that breaks every write.
+    out[key] = { text: clampDraftText(draft.text), at: draft.at as number };
   }
   return out;
 }
 
-/** Expired entries out, newest `MAX_DRAFTS` kept. */
-function prune(map: DraftMap, now: number): DraftMap {
+/**
+ * Expired entries out, then the newest kept until either bound is reached.
+ *
+ * `keep` is the entry the current write is about, and it goes to the front
+ * regardless of age. Ordering by timestamp alone is not enough: two writes in
+ * the same millisecond tie, and a tie resolves to insertion order, so the entry
+ * a caller just wrote could be the one evicted — the one outcome no caller can
+ * work around.
+ */
+function prune(map: DraftMap, now: number, keep?: string): DraftMap {
   const live = Object.entries(map).filter(([, draft]) => now - draft.at < DRAFT_TTL_MS);
   live.sort((a, b) => b[1].at - a[1].at);
-  return Object.fromEntries(live.slice(0, MAX_DRAFTS));
+  const first = keep === undefined ? -1 : live.findIndex(([key]) => key === keep);
+  if (first > 0) live.unshift(...live.splice(first, 1));
+
+  const out: DraftMap = {};
+  let total = 0;
+  for (const [key, draft] of live.slice(0, MAX_DRAFTS)) {
+    // Stop rather than skip: entries are in eviction order already, so passing
+    // over one that does not fit to reach a smaller, older one would keep the
+    // wrong draft.
+    if (total + draft.text.length > MAX_DRAFTS_CHARS) break;
+    total += draft.text.length;
+    out[key] = draft;
+  }
+  return out;
 }
 
 /**
@@ -121,16 +208,31 @@ export function dropDraft(key: string): void {
  * entries, and stamping a fresh `at` that pushes the TTL out. The age would
  * then measure time since you last looked at a draft rather than time since
  * you last touched it, and a draft you never edit again would never age out.
+ *
+ * Returns the text now held under `key`, which is `text` clamped, or empty
+ * where the entry was dropped. Callers that keep their own copy of what they
+ * wrote must keep *this* rather than what they passed: the composer records
+ * the submitted text to recognise it again when the send acks, and comparing a
+ * full-length copy against a clamped stored one makes every such test miss —
+ * which would restore an already-sent message into the field as unsent text,
+ * and leave its draft behind for good.
  */
-export function writeDraft(key: string, text: string): void {
+export function writeDraft(key: string, text: string): string {
   const now = Date.now();
   const map = readAll(now);
   if (text.trim() === '') {
-    if (!(key in map)) return;
-    delete map[key];
-  } else {
-    if (map[key]?.text === text) return;
-    map[key] = { text, at: now };
+    if (key in map) {
+      delete map[key];
+      saveSetting(DRAFT_STORAGE_KEY, prune(map, now));
+    }
+    return '';
   }
-  saveSetting(DRAFT_STORAGE_KEY, prune(map, now));
+  // Compared after clamping, and against an already-clamped stored value, so
+  // typing on past the cap settles into the no-op instead of rewriting the map
+  // on every debounce for text that cannot change what is stored.
+  const clamped = clampDraftText(text);
+  if (map[key]?.text === clamped) return clamped;
+  map[key] = { text: clamped, at: now };
+  saveSetting(DRAFT_STORAGE_KEY, prune(map, now, key));
+  return clamped;
 }

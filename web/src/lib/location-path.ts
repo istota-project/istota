@@ -107,16 +107,18 @@ export function greatCircleArc(
 //   - implied speed > 200 km/h (clear teleport)
 //   - dt >= dwell minimum (a filtered dwell sits between the two kept pings)
 //   - the two pings are in different place states (null vs place, or two
-//     different places) AND the distance crosses a place boundary. This
-//     catches "rays" — the phone waking up mid-trip after leaving a
-//     geofence, where the first new ping is already hundreds of metres
-//     away. Without this, such edges render as solid coloured straight
-//     lines cutting across blocks.
+//     different places) AND the distance crosses a place boundary AND the
+//     two pings do not both report being in motion. This catches "rays" —
+//     the phone waking up mid-trip after leaving a geofence, where the first
+//     new ping is already hundreds of metres away. Without this, such edges
+//     render as solid coloured straight lines cutting across blocks. The
+//     motion test is what keeps a pass-through out of the rule: see below.
 const GAP_SPEED_MAX_MS = 140; // ~500 km/h — above any ground transport (Shinkansen ~300), below any flight
 const FLIGHT_DIST_MIN_M = 300_000; // 300 km — a single un-sampled edge of this length is flight-shaped even when airport dwell drags the implied speed below cruise
 const FLIGHT_DIST_SPEED_MS = 28; // ~100 km/h — paired with FLIGHT_DIST_MIN_M, keeps slow-and-long edges (overnight ferries, very long parked stretches) in the sparse bucket
-const FLIGHT_ENDPOINT_REST_MS = 5; // ~18 km/h — below this, OS-reported endpoint speed counts as "at rest"; tolerates walk-to-gate noise
+const ENDPOINT_REST_MS = 5; // ~18 km/h — below this, OS-reported endpoint speed counts as "at rest"; tolerates walk-to-gate noise. Read by the flight rule and the place-crossing rule both, so it is not named for either
 const PLACE_CROSSING_DIST_M = 200; // boundary-skip threshold
+const PLACE_CROSSING_MAX_GAP_S = 60; // beyond this an edge is not a sampled step, whatever its endpoints were doing
 
 // 'flight' = implied speed too fast for any ground transport (clear teleport).
 // 'sparse' = the gap is consistent with ground travel that just wasn't
@@ -130,7 +132,43 @@ export type GapKind = 'flight' | 'sparse' | null;
 // is treated as at-rest so we degrade to the pre-OS-speed behaviour for
 // users / configs that don't carry the field.
 function endpointInMotion(p: LocationPing): boolean {
-  return p.speed != null && p.speed > FLIGHT_ENDPOINT_REST_MS;
+  return p.speed != null && p.speed > ENDPOINT_REST_MS;
+}
+
+// Whether an edge that changes place state is a pass-through — the track went
+// straight across a geofence while it was being sampled — rather than the gap
+// the place-crossing rule below exists to catch.
+//
+// Two conditions, and both are needed. The edge has to be a *sampled step*:
+// a long silence is an unsampled gap however fast its endpoints were going, so
+// a train losing signal in a tunnel for four minutes and re-appearing 6 km
+// later stays a gap even though it never stopped moving. And both endpoints
+// have to report real motion, because the ray the rule catches begins at rest —
+// the phone was parked inside the geofence and slept through the departure, so
+// the ping inside it is stationary and only the one outside is moving.
+//
+// A null speed normally counts as at rest, which keeps the original behaviour
+// for a deployment whose pings carry no speed at all. But null is not rare at
+// exactly this boundary: iOS reports -1 for "speed unavailable" while the fix
+// is reacquiring, which the receiver stores as null, and imported tracks often
+// omit it. So where one endpoint is silent and the other is unambiguously
+// moving, the edge's own implied speed stands in for the silent one. It cannot
+// rescue the departure ray, whose implied speed over a minute-plus of silence
+// is low and which the sampled-step test has already excluded.
+function crossedPlaceInMotion(
+  a: LocationPing,
+  b: LocationPing,
+  dist: number,
+  timeDeltaS: number,
+): boolean {
+  if (timeDeltaS > PLACE_CROSSING_MAX_GAP_S) return false;
+  const aMoving = endpointInMotion(a);
+  const bMoving = endpointInMotion(b);
+  if (aMoving && bMoving) return true;
+  if (aMoving === bMoving) return false;
+  const silent = a.speed == null ? a : b.speed == null ? b : null;
+  if (silent === null) return false;
+  return dist / timeDeltaS > ENDPOINT_REST_MS;
 }
 
 export function gapKind(
@@ -158,7 +196,15 @@ export function gapKind(
   if (timeDeltaS >= DWELL_MIN_DURATION_S) return 'sparse';
   const placeA = a.place ?? null;
   const placeB = b.place ?? null;
-  if (placeA !== placeB && dist > PLACE_CROSSING_DIST_M) return 'sparse';
+  // A place transition only stands for an unsampled gap when something was
+  // actually unsampled. Without this test, any track crossing a saved place at
+  // speed was dashed on the way in and again on the way out — ISSUE-217, a
+  // flight clipping LAX's 750 m transit geofence for three pings at ~48 m/s,
+  // on both the outbound and the return leg. See `crossedPlaceInMotion` for
+  // what separates that from the ray this rule is for.
+  if (placeA !== placeB && dist > PLACE_CROSSING_DIST_M) {
+    if (!crossedPlaceInMotion(a, b, dist, timeDeltaS)) return 'sparse';
+  }
   return null;
 }
 

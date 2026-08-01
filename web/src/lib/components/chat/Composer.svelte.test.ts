@@ -29,7 +29,7 @@ import {
   pickDocuments,
 } from '$lib/platform/nativePicker';
 import { resetCommandCatalogue } from './autocomplete/providers';
-import { readDraft, writeDraft, DRAFT_STORAGE_KEY } from '$lib/stores/drafts';
+import { readDraft, writeDraft, DRAFT_STORAGE_KEY, MAX_DRAFT_CHARS } from '$lib/stores/drafts';
 import Composer, { DRAFT_SAVE_DEBOUNCE_MS } from './Composer.svelte';
 
 const upload = uploadChatAttachment as ReturnType<typeof vi.fn>;
@@ -976,6 +976,45 @@ describe('Composer drafts', () => {
     await rerender({ sendSettled: { n: 1, key: 'room:3' } });
     await tick();
     expect(readDraft('room:3')).toBe('');
+  });
+
+  it('settles a send whose text was too long to store whole', async () => {
+    // The draft store caps one draft, so what it holds for an over-long
+    // message is a prefix. Both tests that recognise the message again compare
+    // against the stored copy, so recording the full text instead left the ack
+    // unable to match it: the draft was never cleared, and coming back to the
+    // room restored an already-sent message into the field as unsent text.
+    const { textarea, rerender } = mount({
+      draftKey: 'room:3',
+      sendSettled: { n: 0, key: null },
+    });
+    await type(textarea, 'y'.repeat(MAX_DRAFT_CHARS + 500));
+
+    await fireEvent.click(btn(document.body, 'Send')!);
+    expect(readDraft('room:3').length).toBe(MAX_DRAFT_CHARS);
+
+    // Away from the room, so the ack has to judge by what is stored rather
+    // than by the field — which is the comparison the clamp breaks.
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+    await rerender({ sendSettled: { n: 1, key: 'room:3' } });
+    await tick();
+    expect(readDraft('room:3')).toBe('');
+  });
+
+  it('does not restore an over-long message that is still in flight', async () => {
+    const { textarea, rerender } = mount({
+      draftKey: 'room:3',
+      sendSettled: { n: 0, key: null },
+    });
+    await type(textarea, 'z'.repeat(MAX_DRAFT_CHARS + 500));
+    await fireEvent.click(btn(document.body, 'Send')!);
+
+    await rerender({ draftKey: 'room:9' });
+    await tick();
+    await rerender({ draftKey: 'room:3' });
+    await tick();
+    expect(textarea.value).toBe('');
   });
 
   it('holds the draft through a send that never lands', async () => {

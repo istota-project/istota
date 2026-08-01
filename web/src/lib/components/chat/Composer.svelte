@@ -581,8 +581,11 @@
     if (activeDraftKey) {
       clearTimeout(saveTimer);
       saveTimer = undefined;
-      writeDraft(activeDraftKey, t);
-      unsettledSends.set(activeDraftKey, t);
+      // What was stored, not what was passed: an over-long message is held
+      // clamped, and both the tests that recognise it again — the ack in
+      // `settleDraft` and the restore refusal in `switchDraft` — compare
+      // against the stored copy.
+      unsettledSends.set(activeDraftKey, writeDraft(activeDraftKey, t));
     }
     queueMicrotask(autoGrow);
     // A sent message is the end of a turn, and the reply arrives in the third of

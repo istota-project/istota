@@ -5,6 +5,8 @@ import {
   dropDraft,
   DRAFT_TTL_MS,
   MAX_DRAFTS,
+  MAX_DRAFT_CHARS,
+  MAX_DRAFTS_CHARS,
   DRAFT_STORAGE_KEY,
 } from './drafts';
 
@@ -182,5 +184,126 @@ describe('drafts', () => {
     const before = localStorage.getItem(DRAFT_STORAGE_KEY);
     dropDraft('room:404');
     expect(localStorage.getItem(DRAFT_STORAGE_KEY)).toBe(before);
+  });
+});
+
+describe('drafts — size bounds', () => {
+  it('keeps the per-draft cap within the whole-map budget', () => {
+    // The one relationship the eviction rule rests on: the newest entry is
+    // always kept, which is only guaranteed while a single capped draft can
+    // fit inside the budget on its own.
+    expect(MAX_DRAFT_CHARS).toBeLessThanOrEqual(MAX_DRAFTS_CHARS);
+  });
+
+  it('truncates an oversized draft rather than dropping it', () => {
+    writeDraft('room:3', 'x'.repeat(MAX_DRAFT_CHARS + 5000));
+    expect(readDraft('room:3')).toBe('x'.repeat(MAX_DRAFT_CHARS));
+  });
+
+  it('keeps the head of an oversized draft, not the tail', () => {
+    writeDraft('room:3', 'START' + 'x'.repeat(MAX_DRAFT_CHARS));
+    expect(readDraft('room:3').startsWith('START')).toBe(true);
+  });
+
+  it('leaves a draft at exactly the cap alone', () => {
+    const text = 'x'.repeat(MAX_DRAFT_CHARS);
+    writeDraft('room:3', text);
+    expect(readDraft('room:3')).toBe(text);
+  });
+
+  it('does not split a surrogate pair at the truncation boundary', () => {
+    // Slicing mid-pair leaves a lone high surrogate, which round-trips through
+    // JSON intact and then renders as a replacement character.
+    const text = 'a'.repeat(MAX_DRAFT_CHARS - 1) + '😀' + 'b';
+    writeDraft('room:3', text);
+    const kept = readDraft('room:3');
+    expect(kept).toBe('a'.repeat(MAX_DRAFT_CHARS - 1));
+    expect(kept.length).toBe(MAX_DRAFT_CHARS - 1);
+  });
+
+  it('clamps an oversized entry already in storage on read', () => {
+    // A draft written before the cap existed must not be able to re-poison the
+    // map by being read back at full size and re-stored.
+    localStorage.setItem(
+      DRAFT_STORAGE_KEY,
+      JSON.stringify({ 'room:3': { text: 'y'.repeat(MAX_DRAFT_CHARS * 3), at: Date.now() } }),
+    );
+    expect(readDraft('room:3').length).toBe(MAX_DRAFT_CHARS);
+    writeDraft('room:9', 'small');
+    expect(stored()['room:3'].text.length).toBe(MAX_DRAFT_CHARS);
+  });
+
+  it('bounds the whole map, evicting the oldest drafts to fit', () => {
+    const big = 'x'.repeat(MAX_DRAFT_CHARS);
+    const rooms = Math.ceil(MAX_DRAFTS_CHARS / MAX_DRAFT_CHARS) + 2;
+    for (let i = 0; i < rooms; i++) {
+      vi.setSystemTime(Date.now() + 1000);
+      writeDraft(`room:${i}`, big + i);
+    }
+    const total = Object.values(stored()).reduce((n, d) => n + d.text.length, 0);
+    expect(total).toBeLessThanOrEqual(MAX_DRAFTS_CHARS);
+    // The newest survives; the oldest are the ones that went.
+    expect(readDraft(`room:${rooms - 1}`).length).toBe(MAX_DRAFT_CHARS);
+    expect(readDraft('room:0')).toBe('');
+  });
+
+  it('always stores the draft just written, however large the rest', () => {
+    const big = 'x'.repeat(MAX_DRAFT_CHARS);
+    for (let i = 0; i < 10; i++) {
+      vi.setSystemTime(Date.now() + 1000);
+      writeDraft(`room:${i}`, big + i);
+    }
+    vi.setSystemTime(Date.now() + 1000);
+    writeDraft('room:new', 'a short one');
+    expect(readDraft('room:new')).toBe('a short one');
+  });
+
+  it('a draft that fits does not make the next room unwritable', () => {
+    // ISSUE-216 as reported: "no draft in any room is saved — including short
+    // ones in rooms you never pasted into." Reaching that needs the oversized
+    // draft to *fit* and then poison every later write, so the sizes here are
+    // picked against the stubbed ceiling rather than being merely huge: a
+    // draft that blows the quota on its own is refused, stores nothing, and
+    // leaves the next room's write to succeed — which is not the bug.
+    //
+    // jsdom has no localStorage on an opaque origin, so `vitest-setup.ts`
+    // installs a plain object. It is not a `Storage` instance, so the ceiling
+    // has to be stubbed on that object; spying on `Storage.prototype` patches
+    // something nothing calls, and the test then passes against any code.
+    const quota = 1_000_000;
+    const real = localStorage.setItem.bind(localStorage);
+    let refused = 0;
+    const spy = vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
+      if (value.length > quota) {
+        refused++;
+        const err = new Error('quota');
+        err.name = 'QuotaExceededError';
+        throw err;
+      }
+      real(key, value);
+    });
+    try {
+      writeDraft('room:big', 'x'.repeat(quota - 50));
+      expect(spy).toHaveBeenCalled();
+      vi.setSystemTime(Date.now() + 1000);
+      writeDraft('room:small', 'a short one');
+      expect(refused).toBe(0);
+      // Both survive: the oversized one keeps its head rather than being lost
+      // whole, and the room that never saw the paste is unaffected.
+      expect(readDraft('room:big').length).toBe(MAX_DRAFT_CHARS);
+      expect(readDraft('room:small')).toBe('a short one');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the draft just written when every entry shares one timestamp', () => {
+    // The tie the `keep` argument exists for. Ordering by age alone resolves a
+    // tie by insertion order, so without it the entry a caller just wrote is
+    // the one evicted — the single outcome no caller can work around. Every
+    // other eviction test advances the clock and so passes either way.
+    const big = 'x'.repeat(MAX_DRAFT_CHARS - 1);
+    for (let i = 0; i < 10; i++) writeDraft(`room:${i}`, big + i);
+    expect(readDraft('room:9')).toBe(big + '9');
   });
 });
