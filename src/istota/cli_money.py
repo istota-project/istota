@@ -741,10 +741,18 @@ def _merge_tax(db_path, data: dict):
     tax_data = data.get("tax", data) or {}
     incoming = config_store.tax_config_from_toml_dict(data)
 
+    # Captured before any overlay: these are the coordinates the schedule
+    # overrides now sitting on `existing` were actually read under.
+    loaded_year, loaded_status, loaded_state = (
+        existing.tax_year, existing.filing_status, existing.state,
+    )
+
     if "filing_status" in tax_data:
         existing.filing_status = incoming.filing_status
     if "tax_year" in tax_data:
         existing.tax_year = incoming.tax_year
+    if "state" in tax_data:
+        existing.state = incoming.state
 
     w2 = tax_data.get("w2") or {}
     if "income" in w2:
@@ -787,6 +795,22 @@ def _merge_tax(db_path, data: dict):
         "federal_brackets": "federal_brackets",
         "state_brackets": "state_brackets",
     }
+    # Coordinates the schedule overrides on `existing` were loaded under. If
+    # the incoming TOML moves any of them, those values belong to the *old*
+    # coordinates and must not be carried across — `config import` is the one
+    # path that opts into `write_schedules=True`, so carrying them is exactly
+    # the copy-forward this table's filing-status dimension exists to prevent.
+    coordinates_moved = (
+        existing.tax_year != loaded_year
+        or existing.filing_status != loaded_status
+        or existing.state != loaded_state
+    )
+    if coordinates_moved:
+        existing.federal_brackets = None
+        existing.federal_standard_deduction = None
+        existing.state_brackets = None
+        existing.state_standard_deduction = None
+
     for toml_key, attr in rate_field_map.items():
         if toml_key in rates:
             setattr(existing, attr, getattr(incoming, attr))
@@ -1237,7 +1261,15 @@ def _tax_set(args, istota_config) -> int:
     if args.state is not None:
         # "" is a real choice (no state tax), so `is not None` rather than a
         # truthiness check — otherwise the state could never be cleared.
-        cfg.state = args.state.upper()
+        code = args.state.strip().upper()
+        if code:
+            from istota.money.core.tax_data import load_tax_rates
+            if load_tax_rates().jurisdiction(code) is None:
+                # Validated here as well as in the web PUT: a typo'd code
+                # stores fine and then resolves to nothing forever, and the
+                # settings page is the surface that has to cope with it.
+                return _print_error(f"unknown state: {code}")
+        cfg.state = code
     if args.w2_income is not None:
         cfg.w2_income = args.w2_income
     if args.w2_federal_withholding is not None:

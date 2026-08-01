@@ -899,3 +899,49 @@ class TestParseTaxConfig:
         assert config.se_expense_accounts == ["Expenses:Consulting"]
         assert config.prior_year_federal_tax == 35_000
         assert config.prior_year_state_tax == 12_000
+
+
+class TestQbiPhaseoutBasis:
+    """Section 199A phases on taxable income, not AGI.
+
+    § 199A(e)(2) defines the threshold against taxable income computed without
+    regard to the QBI deduction — which is AGI less the standard deduction. The
+    code tested `federal_agi > threshold`, so the phase-out began a whole
+    standard deduction ($32,200 MFJ for 2026) of income too early. The cap two
+    lines below already used the right basis, so the two disagreed.
+    """
+
+    def _estimate(self, se, w2, year=2026, status="mfj"):
+        return estimate_quarterly_tax(
+            se_income_ytd=se, w2_income=w2, w2_federal_withholding=0,
+            w2_state_withholding=0, federal_estimated_paid=0,
+            state_estimated_paid=0, filing_status=status, tax_year=year,
+            enable_qbi=True, current_quarter=4, income_months=12,
+        )
+
+    def test_income_between_the_two_bases_is_not_phased_out(self):
+        # AGI above the threshold but taxable income below it: phasing on AGI
+        # cuts the deduction here, phasing on taxable income does not.
+        r = self._estimate(se=60_000, w2=360_000)
+        taxable_before_qbi = r.federal_agi - r.federal_standard_deduction
+        assert r.federal_agi > 403_500        # over on the wrong basis
+        assert taxable_before_qbi < 403_500   # under on the right one
+        assert round(r.qbi_deduction, 2) == round(60_000 * 0.20, 2)
+
+    def test_the_phase_out_still_reaches_zero_above_the_range(self):
+        r = self._estimate(se=60_000, w2=700_000)
+        assert r.qbi_deduction == 0
+
+    def test_partial_phase_out_is_measured_from_taxable_income(self):
+        r = self._estimate(se=60_000, w2=450_000)
+        taxable_before_qbi = r.federal_agi - r.federal_standard_deduction
+        assert 403_500 < taxable_before_qbi < 403_500 + 150_000
+        expected = 60_000 * 0.20 * (
+            1 - (taxable_before_qbi - 403_500) / 150_000
+        )
+        assert round(r.qbi_deduction, 2) == round(expected, 2)
+
+    def test_well_below_the_threshold_is_untouched(self):
+        r = self._estimate(se=60_000, w2=0)
+        # Capped at 20% of taxable income, which binds at this income.
+        assert r.qbi_deduction > 0

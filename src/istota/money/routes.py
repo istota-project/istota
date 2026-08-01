@@ -1845,6 +1845,18 @@ async def api_config_tax_put(
             {"status": "error",
              "error": f"unknown filing status: {body['filing_status']}"}, 400,
         )
+    if "tax_year" in body:
+        # Range-checked because the staleness test builds `date(tax_year, 1, 1)`,
+        # which raises outside 1-9999 — and that raise lands in the estimate and
+        # the settings loader, not here where it could be reported.
+        year = body["tax_year"]
+        if (isinstance(year, bool) or not isinstance(year, int)
+                or not 1900 <= year <= 2200):
+            return JSONResponse(
+                {"status": "error",
+                 "error": f"tax_year must be a year between 1900 and 2200: {year!r}"},
+                400,
+            )
     for k, v in body.items():
         setattr(cfg, k, v)
     config_store.save_tax(user_ctx.db_path, cfg, replace_collections=False)
@@ -1852,7 +1864,9 @@ async def api_config_tax_put(
 
 
 @router.get("/config/tax/jurisdictions")
-async def api_config_tax_jurisdictions():
+async def api_config_tax_jurisdictions(
+    user_ctx: UserContext = Depends(get_user_config),
+):
     """The selectable states, whether each taxes income, and what we ship.
 
     ``has_bundled_data`` drives the "you will need to enter brackets" hint on
@@ -1927,7 +1941,7 @@ async def api_config_tax_resolved(
             "brackets",
             [list(b) for b in fed_rates.brackets(status)] if fed_rates else [],
         ),
-        "provenance": _provenance_dict(fed_rates, tax_year),
+        "provenance": _provenance_dict(fed_rates),
     }
 
     # Payroll scalars are year-keyed and status-agnostic, so they come from the
@@ -1970,9 +1984,14 @@ async def api_config_tax_resolved(
     }
 
 
-def _provenance_dict(rates, requested_year: int) -> dict:
-    from istota.money.core.tax import _provenance
-    return _provenance(rates, overridden=False)
+def _provenance_dict(rates) -> dict:
+    """The citation block for a resolved rate set.
+
+    `overridden` is False here because this endpoint reports it per *field*
+    alongside each value, not once for the whole block.
+    """
+    from istota.money.core.tax import build_provenance
+    return build_provenance(rates, overridden=False)
 
 
 def _resolved_state_block(db_path, rates, code: str, tax_year: int, status: str) -> dict:
@@ -1985,6 +2004,23 @@ def _resolved_state_block(db_path, rates, code: str, tax_year: int, status: str)
     from istota.money import config_store
 
     jurisdiction = rates.jurisdiction(code)
+    if jurisdiction is None:
+        # Resolved before the schedule lookup, which validates the jurisdiction
+        # and raises. Without this the endpoint 500s on a state the config
+        # already holds — and a stored typo has no UI route back, since this is
+        # the settings page's own loader.
+        return {
+            "code": code,
+            "name": "",
+            "taxes_income": False,
+            "available": False,
+            "reason": "unknown_state",
+            "starts_from": "federal_agi",
+            "installment_schedule": None,
+            "standard_deduction": _resolved_field(None, overridden=False),
+            "brackets": _resolved_field([], overridden=False),
+            "provenance": _provenance_dict(None),
+        }
     bundled = rates.state_year(code, tax_year)
     override = config_store.get_tax_schedule(db_path, tax_year, code, status) or {}
 
@@ -1998,9 +2034,7 @@ def _resolved_state_block(db_path, rates, code: str, tax_year: int, status: str)
     )
 
     reason = ""
-    if jurisdiction is None:
-        reason = "unknown_state"
-    elif not jurisdiction.taxes_income:
+    if not jurisdiction.taxes_income:
         reason = "no_income_tax"
     elif not brackets:
         reason = "no_brackets"
@@ -2008,16 +2042,24 @@ def _resolved_state_block(db_path, rates, code: str, tax_year: int, status: str)
     meta = rates.state_meta(code)
     return {
         "code": code,
-        "name": jurisdiction.name if jurisdiction else "",
-        "taxes_income": bool(jurisdiction and jurisdiction.taxes_income),
+        "name": jurisdiction.name,
+        "taxes_income": jurisdiction.taxes_income,
         "available": reason == "",
         "reason": reason,
         "starts_from": meta.starts_from if meta else "federal_agi",
         "installment_schedule": list(meta.installment_schedule) if meta else None,
         "standard_deduction": _resolved_field(std_ded, overridden=ov_std is not None),
         "brackets": _resolved_field(brackets, overridden=ov_brackets is not None),
-        "provenance": _provenance_dict(bundled, tax_year),
+        "provenance": _provenance_dict(bundled),
     }
+
+
+# Writable on `tax_year_rates` but read by nothing since the schedules table
+# took over — see `config_store.migrate_tax_schedules`.
+_LEGACY_YEAR_RATE_KEYS = frozenset({
+    "federal_brackets", "ca_brackets",
+    "federal_standard_deduction", "ca_standard_deduction",
+})
 
 
 def _validate_brackets(raw) -> str | None:
@@ -2035,7 +2077,12 @@ def _validate_brackets(raw) -> str | None:
     for pair in raw:
         if (not isinstance(pair, list) or len(pair) != 2
                 or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                       or not math.isfinite(v)
                        for v in pair)):
+            # `isfinite` is not fussiness: Starlette renders with
+            # allow_nan=False, so an Infinity that got stored raises on the way
+            # back out and 500s both the estimate and the settings page's own
+            # loader — leaving no UI route back to the value that broke it.
             return f"malformed bracket: {pair!r} (expected [threshold, rate])"
         threshold, rate = pair
         if threshold < 0:
@@ -2081,9 +2128,10 @@ async def api_config_tax_schedules_put(
             return JSONResponse({"status": "error", "error": problem}, 400)
     std_ded = body.get("standard_deduction", config_store.UNSET)
     if std_ded is not None and not isinstance(std_ded, config_store._Unset):
-        if isinstance(std_ded, bool) or not isinstance(std_ded, (int, float)):
+        if (isinstance(std_ded, bool) or not isinstance(std_ded, (int, float))
+                or not math.isfinite(std_ded)):
             return JSONResponse(
-                {"status": "error", "error": "standard_deduction must be a number"},
+                {"status": "error", "error": "standard_deduction must be a finite number"},
                 400,
             )
         if std_ded < 0:
@@ -2133,6 +2181,34 @@ async def api_config_tax_years_put(
 ):
     from istota.money import config_store
     body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"status": "error", "error": "body must be an object"}, 400,
+        )
+    # The legacy bracket/deduction columns are still writable on the table but
+    # nothing reads them any more, so accepting one would return 200 and change
+    # nothing at all — a worse answer than a 400 that names where they moved.
+    dead = _LEGACY_YEAR_RATE_KEYS & set(body)
+    if dead:
+        return JSONResponse(
+            {"status": "error",
+             "error": (f"{sorted(dead)} moved to /config/tax/schedules/"
+                       "{year}/{jurisdiction}/{filing_status}, which carries the "
+                       "filing-status dimension these lack")}, 400,
+        )
+    for key, value in body.items():
+        # `null` clears the override; anything else must be a usable number.
+        # Without this a string lands in a REAL column, comes back a string, and
+        # `compute_se_tax` multiplies it — 500ing every later estimate.
+        if value is None:
+            continue
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            return JSONResponse(
+                {"status": "error",
+                 "error": f"{key} must be a non-negative finite number or null"},
+                400,
+            )
     try:
         state = config_store.upsert_tax_year_rates(user_ctx.db_path, year, **body)
     except ValueError as exc:

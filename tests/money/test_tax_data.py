@@ -409,3 +409,57 @@ class TestFlatStates:
         for code in rates.omitted_states():
             assert code not in rates.bundled_state_codes()
             assert rates.state_year(code, 2026) is None
+
+
+class TestDataIntegrityGuards:
+    """Shapes a hand-edit of the rate file could produce that compute silently.
+
+    Every one of these is a wrong *number* rather than a crash, which is the
+    failure mode this module exists to make impossible.
+    """
+
+    def test_every_federal_year_carries_a_payroll_block(self):
+        # A year block without one yields an all-zeros PayrollRates, and a zero
+        # wage base means `min(taxable_se, 0) == 0` — the entire Social Security
+        # half of SE tax vanishes, reported as a normal result.
+        rates = tax_data.load_tax_rates()
+        for year in rates.federal_years():
+            payroll = rates.federal_year(year).payroll
+            assert payroll is not None, year
+            assert payroll.ss_wage_base > 0, year
+            assert payroll.ss_rate > 0, year
+            assert payroll.medicare_rate > 0, year
+            assert payroll.se_taxable_fraction > 0, year
+
+    def test_every_installment_schedule_is_four_ascending_ending_at_one(self):
+        rates = tax_data.load_tax_rates()
+        for code in rates.bundled_state_codes():
+            schedule = rates.state_meta(code).installment_schedule
+            assert len(schedule) == 4, code
+            assert list(schedule) == sorted(schedule), code
+            assert schedule[-1] == 1.0, code
+            assert all(0 <= v <= 1 for v in schedule), code
+
+    def test_the_default_schedule_satisfies_the_same_rules(self):
+        s = tax_data.DEFAULT_INSTALLMENT_SCHEDULE
+        assert len(s) == 4 and list(s) == sorted(s) and s[-1] == 1.0
+
+    def test_no_bundled_year_carries_a_non_finite_number(self):
+        import math
+
+        rates = tax_data.load_tax_rates()
+
+        def _check(year_rates, label):
+            for status in ("mfj", "single"):
+                for threshold, rate in year_rates.brackets(status):
+                    assert math.isfinite(threshold), f"{label} {status}"
+                    assert math.isfinite(rate), f"{label} {status}"
+                    assert 0 <= rate <= 1, f"{label} {status}"
+                assert math.isfinite(year_rates.standard_deduction(status))
+                assert year_rates.standard_deduction(status) >= 0
+
+        for year in rates.federal_years():
+            _check(rates.federal_year(year), f"federal {year}")
+        for code in rates.bundled_state_codes():
+            for year in rates.state_years(code):
+                _check(rates.state_year(code, year), f"{code} {year}")

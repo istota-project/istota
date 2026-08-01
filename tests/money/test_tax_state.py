@@ -572,3 +572,170 @@ class TestSaveTaxDoesNotDestroyOverrides:
         reloaded = config_store.load_tax(db)
         assert reloaded.state_standard_deduction == 10_800
         assert reloaded.state_brackets == [[0, 0.011]]
+
+
+class TestPayrollFallbacks:
+    """A rate file missing a payroll block must not silently halve SE tax.
+
+    Every field but the wage base already fell back to a statutory constant. The
+    wage base had no third tier, so a missing block made it 0 — and
+    `min(taxable_se, 0)` is 0, so the whole Social Security portion vanished. On
+    $200k of SE income that is a ~$22,900 understatement reported as a normal
+    result with correct-looking provenance.
+    """
+
+    def test_a_year_with_no_payroll_block_falls_back_rather_than_zeroing(self, monkeypatch):
+        from istota.money.core import tax, tax_data
+
+        real = tax_data.load_tax_rates()
+        stripped = tax_data.TaxRates(
+            {
+                **real._raw,
+                "federal": {
+                    **real._raw["federal"],
+                    "2031": {
+                        **real._raw["federal"]["2026"],
+                        "payroll": {},  # the hand-edit that loses the block
+                    },
+                },
+            }
+        )
+        monkeypatch.setattr(tax_data, "load_tax_rates", lambda: stripped)
+        monkeypatch.setattr(tax, "load_tax_rates", lambda: stripped)
+
+        se_2026, _ = tax.compute_se_tax(200_000, year=2026)
+        se_2031, _ = tax.compute_se_tax(200_000, year=2031)
+        # Falls back to the newest bundled wage base, so the figures match.
+        assert round(se_2031, 2) == round(se_2026, 2)
+        assert se_2031 > 20_000
+
+    def test_the_configured_override_still_wins(self):
+        from istota.money.core.tax import compute_se_tax
+
+        capped, _ = compute_se_tax(
+            200_000, config=TaxConfig(ss_wage_base=50_000), year=2026,
+        )
+        uncapped, _ = compute_se_tax(200_000, year=2026)
+        assert capped < uncapped
+
+
+class TestSafeHarborRespectsStateAvailability:
+    """A state that levies no income tax must not produce a payment.
+
+    The annualized branch is driven by the computed state tax, so it yields 0.
+    The safe-harbor branch computed from `prior_year_state_tax` without asking
+    whether the state was computable — so a user who moved from California to
+    Texas and left a stale prior-year figure behind got a state payment folded
+    into the total, with no state row on the page to explain it.
+    """
+
+    def _safe_harbor(self, state):
+        # Income chosen so AGI clears SAFE_HARBOR_AGI_THRESHOLD and the 110%
+        # multiplier is actually exercised.
+        return estimate_quarterly_tax(
+            se_income_ytd=250_000, w2_income=0, w2_federal_withholding=0,
+            w2_state_withholding=0, federal_estimated_paid=0,
+            state_estimated_paid=0, filing_status="mfj", tax_year=2026,
+            method="safe_harbor", prior_year_federal_tax=40_000,
+            prior_year_state_tax=9_000, current_quarter=1, income_months=12,
+            state=state,
+        )
+
+    def test_no_income_tax_state_owes_nothing(self):
+        r = self._safe_harbor("TX")
+        assert r.state_available is False
+        assert r.state_quarterly_amount == 0
+        assert r.state_net_due == 0
+
+    def test_state_without_brackets_owes_nothing(self):
+        r = self._safe_harbor("NY")
+        assert r.state_available is False
+        assert r.state_quarterly_amount == 0
+        assert r.state_net_due == 0
+
+    def test_unset_state_owes_nothing(self):
+        assert self._safe_harbor("").state_quarterly_amount == 0
+
+    def test_a_computable_state_is_unaffected(self):
+        r = self._safe_harbor("CA")
+        assert r.state_available is True
+        # 9000 * 1.10 safe-harbor multiplier, 30% CA Q1 installment.
+        assert r.state_quarterly_amount == round(9_000 * 1.10 * 0.30, 2)
+
+    def test_federal_is_unaffected_by_the_state_being_unavailable(self):
+        assert self._safe_harbor("TX").federal_quarterly_amount == (
+            self._safe_harbor("CA").federal_quarterly_amount
+        )
+
+
+class TestImportDoesNotCopyOverridesForward:
+    """`config import` is the one path that opts back into writing schedules.
+
+    It loads the existing config — schedules read under the *old* coordinates —
+    overlays the TOML keys present, and saves with `write_schedules=True`. So a
+    TOML naming only a new `tax_year` re-filed the previous year's overrides
+    under it: the copy-forward defect, on the one path allowed to write.
+    """
+
+    def test_changing_the_year_does_not_carry_the_old_years_overrides(self, db):
+        from istota.cli_money import _merge_tax
+
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2026))
+        config_store.upsert_tax_schedule(
+            db, 2026, "federal", "mfj",
+            brackets=[[0, 0.09]], standard_deduction=31_000,
+        )
+        merged = _merge_tax(db, {"tax": {"tax_year": 2027}})
+        assert merged.tax_year == 2027
+        assert merged.federal_brackets is None
+        assert merged.federal_standard_deduction is None
+
+    def test_changing_the_state_does_not_carry_the_old_states_overrides(self, db):
+        from istota.cli_money import _merge_tax
+
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2026,
+                                            state="CA"))
+        config_store.upsert_tax_schedule(
+            db, 2026, "CA", "mfj", standard_deduction=11_000,
+        )
+        merged = _merge_tax(db, {"tax": {"state": "NY"}})
+        assert merged.state == "NY"
+        assert merged.state_standard_deduction is None
+
+    def test_changing_the_filing_status_does_not_carry_them_either(self, db):
+        from istota.cli_money import _merge_tax
+
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2026))
+        config_store.upsert_tax_schedule(
+            db, 2026, "federal", "mfj", standard_deduction=31_000,
+        )
+        merged = _merge_tax(db, {"tax": {"filing_status": "single"}})
+        assert merged.federal_standard_deduction is None
+
+    def test_rates_supplied_by_the_toml_are_still_applied(self, db):
+        from istota.cli_money import _merge_tax
+
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2026))
+        merged = _merge_tax(
+            db,
+            {"tax": {"tax_year": 2027,
+                     "rates": {"federal_standard_deduction": 33_000}}},
+        )
+        assert merged.federal_standard_deduction == 33_000
+
+    def test_unchanged_coordinates_keep_the_existing_overrides(self, db):
+        from istota.cli_money import _merge_tax
+
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2026))
+        config_store.upsert_tax_schedule(
+            db, 2026, "federal", "mfj", standard_deduction=31_000,
+        )
+        merged = _merge_tax(db, {"tax": {"w2": {"income": 5}}})
+        assert merged.federal_standard_deduction == 31_000
+
+    def test_state_key_reaches_the_merge(self, db):
+        from istota.cli_money import _merge_tax
+
+        config_store.save_tax(db, TaxConfig(filing_status="mfj", tax_year=2026,
+                                            state="CA"))
+        assert _merge_tax(db, {"tax": {"state": "NY"}}).state == "NY"

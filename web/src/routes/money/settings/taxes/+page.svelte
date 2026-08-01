@@ -41,6 +41,14 @@
   >({});
   let payrollPatch = $state<Record<string, number | null>>({});
 
+  /** How many fields a schedule row has — reverting all of them deletes it. */
+  const SCHEDULE_FIELDS = 2;
+
+  // An unsaveable bracket table blocks the Save rather than being sent and
+  // 400ing — or worse, being silently trimmed of the row that is half typed.
+  let bracketProblems = $state<Record<string, string>>({});
+  let hasBracketProblem = $derived(Object.values(bracketProblems).some(Boolean));
+
   let dirty = $derived(
     Object.keys(settingsPatch).length > 0 ||
       Object.keys(schedulePatches).length > 0 ||
@@ -141,18 +149,23 @@
         await updateTaxSettings(settingsPatch);
       }
       const year = taxYear;
-      const status = filingStatus;
       for (const [key, patch] of Object.entries(schedulePatches)) {
-        const jurisdiction = key.split(':')[1];
-        // A patch of nothing but nulls is a revert, which is a delete rather
-        // than a write of null columns — resolution reads "row present" as
-        // "overridden", so a row of nulls would never fall back.
-        const isFullRevert =
-          Object.keys(patch).length > 0 && Object.values(patch).every((v) => v === null);
+        // All three coordinates come off the key: a pending patch belongs to
+        // the year and status it was typed under, and reading them off the live
+        // values would file it under whatever was picked afterwards.
+        const [patchYear, jurisdiction, patchStatus] = key.split(':');
+
+        // Reverting *both* fields is a row delete — resolution reads "row
+        // present" as "overridden", so a row of nulls would never fall back to
+        // the shipped values. Reverting one is an ordinary write of an explicit
+        // null, which the server merges per field; issuing a delete for that
+        // case would silently drop the other field's override too.
+        const reverted = Object.values(patch).filter((v) => v === null).length;
+        const isFullRevert = reverted > 0 && reverted === SCHEDULE_FIELDS;
         if (isFullRevert) {
-          await deleteTaxSchedule(year, jurisdiction, status);
+          await deleteTaxSchedule(Number(patchYear), jurisdiction, patchStatus);
         } else {
-          await putTaxSchedule(year, jurisdiction, status, patch);
+          await putTaxSchedule(Number(patchYear), jurisdiction, patchStatus, patch);
         }
       }
       if (Object.keys(payrollPatch).length) {
@@ -171,7 +184,7 @@
     }
   }
 
-  useSettingsSave(() => ({ dirty, saving, save }));
+  useSettingsSave(() => ({ dirty: dirty && !hasBracketProblem, saving, save }));
 
   onMount(load);
 
@@ -245,6 +258,7 @@
       standardDeduction={resolved.federal.standard_deduction}
       brackets={resolved.federal.brackets}
       provenance={resolved.federal.provenance}
+      onproblem={(p) => (bracketProblems = { ...bracketProblems, federal: p })}
       onEdit={(patch) => editSchedule('federal', patch)}
     />
 
@@ -265,6 +279,8 @@
           : resolved.state.reason === 'no_income_tax'
             ? `${resolved.state.name} levies no individual income tax, so nothing here affects the estimate.`
             : 'No brackets for this state and filing status. The estimate shows federal only until you enter some.'}
+        available={resolved.state.available}
+        onproblem={(p) => (bracketProblems = { ...bracketProblems, state: p })}
         onEdit={(patch) => editSchedule(resolved!.state!.code, patch)}
       />
     {/if}

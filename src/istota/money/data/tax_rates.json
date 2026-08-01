@@ -610,10 +610,10 @@
       "starts_from": "federal_agi",
       "years": {
         "2026": {
-          "source": "Georgia HB 463 (2026), per the Office of the Governor and the GA DOR Employer's Withholding Tax Guide 2026",
-          "source_url": "https://gov.georgia.gov/press-releases/2026-05-11/gov-kemp-signs-legislation-lowering-taxes-and-supporting-economic-growth",
+          "source": "Georgia HB 463 (2026), enrolled text amending O.C.G.A. 48-7-20 and 48-7-27; corroborated by the Office of the Governor and the GA DOR Employer's Withholding Tax Guide 2026",
+          "source_url": "https://www.legis.ga.gov/api/legislation/document/20252026/249080",
           "verified_on": "2026-08-01",
-          "notes": "HB 463 cut the rate from 5.19% to 4.99% retroactive to 1 January 2026, after most secondary comparison tables were compiled \u2014 a table published early in 2026 will say 5.19%. Withholding split mid-year but the annual return rate is 4.99% for all of 2026. Further cuts to a 3.99% floor are revenue-trigger contingent.",
+          "notes": "HB 463 cut the rate from 5.19% to 4.99% retroactive to 1 January 2026, after most secondary comparison tables were compiled \u2014 a table published early in 2026 will say 5.19%. Withholding split mid-year but the annual return rate is 4.99% for all of 2026. Further cuts to a 3.99% floor are revenue-trigger contingent. DO NOT 'correct' the standard deduction: 30000/15000 coincidentally equals the FEDERAL 2025 figure, which looks exactly like the copy-forward defect this file exists to prevent, but it is Georgia's own number. The enrolled bill strikes '$24,000.00' and inserts '$30,000.00' for a joint return, and strikes '$12,000.00' inserts '$15,000.00' for a single or separate return. The 24000/12000 figures a reader may remember are the pre-HB-463 amounts.",
           "filing_status": {
             "mfj": {
               "standard_deduction": 30000,

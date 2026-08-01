@@ -17,6 +17,10 @@
     provenance: RateProvenance;
     /** Shown above the fields when the jurisdiction has nothing to compute. */
     unavailableNotice?: string;
+    /** False for a no-tax or no-bracket state — see RateProvenanceLine. */
+    available?: boolean;
+    /** Reports an unsaveable bracket table up to the page. */
+    onproblem?: (problem: string) => void;
     onEdit: (patch: { standard_deduction?: number | null; brackets?: number[][] | null }) => void;
   }
 
@@ -28,6 +32,8 @@
     brackets,
     provenance,
     unavailableNotice = '',
+    available = true,
+    onproblem,
     onEdit,
   }: Props = $props();
 
@@ -47,7 +53,7 @@
     <p class="unavailable">{unavailableNotice}</p>
   {/if}
 
-  <RateProvenanceLine {provenance} {taxYear} />
+  <RateProvenanceLine {provenance} {taxYear} {available} />
 
   <SettingsField
     label="Standard deduction"
@@ -74,7 +80,11 @@
   </SettingsField>
 
   <SettingsField label="Brackets" labelled={false} wide>
-    <BracketEditor value={brackets.value ?? []} onchange={(next) => onEdit({ brackets: next })} />
+    <BracketEditor
+      value={brackets.value ?? []}
+      onchange={(next) => onEdit({ brackets: next })}
+      {onproblem}
+    />
     {#if brackets.overridden}
       <div class="revert-row">
         <p class="overridden">Your brackets, not the shipped ones.</p>

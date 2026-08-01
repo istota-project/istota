@@ -158,6 +158,22 @@ class TaxRates:
 
     # -- federal ------------------------------------------------------------
 
+    def latest_ss_wage_base(self) -> float:
+        """The newest bundled Social Security wage base, or 0 if none.
+
+        The last-resort fallback for a year whose block is missing its payroll
+        data. A zero wage base is not a benign default: `min(taxable_se, 0)` is
+        zero, so the entire Social Security half of SE tax silently vanishes and
+        the result looks normal. Standing in the newest real figure is wrong by
+        one year's indexation rather than by the whole component.
+        """
+        for year in sorted(self._raw.get("federal", {}), reverse=True):
+            block = self._raw["federal"][year]
+            base = (block.get("payroll") or {}).get("ss_wage_base")
+            if base:
+                return float(base)
+        return 0.0
+
     def federal_years(self) -> list[int]:
         return sorted(int(y) for y in self._raw.get("federal", {}))
 

@@ -127,14 +127,21 @@ class TestTaxScalars:
 
 
 class TestTaxYears:
+    """The year table carries the payroll scalars only.
+
+    Brackets and standard deductions moved to `tax_schedules`, which has the
+    filing-status dimension they actually need.
+    """
+
     def test_upsert(self, ctx, client):
         resp = client.put(
             "/istota/api/money/config/tax/years/2026",
-            json={"federal_standard_deduction": 30000, "ss_wage_base": 176100},
+            json={"ss_wage_base": 184500, "ss_rate": 0.124},
         )
         assert resp.json()["state"] == "created"
         years = client.get("/istota/api/money/config/tax/years").json()["years"]
         assert years[0]["tax_year"] == 2026
+        assert years[0]["ss_wage_base"] == 184500
 
     def test_unknown_field_rejected(self, client):
         resp = client.put(
@@ -142,6 +149,14 @@ class TestTaxYears:
             json={"unknown": 1},
         )
         assert resp.status_code == 400
+
+    def test_moved_bracket_field_rejected_with_a_pointer(self, client):
+        resp = client.put(
+            "/istota/api/money/config/tax/years/2026",
+            json={"federal_standard_deduction": 30000},
+        )
+        assert resp.status_code == 400
+        assert "schedules" in resp.json()["error"]
 
 
 class TestTaxPatterns:

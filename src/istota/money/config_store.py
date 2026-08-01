@@ -1914,7 +1914,13 @@ def list_tax_year_rates(db_path: Path | str) -> list[dict]:
 
 
 def upsert_tax_year_rates(db_path: Path | str, year: int, **fields: Any) -> str:
-    """Upsert a single ``tax_year_rates`` row. Returns 'created'/'updated'/'noop'."""
+    """Upsert a single ``tax_year_rates`` row. Returns 'created'/'updated'/'noop'.
+
+    An omitted field is left alone; an explicit ``None`` clears it, matching
+    :func:`upsert_tax_schedule`. The four legacy bracket/deduction fields are
+    still accepted and still written, but nothing reads them any more — see
+    :func:`migrate_tax_schedules`.
+    """
     init_db(db_path)
     allowed = {
         "ss_wage_base", "ss_rate", "medicare_rate", "se_taxable_fraction",
@@ -1940,7 +1946,11 @@ def upsert_tax_year_rates(db_path: Path | str, year: int, **fields: Any) -> str:
                     merged[k] = existing[k]
         before = dict(merged)
         for k, v in fields.items():
-            if v is None:
+            # An explicit None clears the override, the way it does for a
+            # schedule. Skipping it made a payroll override unclearable — the
+            # settings page has no Revert for these fields, so an entered wage
+            # base could never be returned to the shipped one.
+            if isinstance(v, _Unset):
                 continue
             merged[k] = v
         fed_brackets_json = (

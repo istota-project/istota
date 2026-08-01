@@ -296,6 +296,15 @@ class QuarterlyTaxEstimate:
     # page must say which rather than render zeros.
     state: str = ""
     state_name: str = ""
+    # Several flat states (Illinois, Indiana, Michigan) carry an exemption
+    # instead of a standard deduction. Without it on the response the taxes
+    # page shows a gap between AGI and taxable income with nothing explaining
+    # it — for three of the ten bundled flat states.
+    state_personal_exemption: float = 0.0
+    # Which federal figure the state's tax starts from. On the response because
+    # the page's explainers are wrong for a state that starts from federal
+    # *taxable* income — where the QBI deduction is already inside the base.
+    state_starts_from: str = ""
     state_available: bool = False
     state_unavailable_reason: str = ""
     # Provenance for the rates actually used, as plain dicts so the whole

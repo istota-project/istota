@@ -10,15 +10,24 @@
     provenance: RateProvenance;
     /** The year the user asked for, which is not always the year in use. */
     taxYear: number;
+    /**
+     * False when there is nothing to compute — a no-tax state, or one with no
+     * brackets. Without it the no-source branch tells the user these are "your
+     * own values", which on a page whose whole subject is honest provenance is
+     * the one line that states something untrue.
+     */
+    available?: boolean;
   }
 
-  let { provenance, taxYear }: Props = $props();
+  let { provenance, taxYear, available = true }: Props = $props();
 
   let hasSource = $derived(!!provenance.source);
 </script>
 
 <div class="provenance">
-  {#if provenance.is_fallback}
+  {#if !available}
+    <!-- Nothing to be stale or fall back about. -->
+  {:else if provenance.is_fallback}
     <!-- The signal that would have caught the original bug: figures for one
          year silently standing in for another. -->
     <p class="warn">
@@ -45,8 +54,12 @@
         <span class="checked">· checked {provenance.verified_on}</span>
       {/if}
     </p>
-  {:else}
+  {:else if !available}
+    <p class="source">No rates apply here.</p>
+  {:else if provenance.overridden}
     <p class="source">No bundled figures — these are your own values.</p>
+  {:else}
+    <p class="source">No bundled figures for this jurisdiction and year.</p>
   {/if}
 </div>
 

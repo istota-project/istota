@@ -110,8 +110,13 @@
     return (n * 100).toFixed(1) + '%';
   }
 
+  // Gated on availability as well as on the backend zeroing it: a total that
+  // silently exceeds the sum of its visible parts is the worst thing this page
+  // could show.
   let totalQuarterly = $derived(
-    data ? data.federal_quarterly_amount + data.state_quarterly_amount : 0,
+    data
+      ? data.federal_quarterly_amount + (data.state_available ? data.state_quarterly_amount : 0)
+      : 0,
   );
 
   let seTaxableBase = $derived(
@@ -153,6 +158,19 @@
   });
 
   let stateColumnLabel = $derived(data && data.state ? `State (${data.state})` : 'State');
+
+  // Colorado and Iowa apply their rate to federal *taxable* income, so both
+  // "AGI" as a row label and "QBI does not apply" are false for them — the QBI
+  // deduction is already inside their base. The settings card branches on this;
+  // the breakdown did not.
+  let stateStartsFromTaxable = $derived(data?.state_starts_from === 'federal_taxable_income');
+  let stateBasisLabel = $derived(
+    data?.state_starts_from === 'federal_taxable_income'
+      ? 'federal taxable income'
+      : data?.state_starts_from === 'gross_compensation'
+        ? 'gross compensation'
+        : '',
+  );
 
   // The schedule in force, described rather than assumed. California's
   // 30/40/0/30 used to be stated here as though it were everyone's.
@@ -390,7 +408,11 @@
 
           <div class="breakdown-group-label">Tax calculation</div>
           <div class="breakdown-row">
-            <span class="breakdown-label">AGI</span>
+            <span class="breakdown-label"
+              >AGI{#if showState && stateBasisLabel}<span class="basis-note">
+                  · state basis: {stateBasisLabel}</span
+                >{/if}</span
+            >
             <span class="breakdown-val">{fmtDollar(data.federal_agi)}</span>
             {#if showState}<span class="breakdown-val">{fmtDollar(data.state_agi)}</span>{/if}
           </div>
@@ -401,11 +423,25 @@
                 >{fmtDollar(data.state_standard_deduction)}</span
               >{/if}
           </div>
+          {#if showState && data.state_personal_exemption > 0}
+            <!-- Illinois, Indiana and Michigan carry an exemption instead of a
+                 standard deduction. Without this row the gap between AGI and
+                 taxable income has nothing explaining it. -->
+            <div class="breakdown-row">
+              <span class="breakdown-label">Personal exemption</span>
+              <span class="breakdown-val dim">n/a</span>
+              <span class="breakdown-val">{fmtDollar(data.state_personal_exemption)}</span>
+            </div>
+          {/if}
           {#if data.qbi_deduction > 0}
             <div class="breakdown-row">
               <span class="breakdown-label">QBI deduction</span>
               <span class="breakdown-val">{fmtDollar(data.qbi_deduction)}</span>
-              {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
+              {#if showState}
+                <!-- Already inside the base for a federal-taxable-income state,
+                     rather than excluded from it. -->
+                <span class="breakdown-val dim">{stateStartsFromTaxable ? 'included' : 'n/a'}</span>
+              {/if}
             </div>
           {/if}
           <div class="breakdown-row">
@@ -443,9 +479,22 @@
               {data.filing_status.toUpperCase()} brackets. Federal total liability includes both income
               tax and SE tax.
               {#if showState}
-                {data.state_name} uses its own brackets and a standard deduction of {fmtDollar(
-                  data.state_standard_deduction,
-                )}; the QBI deduction does not reduce its taxable income.
+                {#if stateStartsFromTaxable}
+                  {data.state_name} applies its rate to federal taxable income, so the federal standard
+                  deduction and the QBI deduction are both already inside its base and it has no deduction
+                  of its own.
+                {:else if data.state_starts_from === 'gross_compensation'}
+                  {data.state_name} taxes gross wage and self-employment income under its own rules: no
+                  standard deduction, no personal exemption, and no above-the-line deductions.
+                {:else if data.state_personal_exemption > 0}
+                  {data.state_name} uses its own rate and a personal exemption of {fmtDollar(
+                    data.state_personal_exemption,
+                  )} rather than a standard deduction; the QBI deduction does not reduce its taxable income.
+                {:else}
+                  {data.state_name} uses its own brackets and a standard deduction of {fmtDollar(
+                    data.state_standard_deduction,
+                  )}; the QBI deduction does not reduce its taxable income.
+                {/if}
               {/if}
             </p>
           </details>
@@ -508,7 +557,11 @@
           {#if data.state_rates && data.state}
             <div class="prov-block">
               <span class="prov-label">{data.state_name || data.state}</span>
-              <RateProvenanceLine provenance={data.state_rates} taxYear={data.tax_year} />
+              <RateProvenanceLine
+                provenance={data.state_rates}
+                taxYear={data.tax_year}
+                available={data.state_available}
+              />
             </div>
           {/if}
           <p class="settings-link">
@@ -796,6 +849,11 @@
 
   .settings-link {
     margin: 0;
+    font-size: var(--text-xs);
+  }
+
+  .basis-note {
+    color: var(--text-dim);
     font-size: var(--text-xs);
   }
 

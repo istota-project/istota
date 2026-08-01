@@ -14,11 +14,14 @@
   interface Props {
     /** Stored form: [threshold, rate-as-fraction] pairs. */
     value: number[][];
-    onchange: (next: number[][]) => void;
+    /** `null` means "revert to the shipped rates" — see `emit`. */
+    onchange: (next: number[][] | null) => void;
+    /** Reports whether the table is currently unsaveable, so the page can gate Save. */
+    onproblem?: (problem: string) => void;
     disabled?: boolean;
   }
 
-  let { value, onchange, disabled = false }: Props = $props();
+  let { value, onchange, onproblem, disabled = false }: Props = $props();
 
   // Rows are the edit buffer, not a projection of `value`: mid-edit a field can
   // legitimately be empty or a lone "-", which has no number to project from
@@ -53,7 +56,10 @@
       next.push([threshold, Number((percent / 100).toFixed(8))]);
     }
     lastSerialized = JSON.stringify(next);
-    onchange(next);
+    // An emptied editor is the natural gesture for "go back to the shipped
+    // rates", and the server refuses an empty array — so it is reported as a
+    // revert (null) rather than saved as a validation error.
+    onchange(next.length ? next : null);
   }
 
   function addRow() {
@@ -70,9 +76,15 @@
     emit();
   }
 
-  // Advisory only — the server is the authority and refuses the save. Showing
-  // it here means the user finds out at the edit rather than at the Save.
+  // Reported up so the page can refuse the Save. Not merely advisory: `emit`
+  // drops a row it cannot parse, so a half-typed bracket would otherwise be
+  // saved as a table that is silently missing that band — income in it falls to
+  // the rate below, understating the tax with nothing to show for it.
   let problem = $derived.by(() => {
+    const halfTyped = rows.some(
+      (r) => (r.threshold.trim() === '') !== (r.ratePercent.trim() === ''),
+    );
+    if (halfTyped) return 'Every bracket needs both a threshold and a rate.';
     const parsed = rows.filter((r) => r.threshold.trim() !== '').map((r) => Number(r.threshold));
     if (parsed.some((n) => !Number.isFinite(n))) return 'Thresholds must be numbers.';
     if (parsed.length && parsed[0] !== 0) return 'The first threshold must be 0.';
@@ -85,6 +97,8 @@
     }
     return '';
   });
+
+  $effect(() => onproblem?.(problem));
 </script>
 
 <div class="bracket-editor">
@@ -132,7 +146,7 @@
 
   {#if !rows.length}
     <p class="empty small">
-      No brackets. Add one to start, or leave empty to use the shipped rates.
+      No brackets. Add one to start, or save with this empty to go back to the shipped rates.
     </p>
   {/if}
 

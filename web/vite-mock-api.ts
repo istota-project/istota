@@ -7022,6 +7022,19 @@ const handlers: MockHandler[] = [
       return (TAX_RATES.jurisdictions ?? []).find((j: any) => j.code === code) ?? null;
     }
 
+    /**
+     * True when `value` is a well-formed ISO date on or after `floor`.
+     *
+     * A plain string compare reads a malformed date (`2026/01/01` — exactly the
+     * typo a hand-edit produces) as *fresh*, where Python's `date.fromisoformat`
+     * raises and the staleness check treats it as stale. Getting the safety
+     * signal itself backwards in the mock is worth the extra function.
+     */
+    function isoDateBefore(value: string, floor: string): boolean {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value ?? '')) return false;
+      return value >= floor;
+    }
+
     function provenance(block: any, requestedYear: number, overridden: boolean) {
       if (!block) {
         return {
@@ -7040,7 +7053,7 @@ const handlers: MockHandler[] = [
         year: block.__year,
         requested_year: requestedYear,
         is_fallback: block.__year !== requestedYear,
-        is_stale: !verified || verified < `${requestedYear}-01-01`,
+        is_stale: !isoDateBefore(verified, `${requestedYear}-01-01`),
         overridden,
         source: block.source ?? '',
         source_url: block.source_url ?? '',
@@ -7201,7 +7214,8 @@ const handlers: MockHandler[] = [
       const federalAgi = seAnnualized + w2Annualized - halfSe;
 
       const seTaxableForMedicare = seAnnualized * payroll.se_taxable_fraction;
-      const amtThreshold = fedStatus.additional_medicare_threshold ?? 200_000;
+      // `||` not `??`, matching Python's `or` (tax.py).
+      const amtThreshold = fedStatus.additional_medicare_threshold || 200_000;
       const additionalMedicare =
         Math.max(0, w2Annualized + seTaxableForMedicare - amtThreshold) *
         payroll.additional_medicare_rate;
@@ -7211,13 +7225,16 @@ const handlers: MockHandler[] = [
       let qbiDeduction = 0;
       if (config.enable_qbi_deduction && seAnnualized > 0) {
         qbiDeduction = seAnnualized * 0.2;
-        const threshold = fedStatus.qbi_threshold ?? 0;
-        const phaseout = fedStatus.qbi_phaseout_range ?? 50_000;
-        if (threshold > 0 && federalAgi > threshold) {
-          if (federalAgi >= threshold + phaseout) qbiDeduction = 0;
-          else qbiDeduction *= 1 - (federalAgi - threshold) / phaseout;
-        }
+        // `||` not `??`, matching Python's `or`: a 0 placeholder in the data
+        // must fall through to the default, not be taken as a real range.
+        const threshold = fedStatus.qbi_threshold || 0;
+        const phaseout = fedStatus.qbi_phaseout_range || 50_000;
+        // Section 199A measures against taxable income, not AGI — see tax.py.
         const taxableBeforeQbi = Math.max(0, federalAgi - fedStdDed);
+        if (threshold > 0 && taxableBeforeQbi > threshold) {
+          if (taxableBeforeQbi >= threshold + phaseout) qbiDeduction = 0;
+          else qbiDeduction *= 1 - (taxableBeforeQbi - threshold) / phaseout;
+        }
         qbiDeduction = Math.min(qbiDeduction, taxableBeforeQbi * 0.2);
       }
 
@@ -7317,6 +7334,7 @@ const handlers: MockHandler[] = [
         state_agi: stateAgi,
         state_standard_deduction: stateStdDed,
         state_taxable_income: stateTaxable,
+        state_personal_exemption: stateExemption,
         state_tax: stateTax,
         federal_withholding: fedWithholdingAnnual,
         state_withholding: stateWithholdingAnnual,
@@ -7334,6 +7352,7 @@ const handlers: MockHandler[] = [
         state_installment_schedule: stateCumulative,
         state: stateCode,
         state_name: jurisdiction?.name ?? '',
+        state_starts_from: stateCode ? startsFrom : '',
         state_available: stateAvailable,
         state_unavailable_reason: stateReason,
         federal_rates: provenance(fedBlock, config.tax_year, false),
@@ -7390,7 +7409,7 @@ const handlers: MockHandler[] = [
       let statePayload: unknown = null;
       if (code) {
         const jur = jurisdictionOf(code);
-        const bundled = stateYear(code, year);
+        const bundled = jur ? stateYear(code, year) : null;
         const bundledStatus = bundled?.filing_status?.[status] ?? {};
         const override = findSchedule(year, code, status);
         const brackets = override?.brackets ?? bundledStatus.brackets ?? [];
@@ -7568,7 +7587,16 @@ const handlers: MockHandler[] = [
       const yearMatch = path.match(/^\/istota\/api\/money\/config\/tax\/years\/(\d+)$/);
       if (yearMatch && method === 'PUT') {
         const year = Number(yearMatch[1]);
-        yearRates[year] = { ...(yearRates[year] ?? {}), ...(body ?? {}) };
+        // An explicit null clears the field, matching upsert_tax_year_rates.
+        // The mock used to store the null, so the revert appeared to work here
+        // and silently failed against the real server — a mock more permissive
+        // than the thing it stands in for is how that ships.
+        const merged: Record<string, number> = { ...(yearRates[year] ?? {}) };
+        for (const [k, v] of Object.entries(body ?? {})) {
+          if (v === null) delete merged[k];
+          else merged[k] = v as number;
+        }
+        yearRates[year] = merged;
         return { status: 'ok', state: 'updated' };
       }
       if (yearMatch && method === 'DELETE') {

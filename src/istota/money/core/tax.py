@@ -152,7 +152,7 @@ def state_rates(state: str, year: int) -> YearRates | None:
     return load_tax_rates().state_year(state, year)
 
 
-def _provenance(rates: YearRates | None, *, overridden: bool) -> dict:
+def build_provenance(rates: YearRates | None, *, overridden: bool) -> dict:
     """The citation block the UI renders beside a set of figures.
 
     A plain dict rather than a dataclass so the estimate stays JSON-serializable
@@ -233,8 +233,15 @@ def compute_se_tax(
         payroll.medicare_rate if payroll else None,
         MEDICARE_RATE,
     )
-    wage_base = (config.ss_wage_base if config and config.ss_wage_base
-                 else (payroll.ss_wage_base if payroll else 0))
+    wage_base = (
+        (config.ss_wage_base if config else None)
+        or (payroll.ss_wage_base if payroll else None)
+        # Third tier, matching the rates above. Without it a year block missing
+        # its payroll data yields 0, and `min(taxable_se, 0)` drops the whole
+        # Social Security portion — a five-figure understatement reported as a
+        # normal result.
+        or load_tax_rates().latest_ss_wage_base()
+    )
 
     taxable_se = se_net_income * se_frac
     ss_income = min(taxable_se, wage_base)
@@ -488,13 +495,18 @@ def estimate_quarterly_tax(
         # deduction for incomes that now still qualify for part of it.
         threshold = fed_rates.qbi_threshold(filing_status) if fed_rates else 0
         phaseout = (fed_rates.qbi_phaseout_range(filing_status) if fed_rates else 0) or 50_000
-        if threshold > 0 and federal_agi > threshold:
-            if federal_agi >= threshold + phaseout:
+        # § 199A(e)(2) measures the threshold against TAXABLE income computed
+        # without regard to the QBI deduction — not AGI. Keying on AGI started
+        # the phase-out a whole standard deduction of income too early ($32,200
+        # MFJ for 2026), and disagreed with the cap below, which had the basis
+        # right all along.
+        taxable_before_qbi = max(0, federal_agi - fed_std_ded)
+        if threshold > 0 and taxable_before_qbi > threshold:
+            if taxable_before_qbi >= threshold + phaseout:
                 qbi_deduction = 0.0
             else:
-                qbi_deduction *= 1 - (federal_agi - threshold) / phaseout
+                qbi_deduction *= 1 - (taxable_before_qbi - threshold) / phaseout
         # Cap at 20% of taxable income (before QBI deduction)
-        taxable_before_qbi = max(0, federal_agi - fed_std_ded)
         qbi_deduction = min(qbi_deduction, taxable_before_qbi * 0.20)
 
     fed_taxable, fed_std_ded, fed_tax = compute_federal_tax(
@@ -534,7 +546,14 @@ def estimate_quarterly_tax(
         # For AGI > $150K, safe harbor requires 110% of prior year tax
         safe_harbor_mult = 1.10 if federal_agi > SAFE_HARBOR_AGI_THRESHOLD else 1.00
         federal_target = prior_year_federal_tax * safe_harbor_mult
-        state_target = prior_year_state_tax * safe_harbor_mult
+        # A prior-year state figure cannot create a liability in a state that
+        # has none. The annualized branch gets this for free by keying on the
+        # computed tax; this branch keys on a stored number, so it has to ask.
+        # The case is ordinary: move from a taxing state to Texas and the stale
+        # prior-year figure is still sitting in the config.
+        state_target = (
+            prior_year_state_tax * safe_harbor_mult if state_result.available else 0.0
+        )
         federal_net_due = max(0, federal_target - fed_withholding_annual)
         state_net_due = max(0, state_target - state_withholding_annual)
         fed_cumulative_due = federal_net_due * FED_CUMULATIVE_PCT[current_quarter]
@@ -579,6 +598,7 @@ def estimate_quarterly_tax(
         state_agi=state_agi,
         state_standard_deduction=state_result.standard_deduction,
         state_taxable_income=state_result.taxable_income,
+        state_personal_exemption=state_result.personal_exemption,
         state_tax=state_tax,
         federal_withholding=fed_withholding_annual,
         state_withholding=state_withholding_annual,
@@ -596,13 +616,14 @@ def estimate_quarterly_tax(
         state_installment_schedule=list(state_cumulative),
         state=state_code,
         state_name=state_result.name,
+        state_starts_from=starts_from if state_code else "",
         state_available=state_result.available,
         state_unavailable_reason=state_result.reason,
-        federal_rates=_provenance(fed_rates, overridden=bool(
+        federal_rates=build_provenance(fed_rates, overridden=bool(
             config and (config.federal_brackets or
                         config.federal_standard_deduction is not None)
         )),
-        state_rates=None if not state_code else _provenance(
+        state_rates=None if not state_code else build_provenance(
             state_rates(state_code, tax_year),
             overridden=bool(config and (config.state_brackets or
                                         config.state_standard_deduction is not None)),

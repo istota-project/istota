@@ -676,6 +676,8 @@ export interface TaxEstimateResponse {
   state_agi: number;
   state_standard_deduction: number;
   state_taxable_income: number;
+  /** Non-zero for the states that carry an exemption instead of a deduction. */
+  state_personal_exemption: number;
   state_tax: number;
   federal_withholding: number;
   state_withholding: number;
@@ -700,6 +702,12 @@ export interface TaxEstimateResponse {
   /** Two-letter code, or '' for no state tax. */
   state: string;
   state_name: string;
+  /**
+   * Which federal figure the state's tax starts from. The page's explainers
+   * depend on it: for `federal_taxable_income` the QBI deduction is already
+   * inside the base, so saying it does not apply is false.
+   */
+  state_starts_from: '' | 'federal_agi' | 'federal_taxable_income' | 'gross_compensation';
   /**
    * False with a reason is distinct from a zero liability: no state selected,
    * a state that levies no income tax, and a state we ship no brackets for all

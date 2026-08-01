@@ -323,3 +323,187 @@ class TestResolvedStateOverride:
     def test_state_query_is_normalized(self, client):
         body = client.get(f"{API}/config/tax/resolved?state=co").json()
         assert body["state"]["code"] == "CO"
+
+
+class TestWriteValidationHardening:
+    """Values that pass validation but break the read path are worse than 400s.
+
+    Starlette renders with `allow_nan=False`, so a stored Infinity raises on the
+    way out — 500ing both the estimate and the settings page's own loader, which
+    leaves no UI route back to the value that broke it.
+    """
+
+    # Sent as a raw body: httpx refuses to *serialize* a non-finite float, but
+    # `json.loads` accepts the `Infinity` / `NaN` literals by default, so this
+    # is exactly what reaches the route from any client that emits them.
+    JSON_HEADERS = {"Content-Type": "application/json"}
+
+    @pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "NaN"])
+    def test_non_finite_standard_deduction_rejected(self, client, literal):
+        resp = client.put(
+            f"{API}/config/tax/schedules/2026/federal/mfj",
+            content='{"standard_deduction": %s}' % literal,
+            headers=self.JSON_HEADERS,
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.parametrize("literal", ["Infinity", "NaN"])
+    def test_non_finite_bracket_rejected(self, client, literal):
+        assert client.put(
+            f"{API}/config/tax/schedules/2026/federal/mfj",
+            content='{"brackets": [[0, 0.1], [%s, 0.2]]}' % literal,
+            headers=self.JSON_HEADERS,
+        ).status_code == 400
+        assert client.put(
+            f"{API}/config/tax/schedules/2026/federal/mfj",
+            content='{"brackets": [[0, %s]]}' % literal,
+            headers=self.JSON_HEADERS,
+        ).status_code == 400
+
+    def test_the_read_path_survives_a_rejected_write(self, ctx, client):
+        config_store.save_tax(
+            ctx.db_path, TaxConfig(tax_year=2026, filing_status="mfj", state="CA"),
+        )
+        client.put(
+            f"{API}/config/tax/schedules/2026/federal/mfj",
+            content='{"standard_deduction": Infinity}',
+            headers=self.JSON_HEADERS,
+        )
+        assert client.get(f"{API}/config/tax/resolved").status_code == 200
+        assert client.get(f"{API}/tax/estimate").status_code == 200
+
+    def test_out_of_range_tax_year_rejected(self, client):
+        # `is_stale` builds date(tax_year, 1, 1), which raises outside 1-9999 —
+        # and that raise lands in the estimate, not at the edit that caused it.
+        for bad in (99_999, 0, -5, "2026", 2026.5, True):
+            assert client.put(
+                f"{API}/config/tax", json={"tax_year": bad},
+            ).status_code == 400, bad
+
+    def test_a_valid_year_still_saves(self, client):
+        assert client.put(
+            f"{API}/config/tax", json={"tax_year": 2027},
+        ).status_code == 200
+
+
+class TestUnknownStoredState:
+    """A state code the registry doesn't know must not break the page that fixes it."""
+
+    def test_resolved_reports_unknown_rather_than_500ing(self, ctx, client):
+        # Written straight to the store, as a pre-validation config or a stale
+        # migration could leave it.
+        config_store.save_tax(
+            ctx.db_path, TaxConfig(tax_year=2026, filing_status="mfj", state="ZZ"),
+        )
+        resp = client.get(f"{API}/config/tax/resolved")
+        assert resp.status_code == 200
+        state = resp.json()["state"]
+        assert state["code"] == "ZZ"
+        assert state["available"] is False
+        assert state["reason"] == "unknown_state"
+
+    def test_unknown_state_query_reports_rather_than_500ing(self, client):
+        resp = client.get(f"{API}/config/tax/resolved?state=ZZ")
+        assert resp.status_code == 200
+        assert resp.json()["state"]["reason"] == "unknown_state"
+
+    def test_the_estimate_also_survives_it(self, ctx, client):
+        config_store.save_tax(
+            ctx.db_path, TaxConfig(tax_year=2026, filing_status="mfj", state="ZZ"),
+        )
+        body = client.get(f"{API}/tax/estimate").json()
+        assert body["state_available"] is False
+        assert body["state_unavailable_reason"] == "unknown_state"
+
+
+class TestPayrollOverrideCanBeCleared:
+    def test_null_clears_a_payroll_override(self, client):
+        client.put(f"{API}/config/tax", json={"tax_year": 2026})
+        client.put(f"{API}/config/tax/years/2026", json={"ss_wage_base": 999_999})
+        assert client.get(
+            f"{API}/config/tax/resolved"
+        ).json()["payroll"]["ss_wage_base"]["value"] == 999_999
+
+        client.put(f"{API}/config/tax/years/2026", json={"ss_wage_base": None})
+        resolved = client.get(f"{API}/config/tax/resolved").json()
+        assert resolved["payroll"]["ss_wage_base"]["value"] == 184_500
+        assert resolved["payroll"]["ss_wage_base"]["overridden"] is False
+
+    def test_clearing_one_field_leaves_the_others(self, client):
+        client.put(f"{API}/config/tax", json={"tax_year": 2026})
+        client.put(
+            f"{API}/config/tax/years/2026",
+            json={"ss_wage_base": 999_999, "ss_rate": 0.2},
+        )
+        client.put(f"{API}/config/tax/years/2026", json={"ss_wage_base": None})
+        payroll = client.get(f"{API}/config/tax/resolved").json()["payroll"]
+        assert payroll["ss_wage_base"]["overridden"] is False
+        assert payroll["ss_rate"]["value"] == 0.2
+
+
+class TestJurisdictionsRequiresAuth:
+    def test_route_carries_the_auth_dependency(self):
+        # Every other money route chains to require_auth via get_user_config;
+        # this one is static reference data but must not be the one exception.
+        from istota.money.routes import api_config_tax_jurisdictions
+        import inspect
+
+        params = inspect.signature(api_config_tax_jurisdictions).parameters
+        assert "user_ctx" in params
+
+
+class TestPayrollWriteValidation:
+    """The payroll endpoint validated nothing, unlike its schedules sibling.
+
+    A string in a REAL column comes back as a string, and `compute_se_tax`
+    multiplies it — so one bad write 500s every subsequent estimate, with no UI
+    route to the value that did it.
+    """
+
+    def test_non_numeric_rejected(self, client):
+        assert client.put(
+            f"{API}/config/tax/years/2026", json={"ss_rate": "abc"},
+        ).status_code == 400
+
+    def test_negative_rejected(self, client):
+        assert client.put(
+            f"{API}/config/tax/years/2026", json={"ss_wage_base": -5},
+        ).status_code == 400
+
+    def test_non_finite_rejected(self, client):
+        assert client.put(
+            f"{API}/config/tax/years/2026",
+            content='{"ss_wage_base": Infinity}',
+            headers={"Content-Type": "application/json"},
+        ).status_code == 400
+
+    def test_bool_rejected(self, client):
+        assert client.put(
+            f"{API}/config/tax/years/2026", json={"ss_rate": True},
+        ).status_code == 400
+
+    def test_the_estimate_survives_a_rejected_write(self, ctx, client):
+        config_store.save_tax(
+            ctx.db_path, TaxConfig(tax_year=2026, filing_status="mfj", state="CA"),
+        )
+        client.put(f"{API}/config/tax/years/2026", json={"ss_rate": "abc"})
+        assert client.get(f"{API}/tax/estimate").status_code == 200
+
+    def test_null_is_still_accepted_as_a_clear(self, client):
+        assert client.put(
+            f"{API}/config/tax/years/2026", json={"ss_wage_base": None},
+        ).status_code == 200
+
+    def test_a_valid_value_still_saves(self, client):
+        assert client.put(
+            f"{API}/config/tax/years/2026", json={"ss_wage_base": 200_000},
+        ).status_code == 200
+
+    def test_the_dead_legacy_bracket_keys_are_rejected(self, client):
+        # load_tax no longer reads these columns, so accepting a write to them
+        # returns 200 and changes nothing — worse than a 400.
+        for key in ("federal_brackets", "ca_brackets",
+                    "federal_standard_deduction", "ca_standard_deduction"):
+            resp = client.put(f"{API}/config/tax/years/2026", json={key: 1})
+            assert resp.status_code == 400, key
+            assert "schedules" in resp.json()["error"], key

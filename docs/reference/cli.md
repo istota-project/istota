@@ -222,8 +222,11 @@ istota money tax schedule remove -u USER --year 2026 --jurisdiction NY --filing-
 istota money tax schedule list -u USER
 ```
 
-`remove` reverts to the bundled figures. An omitted flag on `set` leaves that
-field alone rather than clearing it.
+`remove` reverts both fields to the bundled figures. An omitted flag on `set`
+leaves that field alone; `--brackets-json null` reverts just the brackets.
+
+`istota money tax set --state` is validated against the jurisdiction registry —
+a typo'd code would otherwise store fine and resolve to nothing forever.
 
 ### Interactive REPL
 
