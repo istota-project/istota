@@ -6951,6 +6951,408 @@ const handlers: MockHandler[] = [
       return undefined;
     };
   })(),
+
+  // Money tax estimate (/money/taxes). The GET 404'd against the mock, so the
+  // Taxes tab was uninspectable in dev: it rendered its error state and nothing
+  // below it could be worked on. The POST was worse than a 404 — the mock's
+  // non-GET fallback answers `{}`, so a recalculation would have replaced the
+  // response with an object whose every field is undefined and crashed the
+  // page's `toLocaleString` formatting.
+  //
+  // The arithmetic is a port of `istota/money/core/tax.py` rather than a frozen
+  // payload, because every number this page shows is derived from the six
+  // inputs beside them — a fixture would let the inputs move while nothing
+  // below them changed, which is the one thing the page is for. Ported:
+  // `apply_brackets`, `compute_se_tax`, `compute_federal_tax`, `compute_ca_tax`,
+  // `annualization_months`, `_project_full_year`, `payment_quarter_from_date`
+  // and `estimate_quarterly_tax`, including both the annualized and safe-harbor
+  // branches and the two installment schedules (federal's flat 25%, CA's
+  // 30/40/0/30).
+  //
+  // The bracket tables are copied from that module and are dev data, not a
+  // second source of truth: when the real ones are updated for a new year these
+  // go stale, and the page still exercises correctly against them.
+  (() => {
+    const PATH = '/istota/api/money/tax/estimate';
+
+    // Set to true to exercise the "no tax configuration found" empty state,
+    // which the real API signals with a 404 (`_load_tax_config` returning None).
+    const NO_TAX_CONFIG = false;
+
+    type Bracket = [threshold: number, rate: number];
+
+    const FEDERAL_BRACKETS: Record<string, Bracket[]> = {
+      mfj: [
+        [0, 0.1],
+        [23_850, 0.12],
+        [96_950, 0.22],
+        [206_700, 0.24],
+        [394_600, 0.32],
+        [501_050, 0.35],
+        [751_600, 0.37],
+      ],
+      single: [
+        [0, 0.1],
+        [11_925, 0.12],
+        [48_475, 0.22],
+        [103_350, 0.24],
+        [197_300, 0.32],
+        [250_525, 0.35],
+        [626_350, 0.37],
+      ],
+    };
+
+    // Includes the 1% mental-health surcharge folded into the top two bands.
+    const CA_BRACKETS: Record<string, Bracket[]> = {
+      mfj: [
+        [0, 0.01],
+        [21_428, 0.02],
+        [50_798, 0.04],
+        [80_158, 0.06],
+        [111_340, 0.08],
+        [140_698, 0.093],
+        [721_314, 0.103],
+        [865_574, 0.113],
+        [1_000_000, 0.123],
+        [1_442_628, 0.133],
+      ],
+      single: [
+        [0, 0.01],
+        [10_714, 0.02],
+        [25_399, 0.04],
+        [40_084, 0.06],
+        [55_670, 0.08],
+        [70_349, 0.093],
+        [360_657, 0.103],
+        [432_787, 0.113],
+        [721_314, 0.123],
+        [1_000_000, 0.133],
+      ],
+    };
+
+    const FEDERAL_STANDARD_DEDUCTION: Record<string, number> = { mfj: 30_000, single: 15_000 };
+    const CA_STANDARD_DEDUCTION: Record<string, number> = { mfj: 10_726, single: 5_363 };
+    const ADDITIONAL_MEDICARE_THRESHOLD: Record<string, number> = { mfj: 250_000, single: 200_000 };
+    const QBI_THRESHOLD: Record<string, number> = { mfj: 394_600, single: 197_300 };
+    const QBI_PHASEOUT_RANGE: Record<string, number> = { mfj: 100_000, single: 50_000 };
+
+    const SS_WAGE_BASE = 176_100;
+    const SS_RATE = 0.124;
+    const MEDICARE_RATE = 0.029;
+    const SE_TAXABLE_FRACTION = 0.9235;
+    const ADDITIONAL_MEDICARE_RATE = 0.009;
+    const SAFE_HARBOR_AGI_THRESHOLD = 150_000;
+
+    const FED_CUMULATIVE_PCT: Record<number, number> = { 1: 0.25, 2: 0.5, 3: 0.75, 4: 1.0 };
+    const CA_CUMULATIVE_PCT: Record<number, number> = { 1: 0.3, 2: 0.7, 3: 0.7, 4: 1.0 };
+    const ANNUALIZATION_PERIOD_END_MONTH: Record<number, number> = { 1: 3, 2: 5, 3: 8, 4: 12 };
+
+    function applyBrackets(taxableIncome: number, brackets: Bracket[]): number {
+      if (taxableIncome <= 0) return 0;
+      let tax = 0;
+      for (let i = 0; i < brackets.length; i++) {
+        const [threshold] = brackets[i];
+        const rate = brackets[i][1];
+        const bracketIncome =
+          i + 1 < brackets.length
+            ? Math.min(taxableIncome, brackets[i + 1][0]) - threshold
+            : taxableIncome - threshold;
+        if (bracketIncome <= 0) break;
+        tax += bracketIncome * rate;
+      }
+      return tax;
+    }
+
+    function computeSeTax(seNetIncome: number): { seTax: number; halfSe: number } {
+      if (seNetIncome <= 0) return { seTax: 0, halfSe: 0 };
+      const taxableSe = seNetIncome * SE_TAXABLE_FRACTION;
+      const ssTax = Math.min(taxableSe, SS_WAGE_BASE) * SS_RATE;
+      const medicareTax = taxableSe * MEDICARE_RATE;
+      const seTax = ssTax + medicareTax;
+      return { seTax, halfSe: seTax / 2 };
+    }
+
+    /** Payment-quarter period, capped at the months that have actually elapsed. */
+    function annualizationMonths(quarter: number, taxYear: number, today: Date): number {
+      const periodEnd = ANNUALIZATION_PERIOD_END_MONTH[quarter] ?? 12;
+      let elapsed: number;
+      if (today.getFullYear() > taxYear) elapsed = 12;
+      else if (today.getFullYear() < taxYear) elapsed = 0;
+      else elapsed = today.getMonth(); // the current month is still in progress
+      return Math.max(1, Math.min(periodEnd, elapsed));
+    }
+
+    /** Scale a YTD figure to `targetMonths`, never below what's already earned. */
+    function projectFullYear(ytd: number, monthsElapsed: number, targetMonths: number): number {
+      if (ytd <= 0 || monthsElapsed <= 0) return Math.max(ytd, 0);
+      const projected = (ytd / monthsElapsed) * Math.min(targetMonths, 12);
+      return Math.max(projected, ytd);
+    }
+
+    function paymentQuarterFromDate(today: Date, taxYear: number): number {
+      if (today.getFullYear() > taxYear) return 4;
+      if (today.getFullYear() < taxYear) return 1;
+      const month = today.getMonth() + 1;
+      const day = today.getDate();
+      if (month < 4 || (month === 4 && day <= 15)) return 1;
+      if (month < 6 || (month === 6 && day <= 15)) return 2;
+      if (month < 9 || (month === 9 && day <= 15)) return 3;
+      return 4;
+    }
+
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+
+    const today = new Date();
+    const TAX_YEAR = today.getFullYear();
+    const CURRENT_QUARTER = paymentQuarterFromDate(today, TAX_YEAR);
+    const MONTHS = annualizationMonths(CURRENT_QUARTER, TAX_YEAR, today);
+
+    // Stands in for `query_se_income`, which sums the ledger's SE income
+    // accounts over the first N months of the year — so it is per-ledger, and
+    // the section's ledger picker moves these numbers the way it does in
+    // production. An unknown ledger name resolves to nothing, matching
+    // `_resolve_user_ledger` returning None.
+    const SE_MONTHLY_BY_LEDGER: Record<string, number> = {
+      main: 200_000 / 12,
+      business: 48_000 / 12,
+    };
+    const DEFAULT_LEDGER = 'main';
+
+    // Stands in for TAX.md / the money DB's tax config. The W-2 figures are
+    // year-to-date amounts the user typed, so they are seeded from a monthly
+    // rate over the elapsed period rather than being fixed — otherwise the
+    // starting numbers would only look sensible in whichever quarter they were
+    // written in. Chosen so the three conditional rows the page can render are
+    // all reachable at the defaults: the Social Security wage-base note, the
+    // additional Medicare row, and the QBI deduction.
+    const config = {
+      tax_year: TAX_YEAR,
+      filing_status: 'mfj',
+      enable_qbi_deduction: true,
+      prior_year_federal_tax: 62_000,
+      prior_year_state_tax: 18_000,
+      w2_income: 10_000 * MONTHS,
+      w2_federal_withholding: 1_800 * MONTHS,
+      w2_state_withholding: 600 * MONTHS,
+      federal_estimated_paid: 24_000,
+      state_estimated_paid: 7_000,
+    };
+
+    // Mirrors `save_tax_inputs` / `load_tax_inputs`: the POST persists the
+    // user's inputs, so a reload (or a ledger switch, which re-issues the GET)
+    // comes back with what was last entered rather than the config defaults.
+    const savedInputs: Record<string, number | string | undefined> = {};
+
+    function estimate(opts: {
+      seIncomeYtd: number;
+      w2Income: number;
+      w2FederalWithholding: number;
+      w2StateWithholding: number;
+      federalEstimatedPaid: number;
+      stateEstimatedPaid: number;
+      method: string;
+      w2Months: number;
+      quarter: number;
+      months: number;
+    }) {
+      const filingStatus = config.filing_status;
+      const months = Math.max(1, opts.months);
+
+      const seAnnualized = Math.max(opts.seIncomeYtd, opts.seIncomeYtd * (12 / months));
+      const w2Annualized = projectFullYear(opts.w2Income, months, opts.w2Months);
+      const fedWithholdingAnnual = projectFullYear(
+        opts.w2FederalWithholding,
+        months,
+        opts.w2Months,
+      );
+      const stateWithholdingAnnual = projectFullYear(
+        opts.w2StateWithholding,
+        months,
+        opts.w2Months,
+      );
+
+      const { seTax, halfSe } = computeSeTax(seAnnualized);
+      const federalAgi = seAnnualized + w2Annualized - halfSe;
+
+      const seTaxableForMedicare = seAnnualized * SE_TAXABLE_FRACTION;
+      const amtThreshold = ADDITIONAL_MEDICARE_THRESHOLD[filingStatus] ?? 200_000;
+      const additionalMedicare =
+        Math.max(0, w2Annualized + seTaxableForMedicare - amtThreshold) * ADDITIONAL_MEDICARE_RATE;
+
+      const fedStdDed = FEDERAL_STANDARD_DEDUCTION[filingStatus] ?? 0;
+      const caStdDed = CA_STANDARD_DEDUCTION[filingStatus] ?? 0;
+
+      let qbiDeduction = 0;
+      if (config.enable_qbi_deduction && seAnnualized > 0) {
+        qbiDeduction = seAnnualized * 0.2;
+        const threshold = QBI_THRESHOLD[filingStatus] ?? 0;
+        const phaseout = QBI_PHASEOUT_RANGE[filingStatus] ?? 50_000;
+        if (threshold > 0 && federalAgi > threshold) {
+          if (federalAgi >= threshold + phaseout) qbiDeduction = 0;
+          else qbiDeduction *= 1 - (federalAgi - threshold) / phaseout;
+        }
+        const taxableBeforeQbi = Math.max(0, federalAgi - fedStdDed);
+        qbiDeduction = Math.min(qbiDeduction, taxableBeforeQbi * 0.2);
+      }
+
+      const fedTaxable = Math.max(0, federalAgi - fedStdDed - qbiDeduction);
+      const fedTax = applyBrackets(fedTaxable, FEDERAL_BRACKETS[filingStatus] ?? []);
+      const federalTotalLiability = fedTax + seTax + additionalMedicare;
+
+      // CA allows the above-the-line half-SE deduction but neither QBI nor SE
+      // tax, so it shares the AGI and nothing else.
+      const caAgi = federalAgi;
+      const caTaxable = Math.max(0, caAgi - caStdDed);
+      const caTax = applyBrackets(caTaxable, CA_BRACKETS[filingStatus] ?? []);
+
+      let federalNetDue: number;
+      let stateNetDue: number;
+      let fedQuarterly: number;
+      let stateQuarterly: number;
+
+      if (opts.method === 'safe_harbor') {
+        const mult = federalAgi > SAFE_HARBOR_AGI_THRESHOLD ? 1.1 : 1.0;
+        federalNetDue = Math.max(0, config.prior_year_federal_tax * mult - fedWithholdingAnnual);
+        stateNetDue = Math.max(0, config.prior_year_state_tax * mult - stateWithholdingAnnual);
+        fedQuarterly = round2(
+          Math.max(0, federalNetDue * FED_CUMULATIVE_PCT[opts.quarter] - opts.federalEstimatedPaid),
+        );
+        stateQuarterly = round2(
+          Math.max(0, stateNetDue * CA_CUMULATIVE_PCT[opts.quarter] - opts.stateEstimatedPaid),
+        );
+      } else {
+        federalNetDue = Math.max(
+          0,
+          federalTotalLiability - fedWithholdingAnnual - opts.federalEstimatedPaid,
+        );
+        stateNetDue = Math.max(0, caTax - stateWithholdingAnnual - opts.stateEstimatedPaid);
+        const fedTotalRequired = Math.max(0, federalTotalLiability - fedWithholdingAnnual);
+        fedQuarterly = round2(
+          Math.max(
+            0,
+            fedTotalRequired * FED_CUMULATIVE_PCT[opts.quarter] - opts.federalEstimatedPaid,
+          ),
+        );
+        const stateTotalRequired = Math.max(0, caTax - stateWithholdingAnnual);
+        stateQuarterly = round2(
+          Math.max(
+            0,
+            stateTotalRequired * CA_CUMULATIVE_PCT[opts.quarter] - opts.stateEstimatedPaid,
+          ),
+        );
+      }
+
+      return {
+        status: 'ok',
+        tax_year: config.tax_year,
+        quarter: opts.quarter,
+        method: opts.method,
+        filing_status: filingStatus,
+        w2_months: opts.w2Months,
+        annualization_months: months,
+        se_income_ytd: opts.seIncomeYtd,
+        se_income_annualized: seAnnualized,
+        w2_income: opts.w2Income,
+        w2_income_annualized: w2Annualized,
+        se_tax: seTax,
+        half_se_deduction: halfSe,
+        additional_medicare_tax: additionalMedicare,
+        federal_agi: federalAgi,
+        federal_standard_deduction: fedStdDed,
+        federal_taxable_income: fedTaxable,
+        federal_tax: fedTax,
+        qbi_deduction: qbiDeduction,
+        ca_agi: caAgi,
+        ca_standard_deduction: caStdDed,
+        ca_taxable_income: caTaxable,
+        ca_tax: caTax,
+        federal_withholding: fedWithholdingAnnual,
+        state_withholding: stateWithholdingAnnual,
+        federal_estimated_paid: opts.federalEstimatedPaid,
+        state_estimated_paid: opts.stateEstimatedPaid,
+        federal_total_liability: federalTotalLiability,
+        state_total_liability: caTax,
+        federal_net_due: federalNetDue,
+        state_net_due: stateNetDue,
+        federal_quarterly_amount: fedQuarterly,
+        state_quarterly_amount: stateQuarterly,
+        quarters_remaining: Math.max(1, 5 - opts.quarter),
+      };
+    }
+
+    function seIncomeFor(ledger: string | null): number {
+      const name = ledger || DEFAULT_LEDGER;
+      const monthly = SE_MONTHLY_BY_LEDGER[name.toLowerCase()];
+      // An unknown ledger yields no SE income rather than an error, matching
+      // the route's `except: pass` around the ledger query.
+      return monthly === undefined ? 0 : monthly * MONTHS;
+    }
+
+    return ({ url, method, body }) => {
+      if (!url.startsWith(PATH)) return undefined;
+      if (NO_TAX_CONFIG) return { __status: 404, error: 'no tax config' };
+
+      const params = new URLSearchParams(url.split('?')[1] ?? '');
+      const ledger = params.get('ledger');
+
+      const pick = (key: string, fallback: number): number => {
+        const v = savedInputs[key];
+        return typeof v === 'number' ? v : fallback;
+      };
+
+      if (method === 'GET') {
+        // A `method` query param only wins when it isn't the default, so a
+        // saved safe-harbor choice survives the page's plain reload.
+        const requested = params.get('method') ?? 'annualized';
+        const useMethod =
+          requested !== 'annualized' ? requested : ((savedInputs.method as string) ?? requested);
+        return estimate({
+          seIncomeYtd: seIncomeFor(ledger),
+          w2Income: pick('w2_income', config.w2_income),
+          w2FederalWithholding: pick('w2_federal_withholding', config.w2_federal_withholding),
+          w2StateWithholding: pick('w2_state_withholding', config.w2_state_withholding),
+          federalEstimatedPaid: pick('federal_estimated_paid', config.federal_estimated_paid),
+          stateEstimatedPaid: pick('state_estimated_paid', config.state_estimated_paid),
+          method: useMethod,
+          w2Months: pick('w2_months', 12),
+          quarter: CURRENT_QUARTER,
+          months: MONTHS,
+        });
+      }
+
+      if (method === 'POST') {
+        const bval = (key: string, fallback: number): number => {
+          const v = body?.[key];
+          return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+        };
+        const inputs = {
+          method: typeof body?.method === 'string' ? body.method : 'annualized',
+          w2_income: bval('w2_income', config.w2_income),
+          w2_federal_withholding: bval('w2_federal_withholding', config.w2_federal_withholding),
+          w2_state_withholding: bval('w2_state_withholding', config.w2_state_withholding),
+          federal_estimated_paid: bval('federal_estimated_paid', config.federal_estimated_paid),
+          state_estimated_paid: bval('state_estimated_paid', config.state_estimated_paid),
+          w2_months: bval('w2_months', 12),
+        };
+        Object.assign(savedInputs, inputs);
+
+        return estimate({
+          seIncomeYtd: seIncomeFor(ledger),
+          w2Income: inputs.w2_income,
+          w2FederalWithholding: inputs.w2_federal_withholding,
+          w2StateWithholding: inputs.w2_state_withholding,
+          federalEstimatedPaid: inputs.federal_estimated_paid,
+          stateEstimatedPaid: inputs.state_estimated_paid,
+          method: inputs.method,
+          w2Months: inputs.w2_months,
+          quarter: CURRENT_QUARTER,
+          months: MONTHS,
+        });
+      }
+
+      return undefined;
+    };
+  })(),
 ];
 
 function readBody(req: any): Promise<any> {
