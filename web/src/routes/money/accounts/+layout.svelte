@@ -22,6 +22,7 @@
       options={yearOptions}
       onValueChange={(v) => selectedYear.set(v === '' ? 0 : Number(v))}
       ariaLabel="Year"
+      minChars={4}
     />
     <input
       type="text"

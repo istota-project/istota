@@ -30,10 +30,11 @@
 </script>
 
 <div class="money-section-header">
-  <!-- Field tier for the collapsed Select below 768px, so a body-header nav is
-       the same size and shape in every money section whether or not it has a
-       filter beside it. Inert on the wide layout — `NavLink` reads neither
-       token, so the inline links keep their chip shape. -->
+  <!-- Field tier at both widths: the inline links on the wide layout and the
+       Select they collapse into below 768px. A body-header nav is then the
+       same height as the filters in a sibling section, so the bar does not
+       change height as you move between tabs of the same module — this section
+       has no filter at all, and used to sit shorter than the rest. -->
   <div class="money-section-nav control-row">
     <HeaderNav items={navItems} ariaLabel="Business section" />
   </div>

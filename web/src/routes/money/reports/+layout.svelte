@@ -39,12 +39,12 @@
 </script>
 
 <div class="money-section-header reports-header">
-  <!-- The field tier is inert on the wide layout: `NavLink` reads neither
-       --control-height-* nor --control-radius, so the inline links keep their
-       chip shape. It reaches only the collapsed Select below 768px, which lands
-       it at the same height and corner as the year filter it sits beside —
-       these are two peer dropdowns in a body header, and the app bar's own
-       compact pills are what they should read as different from. -->
+  <!-- Field tier at both widths: the inline links, and the Select they collapse
+       into below 768px. Either way the nav comes out at the height and corner
+       of the year filter beside it, so the header is one band rather than a
+       tall control next to short ones — and it stays that height in a sibling
+       section that has no filter. The app bar's compact pills above are what
+       this should read as different from. -->
   <div class="money-section-nav control-row">
     <HeaderNav items={navItems} ariaLabel="Report" />
   </div>
@@ -54,6 +54,7 @@
       options={yearOptions}
       onValueChange={(v) => selectedYear.set(v === '' ? 0 : Number(v))}
       ariaLabel="Year"
+      minChars={4}
     />
   </div>
 </div>

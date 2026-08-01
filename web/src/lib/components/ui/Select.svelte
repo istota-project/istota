@@ -32,6 +32,18 @@
      * or the two are ~2.6px apart.
      */
     size?: 'sm' | 'md';
+    /**
+     * Reserve at least this many characters of label width, so the trigger
+     * keeps one size as the selection changes.
+     *
+     * A trigger is only as wide as whatever is currently picked, so a filter
+     * whose options differ in length resizes every time you use it and shoves
+     * its neighbours along the row — the money year filter is the case, where
+     * "All" is a character narrower than any year. `ch` rather than a px
+     * literal so the reservation tracks the trigger's own font size, which
+     * moves with the text-scale preference.
+     */
+    minChars?: number;
   }
 
   let {
@@ -44,6 +56,7 @@
     fullWidth = false,
     align = 'start',
     size = 'sm',
+    minChars,
   }: Props = $props();
 
   const selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? placeholder);
@@ -54,7 +67,9 @@
     class="ui-select-trigger ui-select-trigger--{size}{fullWidth ? ' ui-select-trigger--full' : ''}"
     aria-label={ariaLabel}
   >
-    <span class="ui-select-label">{selectedLabel}</span>
+    <span class="ui-select-label" style={minChars ? `min-width: ${minChars}ch` : undefined}
+      >{selectedLabel}</span
+    >
     <ChevronDown size={12} />
   </BitsSelect.Trigger>
   <BitsSelect.Portal>

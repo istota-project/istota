@@ -79,6 +79,11 @@ const TIER_CONTROLS = [
   'Input.svelte',
   'IconButton.svelte',
   'Select.svelte',
+  // A nav chip is on the channel for the same reason the rest are: in a body
+  // section header it shares a row with the filters, and a section whose header
+  // holds only a nav must come out the same height as one that also has a
+  // Select — otherwise the bar grows and shrinks as you move between them.
+  'NavLink.svelte',
 ];
 
 describe('controls resolve the tier channel', () => {
@@ -91,6 +96,7 @@ describe('controls resolve the tier channel', () => {
   it.each([
     ['Button.svelte', '.btn'],
     ['Chip.svelte', '.chip'],
+    ['NavLink.svelte', '.nav-link'],
   ])('%s takes its corner from --control-radius', (file) => {
     const radii = radiiOf(read(file));
     expect(radii).toContain('var(--control-radius)');
@@ -109,8 +115,18 @@ describe('controls resolve the tier channel', () => {
     ['Chip.svelte', /min-height:\s*var\(--control-height-(sm|md)\)/],
     ['Input.svelte', /min-height:\s*var\(--control-height-md\)/],
     ['IconButton.svelte', /min-height:\s*var\(--control-height-md\)/],
+    ['NavLink.svelte', /min-height:\s*var\(--control-height-sm\)/],
   ])('%s reserves a height through the channel', (file, pattern) => {
     expect(read(file)).toMatch(pattern);
+  });
+
+  it('leaves the app bar unchanged by keeping the nav chip on the sm tier', () => {
+    // --control-height-sm is exactly what a nav chip already computed to
+    // (0.75rem text at 1.2 leading, plus 0.15rem of padding either side), so
+    // adopting the channel is inert in `ShellHeader` and only bites where a
+    // container raises the tier. Naming `md` here would silently grow the app
+    // bar on every page.
+    expect(read('NavLink.svelte')).not.toMatch(/min-height:\s*var\(--control-height-md\)/);
   });
 
   it.each([['Input.svelte'], ['Field.svelte']])(
