@@ -739,8 +739,8 @@ class MonarchClient:
                     )
                     raise MonarchCaptchaRequired(
                         "Monarch requires a CAPTCHA we can't solve "
-                        "programmatically. Use the browser cookie-paste "
-                        "workflow instead (Option B in the settings page)."
+                        "programmatically. Use \"Paste cookies from your "
+                        "browser\" on the money settings page instead."
                     )
 
                 # Monarch returns 404 (not 401) for "Invalid email and

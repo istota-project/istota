@@ -1046,7 +1046,11 @@ class TestOutdatedClientRecovery:
             await MonarchClient.login_with_credentials(
                 email="a@b.com", password="pw",
             )
-        assert "cookie-paste" in str(exc.value).lower()
+        # Names the settings page's own disclosure label, not a description of
+        # it: the message is read beside that control, and it used to say
+        # "Option B", which named the ordering rather than the method and went
+        # stale the moment the headings were reworded (ISSUE-222).
+        assert "paste cookies from your browser" in str(exc.value).lower()
 
     @pytest.mark.asyncio
     async def test_404_treated_as_auth_error(self, monkeypatch):

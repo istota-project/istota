@@ -19,7 +19,10 @@
     disabled?: boolean;
     /** Marks the field invalid (aria-invalid + a styling hook). */
     invalid?: boolean;
-    /** Render the dropdown options in a monospace face (paths, tokens, ids). */
+    /** Render the field and its dropdown in a monospace face (paths, tokens,
+     *  ids). Both, not only the menu: a mono suggestion list under a sans field
+     *  reads as two unrelated controls, and the text you pick is the text you
+     *  are then editing. */
     monospace?: boolean;
     ariaLabel?: string;
     id?: string;
@@ -142,6 +145,7 @@
     {placeholder}
     {disabled}
     {value}
+    class:mono={monospace}
     type="text"
     autocomplete="off"
     role="combobox"
@@ -213,6 +217,15 @@
     color: var(--text-secondary);
     font-size: var(--text-sm);
     cursor: pointer;
+  }
+
+  /* The field takes its appearance from its container (a Field, in practice),
+     so this is the one appearance declaration the component owns — and only
+     because the container has no way to know the value is monospace-shaped.
+     Deliberately font-family alone: anything else here would start competing
+     with the container's rules at a tie. */
+  .ac-field input.mono {
+    font-family: var(--font-mono);
   }
 
   .ac-option.mono {

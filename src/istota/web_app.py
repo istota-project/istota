@@ -5235,7 +5235,7 @@ async def money_monarch_login(
         # Monarch's bot-protection gate is sticky once tripped. There is no
         # programmatic way through it; the user must use cookie-paste.
         # 503 + a UI-friendly message so the SvelteKit form can route them
-        # to Option B.
+        # to the cookie-paste method.
         logger.warning("monarch_login_captcha user=%s", user["username"])
         raise HTTPException(status_code=503, detail=str(exc))
     except MonarchCloudflareBlocked as exc:

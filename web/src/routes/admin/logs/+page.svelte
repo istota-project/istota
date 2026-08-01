@@ -38,7 +38,6 @@
   // keystroke against a file scan.
   let level = $state('');
   let query = $state('');
-  let loggerFilter = $state('');
   let userFilter = $state('');
   let taskFilter = $state<number | null>(null);
   let applied = $state<AdminLogFilters>({});
@@ -60,23 +59,20 @@
     })),
   );
   let isTaskSource = $derived(sourceId === 'tasks');
-  // Compared against the filters the *current* source actually uses. A logger
-  // prefix typed on the app source is not rendered on the tasks source, so
-  // including it unconditionally would latch the button on "Apply" for the rest
-  // of the session with no control able to clear it.
+  // Compared against the filters the *current* source actually uses. A user
+  // typed on the tasks source has no control on the app source, so including it
+  // unconditionally would latch the button on "Apply" for the rest of the
+  // session with nothing able to clear it.
   let filtersDirty = $derived(
     (applied.level ?? '') !== level ||
       (applied.q ?? '') !== query.trim() ||
-      (isTaskSource
-        ? (applied.user_id ?? '') !== userFilter.trim()
-        : (applied.logger ?? '') !== loggerFilter.trim()),
+      (isTaskSource ? (applied.user_id ?? '') !== userFilter.trim() : false),
   );
 
   function currentFilters(): AdminLogFilters {
     const f: AdminLogFilters = {};
     if (level) f.level = level;
     if (query.trim()) f.q = query.trim();
-    if (loggerFilter.trim() && !isTaskSource) f.logger = loggerFilter.trim();
     if (userFilter.trim() && isTaskSource) f.user_id = userFilter.trim();
     if (taskFilter !== null && isTaskSource) f.task_id = taskFilter;
     return f;
@@ -327,7 +323,10 @@
 </script>
 
 <div class="settings logs-page">
-  <div class="log-toolbar">
+  <!-- A field tier row: two Selects, two text inputs, a Chip and a Button in
+       one bar. Without the scope the inputs are the only members iOS floors at
+       16px, so on a phone they stand a head above everything beside them. -->
+  <div class="log-toolbar control-row">
     <Select
       value={sourceId}
       options={sourceOptions}
@@ -342,31 +341,34 @@
       ariaLabel="Minimum level"
       size="md"
     />
+    <!-- An ordinary search box, deliberately not monospace: it takes prose, not
+         an id. It already covers what a logger filter did — `q` is matched
+         against the logger name as well as the message, so typing a namespace
+         narrows to it (a substring rather than a prefix, which is the more
+         forgiving of the two when you are guessing at a name). -->
     <Input bind:value={query} placeholder="Search…" aria-label="Search log text" />
     {#if isTaskSource}
       <Input bind:value={userFilter} placeholder="User" aria-label="Filter by user" monospace />
-    {:else}
-      <Input
-        bind:value={loggerFilter}
-        placeholder="Logger prefix"
-        aria-label="Filter by logger prefix"
-        monospace
-      />
     {/if}
-    <Button onclick={() => load()} {loading} loadingLabel="Loading…">
-      {filtersDirty ? 'Apply' : 'Refresh'}
-    </Button>
-    <Chip checked={live} onclick={toggleLive} title="Follow new entries as they arrive">
-      {live ? 'Live' : 'Follow'}
-    </Chip>
-    {#if taskFilter !== null}
-      <!-- Set by clicking a `task N` cell; there is no input for it, because
-           picking a task off a row you are already reading is the way you
-           actually arrive at one. -->
-      <Chip checked onclick={clearTaskFilter} title="Clear the task filter">
-        task {taskFilter} ×
+    <!-- Grouped so the actions can be broken onto a row of their own under
+         768px. `display: contents` above that breakpoint, so on a wide screen
+         they stay direct flex items of the toolbar and the bar is unchanged. -->
+    <div class="log-actions">
+      <Button onclick={() => load()} {loading} loadingLabel="Loading…">
+        {filtersDirty ? 'Apply' : 'Refresh'}
+      </Button>
+      <Chip checked={live} onclick={toggleLive} title="Follow new entries as they arrive">
+        {live ? 'Live' : 'Follow'}
       </Chip>
-    {/if}
+      {#if taskFilter !== null}
+        <!-- Set by clicking a `task N` cell; there is no input for it, because
+             picking a task off a row you are already reading is the way you
+             actually arrive at one. -->
+        <Chip checked onclick={clearTaskFilter} title="Clear the task filter">
+          task {taskFilter} ×
+        </Chip>
+      {/if}
+    </div>
   </div>
 
   {#if activeSource}
@@ -394,7 +396,7 @@
       <div class="center-msg">Loading…</div>
     {:else if records.length === 0 && !error}
       <div class="center-msg">
-        {applied.q || applied.level || applied.logger || applied.user_id
+        {applied.q || applied.level || applied.user_id
           ? 'No entries match these filters.'
           : 'No entries yet.'}
       </div>
@@ -476,6 +478,32 @@
   .log-toolbar :global(input) {
     min-width: 9rem;
     max-width: 16rem;
+  }
+
+  /* Transparent to layout by default: the actions are laid out by the toolbar
+     itself, exactly as they were before they were grouped. */
+  .log-actions {
+    display: contents;
+  }
+
+  @media (max-width: 768px) {
+    /* On a phone the fields are floored to 16px while Button and Chip
+       deliberately are not, so an action landing beside a field is visibly
+       shorter than it — and where the wrap happened to fall decided which.
+       Giving the actions a row of their own settles the order and removes the
+       mismatch from view without restyling the control system, which is a
+       design change rather than a bug fix (ISSUE-220).
+
+       A width query, though the floor it answers to is `pointer: coarse`: this
+       is the layout ISSUE-220 asked for, and the two Selects on the fields row
+       are unfloored either way, so a coarse-pointer tablet above 768px keeps a
+       height mismatch this does not claim to fix. */
+    .log-actions {
+      display: flex;
+      flex-basis: 100%;
+      align-items: center;
+      gap: var(--space-2);
+    }
   }
 
   .source-note {

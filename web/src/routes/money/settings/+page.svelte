@@ -335,10 +335,10 @@
           <details open>
             <summary>
               <span class="summary-label">
-                Option A — Login with email and password
+                Log in with email and password
                 <HintPopover
                   label="About logging in with email and password"
-                  text="We sign in to Monarch on your behalf and store the session cookies it returns (session_id and csrftoken). Your password is used once and is never written to disk. If Monarch doesn't recognise this device it emails you a 6-digit code — enter it when asked. If Cloudflare blocks the request from this server, fall back to Option B."
+                  text="We sign in to Monarch on your behalf and store the session cookies it returns (session_id and csrftoken). Your password is used once and is never written to disk. If Monarch doesn't recognise this device it emails you a 6-digit code — enter it when asked. If Cloudflare blocks the request from this server, paste cookies from your browser instead."
                 />
               </span>
             </summary>
@@ -434,7 +434,7 @@
           </details>
 
           <details>
-            <summary>Option B — Paste cookies from your browser</summary>
+            <summary>Paste cookies from your browser</summary>
             <p class="hint">
               Use this when programmatic login is blocked by Cloudflare (common on cloud-hosted
               Istota deploys).
@@ -789,11 +789,15 @@
     margin-top: var(--space-2);
   }
 
+  /* Stacked, not label-beside-input. The field was a `120px 1fr` grid with no
+     responsive collapse, so on a narrow screen the caption ate a fixed slice of
+     a width that was not there and squeezed the input (ISSUE-222). Single
+     column unconditionally rather than at a breakpoint: this is four short
+     fields inside a disclosure, and nothing about it wants the horizontal
+     density that cost. */
   .login-form label {
     display: grid;
-    grid-template-columns: 120px 1fr;
-    gap: var(--space-2);
-    align-items: center;
+    gap: var(--space-1);
     font-size: var(--text-sm);
   }
 
@@ -803,6 +807,10 @@
 
   .login-form input {
     font: inherit;
+    /* Capped at the same 24rem a `Field` gives a text input. Stacking the
+       caption freed the 120px the old grid column took, and without a cap the
+       four short login fields would span the whole card on a desktop. */
+    max-width: 24rem;
     /* Names the token rather than inheriting the label's computed size: the
        iOS zoom floor in app.css redefines the type tokens on the control, so
        an inherited size arrives already under the line and zooms. */
