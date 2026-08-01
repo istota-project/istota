@@ -18,11 +18,17 @@
     type BusinessDefaults,
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { ServiceCard, SettingsLayout, SettingsCard } from '$lib/components/settings';
+  import {
+    ServiceCard,
+    SettingsLayout,
+    SettingsCard,
+    SettingsField,
+  } from '$lib/components/settings';
   import {
     Button,
     ConfirmDialog,
     HintPopover,
+    Input,
     KebabMenu,
     NoticeBanner,
     type KebabItem,
@@ -325,14 +331,11 @@
   {:else}
     {#each moduleServices as svc (svc.service)}
       {#if svc.service === 'monarch'}
-        <div class="monarch-help">
-          <h3>Connect to Monarch Money</h3>
-          <p>
-            Monarch's API requires browser session cookies. Pick the method that works for your
-            account:
-          </p>
-
-          <details open>
+        <SettingsCard
+          title="Connect to Monarch Money"
+          description="Monarch's API requires browser session cookies. Pick the method that works for your account."
+        >
+          <details class="monarch-method" open>
             <summary>
               <span class="summary-label">
                 Log in with email and password
@@ -349,48 +352,43 @@
                 void submitLogin();
               }}
             >
-              <label>
-                <span>Email</span>
-                <input
+              <SettingsField label="Email">
+                <Input
                   type="email"
                   bind:value={loginEmail}
                   autocomplete="off"
                   disabled={loginBusy}
                   required
                 />
-              </label>
-              <label>
-                <span>Password</span>
-                <input
+              </SettingsField>
+              <SettingsField label="Password">
+                <Input
                   type="password"
                   bind:value={loginPassword}
                   autocomplete="off"
                   disabled={loginBusy}
                   required
                 />
-              </label>
+              </SettingsField>
               {#if loginChallenge}
-                <label>
-                  <span>
-                    {loginChallenge === 'email_otp' ? 'Emailed code' : 'Authenticator code'}
-                  </span>
-                  <!-- svelte-ignore a11y_autofocus -->
-                  <input
+                <SettingsField
+                  label={loginChallenge === 'email_otp' ? 'Emailed code' : 'Authenticator code'}
+                >
+                  <Input
                     type="text"
                     inputmode="numeric"
                     pattern="[0-9]*"
-                    maxlength="6"
+                    maxlength={6}
                     bind:value={loginCode}
                     autocomplete="one-time-code"
                     disabled={loginBusy}
                     placeholder="6-digit code"
                     autofocus
                   />
-                </label>
+                </SettingsField>
               {:else}
-                <label>
-                  <span>MFA code <small>(if MFA enabled)</small></span>
-                  <input
+                <SettingsField label="MFA code" hint="Only if your account has MFA enabled.">
+                  <Input
                     type="text"
                     inputmode="numeric"
                     pattern="[0-9]*"
@@ -399,7 +397,7 @@
                     disabled={loginBusy}
                     placeholder="6-digit code"
                   />
-                </label>
+                </SettingsField>
               {/if}
               <div class="login-actions">
                 <Button
@@ -433,7 +431,7 @@
             </form>
           </details>
 
-          <details>
+          <details class="monarch-method">
             <summary>Paste cookies from your browser</summary>
             <p class="hint">
               Use this when programmatic login is blocked by Cloudflare (common on cloud-hosted
@@ -459,7 +457,7 @@
           <p class="legacy-note">
             Cookies are the only credential we store. They last months on a trusted-device login.
           </p>
-        </div>
+        </SettingsCard>
       {/if}
       <ServiceCard service={svc} onChanged={loadServices} />
     {/each}
@@ -712,114 +710,78 @@
     table-layout: auto;
   }
 
-  .monarch-help {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-3) var(--space-4);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-  }
-
-  .monarch-help h3 {
-    margin: 0 0 var(--space-2);
-    font-size: var(--text-sm);
-    color: var(--text-primary);
-  }
-
-  .monarch-help p,
-  .monarch-help ol {
-    margin: var(--space-1) 0;
-  }
-
-  .monarch-help ol {
-    padding-left: 1.25rem;
-  }
-
-  .monarch-help li {
-    margin: 0.1rem 0;
-  }
-
-  .monarch-help code {
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
-    font-size: 0.92em;
-  }
-
-  .monarch-help .legacy-note {
-    margin-top: var(--space-2);
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-  }
-
-  .monarch-help details {
+  /* The two connection methods, as disclosures inside the card. A tile on a
+     card, so `--surface-raised` against the card's own fill is the tile
+     contrast — the panel around them used to be a hand-rolled card at
+     card level, which put a different fill and a stronger border beside every
+     real SettingsCard on the page. */
+  .monarch-method {
     margin: var(--space-2) 0;
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
     padding: var(--space-2) var(--space-3);
     background: var(--surface-raised);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
   }
 
-  .monarch-help summary {
+  .monarch-method summary {
     cursor: pointer;
     font-weight: 600;
     color: var(--text-primary);
+  }
+
+  .monarch-method p,
+  .monarch-method ol {
+    margin: var(--space-1) 0;
+  }
+
+  .monarch-method ol {
+    padding-left: 1.25rem;
+  }
+
+  .monarch-method li {
+    margin: 0.1rem 0;
+  }
+
+  .monarch-method code {
+    background: var(--surface-base);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    font-size: 0.92em;
   }
 
   /* The hint trigger rides inside the <summary> so it sits beside the label
      rather than below the disclosure. `display: inline-flex` on a wrapper —
      not on the summary itself, which would drop the disclosure triangle in
      some engines — keeps the "?" aligned to the text baseline box. */
-  .monarch-help .summary-label {
+  .monarch-method .summary-label {
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
   }
 
-  .monarch-help .hint {
+  .monarch-method .hint {
     color: var(--text-dim);
     font-size: var(--text-xs);
     margin: var(--space-1) 0;
   }
 
+  .legacy-note {
+    margin: var(--space-2) 0 0;
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+  }
+
+  /* Stacked, not label-beside-input — that is `Field`'s arrangement, and it is
+     now `Field` doing it. The fields were a hand-rolled label + raw input
+     whose `--space-2` vertical padding and inherited 1.5 leading made them
+     ~8.6px taller than every other input on the page, with no tier min-height
+     to bring them back. */
   .login-form {
     display: grid;
     gap: var(--space-2);
     margin-top: var(--space-2);
-  }
-
-  /* Stacked, not label-beside-input. The field was a `120px 1fr` grid with no
-     responsive collapse, so on a narrow screen the caption ate a fixed slice of
-     a width that was not there and squeezed the input (ISSUE-222). Single
-     column unconditionally rather than at a breakpoint: this is four short
-     fields inside a disclosure, and nothing about it wants the horizontal
-     density that cost. */
-  .login-form label {
-    display: grid;
-    gap: var(--space-1);
-    font-size: var(--text-sm);
-  }
-
-  .login-form label span {
-    color: var(--text-dim);
-  }
-
-  .login-form input {
-    font: inherit;
-    /* Capped at the same 24rem a `Field` gives a text input. Stacking the
-       caption freed the 120px the old grid column took, and without a cap the
-       four short login fields would span the whole card on a desktop. */
-    max-width: 24rem;
-    /* Names the token rather than inheriting the label's computed size: the
-       iOS zoom floor in app.css redefines the type tokens on the control, so
-       an inherited size arrives already under the line and zooms. */
-    font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border-default);
-    background: var(--surface-base);
-    color: var(--text-primary);
   }
 
   .login-actions {

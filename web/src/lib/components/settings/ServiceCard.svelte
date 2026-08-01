@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button } from '$lib/components/ui';
+  import { Button, ConfirmDialog } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SecretField from './SecretField.svelte';
@@ -39,6 +39,15 @@
   let confirmingClearKey: string | null = $state(null);
 
   let dirty = $derived(Object.values(pending).some((v) => v && v.length > 0));
+
+  let clearMessage = $derived.by(() => {
+    const field = service.fields.find((f) => f.key === confirmingClearKey);
+    return (
+      `Are you sure you want to clear the stored ${field?.label ?? 'value'} ` +
+      `for ${service.label}? The credential is deleted from the server and ` +
+      'cannot be recovered — you would have to enter it again.'
+    );
+  });
 
   function setFieldValue(key: string, next: string) {
     pending = { ...pending, [key]: next };
@@ -159,21 +168,28 @@
         onValueChange={(v) => setFieldValue(f.key, v)}
         onRequestClear={() => (confirmingClearKey = f.key)}
       />
-      {#if confirmingClearKey === f.key}
-        <div class="clear-confirm">
-          <span>Clear stored <code>{f.label}</code>?</span>
-          <Button variant="ghost" size="sm" onclick={() => (confirmingClearKey = null)}>
-            Cancel
-          </Button>
-          <Button variant="primary" size="sm" onclick={() => performClear(f.key)}>Clear</Button>
-        </div>
-      {/if}
     {/each}
     {#if saveError}
       <div class="banner error">{saveError}</div>
     {/if}
   {/if}
 </section>
+
+<!--
+  Clearing a stored credential is destructive and irreversible, so it goes
+  through the shared dialog like every other such action — it used to be a
+  hand-rolled inline row whose confirm button was `primary`, i.e. the same
+  affordance as Save. One dialog outside the loop rather than one per field:
+  `confirmingClearKey` already names the single field being cleared.
+-->
+<ConfirmDialog
+  open={confirmingClearKey !== null}
+  title="Clear stored value"
+  message={clearMessage}
+  confirmLabel="Clear"
+  onConfirm={() => confirmingClearKey && performClear(confirmingClearKey)}
+  onCancel={() => (confirmingClearKey = null)}
+/>
 
 <style>
   /* Inherit shared .settings .card / .section-header / .status-pill /
@@ -201,13 +217,5 @@
   .saved-flash {
     font-size: var(--text-xs);
     color: var(--status-success-fg);
-  }
-
-  .clear-confirm {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 </style>

@@ -824,6 +824,12 @@
     width: 2.75rem;
   }
 
+  /* A borderless cell editor, not a field: the box appears on hover/focus so a
+     row of titles reads as text until you reach for one. `Input` cannot express
+     that, so this stays hand-rolled — but it takes the tier height and the
+     leading pin, or the row's own height is set by this cell's 1.5 leading and
+     it sits taller than the IconButtons in the cells beside it. The transparent
+     border is what keeps the box from shifting when it appears. */
   .grid input[type='text'] {
     width: 100%;
     background: transparent;
@@ -833,6 +839,8 @@
     padding: 0.2rem var(--space-1);
     font: inherit;
     font-size: var(--text-sm);
+    line-height: 1.2;
+    min-height: var(--control-height-md);
   }
 
   .grid input[type='text']:focus,

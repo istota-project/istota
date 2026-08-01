@@ -1,6 +1,11 @@
 /* Shared styles for settings pages — /settings, /feeds/settings, /money/settings.
    Pages declare a wrapper element with class="settings" and use the
-   .card / .section-header / .field / .banner / .grid primitives below. */
+   .card / .section-header / .grid primitives below.
+
+   Form rows are NOT here: `.field` moved to ui/Field.svelte, which is also
+   what styles a bare <input> a caller passes into it. A settings page reaches
+   for SettingsField / Field / Input rather than restating their declarations —
+   see settingsControls.test.ts for why. */
 
 .settings {
   width: 100%;

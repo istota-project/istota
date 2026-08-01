@@ -1,4 +1,8 @@
 <script lang="ts">
+  import Field from '../ui/Field.svelte';
+  import Input from '../ui/Input.svelte';
+  import IconButton from '../ui/IconButton.svelte';
+
   interface Props {
     label: string;
     type?: 'text' | 'email' | 'password' | 'url';
@@ -18,83 +22,55 @@
     onValueChange,
     onRequestClear,
   }: Props = $props();
+
+  let showClear = $derived(configured && !!onRequestClear);
 </script>
 
-<label class="secret-field">
-  <span class="secret-label">{label}</span>
+<!--
+  Field + Input + IconButton. This used to restate Field's descendant rule
+  declaration-for-declaration while dropping the two lines that are not
+  obvious — the tier `min-height` and the `line-height` that has to be pinned
+  beside `font: inherit` — so on touch it computed ~34.8px against a 32px tier
+  and stood proud of every control beside it. It renders on five settings
+  pages, which made it the widest copy of that bug in the tree.
+
+  `labelled` is false only while the clear button is present: a <button> is a
+  labelable element, so inside a <label> it would become the label's implicit
+  control and clicking the field's caption would clear the stored secret. With
+  no button there is nothing to steal the association, and clicking the caption
+  should focus the input as it does in every other field.
+-->
+<Field {label} labelled={!showClear}>
   <div class="secret-row">
-    <input
-      class="secret-input"
+    <Input
       {type}
+      {value}
+      {disabled}
       autocomplete="new-password"
       placeholder={configured ? '•••• stored — enter to replace' : 'Enter value'}
-      {value}
-      oninput={(e) => onValueChange((e.currentTarget as HTMLInputElement).value)}
-      {disabled}
+      aria-label={showClear ? label : undefined}
+      oninput={(e: Event) => onValueChange((e.currentTarget as HTMLInputElement).value)}
     />
-    {#if configured && onRequestClear}
-      <button
-        class="secret-clear"
+    {#if showClear}
+      <IconButton
+        label="Clear stored {label}"
         title="Clear stored value"
-        type="button"
+        danger
         {disabled}
-        onclick={onRequestClear}>×</button
+        onclick={onRequestClear}>×</IconButton
       >
     {/if}
   </div>
-</label>
+</Field>
 
 <style>
-  .secret-field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-  }
-
-  .secret-label {
-    color: var(--text-muted);
-  }
-
+  /* Carries the input's own 24rem cap so the button rides inside it rather
+     than pushing past — a field with a clear button and one without have to
+     end at the same edge, or the card's right margin moves per row. */
   .secret-row {
     display: flex;
     gap: var(--space-2);
     align-items: center;
-  }
-
-  .secret-input {
-    background: var(--surface-base);
-    color: var(--text-primary);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-2);
-    font: inherit;
-    font-size: var(--text-sm);
-    width: 100%;
     max-width: 24rem;
-    min-width: 0;
-    box-sizing: border-box;
-  }
-
-  .secret-clear {
-    background: transparent;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 0.1rem var(--space-2);
-    border-radius: var(--radius-sm);
-    font: inherit;
-    font-size: var(--text-base);
-    line-height: 1;
-  }
-
-  .secret-clear:hover:not(:disabled) {
-    color: var(--status-danger-fg);
-    background: var(--surface-raised);
-  }
-
-  .secret-clear:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
   }
 </style>

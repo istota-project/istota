@@ -160,9 +160,6 @@ export const RULES = [
       'src/lib/components/ui/IconButton.svelte',
       'src/lib/components/ui/Field.svelte',
       'src/lib/components/ui/Chip.svelte',
-      // The settings-page shell styles a `.field` a caller composes by hand;
-      // it predates Field and is the section's documented contract.
-      'src/lib/styles/settings.css',
     ],
     hint: 'this class belongs to a ui/ primitive — use the component instead',
   },

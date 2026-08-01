@@ -36,6 +36,7 @@
     Button,
     ConfirmDialog,
     IconButton,
+    Input,
     KebabMenu,
     Select,
     type KebabItem,
@@ -1315,11 +1316,12 @@
             </div>
           {/if}
 
-          <div class="add-block">
-            <input
+          <div class="add-block control-row">
+            <Input
               placeholder="New block title (e.g. World News)"
+              aria-label="New block title"
               bind:value={newBlockTitle}
-              onkeydown={(e) => {
+              onkeydown={(e: KeyboardEvent) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
                   addBlock();
@@ -1449,12 +1451,15 @@
               {/if}
               {#each sharedDraft.sources as src, i (i)}
                 <div class="sb-source">
-                  <button
-                    type="button"
-                    class="sb-source-remove"
-                    title="Remove source"
-                    onclick={() => removeSharedSource(i)}>×</button
-                  >
+                  <span class="sb-source-remove">
+                    <IconButton
+                      label="Remove source {i + 1}"
+                      title="Remove source"
+                      size="sm"
+                      danger
+                      onclick={() => removeSharedSource(i)}>×</IconButton
+                    >
+                  </span>
                   <SettingsField label="Type">
                     <Select
                       value={src.kind}
@@ -1846,15 +1851,12 @@
     margin-top: var(--space-3);
   }
 
-  .add-block input {
+  /* `control-row` on the wrapper is what levels the input with the Button
+     beside it: the input was a hand-rolled box at double the canonical
+     vertical padding, so the row sat uneven at every text scale and split
+     further on touch. The flex-grow is all that is left to say here. */
+  .add-block :global(.ui-input) {
     flex: 1;
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    padding: var(--space-2) var(--space-2);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
   }
 
   /* The blocks table's own responsive columns are driven from the script (see
@@ -1954,20 +1956,14 @@
     flex-basis: 100%;
     margin: 0;
   }
+  /* A positioning wrapper, so the IconButton inside keeps its own padding and
+     hit area rather than having them overwritten to place it. */
   .sb-source-remove {
     position: absolute;
     top: 0.35rem;
     right: 0.4rem;
-    background: none;
-    border: none;
-    cursor: pointer;
     font-size: 1.25rem;
     line-height: 1;
-    padding: 0.1rem var(--space-1);
-    color: var(--text-muted);
-  }
-  .sb-source-remove:hover {
-    color: var(--text-primary);
   }
   @container settings (max-width: 560px) {
     .sb-grid {
