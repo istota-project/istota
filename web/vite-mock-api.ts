@@ -6397,6 +6397,555 @@ const handlers: MockHandler[] = [
       return undefined;
     };
   })(),
+  // Portfolio (positions snapshots) mock — a small stateful closure mirroring
+  // the server's read-time semantics: exclusion + classification resolve at
+  // read time, so toggling an account or editing a classification reshapes
+  // the summary the way the real API does.
+  (() => {
+    const PREFIX = '/istota/api/money/portfolio';
+
+    interface MockPosition {
+      account: string;
+      symbol: string; // normalized
+      description: string;
+      row_type: 'position' | 'cash' | 'pending';
+      quantity: number | null;
+      price: number | null;
+      value: number;
+      cost_basis: number | null;
+    }
+    interface MockSnapshot {
+      id: number;
+      exported_at: string;
+      exported_at_estimated: boolean;
+      imported_at: string;
+      source: string;
+      source_file: string | null;
+      positions: MockPosition[];
+    }
+
+    const accounts = [
+      {
+        id: 1,
+        account_name: 'Taxable Brokerage',
+        account_number: 'X111',
+        owner: 'Alice',
+        account_type: 'taxable',
+        excluded: false,
+        first_seen_at: '2026-01-05T09:00:00Z',
+        last_seen_at: '2026-07-01T09:00:00Z',
+      },
+      {
+        id: 2,
+        account_name: 'Roth IRA A',
+        account_number: 'X222',
+        owner: 'Alice',
+        account_type: 'retirement',
+        excluded: false,
+        first_seen_at: '2026-01-05T09:00:00Z',
+        last_seen_at: '2026-07-01T09:00:00Z',
+      },
+      {
+        id: 3,
+        account_name: 'Active Trading (IBKR)',
+        account_number: 'X333',
+        owner: 'Alice',
+        account_type: 'trading',
+        excluded: false,
+        first_seen_at: '2026-02-10T09:00:00Z',
+        last_seen_at: '2026-07-01T09:00:00Z',
+      },
+      {
+        id: 4,
+        account_name: 'Joint Brokerage',
+        account_number: 'X444',
+        owner: 'Bob',
+        account_type: 'taxable',
+        excluded: false,
+        first_seen_at: '2026-01-05T09:00:00Z',
+        last_seen_at: '2026-07-01T09:00:00Z',
+      },
+      {
+        id: 5,
+        account_name: 'SK Tax',
+        account_number: 'X555',
+        owner: 'Alice',
+        account_type: 'cash',
+        excluded: true,
+        first_seen_at: '2026-01-05T09:00:00Z',
+        last_seen_at: '2026-07-01T09:00:00Z',
+      },
+    ];
+
+    const classifications = [
+      {
+        symbol: 'VTI',
+        asset_class: 'Stocks',
+        sub_class: 'Total Market',
+        geography: 'US',
+        updated_at: '2026-01-05T09:00:00Z',
+      },
+      {
+        symbol: 'VXUS',
+        asset_class: 'Stocks',
+        sub_class: 'Total Market',
+        geography: 'International',
+        updated_at: '2026-01-05T09:00:00Z',
+      },
+      {
+        symbol: 'SGOV',
+        asset_class: 'Fixed Income',
+        sub_class: 'Short-Term',
+        geography: 'US',
+        updated_at: '2026-01-05T09:00:00Z',
+      },
+      {
+        symbol: 'PDBC',
+        asset_class: 'Commodities',
+        sub_class: 'Broad Basket',
+        geography: 'Global',
+        updated_at: '2026-01-05T09:00:00Z',
+      },
+      {
+        symbol: 'SPAXX',
+        asset_class: 'Cash & Equivalents',
+        sub_class: 'Money Market',
+        geography: 'US',
+        updated_at: '2026-01-05T09:00:00Z',
+      },
+      {
+        symbol: 'FBTC',
+        asset_class: 'Alternative',
+        sub_class: 'Cryptocurrency',
+        geography: 'US',
+        updated_at: '2026-01-05T09:00:00Z',
+      },
+    ];
+
+    function pos(
+      account: string,
+      symbol: string,
+      quantity: number | null,
+      price: number | null,
+      value: number,
+      costBasis: number | null,
+      rowType: 'position' | 'cash' | 'pending' = 'position',
+    ): MockPosition {
+      return {
+        account,
+        symbol,
+        description: symbol ? `${symbol} FUND` : 'Pending Activity',
+        row_type: rowType,
+        quantity,
+        price,
+        value,
+        cost_basis: costBasis,
+      };
+    }
+
+    let nextSnapshotId = 4;
+    const snapshots: MockSnapshot[] = [
+      {
+        id: 1,
+        exported_at: '2026-05-02T10:15:00',
+        exported_at_estimated: false,
+        imported_at: '2026-05-02T17:20:00Z',
+        source: 'fidelity-positions-csv',
+        source_file: 'Portfolio_Positions_May-02-2026.csv',
+        positions: [
+          pos('Taxable Brokerage', 'VTI', 500, 350.1, 175050, 140000),
+          pos('Taxable Brokerage', 'VXUS', 600, 80.2, 48120, 40000),
+          pos('Taxable Brokerage', 'SPAXX', null, null, 1200, null, 'cash'),
+          pos('Roth IRA A', 'VTI', 150, 350.1, 52515, 38000),
+          pos('Active Trading (IBKR)', 'GOOG', 40, 340.0, 13600, 14600),
+          pos('Joint Brokerage', 'FZDXX', 230000, 1.0, 230000, null, 'cash'),
+          pos('SK Tax', 'CORE', null, null, 1800, null, 'cash'),
+        ],
+      },
+      {
+        id: 2,
+        exported_at: '2026-06-15T09:00:00',
+        exported_at_estimated: false,
+        imported_at: '2026-06-15T16:00:00Z',
+        source: 'fidelity-positions-csv',
+        source_file: 'Portfolio_Positions_Jun-15-2026.csv',
+        positions: [
+          pos('Taxable Brokerage', 'VTI', 510, 360.5, 183855, 143500),
+          pos('Taxable Brokerage', 'VXUS', 610, 82.9, 50569, 40800),
+          pos('Taxable Brokerage', 'SPAXX', null, null, 900, null, 'cash'),
+          pos('Roth IRA A', 'VTI', 150, 360.5, 54075, 38000),
+          pos('Active Trading (IBKR)', 'GOOG', 40, 352.0, 14080, 14600),
+          pos('Active Trading (IBKR)', 'FBTC', 90, 60.0, 5400, 7300),
+          pos('Joint Brokerage', 'FZDXX', 232000, 1.0, 232000, null, 'cash'),
+          pos('SK Tax', 'CORE', null, null, 1850, null, 'cash'),
+        ],
+      },
+      {
+        id: 3,
+        exported_at: '2026-08-01T14:04:00',
+        exported_at_estimated: false,
+        imported_at: '2026-08-01T18:05:00Z',
+        source: 'fidelity-positions-csv',
+        source_file: 'Portfolio_Positions_Aug-01-2026.csv',
+        positions: [
+          pos('Taxable Brokerage', 'VTI', 518, 368.2, 190728, 145800),
+          pos('Taxable Brokerage', 'VXUS', 615, 84.6, 52029, 41600),
+          pos('Taxable Brokerage', 'SPAXX', null, null, 1.2, null, 'cash'),
+          pos('Roth IRA A', 'VTI', 151, 368.2, 55598, 39800),
+          pos('Active Trading (IBKR)', 'GOOG', 40, 357.9, 14316, 14600),
+          pos('Active Trading (IBKR)', 'FBTC', 97, 54.7, 5306, 7328),
+          pos('Active Trading (IBKR)', 'ZZZT', 100, 10.0, 1000, 1100),
+          pos('Active Trading (IBKR)', '', null, null, -120.5, null, 'pending'),
+          pos('Joint Brokerage', 'FZDXX', 233588, 1.0, 233588, null, 'cash'),
+          pos('SK Tax', 'CORE', null, null, 1780, null, 'cash'),
+        ],
+      },
+    ];
+
+    function accountFor(name: string) {
+      return accounts.find((a) => a.account_name === name);
+    }
+
+    function classify(p: MockPosition): {
+      asset_class: string;
+      sub_class: string;
+      geography: string;
+    } {
+      if (p.row_type !== 'position')
+        return { asset_class: 'Cash & Equivalents', sub_class: 'Cash', geography: 'US' };
+      const explicit = classifications.find((c) => c.symbol === p.symbol);
+      if (explicit) return explicit;
+      if (p.symbol === 'FZDXX' || p.symbol === 'CORE')
+        return { asset_class: 'Cash & Equivalents', sub_class: 'Money Market', geography: 'US' };
+      return { asset_class: 'Unclassified', sub_class: 'Unclassified', geography: 'Unclassified' };
+    }
+
+    function visiblePositions(snap: MockSnapshot, owner?: string | null) {
+      return snap.positions.filter((p) => {
+        const acct = accountFor(p.account);
+        if (!acct || acct.excluded) return false;
+        if (owner && acct.owner !== owner) return false;
+        return true;
+      });
+    }
+
+    function groupSums(rows: MockPosition[], labelFn: (p: MockPosition) => string) {
+      const sums = new Map<string, number>();
+      for (const p of rows) sums.set(labelFn(p), (sums.get(labelFn(p)) ?? 0) + p.value);
+      const total = [...sums.values()].reduce((a, b) => a + b, 0);
+      return [...sums.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([key, value]) => ({
+          key,
+          value: Math.round(value * 100) / 100,
+          pct: total ? Math.round((value / total) * 10000) / 10000 : 0,
+        }));
+    }
+
+    function summaryOf(snap: MockSnapshot, owner?: string | null) {
+      const rows = visiblePositions(snap, owner);
+      const total = rows.reduce((a, p) => a + p.value, 0);
+      const holdings = new Map<string, any>();
+      for (const p of rows) {
+        const key = p.row_type === 'position' ? p.symbol : 'CASH';
+        const h = holdings.get(key) ?? {
+          symbol: key,
+          description: key === 'CASH' ? 'Cash & equivalents' : p.description,
+          quantity: null,
+          value: 0,
+          cost_basis: null,
+          gain: null,
+          gain_pct: null,
+          ...(key === 'CASH'
+            ? { asset_class: 'Cash & Equivalents', sub_class: 'Cash', geography: 'US' }
+            : classify(p)),
+          accounts: new Set<string>(),
+        };
+        h.value += p.value;
+        if (p.quantity != null && key !== 'CASH') h.quantity = (h.quantity ?? 0) + p.quantity;
+        if (p.cost_basis != null) h.cost_basis = (h.cost_basis ?? 0) + p.cost_basis;
+        h.accounts.add(p.account);
+        holdings.set(key, h);
+      }
+      const holdingsList = [...holdings.values()]
+        .map((h) => ({
+          ...h,
+          accounts: h.accounts.size,
+          gain: h.cost_basis ? Math.round((h.value - h.cost_basis) * 100) / 100 : null,
+          gain_pct: h.cost_basis
+            ? Math.round(((h.value - h.cost_basis) / h.cost_basis) * 10000) / 10000
+            : null,
+        }))
+        .sort((a, b) => b.value - a.value);
+      const byAccount = groupSums(rows, (p) => p.account).map((g) => {
+        const acct = accountFor(g.key)!;
+        return { ...g, account_id: acct.id, owner: acct.owner, account_type: acct.account_type };
+      });
+      return {
+        snapshot_id: snap.id,
+        exported_at: snap.exported_at,
+        exported_at_estimated: snap.exported_at_estimated,
+        total_value: Math.round(total * 100) / 100,
+        position_count: rows.length,
+        by_asset_class: groupSums(rows, (p) => classify(p).asset_class),
+        by_account: byAccount,
+        by_account_type: groupSums(
+          rows,
+          (p) => accountFor(p.account)?.account_type || 'unspecified',
+        ),
+        by_owner: groupSums(rows, (p) => accountFor(p.account)?.owner || 'Unassigned'),
+        by_geography: groupSums(rows, (p) => classify(p).geography),
+        holdings: holdingsList,
+      };
+    }
+
+    function snapshotRow(snap: MockSnapshot) {
+      const rows = visiblePositions(snap);
+      return {
+        id: snap.id,
+        exported_at: snap.exported_at,
+        exported_at_estimated: snap.exported_at_estimated,
+        imported_at: snap.imported_at,
+        source: snap.source,
+        source_file: snap.source_file,
+        position_count: snap.positions.length,
+        total_value: Math.round(rows.reduce((a, p) => a + p.value, 0) * 100) / 100,
+      };
+    }
+
+    return ({ url, method, body }: MockReq) => {
+      if (!url.startsWith(PREFIX)) return undefined;
+      const [path, query] = url.slice(PREFIX.length).split('?');
+      const params = new URLSearchParams(query ?? '');
+
+      if (path === '/import' && method === 'POST') {
+        if (params.get('dry_run')) {
+          return {
+            status: 'ok',
+            dry_run: true,
+            snapshots: [
+              {
+                exported_at: new Date().toISOString().slice(0, 19),
+                exported_at_estimated: false,
+                source: 'fidelity-positions-csv',
+                position_count: 46,
+                total_value: 812345.67,
+                warnings: [],
+              },
+            ],
+          };
+        }
+        const replace = params.get('replace');
+        if (replace) {
+          const idx = snapshots.findIndex((s) => s.id === Number(replace));
+          if (idx >= 0) snapshots.splice(idx, 1);
+        }
+        const template = snapshots[snapshots.length - 1] ?? snapshots[0];
+        const snap: MockSnapshot = {
+          id: nextSnapshotId++,
+          exported_at: new Date().toISOString().slice(0, 19),
+          exported_at_estimated: false,
+          imported_at: new Date().toISOString(),
+          source: 'fidelity-positions-csv',
+          source_file: 'upload.csv',
+          positions: template ? template.positions.map((p) => ({ ...p })) : [],
+        };
+        snapshots.push(snap);
+        return {
+          status: 'ok',
+          snapshot_id: snap.id,
+          exported_at: snap.exported_at,
+          exported_at_estimated: false,
+          position_count: snap.positions.length,
+          total_value: snap.positions.reduce((a, p) => a + p.value, 0),
+          new_accounts: [],
+          unclassified_symbols: ['ZZZT'],
+          warnings: [],
+          source_file: snap.source_file,
+        };
+      }
+
+      if (path === '/snapshots' && method === 'GET') {
+        return {
+          status: 'ok',
+          snapshots: [...snapshots]
+            .sort((a, b) => (a.exported_at < b.exported_at ? 1 : -1))
+            .map(snapshotRow),
+        };
+      }
+
+      const snapMatch = path.match(/^\/snapshots\/(\d+)$/);
+      if (snapMatch) {
+        const snap = snapshots.find((s) => s.id === Number(snapMatch[1]));
+        if (method === 'GET') {
+          if (!snap) return { __status: 404, status: 'error', error: 'no such snapshot' };
+          return { status: 'ok', summary: summaryOf(snap, params.get('owner')) };
+        }
+        if (method === 'DELETE') {
+          if (!snap) return { __status: 404, status: 'error', error: 'no such snapshot' };
+          snapshots.splice(snapshots.indexOf(snap), 1);
+          return { status: 'ok', deleted: snap.id };
+        }
+      }
+
+      if (path === '/summary' && method === 'GET') {
+        if (snapshots.length === 0) return { status: 'ok', summary: null };
+        const latest = [...snapshots].sort((a, b) => (a.exported_at < b.exported_at ? 1 : -1))[0];
+        return { status: 'ok', summary: summaryOf(latest, params.get('owner')) };
+      }
+
+      if (path === '/history' && method === 'GET') {
+        const groupBy = params.get('group_by') ?? 'total';
+        const owner = params.get('owner');
+        const series = [...snapshots]
+          .sort((a, b) => (a.exported_at > b.exported_at ? 1 : -1))
+          .map((snap) => {
+            const rows = visiblePositions(snap, owner);
+            const point: any = {
+              snapshot_id: snap.id,
+              exported_at: snap.exported_at,
+              exported_at_estimated: snap.exported_at_estimated,
+              total: Math.round(rows.reduce((a, p) => a + p.value, 0) * 100) / 100,
+            };
+            if (groupBy !== 'total') {
+              const labelFn =
+                groupBy === 'owner'
+                  ? (p: MockPosition) => accountFor(p.account)?.owner || 'Unassigned'
+                  : groupBy === 'account_type'
+                    ? (p: MockPosition) => accountFor(p.account)?.account_type || 'unspecified'
+                    : (p: MockPosition) => classify(p).asset_class;
+              point.groups = Object.fromEntries(
+                groupSums(rows, labelFn).map((g) => [g.key, g.value]),
+              );
+            }
+            return point;
+          });
+        return { status: 'ok', group_by: groupBy, series };
+      }
+
+      if (path === '/diff' && method === 'GET') {
+        const older = snapshots.find((s) => s.id === Number(params.get('older')));
+        const newer = snapshots.find((s) => s.id === Number(params.get('newer')));
+        if (!older || !newer)
+          return { __status: 404, status: 'error', error: 'snapshot not found' };
+        const key = (p: MockPosition) =>
+          `${p.account}|${p.row_type === 'position' ? p.symbol : 'CASH'}`;
+        const agg = (snap: MockSnapshot) => {
+          const m = new Map<
+            string,
+            { symbol: string; account_name: string; quantity: number; value: number }
+          >();
+          for (const p of visiblePositions(snap)) {
+            const k = key(p);
+            const e = m.get(k) ?? {
+              symbol: p.row_type === 'position' ? p.symbol : 'CASH',
+              account_name: p.account,
+              quantity: 0,
+              value: 0,
+            };
+            e.quantity += p.quantity ?? 0;
+            e.value += p.value;
+            m.set(k, e);
+          }
+          return m;
+        };
+        const a = agg(older);
+        const b = agg(newer);
+        const opened = [...b.entries()].filter(([k]) => !a.has(k)).map(([, e]) => e);
+        const closed = [...a.entries()].filter(([k]) => !b.has(k)).map(([, e]) => e);
+        const changed = [...a.entries()]
+          .filter(([k]) => b.has(k))
+          .map(([k, e]) => {
+            const n = b.get(k)!;
+            return {
+              symbol: e.symbol,
+              account_name: e.account_name,
+              quantity_from: e.quantity,
+              quantity_to: n.quantity,
+              value_from: e.value,
+              value_to: n.value,
+            };
+          })
+          .filter(
+            (c) =>
+              Math.abs(c.quantity_from - c.quantity_to) > 1e-6 ||
+              Math.abs(c.value_from - c.value_to) > 0.01,
+          );
+        return {
+          status: 'ok',
+          diff: { older_id: older.id, newer_id: newer.id, opened, closed, changed },
+        };
+      }
+
+      const symMatch = path.match(/^\/symbols\/([^/]+)\/history$/);
+      if (symMatch && method === 'GET') {
+        const symbol = decodeURIComponent(symMatch[1]).toUpperCase();
+        const points = [...snapshots]
+          .sort((a, b) => (a.exported_at > b.exported_at ? 1 : -1))
+          .map((snap) => {
+            const rows = visiblePositions(snap).filter((p) => p.symbol === symbol);
+            if (rows.length === 0) return null;
+            return {
+              snapshot_id: snap.id,
+              exported_at: snap.exported_at,
+              quantity: rows.reduce((a, p) => a + (p.quantity ?? 0), 0),
+              price: rows[0].price,
+              value: Math.round(rows.reduce((a, p) => a + p.value, 0) * 100) / 100,
+            };
+          })
+          .filter((p) => p !== null);
+        return { status: 'ok', history: { symbol, points } };
+      }
+
+      if (path === '/accounts' && method === 'GET') {
+        return { status: 'ok', accounts };
+      }
+
+      const acctMatch = path.match(/^\/accounts\/(\d+)$/);
+      if (acctMatch && method === 'PATCH') {
+        const acct = accounts.find((a) => a.id === Number(acctMatch[1]));
+        if (!acct) return { __status: 404, status: 'error', error: 'no such account' };
+        const allowed = ['owner', 'account_type', 'excluded'];
+        const unknown = Object.keys(body ?? {}).filter((k) => !allowed.includes(k));
+        if (unknown.length)
+          return { __status: 400, status: 'error', error: `unknown fields: ${unknown.join(', ')}` };
+        Object.assign(acct, body);
+        return { status: 'ok', account: acct };
+      }
+
+      if (path === '/classifications' && method === 'GET') {
+        return { status: 'ok', classifications };
+      }
+
+      const clsMatch = path.match(/^\/classifications\/([^/]+)$/);
+      if (clsMatch) {
+        const symbol = decodeURIComponent(clsMatch[1]).replace(/\*+$/, '').toUpperCase();
+        if (method === 'PUT') {
+          if (!body?.asset_class?.trim())
+            return { __status: 400, status: 'error', error: 'asset_class is required' };
+          const existing = classifications.find((c) => c.symbol === symbol);
+          const record = {
+            symbol,
+            asset_class: body.asset_class,
+            sub_class: body.sub_class ?? '',
+            geography: body.geography ?? '',
+            updated_at: new Date().toISOString(),
+          };
+          if (existing) Object.assign(existing, record);
+          else classifications.push(record);
+          return { status: 'ok', classification: record };
+        }
+        if (method === 'DELETE') {
+          const idx = classifications.findIndex((c) => c.symbol === symbol);
+          if (idx < 0) return { __status: 404, status: 'error', error: 'no such classification' };
+          classifications.splice(idx, 1);
+          return { status: 'ok' };
+        }
+      }
+
+      return undefined;
+    };
+  })(),
 ];
 
 function readBody(req: any): Promise<any> {

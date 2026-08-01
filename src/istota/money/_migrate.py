@@ -536,6 +536,11 @@ def ensure_initialised(ctx: UserContext) -> None:
 
     db_path = ctx.db_path or (data_dir / "data" / "money.db")
     config_store.init_db(db_path)
+    # Tracking + portfolio schema families. The CLI's _get_db_conn used to be
+    # the only caller of db.init_db, which left web-route-only paths without
+    # the portfolio tables.
+    from istota.money.db import init_db as tracking_init_db
+    tracking_init_db(db_path)
     if ctx.db_path is None:
         ctx.db_path = db_path
 

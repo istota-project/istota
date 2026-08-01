@@ -14,7 +14,10 @@ import logging
 import math
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import File as FastAPIFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from istota.money._loader import UserNotFoundError, resolve_for_user
@@ -2151,7 +2154,6 @@ async def api_config_import(
     nothing is written.
     """
     import tomli
-    from istota.money import config_store
 
     text: str | None = None
     content_type = request.headers.get("content-type", "")
@@ -2213,3 +2215,401 @@ async def api_config_import(
         })
 
     return {"status": "ok", "dry_run": bool(dry_run), "sections": sections_out}
+
+
+# ---------------------------------------------------------------------------
+# Portfolio (positions snapshots)
+# ---------------------------------------------------------------------------
+
+
+def _portfolio_conn(user_ctx: UserContext):
+    """Open the per-user money DB for portfolio reads/writes.
+
+    ``resolve_for_user`` → ``ensure_initialised`` has already created the
+    schema; tests initialise via ``db.init_db`` themselves.
+    """
+    import sqlite3
+
+    if user_ctx.db_path is None:
+        raise HTTPException(500, "money DB not configured for this user")
+    conn = sqlite3.connect(str(user_ctx.db_path))
+    conn.execute("PRAGMA busy_timeout = 30000")
+    return conn
+
+
+@router.post("/portfolio/import")
+async def api_portfolio_import(
+    file: UploadFile = FastAPIFile(...),
+    dry_run: int = 0,
+    replace: int | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Import a positions CSV (Fidelity export or fina history file).
+
+    ``?dry_run=1`` returns the parse preview without writing. A duplicate
+    (same content hash) is a 409 naming the existing snapshot. A same-day
+    snapshot with different content returns ``{"status": "date_collision"}``
+    unless ``?replace=<old_id>`` is passed.
+    """
+    import tempfile
+
+    from istota.money import portfolio
+    from istota.money.core.importers import parse_positions_file
+    from istota.money.core.importers.positions_base import PositionParseError
+
+    raw = await file.read()
+    if not raw:
+        return _error("empty upload", 400)
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        tmp.write(raw)
+        tmp_path = Path(tmp.name)
+    try:
+        try:
+            snapshots = parse_positions_file(tmp_path)
+        except PositionParseError as exc:
+            return _error(str(exc), 400)
+
+        source_file = file.filename or "upload.csv"
+
+        if dry_run:
+            return {
+                "status": "ok",
+                "dry_run": True,
+                "snapshots": [
+                    {
+                        "exported_at": s.exported_at.isoformat(),
+                        "exported_at_estimated": s.exported_at_estimated,
+                        "source": s.source,
+                        "position_count": len(s.rows),
+                        "total_value": round(
+                            sum(r.value for r in s.rows if r.value is not None), 2
+                        ),
+                        "warnings": s.warnings,
+                    }
+                    for s in snapshots
+                ],
+            }
+
+        conn = _portfolio_conn(user_ctx)
+        try:
+            if replace is not None:
+                portfolio.delete_snapshot(conn, replace)
+            elif len(snapshots) == 1:
+                # Same-calendar-date collision check (single-export flow only —
+                # a fina-history migration legitimately spans many dates).
+                snap = snapshots[0]
+                if (
+                    portfolio._duplicate_result(
+                        conn, portfolio.compute_snapshot_hash(snap.rows)
+                    )
+                    is None
+                ):
+                    existing = portfolio.find_snapshot_by_date(conn, snap.exported_at)
+                    if existing is not None:
+                        return {
+                            "status": "date_collision",
+                            "existing": {
+                                "id": existing.id,
+                                "exported_at": existing.exported_at,
+                                "position_count": existing.position_count,
+                            },
+                            "position_count": len(snap.rows),
+                        }
+
+            results = [
+                portfolio.insert_snapshot(conn, s, source_file=source_file)
+                for s in snapshots
+            ]
+        finally:
+            conn.close()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    logger.info(
+        "portfolio_import source_file=%s snapshots=%s ok=%s duplicates=%s",
+        source_file, len(results),
+        sum(1 for r in results if r["status"] == "ok"),
+        sum(1 for r in results if r["status"] == "duplicate"),
+    )
+    if len(results) == 1:
+        result = dict(results[0])
+        result["source_file"] = source_file
+        if result["status"] == "duplicate":
+            return JSONResponse(result, status_code=409)
+        return result
+    return {
+        "status": "ok",
+        "imported": sum(1 for r in results if r["status"] == "ok"),
+        "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
+        "results": results,
+    }
+
+
+@router.get("/portfolio/snapshots")
+async def api_portfolio_snapshots(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        return {"status": "ok", "snapshots": portfolio.list_snapshots(conn)}
+    finally:
+        conn.close()
+
+
+@router.get("/portfolio/snapshots/{snapshot_id}")
+async def api_portfolio_snapshot_detail(
+    snapshot_id: int,
+    owner: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        summary = portfolio.snapshot_summary(conn, snapshot_id, owner=owner)
+        if summary is None:
+            return _error(f"no snapshot with id {snapshot_id}", 404)
+        return {"status": "ok", "summary": summary}
+    finally:
+        conn.close()
+
+
+@router.delete("/portfolio/snapshots/{snapshot_id}")
+async def api_portfolio_snapshot_delete(
+    snapshot_id: int,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        if not portfolio.delete_snapshot(conn, snapshot_id):
+            return _error(f"no snapshot with id {snapshot_id}", 404)
+        return {"status": "ok", "deleted": snapshot_id}
+    finally:
+        conn.close()
+
+
+@router.get("/portfolio/summary")
+async def api_portfolio_summary(
+    owner: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    """Summary of the latest snapshot; ``summary: null`` when nothing imported."""
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        snapshots = portfolio.list_snapshots(conn)
+        if not snapshots:
+            return {"status": "ok", "summary": None}
+        summary = portfolio.snapshot_summary(conn, snapshots[0]["id"], owner=owner)
+        return {"status": "ok", "summary": summary}
+    finally:
+        conn.close()
+
+
+@router.get("/portfolio/history")
+async def api_portfolio_history(
+    group_by: str = "total",
+    owner: str | None = None,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        try:
+            result = portfolio.history_series(conn, group_by=group_by, owner=owner)
+        except ValueError as exc:
+            return _error(str(exc), 400)
+        return {"status": "ok", **result}
+    finally:
+        conn.close()
+
+
+@router.get("/portfolio/diff")
+async def api_portfolio_diff(
+    older: int,
+    newer: int,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        diff = portfolio.snapshot_diff(conn, older, newer)
+        if diff is None:
+            return _error("one or both snapshot ids not found", 404)
+        return {"status": "ok", "diff": diff}
+    finally:
+        conn.close()
+
+
+@router.get("/portfolio/symbols/{symbol}/history")
+async def api_portfolio_symbol_history(
+    symbol: str,
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        return {"status": "ok", "history": portfolio.symbol_history(conn, symbol)}
+    finally:
+        conn.close()
+
+
+def _account_to_dict(account) -> dict:
+    from dataclasses import asdict
+
+    return asdict(account)
+
+
+@router.get("/portfolio/accounts")
+async def api_portfolio_accounts(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        return {
+            "status": "ok",
+            "accounts": [_account_to_dict(a) for a in portfolio.list_accounts(conn)],
+        }
+    finally:
+        conn.close()
+
+
+@router.patch("/portfolio/accounts/{account_id}")
+async def api_portfolio_account_patch(
+    account_id: int,
+    request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    from istota.money import portfolio
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _bad_body()
+    if not isinstance(body, dict):
+        return _bad_body()
+    allowed = {"owner", "account_type", "excluded"}
+    unknown = set(body) - allowed
+    if unknown:
+        return _error(f"unknown fields: {', '.join(sorted(unknown))}", 400)
+    for key in ("owner", "account_type"):
+        if key in body:
+            if not isinstance(body[key], str) or _CONTROL_CHARS_RE.search(body[key]):
+                return _error(f"{key} must be a plain string", 400)
+    if "excluded" in body and not isinstance(body["excluded"], bool):
+        return _error("excluded must be a boolean", 400)
+    if not body:
+        return _error("no fields to update", 400)
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        ok = portfolio.update_account(
+            conn, account_id,
+            owner=body.get("owner"),
+            account_type=body.get("account_type"),
+            excluded=body.get("excluded"),
+        )
+        if not ok:
+            return _error(f"no account with id {account_id}", 404)
+        return {"status": "ok", "account": _account_to_dict(portfolio.get_account(conn, account_id))}
+    finally:
+        conn.close()
+
+
+def _classification_to_dict(cls) -> dict:
+    return {
+        "symbol": cls.symbol_norm,
+        "asset_class": cls.asset_class,
+        "sub_class": cls.sub_class,
+        "geography": cls.geography,
+        "updated_at": cls.updated_at,
+    }
+
+
+@router.get("/portfolio/classifications")
+async def api_portfolio_classifications(user_ctx: UserContext = Depends(get_user_config)):
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        return {
+            "status": "ok",
+            "classifications": [
+                _classification_to_dict(c)
+                for c in portfolio.list_classifications(conn)
+            ],
+        }
+    finally:
+        conn.close()
+
+
+@router.put("/portfolio/classifications/{symbol}")
+async def api_portfolio_classification_put(
+    symbol: str,
+    request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    from istota.money import portfolio
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _bad_body()
+    if not isinstance(body, dict):
+        return _bad_body()
+    allowed = {"asset_class", "sub_class", "geography"}
+    unknown = set(body) - allowed
+    if unknown:
+        return _error(f"unknown fields: {', '.join(sorted(unknown))}", 400)
+    for key in allowed:
+        value = body.get(key, "")
+        if not isinstance(value, str) or _CONTROL_CHARS_RE.search(value):
+            return _error(f"{key} must be a plain string", 400)
+    if not body.get("asset_class", "").strip():
+        return _error("asset_class is required", 400)
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        try:
+            norm = portfolio.set_classification(
+                conn, symbol,
+                asset_class=body["asset_class"],
+                sub_class=body.get("sub_class", ""),
+                geography=body.get("geography", ""),
+            )
+        except ValueError as exc:
+            return _error(str(exc), 400)
+        cls = next(
+            c for c in portfolio.list_classifications(conn) if c.symbol_norm == norm
+        )
+        return {"status": "ok", "classification": _classification_to_dict(cls)}
+    finally:
+        conn.close()
+
+
+@router.delete("/portfolio/classifications/{symbol}")
+async def api_portfolio_classification_delete(
+    symbol: str,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    from istota.money import portfolio
+
+    conn = _portfolio_conn(user_ctx)
+    try:
+        if not portfolio.delete_classification(conn, symbol):
+            return _error(f"no classification for {symbol}", 404)
+        return {"status": "ok"}
+    finally:
+        conn.close()

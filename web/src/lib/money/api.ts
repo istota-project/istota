@@ -725,4 +725,262 @@ export async function recalculateTaxEstimate(
   });
 }
 
+// --- Portfolio (positions snapshots) ---
+
+export interface PortfolioSnapshotRow {
+  id: number;
+  exported_at: string;
+  exported_at_estimated: boolean;
+  imported_at: string;
+  source: string;
+  source_file: string | null;
+  position_count: number;
+  /** Read-time total over non-excluded accounts. */
+  total_value: number;
+}
+
+export interface PortfolioGroupSlice {
+  key: string;
+  value: number;
+  pct: number;
+}
+
+export interface PortfolioAccountSlice extends PortfolioGroupSlice {
+  account_id: number;
+  owner: string;
+  account_type: string;
+}
+
+export interface PortfolioHolding {
+  symbol: string;
+  description: string;
+  quantity: number | null;
+  value: number;
+  cost_basis: number | null;
+  gain: number | null;
+  gain_pct: number | null;
+  asset_class: string;
+  sub_class: string;
+  geography: string;
+  accounts: number;
+}
+
+export interface PortfolioSummary {
+  snapshot_id: number;
+  exported_at: string;
+  exported_at_estimated: boolean;
+  total_value: number;
+  position_count: number;
+  by_asset_class: PortfolioGroupSlice[];
+  by_account: PortfolioAccountSlice[];
+  by_account_type: PortfolioGroupSlice[];
+  by_owner: PortfolioGroupSlice[];
+  by_geography: PortfolioGroupSlice[];
+  holdings: PortfolioHolding[];
+}
+
+export interface PortfolioHistoryPoint {
+  snapshot_id: number;
+  exported_at: string;
+  exported_at_estimated: boolean;
+  total: number;
+  groups?: Record<string, number>;
+}
+
+export interface PortfolioAccount {
+  id: number;
+  account_name: string;
+  account_number: string;
+  owner: string;
+  account_type: string;
+  excluded: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface PortfolioClassification {
+  symbol: string;
+  asset_class: string;
+  sub_class: string;
+  geography: string;
+  updated_at: string;
+}
+
+export interface PortfolioImportResult {
+  status: string;
+  snapshot_id?: number;
+  exported_at?: string;
+  exported_at_estimated?: boolean;
+  position_count?: number;
+  total_value?: number;
+  new_accounts?: string[];
+  unclassified_symbols?: string[];
+  warnings?: string[];
+  source_file?: string;
+  dry_run?: boolean;
+  snapshots?: {
+    exported_at: string;
+    exported_at_estimated: boolean;
+    source: string;
+    position_count: number;
+    total_value: number;
+    warnings: string[];
+  }[];
+  /** Multi-snapshot (fina history) import. */
+  imported?: number;
+  duplicates?: number;
+  results?: PortfolioImportResult[];
+  /** Same-day collision. */
+  existing?: { id: number; exported_at: string; position_count: number };
+}
+
+export interface PortfolioDiffEntry {
+  symbol: string;
+  account_name: string;
+  quantity: number;
+  value: number;
+}
+
+export interface PortfolioDiffChange {
+  symbol: string;
+  account_name: string;
+  quantity_from: number;
+  quantity_to: number;
+  value_from: number;
+  value_to: number;
+}
+
+export interface PortfolioDiff {
+  older_id: number;
+  newer_id: number;
+  opened: PortfolioDiffEntry[];
+  closed: PortfolioDiffEntry[];
+  changed: PortfolioDiffChange[];
+}
+
+export interface PortfolioSymbolHistory {
+  symbol: string;
+  points: {
+    snapshot_id: number;
+    exported_at: string;
+    quantity: number | null;
+    price: number | null;
+    value: number | null;
+  }[];
+}
+
+export async function importPortfolioFile(
+  file: File,
+  opts?: { dryRun?: boolean; replace?: number },
+): Promise<PortfolioImportResult> {
+  const params = new URLSearchParams();
+  if (opts?.dryRun) params.set('dry_run', '1');
+  if (opts?.replace != null) params.set('replace', String(opts.replace));
+  const qs = params.toString();
+  const form = new FormData();
+  form.append('file', file);
+  return apiFetch<PortfolioImportResult>(`/portfolio/import${qs ? '?' + qs : ''}`, {
+    method: 'POST',
+    body: form,
+  });
+}
+
+export async function getPortfolioSnapshots(): Promise<{
+  status: string;
+  snapshots: PortfolioSnapshotRow[];
+}> {
+  return apiFetch('/portfolio/snapshots');
+}
+
+export async function getPortfolioSnapshotSummary(
+  id: number,
+  opts?: { owner?: string },
+): Promise<{ status: string; summary: PortfolioSummary }> {
+  const params = new URLSearchParams();
+  if (opts?.owner) params.set('owner', opts.owner);
+  const qs = params.toString();
+  return apiFetch(`/portfolio/snapshots/${id}${qs ? '?' + qs : ''}`);
+}
+
+export async function deletePortfolioSnapshot(
+  id: number,
+): Promise<{ status: string; deleted: number }> {
+  return apiFetch(`/portfolio/snapshots/${id}`, { method: 'DELETE' });
+}
+
+export async function getPortfolioSummary(opts?: {
+  owner?: string;
+}): Promise<{ status: string; summary: PortfolioSummary | null }> {
+  const params = new URLSearchParams();
+  if (opts?.owner) params.set('owner', opts.owner);
+  const qs = params.toString();
+  return apiFetch(`/portfolio/summary${qs ? '?' + qs : ''}`);
+}
+
+export async function getPortfolioHistory(opts?: {
+  groupBy?: 'total' | 'owner' | 'account_type' | 'asset_class';
+  owner?: string;
+}): Promise<{ status: string; group_by: string; series: PortfolioHistoryPoint[] }> {
+  const params = new URLSearchParams();
+  if (opts?.groupBy) params.set('group_by', opts.groupBy);
+  if (opts?.owner) params.set('owner', opts.owner);
+  const qs = params.toString();
+  return apiFetch(`/portfolio/history${qs ? '?' + qs : ''}`);
+}
+
+export async function getPortfolioDiff(
+  older: number,
+  newer: number,
+): Promise<{ status: string; diff: PortfolioDiff }> {
+  return apiFetch(`/portfolio/diff?older=${older}&newer=${newer}`);
+}
+
+export async function getPortfolioSymbolHistory(
+  symbol: string,
+): Promise<{ status: string; history: PortfolioSymbolHistory }> {
+  return apiFetch(`/portfolio/symbols/${encodeURIComponent(symbol)}/history`);
+}
+
+export async function getPortfolioAccounts(): Promise<{
+  status: string;
+  accounts: PortfolioAccount[];
+}> {
+  return apiFetch('/portfolio/accounts');
+}
+
+export async function patchPortfolioAccount(
+  id: number,
+  fields: { owner?: string; account_type?: string; excluded?: boolean },
+): Promise<{ status: string; account: PortfolioAccount }> {
+  return apiFetch(`/portfolio/accounts/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+}
+
+export async function getPortfolioClassifications(): Promise<{
+  status: string;
+  classifications: PortfolioClassification[];
+}> {
+  return apiFetch('/portfolio/classifications');
+}
+
+export async function putPortfolioClassification(
+  symbol: string,
+  fields: { asset_class: string; sub_class?: string; geography?: string },
+): Promise<{ status: string; classification: PortfolioClassification }> {
+  return apiFetch(`/portfolio/classifications/${encodeURIComponent(symbol)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+}
+
+export async function deletePortfolioClassification(symbol: string): Promise<{ status: string }> {
+  return apiFetch(`/portfolio/classifications/${encodeURIComponent(symbol)}`, {
+    method: 'DELETE',
+  });
+}
+
 export { AuthError, ApiError };
