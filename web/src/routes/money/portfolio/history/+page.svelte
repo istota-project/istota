@@ -400,9 +400,18 @@
   onCancel={() => (confirmDeleteId = null)}
 />
 
-<!-- A diff is a list, not a form: it takes the screen it can get, and the
-     money record-table shell so its rows read like every other money table.
-     The Modal's own max-width/max-height cap these to the safe box. -->
+<!-- A diff is a list, and it borrows the money record-table shell so its rows
+     read like every other money table — but it is sized to those columns
+     rather than to the screen. 900px is the five fixed columns plus room for
+     the account name to be worth reading; `min()` collapses it to the phone's
+     width, where the panel's own max-width then insets it, so the one value
+     covers both breakpoints without a media query.
+
+     Height is left at `auto` (capped by the panel's max-height) instead of the
+     100dvh it used to force: a two-row diff is a two-row dialog, and a long
+     one still fills the safe box and scrolls its body under a title that stays
+     put. Full-screen for both was the wall of empty space around a pair of
+     rows. -->
 <Modal
   open={diffOpen}
   title="Changes since previous snapshot"
@@ -410,8 +419,7 @@
   onOpenChange={(open) => {
     if (!open) diffOpen = false;
   }}
-  width="100vw"
-  height="100dvh"
+  width="min(900px, 100vw)"
 >
   {#if diff}
     {#if diffEmpty}
@@ -490,6 +498,14 @@
       {/if}
     {/if}
   {/if}
+
+  <!-- A read-only dialog has no action to close itself by the way a form's
+       Save does, which left Escape and a backdrop click as the only way out —
+       neither of them visible. The footer sits outside the scrolling body, so
+       it stays put however long the diff is. -->
+  {#snippet footer()}
+    <Button variant="secondary" onclick={() => (diffOpen = false)}>Close</Button>
+  {/snippet}
 </Modal>
 
 <style>
